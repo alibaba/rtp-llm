@@ -63,7 +63,7 @@ public:
                                                         size_t               gpu_bytes,
                                                         size_t               max_write_rows);
     static uint32_t synchronizeOffloadConfig(CacheConfig& config, const ParallelismConfig& parallelism_config);
-    static uint32_t selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service);
+    static uint32_t selectConfirmedBlockNum(const int* candidates, size_t count);
 
     // Unified desc->spec conversion. Callers provide the runtime build context;
     // descs remain read-only.

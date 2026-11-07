@@ -28,7 +28,6 @@
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -48,18 +47,14 @@ const std::vector<std::string> kDsv4Tags    = {
 class KVCacheManagerTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
-        StaticConfig::user_ft_core_dump_on_exception = false;
         rtp_llm::initLogger();
         createDevice();
     }
 
     void TearDown() override {
-        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
     }
 
 private:
-    bool old_core_dump_on_exception_{false};
 };
 
 static void assertBlockBytesEq(const std::shared_ptr<rtp_llm::KVCacheManager>& cache_manager,
@@ -500,14 +495,13 @@ TEST_F(KVCacheManagerTest, LayoutWithoutCapacityCannotAllocatePool) {
     EXPECT_ANY_THROW(KVCacheManager(config, /*warmup=*/false));
 }
 
-TEST_F(KVCacheManagerTest, RankAgreementUsesMinimumAndFfnBaseline) {
+TEST_F(KVCacheManagerTest, RankAgreementUsesMinimum) {
     const int candidates[] = {11, 7, 9};
-    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3, false), 7u);
-    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3, true), 1u);
+    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3), 7u);
 
     const int invalid_candidates[] = {11, 0, 9};
-    EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(invalid_candidates, 3, false));
-    EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(nullptr, 0, false));
+    EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(invalid_candidates, 3));
+    EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(nullptr, 0));
 }
 
 TEST_F(KVCacheManagerTest, BaselineOneIsRejected) {

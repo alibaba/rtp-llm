@@ -317,7 +317,7 @@ bool MtpExecutor::reduceDSparkCacheStoreStatus(bool local_ok) {
     RTP_LLM_CHECK_WITH_INFO(dspark_cache_store_status_.defined(),
                             "DSpARK cache-store TP status buffer is not initialized");
     dspark_cache_store_status_.fill_(local_ok ? 1 : 0);
-    auto global_status = execAllReduce({dspark_cache_store_status_, ReduceOp::Min, false, ParallelMode::TP}).buffer;
+    auto global_status = execAllReduce({dspark_cache_store_status_, ReduceOp::Min, ParallelMode::TP}).buffer;
     return global_status.item<int32_t>() != 0;
 }
 
@@ -592,16 +592,12 @@ static void applyCacheStrideToModelInput(GptModelInputs& model_input, const Cach
     }
 }
 
-bool MtpExecutor::canEarlyReturnTargetOnlyPrefill(int64_t dp_size, bool enable_ffn_disaggregate) {
-    return dp_size == 1 && !enable_ffn_disaggregate;
+bool MtpExecutor::canEarlyReturnTargetOnlyPrefill(int64_t dp_size) {
+    return dp_size == 1;
 }
 
-bool MtpExecutor::shouldSkipEmptyDecode(bool streams_empty, bool enable_ffn_disaggregate) {
-    return streams_empty && !enable_ffn_disaggregate;
-}
-
-bool MtpExecutor::shouldSyncDecodeInputOnRank0(bool alignment_only) {
-    return !alignment_only;
+bool MtpExecutor::shouldSkipEmptyDecode(bool streams_empty) {
+    return streams_empty;
 }
 
 static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
@@ -717,7 +713,6 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
 MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
-                         MlaOpsType                                     mla_ops_type,
                          int32_t                                        kv_cache_group_num,
                          bool                                           warm_up):
     Executor(),
@@ -755,8 +750,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 static_cast<int>(role_type_));
         // DSpARK commit handles both replicated and byte-sharded prefill-CP
         // cache layouts after gathering the rank-local target features.
-        RTP_LLM_CHECK_WITH_INFO(params.device_resource_config.enable_layer_micro_batch == 0,
-                                "dspark fixed-gamma v1 does not support layer micro-batching");
         RTP_LLM_CHECK_WITH_INFO(params.sp_config.sp_dspark_mask_token_id >= 0,
                                 "dspark requires sp_dspark_mask_token_id, got %ld",
                                 params.sp_config.sp_dspark_mask_token_id);
@@ -844,8 +837,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          params.runtime_config,
          params.concurrency_config,
          params.sp_config,
-         params.device_resource_config,
-         mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
          cache_manager,
@@ -874,11 +865,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         model_init_params.kernel_block_table_width = std::max(real_width, fake_width);
     }
 #endif
-
-    if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
-        RTP_LLM_LOG_INFO("using ffn as service");
-        enable_ffn_disaggregate_ = true;
-    }
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
@@ -921,8 +907,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 params.runtime_config,
                                 params.concurrency_config,
                                 params.sp_config,
-                                params.device_resource_config,
-                                mla_ops_type,
                                 mtp_params->model_config_.max_seq_len,
                                 mtp_params->model_config_.hidden_size,
                                 cache_manager,
@@ -1133,7 +1117,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     SamplerOutput   draft_sampler_output;
     torch::Tensor   draft_last_hidden_states;
     const bool      cp_enabled     = parallelism_config_.prefill_cp_config.is_enabled();
-    const bool      alignment_only = enable_ffn_disaggregate_ && streams.empty();
 
     // placeholder for some tensors
     torch::Tensor                      draft_probs;
@@ -1153,7 +1136,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(tp_sync_input)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.skip_run  = streams.empty();
         tpSyncModelInputs(model_input, parallelism_config_);
         target_only = model_input.skip_lm_head;
         if (model_input.skip_run) {
@@ -1215,7 +1198,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (cp_enabled) {
         global_model_input = model_input;
     }
-    if (cp_enabled && isTpRank0() && !alignment_only) {
+    if (cp_enabled && isTpRank0()) {
         global_model_input.combo_tokens  = snapshotMutableHostInputToCuda(model_input.combo_tokens, buffer_holder_);
         global_model_input.input_lengths = snapshotMutableHostInputToCuda(model_input.input_lengths, buffer_holder_);
     }
@@ -1239,7 +1222,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     if (target_only && !is_dspark_
-        && canEarlyReturnTargetOnlyPrefill(parallelism_config_.dp_size, enable_ffn_disaggregate_)) {
+        && canEarlyReturnTargetOnlyPrefill(parallelism_config_.dp_size)) {
         if (metrics_reporter_) {
             collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
         }
@@ -1263,7 +1246,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // Prepare the draft prefill input on each TP root. Target-only MTP uses a
     // dummy sampled token solely to preserve the ordinary shifted draft shape;
     // DSpARK keeps its commit-only prompt geometry and never consumes it.
-    if (isTpRank0() && !alignment_only) {
+    if (isTpRank0()) {
         bool update_draft_input = target_only && !is_dspark_;
         if (target_only) {
             if (!is_dspark_) {
@@ -1297,7 +1280,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
     }
 
-    if (cp_enabled && (!isTpRank0() || alignment_only)) {
+    if (cp_enabled && !isTpRank0()) {
         model_input = std::move(global_model_input);
     }
 
@@ -1340,7 +1323,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     const bool dspark_cache_store_ok = finishDSparkPrefillCachePublication(model_input, streams);
     cache_store_drain_guard.disarm();
-    if (!dspark_cache_store_ok || alignment_only) {
+    if (!dspark_cache_store_ok) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         return absl::OkStatus();
@@ -1515,7 +1498,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     bool                          prev_bookkeeping_synced_for_spec_logits = false;
     bool                          spec_logits_async_launched              = false;
     bool                          spec_logits_processor_present           = false;
-    const bool                    alignment_only                          = enable_ffn_disaggregate_ && streams.empty();
 
     // StreamGroups snapshots scheduling metadata. Wait for any mutable
     // bookkeeping/KV-swap state that has not yet reached a safe snapshot.
@@ -1525,21 +1507,20 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(gather_model_input)");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    model_input_status = alignment_only ?
-                                         batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_) :
-                                         batch_stream_processor_->gatherDecodeModelInput(stream_groups, buffer_holder_);
+        auto model_input_status =
+            batch_stream_processor_->gatherDecodeModelInput(stream_groups, buffer_holder_);
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
         model_input = std::move(model_input_status.value());
         executor_collector.gather_model_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     const auto engram_anchor_windows = model_input.engram_token_windows;
 
-    if (isTpRank0() && shouldSyncDecodeInputOnRank0(alignment_only)) {
+    if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_input_rank0)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         // Only rank 0 owns real streams. Publish the empty-step decision through
         // tpSyncModelInputs so every TP rank enters and leaves the same collective.
-        model_input.skip_run = shouldSkipEmptyDecode(streams.empty(), enable_ffn_disaggregate_);
+        model_input.skip_run = shouldSkipEmptyDecode(streams.empty());
         if (model_input.skip_run) {
             if (cache_manager_) {
                 cache_manager_->resizeOffloadHotCache(0);
@@ -1551,19 +1532,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     metrics_collector.not_skip = true;
-
-    if (alignment_only) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(alignment_only_tp_sync)");
-        tpSyncModelInputs(model_input, parallelism_config_);
-        if (model_input.skip_run) {
-            if (cache_manager_) {
-                cache_manager_->resizeOffloadHotCache(0);
-            }
-            return absl::OkStatus();
-        }
-        releaseAllModelBuffers();
-        return runDecodeAlignmentOnly(model_input);
-    }
 
     // TODO(yinzhi): consider beam search & lora
 
@@ -2103,39 +2071,6 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     return model_output;
 }
 
-absl::Status MtpExecutor::runDecodeAlignmentOnly(GptModelInputs& model_input) {
-    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(alignment_only)");
-    RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "decode alignment requires cache manager");
-
-    const size_t proposal_forward_count = is_dspark_ ? 1 : propose_step_ - 1;
-    const auto&  draft_cache_config     = cache_manager_->getMTPModuleCacheConfig(0);
-
-    applyCacheStrideToModelInput(model_input, draft_cache_config);
-    model_input.is_target_verify = is_dspark_;
-    // Empty decode alignment has prefill-shaped zero-token inputs. Keep its
-    // generation routing explicit instead of inferring it from tensor sizes.
-    for (size_t i = 0; i < proposal_forward_count; ++i) {
-        ensureModelInputsOnCuda(model_input, "decode.alignment_propose");
-        if (is_dspark_) {
-            maybePrintModelInput(model_input, "decode dspark propose model");
-            forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT, /*is_draft_extend=*/true);
-        } else {
-            forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT, /*is_draft_extend=*/true);
-        }
-    }
-
-    applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
-    model_input.is_target_verify = true;
-    ensureModelInputsOnCuda(model_input, "decode.alignment_target_verify");
-    forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET);
-
-    applyCacheStrideToModelInput(model_input, draft_cache_config);
-    runDraftPrefillForward(model_input);
-
-    cudaSyncAndCheck();
-    releaseAllModelBuffers();
-    return absl::OkStatus();
-}
 
 SpecLogitsVerifyRunner::LaunchResult
 MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
@@ -2542,7 +2477,7 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
             }
         }
         // process() still enters the role-required empty prefill/decode steps, which
-        // preserves TP/FFN alignment instead of returning before a collective.
+        // preserves TP collective alignment instead of returning before a collective.
         execution_batch.clear();
     };
     reject_mixed_execution_modes(prefill_streams);

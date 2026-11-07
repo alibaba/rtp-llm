@@ -61,7 +61,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                bool                                   warm_up,
                                bool                                   is_propose,
                                int                                    propose_model_index,
-                               MlaOpsType                             mla_ops_type,
                                std::function<void()>                  profile_step_start,
                                std::function<void()>                  profile_step_finish):
     Executor(),
@@ -134,8 +133,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          params.runtime_config,
          params.concurrency_config,
          params.sp_config,
-         params.device_resource_config,
-         mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
          cache_manager,
@@ -180,10 +177,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
 #endif
 
-    if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
-        RTP_LLM_LOG_INFO("using ffn as service");
-        enable_ffn_disaggregate_ = true;
-    }
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(model_init_params, params.py_model));
@@ -264,7 +257,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.skip_run  = streams.empty();
         if (!model_input.skip_run && tp_rank_ == 0 && cache_manager_ && cache_manager_->hasSparseKvOffload()) {
             model_input.kv_cache_generation_updates = cache_manager_->takeOffloadVersionUpdates();
         }

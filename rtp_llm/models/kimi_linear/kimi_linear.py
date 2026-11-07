@@ -7,7 +7,7 @@ from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.models.kimi_linear.kimi_linear_weight import KimiLinearWeight
-from rtp_llm.ops import HybridAttentionType, KVCacheSpecType, MlaOpsType
+from rtp_llm.ops import HybridAttentionType, KVCacheSpecType
 
 
 class KimiLinear(BaseModel):
@@ -69,14 +69,9 @@ class KimiLinear(BaseModel):
 
     @staticmethod
     def _parse_rope_config(config_json: dict, config: ModelConfig):
-        from rtp_llm.ops import MlaOpsType
-
         config.attn_config.rope_config.base = int(config_json.get("rope_theta", 10000))
         # No YaRN scaling for Kimi Linear (rope_scaling is null)
-        if config.mla_ops_type != MlaOpsType.MHA:
-            config.attn_config.rope_config.style = 0
-        else:
-            config.attn_config.rope_config.style = 5
+        config.attn_config.rope_config.style = 0
 
         rope_scaling = config_json.get("rope_scaling")
         if rope_scaling is not None:
@@ -173,7 +168,7 @@ class KimiLinear(BaseModel):
         if model_config.kv_cache_spec_descs:
             return
 
-        if model_config.attn_config.use_mla and model_config.mla_ops_type != MlaOpsType.MHA:
+        if model_config.attn_config.use_mla:
             full_cache_type = KVCacheSpecType.MLA
         else:
             full_cache_type = KVCacheSpecType.MHA
@@ -201,7 +196,6 @@ class KimiLinear(BaseModel):
             max_generate_batch_size=self.max_generate_batch_size,
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.hw_kernel_config,
-            device_resource_config=self.device_resource_config,
         )
         return self.py_model
 

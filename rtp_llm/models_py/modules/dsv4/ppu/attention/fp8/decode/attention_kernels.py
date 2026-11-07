@@ -1,10 +1,6 @@
 """PPU overrides; unchanged behavior is inherited from the shared DSV4 implementation."""
 
 from __future__ import annotations
-from rtp_llm.models_py.modules.dsv4.fp8.decode.attention_kernels import (
-    _TOPK_DEBUG,
-    _debug_check_topk_length,
-)
 import os
 from typing import Any, Optional
 import torch
@@ -43,7 +39,6 @@ def attn_fp8_swa_paged(
     validate = getattr(platform_provider, "validate_swa_pool", None)
     if validate is not None:
         validate(q=q, swa_pool_3d=swa_pool_3d, swa_topk_3d=swa_topk_3d, attn_sink=attn_sink, topk_length=topk_length)
-    _debug_check_topk_length("swa", topk_length, swa_topk_3d)
     return fp8_op.forward(
         q,
         swa_pool_3d,
@@ -94,8 +89,6 @@ def attn_fp8_dual_paged(
     validate = getattr(platform_provider, "validate_dual_pool", None)
     if validate is not None:
         validate(q=q, swa_pool_3d=swa_pool_3d, swa_topk_3d=swa_topk_3d, cmp_pool_3d=cmp_pool_3d, cmp_topk_3d=cmp_topk_3d, attn_sink=attn_sink, topk_length=topk_length, extra_topk_length=extra_topk_length, compress_ratio=compress_ratio, cmp_tokens_per_block=cmp_tokens_per_block)
-    _debug_check_topk_length("dual.swa", topk_length, swa_topk_3d)
-    _debug_check_topk_length("dual.extra", extra_topk_length, cmp_topk_3d)
     return fp8_op.forward(
         q,
         swa_pool_3d,

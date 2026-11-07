@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/cache/SWACacheManager.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
 namespace test {
@@ -67,15 +66,12 @@ size_t validBlockCount(const BlockIndicesType& blocks) {
 class DeviceSWACacheManagerTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
-        StaticConfig::user_ft_core_dump_on_exception = false;
         block_pool_                                  = createDeviceBlockPool();
         block_pool_->init();
         total_blocks_ = block_pool_->freeBlocksNum();
     }
 
     void TearDown() override {
-        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
     }
 
     DeviceSWACacheManager makeGroup(int seq_size_per_block) {
@@ -92,7 +88,6 @@ protected:
 
     DeviceBlockPoolPtr block_pool_;
     size_t             total_blocks_ = 0;
-    bool               old_core_dump_on_exception_{false};
 };
 
 TEST_F(DeviceSWACacheManagerTest, DefaultPolicyDrivesBehaviorInterfaces) {

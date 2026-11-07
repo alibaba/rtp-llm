@@ -3,14 +3,12 @@
 The DSV4 indexer score kernel already fuses score generation; the remaining
 hot path is the row-wise ``torch.topk`` plus mask/copy post-processing.  vLLM
 and SGLang avoid this for DeepSeek sparse attention with custom row-wise TopK
-kernels.  TileLang HISA is different: it is an algorithmic replacement for the
-indexer, not an exact TopK kernel, so it stays behind an explicit experimental
-backend.
+kernels.  Production dispatch always uses the auto backend; the explicit
+backend classes below stay importable as references.
 """
 
 from __future__ import annotations
 
-import os
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -18,20 +16,6 @@ import torch
 
 _FAST_TOPK_VALUES = (2048,)
 _PERSISTENT_TOPK_VALUES = (512, 1024, 2048)
-_ENV_CANONICALIZE = "DSV4_INDEXER_TOPK_CANONICALIZE"
-
-
-def _backend_name() -> str:
-    return os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower()
-
-
-def _canonicalize_enabled() -> bool:
-    return os.environ.get(_ENV_CANONICALIZE, "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
 
 
 def _flatten_score(score: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]]:
@@ -76,17 +60,6 @@ def _apply_offset(indices: torch.Tensor, offset: int | torch.Tensor) -> torch.Te
         flat = indices.reshape(-1, indices.shape[-1])
         return torch.where(flat >= 0, flat + off, flat).view_as(indices)
     return torch.where(indices >= 0, indices + int(offset), indices)
-
-
-def _sort_valid_indices(indices: torch.Tensor) -> torch.Tensor:
-    sentinel = torch.full_like(indices, torch.iinfo(indices.dtype).max)
-    sortable = torch.where(indices >= 0, indices, sentinel)
-    sorted_indices = torch.sort(sortable, dim=-1).values
-    return torch.where(
-        sorted_indices == sentinel,
-        torch.full_like(sorted_indices, -1),
-        sorted_indices,
-    )
 
 
 class IndexerTopKBackend(ABC):
@@ -214,32 +187,7 @@ class PersistentIndexerTopKBackend(IndexerTopKBackend):
             flat, lengths_i32, out, workspace, int(topk), int(flat.shape[1])
         )
         out = _apply_offset(out, offset)
-        if _canonicalize_enabled():
-            out = _sort_valid_indices(out)
         return _reshape_indices(out, shape)
-
-
-class HisaIndexerTopKBackend(IndexerTopKBackend):
-    """Experimental TileLang HISA branch.
-
-    HISA changes the indexer algorithm by hierarchical sparse selection; it is
-    not an exact replacement for DSV4 ``score.topk``.  Keep it explicit so no
-    production path silently changes sparse attention recall.
-    """
-
-    name = "hisa"
-
-    def select(
-        self,
-        score: torch.Tensor,
-        topk: int,
-        *,
-        lengths: Optional[torch.Tensor] = None,
-        offset: int | torch.Tensor = 0,
-    ) -> torch.Tensor:
-        raise NotImplementedError(
-            "DSV4_INDEXER_TOPK_BACKEND=hisa is experimental and not implemented"
-        )
 
 
 class AutoIndexerTopKBackend(IndexerTopKBackend):
@@ -291,17 +239,7 @@ class AutoIndexerTopKBackend(IndexerTopKBackend):
 
 
 def get_indexer_topk_backend() -> IndexerTopKBackend:
-    name = _backend_name()
-    if name == "torch":
-        return TorchIndexerTopKBackend()
-    if name == "fast":
-        return FastIndexerTopKBackend()
-    if name == "persistent":
-        return PersistentIndexerTopKBackend()
-    if name == "hisa":
-        return HisaIndexerTopKBackend()
-    if name == "auto":
-        return AutoIndexerTopKBackend()
+    return AutoIndexerTopKBackend()
 
 
 def select_indexer_topk(

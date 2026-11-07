@@ -25,7 +25,6 @@ class ModelArgs:
         "task_type",
         "act_type",
         "max_seq_len",
-        "mla_ops_type",
         "json_model_override_args",
         "phy2log_path",
         "enable_fp32_lm_head",
@@ -48,9 +47,6 @@ class ModelArgs:
 
         # Sequence length
         self.max_seq_len: Optional[int] = None
-
-        # MLA config
-        self.mla_ops_type: Optional[str] = None
 
         # Model override args
         self.json_model_override_args: str = "{}"

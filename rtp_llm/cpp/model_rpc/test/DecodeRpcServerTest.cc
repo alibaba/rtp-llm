@@ -1247,7 +1247,7 @@ class SparseOffloadPdTest: public ::testing::Test {
 protected:
     void SetUp() override {
         initLogger();
-        initRuntime(0, false, false, MlaOpsType::AUTO);
+        initRuntime(0);
     }
 
     void allocate(KVCacheManager& manager) {

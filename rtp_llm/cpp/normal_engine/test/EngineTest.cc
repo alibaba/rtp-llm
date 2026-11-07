@@ -235,13 +235,11 @@ TEST_F(NormalEngineTest, testMakeStreamReservesKVBeforeEnqueue) {
 
 TEST(NormalEnginePolicyTest, testEmptyBatchEarlyReturnPreservesRequiredAlignment) {
     EXPECT_TRUE(NormalEngine::shouldEarlyReturnEmptyBatch(
-        /*streams_empty=*/true, /*tp_size=*/1, /*enable_ffn_disaggregate=*/false));
+        /*streams_empty=*/true, /*tp_size=*/1));
     EXPECT_FALSE(NormalEngine::shouldEarlyReturnEmptyBatch(
-        /*streams_empty=*/true, /*tp_size=*/1, /*enable_ffn_disaggregate=*/true));
+        /*streams_empty=*/true, /*tp_size=*/2));
     EXPECT_FALSE(NormalEngine::shouldEarlyReturnEmptyBatch(
-        /*streams_empty=*/true, /*tp_size=*/2, /*enable_ffn_disaggregate=*/false));
-    EXPECT_FALSE(NormalEngine::shouldEarlyReturnEmptyBatch(
-        /*streams_empty=*/false, /*tp_size=*/1, /*enable_ffn_disaggregate=*/false));
+        /*streams_empty=*/false, /*tp_size=*/1));
 }
 
 TEST_F(NormalEngineTest, testWarmUpInputLengthAccountsForReserve) {
@@ -1473,7 +1471,6 @@ EngineInitParams supportedConfig() {
 }
 
 TEST(SparseKvOffloadConfigTest, AcceptsTpDecodeAndRejectsUnsupportedCombinations) {
-    StaticConfig::user_ft_core_dump_on_exception = false;
     auto params                                  = supportedConfig();
     params.parallelism_config.tp_size            = 2;
     EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
@@ -1511,7 +1508,6 @@ TEST(SparseKvOffloadConfigTest, AcceptsTpDecodeAndRejectsUnsupportedCombinations
         [](auto& p) { p.parallelism_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP; },
         [](auto& p) { p.sp_config.type = SP_TYPE_MTP; },
         [](auto& p) { p.sp_config.type = SP_TYPE_VANILLA; },
-        [](auto& p) { p.device_resource_config.enable_layer_micro_batch = 1; },
         [](auto& p) { p.kv_cache_config.enable_memory_cache = true; },
         [](auto& p) { p.kv_cache_config.enable_disk_cache = true; },
         [](auto& p) { p.kv_cache_config.enable_remote_cache = true; },
@@ -1552,7 +1548,6 @@ TEST(SparseKvOffloadConfigTest, RejectsBatchDecodeSizeAboveHotCacheCapacity) {
 }
 
 TEST(SparseKvOffloadConfigTest, UsesModelDeclarationWithoutHardcodedTagsOrRowWidths) {
-    StaticConfig::user_ft_core_dump_on_exception = false;
     auto params                                  = supportedConfig();
     params.model_config_.attn_config.use_mla     = false;
     params.model_config_.attn_config.is_sparse   = false;

@@ -138,7 +138,6 @@ PDFusionRatioScheduler::PDFusionRatioScheduler(const RuntimeConfig&             
                                                const ModelConfig&                     model_config,
                                                const PDSepConfig&                     pd_sep_config,
                                                const ParallelismConfig&               parallelism_config,
-                                               const ModelSpecificConfig&             model_specific_config,
                                                const std::shared_ptr<KVCacheManager>& cache_manager,
                                                const kmonitor::MetricsReporterPtr     metrics_reporter,
                                                const int                              max_score_len):
@@ -146,7 +145,6 @@ PDFusionRatioScheduler::PDFusionRatioScheduler(const RuntimeConfig&             
                       model_config,
                       pd_sep_config,
                       parallelism_config,
-                      model_specific_config,
                       cache_manager,
                       metrics_reporter),
     decode_prefill_step_(parseDecodePrefillRatio(runtime_config.fifo_scheduler_config.decode_prefill_ratio)),

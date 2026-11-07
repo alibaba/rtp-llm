@@ -5,8 +5,6 @@ does not mutate the attention output and preserves the eager BF16 RoPE
 intermediate and the selected RTP quantizer's scale policy.
 """
 
-import os
-
 import torch
 
 from rtp_llm.models_py.modules.dsv41._fused_inv_rope_fp8_quant_triton import (
@@ -60,10 +58,7 @@ def is_supported(o, freqs, weight, weight_scale) -> bool:
 
 def quantization_scale_min(tokens: int, group_width: int) -> float:
     """Mirror the per-group V41MXFP8Linear -> sgl quantizer dispatch."""
-    backend = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
-    use_v2 = backend == "v2" or (
-        backend == "auto" and tokens * group_width >= 4 * 1024 * 1024
-    )
+    use_v2 = tokens * group_width >= 4 * 1024 * 1024
     return 0.0 if use_v2 else 1e-10
 
 

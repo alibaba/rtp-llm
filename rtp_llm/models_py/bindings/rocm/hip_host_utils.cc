@@ -1,6 +1,5 @@
 #include "hip_host_utils.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include <atomic>
 namespace rtp_llm {
 namespace rocm {
@@ -72,9 +71,6 @@ void throwRocmError(const char* const file, int const line, std::string const& i
     std::printf("%s", error_msg.c_str());
     fflush(stdout);
     fflush(stderr);
-    if (rtp_llm::StaticConfig::user_ft_core_dump_on_exception) {
-        abort();
-    }
     throw RTP_EXCEPTION(error_msg);
 }
 

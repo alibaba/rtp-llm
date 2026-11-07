@@ -108,7 +108,6 @@ class ModelFactory:
             max_generate_batch_size=engine_config.runtime_config.max_generate_batch_size,
             vit_config=vit_config,
             merge_lora=merge_lora,
-            device_resource_config=engine_config.device_resource_config,
             force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
             loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
             moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
@@ -223,7 +222,6 @@ class ModelFactory:
                 moe_config=engine_config.moe_config,
                 load_method=engine_config.load_config.load_method,
                 max_generate_batch_size=engine_config.runtime_config.max_generate_batch_size,
-                device_resource_config=engine_config.device_resource_config,
                 vit_config=None,  # Propose model doesn't need vit_config
                 merge_lora=False,  # Propose model doesn't need merge_lora
                 loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
@@ -499,7 +497,6 @@ class ModelFactory:
         propose_model_args.tokenizer_path = model_args.tokenizer_path
         propose_model_args.model_type = sp_config.model_type
         propose_model_args.act_type = model_args.act_type
-        propose_model_args.mla_ops_type = model_args.mla_ops_type
         propose_model_args.enable_fp32_lm_head = model_args.enable_fp32_lm_head
 
         # Create propose ModelConfig using _create_config

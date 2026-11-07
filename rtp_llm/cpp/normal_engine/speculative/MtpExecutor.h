@@ -43,7 +43,6 @@ public:
     explicit MtpExecutor(const EngineInitParams&                        params,
                          std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
-                         MlaOpsType                                     mla_ops_type       = MlaOpsType::AUTO,
                          int32_t                                        kv_cache_group_num = 1,
                          bool                                           warm_up            = false);
 
@@ -139,7 +138,6 @@ protected:
     void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
-    absl::Status    runDecodeAlignmentOnly(GptModelInputs& model_input);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
@@ -238,9 +236,8 @@ protected:
 private:
     static torch::Tensor snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
 
-    static bool canEarlyReturnTargetOnlyPrefill(int64_t dp_size, bool enable_ffn_disaggregate);
-    static bool shouldSkipEmptyDecode(bool streams_empty, bool enable_ffn_disaggregate);
-    static bool shouldSyncDecodeInputOnRank0(bool alignment_only);
+    static bool canEarlyReturnTargetOnlyPrefill(int64_t dp_size);
+    static bool shouldSkipEmptyDecode(bool streams_empty);
 
     void collectPrefillMetrics(const StreamGroups&  stream_groups,
                                MtpMetricsCollector& metrics_collector,
@@ -257,7 +254,6 @@ private:
     std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
     std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
-    bool                                                                     enable_ffn_disaggregate_ = false;
     bool                                                                     enable_detail_log_       = false;
     int                                                                      tp_rank_                 = 0;
     ParallelismConfig                                                        parallelism_config_;

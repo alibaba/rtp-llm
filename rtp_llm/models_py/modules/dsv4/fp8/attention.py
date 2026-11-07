@@ -77,17 +77,6 @@ from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.utils.memory import dispose_tensor
 
 
-# Phase E1 (dsv4_kvcache_native_refactor_plan.md §9): route prefill
-# continuation reads through the framework BlockPool instead of the
-# register_buffer mirror.  Phase B dual-write keeps the pool fresh each
-# forward, so ``self.kv_cache[:bsz]`` and the pool gather are byte-equal
-# on all well-defined positions (sentinel / uninitialized slots return
-# zero in both paths).  Default ON; ``DSV4_READ_FROM_POOL=0`` restores
-# the legacy register_buffer read for regression bisection.
-def _use_read_from_pool() -> bool:
-    return os.environ.get("DSV4_READ_FROM_POOL", "1") != "0"
-
-
 def _use_cp_cache_hit_raw_q_merge() -> bool:
     # The raw-Q/O/LSE merge implementation is still an experimental validation
     # path: it avoids KV gather communication, but its current index planning is
@@ -119,17 +108,12 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import kv_tag_for_compress_ra
 
 # Phase-Z (post-revert): overlap the prefill CP all-gather with same-layer
 # default-stream compute (SWA write for HCA; SWA write + indexer for CSA).
-# Default OFF — the baseline ``_forward_prefill_compressed`` / per-ratio
-# bodies are byte-for-byte the historical non-overlap path. ``DSV4_
-# PREFILL_CP_OVERLAP=1`` opts the layer into the orchestrator that lives
-# in ``_forward_prefill_*_overlapped``. The orchestrator additionally
-# refuses to engage under CUDA graph capture (NCCL collectives are not
-# capturable on this branch) and when CP is inactive (``cp_size <= 1``),
-# in which case the baseline path runs even with the env on.
-def _prefill_cp_overlap_enabled() -> bool:
-    return os.environ.get("DSV4_PREFILL_CP_OVERLAP", "0") == "1"
-
-
+# Unconditionally on for CP-active layers: every production deployment
+# pinned ``DSV4_PREFILL_CP_OVERLAP=1`` before the flag was removed, so the
+# orchestrator (``_forward_prefill_*_overlapped``) is the only maintained
+# path. It still refuses to engage under CUDA graph capture (NCCL
+# collectives are not capturable on this branch) and when CP is inactive
+# (``cp_size <= 1``), in which case the baseline path runs anyway.
 def _prefill_cp_async_workspace_reads_enabled() -> bool:
     return os.environ.get("DSV4_PREFILL_CP_ASYNC_WORKSPACE_READS", "1") != "0"
 
@@ -2629,7 +2613,6 @@ class AttentionFP8(nn.Module):
         """Per-call gate for the CP-overlap orchestrator.
 
         All conditions must hold:
-          * ``DSV4_PREFILL_CP_OVERLAP=1`` (default off — baseline path);
           * CP is actually active (``cp_size > 1``); no NCCL gather to
             overlap with otherwise;
           * prefill tensors are CUDA-backed — CPU / sync-reference CP
@@ -2640,8 +2623,6 @@ class AttentionFP8(nn.Module):
           * the layer has a compressor (``compress_ratio > 0``) —
             SWA-only layers (ratio == 0) have nothing to overlap.
         """
-        if not _prefill_cp_overlap_enabled():
-            return False
         if not common.cp_on or common.cp_ctx is None or common.cp_ctx.cp_size <= 1:
             return False
         if self.compress_ratio == 0:
@@ -2662,9 +2643,9 @@ class AttentionFP8(nn.Module):
         """Whether workspace cache reads may use side-stream async restore.
 
         This shares the main prefill-CP-overlap gate and only applies to the
-        page-rr / KV-cache-sharded path. With ``DSV4_PREFILL_CP_OVERLAP=0``,
-        workspace reads keep the original synchronous gather/restore/write
-        ordering even when ``--prefill_cp_kv_cache_sharded=1`` is set.
+        page-rr / KV-cache-sharded path; workspace reads otherwise keep the
+        original synchronous gather/restore/write ordering (also forced by
+        ``DSV4_PREFILL_CP_ASYNC_WORKSPACE_READS=0``).
         """
         if not _prefill_cp_async_workspace_reads_enabled():
             return False
@@ -2711,7 +2692,7 @@ class AttentionFP8(nn.Module):
         ``csa`` / ``hca`` additionally share the ``[sliding | compressed]``
         kv_cat + sparse_attn epilogue via :meth:`_forward_prefill_compressed`.
 
-        Under ``DSV4_PREFILL_CP_OVERLAP=1`` + CP-active, CSA/HCA layers
+        When CP-active, CSA/HCA layers
         instead dispatch to the overlap orchestrators (which hoist the
         compressor's CP all-gather ahead of the SWA write so they can
         overlap on the default stream vs the CP communication stream). The baseline sequential path
@@ -3664,10 +3645,7 @@ class AttentionFP8(nn.Module):
         wm = workspace_meta
         D = self.head_dim
         B = int(wm.swa_seq_lens.shape[0])
-        if (
-            os.environ.get("DSV4_FORWARD_TENSOR_DEBUG", "0") != "0"
-            or os.environ.get("DSV4_CP_RAW_Q_MERGE_LOG", "0") != "0"
-        ):
+        if os.environ.get("DSV4_CP_RAW_Q_MERGE_LOG", "0") != "0":
             prefix_src = (
                 cp_ctx.prefix_lengths
                 if cp_ctx.prefix_lengths is not None

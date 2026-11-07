@@ -15,13 +15,21 @@ from rtp_llm.models_py.kernels.ppu.attention.ppu_decode_fused_quant import (
 from rtp_llm.models_py.kernels.ppu.moe.ppu_gate_padding import gate_with_padding
 from rtp_llm.models_py.kernels.ppu.moe.ppu_hash_gate import hash_gate_with_padding
 from rtp_llm.models_py.kernels.ppu.hc.ppu_hc_sum import hc_post_sum
-from rtp_llm.models_py.kernels.ppu.attention.ppu_inverse_rope import inverse_rope_inplace
+from rtp_llm.models_py.kernels.ppu.attention.ppu_inverse_rope import (
+    inverse_rope_inplace,
+)
 from rtp_llm.models_py.kernels.ppu.attention.ppu_qkv_norm import normalize_decode_qkv
-from rtp_llm.models_py.kernels.ppu.attention.ppu_query_slice import prepare_indexer_query
+from rtp_llm.models_py.kernels.ppu.attention.ppu_query_slice import (
+    prepare_indexer_query,
+)
 from rtp_llm.models_py.kernels.ppu.moe.ppu_shared_swiglu import silu_mul_merged_bf16
-from rtp_llm.models_py.modules.dsv4.ppu.attention.decode_query import slice_compressor_query
+from rtp_llm.models_py.modules.dsv4.ppu.attention.decode_query import (
+    slice_compressor_query,
+)
 from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_deepep_fp4 import pad_topk
-from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import quantize_ppu_fp8_activation
+from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import (
+    quantize_ppu_fp8_activation,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -246,8 +254,12 @@ class DecodeFusionsTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_attention_projection_tiles(self):
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a import PpuWoAFp8Linear
-        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import PpuFp8Linear
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a import (
+            PpuWoAFp8Linear,
+        )
+        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import (
+            PpuFp8Linear,
+        )
 
         for n, k, groups in ((32768, 1024, 1), (4096, 8192, 1), (8192, 4096, 8)):
             weight = torch.randn((n, k), device="cuda", dtype=torch.bfloat16).to(
@@ -702,25 +714,6 @@ class DecodeFusionsTest(unittest.TestCase):
                 )
                 self.same(state, before[0])
                 self.same(cache, before[1])
-
-    @torch.inference_mode()
-    def test_hc_head_preserves_reference_projection(self):
-        from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import FallbackHCHead
-        from rtp_llm.models_py.modules.dsv4.ppu.hc.ppu_hc_head import PpuDecodeHCHead
-
-        fn = torch.randn((4, 16384), device="cuda") * 0.01
-        base = torch.randn(4, device="cuda")
-        scale = torch.ones(1, device="cuda")
-        kwargs = dict(dim=4096, hc_mult=4, norm_eps=1e-6, hc_eps=1e-6)
-        old, new = FallbackHCHead(fn, base, scale, **kwargs), PpuDecodeHCHead(
-            fn, base, scale, **kwargs
-        )
-        for b, q in ((1, 1), (3, 1), (8, 4), (32, 4)):
-            x = torch.randn((b, q, 4, 4096), device="cuda", dtype=torch.bfloat16)
-            self.replay(lambda: old.head(x), lambda: new.head(x), x.normal_)
-        # Unsupported width and oversized batches keep the fallback implementation.
-        x = torch.empty((0, 4, 4096), device="cuda", dtype=torch.bfloat16)
-        self.same(new.head(x), old.head(x))
 
     @torch.inference_mode()
     def test_topk_ordering(self):

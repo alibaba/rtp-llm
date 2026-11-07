@@ -39,8 +39,7 @@ using CacheStoreCompletionRegistrar = std::function<CacheStoreCompletionCallback
 // ===================================================================
 
 // Perform one-time runtime init: cudaSetDevice, global flags, etc.
-// Returns the resolved MlaOpsType (AUTO → FLASH_MLA/FLASH_INFER based on GPU arch).
-MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_overlap, MlaOpsType mla_ops_type);
+void initRuntime(size_t device_id);
 
 bool isRuntimeInitialized();
 
@@ -55,12 +54,6 @@ void cudaSyncAndCheck();
 void cudaCheckLastError();
 
 // ===================================================================
-// Config accessors (set once during initRuntime)
-// ===================================================================
-
-bool getEnableCommOverlap();
-
-// ===================================================================
 // Profiling
 // ===================================================================
 
@@ -73,7 +66,6 @@ void cudaProfilerEnd();
 
 ExecStatus    getGpuExecStatus();
 torch::Device getTorchCudaDevice();
-void          setTraceMemory(bool trace_memory);
 
 // ===================================================================
 // Copy ops
@@ -152,7 +144,6 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
 // Static ops (weight preprocessing)
 // ===================================================================
 
-torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai);
 torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale);
 
 }  // namespace rtp_llm

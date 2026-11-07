@@ -101,7 +101,6 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -199,7 +198,7 @@ def _prefill_fast_path_enabled(
         return False
     if prepare_hidden_fn is not None:
         return False
-    if _rt.ENABLED or _fwd_dbg.enabled():
+    if _rt.ENABLED:
         return False
     if layer_calls is None:
         layer_calls = _prefill_fast_path_layer_calls(v4)
@@ -789,17 +788,6 @@ def forward_layers(
         step = getattr(v4, "_dbg_step", 0)
         _rt.dump(step=step, extra=extra)
         v4._dbg_step = step + 1
-    if _fwd_dbg.enabled():
-        _fwd_dbg.print_prefill(
-            hidden=h,
-            input_ids=input_ids,
-            positions=positions,
-            cu_seqlens=cu_seqlens,
-            attn_inputs=attn_inputs,
-            cp_ctx=cp_ctx,
-            head_weight=getattr(v4, "head_weight", None),
-            step=int(getattr(v4, "_dbg_step", 0)),
-        )
     # The per-forward ``PrefillWorkspace`` (prefill-Q + optional CP
     # gather/restore scratch) is a local of this function: it drops here on
     # return, returning ~16 GiB to the caching allocator so the MTP draft

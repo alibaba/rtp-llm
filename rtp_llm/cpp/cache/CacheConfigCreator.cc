@@ -681,17 +681,13 @@ uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candid
         execSyncCommunication(false);
         cudaSyncAndCheck();
 
-        return selectConfirmedBlockNum(
-            block_num_ptr, world_size, parallelism_config.ffn_disaggregate_config.is_ffn_service());
+        return selectConfirmedBlockNum(block_num_ptr, world_size);
     }
     return candidate_block_num;
 }
 
-uint32_t CacheConfigCreator::selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service) {
+uint32_t CacheConfigCreator::selectConfirmedBlockNum(const int* candidates, size_t count) {
     RTP_LLM_CHECK_WITH_INFO(candidates != nullptr && count > 0, "cross-rank cache candidates must not be empty");
-    if (is_ffn_service) {
-        return 1;
-    }
     const auto confirmed = *std::min_element(candidates, candidates + count);
     RTP_LLM_CHECK_WITH_INFO(confirmed > 0, "cross-rank cache block count must be positive");
     return static_cast<uint32_t>(confirmed);

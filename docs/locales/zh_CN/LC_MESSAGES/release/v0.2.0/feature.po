@@ -96,8 +96,6 @@ msgid "[MultiLoRA](../../backend/lora.ipynb)"
 msgstr "[多LoRA](../../backend/lora.ipynb)"
 
 #: ../../release/v0.2.0/feature.md:19
-msgid "[Attention FFN Disaggregation](../../backend/af_disaggregation.md)"
-msgstr "[注意力FFN分离架构](../../backend/af_disaggregation.md)"
 
 #: ../../release/v0.2.0/feature.md:20
 msgid "[Frontend/Backend Disaggregation](../../backend/Frontend.md)"

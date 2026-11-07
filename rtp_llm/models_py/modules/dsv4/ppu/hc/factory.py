@@ -1,13 +1,11 @@
 """PPU overrides; unchanged behavior is inherited from the shared DSV4 implementation."""
 
 from __future__ import annotations
-from rtp_llm.models_py.modules.dsv4.hc.factory import (
-    _mode_from_env,
-)
 import os
 import torch
-from rtp_llm.models_py.modules.dsv4.hc.base import HCHeadBase, HCMode, HCUnitBase
+from rtp_llm.models_py.modules.dsv4.hc.base import HCHeadBase, HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.utils import maybe_squeeze_hc_1d
+
 
 def build_hc_unit(
     fn: torch.Tensor,
@@ -41,41 +39,25 @@ def build_hc_unit(
             tp_size=tp_size,
             tp_rank=tp_rank,
         )
-    mode = _mode_from_env()
     scale = maybe_squeeze_hc_1d(scale)
-    if mode is HCMode.TILELANG:
-        from rtp_llm.models_py.modules.dsv4.ppu.hc.tilelang_impl import TileLangHCUnit
+    from rtp_llm.models_py.modules.dsv4.ppu.hc.tilelang_impl import TileLangHCUnit
 
-        unit = TileLangHCUnit(
-            fn,
-            base,
-            scale,
-            dim=dim,
-            hc_mult=hc_mult,
-            hc_sinkhorn_iters=hc_sinkhorn_iters,
-            norm_eps=norm_eps,
-            hc_eps=hc_eps,
-            layer_id=layer_id,
-            name=name,
-        )
-    else:
-        from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import FallbackHCUnit
-
-        unit = FallbackHCUnit(
-            fn,
-            base,
-            scale,
-            dim=dim,
-            hc_mult=hc_mult,
-            hc_sinkhorn_iters=hc_sinkhorn_iters,
-            norm_eps=norm_eps,
-            hc_eps=hc_eps,
-            layer_id=layer_id,
-            name=name,
-        )
+    unit = TileLangHCUnit(
+        fn,
+        base,
+        scale,
+        dim=dim,
+        hc_mult=hc_mult,
+        hc_sinkhorn_iters=hc_sinkhorn_iters,
+        norm_eps=norm_eps,
+        hc_eps=hc_eps,
+        layer_id=layer_id,
+        name=name,
+    )
     unit.tp_size = int(tp_size)
     unit.tp_rank = int(tp_rank)
     return unit
+
 
 def build_hc_head(
     fn: torch.Tensor,
@@ -103,32 +85,18 @@ def build_hc_head(
             tp_size=tp_size,
             tp_rank=tp_rank,
         )
-    mode = _mode_from_env()
     scale = maybe_squeeze_hc_1d(scale)
-    if mode is HCMode.TILELANG:
-        from rtp_llm.models_py.modules.dsv4.ppu.hc.tilelang_impl import TileLangHCHead
+    from rtp_llm.models_py.modules.dsv4.ppu.hc.tilelang_impl import TileLangHCHead
 
-        head = TileLangHCHead(
-            fn,
-            base,
-            scale,
-            dim=dim,
-            hc_mult=hc_mult,
-            norm_eps=norm_eps,
-            hc_eps=hc_eps,
-        )
-    else:
-        from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import FallbackHCHead
-
-        head = FallbackHCHead(
-            fn,
-            base,
-            scale,
-            dim=dim,
-            hc_mult=hc_mult,
-            norm_eps=norm_eps,
-            hc_eps=hc_eps,
-        )
+    head = TileLangHCHead(
+        fn,
+        base,
+        scale,
+        dim=dim,
+        hc_mult=hc_mult,
+        norm_eps=norm_eps,
+        hc_eps=hc_eps,
+    )
     head.tp_size = int(tp_size)
     head.tp_rank = int(tp_rank)
     return head

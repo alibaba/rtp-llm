@@ -199,7 +199,6 @@ class ModelConfig(CppModelConfig):
         "norm_type",
         "layernorm_type",
         "task_type",
-        "mla_ops_type",
         "extra_data_path",
         "local_extra_data_path",
         "model_type",
@@ -1125,9 +1124,6 @@ def build_model_config(
         # Remote ViT weights must not be instantiated or counted on the LLM worker.
         model_config.vit_separation = vit_config.vit_separation
     model_config.phy2log_path = model_args.phy2log_path
-
-    if model_args.mla_ops_type:
-        model_config.mla_ops_type = model_args.mla_ops_type
 
     if model_args.max_seq_len:
         model_config.max_seq_len = model_args.max_seq_len

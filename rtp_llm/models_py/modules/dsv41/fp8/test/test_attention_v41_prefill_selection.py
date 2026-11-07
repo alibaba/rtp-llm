@@ -85,7 +85,6 @@ class PrefillSelectionIntegrationTest(unittest.TestCase):
         env = patch.dict(
             os.environ,
             {
-                "DSV4_TOPK_V3": "1",
                 "DSV41_PREFILL_CANDIDATE_FLAGS_MAX_BYTES": str(256 * 1024**2),
             },
         )

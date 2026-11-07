@@ -23,7 +23,6 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -156,23 +155,6 @@ buildSwaStorePlan(size_t total_logical_blocks, size_t reuse_block_size, bool use
     CPSlotMapper mapper(/*cp_rank=*/0, cp_size, static_cast<int>(config.seq_size_per_block));
     return mapper.buildStorePlan(config, spec->tag, total_logical_blocks, reuse_block_size, use_hybrid);
 }
-
-class DSV4CacheTestEnvironment: public ::testing::Environment {
-public:
-    void SetUp() override {
-        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
-        StaticConfig::user_ft_core_dump_on_exception = false;
-    }
-
-    void TearDown() override {
-        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
-    }
-
-private:
-    bool old_core_dump_on_exception_{false};
-};
-
-[[maybe_unused]] auto* const dsv4_cache_test_env = ::testing::AddGlobalTestEnvironment(new DSV4CacheTestEnvironment());
 
 }  // namespace
 

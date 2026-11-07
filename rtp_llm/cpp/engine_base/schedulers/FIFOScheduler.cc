@@ -17,7 +17,6 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                              const ModelConfig&                     model_config,
                              const PDSepConfig&                     pd_sep_config,
                              const ParallelismConfig&               parallelism_config,
-                             const ModelSpecificConfig&             model_specific_config,
                              const std::shared_ptr<KVCacheManager>& cache_manager,
                              const kmonitor::MetricsReporterPtr     metrics_reporter,
                              const int                              max_score_len):
@@ -25,7 +24,6 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                       model_config,
                       pd_sep_config,
                       parallelism_config,
-                      model_specific_config,
                       cache_manager,
                       metrics_reporter),
     cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()

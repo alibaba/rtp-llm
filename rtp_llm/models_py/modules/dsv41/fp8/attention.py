@@ -120,10 +120,6 @@ _CACHE_TAG_BY_NAME = {
 }
 
 
-def _use_read_from_pool() -> bool:
-    return os.environ.get("DSV4_READ_FROM_POOL", "1") != "0"
-
-
 def _use_cp_cache_hit_raw_q_merge() -> bool:
     return _force_cp_cache_hit_raw_q_merge() or _force_all_cp_raw_q_merge()
 
@@ -142,10 +138,6 @@ def _force_all_cp_raw_q_merge() -> bool:
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
     require_pool_tokens_per_block as _dsv4_pool_tokens_per_block,
 )
-
-
-def _prefill_cp_overlap_enabled() -> bool:
-    return os.environ.get("DSV4_PREFILL_CP_OVERLAP", "0") == "1"
 
 
 def _prefill_cp_async_workspace_reads_enabled() -> bool:
@@ -698,8 +690,6 @@ class PrefillQKV(NamedTuple):
 
 
 class AttentionFP8(nn.Module):
-    _prefill_cp_overlap_hard_on: bool = False
-
     def __init__(
         self,
         layer_id: int,
@@ -2214,8 +2204,6 @@ class AttentionFP8(nn.Module):
         """Per-call gate for the CP-overlap orchestrator.
 
         All conditions must hold:
-          * overlap enabled — env ``DSV4_PREFILL_CP_OVERLAP=1`` or a
-            subclass hard-on (``_prefill_cp_overlap_hard_on``);
           * CP is actually active (``cp_size > 1``); no NCCL gather to
             overlap with otherwise;
           * prefill tensors are CUDA-backed — CPU / sync-reference CP
@@ -2226,8 +2214,6 @@ class AttentionFP8(nn.Module):
           * the layer has a compressor (``compress_ratio > 0``) —
             SWA-only layers (ratio == 0) have nothing to overlap.
         """
-        if not (self._prefill_cp_overlap_hard_on or _prefill_cp_overlap_enabled()):
-            return False
         if not common.cp_on or common.cp_ctx is None or common.cp_ctx.cp_size <= 1:
             return False
         if self.compress_ratio == 0:
@@ -2248,9 +2234,9 @@ class AttentionFP8(nn.Module):
         """Whether workspace cache reads may use side-stream async restore.
 
         This shares the main prefill-CP-overlap gate and only applies to the
-        page-rr / KV-cache-sharded path. With ``DSV4_PREFILL_CP_OVERLAP=0``,
-        workspace reads keep the original synchronous gather/restore/write
-        ordering even when ``--prefill_cp_kv_cache_sharded=1`` is set.
+        page-rr / KV-cache-sharded path; workspace reads otherwise keep the
+        original synchronous gather/restore/write ordering (also forced by
+        ``DSV4_PREFILL_CP_ASYNC_WORKSPACE_READS=0``).
         """
         if not _prefill_cp_async_workspace_reads_enabled():
             return False
@@ -2297,7 +2283,7 @@ class AttentionFP8(nn.Module):
         ``csa`` / ``hca`` additionally share the ``[sliding | compressed]``
         kv_cat + sparse_attn epilogue via :meth:`_forward_prefill_compressed`.
 
-        Under ``DSV4_PREFILL_CP_OVERLAP=1`` + CP-active, CSA/HCA layers
+        When CP-active, CSA/HCA layers
         instead dispatch to the overlap orchestrators (which hoist the
         compressor's CP all-gather ahead of the SWA write so they can
         overlap on the default stream vs the CP communication stream). The baseline sequential path
@@ -3030,10 +3016,7 @@ class AttentionFP8(nn.Module):
         wm = workspace_meta
         D = self.head_dim
         B = int(wm.swa_seq_lens.shape[0])
-        if (
-            os.environ.get("DSV4_FORWARD_TENSOR_DEBUG", "0") != "0"
-            or os.environ.get("DSV4_CP_RAW_Q_MERGE_LOG", "0") != "0"
-        ):
+        if os.environ.get("DSV4_CP_RAW_Q_MERGE_LOG", "0") != "0":
             prefix_src = (
                 cp_ctx.prefix_lengths
                 if cp_ctx.prefix_lengths is not None

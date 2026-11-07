@@ -131,7 +131,6 @@ class SingleGpuBackendRankTest(TestCase):
             set_parallelism_config(
                 configs.parallelism_config,
                 selected_world_rank,
-                configs.ffn_disaggregate_config,
                 configs.prefill_cp_config,
             )
             local_rank = configs.parallelism_config.local_rank
@@ -734,9 +733,7 @@ class GenerateConfigTest(TestCase):
                 py_env_configs.profiling_debug_logging_config
             ),
             hw_kernel_config=py_env_configs.py_hw_kernel_config,
-            device_resource_config=py_env_configs.device_resource_config,
             moe_config=py_env_configs.moe_config,
-            model_specific_config=py_env_configs.model_specific_config,
             sp_config=py_env_configs.sp_config,
             cache_store_config=py_env_configs.cache_store_config,
             misc_config=py_env_configs.misc_config.misc_config,

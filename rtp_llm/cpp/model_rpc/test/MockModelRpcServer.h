@@ -47,14 +47,11 @@ EngineInitParams createMockEngineInitParams() {
     kv_cache_config.reuse_cache    = false;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     HWKernelConfig              hw_kernel_config;
-    DeviceResourceConfig        device_resource_config;
     MoeConfig                   moe_config;
-    ModelSpecificConfig         model_specific_config;
     SpeculativeExecutionConfig  sp_config;
     CacheStoreConfig            cache_store_config;
     MiscellaneousConfig         misc_config;
     ArpcConfig                  arpc_config;
-    FfnDisAggregateConfig       ffn_disaggregate_config;
     typedef half                T;
     const at::ScalarType        scalar_type  = at::ScalarType::Half;
     const size_t                hidden_units = 128;
@@ -104,14 +101,11 @@ EngineInitParams createMockEngineInitParams() {
         kv_cache_config,
         profiling_debug_logging_config,
         hw_kernel_config,
-        device_resource_config,
         moe_config,
-        model_specific_config,
         sp_config,
         cache_store_config,
         misc_config,
         arpc_config,
-        ffn_disaggregate_config,
         std::move(*convert.createGptWeights(std::make_unique<TensorMaps>(layer_weights),
                                             std::make_unique<TensorMap>(global_weights))));
     return rtp_llm_params;

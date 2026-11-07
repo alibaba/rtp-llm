@@ -35,21 +35,6 @@ static std::string taskTypeToString(TaskType task_type) {
     }
 }
 
-static std::string mlaOpsTypeToString(MlaOpsType mla_ops_type) {
-    switch (mla_ops_type) {
-        case MlaOpsType::AUTO:
-            return "AUTO";
-        case MlaOpsType::MHA:
-            return "MHA";
-        case MlaOpsType::FLASH_INFER:
-            return "FLASH_INFER";
-        case MlaOpsType::FLASH_MLA:
-            return "FLASH_MLA";
-        default:
-            return "UNKNOWN(" + std::to_string(static_cast<int>(mla_ops_type)) + ")";
-    }
-}
-
 static std::string hiddenStateCaptureDtypeToString(HiddenStateCaptureDtype capture_dtype) {
     switch (capture_dtype) {
         case HiddenStateCaptureDtype::BF16:
@@ -149,14 +134,6 @@ void ModelConfig::set_data_type(std::string data_type_str) {
     }
 }
 
-void ModelConfig::set_mla_ops_type(std::string mla_ops_type_str) {
-    try {
-        mla_ops_type = getMlaOpsType(mla_ops_type_str);
-    } catch (...) {
-        throw std::runtime_error("Invalid mla_ops_type: " + mla_ops_type_str);
-    }
-}
-
 bool ModelConfig::isGatedActivation() const {
     return rtp_llm::isGatedActivation(activation_type);
 }
@@ -231,7 +208,6 @@ std::string ModelConfig::to_string() const {
         << "hidden_state_capture_dtype: " << hiddenStateCaptureDtypeToString(hidden_state_capture_dtype) << "\n"
         << "attn_config: {\n"
         << attn_config.DebugAttentionConfigStr() << "\n}\n"
-        << "mla_ops_type: " << mlaOpsTypeToString(mla_ops_type) << "\n"
         << "deepseek_rope_mscale: " << deepseek_rope_mscale << "\n"
         << "deepseek_mscale_all_dim: " << deepseek_mscale_all_dim << "\n"
         << "moe_n_group: " << moe_n_group << "\n"

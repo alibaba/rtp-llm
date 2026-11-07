@@ -213,8 +213,6 @@ void NormalEngine::validateSparseKvOffloadConfig(const EngineInitParams& params,
                            && params.sp_config.gen_num_per_cycle > 0;
     RTP_LLM_CHECK_WITH_INFO((params.sp_config.type == SP_TYPE_NONE && !has_propose_model) || glm_mtp || v4_dspark,
                             "sparse KV offload supports speculative execution only with GLM MTP or V4 DSpark");
-    RTP_LLM_CHECK_WITH_INFO(params.device_resource_config.enable_layer_micro_batch == 0,
-                            "sparse KV offload does not support layer micro-batch");
     RTP_LLM_CHECK_WITH_INFO(!cache.enable_memory_cache && !cache.enable_disk_cache && !cache.enable_remote_cache,
                             "sparse KV offload does not support memory/disk/remote prefix connectors");
     RTP_LLM_CHECK_WITH_INFO(cache.multi_task_prompt.empty() && cache.multi_task_prompt_str.empty()
@@ -247,8 +245,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     profiling_debug_logging_config(params.profiling_debug_logging_config),
     kv_cache_config(params.kv_cache_config),
     cache_store_config(params.cache_store_config),
-    ffn_disaggregate_config(params.ffn_disaggregate_config),
-    model_specific_config(params.model_specific_config),
     sp_config(params.sp_config),
     metrics_reporter_(params.metrics_reporter),
     propose_params_(std::move(propose_params)),
@@ -346,8 +342,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
 #if USING_CUDA
-    if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)
-        && !ffn_disaggregate_config.enable_ffn_disaggregate) {
+    if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)) {
         // warm up
         RTP_LLM_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
                          runtime_config.fifo_scheduler_config.max_context_batch_size,
@@ -387,7 +382,7 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
     if (propose_params_) {
         executor_.reset(new MtpExecutor(
-            params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
+            params, propose_params, resource_context_.cache_manager, kv_cache_group_num_));
     } else {
         executor_.reset(new NormalExecutor(
             params,
@@ -395,7 +390,6 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
             false,
             false,
             0,
-            mla_ops_type_,
             [this]() { step_profiler_.startStep(); },
             [this]() { step_profiler_.finishStep(); }));
     }
@@ -418,7 +412,6 @@ void NormalEngine::initScheduler() {
                                                     model_config_,
                                                     pd_sep_config,
                                                     parallelism_config,
-                                                    model_specific_config,
                                                     resource_context_.cache_manager,
                                                     metrics_reporter_));
         RTP_LLM_LOG_INFO("create pdfusion ratio scheduler done");
@@ -431,7 +424,6 @@ void NormalEngine::initScheduler() {
                                            model_config_,
                                            pd_sep_config,
                                            parallelism_config,
-                                           model_specific_config,
                                            resource_context_.cache_manager,
                                            metrics_reporter_));
         RTP_LLM_LOG_INFO("create fifo scheduler done");
@@ -660,11 +652,9 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         const bool sparse_mla_requires_kv_cache =
             model_config_.attn_config.use_mla && model_config_.attn_config.is_sparse;
         if (!generation_prefill_cuda_graph_requested && !sparse_mla_requires_kv_cache) {
-            rtp_llm::setTraceMemory(true);
-            executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
+            executor_.reset(new NormalExecutor(params, nullptr, true, false, 0));
             THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
             const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
-            rtp_llm::setTraceMemory(false);
             (void)executor_.reset(nullptr);
             cudaDeviceSynchronize();
             c10::cuda::CUDACachingAllocator::emptyCache();
@@ -682,8 +672,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         const auto baseline_allocated = cuda_graph::graphAllocatedBytes();
         const auto baseline_reserved  = cuda_graph::graphReservedBytes();
 
-        rtp_llm::setTraceMemory(true);
-        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0, mla_ops_type_));
+        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0));
         {
             // NormalGenerateStream snapshots ResourceContext at construction. Bind
             // the same temporary manager used by NormalExecutor so fakeInitKVBlock
@@ -714,7 +703,6 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
                          positiveDelta(measured_reserved, baseline_reserved) / 1024 / 1024,
                          positiveDelta(baseline_status.available_bytes, measured_status.available_bytes) / 1024 / 1024);
 
-        rtp_llm::setTraceMemory(false);
         (void)executor_.reset(nullptr);
         releasePythonKvCache(params.py_model);
         warmup_cache_manager.reset();
@@ -731,9 +719,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         warmup_resource_context.cache_manager   = warmup_cache_manager;
         // The temporary paged cache is warmup infrastructure, not runtime activation memory.
         // Create it before tracing and destroy it before sampling production cache capacity.
-        rtp_llm::setTraceMemory(true);
         auto memory_tracker = std::make_unique<WarmupMemoryTracker>();
-        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0, mla_ops_type_));
+        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0));
         auto token_heavy_result = runPrefillWarmupShape(fake_input, warmup_resource_context, 0, token_budget);
         THROW_IF_STATUSOR_ERROR(token_heavy_result);
         max_consumed = memory_tracker->maxConsumedBytes();
@@ -769,7 +756,6 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 
         releasePythonKvCache(params.py_model);
         (void)executor_.reset(nullptr);
-        rtp_llm::setTraceMemory(false);
     }
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
@@ -785,7 +771,6 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
     fake_input->generate_config->num_return_sequences = runtime_config.max_generate_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-    rtp_llm::setTraceMemory(true);
 
     auto cache_manager = createWarmupCacheManager();
     // The temporary KV backing is outside the runtime measurement. Offload
@@ -796,7 +781,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     size_t offload_fixed_bytes = 0;
     const size_t offload_backing_before = cache_manager->offloadDeviceSizeBytes();
     try {
-        executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
+        executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0));
         {
             ScopedWarmUpCacheManagerBinding cache_binding(resource_context_, cache_manager);
             THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
@@ -812,7 +797,6 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         cudaDeviceSynchronize();
     } catch (...) {
         executor_.reset(nullptr);
-        rtp_llm::setTraceMemory(false);
         try {
             releasePythonKvCache(params.py_model);
         } catch (const std::exception& error) {
@@ -824,7 +808,6 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     RTP_LLM_LOG_INFO("decode warmup runtime=%zu bytes, separately budgeted offload buffers=%zu bytes",
                      max_consumed,
                      offload_fixed_bytes);
-    rtp_llm::setTraceMemory(false);
     cache_manager.reset();
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
@@ -1140,7 +1123,7 @@ absl::Status NormalEngine::step() try {
 
     int64_t                 tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     list<GenerateStreamPtr> streams;
-    if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
+    if (parallelism_config.tp_rank == 0) {
         {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule());
@@ -1149,9 +1132,8 @@ absl::Status NormalEngine::step() try {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
         }
-        // TP collectives and FFN-disaggregate alignment both require empty batches to enter process().
-        if (shouldEarlyReturnEmptyBatch(
-                streams.empty(), parallelism_config.tp_size, ffn_disaggregate_config.enable_ffn_disaggregate)) {
+        // TP collectives require empty batches to enter process().
+        if (shouldEarlyReturnEmptyBatch(streams.empty(), parallelism_config.tp_size)) {
             if (resource_context_.cache_manager) {
                 resource_context_.cache_manager->resizeOffloadHotCache(0);
             }
@@ -1242,8 +1224,8 @@ size_t NormalEngine::reserveStepForStream(size_t configured_reserve_step, bool i
     return is_prefill_only ? 0 : configured_reserve_step;
 }
 
-bool NormalEngine::shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size, bool enable_ffn_disaggregate) {
-    return streams_empty && tp_size == 1 && !enable_ffn_disaggregate;
+bool NormalEngine::shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size) {
+    return streams_empty && tp_size == 1;
 }
 
 bool NormalEngine::shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size) {

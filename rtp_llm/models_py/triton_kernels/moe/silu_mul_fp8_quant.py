@@ -463,9 +463,9 @@ def silu_mul_fp8_quant_packed_g32(
     materializing ``hidden``, so the FP8 input and its group-32 scales match
     ``sgl_per_token_group_quant_fp8(..., group_size=32)`` bit-for-bit.
 
-    Quantization honors the repo-wide ``DSV4_FP8_QUANT_KERNEL`` policy; ``auto``
-    selects v2 at ``M*N >= 4Mi`` elements. Legacy's unused scale-pack bytes are
-    unspecified; this entry initializes them to zero, as v2 does.
+    Quantization always uses the v2 kernel; small shapes below ``M*N`` of
+    4Mi elements take the eager fallback. Unused scale-pack bytes are
+    initialized to zero.
 
     Returns:
       out_fp8: ``[M, N]`` torch.float8_e4m3fn.
@@ -482,8 +482,9 @@ def silu_mul_fp8_quant_packed_g32(
     ).T[:m]
     if m * n == 0:
         return quant, scales
-    mode = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
-    legacy = mode == "legacy" or (mode == "auto" and m * n < 4 * 1024 * 1024)
+    # Small shapes stay on the legacy eager path: the fused kernel's launch
+    # overhead dominates below ~4M elements.
+    legacy = m * n < 4 * 1024 * 1024
     apply_clamp = clamp_limit is not None and clamp_limit > 0.0
     _silu_mul_fp8_quant_packed_g32_kernel[(m, triton.cdiv(n, 1024))](
         gate_up,

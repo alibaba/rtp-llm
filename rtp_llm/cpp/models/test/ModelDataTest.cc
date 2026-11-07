@@ -101,11 +101,11 @@ TEST_F(ModelDataTest, testTensorHolderReleasesOnThirdRound) {
 TEST_F(ModelDataTest, testPrefillCPExecutionFollowsRoleConfig) {
     ParallelismConfig prefill_config;
     prefill_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
-    EXPECT_TRUE(buildExecProperties(prefill_config, DeviceResourceConfig{}).enable_prefill_cp);
+    EXPECT_TRUE(buildExecProperties(prefill_config).enable_prefill_cp);
 
     ParallelismConfig decode_config;
     decode_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
-    EXPECT_FALSE(buildExecProperties(decode_config, DeviceResourceConfig{}).enable_prefill_cp);
+    EXPECT_FALSE(buildExecProperties(decode_config).enable_prefill_cp);
 }
 
 TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
@@ -420,7 +420,7 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     ASSERT_NE(rank_env, nullptr);
     ASSERT_NE(base_env, nullptr);
     ::alarm(90);
-    rtp_llm::initRuntime(0, false, false, rtp_llm::MlaOpsType::AUTO);
+    rtp_llm::initRuntime(0);
     const int rank        = std::atoi(rank_env);
     auto&     broadcaster = CpuTpBroadcaster::instance();
     broadcaster.initialize(rank, 2, base_env);
@@ -678,12 +678,9 @@ TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRequiresSingleDeviceParallel
     expect_rejected([](auto& c) { c.dp_size = 2; });
     expect_rejected([](auto& c) { c.ep_size = 2; });
     expect_rejected([](auto& c) { c.pp_size = 2; });
-    expect_rejected([](auto& c) { c.ffn_sp_size = 2; });
     expect_rejected([](auto& c) { c.ffn_tp_size = 2; });
-    expect_rejected([](auto& c) { c.enable_sp = true; });
     expect_rejected([](auto& c) { c.prefill_cp_config.method = CPRotateMethod::ALL_GATHER; });
     expect_rejected([](auto& c) { c.prefill_cp_config.method = CPRotateMethod::PREFILL_CP; });
-    expect_rejected([](auto& c) { c.ffn_disaggregate_config.enable_ffn_disaggregate = true; });
 }
 
 TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRejectsAutoMoeStrategy) {

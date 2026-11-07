@@ -32,7 +32,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
@@ -79,20 +78,6 @@ static_assert(!noexcept(
     std::declval<BlockTreeEvictor&>().rollbackTransferLocked(std::declval<const std::vector<TransferDescriptor>&>())));
 static_assert(noexcept(
     std::declval<BlockTreeEvictor&>().runEvictionTask(std::declval<std::shared_ptr<const EvictionTransferTask>>())));
-
-class DisableCoreDumpGuard {
-public:
-    DisableCoreDumpGuard(): old_value_(StaticConfig::user_ft_core_dump_on_exception) {
-        StaticConfig::user_ft_core_dump_on_exception = false;
-    }
-
-    ~DisableCoreDumpGuard() {
-        StaticConfig::user_ft_core_dump_on_exception = old_value_;
-    }
-
-private:
-    bool old_value_;
-};
 
 std::shared_ptr<FullGroupSet> makeFullGroup(const DeviceBlockPoolPtr& device_pool) {
     return std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, nullptr, nullptr);
@@ -1352,7 +1337,6 @@ TEST_F(BlockTreeEvictorTest, CompleteEvictRejectsNonDemotingResource) {
     ASSERT_NE(node, nullptr);
 
     const TransferDescriptor desc{node, /*group_set_id=*/0, /*path_index=*/0, Tier::DEVICE, Tier::NONE, {source_block}};
-    DisableCoreDumpGuard     core_dump_guard;
     EXPECT_THROW(evictor_->completeEvict({desc}), std::exception);
 
     evictor_->suspendCandidate(node, 0, Tier::DEVICE);

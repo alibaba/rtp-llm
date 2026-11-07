@@ -52,7 +52,6 @@ class HybridKVCacheSpecTest(TestCase):
         config.num_layers = 1
         config.is_mtp = True
         config.attn_config.use_mla = True
-        config.mla_ops_type = "FLASH_MLA"
         config.attn_config.is_sparse = True
         config.attn_config.indexer_head_dim = 128
         config.attn_config.tokens_per_block = 256
@@ -87,7 +86,6 @@ class HybridKVCacheSpecTest(TestCase):
         config.num_layers = 61
         config.is_mtp = True
         config.attn_config.use_mla = True
-        config.mla_ops_type = "FLASH_MLA"
 
         DeepSeekV3Mtp._post_build_model_config(config)
 
@@ -100,7 +98,6 @@ class HybridKVCacheSpecTest(TestCase):
         config = ModelConfig()
         config.num_layers = 2
         config.attn_config.use_mla = True
-        config.mla_ops_type = "FLASH_MLA"
         config.attn_config.is_sparse = True
         config.attn_config.indexer_head_dim = 256
         config.attn_config.tokens_per_block = 512
@@ -116,7 +113,6 @@ class HybridKVCacheSpecTest(TestCase):
         config = ModelConfig()
         config.num_layers = 2
         config.attn_config.use_mla = True
-        config.mla_ops_type = "FLASH_MLA"
         config.attn_config.is_sparse = True
         config.attn_config.indexer_head_dim = 256
         config.attn_config.tokens_per_block = 512
@@ -140,27 +136,10 @@ class HybridKVCacheSpecTest(TestCase):
             self.assertEqual(indexer_desc.compression_ratio, 1)
             self.assertIsNone(indexer_desc.reuse)
 
-    def test_sparse_mla_mha_fallback_keeps_indexer_descriptor(self):
-        config = ModelConfig()
-        config.num_layers = 1
-        config.attn_config.use_mla = True
-        config.mla_ops_type = "MHA"
-        config.attn_config.is_sparse = True
-        config.attn_config.indexer_head_dim = 128
-        config.attn_config.tokens_per_block = 256
-
-        DeepSeekV2._post_build_model_config(config)
-
-        layer_descs = config.kv_cache_spec_descs[0]
-        self.assertEqual([desc.tag for desc in layer_descs], ["default", "indexer_kv"])
-        self.assertEqual(layer_descs[0].cache_type, KVCacheSpecType.MHA)
-        self.assertEqual(layer_descs[1].cache_type, KVCacheSpecType.OPAQUE_KV)
-
     def test_sparse_mtp_uses_same_indexer_descriptor_as_target(self):
         target = ModelConfig()
         target.num_layers = 1
         target.attn_config.use_mla = True
-        target.mla_ops_type = "FLASH_MLA"
         target.attn_config.is_sparse = True
         target.attn_config.indexer_head_dim = 128
         target.attn_config.tokens_per_block = 256
@@ -168,7 +147,6 @@ class HybridKVCacheSpecTest(TestCase):
         propose.num_layers = 1
         propose.is_mtp = True
         propose.attn_config.use_mla = True
-        propose.mla_ops_type = "FLASH_MLA"
         propose.attn_config.is_sparse = True
         propose.attn_config.indexer_head_dim = 128
         propose.attn_config.tokens_per_block = 256
@@ -470,7 +448,6 @@ class HybridKVCacheSpecTest(TestCase):
     def test_kimi_linear_full_desc_uses_mla_when_enabled(self):
         config = self._build_model_config([HybridAttentionType.NONE])
         config.attn_config.use_mla = True
-        config.mla_ops_type = "FLASH_MLA"
 
         KimiLinear._post_build_model_config(config)
 

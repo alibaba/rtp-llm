@@ -85,10 +85,7 @@ public:
     /// Initialize the device once for the whole test suite.
     /// GPU tests are skipped when no device is available.
     static void SetUpTestSuite() {
-        initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false,
-                    /*enable_comm_overlap=*/false,
-                    MlaOpsType::AUTO);
+        initRuntime(/*device_id=*/0);
         device_initialized_ = isRuntimeInitialized();
     }
 

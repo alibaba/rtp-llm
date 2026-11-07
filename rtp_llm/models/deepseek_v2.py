@@ -31,7 +31,6 @@ from rtp_llm.ops import (
     DataType,
     KVCacheSpecDesc,
     KVCacheSpecType,
-    MlaOpsType,
     OpaqueBlockEntryCountMode,
 )
 from rtp_llm.utils.dsa_indexing import build_dsa_indexer_groups, dsa_layer_has_indexer
@@ -75,8 +74,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             kv_lora_rank=self.kv_lora_rank,
             ope_head_dim=self.nope_head_dim,
             v_head_dim=self.v_head_dim,
-            use_mla=self.model_config.attn_config.use_mla
-            and self.model_config.mla_ops_type != MlaOpsType.MHA,
+            use_mla=self.model_config.attn_config.use_mla,
             q_use_lora=self.q_use_lora,
         )
         layer_weights: List[WeightModule] = [
@@ -246,10 +244,7 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 ]
             )
 
-        if (
-            self.model_config.attn_config.use_mla
-            and self.model_config.mla_ops_type != MlaOpsType.MHA
-        ):
+        if self.model_config.attn_config.use_mla:
             mla_layer_weights.append(
                 MlaAttnAtomicWeight(
                     W.mla_kc,
@@ -473,8 +468,6 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
             ]
 
     def _create_rope_w(self) -> Optional[AtomicWeight]:
-        if self.model_config.mla_ops_type == MlaOpsType.MHA:
-            return None
         config = self.model_config
 
         def __create_rope_w(ts: List[torch.Tensor], config: ModelConfig):
@@ -556,10 +549,7 @@ class DeepSeekV2(BaseModel):
         from rtp_llm.utils.sparse_kv_offload import sparse_kv_offload_max_selected_rows
 
         attn = self.model_config.attn_config
-        if (
-            not (attn.use_mla and attn.is_sparse)
-            or self.model_config.mla_ops_type == MlaOpsType.MHA
-        ):
+        if not (attn.use_mla and attn.is_sparse):
             raise ValueError("sparse KV offload requires sparse MLA")
         selected = sparse_kv_offload_max_selected_rows(
             int(self.kv_cache_config.sparse_kv_offload_hot_rows),
@@ -673,7 +663,6 @@ class DeepSeekV2(BaseModel):
             max_generate_batch_size=max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=self.device_resource_config,
         )
 
     @staticmethod
@@ -738,10 +727,7 @@ class DeepSeekV2(BaseModel):
             config.attn_config.rope_config.dim = config.attn_config.rope_head_dim
 
             # yarn rotary config
-            if config.mla_ops_type != MlaOpsType.MHA:
-                config.attn_config.rope_config.style = 0
-            else:
-                config.attn_config.rope_config.style = 5
+            config.attn_config.rope_config.style = 0
             # Check rope_scaling for YaRN (DeepSeek V2/V3 style)
             rope_scaling = config_json.get("rope_scaling")
             if rope_scaling is not None:
@@ -1081,7 +1067,6 @@ class Glm5Mtp(DeepSeekV2):
             max_generate_batch_size=self.max_generate_batch_size,
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.hw_kernel_config,
-            device_resource_config=self.device_resource_config,
         )
 
     @staticmethod

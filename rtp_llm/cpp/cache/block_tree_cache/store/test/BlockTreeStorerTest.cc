@@ -17,7 +17,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -52,19 +51,6 @@ struct StoreEnvironment {
 };
 
 constexpr size_t kStoreDeviceBlocks = 4;
-
-class CoreDumpGuard {
-public:
-    CoreDumpGuard(): old_(StaticConfig::user_ft_core_dump_on_exception) {
-        StaticConfig::user_ft_core_dump_on_exception = false;
-    }
-    ~CoreDumpGuard() {
-        StaticConfig::user_ft_core_dump_on_exception = old_;
-    }
-
-private:
-    bool old_;
-};
 
 StoreEnvironment makeStoreEnvironment(const std::string&              name,
                                       bool                            device_cache_on,
@@ -624,7 +610,6 @@ TEST(BlockTreeStorerTest, UnsupportedInsertTargetsRejectWithoutPublishingOrPinni
     resources[0][0].device_blocks = holder[0];
     resources[1][0].device_blocks = holder[1];
 
-    CoreDumpGuard guard;
     const auto    version = env.cache->getKeySnapshot().version;
     for (const Tier target : {Tier::REMOTE, Tier::NONE}) {
         SCOPED_TRACE(tierName(target));
