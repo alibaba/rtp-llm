@@ -190,6 +190,8 @@ def install_backend_hooks():
     VerlBackend._update_actor_with_loss_routing=checked_update
     UnifiedTrainer.fit_async=checked_fit
     _BACKEND_PATCHED=True
+    from qwen38_initial_policy_replay import install as install_initial_policy_replay
+    install_initial_policy_replay()
 
 
 def _forward_worker_setup():

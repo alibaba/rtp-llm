@@ -58,3 +58,25 @@ all native token IDs and action masks rather than silently truncating them.
 One rollout contains 72 real trajectories; multi-turn conversion may yield
 72 to144 training rows before neutral balance padding. The original dynamic
 minibatch metadata must still cover one complete global update per iteration.
+
+The memory recovery recipe retains at most 76 GiB of FP32 gradients per GPU
+and releases only empty CUDA allocator segments at actual micro boundaries.
+With the recorded uneven 72-rank shards, the worst four-rank CPU state plan
+is about 794.48 GiB including a 96 GiB reserve. This is a static bound, not an
+accepted full-model peak; clean checkpoint page cache must remain reclaimable.
+The BF16 master/moment precision and bounded FP32 optimizer math are unchanged.
+
+Initial-policy recovery is optional and requires
+`Q38_INITIAL_POLICY_REPLAY=1`, `Q38_INITIAL_POLICY_REPLAY_MANIFEST`, and its
+`Q38_INITIAL_POLICY_REPLAY_MANIFEST_SHA256`. Keep this private evidence manifest
+outside version control. Only the failed update's real policy-zero episodes
+may be recovered: original logger UIDs and rewards are joined with original
+native token IDs, FP32 logprob bits and tool results, then passed through the
+unchanged converter. All fresh FSDP shards must match the old source layout
+and fully verified checkpoint bytes; CPU streaming must match every canonical
+source SHA from the original native COMMIT. The current 72 workers must have
+zero optimizer state/gradients and no native exporter, and the new controller
+must prove it has never started a native incarnation. Historical PIDs or pause
+receipts do not authorize the new run. Only the initial native sync/generation
+is skipped; policy1/2 refits and the post-update rollout execute normally.
+Reports must distinguish recovered policy-zero evidence from new generation.
