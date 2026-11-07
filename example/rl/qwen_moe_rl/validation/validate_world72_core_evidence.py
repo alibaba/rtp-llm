@@ -25,6 +25,14 @@ def finite(value):return type(value) in (float,int) and math.isfinite(value)
 def digest(value):return isinstance(value,str) and len(value)==64 and all(c in '0123456789abcdef' for c in value)
 
 
+def fp32_scores(values,bits):
+    if not isinstance(values,list) or not values or not all(finite(v) for v in values):return False
+    try:
+        raw=struct.pack(f'<{len(values)}f',*values)
+        return raw.hex()==bits and list(struct.unpack(f'<{len(values)}f',raw))==values
+    except (OverflowError,TypeError,struct.error):return False
+
+
 class Validator:
     def __init__(self,roots):
         self.roots=[root.resolve() for root in roots]
@@ -227,6 +235,59 @@ class Validator:
             policy_step_not_inferred_from_receipt_file_count=True,
             remaining_binding='Validate original72 trajectories/iteration through episode/native traces and actual two optimizer commits separately')
 
+    def global_minibatches(self,updates):
+        """Bind the real pre-dispatch metadata to both observed update steps.
+
+        The CPU trainer observes the original backend's dynamic row metadata.
+        This receipt does not execute an optimizer, so all72 independent
+        optimizer commit receipts remain mandatory for the same explicit step.
+        Cross-node wall clocks and the number of converter files are not used
+        to infer policy/step identity.
+        """
+        by_step=defaultdict(list)
+        records=self.records('global-minibatch-step*.json')
+        for path,row in records:
+            step=row.get('trainer_global_step')
+            if not self.need(type(step) is int and step in (1,2),
+                    f'{path}: pre-dispatch trainer step must be exactly1 or2'):continue
+            by_step[step].append((path,row))
+            real=row.get('rows_pre_pad');padded=row.get('rows_post_pad')
+            valid=type(real) is int and type(padded) is int and 72<=real<=144
+            if self.need(valid,f'{path}: actual two-turn72-trajectory row count is outside72..144'):
+                self.need(padded==((real+71)//72)*72
+                    and row.get('global_minibatch_rows')==padded
+                    and row.get('rows_per_rank')==padded//72,
+                    f'{path}: neutral dynamic DP padding or one whole global minibatch differs')
+            self.need(row.get('schema')=='q38-real-single-global-minibatch-before-dispatch-v1'
+                and row.get('rollout_loss_denominator')==row.get('data_parallel_size')==72
+                and row.get('ppo_epochs')==row.get('predicted_optimizer_steps_this_iteration')==1
+                and row.get('original_backend_metadata_preserved') is True
+                and row.get('optimizer_step_executed_by_this_observer') is False,
+                f'{path}: original one-minibatch/loss-denominator contract differs')
+            losses=row.get('actual_distinct_role_losses')
+            self.need(isinstance(losses,list) and len(losses)<=1,
+                f'{path}: multiple sequential role-loss updates were scheduled')
+            self.need(type(row.get('pid')) is int and row['pid']>0
+                and type(row.get('time_ns')) is int and row['time_ns']>0,
+                f'{path}: actual CPU trainer process observation is absent')
+        summary=[]
+        for step in (1,2):
+            entries=by_step[step]
+            self.need(len(entries)==1,
+                f'Global minibatch step{step}: exactly one original pre-dispatch metadata receipt is required')
+            actual=updates.get(step,{})
+            self.need(set(actual)==set(range(WORLD)),
+                f'Global minibatch step{step}: prediction is not backed by all72 actual optimizer commits')
+            if len(entries)==1:
+                path,row=entries[0]
+                summary.append(dict(step=step,rows_before_neutral_padding=row.get('rows_pre_pad'),
+                    global_minibatch_rows=row.get('rows_post_pad'),actual_optimizer_rank_commits=len(actual),
+                    observer_does_not_execute_an_optimizer=True))
+        self.details['global_minibatches']=dict(steps=summary,
+            actual_trajectory_count_requires_separate_original_episode_linkage=True,
+            policy_step_taken_from_actual_trainer_state_not_receipt_count=True,
+            cross_node_wall_clocks_not_used_to_infer_step_order=True)
+
     def numerical_policies(self):
         syncs={};probes={};hfs=defaultdict(dict)
         for path,row in self.records('hf-probe-step*-rank*.json'):hfs[row.get('global_step')][row.get('rank')]=(path,row)
@@ -254,26 +315,63 @@ class Validator:
                 and row.get('global_step')==step and row.get('model_version')==sync.get('model_version')
                 and row.get('received_weights')==MAIN_SOURCES and not row.get('update_id') for row in statuses),
                 f'{ppath}: actual native statuses disagree about the committed policy')
-            errors=[]
+            self.need(probe.get('HF_comparison_mode')=='report_only'
+                and probe.get('HF_error_used_for_acceptance') is False
+                and 'HF_reference_tolerance' in probe and probe['HF_reference_tolerance'] is None,
+                f'{ppath}: current HF/native report-only profile is not explicit')
+            errors=[];native={};reference=hfs[step][0][1].get('raw_log_probs',[])
+            target_count=len(probe.get('response_ids',[]))
+            for route in routes:
+                actual=route.get('raw_log_probs',[])
+                if self.need(fp32_scores(actual,route.get('raw_fp32_bits_hex'))
+                        and len(actual)==target_count,
+                        f'{ppath}: actual native FP32 score values/bits/target lengths differ'):
+                    native[route.get('dp_rank')]=route
             for rank,(hpath,hf) in hfs[step].items():
                 expected=hf.get('raw_log_probs',[])
                 self.need(hf.get('schema')=='q38-real-HF-policy-probe-v1'
                     and hf.get('world_size')==WORLD and hf.get('master_dtype')==hf.get('compute_dtype')=='bfloat16'
-                    and hf.get('score_dtype')=='float32' and expected
-                    and all(finite(value) for value in expected)
-                    and hf.get('raw_fp32_bits_hex')==struct.pack(f'<{len(expected)}f',*expected).hex(),
+                    and hf.get('score_dtype')=='float32'
+                    and fp32_scores(expected,hf.get('raw_fp32_bits_hex'))
+                    and len(expected)==target_count,
                     f'{hpath}: actual BF16 HF FP32 target score bits differ')
                 self.need(hf.get('prompt_ids')==probe.get('prompt_ids') and hf.get('response_ids')==probe.get('response_ids'),
                     f'{hpath}: actual HF/native probe token IDs differ')
                 for route in routes:
                     actual=route.get('raw_log_probs',[])
-                    self.need(all(finite(value) for value in actual)
-                        and route.get('raw_fp32_bits_hex')==struct.pack(f'<{len(actual)}f',*actual).hex(),
-                        f'{ppath}: actual native FP32 score bits are nonfinite or inconsistent')
                     if self.need(len(expected)==len(actual),f'{ppath}: target-score lengths differ'):
                         errors.extend(abs(a-b) for a,b in zip(expected,actual) if finite(a) and finite(b))
             maximum=max(errors) if errors else None
-            self.need(maximum is not None and maximum<=.05,f'Policy{step}: recomputed maximum actual HF/native target error exceeds0.05')
+            self.need(maximum is not None and finite(maximum),
+                f'Policy{step}: finite complete HF/native target comparison is absent')
+            reports=[];max_dp_error=None;rank0_max=None;rank0_mean=None
+            if (set(native)==set(range(9)) and target_count>0
+                    and fp32_scores(reference,hfs[step][0][1].get('raw_fp32_bits_hex'))
+                    and len(reference)==target_count):
+                ordered=[native[dp] for dp in range(9)]
+                dp0=ordered[0]['raw_log_probs']
+                max_dp_error=max(abs(a-b) for row in ordered for a,b in zip(dp0,row['raw_log_probs']))
+                self.need(max_dp_error<=.05 and probe.get('max_dp_error')==max_dp_error,
+                    f'Policy{step}: native DP self-agreement exceeds0.05 or its reported maximum differs')
+                rank0_errors=[]
+                for route in ordered:
+                    absolute=[abs(a-b) for a,b in zip(reference,route['raw_log_probs'])]
+                    mean=sum(absolute)/target_count;rank0_errors.extend(absolute)
+                    self.need(route.get('absolute_HF_errors')==absolute
+                        and finite(route.get('mean_HF_absolute_error')) and route['mean_HF_absolute_error']==mean,
+                        f'{ppath}: per-DP reported HF absolute errors or mean differ from actual score values')
+                    reports.append(dict(dp_rank=route['dp_rank'],absolute_HF_errors=absolute,
+                        mean_HF_absolute_error=mean,HF_raw_log_probs=reference,
+                        HF_raw_fp32_bits_hex=hfs[step][0][1]['raw_fp32_bits_hex'],
+                        native_raw_log_probs=route['raw_log_probs'],native_raw_fp32_bits_hex=route['raw_fp32_bits_hex']))
+                rank0_max=max(rank0_errors);rank0_mean=sum(rank0_errors)/(9*target_count)
+                self.need(probe.get('hf_raw_log_probs')==reference
+                    and probe.get('hf_raw_fp32_bits_hex')==hfs[step][0][1].get('raw_fp32_bits_hex')
+                    and finite(probe.get('max_HF_error')) and probe['max_HF_error']==rank0_max
+                    and finite(probe.get('mean_HF_absolute_error')) and probe['mean_HF_absolute_error']==rank0_mean,
+                    f'{ppath}: reported HF reference, maximum or mean differs from recomputed complete scores')
+                self.need(probe.get('actual_HF_reference_sha256')==hashlib.sha256(hfs[step][0][0].read_bytes()).hexdigest(),
+                    f'{ppath}: actual HF reference file digest differs')
             changed=None
             if previous is not None:
                 old={row['name']:row['sha256'] for row in previous['tensors']}
@@ -282,7 +380,13 @@ class Validator:
                     and previous['model_version']!=sync['model_version'],
                     f'Policy{step}: actual BF16 source bytes and native version did not change after the update')
             summary.append(dict(step=step,model_version=sync.get('model_version'),HF_ranks=len(hfs[step]),
-                native_DP_endpoints=len(routes),recomputed_max_abs_error=maximum,changed_source_tensors=changed))
+                native_DP_endpoints=len(routes),recomputed_max_abs_error=maximum,
+                recomputed_mean_abs_error=sum(errors)/len(errors) if errors else None,
+                HF_comparison_mode='report_only',HF_error_used_for_acceptance=False,
+                actual_HF_rank0_recomputed_max_abs_error=rank0_max,
+                actual_HF_rank0_recomputed_mean_abs_error=rank0_mean,
+                native_DP_self_recomputed_max_abs_error=max_dp_error,
+                per_DP_HF_rank0_comparisons=reports,changed_source_tensors=changed))
             previous=sync
         finals=self.records('rtp_final_policy2_actual_reprobe.json')
         self.need(len(finals)==1 and finals[0][1].get('final_native_GPU_reprobe') is True
@@ -299,10 +403,10 @@ class Validator:
             except BaseException as error:self.errors.append(f'{label}: {error!r}');loads={}
         try:updates=self.optimizer_updates(loads)
         except BaseException as error:self.errors.append(f'optimizer: {error!r}');updates={}
-        for label,method in (('actual_loss',lambda:self.policy_loss(updates)),('actual_token_lengths',self.actual_token_lengths),('numerical_policies',self.numerical_policies)):
+        for label,method in (('actual_loss',lambda:self.policy_loss(updates)),('actual_token_lengths',self.actual_token_lengths),('global_minibatches',lambda:self.global_minibatches(updates)),('numerical_policies',self.numerical_policies)):
             try:method()
             except BaseException as error:self.errors.append(f'{label}: {error!r}')
-        return dict(schema='q38-world72-BF16-core-offline-validation-v2',core_checks_passed=not self.errors,
+        return dict(schema='q38-world72-BF16-core-offline-validation-v4',core_checks_passed=not self.errors,
             full_RL_acceptance=False,errors=self.errors,details=self.details,inputs=self.inventory,
             remaining_mandatory_checks=['Original genuine DeepScaleR correctness rewards and72 trajectories/iteration',
                 'Decoded actual Python Tool calls, sandbox replay and exact gateway/native delivered trace linkage',

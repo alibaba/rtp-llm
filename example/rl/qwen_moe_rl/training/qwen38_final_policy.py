@@ -44,9 +44,31 @@ def validate_final_policy_proof(proof, *, expected_step=2):
                 or not all(isinstance(v,(int,float)) and math.isfinite(v) for v in values)
                 or row.get('raw_fp32_bits_hex')!=struct.pack(f'<{len(values)}f',*values).hex()):
             raise RuntimeError('Final DP probe must preserve raw FP32 target-logprob bits')
-    maximum=max(abs(a-b) for row in probes for a,b in zip(hf,row['raw_log_probs']))
-    if maximum>.05 or proof.get('max_HF_error')!=maximum:
-        raise RuntimeError('Final policy-2 native/HF scores differ beyond the actual 0.05 gate')
+    differences=[[abs(a-b) for a,b in zip(hf,row['raw_log_probs'])] for row in probes]
+    maximum=max(value for row in differences for value in row)
+    mean=sum(value for row in differences for value in row)/(len(probes)*len(hf))
+    if proof.get('max_HF_error')!=maximum:
+        raise RuntimeError('Final native/HF maximum error report differs from the actual raw scores')
+    dp_error=max(abs(a-b) for row in probes for a,b in zip(probes[0]['raw_log_probs'],row['raw_log_probs']))
+    if dp_error>.05 or ('max_dp_error' in proof and proof['max_dp_error']!=dp_error):
+        raise RuntimeError('Final native attention-DP copies disagree beyond the unchanged 0.05 gate')
+    report_only=os.environ.get('Q38_HF_RTP_REPORT_ONLY')=='1'
+    if report_only:
+        if (proof.get('HF_comparison_mode')!='report_only' or proof.get('HF_error_used_for_acceptance') is not False
+                or proof.get('hf_raw_fp32_bits_hex')!=struct.pack(f'<{len(hf)}f',*hf).hex()
+                or not isinstance(proof.get('mean_HF_absolute_error'),(int,float))
+                or not math.isclose(proof['mean_HF_absolute_error'],mean,rel_tol=1e-12,abs_tol=1e-12)):
+            raise RuntimeError('The explicit HF report-only contract lacks the actual raw-bit/mean-error report')
+        for row,errors in zip(probes,differences):
+            if (row.get('absolute_HF_errors')!=errors
+                    or not isinstance(row.get('mean_HF_absolute_error'),(int,float))
+                    or not math.isclose(row['mean_HF_absolute_error'],sum(errors)/len(errors),rel_tol=1e-12,abs_tol=1e-12)):
+                raise RuntimeError('A final DP per-token HF error report differs from the actual raw scores')
+    else:
+        if proof.get('HF_comparison_mode')=='report_only' or proof.get('HF_error_used_for_acceptance') is False:
+            raise RuntimeError('The final probe comparison mode differs from the explicit task profile')
+        if maximum>.05:
+            raise RuntimeError('Final policy-2 native/HF scores differ beyond the default strict 0.05 gate')
     return proof
 
 

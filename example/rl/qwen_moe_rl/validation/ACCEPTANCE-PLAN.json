@@ -1,5 +1,5 @@
 {
-  "schema": "q38-world72-bf16-state-real-rl-acceptance-plan-v2",
+  "schema": "q38-world72-bf16-state-real-rl-acceptance-plan-v3",
   "full_model_training_accepted": false,
   "model": {
     "path": "/mnt/fuse/Qwen/Qwen3.8-2.4T-A95B",
@@ -57,7 +57,7 @@
     "Native metadata-only allocation with RL_MODE/WORLD72/START_PAUSED/METADATA_BOOTSTRAP; exact physical map; no admission before all 1590 source COMMIT ACKs from all72",
     "All72 initial BF16 shard loader receipts: correct global policy coverage, dtype, sampled actual source coordinates; no full checkpoint replica in any rank",
     "Collectively identical canonical source order, dtype, shape, actual SR-produced byte digest and per-key all72 native ACK before lease reuse; no live full source backing before training restore",
-    "For policy0,policy1,policy2: actual HF FSDP72 BF16 forward scores, identical target IDs and FP32 score bits; all nine real native DP probes within 0.05 of HF and each other before admission",
+    "For policy0,policy1,policy2: actual HF FSDP72 BF16 forward scores and all nine real native DP probes with identical target IDs, finite FP32 values/raw bits, complete source/version binding; native DP copies must agree within0.05. HF versus native errors are report-only: persist and independently recompute max, mean and per-token absolute errors without rejecting RL because of their magnitude.",
     "Two genuine GRPO updates: eighteen distinct original DeepScaleR prompts times four actual trajectories=72 per iteration; one global prompt-unit minibatch18, ppo_epochs1, micro1; every one of72 actor ranks participates",
     "Actual complete multi-turn prompt/response token IDs satisfy prompt<=2048 and total<=4096 before and after converter padding; no silent truncation or altered reward/advantages to force a pass",
     "Original math correctness evaluator recomputation; at least one nonuniform same-question reward group in each iteration; observed real CUDA loss has nonzero positive and negative GRPO advantages in each update; no synthetic tool rewards",
@@ -113,5 +113,24 @@
     "native_metadata72_attempt1": "failed before backend bootstrap because setproctitle missing and foreign tokenizer inherited; all18 actual native leader exit1 and all72 owned contexts absent",
     "CPU_missing_dependency_trial": "setproctitle/thrift installed actualwait0 each; fresh backend closure actualwait0 with explicit CPU CUDA-branch fixture, no CUDA initialization",
     "next_actual72_native_metadata": "root-supervised fresh run required; not established by CPU imports"
+  },
+  "previous_plan_sha256": "e9292197cc57fca74892e5fd243d53876797c7c6cf1249730a22e97179a3117b",
+  "HF_RTP_comparison_profile": {
+    "runtime_env": {
+      "Q38_HF_RTP_REPORT_ONLY": "1"
+    },
+    "HF_comparison_mode": "report_only",
+    "HF_error_used_for_acceptance": false,
+    "required_reports": [
+      "max_HF_error",
+      "mean_HF_absolute_error",
+      "per_DP_absolute_HF_errors",
+      "actual_FP32_logprob_bits"
+    ],
+    "reported_metrics_must_match_recomputed_values": true,
+    "finite_values_identical_IDs_versions_and_complete_sources_still_required": true,
+    "native_DP_self_max_abs_error_gate": 0.05,
+    "historical_failed_runs_are_not_reclassified": true,
+    "authorization": "Latest explicit user instruction: HF/RTP difference is reported, not an RL acceptance gate"
   }
 }

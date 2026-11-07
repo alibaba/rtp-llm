@@ -53,7 +53,7 @@ def _probe_attempt_payload(values, hf, prompt, target, request_ids, context):
               and all(len(row) == len(target) and all(math.isfinite(x) for x in row) for row in values))
     return dict(schema='q38-native-HF-probe-attempt-v1',
         numeric_gates_not_yet_evaluated=True, acceptance_proven_here=False,
-        generation_admission_granted_here=False, tolerance=.05,
+        generation_admission_granted_here=False, native_DP_tolerance=.05,
         prompt_ids=prompt, response_ids=target, probes=rows,
         hf_raw_log_probs=hf['raw_log_probs'], hf_raw_fp32_bits_hex=hf.get('raw_fp32_bits_hex'),
         all_nine_scores_finite_and_complete=finite,
@@ -586,6 +586,7 @@ class World72RTPServer(RTPServer):
             client.expected_step, client.expected_version = expected_step, expected_version
             client.open_admission()  # Internal probes only; controller admission is still closed.
         try:
+            hf_report_only = os.environ.get('Q38_HF_RTP_REPORT_ONLY') == '1'
             probe_request_ids = [uuid.uuid4().int & ((1 << 63) - 1) for _ in self.clients]
             values = await asyncio.gather(*[client.score_tokens(request_id, prompt, target,
                 expected_version=expected_version) for client, request_id in zip(self.clients, probe_request_ids)],
@@ -597,6 +598,9 @@ class World72RTPServer(RTPServer):
                 logical_model_replicas=1, world_size=72, tp_size=8, dp_size=9, ep_size=72,
                 native_boot=self.boot, native_incarnation=self.incarnation, global_step=expected_step,
                 model_version=expected_version, recorded_unix_ns=attempt_time_ns,
+                HF_comparison_mode='report_only' if hf_report_only else 'absolute_error_gate',
+                HF_error_used_for_acceptance=not hf_report_only,
+                HF_reference_tolerance=None if hf_report_only else .05,
                 actual_HF_reference_path=str(hf_path),
                 actual_HF_reference_sha256=hashlib.sha256(hf_path.read_bytes()).hexdigest(),
                 source_transaction_path=str(sync_path),
@@ -608,17 +612,26 @@ class World72RTPServer(RTPServer):
                     'all nine actual DP probes must return finite target logprobs')
             max_dp_error = max(abs(left - right) for row in values for left, right in zip(values[0], row))
             require(max_dp_error <= .05, 'nine DP copies disagree on the committed policy scores')
-            max_hf_error = max(abs(left - right) for row in values for left, right in zip(hf['raw_log_probs'], row))
-            require(max_hf_error <= .05, 'actual BF16 HF and nine native DP probes differ beyond 0.05')
+            hf_errors = [[abs(left - right) for left, right in zip(hf['raw_log_probs'], row)] for row in values]
+            max_hf_error = max(error for row in hf_errors for error in row)
+            mean_hf_absolute_error = sum(error for row in hf_errors for error in row) / sum(len(row) for row in hf_errors)
+            if not hf_report_only:
+                require(max_hf_error <= .05, 'actual BF16 HF and nine native DP probes differ beyond 0.05')
             record = dict(replica_rank=0, logical_model_replicas=1, world_size=72, tp_size=8, dp_size=9, ep_size=72,
                 native_boot=self.boot, native_incarnation=self.incarnation, global_step=expected_step,
                 model_version=expected_version, prompt_ids=prompt, response_ids=target,
                 full_source_sha256=sync['full_source_sha256'], statuses=_status_rows(statuses),
                 probes=[dict(dp_rank=dp, generation_world_rank=dp * 8, address=self.topology.generation_addresses[dp],
-                             raw_log_probs=row, raw_fp32_bits_hex=struct.pack(f'<{len(row)}f', *row).hex())
+                             raw_log_probs=row, raw_fp32_bits_hex=struct.pack(f'<{len(row)}f', *row).hex(),
+                             absolute_HF_errors=hf_errors[dp],
+                             mean_HF_absolute_error=sum(hf_errors[dp]) / len(hf_errors[dp]))
                         for dp, row in enumerate(values)], max_dp_error=max_dp_error,
                 actual_HF_reference_path=str(hf_path), actual_HF_reference_sha256=hashlib.sha256(hf_path.read_bytes()).hexdigest(),
-                hf_raw_log_probs=hf['raw_log_probs'], max_HF_error=max_hf_error,
+                hf_raw_log_probs=hf['raw_log_probs'], hf_raw_fp32_bits_hex=hf.get('raw_fp32_bits_hex'),
+                max_HF_error=max_hf_error, mean_HF_absolute_error=mean_hf_absolute_error,
+                HF_comparison_mode='report_only' if hf_report_only else 'absolute_error_gate',
+                HF_error_used_for_acceptance=not hf_report_only,
+                HF_reference_tolerance=None if hf_report_only else .05,
                 source_transaction_path=str(sync_path), source_transaction_sha256=hashlib.sha256(sync_path.read_bytes()).hexdigest(),
                 finished_unix=time.time())
             _write_json(self.main_audit_root / f'rtp_probe_rank0_step{expected_step}.json', record)

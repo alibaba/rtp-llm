@@ -25,6 +25,15 @@ python validation/validate_world72_trajectories.py --help
 
 The two offline validators take explicit evidence and source paths; neither independently grants full RL acceptance. The trajectory validator may replay a bounded number of already-recorded original Python Tool calls in the original sandbox. Source, trace, reward, gradient, policy-version and cleanup checks remain required together with all72 GPU peaks, all18 real memory limits and owned job exits.
 
+The functional recipe sets `Q38_HF_RTP_REPORT_ONLY=1`. It reports the actual
+HF and native FP32 target logprobs, their original bits, per-token absolute
+differences, and maximum/mean absolute errors for each policy. HF/native error
+magnitude has no acceptance threshold in this profile. Finite scores, identical
+target IDs and committed versions, all1590 source copies, and the existing
+nine-DP self-agreement checks remain required. The final proof validates the
+reported arithmetic and actual two optimizer updates. Direct controller users
+who leave this flag unset retain the earlier strict HF comparison behavior.
+
 The separate metadata-only preflight takes a fresh dedicated run directory and Ray namespace. Build its private input using `--cluster-plan`, `--collective-proof`, `--targets`, `--model-path` and optional `--start-port`. Keep that generated input and its IP/UUID/container identities outside version control. The wrapper preserves the recipe prefix and changes only the terminal driver. It refuses execution without the explicit operator start gate `Q38_NATIVE_METADATA_BOOT_AUTHORIZED=1`, which is set only after other GPU work is released. It creates no HF workers and permits only native STATUS, PAUSE and owned teardown; no source COMMIT, RESUME or generation. Its actual cleanup must remain training-safe=false.
 
 `validation/qualify_recipe_native_chain_cpu.py` preserves the actual recipe's dataset validator, executes an explicit CPU fixture of the production owner's pre-Popen prefix, and preserves the native launcher's stdin validator. It intercepts the training and native final module entry points before execution and invokes a supplied CPU checker with the captured native argv/profile JSON. It does not claim a live Ray owner, native health or GPU bootstrap.
