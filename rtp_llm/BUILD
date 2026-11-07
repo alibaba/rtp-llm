@@ -256,7 +256,15 @@ py_library(
     name = "pipeline",
     srcs = glob([
         "pipeline/**/*.py",
+    ], exclude = [
+        "pipeline/test/*.py",
+        "pipeline/test/**/*.py",
     ]),
+)
+
+py_library(
+    name = "incremental_tokenize_cache",
+    srcs = ["pipeline/incremental_tokenize_cache.py"],
 )
 
 py_library(

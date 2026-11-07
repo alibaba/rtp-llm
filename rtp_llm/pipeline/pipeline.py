@@ -25,6 +25,7 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
     VitSeparation,
 )
+from rtp_llm.pipeline.incremental_tokenize_cache import IncrementalTokenizeCache
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
     get_role_names,
@@ -75,6 +76,13 @@ class Pipeline(object):
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
+        # Optional prefix-cached incremental tokenization (env-gated, default
+        # off; None keeps the exact pre-existing full-encode behavior).
+        self._tokenize_cache = (
+            IncrementalTokenizeCache.from_env(tokenizer)
+            if tokenizer is not None
+            else None
+        )
         self._special_tokens: SpecialTokens = special_tokens
         self._mm_token: str = ""
         if mm_related_params:
@@ -230,7 +238,10 @@ class Pipeline(object):
         # 在 tokenizer.encode(prompt) 之前解析及填充 banned_combo_token_ids，
         # 避免重复编码 prompt。
         parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
-        token_ids = self.tokenizer.encode(prompt)
+        if self._tokenize_cache is not None:
+            token_ids = self._tokenize_cache.get_token_ids(prompt)
+        else:
+            token_ids = self.tokenizer.encode(prompt)
 
         # Prompt scoring constraints (max_new_tokens=1, non-streaming, no reuse/PD-sep) are
         # already enforced by validate() → enforce_prompt_scoring_constraints() during config creation.

@@ -33,6 +33,11 @@ class AccMetrics(Enum):
     UPDATE_QPS_METRIC = "py_rtp_update_qps_metric"
     ERROR_UPDATE_QPS_METRIC = "py_rtp_error_update_target_qps"
 
+    # incremental tokenize cache (prefix-cached tokenization)
+    TOKENIZE_CACHE_HIT_QPS_METRIC = "py_rtp_tokenize_cache_hit_qps"
+    TOKENIZE_CACHE_MISS_QPS_METRIC = "py_rtp_tokenize_cache_miss_qps"
+    TOKENIZE_CACHE_MISMATCH_QPS_METRIC = "py_rtp_tokenize_cache_mismatch_qps"
+
     # worker_status
     WORKER_STATUS_QPS_METRIC = "py_rtp_worker_status_qps"
     CACHE_STATUS_QPS_METRIC = "py_rtp_cache_status_qps"
@@ -200,6 +205,9 @@ class GaugeMetrics(Enum):
     VIT_EMBEDDING_QUEUE_WAIT_RT_METRIC = "py_rtp_vit_embedding_queue_wait_rt"
     VIT_EMBEDDING_CACHE_TOKENS_METRIC = "py_rtp_vit_embedding_cache_tokens"
     VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
+
+    # incremental tokenize cache (prefix-cached tokenization)
+    TOKENIZE_CACHE_RT_METRIC = "py_rtp_tokenize_cache_rt"
 
 
 class MetricReporter(object):
