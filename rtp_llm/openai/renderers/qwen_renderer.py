@@ -456,8 +456,12 @@ class QwenRenderer(CustomChatRenderer):
             return await self._create_empty_delta(status.output.aux_info)
         status.update_output(
             output,
-            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-            self._remove_stop_word_ids,
+            functools.partial(
+                self._check_finish_reason,
+                max_new_tokens=max_new_tokens,
+                ignore_eos=status.ignore_eos,
+            ),
+            functools.partial(self._remove_stop_word_ids, ignore_eos=status.ignore_eos),
         )
         status.total_output_string = self.tokenizer.decode(status.output_ids).strip()
         if (len(status.total_output_string)) and (
@@ -612,8 +616,12 @@ class QwenRenderer(CustomChatRenderer):
         status.update_output_sync(
             output_ids,
             input_len,
-            functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-            self._remove_stop_word_ids,
+            functools.partial(
+                self._check_finish_reason,
+                max_new_tokens=max_new_tokens,
+                ignore_eos=status.ignore_eos,
+            ),
+            functools.partial(self._remove_stop_word_ids, ignore_eos=status.ignore_eos),
         )
         status.total_output_string = self.tokenizer.decode(status.output_ids).strip()
         if (len(status.total_output_string)) and (
