@@ -101,6 +101,7 @@ py::dict runLmHead(py::object           py_model,
     }
 #if USING_CUDA
     result["int8_lm_head_check_stats"] = cast_or_none(model.int8_lm_head_check_stats_);
+    result["int8_lm_head_check_calls"] = py::cast(model.int8_lm_head_check_calls_);
 #endif
     return result;
 }

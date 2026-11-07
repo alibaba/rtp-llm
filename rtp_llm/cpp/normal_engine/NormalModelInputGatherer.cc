@@ -311,7 +311,18 @@ AllLogitsRowSelection buildAllLogitsRowSelection(const StreamGroups& stream_grou
                 labels.push_back(r + 1 < num_tokens ? tokens[r + 1] : -1);
             }
         }
-        if (stream->returnPromptLogits() && config->prompt_logits_top_k > selection.max_top_k) {
+        // Only a non-empty prompt window consumes top-k output for this stream: a request whose
+        // clamped window is empty (e.g. start == end) selects no rows for top-k, so its k must
+        // not inflate the batch-wide merged width — the forward then allocates [lm prefix ++
+        // scoring rows, k] tables whose unconsumed placeholder rows scale with the largest k.
+        // The check is against the stream's own prompt window, not the unioned scoring range:
+        // loss-only rows never read top-k either.
+        const auto [wa, wb] = promptScoringRowRange(token_size,
+                                                    /*calculate_loss=*/false,
+                                                    stream->returnPromptLogits(),
+                                                    config->prompt_logits_start,
+                                                    config->prompt_logits_end);
+        if (wb > wa && config->prompt_logits_top_k > selection.max_top_k) {
             selection.max_top_k = config->prompt_logits_top_k;
         }
         token_offset += token_size;

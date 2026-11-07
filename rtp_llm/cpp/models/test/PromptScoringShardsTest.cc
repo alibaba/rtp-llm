@@ -224,8 +224,9 @@ TEST(PromptScoringShardsTest, LocalCutoffTieKeepsTrueValue) {
     // FOUR-way tie at value 5.0: three candidates live on shard0 (cols 1,2,3) and one on
     // shard1 (col 5). k_max=3 lets shard0 keep only {9.0} plus two of its three 5.0s —
     // torch.topk picks them by unspecified order, so one tied candidate is genuinely
-    // dropped by the LOCAL cutoff — yet the merged top-3 still reports {9, 5, 5}
-    // because shard1's 5.0 fills the slot.
+    // dropped by the LOCAL cutoff. The merge then orders the surviving candidates by
+    // (value desc, id asc), so the two surviving shard0 ids — both < 5 — take the
+    // remaining top-3 slots and shard1's col-5 candidate is the one left out.
     full[0][1]   = 5.0f;
     full[0][2]   = 5.0f;
     full[0][3]   = 5.0f;
@@ -242,14 +243,16 @@ TEST(PromptScoringShardsTest, LocalCutoffTieKeepsTrueValue) {
     EXPECT_FLOAT_EQ(vals[0][0].item<float>(), 9.0f);
     EXPECT_FLOAT_EQ(vals[0][1].item<float>(), 5.0f);
     EXPECT_FLOAT_EQ(vals[0][2].item<float>(), 5.0f);
-    // Every emitted id is one of the true tied candidates; exactly which two of the
-    // surviving 5.0s appear is the merge's deterministic choice (no global-id ordering
-    // is promised across the cutoff).
+    // The two 5.0 slots must be the two shard0 survivors — an unspecified pair out of
+    // {1,2,3} whichever way the local cutoff fell — emitted in ascending id order by
+    // the merge's (value desc, id asc) key. Shard1's col-5 candidate sorts after both
+    // and cannot reach the merged top-3.
     EXPECT_EQ(ids[0][0].item<int32_t>(), 0);
-    for (int k = 1; k < 3; ++k) {
-        const int32_t id = ids[0][k].item<int32_t>();
-        EXPECT_TRUE(id == 1 || id == 2 || id == 3 || id == 5) << id;
-    }
+    const int32_t id1 = ids[0][1].item<int32_t>();
+    const int32_t id2 = ids[0][2].item<int32_t>();
+    EXPECT_TRUE(id1 == 1 || id1 == 2 || id1 == 3) << id1;
+    EXPECT_TRUE(id2 == 1 || id2 == 2 || id2 == 3) << id2;
+    EXPECT_LT(id1, id2);
     // Same shard layout must merge identically on a repeat run (determinism).
     auto merged2 = mergeScoringPartials(gathered, rows, shard_k, /*k_max=*/3, vocab, 512);
     EXPECT_TRUE(torch::equal(merged2.topk_ids.cpu(), merged.topk_ids.cpu()));
