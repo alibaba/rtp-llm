@@ -93,8 +93,9 @@ struct GptModelInputs {
     torch::Tensor all_logits_row_labels;
     // Max prompt_logits_top_k requested by any scoring stream this step (0 when none ask for
     // top-k). Synchronized via the allLogitsTopK shape hint so every rank computes the same
-    // per-shard top-k width. Larger requested k stays accepted: the merged top-k emits
-    // min(k, vocab) entries.
+    // per-shard top-k width. Larger requested k stays accepted and is never silently
+    // truncated: the merged top-k emits the full merged candidate width (min of k and
+    // tp * per-shard candidates, clamped by the real vocab when output_vocab_size applies).
     int64_t all_logits_top_k = 0;
     // Row budget for the tp>1 scoring partial all-gather/merge. Producers leave this 0 and the
     // shape-hint broadcast fills it from RTP_LLM_SCORING_PARTIAL_CHUNK_ROWS (or the default), so
@@ -157,7 +158,8 @@ struct GptModelOutputs {
     // at tp_size > 1: each rank reduces its local [rows, vocab/tp] shard to small per-row
     // partials and only those are all-gathered, so no rank materializes [rows, vocab] for
     // scoring. All four tensors share the row-selected all_logits layout described above
-    // ([lm rows ++ per-stream scoring ranges]); lm rows are computed but never consumed.
+    // ([lm rows ++ per-stream scoring ranges]); the lm prefix rows are placeholders — they
+    // are never reduced and are only zero-filled to keep the layout the dispatcher expects.
     //   all_logits_lse           [rows]      fp32 global logsumexp over the full vocab
     //   all_logits_topk_values   [rows, K]   fp32 global top-k raw logit values, ordered by the
     //                                        merge's deterministic value-desc/id-asc key (see

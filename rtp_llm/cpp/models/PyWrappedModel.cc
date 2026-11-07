@@ -1282,19 +1282,31 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             const int64_t scoring_vocab = description_.output_vocab_size > 0 ?
                                               static_cast<int64_t>(description_.output_vocab_size) :
                                               vocab_l * device_props_.tp_size;
-            // Compute partials and reduce them in row chunks: the local partial tensors,
-            // the packed payload, the all-gathered buffer and the merge temporaries all
-            // stay O(chunk_rows * shard_k) even when prompt_logits_top_k is as large as the
-            // vocabulary (k itself is a supported contract, never silently truncated). The
-            // chunk size is a function of synchronized state only — the scoringChunkRows
-            // shape hint broadcast (field or env value, identical on every rank), or the
-            // shared default when a producer bypassed tpSync — never a rank-local getenv,
-            // so every rank issues the same all-gathers in the same order. It is
-            // additionally clamped by the fixed scratch byte budget so a large accepted k
-            // cannot turn a fixed row count into a multi-GiB sort workspace.
-            const int64_t lm_rows          = lm_output_indexes_device.size(0);
-            const int64_t sel_rows         = lm_rows + num_scoring_rows;
-            const int64_t shard_k          = std::min<int64_t>(std::max<int64_t>(k_max, 0), vocab_l);
+            // Compute partials and reduce them in row chunks: the partial pass's working
+            // set is O(chunk_rows * vocab_l) (the [c, vocab_l] float selection), while the
+            // partial tensors, packed payload, all-gathered buffer and merge temporaries
+            // stay O(chunk_rows * shard_k) even when prompt_logits_top_k is as large as
+            // the vocabulary (k itself is a supported contract, never silently
+            // truncated). The chunk size is a function of synchronized state only — the
+            // scoringChunkRows shape hint broadcast (field or env value, identical on
+            // every rank), or the shared default when a producer bypassed tpSync — never
+            // a rank-local getenv, so every rank issues the same all-gathers in the same
+            // order. It is additionally clamped by the fixed scratch byte budget so a
+            // large accepted k cannot turn a fixed row count into a multi-GiB sort
+            // workspace.
+            const int64_t lm_rows  = lm_output_indexes_device.size(0);
+            const int64_t sel_rows = lm_rows + num_scoring_rows;
+            const int64_t shard_k  = std::min<int64_t>(std::max<int64_t>(k_max, 0), vocab_l);
+            // The per-shard candidate width the partial pass emits (k_max additionally
+            // clamped to the scoring vocab, as in computeShardScoringPartials) and the
+            // merged top-k width mergeScoringPartials produces. The output buffers below
+            // MUST be sized with the merged width — sizing them by shard_k throws in
+            // copy_ whenever k_max exceeds a single shard's candidate width.
+            const int64_t part_k =
+                std::min<int64_t>(std::max<int64_t>(std::min<int64_t>(k_max, scoring_vocab), 0), vocab_l);
+            const int64_t merge_vocab =
+                description_.output_vocab_size > 0 ? static_cast<int64_t>(description_.output_vocab_size) : 0;
+            const int64_t k_out            = mergedScoringTopkWidth(part_k, k_max, device_props_.tp_size, merge_vocab);
             const int64_t configured_chunk = inputs.scoring_partial_chunk_rows > 0 ? inputs.scoring_partial_chunk_rows :
                                                                                      kDefaultScoringPartialChunkRows;
             const int64_t budget_chunk     = std::max<int64_t>(
@@ -1320,8 +1332,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             ScoringPartials merged;
             merged.lse         = torch::zeros({sel_rows}, local_logits.options().dtype(torch::kFloat32));
             merged.target      = torch::zeros({sel_rows}, local_logits.options().dtype(torch::kFloat32));
-            merged.topk_values = torch::zeros({sel_rows, shard_k}, local_logits.options().dtype(torch::kFloat32));
-            merged.topk_ids    = torch::zeros({sel_rows, shard_k},
+            merged.topk_values = torch::zeros({sel_rows, k_out}, local_logits.options().dtype(torch::kFloat32));
+            merged.topk_ids    = torch::zeros({sel_rows, k_out},
                                            torch::TensorOptions().dtype(torch::kInt32).device(local_logits.device()));
             auto append_chunk  = [&](const ScoringPartials& m, int64_t c0, int64_t c) {
                 merged.lse.narrow(0, lm_rows + c0, c).copy_(m.lse);
@@ -1350,7 +1362,15 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                 }
                 auto ref_lm_local = ref_local.index_select(0, lm_output_indexes_device.to(torch::kLong));
                 ref_local         = torch::Tensor();
-                logits            = tpSyncEmbeddingOrLogits(ref_lm_local);
+                // Gather the int8 lm rows as well and run the same argmax comparison
+                // serveInt8CheckedLogits does on the non-scoring path, so the check
+                // covers the sampler-facing rows — the last loss row and co-batched
+                // decode rows — not only the scoring selection. The extra lm-row
+                // gathers are part of the check-mode collective sequence and run
+                // identically on every rank (lm row count is synchronized).
+                const auto i8_lm =
+                    tpSyncEmbeddingOrLogits(local_logits.index_select(0, lm_output_indexes_device.to(torch::kLong)));
+                logits = serveInt8CheckedLogits(std::move(ref_lm_local), i8_lm);
                 if (!int8_lm_head_check_stats_.defined()) {
                     int8_lm_head_check_stats_ = torch::zeros({2}, logits.options().dtype(torch::kLong));
                 }

@@ -16,9 +16,10 @@ namespace rtp_llm {
 namespace {
 
 // RTP_LLM_SCORING_PARTIAL_CHUNK_ROWS sets the row budget for the tp>1 scoring
-// all-gather/merge. It is parsed once, identically on every rank, and the result only
-// ever reaches the forward loop through the broadcast shape hint — so a malformed local
-// value can never make a single rank throw or pick a different chunk size than its peers.
+// all-gather/merge (an internal debug/test tuning knob). Every rank parses its own env
+// here, but only rank 0's parsed value is broadcast through the shape hint — so a
+// malformed non-root value can at worst log a local warning, and no rank-local value
+// can make a single rank throw or pick a different chunk size than its peers.
 // Empty/unparseable/non-positive input falls back to kDefaultScoringPartialChunkRows.
 int64_t scoringPartialChunkRowsFromEnv() {
     static const int64_t parsed = []() {

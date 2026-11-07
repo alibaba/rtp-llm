@@ -425,9 +425,12 @@ TEST_F(NormalEngineTest, testDispatchScoringOomFailsOnlyScoringStream) {
     CustomConfig config;
     auto         engine = createMockEngine(config);
 
-    // A prompt-scoring request and a normal request enter the engine together. The
-    // dispatcher-side test hook throws an out-of-memory error inside the scoring stream's
-    // own output computation; only that stream is failed while the batch completes.
+    // A prompt-scoring request and a normal request are enqueued into the engine
+    // together (the mock engine runs its step synchronously, so this asserts scoped
+    // failure inside one engine — batch co-scheduling itself is covered by the
+    // batch-stream-processor tests). The dispatcher-side test hook throws an
+    // out-of-memory error inside the scoring stream's own output computation; only
+    // that stream is failed while the batch completes.
     std::shared_ptr<GenerateInput> scoring_query         = make_shared<GenerateInput>();
     scoring_query->input_ids                             = torch::tensor({1, 2, 3, 4}, torch::kInt32);
     scoring_query->generate_config                       = make_shared<GenerateConfig>();
@@ -470,7 +473,7 @@ TEST_F(NormalEngineTest, testDispatchScoringOomFailsOnlyScoringStream) {
     ASSERT_FALSE(scoring_err.ok());
     EXPECT_EQ(scoring_err.status().code(), ErrorCode::EXECUTION_EXCEPTION);
 
-    // The co-scheduled normal request completes and commits its output.
+    // The normal request completes and commits its output.
     auto normal_out = normal_stream->nextOutput(30000);
     ASSERT_TRUE(normal_out.ok());
     EXPECT_EQ(normal_out.value().generate_outputs[0].aux_info.output_len, 2);

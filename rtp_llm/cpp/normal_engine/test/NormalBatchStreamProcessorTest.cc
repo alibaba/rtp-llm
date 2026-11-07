@@ -1572,8 +1572,8 @@ TEST_F(NormalBatchStreamProcessorTest, testDispatchShardedScoringOomFailsOnlyTha
                                          /*warm_up=*/false);
 
     // tp>1 sharded layout: the model emits merged per-row partials (lse / target /
-    // top-k) and all_logits_lm_rows >= 0 instead of all_logits. Build the REAL merged
-    // fields the model would produce for this batch: row layout is
+    // top-k) and all_logits_lm_rows >= 0 instead of all_logits. Build synthetic
+    // tensors in exactly that merged layout for this batch: row layout is
     // [lm(3); loss_stream rows [0,2); prompt_stream window [0,4)] = 9 rows. The hook
     // fails ONLY the loss stream; the neighboring prompt stream must still succeed and
     // slice its own rows at the right offset (lm_rows + cumulative scoring rows).
