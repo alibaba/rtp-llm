@@ -37,6 +37,45 @@ def _error(error):
     return value
 
 
+def _response_snapshot(response):
+    """Retain the final protobuf before subsequent client or policy checks.
+
+    Deterministic reserialization preserves the full protobuf message, including
+    tensor payload bytes. Its SHA is not a hash of the original gRPC wire frame.
+    Keep target FP32 payloads as bytes rather than converting them to Python
+    floats, so NaNs, signed zeros, and all mantissa bits survive diagnostics.
+    """
+    record = dict(model_version=getattr(response, "model_version", None),
+                  global_step=getattr(response, "global_step", None))
+    serialize = getattr(response, "SerializeToString", None)
+    if not callable(serialize):
+        # Some existing transport fixtures return only version metadata. Never
+        # invent a protobuf or scores for these objects.
+        record["response_payload_available"] = False
+        return record
+    payload = serialize(deterministic=True)
+    record.update(response_payload_available=True,
+                  response_pb_encoding="protobuf_deterministic_reserialization",
+                  response_pb_type=response.DESCRIPTOR.full_name,
+                  response_pb_bytes=len(payload),
+                  response_pb_sha256=hashlib.sha256(payload).hexdigest(),
+                  response_pb_b64=base64.b64encode(payload).decode())
+    final = response.flatten_output
+    if final.HasField("prompt_logits"):
+        prompt = final.prompt_logits
+        scores = dict(start_pos=prompt.start_pos, end_pos=prompt.end_pos)
+        if prompt.HasField("target_logprobs"):
+            tensor = prompt.target_logprobs
+            raw = bytes(tensor.fp32_data)
+            scores["target_logprobs"] = dict(data_type=tensor.data_type,
+                                             shape=list(tensor.shape),
+                                             fp32_bytes=len(raw),
+                                             fp32_hex=raw.hex(),
+                                             fp32_sha256=hashlib.sha256(raw).hexdigest())
+        record["prompt_logits"] = scores
+    return record
+
+
 class NativeRpcJournal:
     def __init__(self, directory, replica_rank, state, *, fsync=True):
         self.replica_rank = int(replica_rank)
@@ -224,8 +263,7 @@ class JournaledTokenRpcMixin:
             self._request_journal.start(ticket)
             response = await super()._request(request_id, ids, config)
             ticket["transport_outcome"] = "response_received"
-            ticket["response"] = dict(model_version=getattr(response, "model_version", None),
-                                      global_step=getattr(response, "global_step", None))
+            ticket["response"] = _response_snapshot(response)
             return response
         except asyncio.CancelledError:
             ticket["transport_outcome"] = "cancelled"
