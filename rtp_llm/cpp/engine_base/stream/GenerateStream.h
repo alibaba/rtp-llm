@@ -901,14 +901,25 @@ protected:
     size_t                             iter_count_    = 0;
     size_t                             sp_iter_count_ = 0;
     std::vector<int32_t>               speculative_accepted_tokens_per_pos_;
-    size_t                             last_output_pos_      = 0;
-    int                                initial_reuse_length_ = 0;
-    int                                reuse_length_         = 0;
-    int                                local_reuse_length_   = 0;
-    int                                device_reuse_length_  = 0;
-    int                                remote_reuse_length_  = 0;
-    int                                host_reuse_length_    = 0;
-    int                                disk_reuse_length_    = 0;
+    size_t                             last_output_pos_ = 0;
+    // WorkerStatus polls concurrently with cache matching. Preserve value-copy
+    // semantics when a GenerateStream is copied for speculative execution.
+    struct InitialReuseLength {
+        std::atomic<int> tokens{0};
+        InitialReuseLength() = default;
+        InitialReuseLength(const InitialReuseLength& other): tokens(other.tokens.load(std::memory_order_relaxed)) {}
+        InitialReuseLength& operator=(const InitialReuseLength& other) {
+            tokens.store(other.tokens.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            return *this;
+        }
+    };
+    InitialReuseLength initial_reuse_length_;
+    int                reuse_length_        = 0;
+    int                local_reuse_length_  = 0;
+    int                device_reuse_length_ = 0;
+    int                remote_reuse_length_ = 0;
+    int                host_reuse_length_   = 0;
+    int                disk_reuse_length_   = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;

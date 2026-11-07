@@ -46,6 +46,71 @@ public:
 
 }  // namespace
 
+TEST(RpcServerRuntimeMetaTest, RunningStatusTracksCacheMatchWithoutCountingExecutionProgress) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 104;
+    input->group_id            = 77;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids           = torch::zeros({1000}, torch::kInt32);
+    auto stream                = std::make_shared<RuntimeMetaTestStream>(input);
+    meta.enqueue(input->request_id, stream);
+    EXPECT_EQ(meta.getEngineScheduleInfo(-1).running_task_info_list.at(0).prefix_length, 0);
+
+    stream->setInitialReuseLength(950);
+    stream->setReuseLength(999);
+    auto matched = meta.getEngineScheduleInfo(-1);
+    ASSERT_EQ(matched.running_task_info_list.size(), 1);
+    EXPECT_EQ(matched.running_task_info_list[0].prefix_length, 950);
+    EXPECT_EQ(matched.running_task_info_list[0].input_length, 1000);
+    EXPECT_EQ(matched.running_task_info_list[0].batch_id, 77);
+
+    meta.markRequestCanceling(TaskIdentity{104, 77});
+    stream->setInitialReuseLength(500);
+    auto canceling = meta.getEngineScheduleInfo(-1);
+    ASSERT_EQ(canceling.running_task_info_list.size(), 1);
+    EXPECT_EQ(canceling.running_task_info_list[0].prefix_length, 500);
+    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
+    ASSERT_TRUE(meta.markRequestCanceled(
+        104, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted", stream));
+    auto canceled = meta.getEngineScheduleInfo(-1);
+    EXPECT_TRUE(canceled.running_task_info_list.empty());
+    ASSERT_EQ(canceled.finished_task_info_list.size(), 1);
+    EXPECT_EQ(canceled.finished_task_info_list[0].prefix_length, 500);
+}
+
+TEST(RpcServerRuntimeMetaTest, FinishTaskRefreshesInitialCacheMatch) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 105;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids           = torch::zeros({1000}, torch::kInt32);
+    auto stream                = std::make_shared<RuntimeMetaTestStream>(input);
+    meta.enqueue(input->request_id, stream);
+    stream->setInitialReuseLength(950);
+    stream->setReuseLength(999);
+    meta.finishTask(input->request_id);
+    auto finished = meta.getEngineScheduleInfo(-1);
+    EXPECT_TRUE(finished.running_task_info_list.empty());
+    ASSERT_EQ(finished.finished_task_info_list.size(), 1);
+    EXPECT_EQ(finished.finished_task_info_list[0].prefix_length, 950);
+}
+
+TEST(RpcServerRuntimeMetaTest, CopiedStreamRetainsIndependentCacheMatch) {
+    auto input             = std::make_shared<GenerateInput>();
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids       = torch::zeros({1000}, torch::kInt32);
+    RuntimeMetaTestStream original(input);
+    original.setInitialReuseLength(950);
+    RuntimeMetaTestStream copied(original);
+    copied.setInitialReuseLength(500);
+    EXPECT_EQ(original.initialReuseLength(), 950);
+    EXPECT_EQ(copied.initialReuseLength(), 500);
+    copied = original;
+    original.setInitialReuseLength(0);
+    EXPECT_EQ(copied.initialReuseLength(), 950);
+}
+
 TEST(RpcServerRuntimeMetaTest, EnqueueReadsBatchIdFromStreamInput) {
     RpcServerRuntimeMeta meta;
     auto                 input = std::make_shared<GenerateInput>();
