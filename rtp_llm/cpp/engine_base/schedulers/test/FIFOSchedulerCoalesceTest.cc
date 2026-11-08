@@ -12,28 +12,33 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
-#include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 
 namespace {
 
+std::shared_ptr<GenerateConfig> makeCoalesceTestGenerateConfig(int max_new_tokens = 1) {
+    auto generate_config            = std::make_shared<GenerateConfig>();
+    generate_config->max_new_tokens = max_new_tokens;
+    return generate_config;
+}
+
 std::shared_ptr<GenerateStream> makeCoalesceStream(const std::vector<int>& ids,
                                                    const ModelConfig&      model_config,
                                                    const RuntimeConfig&    runtime_config,
                                                    const ResourceContext&  resource_context,
                                                    int                     max_new_tokens = 1) {
-    auto query                                   = std::make_shared<GenerateInput>();
-    query->input_ids                             = torch::tensor(ids, torch::kInt32);
-    query->generate_config                       = makeTestGenerateConfig();
-    query->generate_config->max_new_tokens       = max_new_tokens;
+    auto query                             = std::make_shared<GenerateInput>();
+    query->input_ids                       = torch::tensor(ids, torch::kInt32);
+    query->generate_config                 = makeCoalesceTestGenerateConfig(max_new_tokens);
     query->generate_config->num_return_sequences = 1;
     return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 }
 
 struct CoalesceFixture {
-    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    CacheConfig                     cache_config  = rtp_llm::test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/21, /*tokens_per_block=*/1, rtp_llm::DataType::TYPE_FP16, 1, 4);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ResourceContext                 resource_context;
     ModelConfig                     model_config;
@@ -44,7 +49,7 @@ struct CoalesceFixture {
     std::unique_ptr<FIFOScheduler>  scheduler;
 
     CoalesceFixture(int64_t window_ms, int64_t target_streams) {
-        ASSERT_TRUE(cache_manager->init());
+        EXPECT_TRUE(cache_manager->init());
         resource_context.cache_manager                     = cache_manager;
         model_config.max_seq_len                            = 8192;
         runtime_config.max_generate_batch_size              = 16;
