@@ -1389,7 +1389,7 @@ TEST_F(NormalBatchStreamProcessorTest, testShardedScoringOutputsLayout) {
 
     // Dense row-selected [lm ++ per-stream [a,b)] layout for the gathered reference arm; the
     // label list covers only the scoring rows (the gatherer's all_logits_row_labels contract).
-    std::vector<torch::Tensor> pieces       = {torch::full({lm_rows, vocab}, -1e30f, aligned.options())};
+    std::vector<torch::Tensor> pieces = {torch::full({lm_rows, vocab}, -1e30f, aligned.options())};
     std::vector<int32_t>       label_vec;
     int                        token_offset = 0;
     for (const auto& spec : specs) {
