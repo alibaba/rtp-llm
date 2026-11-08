@@ -9,10 +9,11 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Records each returned host's local and global cache hit block counts.
+ * Records the total host count and up to ten hosts' cache hit block counts in response order.
  */
 final class KvcmQueryLogger {
 
+    private static final int MAX_LOGGED_HOSTS = 10;
     private static final Logger QUERY_LOG = LoggerFactory.getLogger("kvcmLogger");
     private static final Logger LOG = LoggerFactory.getLogger(KvcmQueryLogger.class);
 
@@ -24,12 +25,16 @@ final class KvcmQueryLogger {
             return;
         }
         try {
-            Map<String, Object> entry = new LinkedHashMap<>();
+            Map<String, Object> entry = new LinkedHashMap<>(4);
             entry.put("requestId", requestId);
-            entry.put("hosts", response.getHostsList().stream()
-                    .map(host -> Map.of("hostIpPort", host.getHostIpPort(),
-                            "local", host.getLocal(), "global", host.getGlobal()))
-                    .toList());
+            entry.put("hostCount", response.getHostsCount());
+            entry.put("hosts",
+                    response.getHostsList()
+                            .stream()
+                            .limit(MAX_LOGGED_HOSTS)
+                            .map(host -> Map.of("hostIpPort", host.getHostIpPort(), "local", host.getLocal(), "global",
+                                    host.getGlobal()))
+                            .toList());
             QUERY_LOG.info("{}", JsonUtils.toString(entry));
         } catch (RuntimeException error) {
             LOG.warn("Failed to record KVCM query response, requestId={}", requestId, error);
