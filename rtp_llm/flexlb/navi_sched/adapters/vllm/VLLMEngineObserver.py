@@ -13,7 +13,7 @@ from collections.abc import Callable
 from concurrent.futures import CancelledError, Future
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
-from functools import partial
+from functools import lru_cache, partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -70,6 +70,21 @@ _LATENCY_PARAMETER_LEARNING_RATE_SCALES = (
 
 class _MediaPreprocessingError(ValueError):
     pass
+
+
+@lru_cache(maxsize=4096)
+def _parse_v6d_cache_identity(
+    identity: str, group_count: int
+) -> tuple[int, tuple[bytes, ...]]:
+    """Decode stable object metadata into immutable group/hash values."""
+    metadata = json.loads(identity)
+    group_id = metadata["group_id"]
+    if type(group_id) is not int or not 0 <= group_id < group_count:
+        raise ValueError("invalid V6D cache group")
+    hashes = tuple(bytes.fromhex(value) for value in metadata["block_hashes"])
+    if not hashes or any(len(value) != 32 for value in hashes):
+        raise ValueError("invalid V6D source block hash")
+    return group_id, hashes
 
 
 def _v6d_peer_cache_enabled(scheduler) -> bool:
@@ -5742,8 +5757,8 @@ class VLLMEngineObserver:
             snapshot["peer_cache_read_available"] for snapshot in snapshots
         )
         common = None
-        # PP nodes return the same object metadata. Parse each distinct value
-        # once per snapshot round; residency still comes from every node.
+        # Reuse immutable metadata decoding across PP nodes and poll rounds.
+        # Resident membership comes from every current node snapshot.
         parsed_identities: dict[str, tuple[int, tuple[bytes, ...]]] = {}
         for snapshot in snapshots:
             groups = {}
@@ -5755,18 +5770,9 @@ class VLLMEngineObserver:
                     continue
                 parsed = parsed_identities.get(identity)
                 if parsed is None:
-                    metadata = json.loads(identity)
-                    group_id = metadata["group_id"]
-                    if type(group_id) is not int or not 0 <= group_id < len(
-                        self._cache_policy.group_roles
-                    ):
-                        raise ValueError("invalid V6D cache group")
-                    hashes = tuple(
-                        bytes.fromhex(value) for value in metadata["block_hashes"]
+                    parsed = _parse_v6d_cache_identity(
+                        identity, len(self._cache_policy.group_roles)
                     )
-                    if not hashes or any(len(value) != 32 for value in hashes):
-                        raise ValueError("invalid V6D source block hash")
-                    parsed = (group_id, hashes)
                     parsed_identities[identity] = parsed
                 group_id, hashes = parsed
                 groups.setdefault(group_id, set()).update(hashes)

@@ -11,6 +11,36 @@ from navi_sched.adapters.vllm.VLLMBlockHash import (
 
 
 class VLLMBlockHashTest(unittest.TestCase):
+
+    def test_plain_runtime_request_uses_native_hashing(self):
+        from navi_sched.adapters.vllm import VLLMBlockHash as hashes
+
+        native_sha = mock.Mock()
+        extra_keys = mock.Mock(return_value=(None, 0))
+        native_hash = mock.Mock(
+            side_effect=lambda function, parent, tokens, extra: hashes._hash_block(
+                parent, tokens
+            )
+        )
+        modules = {
+            "vllm.utils.hashing": SimpleNamespace(sha256_cbor=native_sha),
+            "vllm.v1.core.kv_cache_utils": SimpleNamespace(
+                generate_block_hash_extra_keys=extra_keys,
+                hash_block_tokens=native_hash,
+            ),
+        }
+        request = SimpleNamespace(
+            mm_features=[], lora_request=None, cache_salt=None, prompt_embeds=None
+        )
+        with mock.patch.dict("sys.modules", modules):
+            actual = calculate_vllm_block_hashes(list(range(128)), 64, request=request)
+        self.assertEqual([10918909127363516282, 10585920789087210302], actual)
+        self.assertEqual(2, native_hash.call_count)
+        self.assertEqual(2, extra_keys.call_count)
+        self.assertTrue(
+            all(call.args[0] is native_sha for call in native_hash.call_args_list)
+        )
+
     def test_request_metadata_matches_vllm_hasher(self):
         try:
             from vllm.utils.hashing import sha256_cbor

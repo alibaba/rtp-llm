@@ -83,12 +83,7 @@ def calculate_vllm_block_hashes(
     full_block_count = len(token_ids) // block_size
     parent_hash = hashlib.sha256(_encode_text("0")).digest()
     hash_request = None
-    if request is not None and (
-        getattr(request, "mm_features", None)
-        or getattr(request, "lora_request", None) is not None
-        or getattr(request, "cache_salt", None) is not None
-        or getattr(request, "prompt_embeds", None) is not None
-    ):
+    if request is not None:
         from vllm.utils.hashing import sha256_cbor
         from vllm.v1.core.kv_cache_utils import (
             generate_block_hash_extra_keys,
