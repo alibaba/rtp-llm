@@ -3,14 +3,39 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from functools import cache
+from typing import Callable, Optional
 
 import torch
+
+from rtp_llm.models_py.modules.dsv4.fp8.backend_selection import (
+    _is_sm120_index,
+    cuda_device_index,
+)
 
 
 @dataclass
 class SparsePrefillRun:
     forward: Callable[[int, int], torch.Tensor]
+    request_aligned: bool = False
+
+
+@dataclass(frozen=True)
+class SparsePrefillInputs:
+    """Optional packed pools and split index tables for sparse prefill."""
+
+    swa_kv: Optional[torch.Tensor] = None
+    extra_kv: Optional[torch.Tensor] = None
+    swa_cache: Optional[torch.Tensor] = None
+    extra_cache: Optional[torch.Tensor] = None
+    prefix_cache: Optional[torch.Tensor] = None
+    prefix_slots: Optional[torch.Tensor] = None
+    prefix_lens: Optional[torch.Tensor] = None
+    swa_indices: Optional[torch.Tensor] = None
+    swa_lens: Optional[torch.Tensor] = None
+    extra_indices: Optional[torch.Tensor] = None
+    extra_lens: Optional[torch.Tensor] = None
+    extra_page_size: Optional[int] = None
 
 
 def _prepare_wo_a_stacked(
@@ -45,6 +70,49 @@ def _prepare_wo_a_stacked(
 
 class SparseAttentionBackend:
     uses_deepgemm_einsum = True
+    supports_shared_qkv_quant = True
+    uses_tilelang_sparse = True
+    supports_cp_raw_q_merge = True
+
+    def validate_heads(self, n_heads: int) -> None:
+        pass
+
+    def validate_decode_window(self, window_size: int) -> None:
+        pass
+
+    def preserve_packed_prefix(self, n_heads: int) -> bool:
+        return False
+
+    def uses_flash_mla_prefill(self, n_heads: int) -> bool:
+        return not self.preserve_packed_prefix(n_heads)
+
+    def prepare_decode(
+        self, device: torch.device, n_heads: int, softmax_scale: float
+    ) -> Optional[Callable[..., torch.Tensor]]:
+        return None
+
+    def initialize_workspace(
+        self, workspace: torch.Tensor, compressed_width: int
+    ) -> None:
+        pass
+
+    def workspace_inputs(
+        self,
+        *,
+        workspace,
+        indices,
+        lengths,
+        M,
+        N,
+        window_size,
+        extra_width,
+        ratio,
+        device,
+        prefix_cache,
+        prefix_slots,
+        prefix_lens,
+    ) -> SparsePrefillInputs:
+        return SparsePrefillInputs()
 
     def prepare_prefill(
         self,
@@ -55,6 +123,10 @@ class SparseAttentionBackend:
         topk_length,
         attn_sink,
         softmax_scale,
+        n_heads=None,
+        head_dim=None,
+        prefill_workspace=None,
+        backend_inputs: Optional[SparsePrefillInputs] = None,
     ) -> SparsePrefillRun:
         from rtp_llm.models_py.utils.flash_mla_legacy import flash_mla_sparse_fwd
 
@@ -103,5 +175,17 @@ _DEFAULT = SparseAttentionBackend()
 
 
 def get_sparse_attention_backend(device: torch.device) -> SparseAttentionBackend:
-    """Return the default provider for the execution device."""
+    """Choose a stateless provider using the resolved execution-device index."""
+    index = cuda_device_index(device)
+    return _DEFAULT if index is None else _backend_for_cuda(index)
+
+
+@cache
+def _backend_for_cuda(index: int) -> SparseAttentionBackend:
+    if _is_sm120_index(index):
+        from rtp_llm.models_py.modules.dsv4.fp8.sm120_attention_backend import (
+            SM120_ATTENTION,
+        )
+
+        return SM120_ATTENTION
     return _DEFAULT

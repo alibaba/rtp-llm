@@ -35,6 +35,7 @@ from rtp_llm.models_py.kernels.cuda.quant_layouts import (
 )
 
 _FP8_BLOCK_CONFIG = Fp8BlockWiseQuantConfig()
+_DSV4_FP8_BLOCK_CONFIG = Fp8BlockWiseQuantConfig(prefer_sm120_blockwise=True)
 
 MXFP8_BLOCK = 32
 
@@ -52,14 +53,31 @@ def is_mxfp8_scale(weight: torch.Tensor, scale: torch.Tensor) -> bool:
     )
 
 
-def create_fp8_linear(weight: torch.Tensor, scale: torch.Tensor):
+def create_fp8_linear(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    *,
+    prefer_sm120_blockwise: bool = False,
+):
     """Build the CUDA FP8 linear used by FP8 shared experts."""
+    from rtp_llm.models_py.kernels.cuda.sm120_fp8_blockwise import (
+        sm120_blockwise_fp8_available,
+        sm120_blockwise_layout,
+    )
     from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
     if is_mxfp8_scale(weight, scale):
         return Mxfp8Linear(weight, scale)
 
-    if scale.dtype == torch.float8_e8m0fnu:
+    quant_config = (
+        _DSV4_FP8_BLOCK_CONFIG if prefer_sm120_blockwise else _FP8_BLOCK_CONFIG
+    )
+    # The SM120 CUTLASS backend consumes the compact checkpoint scale; only
+    # DeepGEMM needs the TMA-aligned packed representation.
+    if scale.dtype == torch.float8_e8m0fnu and not (
+        sm120_blockwise_layout(quant_config, weight, scale)
+        and sm120_blockwise_fp8_available(weight.device)
+    ):
         from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
         if scale.dim() != 2:
@@ -74,7 +92,7 @@ def create_fp8_linear(weight: torch.Tensor, scale: torch.Tensor):
         local_weights,
         "weight",
         "scale",
-        quant_config=_FP8_BLOCK_CONFIG,
+        quant_config=quant_config,
     )
 
 

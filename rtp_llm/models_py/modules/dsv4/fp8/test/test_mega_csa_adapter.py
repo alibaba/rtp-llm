@@ -408,6 +408,7 @@ class MegaCSARoutingTest(unittest.TestCase):
                 return hidden
 
         class _V4:
+            _embed_target = V4Transformer._embed_target
             hc_mult = 1
             layers = [_Layer()]
             norm = _IdentityNorm()

@@ -110,10 +110,13 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
             f"{type(self).__name__} does not support fused gate packing"
         )
 
-    @staticmethod
     def _restore_output_dtype(
-        payload: ExpertForwardPayload, output: torch.Tensor
+        self,
+        payload: ExpertForwardPayload,
+        output: torch.Tensor,
     ) -> torch.Tensor:
+        if self.preserve_output_dtype:
+            return output
         output_dtype = payload.expert_x_origin_dtype or payload.expert_x.dtype
         if output.dtype == output_dtype:
             return output

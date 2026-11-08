@@ -1983,36 +1983,38 @@ class CedRouterProjectionTest(_SingleThreadTest):
             for n in cls.body
             if isinstance(n, ast.FunctionDef) and n.name == "_should_chunk"
         )
-        helper = next(
-            n
-            for n in ast.parse(path.read_text()).body
-            if isinstance(n, ast.FunctionDef) and n.name == "_should_chunk_moe"
-        )
-        ns = dict(torch=torch)
-        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(path), "exec"), ns)
+        policy_path = path.with_name("_chunk_policy.py")
+        ns = {}
+        exec(compile(policy_path.read_text(), str(policy_path), "exec"), ns)
         exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), ns)
         plan, _ = _plan(
             131072, 0, torch.arange(130944, 131072), candidate_publication=True
         )
         gate = self._gate()
+        executor = types.SimpleNamespace(single_round_dispatch=False)
         ffn = types.SimpleNamespace(
             gate=gate,
             max_tokens_per_rank=16384,
             chunking_enabled=True,
             _is_decode_role=False,
+            _moe=types.SimpleNamespace(
+                fused_moe=types.SimpleNamespace(fused_experts=executor)
+            ),
         )
         ffn._should_chunk = types.MethodType(ns["_should_chunk"], ffn)
         # Decode and CUDA-graph capture cannot chunk, so their budgets must
         # already cover the batch; capacity overflow is a hard error there.
-        for policy, decode, capture, max_tokens, expect_chunk in (
-            (True, False, False, 16384, True),
-            (False, False, False, 16384, False),
-            (True, True, False, 131072, False),
-            (True, False, True, 131072, False),
+        for policy, decode, capture, single_round, max_tokens, expect_chunk in (
+            (True, False, False, False, 16384, True),
+            (False, False, False, False, 16384, False),
+            (True, True, False, False, 131072, False),
+            (True, False, True, False, 131072, False),
+            (True, False, False, True, 16384, False),
         ):
             ffn.chunking_enabled = policy
             ffn.max_tokens_per_rank = max_tokens
             ffn._is_decode_role = decode
+            executor.single_round_dispatch = single_round
             with mock.patch.object(
                 torch.cuda, "is_available", return_value=True
             ), mock.patch.object(

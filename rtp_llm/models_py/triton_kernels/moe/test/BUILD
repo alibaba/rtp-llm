@@ -1,7 +1,7 @@
 load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
-load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test", "dsv4_sm120_py_test")
 load("@arch_config//:arch_select.bzl", "requirement")
 
 requirement([
@@ -161,4 +161,17 @@ models_py_test(
     deps = [
         ":small_moe_test_support",
     ],
+)
+
+# SM120 sentinel cases split out of test_ep_kernels.py.
+dsv4_sm120_py_test(
+    name = "test_ep_kernels_sm120",
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:sm120_ep",
+    ] + [
+        ":numpy",
+        ":torch",
+        ":triton",
+    ],
+    visibility = ["//visibility:public"],
 )

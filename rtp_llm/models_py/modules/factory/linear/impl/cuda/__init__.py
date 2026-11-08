@@ -18,14 +18,30 @@ if is_cuda():
     from .fp8_gemm_linear import CudaFp8GEMMLinear
     from .fp8_per_tensor_linear import CudaFp8PerTensorLinear
 
-    major, minor = get_sm()
+    # Keep optional FP4 imports isolated from the mandatory FP8 registrations.
+    # FlashInfer FP4 is a Blackwell-only API and may be absent from otherwise
+    # valid CUDA wheels used on SM8x/SM9x.
+    major, _ = get_sm()
     if major >= 10:
-        try:
-            from .fp4_linear import CudaFp4GEMMLinear
-        except ImportError as error:
-            logger.warning("Optional FP4 Linear backend is unavailable: %s", error)
+        if is_sm120():
+            # Consumer-Blackwell wheels may omit the FlashInfer FP4 API; keep
+            # registration best-effort so the rest of the factory still loads.
+            try:
+                from .fp4_linear import CudaFp4GEMMLinear, fp4_backend_available
+
+                if fp4_backend_available():
+                    LinearFactory.register(CudaFp4GEMMLinear)
+                else:
+                    logger.warning("SM120 FP4 backend APIs are unavailable")
+            except (ImportError, AttributeError, OSError, RuntimeError) as e:
+                logger.warning("SM120 FP4 backend unavailable: %s", e)
         else:
-            LinearFactory.register(CudaFp4GEMMLinear)
+            try:
+                from .fp4_linear import CudaFp4GEMMLinear
+            except ImportError as error:
+                logger.warning("Optional FP4 Linear backend is unavailable: %s", error)
+            else:
+                LinearFactory.register(CudaFp4GEMMLinear)
 
     if is_sm120():
         try:

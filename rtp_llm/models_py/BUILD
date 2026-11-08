@@ -182,6 +182,23 @@ cc_binary(
     visibility = ["//visibility:public"],
 )
 
+# Source-level policy tests deliberately do not import GPU modules.
+filegroup(
+    name = "prefill_policy_source_data",
+    srcs = [
+        "modules/dsv4/dsv4_kernel_jit_warmup.py",
+        "modules/dsv4/fp8/attention.py",
+        "modules/dsv4/utils.py",
+        "modules/dsv4/fp8/attention_backend.py",
+        "modules/dsv4/fp8/backend_selection.py",
+        "modules/dsv4/fp8/sm120_attention_backend.py",
+        "modules/dsv4/fp8/sm120_projection.py",
+        "utils/arch.py",
+        "//rtp_llm:device_type_source",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "prefill_optimization_source_data",
     srcs = glob([
@@ -221,6 +238,7 @@ py_library(
         ":kernels",
         ":tile_kernels_mhc",
         "//rtp_llm:warmup",
+        "//rtp_llm/models_py/triton_kernels:sm120_ep",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",

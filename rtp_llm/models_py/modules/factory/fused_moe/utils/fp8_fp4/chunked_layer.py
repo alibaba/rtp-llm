@@ -11,6 +11,9 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4._chunk_policy import (
+    should_chunk_moe_input,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.layer import (
     Fp8Fp4MoeLayer,
 )
@@ -23,8 +26,23 @@ _CHUNKED_MOE_LOGGED = False
 _SYNCHRONIZED_CHUNK_TOKENS: ContextVar[Optional[int]] = ContextVar(
     "moe_synchronized_chunk_tokens", default=None
 )
-
 _MOE_DECODE_FORWARD: ContextVar[bool] = ContextVar("moe_decode_forward", default=False)
+_STANDALONE_CHUNK_STRATEGIES = frozenset({"mega_moe", "mega_moe_se"})
+
+
+def _requires_synchronized_chunks(
+    layer: nn.Module, *, mega_strategies: frozenset[str] = _STANDALONE_CHUNK_STRATEGIES
+) -> bool:
+    """Whether every EP rank must run the same number of eager MoE chunks.
+
+    Mega kernels and executors that exchange variable-size payloads over a
+    collective (``requires_synchronized_chunk_schedule``) need it.
+    """
+    if getattr(layer, "strategy_name", None) in mega_strategies:
+        return True
+    moe = getattr(layer, "_moe", None)
+    executor = getattr(getattr(moe, "fused_moe", None), "fused_experts", None)
+    return getattr(executor, "requires_synchronized_chunk_schedule", False) is True
 
 
 def moe_decode_forward() -> bool:
@@ -263,8 +281,10 @@ def synchronized_moe_chunk_plan(
         needs_sync = not is_decode_forward and any(
             (
                 not getattr(layer, "_is_decode_role", False)
-                and getattr(layer, "strategy_name", None) in MEGA_MOE_STRATEGIES
                 and getattr(layer, "chunking_enabled", False)
+                and _requires_synchronized_chunks(
+                    layer, mega_strategies=MEGA_MOE_STRATEGIES
+                )
             )
             or (
                 not getattr(executor, "_is_decode_role", False)
@@ -317,6 +337,12 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         has_shared_expert_gate: bool = False,
         observer_factory: Optional[ObserverFactory] = None,
         record_function_scope: Callable[[], ContextManager] = nullcontext,
+        moe_cp_enabled: bool = False,
+        moe_cp_size: int = 1,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        attn_tp_size: int = 1,
+        sm120_workspace=None,
     ) -> None:
         super().__init__()
         if layer_weights is None:
@@ -353,6 +379,12 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             has_shared_expert_gate=has_shared_expert_gate,
             physical_expert_num=n_physical_experts,
             is_decode_role=is_decode_role,
+            moe_cp_enabled=moe_cp_enabled,
+            moe_cp_size=moe_cp_size,
+            moe_tp_size=moe_tp_size,
+            moe_tp_rank=moe_tp_rank,
+            attn_tp_size=attn_tp_size,
+            sm120_workspace=sm120_workspace,
         )
         self.strategy_name = self._moe.strategy_name
 
@@ -369,12 +401,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         return self._moe.shared_experts
 
     def _should_chunk(self, tokens: int, *, is_decode_forward: bool = False) -> bool:
-        return _should_chunk_moe(
-            tokens,
-            self.max_tokens_per_rank,
-            is_decode_forward=self._is_decode_role or is_decode_forward,
-            chunking_enabled=self.chunking_enabled,
-        )
+        return should_chunk_moe_input(self, tokens, is_decode_forward=is_decode_forward)
 
     def _synchronized_chunk_tokens(
         self,
@@ -384,7 +411,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         is_decode_forward: bool = False,
     ) -> int:
         if (
-            self.strategy_name not in {"mega_moe", "mega_moe_se"}
+            not _requires_synchronized_chunks(self)
             or self._is_decode_role
             or is_decode_forward
             or not self.chunking_enabled
@@ -421,6 +448,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         is_decode_forward: bool = False,
         positions: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        is_decode_forward = is_decode_forward or moe_decode_forward()
         shape = x.shape
         flat_x = x.reshape(-1, self.dim)
         flat_ids = None if input_ids is None else input_ids.reshape(-1)
@@ -434,6 +462,10 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             flat_x.device,
             is_decode_forward=is_decode_forward,
         )
+        chunked = self._should_chunk(
+            max(flat_x.size(0), synchronized_tokens),
+            is_decode_forward=is_decode_forward,
+        )
         output = _get_or_create_final_out(
             max(flat_x.size(0), self.max_tokens_per_rank),
             self.dim,
@@ -444,7 +476,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         def call_chunk(start, end, out_view):
             chunk_ids = None if flat_ids is None else flat_ids[start:end]
             chunk_observer = observer
-            if observer is not None and synchronized_tokens > self.max_tokens_per_rank:
+            if observer is not None and chunked:
                 chunk_positions = (
                     positions[start:end] if positions is not None else None
                 )
@@ -460,7 +492,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             self.max_tokens_per_rank,
             call_chunk,
             is_decode_forward=self._is_decode_role or is_decode_forward,
-            chunking_enabled=self.chunking_enabled,
+            chunking_enabled=chunked,
             synchronized_tokens=synchronized_tokens,
             out=output,
         )

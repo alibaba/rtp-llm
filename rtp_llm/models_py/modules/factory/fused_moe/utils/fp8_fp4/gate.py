@@ -22,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import ExpertGatePayload
+from rtp_llm.models_py.utils.arch import is_sm120
 
 # Single-Triton-kernel router-gate epilogue for
 # score_func='sqrtsoftplus'.  Replaces ~7 elementwise/reduce/topk launches
@@ -128,6 +129,8 @@ class Gate(nn.Module):
         n_hash_layers: int = 0,
         vocab_size: int = 0,
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+        *,
+        model_type: str = "generic_fp8_fp4_moe",
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W``. Reads
@@ -142,6 +145,8 @@ class Gate(nn.Module):
         self.hash = layer_id < n_hash_layers
         self.fuse_hash_gate = False
         self.vocab_size = int(vocab_size)
+        self.model_type = model_type
+        self.batch_invariant_scores = False
         from rtp_llm.utils.model_weight import W
 
         assert (
@@ -211,7 +216,33 @@ class Gate(nn.Module):
 
     def _bf16_scores(self, x: torch.Tensor) -> torch.Tensor:
         x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
+        # CED remaps compact rows through its own projection and must keep
+        # seeing every gate call; the SM120 batch-invariant path below must not
+        # short-circuit it.  Only DeepSeek-V4.1 prefill installs
+        # ``_ced_row_projection``, and it never enables batch-invariant scores,
+        # so this check leaves SM120 DSv4 routing numerics unchanged.
+        if getattr(self, "_ced_row_projection", None) is not None:
+            return self._project_scores(x_bf16, self._weight_bf16())
+        if self.batch_invariant_scores and self._sm120_dsv4_policy(x):
+            from rtp_llm.models_py.triton_kernels.sm120_batch_invariant_linear import (
+                batch_invariant_linear,
+                is_supported,
+            )
+
+            if is_supported(x_bf16, self._weight_bf16()):
+                return batch_invariant_linear(
+                    x_bf16, self._weight_bf16(), out_dtype=torch.bfloat16
+                )
         return self._project_scores(x_bf16, self._weight_bf16())
+
+    def _sm120_dsv4_policy(self, x: torch.Tensor) -> bool:
+        """Scope DSv4 SM120 numerical policy to its intended model/device."""
+        return (
+            getattr(self, "model_type", None) == "deepseek_v4"
+            and x.is_cuda
+            and is_sm120(x.device)
+            and getattr(self, "_ced_row_projection", None) is None
+        )
 
     def _visual_routing_active(self) -> bool:
         return self.bias_vl is not None and bool(
@@ -281,10 +312,19 @@ class Gate(nn.Module):
         # FP32-everywhere path that previously emitted SIMT sgemm 128x128
         # (127× × 1.15 ms = 145 ms in the 64k+CP=4 trace).  Score numerics
         # then run in FP32 through softplus/sqrt/topk, same as before.
+        rows = x.size(0)
+        # Use one GEMM shape for single-token and small speculative-verify
+        # batches: SM120 small-M algorithms otherwise round differently.
+        # CED remaps compact rows itself, so leave its row count untouched.
+        x_gemm = (
+            F.pad(x, (0, 0, 0, 8 - rows))
+            if rows < 8 and self._sm120_dsv4_policy(x)
+            else x
+        )
         if os.environ.get("MOE_GATE_FP32", "0") == "1":
-            scores = self._project_scores(x.float(), self.weight.float())
+            scores = self._project_scores(x_gemm.float(), self.weight.float())[:rows]
         else:
-            scores = self._bf16_scores(x)
+            scores = self._bf16_scores(x_gemm)[:rows]
             if (
                 self.hash
                 and self.fuse_hash_gate

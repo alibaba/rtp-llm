@@ -323,7 +323,9 @@ def forward_layers(
     input_ids = input_ids.reshape(-1)
 
     if prepare_hidden_fn is None:
-        h = v4.embed(input_ids).view(B, q_len, -1)  # [B, q_len, dim]
+        # ``_embed_target`` gathers TP-sharded embeddings on SM120 and is a
+        # plain ``embed`` elsewhere.
+        h = v4._embed_target(input_ids).view(B, q_len, -1)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, v4.hc_mult, 1)  # [B, q_len, hc, dim]
     else:
         h = prepare_hidden_fn(input_ids=input_ids, meta=attn_metadata)

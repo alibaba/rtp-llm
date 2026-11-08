@@ -140,5 +140,44 @@ class DSparkSparseBackendTest(_DSparkTestCase):
         self.assertIsNone(kernel.call_args.kwargs["sched_meta"])
 
 
+class DSparkSm120BackendTest(_DSparkTestCase):
+
+    def test_sm120_binds_once_without_loading_flashmla(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import sm120_sparse_mla
+        from rtp_llm.models_py.modules.dsv4.fp8.sm120_attention_backend import (
+            SM120_ATTENTION,
+        )
+
+        op = SparseAttnV4DecodeFp8Op(8, 512, 0.5)
+        device = torch.device("cuda:7")
+        with patch.object(
+            fp8_sparse_attn_decode_op,
+            "get_sparse_attention_backend",
+            return_value=SM120_ATTENTION,
+        ), patch.object(
+            sm120_sparse_mla, "_load_sm120_sparse_mla", return_value=object()
+        ), patch.object(
+            sm120_sparse_mla, "warmup"
+        ) as warmup, patch.object(
+            sm120_sparse_mla, "forward_decode", return_value=object()
+        ) as kernel, patch.object(
+            decode_attn_metadata,
+            "get_or_build_sched_meta",
+            side_effect=AssertionError("unexpected FlashMLA planner"),
+        ), patch.object(
+            fp8_sparse_attn_decode_op,
+            "_load_flash_mla",
+            side_effect=AssertionError("unexpected FlashMLA wheel"),
+        ), patch.dict(
+            sys.modules, {"rtp_llm.models_py.utils.flash_mla_legacy": None}
+        ):
+            for _ in range(2):
+                self.run_attention(op, object(), device)
+            warmup.assert_called_once_with(device)
+        self.assertEqual(kernel.call_count, 2)
+        self.assertIsNone(kernel.call_args.kwargs["sched_meta"])
+        self.assertEqual(kernel.call_args.kwargs["softmax_scale"], 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()
