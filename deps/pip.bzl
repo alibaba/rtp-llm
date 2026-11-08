@@ -114,6 +114,19 @@ def pip_deps():
         quiet = False,
     )
 
+    # DSv4 SM120 provider profile: same closure as pip_gpu_cuda13_torch except
+    # for the qualified DeepGEMM / FlashInfer providers. The FlashInfer 0.6.9
+    # annotations do not apply to its 0.6.16 wheel.
+    pip_parse(
+        name = "pip_gpu_cuda13_sm120_dsv4_torch",
+        requirements_lock = "@rtp_pip_deps//:requirements_lock_torch_gpu_cuda13_sm120_dsv4.txt",
+        python_interpreter = "/opt/conda310/bin/python3",
+        extra_pip_args = PIP_EXTRA_ARGS + PIP_INDEX_ARGS + ["--quiet"],
+        envsubst = PIP_INDEX_ENVSUBST,
+        timeout = 3600,
+        quiet = False,
+    )
+
     pip_parse(
         name = "pip_cuda12_arm_torch",
         annotations = FLASHINFER_069_ANNOTATIONS,

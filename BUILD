@@ -76,6 +76,19 @@ config_setting(
     },
 )
 
+# DSv4 SM120 provider profile (--config=cuda13_sm120_dsv4).  Stricter than
+# using_cuda13_x86 so kernels reserved for this profile (e.g. the FP8
+# blockwise GEMM) compile only here.
+config_setting(
+    name = "using_cuda13_sm120_dsv4",
+    define_values = {
+        "using_cuda": "true",
+        "using_cuda12": "true",
+        "using_cuda13_x86": "true",
+        "using_cuda13_sm120_dsv4": "true",
+    },
+)
+
 config_setting(
     name = "using_cuda12_x86",
     values = {"define": "using_cuda12_x86=true"},

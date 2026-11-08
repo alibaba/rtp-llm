@@ -1,0 +1,65 @@
+"""Run a Bazel pytest target and reject a successful run with no test execution."""
+
+import argparse
+import os
+import sys
+import tempfile
+
+from rtp_llm.test.pytest.pytest_main import ExecutionCount
+from rtp_llm.utils.jit_cache_env import configure_cache_env
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cuda-devices", type=int, default=0)
+    parser.add_argument("--cuda-major", type=int, default=10)
+    parser.add_argument("--cuda-minor", type=int)
+    parser.add_argument("test_file")
+    options, pytest_args = parser.parse_known_args()
+
+    # DeepGEMM may import before the model's HOME fallback. NVCC needs an
+    # absolute cache path because its compiler subprocess can change directory.
+    cache_root = os.environ.get("TEST_TMPDIR") or tempfile.gettempdir()
+    configure_cache_env(
+        "DG_JIT_CACHE_DIR",
+        os.path.abspath(
+            os.environ.get("DG_JIT_CACHE_DIR") or os.path.join(cache_root, "deep_gemm")
+        ),
+    )
+
+    if options.cuda_devices:
+        import torch
+
+        if not torch.version.cuda or int(torch.version.cuda.split(".")[0]) != 13:
+            raise RuntimeError(f"CUDA 13 runtime required, got {torch.version.cuda}")
+        if torch.cuda.device_count() < options.cuda_devices:
+            raise RuntimeError(
+                f"requires {options.cuda_devices} CUDA devices, "
+                f"found {torch.cuda.device_count()}"
+            )
+        for index in range(options.cuda_devices):
+            capability = torch.cuda.get_device_capability(index)
+            if capability[0] != options.cuda_major or (
+                options.cuda_minor is not None and capability[1] != options.cuda_minor
+            ):
+                required_minor = (
+                    "x" if options.cuda_minor is None else str(options.cuda_minor)
+                )
+                raise RuntimeError(
+                    f"DSV4 CUDA13 tests require SM{options.cuda_major}{required_minor} devices, "
+                    f"found SM{capability[0]}{capability[1]} on device {index}"
+                )
+
+    # Machine-installed plugins must not change test collection or dependencies.
+    os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    import pytest
+
+    args = [options.test_file, "-ra", "-p", "no:cacheprovider"] + pytest_args
+    xml_path = os.environ.get("XML_OUTPUT_FILE")
+    if xml_path:
+        args += ["--junitxml", xml_path]
+    return pytest.main(args, plugins=[ExecutionCount()])
+
+
+if __name__ == "__main__":
+    sys.exit(main())
