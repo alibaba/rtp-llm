@@ -5899,6 +5899,442 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetPDFusionFourRoundPrefix) {
     verifyGlobalChunkBudgetFourRoundPrefix<PDFusionRatioScheduler>(RoleType::PDFUSION, "1/100");
 }
 
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpFillsContinuationTail) {
+    ChunkSchedulerTestConfig             config;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto  first     = env.makeStream(std::vector<int>(20, 1));
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    first->update(makeSingleTokenUpdate(101));
+
+    auto next = env.makeStream(std::vector<int>(20, 2));
+    ASSERT_TRUE(scheduler.enqueue(next).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first, next}, {4, 12}));
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+    EXPECT_FALSE(next->hasError());
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpPreloadsCacheAndKeepsFifoOrder) {
+    ChunkSchedulerTestConfig             config;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    env.resource_context.enable_memory_cache = true;
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto  first     = env.makeStream(std::vector<int>(36, 1));
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    first->update(makeSingleTokenUpdate(101));
+
+    auto context                                   = setupPendingCacheLoad(env.cache_manager);
+    auto loading                                   = env.makeStream(std::vector<int>(20, 2));
+    loading->generateConfig()->reuse_cache         = true;
+    loading->generateConfig()->enable_memory_cache = true;
+    ASSERT_TRUE(scheduler.enqueue(loading).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    ASSERT_EQ(loading->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_GT(loading->curBlocksNum(), 0);
+    first->update(makeSingleTokenUpdate(102));
+
+    auto newer = env.makeStream({3, 3, 3, 3});
+    ASSERT_TRUE(scheduler.enqueue(newer).ok());
+    ASSERT_TRUE(context->settle(true));
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first, loading}, {4, 12}));
+    EXPECT_EQ(loading->getStatus(), StreamState::RUNNING);
+    EXPECT_FALSE(loading->hasError());
+    EXPECT_EQ(newer->reuseLength(), 0);
+    EXPECT_FALSE(newer->hasOutput());
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpCountsPendingLoadsAcrossRounds) {
+    ChunkSchedulerTestConfig             config;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    env.runtime_config.max_generate_batch_size = 2;
+    env.resource_context.enable_memory_cache   = true;
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto  first     = env.makeStream(std::vector<int>(52, 1));
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    first->update(makeSingleTokenUpdate(101));
+
+    auto context                                   = setupPendingCacheLoad(env.cache_manager);
+    auto loading                                   = env.makeStream(std::vector<int>(20, 2));
+    loading->generateConfig()->reuse_cache         = true;
+    loading->generateConfig()->enable_memory_cache = true;
+    ASSERT_TRUE(scheduler.enqueue(loading).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    ASSERT_EQ(loading->getStatus(), StreamState::LOADING_CACHE);
+    first->update(makeSingleTokenUpdate(102));
+
+    auto excess = env.makeStream({3, 3, 3, 3});
+    ASSERT_TRUE(scheduler.enqueue(excess).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    EXPECT_EQ(excess->curBlocksNum(), 0);
+    EXPECT_FALSE(excess->hasEvent(StreamEvents::CanRun));
+    first->update(makeSingleTokenUpdate(103));
+
+    ASSERT_TRUE(context->settle(true));
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first, loading}, {4, 12}));
+    EXPECT_EQ(excess->curBlocksNum(), 0);
+    EXPECT_FALSE(loading->hasError());
+    EXPECT_EQ(scheduler.runningStreamsSize(), 2);
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpRestoresFifoAcrossReadyCandidates) {
+    ChunkSchedulerTestConfig             config;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    env.resource_context.enable_memory_cache = true;
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto  first     = env.makeStream(std::vector<int>(52, 1));
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    first->update(makeSingleTokenUpdate(101));
+
+    auto context                                 = setupPendingCacheLoad(env.cache_manager);
+    auto older                                   = env.makeStream(std::vector<int>(20, 2));
+    older->generateConfig()->reuse_cache         = true;
+    older->generateConfig()->enable_memory_cache = true;
+    ASSERT_TRUE(scheduler.enqueue(older).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    ASSERT_EQ(older->getStatus(), StreamState::LOADING_CACHE);
+    first->update(makeSingleTokenUpdate(102));
+
+    auto newer = env.makeStream(std::vector<int>(20, 3));
+    ASSERT_TRUE(scheduler.enqueue(newer).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    ASSERT_EQ(newer->getStatus(), StreamState::RUNNING);
+    first->update(makeSingleTokenUpdate(103));
+
+    ASSERT_TRUE(context->settle(true));
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first, older}, {4, 12}));
+    EXPECT_FALSE(newer->hasOutput());
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpResumesAlreadyRequeuedCacheLoad) {
+    ChunkSchedulerTestConfig             config;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    env.resource_context.enable_memory_cache = true;
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto  first     = env.makeStream(std::vector<int>(20, 1));
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    first->update(makeSingleTokenUpdate(101));
+
+    auto context                                   = setupPendingCacheLoad(env.cache_manager);
+    auto loading                                   = env.makeStream(std::vector<int>(20, 2));
+    loading->generateConfig()->reuse_cache         = true;
+    loading->generateConfig()->enable_memory_cache = true;
+    ASSERT_TRUE(scheduler.enqueue(loading).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {4}));
+    ASSERT_EQ(loading->getStatus(), StreamState::LOADING_CACHE);
+    first->update(makeSingleTokenUpdate(102));
+    ASSERT_FALSE(first->isContextStream());
+
+    // Reproduce completion in a later poll after the first poll's size snapshot.
+    ASSERT_TRUE(context->settle(true));
+    scheduler.evaluateAndUpdateStreams(scheduler.loading_cache_streams_);
+    ASSERT_EQ(loading->getStatus(), StreamState::WAITING);
+    ASSERT_FALSE(loading->hasEvent(StreamEvents::CanRun));
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {loading}, {16}));
+    EXPECT_EQ(scheduler.pending_decode_streams_.size(), 1);
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpRecalculatesContinuationQuota) {
+    ChunkSchedulerTestConfig             config;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    env.runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 16;
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto  first     = env.makeStream(std::vector<int>(20, 1));
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    first->update(makeSingleTokenUpdate(101));
+
+    auto next = env.makeStream(std::vector<int>(52, 2));
+    ASSERT_TRUE(scheduler.enqueue(next).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first, next}, {4, 12}));
+    first->update(makeSingleTokenUpdate(102));
+    next->update(makeSingleTokenUpdate(103));
+    first->reportEvent(StreamEvents::GenerateDone);
+
+    auto excess = env.makeStream(std::vector<int>(20, 3));
+    ASSERT_TRUE(scheduler.enqueue(excess).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {next}, {16}));
+    EXPECT_EQ(excess->curBlocksNum(), 0);
+    EXPECT_FALSE(excess->hasEvent(StreamEvents::CanRun));
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpPreservesPaddedShapeLimit) {
+    ChunkSchedulerTestConfig config;
+    config.max_batch_tokens_size = 48;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto  first     = env.makeStream(std::vector<int>(20, 1));
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    first->update(makeSingleTokenUpdate(101));
+
+    auto next   = env.makeStream(std::vector<int>(20, 2));
+    auto excess = env.makeStream({3, 3, 3, 3});
+    ASSERT_TRUE(enqueueIndividually(scheduler, {next, excess}));
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first, next}, {4, 12}));
+    // 20 + 20 + 4 fits the sum, but 20 * 3 exceeds the padded-shape cap.
+    EXPECT_EQ(excess->curBlocksNum(), 0);
+    EXPECT_FALSE(excess->hasEvent(StreamEvents::CanRun));
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpPreservesInitializedKvLimit) {
+    ChunkSchedulerTestConfig             config;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    env.runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = 1;
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto  first     = env.makeStream(std::vector<int>(20, 1));
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    first->update(makeSingleTokenUpdate(101));
+
+    auto next = env.makeStream(std::vector<int>(20, 2));
+    ASSERT_TRUE(scheduler.enqueue(next).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {4}));
+    EXPECT_EQ(next->curBlocksNum(), 0);
+    EXPECT_FALSE(next->hasEvent(StreamEvents::CanRun));
+    first->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {next}, {16}));
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpDoesNotJoinExplicitGroup) {
+    ChunkSchedulerTestConfig             config;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto  grouped   = env.makeStream(std::vector<int>(20, 1));
+    ASSERT_EQ(scheduler.enqueueGroup({grouped}).first, std::vector<bool>({true}));
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {grouped}, {16}));
+    grouped->update(makeSingleTokenUpdate(101));
+
+    auto ordinary = env.makeStream(std::vector<int>(20, 2));
+    ASSERT_TRUE(scheduler.enqueue(ordinary).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {grouped}, {4}));
+    EXPECT_EQ(ordinary->curBlocksNum(), 0);
+    EXPECT_FALSE(ordinary->hasEvent(StreamEvents::CanRun));
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpPreservesExecutionMode) {
+    ChunkSchedulerTestConfig             config;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler    = env.scheduler();
+    auto  prefill_only = env.makeStream(std::vector<int>(20, 1), 0);
+    ASSERT_TRUE(scheduler.enqueue(prefill_only).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {prefill_only}, {16}));
+    prefill_only->advanceChunk();
+
+    auto generation = env.makeStream(std::vector<int>(20, 2), 8);
+    ASSERT_TRUE(scheduler.enqueue(generation).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {prefill_only}, {4}));
+    EXPECT_EQ(generation->curBlocksNum(), 0);
+    EXPECT_FALSE(generation->hasEvent(StreamEvents::CanRun));
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpKvShortageDoesNotBlockSmallerRequest) {
+    ChunkSchedulerTestConfig config;
+    config.block_num = 8;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto  first     = env.makeStream(std::vector<int>(20, 1));
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    first->update(makeSingleTokenUpdate(101));
+
+    auto large = env.makeStream(std::vector<int>(20, 2));
+    auto small = env.makeStream({3, 3, 3, 3});
+    ASSERT_TRUE(enqueueIndividually(scheduler, {large, small}));
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first, small}, {4, 4}));
+    EXPECT_EQ(large->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(large->curBlocksNum(), 0);
+    EXPECT_FALSE(large->hasError());
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpPreservesUncachedQuota) {
+    ChunkSchedulerTestConfig             config;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    env.runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 4;
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto  first     = env.makeStream(std::vector<int>(20, 1));
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    first->update(makeSingleTokenUpdate(101));
+
+    auto next = env.makeStream(std::vector<int>(20, 2));
+    ASSERT_TRUE(scheduler.enqueue(next).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {4}));
+    EXPECT_EQ(next->curBlocksNum(), 0);
+    EXPECT_FALSE(next->hasEvent(StreamEvents::CanRun));
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpDrainsPreparedWorkBeforeGroup) {
+    ChunkSchedulerTestConfig             config;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    env.resource_context.enable_memory_cache = true;
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto  first     = env.makeStream(std::vector<int>(36, 1));
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    first->update(makeSingleTokenUpdate(101));
+
+    auto context                                   = setupPendingCacheLoad(env.cache_manager);
+    auto loading                                   = env.makeStream(std::vector<int>(20, 2));
+    loading->generateConfig()->reuse_cache         = true;
+    loading->generateConfig()->enable_memory_cache = true;
+    ASSERT_TRUE(scheduler.enqueue(loading).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first}, {16}));
+    ASSERT_EQ(loading->getStatus(), StreamState::LOADING_CACHE);
+    first->update(makeSingleTokenUpdate(102));
+
+    auto grouped  = env.makeStream({3, 3, 3, 3});
+    auto ordinary = env.makeStream({4, 4, 4, 4});
+    ASSERT_EQ(scheduler.enqueueGroup({grouped}).first, std::vector<bool>({true}));
+    ASSERT_TRUE(scheduler.enqueue(ordinary).ok());
+    ASSERT_TRUE(context->settle(true));
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {first, loading}, {4, 12}));
+    EXPECT_EQ(grouped->curBlocksNum(), 0);
+    EXPECT_EQ(ordinary->curBlocksNum(), 0);
+    EXPECT_FALSE(grouped->hasEvent(StreamEvents::CanRun));
+    EXPECT_FALSE(ordinary->hasEvent(StreamEvents::CanRun));
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpEventuallyResumesLocalDecodeUnderPdTraffic) {
+    ChunkSchedulerTestConfig config;
+    config.block_num = 256;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    env.runtime_config.max_generate_batch_size = 3;
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto  local     = env.makeStream(std::vector<int>(20, 1));
+    ASSERT_FALSE(local->queryPdSep());
+    ASSERT_TRUE(scheduler.enqueue(local).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {local}, {16}));
+    local->update(makeSingleTokenUpdate(101));
+
+    bool local_decode_ran = false;
+    for (int round = 0; round < 12; ++round) {
+        SCOPED_TRACE(round);
+        // PD completions release admission slots while the local fallback still
+        // needs Decode. New PD traffic must not keep it parked indefinitely.
+        auto pd                             = env.makeStream(std::vector<int>(52, round + 2));
+        pd->generateConfig()->pd_separation = true;
+        ASSERT_TRUE(scheduler.enqueue(pd).ok());
+        auto batch = scheduler.schedule();
+        ASSERT_TRUE(batch.ok());
+        for (const auto& stream : batch->streams) {
+            const bool is_local_decode = stream == local && !stream->isContextStream();
+            stream->update(makeSingleTokenUpdate(102 + round));
+            if (stream->queryPdSep() && stream->hasEvent(StreamEvents::GenerateDone)) {
+                // Simulate the completed remote handoff, so held PD KV cannot
+                // accidentally stop the arrival sequence through memory pressure.
+                stream->releaseKVCacheForPDSep();
+            }
+            local_decode_ran = local_decode_ran || is_local_decode;
+        }
+        if (local_decode_ran) {
+            break;
+        }
+    }
+    EXPECT_TRUE(local_decode_ran);
+    EXPECT_EQ(local->seqLength(), 22);  // First token, then a real Decode step.
+    EXPECT_FALSE(local->hasError());
+    EXPECT_GT(scheduler.waitingStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpDrainsPreparedLoadBeforeLocalDecode) {
+    ChunkSchedulerTestConfig             config;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    env.resource_context.enable_memory_cache = true;
+    ASSERT_TRUE(env.init());
+    auto& scheduler = env.scheduler();
+    auto  local     = env.makeStream(std::vector<int>(20, 1));
+    ASSERT_TRUE(scheduler.enqueue(local).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {local}, {16}));
+    local->update(makeSingleTokenUpdate(101));
+
+    auto context                                   = setupPendingCacheLoad(env.cache_manager);
+    auto loading                                   = env.makeStream(std::vector<int>(20, 2));
+    loading->generateConfig()->pd_separation       = true;
+    loading->generateConfig()->reuse_cache         = true;
+    loading->generateConfig()->enable_memory_cache = true;
+    ASSERT_TRUE(scheduler.enqueue(loading).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {local}, {4}));
+    ASSERT_EQ(loading->getStatus(), StreamState::LOADING_CACHE);
+    local->update(makeSingleTokenUpdate(102));
+    ASSERT_FALSE(local->isContextStream());
+
+    auto fresh                             = env.makeStream(std::vector<int>(20, 3));
+    fresh->generateConfig()->pd_separation = true;
+    ASSERT_TRUE(scheduler.enqueue(fresh).ok());
+    ASSERT_TRUE(context->settle(true));
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {loading}, {16}));
+    EXPECT_EQ(fresh->curBlocksNum(), 0);
+    EXPECT_FALSE(fresh->hasEvent(StreamEvents::CanRun));
+    loading->update(makeSingleTokenUpdate(103));
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {loading}, {4}));
+    loading->update(makeSingleTokenUpdate(104));
+    ASSERT_TRUE(loading->hasEvent(StreamEvents::GenerateDone));
+    loading->releaseKVCacheForPDSep();
+
+    auto decode_batch = scheduler.schedule();
+    ASSERT_TRUE(decode_batch.ok());
+    ASSERT_EQ(decode_batch->streams.size(), 1);
+    ASSERT_EQ(decode_batch->streams.front(), local);
+    ASSERT_FALSE(local->isContextStream());
+    local->update(makeSingleTokenUpdate(105));
+    EXPECT_EQ(local->seqLength(), 22);
+    EXPECT_EQ(fresh->curBlocksNum(), 0);
+}
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillTopUpDoesNotTreatPdHandoffAsLocalDecode) {
+    ChunkSchedulerTestConfig             config;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    env.runtime_config.max_generate_batch_size = 3;
+    ASSERT_TRUE(env.init());
+    auto& scheduler                          = env.scheduler();
+    auto  handoff                            = env.makeStream(std::vector<int>(20, 1));
+    handoff->generateConfig()->pd_separation = true;
+    ASSERT_TRUE(scheduler.enqueue(handoff).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {handoff}, {16}));
+    handoff->update(makeSingleTokenUpdate(101));
+
+    auto continuation                             = env.makeStream(std::vector<int>(52, 2));
+    continuation->generateConfig()->pd_separation = true;
+    ASSERT_TRUE(scheduler.enqueue(continuation).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {handoff, continuation}, {4, 12}));
+    // Model the first-token handoff window before PD completion is committed.
+    // This row needs no local Decode and must not stop continuous PD admission.
+    auto update                   = makeSingleTokenUpdate(102);
+    update.update_remote_generate = false;
+    handoff->update(update);
+    continuation->update(makeSingleTokenUpdate(103));
+    ASSERT_FALSE(handoff->isContextStream());
+    ASSERT_FALSE(handoff->hasEvent(StreamEvents::GenerateDone));
+
+    auto fresh                             = env.makeStream(std::vector<int>(20, 3));
+    fresh->generateConfig()->pd_separation = true;
+    ASSERT_TRUE(scheduler.enqueue(fresh).ok());
+    ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {continuation}, {16}));
+    EXPECT_EQ(scheduler.pending_decode_streams_.size(), 1);
+    EXPECT_EQ(fresh->getStatus(), StreamState::RUNNING);
+    EXPECT_GT(fresh->curBlocksNum(), 0);
+    EXPECT_TRUE(fresh->hasEvent(StreamEvents::CanRun));
+}
+
 static CacheConfig makeChunkCpGroupCacheConfig(size_t group_block_size,
                                                bool   prefix_reuse,
                                                size_t block_size,
