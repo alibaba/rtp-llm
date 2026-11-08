@@ -442,7 +442,10 @@ std::vector<AgentBatchR::ExecutionState> AgentBatchR::stop()
         for (const auto &entry : runningBatches)
             finishUtilizationExecutionLocked(*entry.second);
         _batchWaitingRequestCount = 0;
+        _backendWaitingRequests.store(0, std::memory_order_relaxed);
+        _backendWaitingRequestIds.clear();
         _queuedBatchRequestCount.store(0, std::memory_order_relaxed);
+        refreshReadyRequestsAlsoInBackendWaitingLocked();
         _runningRequestCount = 0;
         refreshExecutionUtilizationLocked();
         updateReadyWithoutRunningLocked(nowTimeUs);
@@ -523,6 +526,7 @@ bool AgentBatchR::startBatch(int64_t batchId, const std::vector<uint64_t> &reque
     _queuedBatchRequestCount.store(
         _queuedBatchRequestCount.load(std::memory_order_relaxed) - batch->requestIdSet.size(),
         std::memory_order_relaxed);
+    refreshReadyRequestsAlsoInBackendWaitingLocked();
     _runningRequestCount += static_cast<int32_t>(batch->requestIdSet.size());
     updateReadyWithoutRunningLocked(batch->startTimeUs);
     makeExecutionState(state);
@@ -1070,6 +1074,7 @@ bool AgentBatchR::abortBatchRequests(
             std::max<int32_t>(0, _queuedBatchRequestCount.load(std::memory_order_relaxed) -
                                     abortedRequestCount),
             std::memory_order_relaxed);
+        refreshReadyRequestsAlsoInBackendWaitingLocked();
     } else {
         _runningRequestCount =
             std::max<int32_t>(0, _runningRequestCount - abortedRequestCount);
@@ -1109,6 +1114,7 @@ bool AgentBatchR::abortBatch(int64_t batchId, ExecutionState &state)
         _queuedBatchRequestCount.store(
             _queuedBatchRequestCount.load(std::memory_order_relaxed) - batchRequestCount,
             std::memory_order_relaxed);
+        refreshReadyRequestsAlsoInBackendWaitingLocked();
     } else {
         auto runningIt = _runningBatches.find(batchId);
         if (_runningBatches.end() == runningIt) {
@@ -1715,8 +1721,7 @@ navi::SummaryErrorCode AgentBatchR::getSummary(const std::string &query,
     TABLE_ADD_COLUMN_VALUE(overview, "backend_waiting_requests", backendWaiting);
     TABLE_ADD_COLUMN_VALUE(overview, "ready_batch_queued_requests", readyQueued);
     TABLE_ADD_COLUMN_VALUE(overview, "gpu_ready_queued_requests",
-                           std::min<int64_t>(std::numeric_limits<int32_t>::max(),
-                                             int64_t(backendWaiting) + readyQueued));
+                           getGpuReadyQueuedRequestCount());
     TABLE_ADD_COLUMN_VALUE(overview, "execution_running_requests",
                            _utilizationRunningRequests);
     TABLE_ADD_COLUMN_VALUE(overview, "execution_utilization",
@@ -1919,6 +1924,7 @@ void AgentBatchR::publishReadyBatch(const CallbackBatchPtr &batch)
     _queuedBatchRequestCount.store(
         _queuedBatchRequestCount.load(std::memory_order_relaxed) + batch->requestIdSet.size(),
         std::memory_order_relaxed);
+    refreshReadyRequestsAlsoInBackendWaitingLocked();
     updateReadyWithoutRunningLocked(batch->readyTimeUs);
 }
 
@@ -2083,9 +2089,7 @@ AgentBatchR::ExecutionUtilizationSnapshot AgentBatchR::getExecutionUtilizationSn
         _backendWaitingRequests.load(std::memory_order_relaxed);
     snapshot.readyBatchQueuedRequests = _includeReadyQueueInUtilization
         ? _queuedBatchRequestCount.load(std::memory_order_relaxed) : 0;
-    snapshot.gpuReadyQueuedRequests = static_cast<int32_t>(std::min<int64_t>(
-        std::numeric_limits<int32_t>::max(),
-        int64_t(snapshot.backendWaitingRequests) + snapshot.readyBatchQueuedRequests));
+    snapshot.gpuReadyQueuedRequests = getGpuReadyQueuedRequestCount();
     return snapshot;
 }
 
@@ -2111,11 +2115,7 @@ void AgentBatchR::finishUtilizationExecutionLocked(CallbackBatch &batch)
 
 void AgentBatchR::refreshExecutionUtilizationLocked() const
 {
-    const auto readyQueued = _includeReadyQueueInUtilization
-        ? _queuedBatchRequestCount.load(std::memory_order_relaxed) : 0;
-    const auto waiting = static_cast<int32_t>(std::min<int64_t>(
-        std::numeric_limits<int32_t>::max(),
-        int64_t(_backendWaitingRequests.load(std::memory_order_relaxed)) + readyQueued));
+    const auto waiting = getGpuReadyQueuedRequestCount();
     _executionUtilization->store(
         ExecutionUtilizationController::effectiveUtilization(
             _backendExecutionUtilization->load(std::memory_order_relaxed),
@@ -2124,11 +2124,46 @@ void AgentBatchR::refreshExecutionUtilizationLocked() const
         std::memory_order_relaxed);
 }
 
-void AgentBatchR::updateBackendWaitingRequests(int32_t requestCount,
-                                               int32_t runningRequests)
+int32_t AgentBatchR::getGpuReadyQueuedRequestCount() const
+{
+    const auto ready =
+        _includeReadyQueueInUtilization
+            ? std::max(0, _queuedBatchRequestCount.load(std::memory_order_relaxed))
+            : 0;
+    const auto overlapping = std::min(
+        ready, _readyRequestsAlsoInBackendWaiting.load(std::memory_order_relaxed));
+    return static_cast<int32_t>(std::min<int64_t>(
+        std::numeric_limits<int32_t>::max(),
+        int64_t(_backendWaitingRequests.load(std::memory_order_relaxed)) + ready -
+            overlapping));
+}
+
+void AgentBatchR::refreshReadyRequestsAlsoInBackendWaitingLocked()
+{
+    int32_t overlapping = 0;
+    if (_includeReadyQueueInUtilization && !_backendWaitingRequestIds.empty()) {
+        for (const auto &entry : _readyBatches) {
+            for (auto requestId : entry.second->requestIdSet) {
+                overlapping += _backendWaitingRequestIds.count(requestId) != 0;
+            }
+        }
+    }
+    _readyRequestsAlsoInBackendWaiting.store(overlapping, std::memory_order_relaxed);
+}
+
+void AgentBatchR::updateBackendWaitingRequests(
+    int32_t requestCount, int32_t runningRequests,
+    const std::vector<uint64_t> *waitingRequestIds)
 {
     if (requestCount < 0 || runningRequests < 0) return;
+    autil::ScopedLock lock(_lock);
+    _backendWaitingRequestIds.clear();
+    if (waitingRequestIds) {
+        _backendWaitingRequestIds.insert(waitingRequestIds->begin(),
+                                         waitingRequestIds->end());
+    }
     _backendWaitingRequests.store(requestCount, std::memory_order_relaxed);
+    refreshReadyRequestsAlsoInBackendWaitingLocked();
     refreshExecutionUtilizationLocked();
 }
 

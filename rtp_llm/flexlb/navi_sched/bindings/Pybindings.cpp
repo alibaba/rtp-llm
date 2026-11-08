@@ -813,7 +813,8 @@ public:
         const std::vector<uint64_t> &admittedRequestIds, double runningElapsedTimeMs,
         int32_t runningDecodeRequestCount, int64_t runningDecodeGeneratedTokenCount,
         int64_t runningDecodeRemainingTokenBudget,
-        const std::vector<int64_t> &coveredNativeBatchIds) const
+        const std::vector<int64_t> &coveredNativeBatchIds,
+        const std::optional<std::vector<uint64_t>> &waitingRequestIds) const
     {
         if (!_agent) {
             return false;
@@ -872,7 +873,10 @@ public:
         return (!_pdSeparated || (runningDecodeRequestCount == 0 &&
                                   runningDecodeGeneratedTokenCount == 0 &&
                                   runningDecodeRemainingTokenBudget == 0)) &&
-               _agent->reportObservedWorkload(snapshot, coveredNativeBatchIds);
+               (waitingRequestIds
+                    ? _agent->reportObservedWorkload(snapshot, coveredNativeBatchIds,
+                                                     *waitingRequestIds)
+                    : _agent->reportObservedWorkload(snapshot, coveredNativeBatchIds));
     }
 
     static NaviSchedCacheKeyType checkedCacheKeyType(int value)
@@ -981,6 +985,7 @@ NaviSchedBlockHashesConstPtr blockHashesFromPython(const py::iterable &values)
 
 void bindNaviSchedData(py::module_ &m)
 {
+    m.attr("VLLM_WAITING_REQUEST_IDS_VERSION") = 1;
     m.def("native_wire_versions", []() {
         py::dict versions;
         versions["agent_update_protocol"] = NAVI_SCHED_AGENT_UPDATE_VERSION;
@@ -1208,6 +1213,7 @@ void bindNaviSchedData(py::module_ &m)
              py::arg("running_decode_generated_token_count"),
              py::arg("running_decode_remaining_token_budget"),
              py::arg("covered_native_batch_ids") = std::vector<int64_t>(),
+             py::arg("waiting_request_ids") = py::none(),
              py::call_guard<py::gil_scoped_release>())
         .def("report_cache_inserted", &VLLMAgentBridge::reportCacheInserted,
              py::arg("hashes"), py::arg("cache_key_type") = 0,

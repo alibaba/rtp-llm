@@ -807,6 +807,9 @@ class _ObservedWorkload:
         default_factory=_PrefillWorkloadSlice
     )
 
+    waiting_request_ids: tuple[int, ...] | None = field(
+        default=None, compare=False, repr=False
+    )
     native_handoff_batch_ids: tuple[int, ...] = field(
         default=(), compare=False, repr=False
     )
@@ -3454,6 +3457,7 @@ class VLLMEngineObserver:
             native_handoff_batch_ids = tuple(self._native_handoff_batches)
             pending = self._prepared_workload
             pending_request_count = pending.request_count
+            pending_waiting_request_ids = tuple(self._prepared_contributions)
             for name in _WorkloadAggregate.__dataclass_fields__:
                 if name != "batch_request_counts":
                     setattr(
@@ -3511,7 +3515,16 @@ class VLLMEngineObserver:
             scheduler_waiting.snapshot(),
         )
         if workload.valid():
-            return replace(workload, native_handoff_batch_ids=native_handoff_batch_ids)
+            return replace(
+                workload,
+                native_handoff_batch_ids=native_handoff_batch_ids,
+                waiting_request_ids=tuple(
+                    sorted(
+                        set(base.waiting_request_ids or ())
+                        | set(pending_waiting_request_ids)
+                    )
+                ),
+            )
         logger.error(
             "invalid NaviSched vLLM workload with pending admissions; "
             "using scheduler state: %r",
@@ -3775,9 +3788,17 @@ class VLLMEngineObserver:
             for started_ns in self._running_prefill_started_ns.values()
         )
         try:
-            waiting_request_count = len(scheduler.waiting)
+            waiting = tuple(scheduler.waiting)
         except (AttributeError, TypeError):
-            waiting_request_count = 0
+            waiting = ()
+        waiting_request_count = len(waiting)
+        waiting_request_ids = set()
+        for value in waiting:
+            request = (
+                value if hasattr(value, "request_id") else requests.get(str(value))
+            )
+            if request is not None:
+                waiting_request_ids.add(self._navi_request_id(request))
         (
             max_running_request_count,
             running_capacity_slot_count,
@@ -3786,7 +3807,7 @@ class VLLMEngineObserver:
             scheduler_running_prefill,
             scheduler_waiting_prefill,
         ) = self._partition_prefill_workload(scheduler)
-        return self._workload_aggregate.snapshot(
+        workload = self._workload_aggregate.snapshot(
             running_request_count,
             running_elapsed_time_ms,
             running_decode_request_count,
@@ -3802,6 +3823,7 @@ class VLLMEngineObserver:
             scheduler_running_prefill,
             scheduler_waiting_prefill,
         )
+        return replace(workload, waiting_request_ids=tuple(sorted(waiting_request_ids)))
 
     def _audit_stalled_running_requests(
         self, scheduler, running, inflight_scheduled_tokens, now_ns
@@ -4044,6 +4066,14 @@ class VLLMEngineObserver:
                 ):
                     admitted_request_ids = []
                 admitted_pending_cache_tracked = admitted_state.pending_cache_tracked
+        waiting_request_options = {}
+        if (
+            self._native_ingress
+            and getattr(naviSchedModule(), "VLLM_WAITING_REQUEST_IDS_VERSION", 0) >= 1
+        ):
+            waiting_request_options["waiting_request_ids"] = list(
+                workload.waiting_request_ids or ()
+            )
         try:
             reported = self._bridge.report_workload(
                 time.time_ns() // 1000,
@@ -4084,6 +4114,7 @@ class VLLMEngineObserver:
                 workload.running_decode_generated_tokens,
                 workload.running_decode_remaining_token_budget,
                 workload.native_handoff_batch_ids,
+                **waiting_request_options,
             )
         except Exception:
             logger.exception(

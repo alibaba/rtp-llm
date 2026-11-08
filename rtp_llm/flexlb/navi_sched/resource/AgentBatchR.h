@@ -304,7 +304,9 @@ public:
     CacheHitPathStats getCacheHitPathStats() const;
     int64_t getExecutionBusyTimeUs(int64_t currentTimeUs) const;
     bool beginBackendExecution(int64_t eventTimeUs = 0, int32_t requestCount = 0);
-    void updateBackendWaitingRequests(int32_t requestCount, int32_t runningRequests = 0);
+    void updateBackendWaitingRequests(
+        int32_t requestCount, int32_t runningRequests = 0,
+        const std::vector<uint64_t> *waitingRequestIds = nullptr);
     bool endBackendExecution(int64_t eventTimeUs = 0);
     bool hasBackendExecutionObservation() const;
     int64_t getBackendExecutionBusyTimeUs(int64_t currentTimeUs) const;
@@ -404,6 +406,8 @@ private:
     void beginUtilizationExecutionLocked(CallbackBatch &batch);
     void finishUtilizationExecutionLocked(CallbackBatch &batch);
     void refreshExecutionUtilizationLocked() const;
+    void refreshReadyRequestsAlsoInBackendWaitingLocked();
+    int32_t getGpuReadyQueuedRequestCount() const;
 
 private:
     DECLARE_LOGGER();
@@ -429,6 +433,8 @@ private:
         std::make_shared<std::atomic<double>>(0.0);
     std::atomic<double> _backendExecutionCapacity{0.0};
     std::atomic<int32_t> _backendWaitingRequests{0};
+    std::unordered_set<uint64_t> _backendWaitingRequestIds;
+    std::atomic<int32_t> _readyRequestsAlsoInBackendWaiting{0};
     int32_t _utilizationRunningRequests = 0;
     std::shared_ptr<std::atomic<double>> _executionUtilization =
         std::make_shared<std::atomic<double>>(0.0);

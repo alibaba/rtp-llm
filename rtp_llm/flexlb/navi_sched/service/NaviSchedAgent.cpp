@@ -1667,14 +1667,25 @@ bool NaviSchedAgentImpl::reportPeerCacheReadAvailable(bool available) const
 
 bool NaviSchedAgentImpl::reportObservedWorkload(
     const NaviSchedWorkloadSnapshot &snapshot,
-    const std::vector<int64_t> &coveredNativeBatchIds) const
+    const std::vector<int64_t> &coveredNativeBatchIds,
+    const std::vector<uint64_t> *waitingRequestIds) const
 {
+    if (waitingRequestIds) {
+        if (snapshot.waitingRequestCount < 0 ||
+            waitingRequestIds->size() > static_cast<size_t>(snapshot.waitingRequestCount))
+            return false;
+        std::unordered_set<uint64_t> unique;
+        for (auto requestId : *waitingRequestIds) {
+            if (requestId == 0 || !unique.insert(requestId).second) return false;
+        }
+    }
     const auto revision = _agentReportR ? _agentReportR->reportWorkloadUpdated(
                                               snapshot, coveredNativeBatchIds)
                                         : 0;
     if (revision > 0 && _agentBatchR) {
         _agentBatchR->updateBackendWaitingRequests(snapshot.waitingRequestCount,
-                                                   snapshot.runningRequestCount);
+                                                   snapshot.runningRequestCount,
+                                                   waitingRequestIds);
     }
     return revision > 0;
 }
@@ -2826,6 +2837,15 @@ bool NaviSchedAgent::reportObservedWorkload(
     const std::vector<int64_t> &coveredNativeBatchIds) const
 {
     return _impl && _impl->reportObservedWorkload(snapshot, coveredNativeBatchIds);
+}
+
+bool NaviSchedAgent::reportObservedWorkload(
+    const NaviSchedWorkloadSnapshot &snapshot,
+    const std::vector<int64_t> &coveredNativeBatchIds,
+    const std::vector<uint64_t> &waitingRequestIds) const
+{
+    return _impl && _impl->reportObservedWorkload(snapshot, coveredNativeBatchIds,
+                                                  &waitingRequestIds);
 }
 
 bool NaviSchedAgent::beginObservedBackendExecution(int64_t eventTimeUs, int32_t requestCount) const
