@@ -8,7 +8,7 @@ global cache controls, writes model bytes, or assumes advice released memory.
 from pathlib import Path
 from bisect import bisect_right
 from collections import deque
-import ctypes,hashlib,json,mmap,os,struct,threading,time
+import ctypes,fcntl,hashlib,json,mmap,os,re,resource,stat,struct,threading,time,traceback,weakref
 from source_range_planner import tensor_intervals,page_aligned_union,subtract_intervals
 
 INDEX_SHA='e36c40d4e99b2714fff821218a0433bda2dec46afdb1ebee8ce96ced997928ee'
@@ -26,9 +26,99 @@ MAX_ADVICE_RANGES_PER_BATCH=32
 
 def _sha(data):return hashlib.sha256(data).hexdigest()
 
+MAX_PINNED_FILES=213
+
+# Never serialize arbitrary exception messages: they can contain user data or
+# credentials. These exact constant strings are authored by this module.
+SAFE_FAILURE_MESSAGES=frozenset({
+    'Checkpoint file identity changed','Checkpoint header changed',
+    'Pinned source identity changed','Pinned source metadata changed',
+    'Source is not pinned and planned','Pinned source plan was not sealed',
+    'Pinned sources closed or coordinator identity changed',
+    'Current-run source receipt changed','Invalid bounded mincore scan',
+    'Advice escaped source interval','Advice escaped selected resident run',
+    'Non-monotonic advice result','Non-monotonic resident advice',
+    'Resident selector escaped or reordered its authorized window',
+    'Exclusive reclaim claim identity changed','Exclusive reclaim claim size changed',
+    'Exclusive reclaim claim contents changed','A reclaim failure marker forbids further advice',
+    'Invalid per-batch advice limit','Invalid wider scan progress',
+    'Wider scan escaped policy tensor','No progress within exact source plan',
+    'Pinned checkpoint root differs',
+})
+
+def _safe_failure(error):
+    message=str(error)
+    frames=[]
+    for frame in traceback.extract_tb(error.__traceback__)[-24:]:
+        if Path(frame.filename).name in {'bounded_reclaim.py','distributed_reclaim.py','source_range_planner.py'}:
+            frames.append(dict(file=Path(frame.filename).name,function=frame.name,line=frame.lineno))
+    return dict(failure_message=message if message in SAFE_FAILURE_MESSAGES else None,
+                failure_message_redacted=message not in SAFE_FAILURE_MESSAGES,
+                failure_errno=error.errno if isinstance(error,OSError) and isinstance(error.errno,int) else None,
+                failure_frames=frames)
+
+def _close_pinned_fds(entries):
+    errors=[]
+    for fd,_identity in list(entries.values()):
+        try:os.close(fd)
+        except OSError as exc:errors.append(exc)
+    entries.clear()
+    if errors:raise RuntimeError('Unable to close all pinned source descriptors') from errors[0]
+
+class PinnedSources:
+    """Own the originally header-verified file descriptions, never reopen a path."""
+    def __init__(self,model=MODEL):
+        self.model=Path(model);self._owner_pid=os.getpid();self._entries={};self._sealed=False;self._sealed_metadata=None
+        soft,_hard=resource.getrlimit(resource.RLIMIT_NOFILE)
+        used=len(os.listdir('/proc/self/fd'))
+        if soft!=resource.RLIM_INFINITY and soft<used+MAX_PINNED_FILES+32:
+            raise RuntimeError('Insufficient file descriptor reserve for pinned checkpoint sources')
+        self._finalizer=weakref.finalize(self,_close_pinned_fds,self._entries)
+    def _require_owner(self):
+        if os.getpid()!=self._owner_pid or not self._finalizer.alive:
+            raise RuntimeError('Pinned sources closed or coordinator identity changed')
+    def open_source(self,name):
+        self._require_owner()
+        if self._sealed or re.fullmatch(r'model-\d{5}-of-00213\.safetensors',name) is None:
+            raise ValueError('Source name or pinned source phase invalid')
+        if name in self._entries or len(self._entries)>=MAX_PINNED_FILES:
+            raise ValueError('Duplicate or excessive pinned checkpoint source')
+        fd=os.open(self.model/name,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW)
+        try:
+            s=os.fstat(fd)
+            if not fcntl.fcntl(fd,fcntl.F_GETFD)&fcntl.FD_CLOEXEC:raise RuntimeError('Pinned source lacks CLOEXEC')
+            if not stat.S_ISREG(s.st_mode) or fcntl.fcntl(fd,fcntl.F_GETFL)&os.O_ACCMODE!=os.O_RDONLY:
+                raise ValueError('Pinned source is not a read-only regular file')
+            self._entries[name]=(fd,(s.st_dev,s.st_ino,s.st_size));return fd
+        except BaseException:
+            os.close(fd);raise
+    def seal(self,files):
+        self._require_owner()
+        if self._sealed or set(self._entries)!=set(files):raise ValueError('Pinned sources do not cover plan exactly')
+        for name in files:self.borrow(name,files,allow_unsealed=True)
+        self._sealed_metadata={name:(v['device'],v['inode'],v['size'],v['header_sha256']) for name,v in files.items()}
+        self._sealed=True
+        # Recheck through the very same descriptions after all receipt/plan
+        # validation; a header changed while planning must not be accepted.
+        for name in files:_open_verified({'files':files},self.model,name,pinned=self)
+    def borrow(self,name,files,*,allow_unsealed=False):
+        self._require_owner()
+        if not self._sealed and not allow_unsealed:raise RuntimeError('Pinned source plan was not sealed')
+        if name not in self._entries or name not in files:raise ValueError('Source is not pinned and planned')
+        fd,identity=self._entries[name];s=os.fstat(fd);expected=files[name]
+        if self._sealed and (expected['device'],expected['inode'],expected['size'],expected['header_sha256'])!=self._sealed_metadata[name]:
+            raise ValueError('Pinned source metadata changed')
+        if ((s.st_dev,s.st_ino,s.st_size)!=identity or identity!=(expected['device'],expected['inode'],expected['size'])
+                or not fcntl.fcntl(fd,fcntl.F_GETFD)&fcntl.FD_CLOEXEC):
+            raise ValueError('Pinned source identity changed')
+        return fd
+    def close(self):
+        if self._finalizer.alive:self._finalizer()
+
 def build_plan(run_root,peers,hostname,*,model=MODEL,expected_index_sha=INDEX_SHA,
-               expected_parameters=7324,expected_sources=1590,world=72):
+               expected_parameters=7324,expected_sources=1590,world=72,pinned=None):
     root=Path(run_root);model=Path(model)
+    if pinned is not None and pinned.model!=model:raise ValueError('Pinned checkpoint root differs')
     if len(peers)!=4 or len({p['rank'] for p in peers})!=4 or any(p['hostname']!=hostname for p in peers):
         raise ValueError('Exactly four distinct local rank identities required')
     raw_index=(model/'model.safetensors.index.json').read_bytes()
@@ -56,7 +146,7 @@ def build_plan(run_root,peers,hostname,*,model=MODEL,expected_index_sha=INDEX_SH
             keys.add(row['canonical_name']);files.add(name)
             if index.get(row['canonical_name'])!=name:raise ValueError('Canonical source differs from official index')
             if name not in headers:
-                path=model/name;fd=os.open(path,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW)
+                path=model/name;fd=pinned.open_source(name) if pinned is not None else os.open(path,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW)
                 try:
                     file_stat=os.fstat(fd);size=file_stat.st_size;raw_length=os.pread(fd,8,0)
                     if len(raw_length)!=8:raise ValueError('Incomplete safetensors prefix')
@@ -64,8 +154,12 @@ def build_plan(run_root,peers,hostname,*,model=MODEL,expected_index_sha=INDEX_SH
                     if not 0<length<=MAX_HEADER:raise ValueError('Invalid header length')
                     raw_header=os.pread(fd,length,8)
                     if len(raw_header)!=length:raise ValueError('Incomplete safetensors header')
+                    after=os.fstat(fd)
+                    if (file_stat.st_dev,file_stat.st_ino,file_stat.st_size)!=(after.st_dev,after.st_ino,after.st_size):
+                        raise ValueError('Checkpoint file identity changed')
                     headers[name]=(json.loads(raw_header),8+length,size,_sha(raw_header),file_stat.st_dev,file_stat.st_ino)
-                finally:os.close(fd)
+                finally:
+                    if pinned is None:os.close(fd)
             header,start,size,_,_,_=headers[name]
             spans=tensor_intervals(row,header,start,size)
             # The loader splits a fragment into <=128MiB reads. The ranges
@@ -94,39 +188,50 @@ def build_plan(run_root,peers,hostname,*,model=MODEL,expected_index_sha=INDEX_SH
         if not 0<=left<=right or start+right>size:raise ValueError('Wider tensor outside file')
         wide.append((name,start+left,start+right))
     wider_only=subtract_intervals(page_aligned_union(wide,page),union)
-    return dict(schema='q38-current-node-source-reclaim-plan-v1',run_id=root.name,run_root=str(root),hostname=hostname,
+    result=dict(schema='q38-current-node-source-reclaim-plan-v1',run_id=root.name,run_root=str(root),hostname=hostname,
         ranks=receipt_proofs,index_sha256=_sha(raw_index),page_size=page,raw_intervals=len(all_spans),
         raw_bytes=sum(b-a for _,a,b in all_spans),union_bytes=sum(b-a for _,a,b in union),
         files={name:dict(size=data[2],header_sha256=data[3],device=data[4],inode=data[5]) for name,data in headers.items()},
         intervals=union,wider_only_intervals=wider_only,wider_only_bytes=sum(b-a for _,a,b in wider_only),
         shared_cache_IO_impact_possible=True,metadata_only=True)
+    if pinned is not None:pinned.seal(result['files'])
+    return result
 
-def _open_verified(plan,model,name):
-    fd=os.open(Path(model)/name,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW)
+def _open_verified(plan,model,name,pinned=None):
+    if pinned is not None and pinned.model!=Path(model):raise ValueError('Pinned checkpoint root differs')
+    fd=pinned.borrow(name,plan['files']) if pinned is not None else os.open(Path(model)/name,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW)
     try:
         stat=os.fstat(fd);expected=plan['files'][name]
         if (stat.st_size,stat.st_dev,stat.st_ino)!=(expected['size'],expected['device'],expected['inode']):
             raise ValueError('Checkpoint file identity changed')
-        length=struct.unpack('<Q',os.pread(fd,8,0))[0]
-        if not 0<length<=MAX_HEADER or _sha(os.pread(fd,length,8))!=expected['header_sha256']:
+        prefix=os.pread(fd,8,0)
+        if len(prefix)!=8:raise ValueError('Checkpoint header changed')
+        length=struct.unpack('<Q',prefix)[0]
+        header=os.pread(fd,length,8) if 0<length<=MAX_HEADER else b''
+        if not 0<length<=MAX_HEADER or len(header)!=length or _sha(header)!=expected['header_sha256']:
             raise ValueError('Checkpoint header changed')
+        after=os.fstat(fd)
+        if (after.st_size,after.st_dev,after.st_ino)!=(stat.st_size,stat.st_dev,stat.st_ino):
+            raise ValueError('Checkpoint file identity changed')
         return fd,stat
     except BaseException:
-        os.close(fd);raise
+        if pinned is None:os.close(fd)
+        raise
 
-def resident_runs(plan,name,start,end,*,model=MODEL):
+def resident_runs(plan,name,start,end,*,model=MODEL,pinned=None):
     """mincore is only a selector, never evidence of charged bytes released."""
     page=plan['page_size'];length=end-start
     if start%page or length<=0 or length%page or length>MAX_SCAN_WINDOW:
         raise ValueError('Invalid bounded mincore scan')
-    fd,_=_open_verified(plan,model,name)
+    fd,_=_open_verified(plan,model,name,pinned)
     try:
         view=mmap.mmap(fd,length,access=mmap.ACCESS_COPY,offset=start)
         pointer=ctypes.c_char.from_buffer(view);vector=(ctypes.c_ubyte*(length//page))()
         libc=ctypes.CDLL(None,use_errno=True);libc.mincore.argtypes=[ctypes.c_void_p,ctypes.c_size_t,ctypes.c_void_p]
         if libc.mincore(ctypes.addressof(pointer),length,vector)!=0:raise OSError(ctypes.get_errno(),'mincore')
         values=[bool(x&1) for x in vector];del pointer;view.close()
-    finally:os.close(fd)
+    finally:
+        if pinned is None:os.close(fd)
     runs=[];begin=None
     for i,resident in enumerate(values+[False]):
         if resident and begin is None:begin=i
@@ -134,7 +239,7 @@ def resident_runs(plan,name,start,end,*,model=MODEL):
             runs.append((name,start+begin*page,start+i*page));begin=None
     return runs
 
-def advise_one_batch(plan,offset_intervals,*,model=MODEL,max_bytes=MAX_BATCH):
+def advise_one_batch(plan,offset_intervals,*,model=MODEL,max_bytes=MAX_BATCH,pinned=None):
     """One exact ≤4GiB batch; return facts, never implied reclaimed bytes."""
     page=plan['page_size']
     if max_bytes<=0 or max_bytes>MAX_BATCH or max_bytes%page:raise ValueError('Invalid hard batch bound')
@@ -166,7 +271,7 @@ def advise_one_batch(plan,offset_intervals,*,model=MODEL,max_bytes=MAX_BATCH):
     if total>max_bytes:raise RuntimeError('Batch limit exceeded')
     result=[];started=time.monotonic()
     for name,start,end in batch:
-        fd,stat=_open_verified(plan,model,name)
+        fd,stat=_open_verified(plan,model,name,pinned)
         try:
             sample=min(page,end-start);before=os.pread(fd,sample,start)
             if len(before)!=sample:raise ValueError('Incomplete pre-advice sample')
@@ -180,7 +285,8 @@ def advise_one_batch(plan,offset_intervals,*,model=MODEL,max_bytes=MAX_BATCH):
             os.posix_fadvise(fd,start,sample,os.POSIX_FADV_DONTNEED)
             result.append(dict(file=name,offset=start,length=end-start,sample_bytes=sample,
                 sample_sha256_before=first,sample_sha256_after=second))
-        finally:os.close(fd)
+        finally:
+            if pinned is None:os.close(fd)
     return dict(schema='q38-bounded-source-cache-advice-v1',advised_bytes=total,ranges=result,
         advice_range_count=len(result),advice_range_limit=MAX_ADVICE_RANGES_PER_BATCH,
         sample_read_bytes=2*len(result)*page,re_advised_sample_bytes=len(result)*page,
@@ -190,13 +296,13 @@ def advise_one_batch(plan,offset_intervals,*,model=MODEL,max_bytes=MAX_BATCH):
 
 class ReclaimCursor:
     """One node-local exclusive, monotonic coordinator; never auto-resume."""
-    def __init__(self,plan,*,max_total=MAX_TOTAL):
+    def __init__(self,plan,*,max_total=MAX_TOTAL,pinned=None):
         if not 0<max_total<=MAX_TOTAL or max_total%plan['page_size']:
             raise ValueError('Invalid total advice budget')
         root=Path(plan['run_root'])
         if root.name!=plan['run_id']:raise ValueError('Run root mismatch')
-        self.plan=plan;self.max_total=max_total;self.index=0;self.cursor=None;self.total=0;self.round=0
-        self._failed=False;self._lock=threading.Lock();self._owner_pid=os.getpid()
+        self.plan=plan;self.pinned=pinned;self.max_total=max_total;self.index=0;self.cursor=None;self.total=0;self.round=0
+        self._failed=False;self._closed=False;self._lock=threading.Lock();self._owner_pid=os.getpid()
         self.exact_count=len(plan['intervals'])
         self.segments=plan['intervals']+plan.get('wider_only_intervals',[])
         self.wide_scan_limit=sum(end-start for _,start,end in plan.get('wider_only_intervals',[]))
@@ -212,6 +318,10 @@ class ReclaimCursor:
         self._claim_identity=(claim_stat.st_dev,claim_stat.st_ino)
         self._claim_size=len(claim_text.encode('utf-8'))
         self._claim_sha256=_sha(claim_text.encode('utf-8'))
+
+    def close(self):
+        self._closed=True
+        if self.pinned is not None:self.pinned.close()
 
     def _verify_owner_claim(self):
         if os.getpid()!=self._owner_pid:
@@ -235,7 +345,7 @@ class ReclaimCursor:
             return self._next_batch_once(model=model,max_bytes=max_bytes)
 
     def _next_batch_once(self,*,model=MODEL,max_bytes=MAX_BATCH):
-        if self._failed:
+        if self._failed or self._closed:
             raise RuntimeError('Reclaim cursor failed; its exclusive claim forbids all replay')
         try:
             self._verify_owner_claim()
@@ -252,12 +362,14 @@ class ReclaimCursor:
                         coordinator_pid=self._owner_pid,failure_observer_pid=os.getpid(),completed_rounds=self.round,
                         completed_syscall_advised_bytes=self.total,
                         partial_current_batch_may_have_executed=True,
-                        failure_type=type(error).__name__,failed_unix=time.time()),stream,indent=2)
+                        failure_type=type(error).__name__,failed_unix=time.time(),**_safe_failure(error)),stream,indent=2)
                     stream.write('\n')
             except BaseException:
                 # The original exclusive claim and in-memory poison remain;
                 # failure to record a receipt must never make retry legal.
                 pass
+            try:self.close()
+            except BaseException:pass
             raise
 
     def _next_batch(self,*,model=MODEL,max_bytes=MAX_BATCH):
@@ -274,7 +386,8 @@ class ReclaimCursor:
                 name,start,end=self.segments[index]
                 if index==self.index and self.cursor is not None:start=self.cursor
                 if start<end:remaining.append((name,start,end))
-            result=advise_one_batch(self.plan,remaining,model=model,max_bytes=budget)
+            opts={} if self.pinned is None else {'pinned':self.pinned}
+            result=advise_one_batch(self.plan,remaining,model=model,max_bytes=budget,**opts)
             if not result['advised_bytes']:raise RuntimeError('No progress within exact source plan')
             for record in result['ranges']:
                 name,start,end=self.segments[self.index]
@@ -298,7 +411,8 @@ class ReclaimCursor:
                                self.wide_scan_limit-self.wide_scanned)
                     window=(window//self.plan['page_size'])*self.plan['page_size']
                     if not window:raise RuntimeError('Invalid wider scan progress')
-                    selected=resident_runs(self.plan,name,start,start+window,model=model)
+                    opts={} if self.pinned is None else {'pinned':self.pinned}
+                    selected=resident_runs(self.plan,name,start,start+window,model=model,**opts)
                     previous=start
                     for selected_name,left,right in selected:
                         if (selected_name!=name or left<previous or left>=right or right>start+window
@@ -310,7 +424,8 @@ class ReclaimCursor:
                     self.cursor=start+window
                     if self.cursor==end:self.index+=1;self.cursor=None
                     elif self.cursor>end:raise RuntimeError('Wider scan escaped policy tensor')
-            result=advise_one_batch(self.plan,self.pending_resident,model=model,max_bytes=budget)
+            opts={} if self.pinned is None else {'pinned':self.pinned}
+            result=advise_one_batch(self.plan,self.pending_resident,model=model,max_bytes=budget,**opts)
             for record in result['ranges']:
                 n,left,right=self.pending_resident[0]
                 if record['file']!=n or record['offset']!=left:raise RuntimeError('Non-monotonic resident advice')

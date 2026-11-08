@@ -2,7 +2,7 @@
 import hashlib,json,os,time
 from pathlib import Path
 from cpu_admission import evaluate
-from bounded_reclaim import build_plan,ReclaimCursor
+from bounded_reclaim import build_plan,ReclaimCursor,PinnedSources
 
 MAX_ROUNDS=4096
 
@@ -16,7 +16,24 @@ def _gather(dist,group,value,world):
     rows=[None]*world;dist.all_gather_object(rows,value,group=group);return rows
 
 def reclaim_world(dist,group,local,all_rows,*,root,run_id,world,reserve,
-                  cursor_holder=None,phase='first_adam'):
+                  action_group,cursor_holder=None,phase='first_adam'):
+    if action_group is None or action_group is group:
+        raise ValueError('Reclaim action requires its own bounded Gloo group')
+    if str(dist.get_backend(action_group)).lower()!='gloo' or dist.get_world_size(action_group)!=world:
+        raise ValueError('Reclaim action group must contain the full Gloo world')
+    holder={} if cursor_holder is None else cursor_holder
+    try:
+        return _reclaim_world(dist,group,local,all_rows,root=root,run_id=run_id,world=world,reserve=reserve,
+                              action_group=action_group,cursor_holder=holder,phase=phase)
+    except BaseException:
+        cursor=holder.get('cursor')
+        if cursor is not None:
+            try:cursor.close()
+            except BaseException:pass
+        raise
+
+def _reclaim_world(dist,group,local,all_rows,*,root,run_id,world,reserve,
+                   action_group,cursor_holder=None,phase='first_adam'):
     """Reclaim only while measured budget fails, before any Adam mutation.
 
     Every node elects the minimum rank once; other ranks never call fadvise.
@@ -61,8 +78,14 @@ def reclaim_world(dist,group,local,all_rows,*,root,run_id,world,reserve,
             action['leader']=True
             try:
                 if cursor is None:
-                    plan=build_plan(root,peers,host);cursor=ReclaimCursor(plan);cursor_holder['cursor']=cursor
-                    with (cursor.directory/'PLAN.json').open('x') as stream:json.dump(plan,stream,indent=2);stream.write('\n')
+                    pinned=PinnedSources()
+                    try:
+                        plan=build_plan(root,peers,host,pinned=pinned);cursor=ReclaimCursor(plan,pinned=pinned);cursor_holder['cursor']=cursor
+                        with (cursor.directory/'PLAN.json').open('x') as stream:json.dump(plan,stream,indent=2);stream.write('\n')
+                    except BaseException:
+                        try:pinned.close()
+                        except BaseException as close_error:action['source_close_error_type']=type(close_error).__name__
+                        raise
                 batch=cursor.next_batch()
                 if batch is None:raise MemoryError('Bounded source/wider reclaim budget exhausted')
                 receipt=cursor.directory/('batch-%05d.json'%batch['round'])
@@ -72,7 +95,7 @@ def reclaim_world(dist,group,local,all_rows,*,root,run_id,world,reserve,
                     finished_unix=time.time(),finished_monotonic=time.monotonic())
             except Exception as exc:
                 action['error']=type(exc).__name__+': '+str(exc)
-        actions=_gather(dist,group,action,world)
+        actions=_gather(dist,action_group,action,world)
         if any(row.get('error') for row in actions):raise MemoryError('A node reclaim action failed; no Adam update')
         local_actions=[row for row in actions if row['hostname']==host and row.get('leader')]
         if local_needed:

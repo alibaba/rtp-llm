@@ -86,6 +86,7 @@ def next_batch_admission(engine,dist,group,*,world=72):
     if os.environ.get('Q38_CPU_CACHE_RECLAIM_ENABLED')=='1':
         from distributed_reclaim import reclaim_world
         reclaim_world(dist,group,local,rows,root=root,run_id=run_id,world=world,reserve=reserve,
+                      action_group=engine._q38_cpu_reclaim_action_group,
                       cursor_holder=engine._q38_reclaim_cursor_holder,phase='next_backward')
     peers=groups[host]
     def decision():

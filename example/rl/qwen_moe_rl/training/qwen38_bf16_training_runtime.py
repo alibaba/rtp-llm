@@ -21,6 +21,15 @@ from qwen38_training_contract import POLICY_NUMEL, WORLD_SIZE
 
 _INSTALLED=False
 
+def _reclaim_action_timeout_seconds(value):
+    # The final value must be bound by the production plan and justified by
+    # same-scale timing; accepting a range is not a timing qualification.
+    if not isinstance(value,str) or not value.isascii() or not value.isdigit():
+        raise ValueError('An explicit bounded reclaim action timeout is required')
+    value=int(value)
+    if not 121<=value<=3600:raise ValueError('Reclaim action timeout outside reviewed bounds')
+    return value
+
 
 def _is_target(engine):return is_qwen38(engine.model_config.hf_config)
 
@@ -50,6 +59,11 @@ def _poison_reuse_engine(engine):
     engine._q38_gradient_store._reuse_failed=True
     engine.optimizer._reuse_failed=True
     engine._q38_phases.phase='failed'
+    holder=getattr(engine,'_q38_reclaim_cursor_holder',None)
+    cursor=holder.get('cursor') if isinstance(holder,dict) else None
+    if cursor is not None:
+        try:cursor.close()
+        except BaseException as exc:engine._q38_reclaim_close_error=type(exc).__name__
 
 
 def _require_unpoisoned(engine):
@@ -299,6 +313,9 @@ def install():
                 # Separate sequence space from the optimizer/CPU admission
                 # votes so a failed rank cannot match a different collective.
                 self._q38_batch_completion_group=dist.new_group(backend='gloo',timeout=timedelta(seconds=120))
+            if os.environ.get('Q38_CPU_CACHE_RECLAIM_ENABLED')=='1':
+                reclaim_timeout=_reclaim_action_timeout_seconds(os.environ.get('Q38_CPU_RECLAIM_ACTION_TIMEOUT_SECONDS'))
+                self._q38_cpu_reclaim_action_group=dist.new_group(backend='gloo',timeout=timedelta(seconds=reclaim_timeout))
             self._q38_planned_moment_bytes=plan['planned_cpu_moment_bytes']
             self._q38_first_adam_admitted=False
         self._q38_phases=MasterPhaseManager(module,gradients,active,

@@ -42,10 +42,10 @@ class AdmissionConcurrencyTest(unittest.TestCase):
             env=dict(Q38_RUN_ID='run',Q38_RUN_ROOT=str(root),Q38_TRAINING_AUDIT_DIR=str(audit),Q38_NODES_FILE=str(nodes),Q38_CPU_CACHE_RECLAIM_ENABLED='0')
             env['Q38_FIRST_ADAM_REUSE_CPU_SPILL']='1' if reuse else '0'
             if old_before_reclaim:env['Q38_CPU_CACHE_RECLAIM_ENABLED']='1'
-            dist=FakeDist(4);results=[]
+            dist=FakeDist(4);results=[];action_group=object()
             def worker(rank):
                 dist.local.rank=rank
-                engine=SimpleNamespace(_q38_planned_moment_bytes=10*GIB,
+                engine=SimpleNamespace(_q38_planned_moment_bytes=10*GIB,_q38_cpu_reclaim_action_group=action_group,
                     _q38_gradient_store=SimpleNamespace(cpu_spilled_bytes=GIB),
                     optimizer=SimpleNamespace(moments=SimpleNamespace(bytes=0)))
                 if reuse:
@@ -67,6 +67,7 @@ class AdmissionConcurrencyTest(unittest.TestCase):
                 if final_one_rank_denies and rank==2 and number==2:result['passed']=False
                 return result
             def simulate_long_reclaim(*args,**kwargs):
+                self.assertIs(kwargs['action_group'],action_group)
                 # The pre-reclaim fixture is 30s old; publish a different
                 # fresh sample before returning, without a real 30s sleep.
                 fresh=dict(sample,sample_unix=time.time(),sample_started_monotonic=time.monotonic()-.01,
