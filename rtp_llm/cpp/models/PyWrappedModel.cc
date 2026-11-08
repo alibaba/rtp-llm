@@ -1297,7 +1297,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             // order. It is additionally clamped by the fixed scratch byte budget so a
             // large accepted k cannot turn a fixed row count into a multi-GiB sort
             // workspace.
-            const int64_t shard_k  = std::min<int64_t>(std::max<int64_t>(k_max, 0), vocab_l);
+            const int64_t shard_k = std::min<int64_t>(std::max<int64_t>(k_max, 0), vocab_l);
             // The per-shard candidate width the partial pass emits (k_max additionally
             // clamped to the scoring vocab, as in computeShardScoringPartials) and the
             // merged top-k width mergeScoringPartials produces. The output buffers below

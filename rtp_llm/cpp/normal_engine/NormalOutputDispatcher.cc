@@ -256,7 +256,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                               config->prompt_logits_start,
                                                               config->prompt_logits_end);
         all_logits_origin = static_cast<int>(model_output.all_logits_lm_rows) + all_logits_row_offset - range_a;
-        scoring_origin                = all_logits_row_offset - range_a;
+        scoring_origin    = all_logits_row_offset - range_a;
         all_logits_row_offset += range_b - range_a;
     }
 
