@@ -520,6 +520,10 @@ class VLLMEngineTransport:
             prompt_tokens, cached_tokens, external_cached_tokens = (
                 self._remote_cache_stats.get(external_request_id, (None, 0, 0))
             )
+            has_prefill_statistics = (
+                getattr(value, "prefill_stats", None) is not None
+                or getattr(value, "num_cached_tokens", None) is not None
+            )
             cached_tokens, external_cached_tokens = restore_cache_statistics(
                 value,
                 self._engine_core_output_type,
@@ -529,7 +533,7 @@ class VLLMEngineTransport:
             )
             if external_request_id in self._remote_cache_stats:
                 self._remote_cache_stats[external_request_id] = (
-                    None,
+                    None if has_prefill_statistics else prompt_tokens,
                     cached_tokens,
                     external_cached_tokens,
                 )
