@@ -662,7 +662,7 @@ def require_gpu_capacity(
         )
 
 
-def main(argv=None, *, configure=None, extend_parser=None):
+def main(argv=None, *, configure=None, extend_parser=None, destination_validator=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", required=True, choices=["PREFILL", "DECODE"])
     parser.add_argument("--tp-size", type=int, help="Defaults to 8 / DP")
@@ -805,7 +805,8 @@ def main(argv=None, *, configure=None, extend_parser=None):
             "Run as the workspace owner inside the verified runtime container"
         )
     run = Path(args.run_dir).resolve()
-    require_bazel_destination(run.parent)
+    validate_destination = destination_validator or (lambda path, args: require_bazel_destination(path))
+    validate_destination(run.parent, args)
     if args.cpu_tp_socket_dir is not None:
         require_bazel_temporary(args.cpu_tp_socket_dir, "k3pd")
     if args.runtime_tmp_dir is not None:
@@ -833,9 +834,9 @@ def main(argv=None, *, configure=None, extend_parser=None):
     jit_cache_root = os.environ.get("RTP_LLM_JIT_CACHE_ROOT")
     if jit_cache_root:
         jit_cache_root = Path(jit_cache_root).resolve()
-        require_bazel_destination(jit_cache_root.parent)
+        validate_destination(jit_cache_root.parent, args)
         jit_cache_root.mkdir(exist_ok=True)
-        require_bazel_destination(jit_cache_root)
+        validate_destination(jit_cache_root, args)
     if args.runtime_tmp_dir is None:
         (run / "tmp").mkdir(mode=0o700)
     logs = run / "logs"
@@ -871,7 +872,8 @@ def main(argv=None, *, configure=None, extend_parser=None):
             "--load-method",
             "fastsafetensors",
             "--allow-checkpoint-root",
-            args.allow_checkpoint_root,
+            getattr(args, "draft_allow_checkpoint_root", None) or args.allow_checkpoint_root
+            if label == "draft" else args.allow_checkpoint_root,
         ]
         if label == "draft" and args.expected_draft_shards is not None:
             guard_command.extend(["--expected-shards", str(args.expected_draft_shards)])
@@ -925,7 +927,8 @@ def main(argv=None, *, configure=None, extend_parser=None):
                 "pid": os.getpid(),
                 "allow_shared_accuracy": args.allow_shared_accuracy,
                 "approved_checkpoint_root": args.allow_checkpoint_root,
-                "execution_mode": "bazel-native",
+                "approved_draft_checkpoint_root": getattr(args, "draft_allow_checkpoint_root", None) or args.allow_checkpoint_root,
+                "execution_mode": "traditional-ssh" if getattr(args, "traditional_artifact_root", None) else "bazel-native",
                 "performance_validated": False,
             },
             indent=2,

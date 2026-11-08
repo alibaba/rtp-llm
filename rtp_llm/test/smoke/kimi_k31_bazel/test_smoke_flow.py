@@ -14,7 +14,7 @@ from rtp_llm.test.smoke.kimi_k3.k31_full_smoke import (
     cache_pressure_plan,
     request_budget,
 )
-from rtp_llm.test.smoke.kimi_k31_bazel import k31_ci
+from rtp_llm.test.smoke.kimi_k3 import k31_smoke as k31_ci
 
 
 class SmokeFlowTest(unittest.TestCase):

@@ -725,6 +725,10 @@ def precision_audit_args(config, output):
 
 
 def run(base, output, startup_timeout, stages=STAGES):
+    if base.get("last_n_checkpoints") is None:
+        from rtp_llm.test.smoke.kimi_k3.k31_ssh_smoke import run as run_shared
+
+        return run_shared(base, output, startup_timeout, stages)
     configs = stage_configs(base, stages)
     if base.get('last_n_checkpoints') is not None and not base.get('last_n_calibration'):
         precision_audit_args(base, output)
@@ -796,12 +800,17 @@ def main(argv=None):
     entry = parser.add_mutually_exclusive_group(required=True)
     entry.add_argument("--config", type=Path)
     entry.add_argument("--request-control", type=Path, help=argparse.SUPPRESS)
+    entry.add_argument("--worker-control", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--startup-timeout", type=int, default=14400)
     parser.add_argument("--stages", nargs="+", choices=STAGES, default=list(STAGES))
     parser.add_argument("--kda-nvfp4", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--dsa-nvfp4", action=argparse.BooleanOptionalAction, default=None)
     args = parser.parse_args(argv)
+    if args.worker_control:
+        from rtp_llm.test.smoke.kimi_k3.k31_ssh_smoke import worker_main
+
+        return worker_main()
     if args.request_control:
         return run_requests(args.request_control)
     if args.output is None or args.startup_timeout < 1:

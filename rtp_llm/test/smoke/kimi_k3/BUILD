@@ -45,6 +45,20 @@ py_library(
     deps = [":pd_test_support"],
 )
 
+py_library(
+    name = "k31_runtime_lib",
+    srcs = [
+        "k31_core_evidence.py",
+        "k31_pd_config.py",
+        "k31_runtime_bootstrap.py",
+        "k31_server_launcher.py",
+        "k31_smoke.py",
+        "k31_ssh_smoke.py",
+        "k31_worker.py",
+    ],
+    deps = [":pd_test_support", ":smoke_lib", "//rtp_llm/test/utils:coredump_util"],
+)
+
 _OFFLINE_TESTS = [
     "test_checkpoint_guard",
     "test_grammar_smoke",
@@ -63,6 +77,7 @@ _OFFLINE_TESTS = [
     "test_k31_full_smoke",
     "test_k31_long_prefix_smoke",
     "test_k31_two_host_smoke",
+    "test_k31_ssh_smoke",
     "test_k31_chunk_fixture",
     "test_audit_k31_full_smoke",
     "test_audit_k31_last_n",
@@ -79,7 +94,7 @@ _OFFLINE_TESTS = [
         srcs = [name + ".py"],
         main = name + ".py",
         data = ["//rtp_llm/models_py:models"] if name == "test_k31_chunk_fixture" else [],
-        deps = [":pd_test_support", ":remote_pd_support", ":smoke_lib"],
+        deps = [":pd_test_support", ":remote_pd_support", ":smoke_lib", ":k31_runtime_lib"],
         env = {"GPU_COUNT": "0"},
     )
     for name in _OFFLINE_TESTS

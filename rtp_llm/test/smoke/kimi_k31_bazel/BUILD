@@ -8,6 +8,7 @@ py_library(
     deps = [
         "//rtp_llm/test/smoke/kimi_k3:smoke_lib",
         "//rtp_llm/test/smoke/kimi_k3:pd_test_support",
+        "//rtp_llm/test/smoke/kimi_k3:k31_runtime_lib",
         "//rtp_llm/test/utils:coredump_util",
     ],
 )

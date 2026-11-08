@@ -153,22 +153,13 @@ class K31TwoHostSmokeTest(unittest.TestCase):
                 env = smoke.launcher.runtime_environment(Path(directory), binary)
             self.assertEqual(env['CC'], '/opt/compiler/gcc')
 
-    def test_regular_only_honors_tp8_decode_and_excludes_one_million_stage(self):
+    def test_regular_only_no_longer_silently_selects_a_different_decode_topology(self):
         base = {**base_config(), "decode_dp": 1}
-        configs = smoke.stage_configs(base, ("regular",))
-        self.assertEqual(len(configs), 1)
-        self.assertEqual(configs[0]["k31_smoke_stage"], "regular")
-        self.assertEqual(configs[0]["decode_dp"], 1)
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "result"
-            record = dict(passed=True, cleanup_complete=True,
-                          request_counts=dict(total=304, formal=267, preparation=37))
-            with patch.object(smoke, "run_stage", return_value=record) as run_stage:
-                self.assertEqual(smoke.run(base, output, 1, ("regular",)), 0)
-            run_stage.assert_called_once()
-            result = json.loads((output / "RESULT.json").read_text())
-            self.assertEqual(list(result["stages"]), ["regular"])
-            self.assertEqual(result["expected_counts"], record["request_counts"])
+            with self.assertRaisesRegex(ValueError, "DP2/TP4"):
+                smoke.run(base, output, 1, ("regular",))
+            self.assertFalse(output.exists())
 
     def test_direct_role_launcher_bootstraps_policy_without_pythonpath(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -196,7 +187,7 @@ class K31TwoHostSmokeTest(unittest.TestCase):
                     smoke.stage_configs({**base_config(), key: value})
 
     def test_precision_audit_requires_executed_fp4_and_native_draft(self):
-        from .nvfp4_evidence import audit_projection_precision, MARKER
+        from rtp_llm.test.smoke.kimi_k3.nvfp4_evidence import audit_projection_precision, MARKER
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -533,54 +524,14 @@ assert rtp_llm.__file__ == runfiles_package
             )
             self.assertFalse((output / "decode").exists())
 
-    def test_failed_regular_audit_keeps_evidence_and_does_not_erase_long_result(self):
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "result"
-            stages = [
-                {
-                    "passed": False,
-                    "cleanup_complete": True,
-                    "errors": ["regular audit failed"],
-                },
-                {
-                    "passed": True,
-                    "cleanup_complete": True,
-                    "request_counts": dict(total=2, formal=1, preparation=1),
-                },
-            ]
-            with patch.object(smoke, "run_stage", side_effect=stages) as run_stage:
-                self.assertEqual(smoke.run(base_config(), output, startup_timeout=1), 1)
-            self.assertEqual(
-                [call.args[0]["k31_smoke_stage"] for call in run_stage.call_args_list],
-                ["regular", "long"],
-            )
-            result = json.loads((output / "RESULT.json").read_text())
-            self.assertIs(result["passed"], False)
-            self.assertIn("regular audit failed", result["stages"]["regular"]["errors"])
-            self.assertIs(result["stages"]["long"]["passed"], True)
+    def test_all_standard_stage_selections_use_the_same_shared_transport(self):
+        from rtp_llm.test.smoke.kimi_k3 import k31_ssh_smoke
 
-    def test_aggregate_counts_only_pass_after_both_audits(self):
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "result"
-            stages = [
-                {
-                    "passed": True,
-                    "cleanup_complete": True,
-                    "request_counts": dict(total=304, formal=267, preparation=37),
-                },
-                {
-                    "passed": True,
-                    "cleanup_complete": True,
-                    "request_counts": dict(total=2, formal=1, preparation=1),
-                },
-            ]
-            with patch.object(smoke, "run_stage", side_effect=stages):
-                self.assertEqual(smoke.run(base_config(), output, startup_timeout=1), 0)
-            result = json.loads((output / "RESULT.json").read_text())
-            self.assertIs(result["passed"], True)
-            self.assertEqual(
-                result["request_counts"], dict(total=306, formal=268, preparation=38)
-            )
+        for stages in (("regular", "long"), ("regular",), ("long",), ("long", "regular")):
+            with self.subTest(stages=stages), patch.object(k31_ssh_smoke, "run", return_value=0) as run:
+                base, output = base_config(), Path("/unused/output")
+                self.assertEqual(smoke.run(base, output, 1, stages), 0)
+                run.assert_called_once_with(base, output, 1, stages)
 
 
 if __name__ == "__main__":

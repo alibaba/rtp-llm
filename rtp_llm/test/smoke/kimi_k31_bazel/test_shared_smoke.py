@@ -7,10 +7,18 @@ from unittest.mock import patch
 from rtp_llm.test.smoke.kimi_k3 import audit_k31_full_smoke as audit
 from rtp_llm.test.smoke.kimi_k3 import server_launcher as shared_launcher
 from rtp_llm.test.smoke.kimi_k3 import worker as shared_worker
-from rtp_llm.test.smoke.kimi_k31_bazel import server_launcher, worker
+from rtp_llm.test.smoke.kimi_k3 import k31_server_launcher as server_launcher
+from rtp_llm.test.smoke.kimi_k31_bazel import worker
 
 
 class SharedSmokeTest(unittest.TestCase):
+    def test_ci_exports_the_same_configuration_and_worker_as_traditional_smoke(self):
+        from rtp_llm.test.smoke.kimi_k31_bazel import k31_ci
+        from rtp_llm.test.smoke.kimi_k3 import k31_smoke
+
+        self.assertIs(k31_ci.K31Worker, k31_smoke.K31Worker)
+        self.assertIs(k31_ci.smoke_config, k31_smoke.smoke_config)
+
     def test_split_large_cohort_still_fails_the_shared_strict_gate(self):
         stage = dict(name="orthogonal_decode_00_batch_63",
                      case_names=[str(i) for i in range(63)])

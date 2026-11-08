@@ -272,6 +272,38 @@ def usable_rdma_hcas(names):
     return usable
 
 
+def checkpoint_preflight(config, role, directory):
+    """Apply the traditional independent target/draft storage contracts."""
+    if __package__:
+        from .checkpoint_guard import preflight
+    else:
+        from checkpoint_guard import preflight
+
+    host = config[role]
+    for name in checkpoint_fields(config):
+        storage = host.get(name + "_storage_policy", host.get("storage_policy", "3fs"))
+        if storage not in ("3fs", "ssd", "published"):
+            raise ValueError("storage_policy must be 3fs, ssd or published")
+        storage_root = host.get(name + "_root", host["checkpoint_root"])
+        if storage == "published":
+            checkpoint = Path(host[name]).resolve(strict=True)
+            if checkpoint != Path(storage_root).resolve(strict=True):
+                raise ValueError("Published checkpoint root must equal the selected checkpoint")
+            expected_fs = host.get(name + "_fstype")
+            actual_fs = subprocess.check_output(
+                ["findmnt", "-T", str(checkpoint), "-n", "-o", "FSTYPE"], text=True).split()
+            if not expected_fs or set(actual_fs) != {expected_fs}:
+                raise ValueError(f"Published checkpoint filesystem mismatch: {name}")
+            policy = {"allow_checkpoint_root": storage_root}
+        else:
+            policy = {"allow_hf3fs_root" if storage == "3fs" else "local_data_root": storage_root}
+        report = preflight(host[name], **policy,
+                           load_method="fastsafetensors", check_layout=True)
+        atomic(directory / (name + "-preflight.json"), report)
+        if not report["passed"]:
+            raise ValueError(f"{name} preflight failed")
+
+
 def serve(config, role):
     source = owned_data(Path(config[role]["repo_root"]))
     sys.path.insert(0, str(source))
@@ -300,31 +332,7 @@ def serve(config, role):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         locks.append(lock)
     require_gpu_capacity(directory, host.get("allow_shared_accuracy", False), host.get("min_free_gib", 250), 8)
-    for name in checkpoint_fields(config):
-        storage = host.get(name + "_storage_policy", host.get("storage_policy", "3fs"))
-        if storage not in ("3fs", "ssd", "published"):
-            raise ValueError("storage_policy must be 3fs, ssd or published")
-        storage_root = host.get(name + "_root", host["checkpoint_root"])
-        if storage == "published":
-            # Reuse an explicitly selected published mount without staging it.
-            # Pin both its exact root and filesystem instead of inferring policy
-            # from a path name or permitting an arbitrary parent directory.
-            checkpoint = Path(host[name]).resolve(strict=True)
-            if checkpoint != Path(storage_root).resolve(strict=True):
-                raise ValueError("Published checkpoint root must equal the selected checkpoint")
-            expected_fs = host.get(name + "_fstype")
-            actual_fs = subprocess.check_output(
-                ["findmnt", "-T", str(checkpoint), "-n", "-o", "FSTYPE"], text=True).split()
-            if not expected_fs or set(actual_fs) != {expected_fs}:
-                raise ValueError(f"Published checkpoint filesystem mismatch: {name}")
-            policy = {"allow_checkpoint_root": storage_root}
-        else:
-            policy = {"allow_hf3fs_root" if storage == "3fs" else "local_data_root": storage_root}
-        report = preflight(host[name], **policy,
-                           load_method="fastsafetensors", check_layout=True)
-        atomic(directory / (name + "-preflight.json"), report)
-        if not report["passed"]:
-            raise ValueError(f"{name} preflight failed")
+    checkpoint_preflight(config, role, directory)
     sockets = []
     try:
         for port in range(host["port"], host["port"] + 72):

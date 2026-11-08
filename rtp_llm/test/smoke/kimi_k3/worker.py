@@ -175,12 +175,12 @@ class Worker:
         self._require_native_artifact_root(root)
         if root.stat().st_uid != os.geteuid():
             raise ValueError("Artifact root must belong to the runtime user")
-        self.task = root / run_id / role
-        self.task.mkdir(parents=True, exist_ok=False)
+        task = root / run_id / role
+        task.mkdir(parents=True, exist_ok=False)
+        self.task = task
         self.role, self.config, self.host = role, config, host
         # The native binary's own runfiles contain the server's complete closure.
-        self.workspace = Path(__file__).absolute().parents[4]
-        self.server = self.workspace / "rtp_llm" / "rtp_llm_server"
+        self.workspace, self.server = self.runtime_paths()
         if not self.server.is_file():
             raise ValueError("rtp_llm_server is missing from Bazel runfiles")
         # Logger.cc resolves this file against cwd; give the service a private
@@ -222,6 +222,13 @@ class Worker:
         }
         (self.task / "identity.json").write_text(json.dumps(manifest, indent=2) + "\n")
         return manifest
+
+    def runtime_paths(self):
+        workspace = Path(__file__).absolute().parents[4]
+        return workspace, workspace / "rtp_llm" / "rtp_llm_server"
+
+    def runtime_runfiles(self):
+        return self.workspace.parent
 
     @staticmethod
     def _require_native_artifact_root(root):

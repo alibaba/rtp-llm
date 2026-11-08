@@ -10,10 +10,10 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from rtp_llm.test.smoke.kimi_k31_bazel import (
-    k31_ci,
     pd_config,
     remote_pd_test,
 )
+from rtp_llm.test.smoke.kimi_k3 import k31_smoke as k31_ci
 from rtp_llm.test.smoke.kimi_k3 import result_check
 
 
