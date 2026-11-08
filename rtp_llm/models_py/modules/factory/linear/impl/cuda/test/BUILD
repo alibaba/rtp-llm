@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm120_py_test")
+
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
@@ -58,4 +60,19 @@ py_test(
     deps = py_test_deps,
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13"},
+)
+
+py_test(
+    name = "fp8_blockwise_sm120_factory_test",
+    srcs = ["fp8_blockwise_sm120_factory_test.py"],
+    deps = py_test_deps,
+)
+
+# Real CUTLASS blockwise GEMM on SM120 hardware (eager, CUDA graph, partial
+# blocks, bias/out). The kernel only exists in the exact cuda13_sm120 build.
+dsv4_sm120_py_test(
+    name = "fp8_blockwise_sm120_hardware_test",
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+    sm120_build_only = True,
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
 )

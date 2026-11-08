@@ -4,6 +4,9 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.sm120_fp8_blockwise import (
+    sm120_blockwise_fp8_available,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
@@ -33,6 +36,11 @@ class CudaFp8GEMMLinear(LinearBase):
         if weight_scales is None or quant_config is None:
             return False
         if weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+            return False
+        if sm120_blockwise_fp8_available(weight.device) and weight_scales.dtype in (
+            torch.float32,
+            torch.float8_e8m0fnu,
+        ):
             return False
         return quant_config.get_method() == "FP8_PER_BLOCK"
 
