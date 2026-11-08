@@ -85,7 +85,12 @@ def grouped_rms_norm_triton(
 
 
 @triton.jit
-def _norm_fp8_scale(AMAX, SCALE, N: tl.constexpr, BLOCK: tl.constexpr):
+def _norm_fp8_scale(AMAX, SCALE, N, BLOCK: tl.constexpr):
+    # ``N`` is a runtime argument on purpose: the call sites pass the step's
+    # element count (rows * 4), and a constexpr N compiled a fresh variant for
+    # every token count — one ~60ms JIT stall per serving step in the first
+    # hc.mlp window. BLOCK stays a power-of-two bucket over the same count,
+    # so the compiled-variant count stays bounded by the bucket count.
     offsets = tl.arange(0, BLOCK)
     maximum = tl.max(tl.load(AMAX + offsets, offsets < N, other=0.0), 0)
     # Match the native per-tensor absmax's true division; multiplying by the
