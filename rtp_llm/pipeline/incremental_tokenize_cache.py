@@ -1255,10 +1255,16 @@ class IncrementalTokenizeCache:
         ids.extend(mid_ids)
         ids.extend(end_ids)
         if new_cut > entry.cut:
+            old_nbytes = entry.nbytes
             entry.ids.extend(array.array("i", mid_ids))
             entry.cut = new_cut
             entry.prefix_sha = _sha256_hex(text[:new_cut])
             entry.nbytes = len(entry.ids) * 4 + 128
+            # In-place growth must be accounted too, or the cap check in
+            # _evict_locked never sees splice-driven expansion and the byte
+            # cap is silently defeated (unbounded worker RSS growth).
+            self._total_bytes += entry.nbytes - old_nbytes
+            self._evict_locked()
         return ids
 
     def _install_locked(self, key: str, entry: _Entry) -> None:
@@ -1288,6 +1294,10 @@ class IncrementalTokenizeCache:
         return ids
 
     def _evict_locked(self) -> None:
+        if self._total_bytes < 0:
+            # Defensive resync: the accumulator must never drift negative; if
+            # it ever did, recompute it from the live entries before evicting.
+            self._total_bytes = sum(e.nbytes for e in self._entries.values())
         while self._total_bytes > self._max_bytes and len(self._entries) > 1:
             key = min(self._entries, key=lambda k: self._entries[k].stamp)
             self._total_bytes -= self._entries.pop(key).nbytes

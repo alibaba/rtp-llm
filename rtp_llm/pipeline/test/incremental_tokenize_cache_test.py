@@ -23,6 +23,7 @@ from rtp_llm.pipeline.incremental_tokenize_cache import (
     _KEY_CHARS,
     IncrementalTokenizeCache,
     _dir_quit,
+    _Entry,
     _sha256_hex,
 )
 
@@ -229,6 +230,182 @@ class IncrementalTokenizeCacheTest(unittest.TestCase):
             self.assertEqual(cache.get_token_ids(text), list(self.tok.encode(text)))
             self.assertEqual(cache.get_token_ids(grown), list(self.tok.encode(grown)))
         self.assertLessEqual(cache._total_bytes, 4096)
+
+    # ---- byte-cap accounting regressions ---------------------------------
+    # The cap only works if in-place splice growth is accounted: entries are
+    # installed at seed size and then grow ~9x via _splice_locked under the
+    # frozen agentic pattern. Unaccounted growth defeated eviction entirely
+    # (worker RSS grew without bound); these tests pin the accounting.
+
+    def _seed(self, tag):
+        # >256 chars so the bucket key stays append-stable (see _KEY_CHARS),
+        # but small enough that cap pressure comes from splice growth, not
+        # from the (always correctly accounted) install path.
+        return f"session {tag} base seed " + " ".join(WORDS) * 5
+
+    def _grow(self, text, words):
+        return text + " " + " ".join(self.rng.choice(WORDS) for _ in range(words))
+
+    @staticmethod
+    def _real_bytes(cache):
+        return sum(e.nbytes for e in cache._entries.values())
+
+    def test_splice_growth_respects_cap(self):
+        # The cap must exceed the install-time footprint (~20 x 7KB here) so
+        # that only accounted splice growth can breach it; a smaller cap would
+        # degenerate into all-miss install churn, which even unaccounted
+        # growth keeps symmetric.
+        cap = 300_000
+        cache = self._cache(max_bytes=cap)
+        texts = [self._seed(i) for i in range(20)]
+        for step in range(15):
+            for i in range(len(texts)):
+                texts[i] = self._grow(texts[i], 120)
+                self.assertEqual(
+                    cache.get_token_ids(texts[i]),
+                    list(self.tok.encode(texts[i])),
+                    f"step {step} session {i}: spliced ids must stay exact",
+                )
+            self.assertEqual(
+                cache._total_bytes,
+                self._real_bytes(cache),
+                f"step {step}: reported total must equal the real entry bytes",
+            )
+            self.assertLessEqual(self._real_bytes(cache), cap * 1.05)
+        self.assertGreaterEqual(cache._total_bytes, 0)
+
+    def test_total_bytes_invariant_mixed_ops(self):
+        cache = self._cache(max_bytes=16384, shadow_rate=1.0)
+
+        def invariant(where):
+            self.assertEqual(
+                cache._total_bytes, self._real_bytes(cache), f"invariant: {where}"
+            )
+            self.assertGreaterEqual(cache._total_bytes, 0, f"invariant: {where}")
+
+        seed0 = self._seed("mixed0")
+        self.assertEqual(cache.get_token_ids(seed0), list(self.tok.encode(seed0)))
+        invariant("after install")
+        text = seed0
+        for g in range(3):
+            text = self._grow(text, 40)
+            self.assertEqual(cache.get_token_ids(text), list(self.tok.encode(text)))
+            invariant(f"after splice growth {g}")
+        for i in (1, 2, 3):
+            seed = self._seed(f"mixed{i}")
+            self.assertEqual(cache.get_token_ids(seed), list(self.tok.encode(seed)))
+            invariant(f"after install {i}")
+            grown = self._grow(seed, 60)
+            self.assertEqual(cache.get_token_ids(grown), list(self.tok.encode(grown)))
+            invariant(f"after growth {i}")
+        # Peer-style install: exactly what the fetch path hands _install_locked.
+        dummy = self._seed("peer") + " peer fetched body"
+        dcut = cache._conservative_cut(dummy)
+        self.assertGreater(dcut, 0)
+        fetched = _Entry(
+            dcut,
+            array.array("i", cache._encode_tail(dummy[:dcut])),
+            _sha256_hex(dummy[:dcut]),
+            0,
+        )
+        with cache._lock:
+            cache._install_locked(_sha256_hex(dummy[:_KEY_CHARS]), fetched)
+        invariant("after peer-style install")
+        # The shadow failsafe pop must keep the accounting exact as well.
+        reported = []
+        original_report = cache._report_acc
+        cache._report_acc = lambda name: reported.append(name)
+        probe = self._seed("mismatch")
+        cache.get_token_ids(probe)
+        grown_probe = self._grow(probe, 40)
+        original_encode = cache._encode_tail
+
+        def corrupted(tail):
+            ids = original_encode(tail)
+            return ids + [999999] if tail else ids
+
+        cache._encode_tail = corrupted
+        self.assertEqual(
+            cache.get_token_ids(grown_probe), list(self.tok.encode(grown_probe))
+        )
+        cache._encode_tail = original_encode
+        cache._report_acc = original_report
+        self.assertIn("TOKENIZE_CACHE_MISMATCH_QPS_METRIC", reported)
+        invariant("after shadow-mismatch pop")
+        with cache._lock:
+            cache._evict_locked()
+        invariant("after direct evict")
+
+    def test_eviction_retains_freshest(self):
+        # Phase 1 (black box): splice-driven cap pressure must evict, and
+        # evicted sessions must still resolve exactly (fallback / re-fetch).
+        cap = 60_000
+        cache = self._cache(max_bytes=cap)
+        texts = [self._seed(i) for i in range(6)]
+        for _step in range(5):
+            for i in range(len(texts)):
+                texts[i] = self._grow(texts[i], 110)
+                self.assertEqual(
+                    cache.get_token_ids(texts[i]), list(self.tok.encode(texts[i]))
+                )
+        self.assertLessEqual(self._real_bytes(cache), cap * 1.05)
+        self.assertEqual(cache._total_bytes, self._real_bytes(cache))
+        self.assertLess(len(cache._entries), 6)
+        for i in range(len(texts)):
+            self.assertEqual(
+                cache.get_token_ids(texts[i]), list(self.tok.encode(texts[i]))
+            )
+        # Phase 2 (white box): eviction pops strictly oldest-stamp entries
+        # first, and accounted growth on the MRU entry never evicts itself.
+        cache2 = self._cache(max_bytes=10_000)
+        with cache2._lock:
+            for i in range(4):
+                ids = array.array("i", [i + 1] * 600)  # 600*4+128 = 2528 B
+                cache2._install_locked(f"k{i}", _Entry(10, ids, "0" * 64, 0))
+            # 4 x 2528 = 10112 > 10000: the oldest (k0) is already out.
+            self.assertNotIn("k0", cache2._entries)
+            self.assertIn("k1", cache2._entries)
+            self.assertIn("k3", cache2._entries)
+            self.assertEqual(cache2._total_bytes, self._real_bytes(cache2))
+            # Grow the MRU entry the same way _splice_locked now does: the
+            # next eviction victim must be k1 (oldest stamp), not k3.
+            mru = cache2._entries["k3"]
+            old_nbytes = mru.nbytes
+            mru.ids.extend(array.array("i", [9] * 700))
+            mru.nbytes = len(mru.ids) * 4 + 128
+            cache2._total_bytes += mru.nbytes - old_nbytes
+            cache2._evict_locked()
+            self.assertNotIn("k1", cache2._entries)
+            self.assertIn("k2", cache2._entries)
+            self.assertIn("k3", cache2._entries)
+            self.assertEqual(cache2._total_bytes, self._real_bytes(cache2))
+
+    def test_many_session_growth_bounded(self):
+        # Incident scenario in miniature: many long-lived sessions growing
+        # step by step under the production default cap (128 MiB).
+        cache = self._cache()
+        sessions = 300
+        steps = 40
+        texts = [self._seed(f"soak{i}") for i in range(sessions)]
+        for step in range(steps):
+            for i in range(sessions):
+                texts[i] = self._grow(texts[i], 400)
+                cache.get_token_ids(texts[i])
+            if step % 10 == 9:
+                self.assertEqual(
+                    cache._total_bytes,
+                    self._real_bytes(cache),
+                    f"step {step}: reported total must equal the real bytes",
+                )
+                self.assertLessEqual(self._real_bytes(cache), cache._max_bytes * 1.05)
+        self.assertLessEqual(self._real_bytes(cache), cache._max_bytes)
+        self.assertLessEqual(len(cache._entries), sessions)
+        self.assertGreaterEqual(cache._total_bytes, 0)
+        # Exactness spot-check after the eviction churn.
+        for i in (0, sessions // 2, sessions - 1):
+            self.assertEqual(
+                cache.get_token_ids(texts[i]), list(self.tok.encode(texts[i]))
+            )
 
     def test_shadow_mismatch_fails_safe(self):
         cache = self._cache(shadow_rate=1.0)
