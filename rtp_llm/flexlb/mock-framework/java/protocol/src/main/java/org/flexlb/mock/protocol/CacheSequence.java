@@ -8,7 +8,7 @@ public final class CacheSequence {
     private final List<Integer> tokens;
     private final List<Span> spans;
     private final long seed;
-    private final List<Long> promptKeys, basePromptKeys;
+    private final List<Long> promptKeys;
     public int blockSize() { return blockSize; }
     public List<Integer> tokens() { return tokens; }
     public List<Span> spans() { return spans; }
@@ -32,8 +32,7 @@ public final class CacheSequence {
         }
         this.hashBlockSize=blockSize; this.keyStride=keyStride;
         this.blockSize = Math.multiplyExact(blockSize,keyStride); this.tokens = tokens; this.spans = spans; this.seed = seed;
-        basePromptKeys = appendKeys(List.of(), 0, 0);
-        promptKeys = canonical(basePromptKeys);
+        promptKeys = appendKeys(List.of(), 0, 0);
     }
     public List<Long> keys() { return promptKeys; }
 
@@ -41,21 +40,19 @@ public final class CacheSequence {
     public List<Long> keys(int computedOutputTokens, int outputToken) {
         if (computedOutputTokens < 0) throw new IllegalArgumentException("Negative computed output length");
         if (computedOutputTokens == 0) return promptKeys;
-        return canonical(appendKeys(basePromptKeys, computedOutputTokens, outputToken));
-    }
-    // Keep physical-block hashing (including media boundaries), then select each group's final key.
-    private List<Long> canonical(List<Long> baseKeys) {
-        if(keyStride==1) return baseKeys;
-        var result=new ArrayList<Long>(baseKeys.size()/keyStride);
-        for(int i=keyStride-1;i<baseKeys.size();i+=keyStride) result.add(baseKeys.get(i));
-        return List.copyOf(result);
+        return appendKeys(promptKeys, computedOutputTokens, outputToken);
     }
     private List<Long> appendKeys(List<Long> prefix, int computedOutputTokens, int outputToken) {
         int length = Math.addExact(tokens.size(), computedOutputTokens);
+        int completeTokens = length - length % blockSize;
+        int prefixTokens = prefix.size() * blockSize;
+        if (completeTokens == prefixTokens) return prefix;
+
         var keys = new ArrayList<>(prefix);
         long hash = prefix.isEmpty() ? seed : prefix.getLast();
         int spanIndex = 0;
-        for (int start = prefix.size() * hashBlockSize; (long) start + hashBlockSize <= length; start += hashBlockSize) {
+        // Hash at physical block boundaries and retain only complete logical block keys.
+        for (int start = prefixTokens; start < completeTokens; start += hashBlockSize) {
             for (int i = start; i < start + hashBlockSize; i++)
                 hash = roll(hash, i < tokens.size() ? tokens.get(i) : outputToken);
             while (spanIndex < spans.size() && spans.get(spanIndex).offset() + spans.get(spanIndex).rowHashes().size() <= start)
@@ -69,7 +66,7 @@ public final class CacheSequence {
                     hash = roll(hash, value);
                 for (int i = begin; i < end; i++) hash = roll(hash, span.rowHashes().get(i - span.offset()));
             }
-            keys.add(hash);
+            if ((start + hashBlockSize) % blockSize == 0) keys.add(hash);
         }
         return List.copyOf(keys);
     }
