@@ -204,7 +204,7 @@ class WorldControllerTests(unittest.IsolatedAsyncioTestCase):
         candidate_refit=load('qwen38_refit_contract',SOURCE_ADAPTER/'qwen38_refit_contract.py')
         token=ModuleType('rtp_llm.RL.token_rpc_client');token.OptionalScoreDataError=OptionalScoreDataError
         try:
-            with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ,{'Q38_OPTIONAL_NUMERICAL_PROBES':mode}),\
+            with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ,{'Q38_OPTIONAL_NUMERICAL_PROBES':mode,'Q38_RUN_ID':'cpu-fixture-run'}),\
                     patch.dict(sys.modules,{'qwen38_refit_contract':candidate_refit,'rtp_llm.RL.token_rpc_client':token}),\
                     fixture.module(Path(folder)) as (mod,native):
                 root=Path(folder);events=[];obj,_=fixture.controller(mod,root,events)
@@ -232,13 +232,24 @@ class WorldControllerTests(unittest.IsolatedAsyncioTestCase):
                     if issue=='bad-status':value.replies.pop()
                     return value
                 mod._control=control
-                if issue in ('network','oom','bad-status','bad-sync'):
-                    with self.assertRaises((RuntimeError,TimeoutError,ValueError)):
+                if issue in ('status-write','score-write'):
+                    old_write=mod._write_json
+                    def fail_write(path,value):
+                        if issue=='status-write' and path.name.startswith('rtp_status_rank0_step'):raise OSError('injected mandatory status write failure')
+                        if issue=='score-write' and path.name.startswith('rtp_probe_'):raise OSError('injected optional score write failure')
+                        return old_write(path,value)
+                    mod._write_json=fail_write
+                if issue in ('network','oom','bad-status','bad-sync','status-write'):
+                    with self.assertRaises((RuntimeError,TimeoutError,ValueError,OSError)):
                         await obj.wake_and_probe(step,version)
                     self.assertFalse(obj._generation_ready);self.assertTrue(obj._incarnation_failed)
                     self.assertTrue(all(not c.open for c in obj.clients))
                     return None
                 proof=await (obj.verify_final_policy(2) if final else obj.wake_and_probe(step,version))
+                status=json.loads((root/f'rtp_status_rank0_step{step}.json').read_text())
+                self.assertEqual(status['run_id'],'cpu-fixture-run')
+                self.assertEqual(status['model_version'],version);self.assertEqual(len(status['statuses']),72)
+                self.assertEqual(status['source_transaction_sha256'],hashlib.sha256(sync_path.read_bytes()).hexdigest())
                 self.assertTrue(obj._generation_ready);self.assertTrue(all(c.open for c in obj.clients))
                 if mode=='0':self.assertTrue(all(not c.entered.is_set() for c in obj.clients))
                 else:self.assertTrue(all(c.entered.is_set() for c in obj.clients if c is not obj.clients[2] or issue!='bad-score'))
@@ -262,8 +273,12 @@ class WorldControllerTests(unittest.IsolatedAsyncioTestCase):
         proof=await self.exercise(mode='0',issue='mode0',final=True)
         self.assertTrue(proof['numerical_probe_skipped']);self.assertFalse(proof['final_native_GPU_reprobe'])
 
+    async def test_missing_optional_score_file_keeps_mandatory_status(self):
+        proof=await self.exercise(issue='score-write')
+        self.assertEqual(len(proof['statuses']),72)
+
     async def test_transport_oom_and_refit_failures_stay_fatal(self):
-        for issue in ('network','oom','bad-status','bad-sync'):
+        for issue in ('network','oom','bad-status','bad-sync','status-write'):
             with self.subTest(issue=issue):await self.exercise(issue=issue)
 
 

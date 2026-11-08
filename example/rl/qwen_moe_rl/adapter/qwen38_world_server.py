@@ -677,6 +677,19 @@ class World72RTPServer(RTPServer):
         finally:
             await control.close()
         require(len(self.clients)==9,'nine actual DP clients are required for generation')
+        if mode in ('0','2'):
+            require(bool(os.environ.get('Q38_RUN_ID')), 'actual native status requires the current run ID')
+        if mode=='2':
+            # This is mandatory evidence of the actual native world, wholly
+            # independent of whether any optional score file can be written.
+            # _write_json is the existing atomic audit writer; failures are
+            # fatal and prevent generation admission.
+            status_record=dict(replica_rank=0,logical_model_replicas=1,world_size=72,tp_size=8,dp_size=9,ep_size=72,
+                native_boot=self.boot,native_incarnation=self.incarnation,global_step=expected_step,
+                model_version=expected_version,full_source_sha256=sync['full_source_sha256'],
+                source_transaction_sha256=hashlib.sha256(sync_path.read_bytes()).hexdigest(),
+                run_id=os.environ.get('Q38_RUN_ID'),statuses=_status_rows(statuses),finished_unix=time.time())
+            _write_json(self.main_audit_root/f'rtp_status_rank0_step{expected_step}.json',status_record)
         if mode=='0':
             # Do not issue optional numerical RPCs. Communication and source
             # validation above remain mandatory and any exception is fatal.
@@ -687,7 +700,7 @@ class World72RTPServer(RTPServer):
                 native_boot=self.boot,native_incarnation=self.incarnation,global_step=expected_step,
                 model_version=expected_version,full_source_sha256=sync['full_source_sha256'],
                 source_transaction_sha256=hashlib.sha256(sync_path.read_bytes()).hexdigest(),
-                statuses=_status_rows(statuses),numerical_probe_skipped=True,
+                run_id=os.environ.get('Q38_RUN_ID'),statuses=_status_rows(statuses),numerical_probe_skipped=True,
                 score_values_not_claimed=True,finished_unix=time.time())
             _write_json(self.main_audit_root/f'rtp_status_rank0_step{expected_step}.json',record)
             self._committed_version,self._committed_step=expected_version,int(expected_step)
@@ -928,6 +941,7 @@ def launch_world72_server(model_path, topology, node_ids):
     from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
     runtime = dict(env_vars={'RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES': '1',
                             'Q38_LOGPROB_REPORT_ONLY': '1' if os.environ.get('Q38_LOGPROB_REPORT_ONLY') == '1' else '0',
+                            'Q38_RUN_ID': os.environ.get('Q38_RUN_ID',''),
                             'Q38_OPTIONAL_NUMERICAL_PROBES': os.environ.get('Q38_OPTIONAL_NUMERICAL_PROBES','1')})
     owner_class = ray.remote(num_cpus=1, num_gpus=0)(WorldNodeOwner)
     owners = [owner_class.options(name=f'q38_native_world_owner_{index}', max_concurrency=16,
