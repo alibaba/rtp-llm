@@ -214,6 +214,13 @@ def install():
         active=Bf16CpuAdamW(params,gradients=gradients,moments=moments,**options)
         self._q38_gradient_store=gradients
         self._q38_owned_numel=sum(local(p).numel() for p in params)
+        if os.environ.get('Q38_CPU_FIRST_ADAM_ADMISSION_REQUIRED')=='1':
+            # All ranks create this CPU-only group in the same constructor
+            # sequence; it must be separately qualified on the current 72 GPUs.
+            from datetime import timedelta
+            self._q38_cpu_admission_group=dist.new_group(backend='gloo',timeout=timedelta(seconds=120))
+            self._q38_planned_moment_bytes=plan['planned_cpu_moment_bytes']
+            self._q38_first_adam_admitted=False
         self._q38_phases=MasterPhaseManager(module,gradients,active,
             leaf_predicate=lambda item:isinstance(item,(ExpertChunk,VocabTile)),
             retained_bytes=int(os.environ.get('Q38_GPU_REFIT_MASTER_CACHE_BYTES',24*1024**3)))
@@ -228,6 +235,11 @@ def install():
         norm=self._q38_gradient_store.clip_grad_norm(self.optimizer_config.clip_grad,
             expected_local_numel=self._q38_owned_numel,expected_global_numel=POLICY_NUMEL,
             collective_device=torch.device('cuda',torch.cuda.current_device()))
+        if (os.environ.get('Q38_CPU_FIRST_ADAM_ADMISSION_REQUIRED')=='1'
+                and not self._q38_first_adam_admitted):
+            from distributed_admission import first_adam_admission
+            first_adam_admission(self,dist,self._q38_cpu_admission_group,world=WORLD_SIZE)
+            self._q38_first_adam_admitted=True
         def reduce_changed(count):
             if not dist.is_initialized() or dist.get_world_size()!=WORLD_SIZE:
                 raise RuntimeError('The real-update changed-weight count must cover all72 actor ranks')
