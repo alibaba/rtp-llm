@@ -9,7 +9,7 @@ class CacheSequenceTest {
         var random = new Random(20261106);
         for (int stride : List.of(1,2,4))
         for (int block : List.of(1, 2, 7, 128))
-            for (int length : List.of(0, 1, block - 1, block, block + 1, 3 * block + 1)) {
+            for (int length : List.of(0, 1, block - 1, block, block + 1, 3 * block + 1, 4 * block + 1)) {
                 var tokens = new ArrayList<Integer>();
                 for (int i = 0; i < length; i++) tokens.add(random.nextInt());
                 var spans = new ArrayList<CacheSequence.Span>();
