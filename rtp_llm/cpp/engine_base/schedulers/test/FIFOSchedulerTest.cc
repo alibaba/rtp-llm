@@ -22,6 +22,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/test/mock/MockCoordinatorCacheManager.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -6444,6 +6445,169 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillRejectsInvalidConfigAtConstruction) 
         } else {
             ASSERT_TRUE(env.init());
             EXPECT_EQ(env.scheduler().prefill_chunk_alignment_, 16384);
+        }
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testShortMultimodalBudgetSplitPreservesLinearStateAndImageInputs) {
+    const int       page   = 128;
+    const int       grant  = 8 * page;
+    const int       prompt = 16 * page;
+    vector<int32_t> tokens;
+    for (int token : {1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, -1, -1, 3, 4}) {
+        tokens.insert(tokens.end(), page, token);
+    }
+    vector<int32_t> mask;
+    for (int token : tokens) {
+        mask.push_back(token >= 0 ? 1 : 0);
+    }
+    auto ints = [](const torch::Tensor& tensor) {
+        auto host = tensor.cpu().contiguous();
+        return vector<int32_t>(host.data_ptr<int32_t>(), host.data_ptr<int32_t>() + host.numel());
+    };
+    for (const auto style : {PositionIdsStyle::DEFAULT, PositionIdsStyle::MMWITHTAG, PositionIdsStyle::MROPE}) {
+        for (const int chunk_size : {prompt, prompt + grant}) {
+            for (const int tail_blocks : {1, 5}) {
+                SCOPED_TRACE(testing::Message()
+                             << "style=" << style << " chunk=" << chunk_size << " tail=" << tail_blocks);
+                auto cache                    = test::makeSimpleHybridMhaCacheConfig(4, 128, page, DataType::TYPE_FP16);
+                cache.local_kv_cache_sharded  = true;
+                cache.reuse_cache_tail_blocks = tail_blocks;
+                auto cache_groups             = cache.groups();
+                for (auto& group : cache_groups) {
+                    group.policy.prefill_borrow_tail = group.policy.group_type == CacheGroupType::LINEAR;
+                }
+                cache.setTopology(std::move(cache_groups), cache.topology().layers());
+                ChunkSchedulerTestConfig config;
+                config.max_seq_len           = 4096;
+                config.max_batch_tokens_size = 8192;
+                config.prefill_chunk_size    = chunk_size;
+                ChunkSchedulerTestEnv<FIFOScheduler> env(config, cache, makeChunkedCpParallelism());
+                env.model_config.num_layers                            = cache.layer_num;
+                env.model_config.has_positional_encoding               = true;
+                env.model_config.mm_model_config.is_multimodal         = true;
+                env.model_config.mm_model_config.mm_position_ids_style = style;
+                const int width                                        = style == PositionIdsStyle::MROPE ? 3 : 1;
+                env.model_config.attn_config.rope_config.index_factor  = width;
+                ASSERT_TRUE(env.init());
+                auto first             = torch::arange(20 * page, torch::kFloat32).reshape({10 * page, 2});
+                auto second            = torch::arange(4 * page, torch::kFloat32).reshape({2 * page, 2}) + 100;
+                auto first_stack       = torch::arange(40 * page, torch::kFloat32).reshape({2, 10 * page, 2});
+                auto second_stack      = torch::arange(8 * page, torch::kFloat32).reshape({2, 2 * page, 2}) + 100;
+                auto input             = make_shared<GenerateInput>();
+                input->input_ids       = torch::tensor(tokens, torch::kInt32);
+                input->generate_config = make_shared<GenerateConfig>();
+                input->generate_config->is_streaming   = true;
+                input->generate_config->max_new_tokens = 2;
+                input->mm_locs                         = torch::tensor({page, 12 * page}, torch::kInt32);
+                input->text_tokens_mask                = torch::tensor(mask, torch::kInt32);
+                input->multimodal_features             = vector<torch::Tensor>{first, second};
+                input->mm_extra_input = vector<torch::Tensor>{first_stack.flatten(), second_stack.flatten()};
+                if (style != PositionIdsStyle::DEFAULT) {
+                    auto first_positions  = torch::arange(10 * page, torch::kInt32);
+                    auto second_positions = torch::arange(2 * page, torch::kInt32);
+                    if (width == 3) {
+                        first_positions  = first_positions.unsqueeze(1).repeat({1, 3});
+                        second_positions = second_positions.unsqueeze(1).repeat({1, 3});
+                    }
+                    input->mm_position_ids = vector<torch::Tensor>{first_positions, second_positions};
+                }
+                vector<int32_t> positions;
+                for (int position = 0; position < prompt; ++position) {
+                    positions.insert(positions.end(), width, position);
+                }
+                auto stream = make_shared<NormalGenerateStream>(
+                    input, env.model_config, env.runtime_config, env.resource_context, nullptr);
+                ASSERT_FALSE(stream->hasError()) << stream->stopReason();
+                auto       preceding        = env.makeStream(vector<int>(chunk_size - grant, 17), 1);
+                const auto preceding_status = env.scheduler().enqueue(preceding);
+                ASSERT_TRUE(preceding_status.ok()) << preceding_status;
+                const auto stream_status = env.scheduler().enqueue(stream);
+                ASSERT_TRUE(stream_status.ok()) << stream_status;
+                // The prompt fits a configured chunk, but a preceding request leaves half its budget.
+                ASSERT_TRUE(
+                    expectPrefillBatch(env.scheduler().schedule(), {preceding, stream}, {chunk_size - grant, grant}));
+                NormalBatchStreamProcessor processor(
+                    env.model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, false);
+                vector<int>           previous_state(cache.groups().size(), 0);
+                vector<torch::Tensor> consumed_first;
+                for (const int start : {0, grant}) {
+                    if (start > 0) {
+                        ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {stream}, {grant}));
+                        ASSERT_TRUE(expectChunkPrefixState(stream, cache));
+                    }
+                    ASSERT_TRUE(stream->chunkedPrefillEnabled());
+                    ASSERT_EQ(stream->prefixLength(), start);
+                    ASSERT_EQ(stream->currentChunkLen(), grant);
+                    StreamGroups groups({stream});
+                    TensorHolder holder;
+                    auto         gathered = processor.gatherModelInput(groups, holder);
+                    ASSERT_TRUE(gathered.ok()) << gathered.status().ToString();
+                    const auto& model_input = gathered.value();
+                    EXPECT_EQ(ints(model_input.combo_tokens),
+                              vector<int32_t>(tokens.begin() + start, tokens.begin() + start + grant));
+                    EXPECT_EQ(ints(model_input.text_tokens_mask),
+                              vector<int32_t>(mask.begin() + start, mask.begin() + start + grant));
+                    EXPECT_EQ(ints(model_input.combo_position_ids),
+                              vector<int32_t>(positions.begin() + start * width,
+                                              positions.begin() + (start + grant) * width));
+                    EXPECT_EQ(ints(model_input.prefix_lengths), (vector<int32_t>{start}));
+                    ASSERT_TRUE(model_input.multimodal_features.has_value());
+                    ASSERT_TRUE(model_input.mm_extra_input.has_value());
+                    ASSERT_EQ(model_input.multimodal_features->size(), start == 0 ? 1 : 2);
+                    ASSERT_EQ(model_input.mm_extra_input->size(), start == 0 ? 1 : 2);
+                    const int image_start = start == 0 ? 0 : 7 * page;
+                    const int image_end   = start == 0 ? 7 * page : 10 * page;
+                    auto      part        = model_input.multimodal_features->at(0).cpu();
+                    consumed_first.push_back(part);
+                    EXPECT_TRUE(torch::equal(part, first.slice(0, image_start, image_end)));
+                    EXPECT_TRUE(torch::equal(model_input.mm_extra_input->at(0).cpu(),
+                                             first_stack.slice(1, image_start, image_end).contiguous().flatten()));
+                    EXPECT_EQ(ints(model_input.mm_features_locs),
+                              start == 0 ? vector<int32_t>{page} : vector<int32_t>({0, 4 * page}));
+                    const vector<int64_t> spans = start == 0 ?
+                                                      vector<int64_t>{0, page, grant} :
+                                                      vector<int64_t>{0, grant, 11 * page, 0, 12 * page, 14 * page};
+                    EXPECT_TRUE(torch::equal(model_input.mm_features_spans.cpu().flatten(),
+                                             torch::tensor(spans, torch::kInt64)));
+                    if (start > 0) {
+                        EXPECT_TRUE(torch::equal(model_input.multimodal_features->at(1).cpu(), second));
+                        EXPECT_TRUE(torch::equal(model_input.mm_extra_input->at(1).cpu(), second_stack.flatten()));
+                    }
+                    auto kernel_table = model_input.kv_cache_kernel_block_id.cpu();
+                    for (size_t index = 0; index < cache.groups().size(); ++index) {
+                        const auto& group = cache.groups()[index];
+                        if (group.policy.group_type != CacheGroupType::LINEAR) {
+                            continue;
+                        }
+                        const auto& ids = stream->kvCache().cacheResource(0).blockIds(group.tag);
+                        ASSERT_NE(ids.linearPrefillPlan(), nullptr);
+                        const auto round = ids.linearPrefillPlan()->round(start, grant);
+                        if (start > 0) {
+                            ASSERT_TRUE(round.input_position.has_value());
+                            EXPECT_EQ(kernel_table[index][0][*round.input_position].item<int>(), previous_state[index]);
+                        }
+                        previous_state[index] = ids.blocks().at(round.output_owner_position);
+                        ASSERT_GT(previous_state[index], 0);
+                    }
+                    MergedOutput output;
+                    output.sampler_output.token_ids = torch::tensor({42}, torch::kInt32).reshape({1, 1});
+                    output.sampler_output.success   = torch::tensor({true}, torch::kBool);
+                    ASSERT_TRUE(processor.dispatch(groups, output).ok());
+                    EXPECT_EQ(stream->hasOutput(), start > 0);
+                    EXPECT_EQ(stream->seqLength(), start > 0 ? prompt + 1 : prompt);
+                    EXPECT_TRUE(torch::equal(stream->multimodalFeatures()[0], first));
+                    EXPECT_TRUE(torch::equal(stream->multimodalFeatures()[1], second));
+                    if (start == 0) {
+                        preceding->reportEvent(StreamEvents::GenerateDone);
+                    }
+                }
+                EXPECT_TRUE(torch::equal(torch::cat(consumed_first), first));
+                auto output = stream->nextOutput(100);
+                ASSERT_TRUE(output.ok());
+                EXPECT_EQ(output.value().generate_outputs[0].output_ids.item<int32_t>(), 42);
+                stream->reportError(ErrorCode::CANCELLED, "unit test cleanup");
+            }
         }
     }
 }

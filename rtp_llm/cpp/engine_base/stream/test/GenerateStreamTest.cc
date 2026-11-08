@@ -1915,7 +1915,7 @@ TEST_F(GenerateStreamTest, testMultimodalContextPrefillWindows) {
                 makeInputIds(input_length), role, /*chunk_size=*/8, [](GenerateInput& input, GenerateConfig&) {
                     input.multimodal_features = std::vector<torch::Tensor>{torch::zeros({2, 4})};
                 });
-            EXPECT_EQ(stream->chunkedPrefillEnabled(), input_length > 8);
+            EXPECT_TRUE(stream->chunkedPrefillEnabled());
             ASSERT_FALSE(stream->hasError());
             markRunning(stream);
             if (input_length > 8) {
@@ -1924,8 +1924,7 @@ TEST_F(GenerateStreamTest, testMultimodalContextPrefillWindows) {
                 EXPECT_EQ(stream->seqLength(), input_length);
                 expectChunkWindow(stream, /*prefix=*/8, /*length=*/1, /*is_last=*/true);
             } else {
-                EXPECT_FALSE(stream->useChunkWindow());
-                EXPECT_EQ(stream->contextLength(), input_length);
+                expectChunkWindow(stream, /*prefix=*/0, /*length=*/input_length, /*is_last=*/true);
             }
             updateOneToken(stream, 101);
             EXPECT_FALSE(stream->isContextStream());
@@ -1935,25 +1934,31 @@ TEST_F(GenerateStreamTest, testMultimodalContextPrefillWindows) {
 }
 
 TEST_F(GenerateStreamTest, testBidirectionalMultimodalContextRequiresUnchunkedPrefill) {
-    for (const int input_length : {7, 9}) {
-        auto input                 = std::make_shared<GenerateInput>();
-        input->input_ids           = torch::arange(input_length, torch::kInt32);
-        input->generate_config     = std::make_shared<GenerateConfig>();
-        input->multimodal_features = std::vector<torch::Tensor>{torch::zeros({2, 4})};
-        ModelConfig model;
-        model.max_seq_len           = 64;
-        model.vocab_size            = 64;
-        model.attn_config.is_causal = false;
-        RuntimeConfig runtime;
-        runtime.fifo_scheduler_config.prefill_chunk_size = 8;
-        ResourceContext resource;
-        resource.role_type = RoleType::PDFUSION;
-        auto stream        = std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
-        EXPECT_FALSE(stream->chunkedPrefillEnabled());
-        EXPECT_EQ(stream->hasError(), input_length > 8);
-        if (input_length > 8) {
-            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
-            EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: non_causal_attention");
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        for (const int chunk_size : {0, 8}) {
+            for (const int input_length : {7, 9}) {
+                SCOPED_TRACE(testing::Message() << "role=" << static_cast<int>(role) << " chunk=" << chunk_size
+                                                << " input=" << input_length);
+                auto input                 = std::make_shared<GenerateInput>();
+                input->input_ids           = torch::arange(input_length, torch::kInt32);
+                input->generate_config     = std::make_shared<GenerateConfig>();
+                input->multimodal_features = std::vector<torch::Tensor>{torch::zeros({2, 4})};
+                ModelConfig model;
+                model.max_seq_len           = 64;
+                model.vocab_size            = 64;
+                model.attn_config.is_causal = false;
+                RuntimeConfig runtime;
+                runtime.fifo_scheduler_config.prefill_chunk_size = chunk_size;
+                ResourceContext resource;
+                resource.role_type = role;
+                auto stream        = std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
+                EXPECT_FALSE(stream->chunkedPrefillEnabled());
+                EXPECT_EQ(stream->hasError(), chunk_size > 0);
+                if (chunk_size > 0) {
+                    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                    EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: non_causal_attention");
+                }
+            }
         }
     }
 }

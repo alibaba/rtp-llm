@@ -67,6 +67,82 @@ def native_checkpoint_reference(q, k, v, gate, beta, initial, alog, bias, prefix
 
 
 class NativeKdaCheckpointTest(unittest.TestCase):
+
+    def test_short_context_budget_split_matches_single_round(self):
+        # A 2560-token context fits the configured 4096-token chunk. Another
+        # request can leave only 1024 tokens, so continuation must use the
+        # published LINEAR state even when that boundary is not retained.
+        length, split, page, interval, heads = 2560, 1024, 128, 1024, 12
+        torch.manual_seed(3108)
+        q, k, v = [
+            torch.randn(length, heads, 128, device="cuda", dtype=torch.bfloat16) * 0.1
+            for _ in range(3)
+        ]
+        v = v * 10
+        gate = torch.full_like(q, -8.0)
+        beta = torch.randn(length, heads, device="cuda", dtype=torch.bfloat16) * 0.1
+        alog = torch.zeros(heads, device="cuda", dtype=torch.float32)
+        bias = torch.zeros(heads * 128, device="cuda", dtype=torch.float32)
+        for last_n in (1, 5):
+            with self.subTest(last_n=last_n):
+                points = list(range(interval, length + 1, interval))[-last_n:]
+                retained = {point: index + 1 for index, point in enumerate(points)}
+                borrowed = len(retained) + 1
+                chunk_pool = torch.zeros(
+                    borrowed + 1, heads, 128, 128, device="cuda", dtype=torch.float32
+                )
+                full_pool = torch.zeros_like(chunk_pool)
+
+                def run(pool, start, end):
+                    row = [-1] * ((length + page - 1) // page)
+                    if start:
+                        row[start // page - 1] = retained.get(start, borrowed)
+                    for point, block in retained.items():
+                        if start < point <= end:
+                            row[point // page - 1] = block
+                    if end not in retained:
+                        row[(end - 1) // page] = borrowed
+                    return cula_kda_paged_prefill(
+                        q[start:end],
+                        k[start:end],
+                        v[start:end],
+                        gate[start:end],
+                        beta[start:end],
+                        alog,
+                        bias,
+                        -5.0,
+                        pool,
+                        [0, end - start],
+                        [start],
+                        [row],
+                        page,
+                    )
+
+                with torch.inference_mode():
+                    expected = run(full_pool, 0, length)
+                    first = run(chunk_pool, 0, split)
+                    state_block = retained.get(split, borrowed)
+                    self.assertGreater(state_block, 0)
+                    prefix_state = chunk_pool[state_block].clone()
+                    self.assertTrue(torch.isfinite(prefix_state).all().item())
+                    self.assertGreater(prefix_state.abs().max().item(), 0)
+                    missing_prefix_pool = chunk_pool.clone()
+                    missing_prefix_pool[state_block].zero_()
+                    second = run(chunk_pool, split, length)
+                    without_prefix = run(missing_prefix_pool, split, length)
+                torch.testing.assert_close(
+                    torch.cat((first, second)), expected, rtol=0.03, atol=0.003
+                )
+                # The same tolerance must reject losing the first round's state.
+                with self.assertRaises(AssertionError):
+                    torch.testing.assert_close(
+                        without_prefix, expected[split:], rtol=0.03, atol=0.003
+                    )
+                for block in [*retained.values(), borrowed]:
+                    torch.testing.assert_close(
+                        chunk_pool[block], full_pool[block], rtol=0.03, atol=0.003
+                    )
+
     def test_last_n_borrowed_chunks_match_disjoint_recurrent_storage(self):
         # N also exceeds the two CP checkpoints covered by one chunk.
         for n in range(1, 6):
