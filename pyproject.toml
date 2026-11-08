@@ -7,7 +7,8 @@
 requires = [
     "setuptools>=75.0,<82",
     "wheel",
-    "grpcio-tools==1.57.0",
+    "grpcio-tools==1.57.0; python_version < '3.12'",
+    "grpcio-tools==1.62.0; python_version >= '3.12'",
     "protobuf==4.25",
     "tomli; python_version < '3.11'",
 ]
