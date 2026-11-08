@@ -5,6 +5,50 @@ from distributed_reclaim import reclaim_world,post_advice_sample_ready
 from test_distributed_admission import FakeDist
 
 class ReclaimWorldTest(unittest.TestCase):
+    def _two_gate_cursor_exercise(self,*,fail_second=False):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);(root/'cpu-monitor').mkdir()
+            (root/'cpu-monitor/CURRENT.json').write_text(json.dumps(dict(same_time_namespace=True,
+                time_namespace='time:[1]',sample_started_monotonic=time.monotonic()+100,
+                sample_completed_monotonic=time.monotonic()+100)))
+            dist=FakeDist(4);rows=[dict(rank=i,pid=100+i,hostname='host',container_id='cid') for i in range(4)]
+            instances=[];calls=[];counts={};lock=threading.Lock();results=[]
+            class Cursor:
+                def __init__(self,plan):
+                    self.directory=root/'cpu-reclaim';self.directory.mkdir();self.round=0;self.total=0;instances.append(self)
+                def next_batch(self):
+                    calls.append(dist.local.rank)
+                    if fail_second and self.round==1:raise OSError('failure in second admission')
+                    self.round+=1;self.total+=8192
+                    out=dict(stage='exact_completed_source_ranges',round=self.round,advised_bytes=4096,
+                        syscall_advised_bytes=8192,total_advised_bytes=self.total,wide_scanned_bytes=0)
+                    (self.directory/('batch-%05d.json'%self.round)).write_text(json.dumps(out));return out
+            def decision(*args,**kwargs):
+                rank=dist.local.rank
+                with lock:counts[rank]=counts.get(rank,0)+1;n=counts[rank]
+                return dict(passed=(n%2==0))
+            def worker(rank):
+                dist.local.rank=rank;holder={}
+                try:
+                    for phase in ('first_adam','next_backward'):
+                        reclaim_world(dist,object(),rows[rank],rows,root=root,run_id='r',world=4,reserve=0,
+                            cursor_holder=holder,phase=phase)
+                    results.append('pass')
+                except Exception as exc:results.append(type(exc).__name__)
+            with patch('distributed_reclaim.evaluate',side_effect=decision),patch('distributed_reclaim.build_plan',return_value={'fixture':True}),\
+                 patch('distributed_reclaim.ReclaimCursor',Cursor),patch('os.readlink',return_value='time:[1]'):
+                threads=[threading.Thread(target=worker,args=(i,)) for i in range(4)]
+                for t in threads:t.start()
+                for t in threads:t.join(8)
+            self.assertTrue(all(not t.is_alive() for t in threads));self.assertEqual(len(results),4)
+            self.assertEqual(len(instances),1);self.assertEqual(calls,[0,0])
+            self.assertEqual(instances[0].total,8192 if fail_second else 16384)
+            return results
+
+    def test_same_leader_cursor_and_ledger_across_two_gates(self):
+        self.assertEqual(self._two_gate_cursor_exercise(),['pass']*4)
+    def test_second_gate_failure_denies_all_and_does_not_restart_claim(self):
+        self.assertEqual(self._two_gate_cursor_exercise(fail_second=True),['MemoryError']*4)
     def test_sample_crossing_advice_end_is_not_fresh(self):
         sample=dict(same_time_namespace=True,time_namespace='time:[1]',
                     sample_started_monotonic=9,sample_completed_monotonic=11,sample_unix=1000)

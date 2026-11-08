@@ -15,7 +15,8 @@ def post_advice_sample_ready(sample,finished_monotonic,expected_time_namespace):
 def _gather(dist,group,value,world):
     rows=[None]*world;dist.all_gather_object(rows,value,group=group);return rows
 
-def reclaim_world(dist,group,local,all_rows,*,root,run_id,world,reserve):
+def reclaim_world(dist,group,local,all_rows,*,root,run_id,world,reserve,
+                  cursor_holder=None,phase='first_adam'):
     """Reclaim only while measured budget fails, before any Adam mutation.
 
     Every node elects the minimum rank once; other ranks never call fadvise.
@@ -29,18 +30,24 @@ def reclaim_world(dist,group,local,all_rows,*,root,run_id,world,reserve):
     if len(nodes)*4!=world or any(len(v)!=4 for v in nodes.values()):
         raise ValueError('Node/rank grouping mismatch')
     peers=nodes[host];leader=min(p['rank'] for p in peers)
-    cursor=None;not_before=0;completed=[]
+    if cursor_holder is None:cursor_holder={}
+    cursor=cursor_holder.get('cursor');not_before=0;completed=[]
     for round_index in range(MAX_ROUNDS):
         try:
+            if cursor_holder.get('identity', (run_id,host,os.getpid()))!=(run_id,host,os.getpid()):
+                raise RuntimeError('Reclaim holder identity changed across admission boundaries')
+            cursor_holder.setdefault('identity',(run_id,host,os.getpid()))
             deadline=time.monotonic()+30
             while True:
                 sample=json.loads((root/'cpu-monitor/CURRENT.json').read_text())
                 if post_advice_sample_ready(sample,not_before,os.readlink('/proc/self/ns/time')):break
                 if time.monotonic()>=deadline:raise TimeoutError('No fresh post-advice cgroup sample')
                 time.sleep(.2)
-            decision=evaluate(sample,peers,run_id=run_id,hostname=host,expected_cid=local['container_id'],
-                              expected_time_namespace=os.readlink('/proc/self/ns/time'),reserve=reserve,maximum_age_seconds=5,
-                              reuse_enabled=os.environ.get('Q38_FIRST_ADAM_REUSE_CPU_SPILL')=='1')
+            options=dict(run_id=run_id,hostname=host,expected_cid=local['container_id'],
+                         expected_time_namespace=os.readlink('/proc/self/ns/time'),reserve=reserve,maximum_age_seconds=5)
+            if phase!='first_adam':options['phase']=phase
+            else:options['reuse_enabled']=os.environ.get('Q38_FIRST_ADAM_REUSE_CPU_SPILL')=='1'
+            decision=evaluate(sample,peers,**options)
             vote=dict(rank=rank,hostname=host,passed=decision['passed'],error=None,decision=decision)
         except Exception as exc:
             vote=dict(rank=rank,hostname=host,passed=False,error=type(exc).__name__+': '+str(exc))
@@ -54,7 +61,7 @@ def reclaim_world(dist,group,local,all_rows,*,root,run_id,world,reserve):
             action['leader']=True
             try:
                 if cursor is None:
-                    plan=build_plan(root,peers,host);cursor=ReclaimCursor(plan)
+                    plan=build_plan(root,peers,host);cursor=ReclaimCursor(plan);cursor_holder['cursor']=cursor
                     with (cursor.directory/'PLAN.json').open('x') as stream:json.dump(plan,stream,indent=2);stream.write('\n')
                 batch=cursor.next_batch()
                 if batch is None:raise MemoryError('Bounded source/wider reclaim budget exhausted')

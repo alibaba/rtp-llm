@@ -56,6 +56,11 @@ def _require_unpoisoned(engine):
     if getattr(engine,'_q38_update_poisoned',False) or engine._q38_phases.phase=='failed':
         raise RuntimeError('Failed optimizer state forbids training, export and refit')
 
+def _require_batch_idle(engine):
+    _require_unpoisoned(engine)
+    if getattr(engine,'_q38_batch_in_progress',False):
+        raise RuntimeError('An uncommitted train batch forbids export, refit and checkpoints')
+
 
 def _reuse_world_vote(dist,group,phase,error,world):
     rank=dist.get_rank();rows=[None]*world
@@ -290,6 +295,10 @@ def install():
             # sequence; it must be separately qualified on the current 72 GPUs.
             from datetime import timedelta
             self._q38_cpu_admission_group=dist.new_group(backend='gloo',timeout=timedelta(seconds=120))
+            if os.environ.get('Q38_NEXT_BATCH_CPU_ADMISSION_REQUIRED')=='1':
+                # Separate sequence space from the optimizer/CPU admission
+                # votes so a failed rank cannot match a different collective.
+                self._q38_batch_completion_group=dist.new_group(backend='gloo',timeout=timedelta(seconds=120))
             self._q38_planned_moment_bytes=plan['planned_cpu_moment_bytes']
             self._q38_first_adam_admitted=False
         self._q38_phases=MasterPhaseManager(module,gradients,active,
@@ -341,6 +350,7 @@ def install():
             return original_to(self,device,model=model,optimizer=optimizer,grad=grad)
         _require_unpoisoned(self)
         if str(device)=='cpu':
+            _require_batch_idle(self)
             if model and self._q38_phases.phase=='train':
                 if self._q38_gradient_store.slots:
                     raise RuntimeError('Explicit optimizer_zero_grad is required before the native rollout phase')
@@ -357,7 +367,7 @@ def install():
 
     def export(self,*args,**kwargs):
         if not _is_target(self):return original_export(self,*args,**kwargs)
-        _require_unpoisoned(self)
+        _require_batch_idle(self)
         if self._q38_phases.phase=='train':
             audit_policy_before_rollout(self)
             self._q38_phases.prepare_rollout();self._q38_native_contexts_released=False
@@ -370,7 +380,7 @@ def install():
         return self._q38_exporter,None
 
     def save_checkpoint(self,*args,**kwargs):
-        if _is_target(self):_require_unpoisoned(self)
+        if _is_target(self):_require_batch_idle(self)
         return original_save(self,*args,**kwargs)
 
     def confirm_cleanup(self,proof):
@@ -409,7 +419,7 @@ def install():
     async def update_before_native_resume(self,global_steps=None,mode='auto'):
         actor=getattr(self,'actor',None);active=getattr(actor,'engine',None)
         if active is not None and _is_target(active):
-            _require_unpoisoned(active)
+            _require_batch_idle(active)
             effective=mode if mode!='auto' else self.config.rollout.checkpoint_engine.backend
             if effective!='naive':
                 raise ValueError('The single-instance leased source path requires direct colocated naive transfer')
@@ -439,6 +449,15 @@ def install():
     install_policy_loss_audit()
     from qwen38_memory_boundaries import install as install_memory_boundaries
     install_memory_boundaries()
+    if os.environ.get('Q38_NEXT_BATCH_CPU_ADMISSION_REQUIRED')=='1':
+        if os.environ.get('Q38_CPU_FIRST_ADAM_ADMISSION_REQUIRED')!='1':
+            raise RuntimeError('Next-batch admission requires the first-Adam Gloo group and admission')
+        from next_backward_admission import install_batch_boundary
+        expected=os.environ.get('Q38_VERL_TRAIN_BATCH_SOURCE_SHA256','')
+        if expected!='dd5e7dba6b8f69b5955685c20823674199e24ba8395f9309f770f575c8bf2d66':
+            raise RuntimeError('Next-batch admission requires the reviewed train_batch source hash')
+        install_batch_boundary(Engine,dist,expected_train_batch_sha256=expected,
+            on_failure=_poison_reuse_engine,is_target=_is_target,world=WORLD_SIZE)
     _INSTALLED=True
 
 

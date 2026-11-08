@@ -11,7 +11,7 @@ class FakeDist:
         self.world=world;self.local=threading.local();self.barrier=threading.Barrier(world,timeout=5)
         self.lock=threading.Lock();self.round=0;self.rows={}
     def is_initialized(self):return True
-    def get_world_size(self):return self.world
+    def get_world_size(self,group=None):return self.world
     def get_rank(self):return self.local.rank
     def get_backend(self,group):return 'gloo'
     def all_gather_object(self,out,value,group=None):

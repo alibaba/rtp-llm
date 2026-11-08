@@ -195,9 +195,141 @@ class GradientStore:
         self._lock = threading.RLock()
         self._cleared_contributions = {}
         self._reuse_failed = False;self._reuse_frozen=False
+        self._q38_capture_contract = None
+
+    def bind_gpu_capture_contract(self, parameters, expected_gpu):
+        """Freeze shard/owner inputs and derive an order-independent CPU cap."""
+        from torch.distributed.fsdp._fully_shard import _fsdp_collectives as collectives
+        from torch.distributed.fsdp._fully_shard import _fsdp_param_group as param_group
+        with self._lock:
+            if (self._q38_capture_contract is not None or self._reuse_failed or self._reuse_frozen
+                    or self.slots or self.retained_bytes or self.cpu_spilled_bytes):
+                raise RuntimeError('Capture contract requires a clean, unbound gradient store')
+            params=tuple(parameters)
+            if (not params or len({id(p) for p in params})!=len(params)
+                    or len(self._params)!=len(params) or len(self._hooks)!=len(params)
+                    or {id(p) for p in self._params}!={id(p) for p in params}
+                    or self.retained_device!='cuda' or self.limit<0 or self.limit%4):
+                raise ValueError('Captured parameters, hooks or CUDA cache limit disagree')
+            if (collectives.foreach_reduce is not param_group.foreach_reduce
+                    or not getattr(collectives.foreach_reduce,'_q38_fp32_before_bf16_capture',False)):
+                raise RuntimeError('Reviewed FP32 FSDP reduction hook is not active')
+            expected_gpu=torch.device(expected_gpu)
+            if expected_gpu.type!='cuda' or expected_gpu.index is None:
+                raise ValueError('Expected an explicit actor CUDA device')
+            sizes={};total=largest=0
+            for p in params:
+                owner=_REDUCED_OWNERS.get(id(p));v=local(p.detach())
+                if (not p.requires_grad or owner is None or owner[0]() is not p or owner[1] is not self
+                        or v.device!=expected_gpu or not v.is_contiguous()
+                        or v.dtype not in (torch.bfloat16,torch.float32)):
+                    raise ValueError('Actual trainable shard identity, device or hook owner disagrees')
+                size=v.numel()*4;sizes[p]=(tuple(v.shape),size);total+=size;largest=max(largest,size)
+            # If any shard is rejected, before that rejection retained GPU
+            # bytes exceed cache-largest; a never-rejected set spills zero.
+            upper=min(total,max(0,total-self.limit+largest))
+            self._q38_capture_contract=dict(params=sizes,limit=self.limit,device=expected_gpu,
+                total_bytes=total,largest_bytes=largest,cpu_upper_bytes=upper,
+                slot_ledger={},storage_ids=set(),expected_gpu_bytes=0,expected_cpu_bytes=0)
+            return dict(total_bytes=total,largest_bytes=largest,cache_bytes=self.limit,cpu_upper_bytes=upper,
+                parameter_count=len(params),device=str(expected_gpu),all_owners_verified=True)
+
+    def finish_gpu_capture_contract(self):
+        with self._lock:
+            if (self._q38_capture_contract is None or self._reuse_failed or self._reuse_frozen
+                    or self.slots or self.retained_bytes or self.cpu_spilled_bytes):
+                raise RuntimeError('Successful batch did not release its captured gradients')
+            self._q38_capture_contract=None
+
+    def _check_gpu_capture_contract(self,parameter,gradient):
+        contract=self._q38_capture_contract
+        if contract is None:return
+        owner=_REDUCED_OWNERS.get(id(parameter));entry=contract['params'].get(parameter)
+        if (entry is None or owner is None or owner[0]() is not parameter or owner[1] is not self
+                or not parameter.requires_grad or self.limit!=contract['limit'] or self.retained_device!='cuda'
+                or gradient.device!=contract['device'] or gradient.dtype!=torch.float32
+                or not gradient.is_contiguous() or tuple(gradient.shape)!=entry[0]
+                or gradient.numel()*4!=entry[1] or entry[1]>contract['largest_bytes']
+                or self.retained_bytes!=contract['expected_gpu_bytes']
+                or self.cpu_spilled_bytes!=contract['expected_cpu_bytes']
+                or self.retained_bytes>contract['limit'] or self.cpu_spilled_bytes>contract['cpu_upper_bytes']):
+            raise RuntimeError('FP32 gradient violated the frozen CUDA capture contract')
+        if parameter in self.slots:self._check_ledger_slot(parameter,self.slots[parameter])
+        if (parameter not in self.slots and self.retained_bytes+entry[1]>self.limit
+                ):
+            self._check_all_ledger_slots()
+            if self.cpu_spilled_bytes+entry[1]>contract['cpu_upper_bytes']:
+                raise MemoryError('Captured CPU gradient would exceed its admitted bound')
+
+    def _check_ledger_slot(self,parameter,slot):
+        contract=self._q38_capture_contract;record=contract['slot_ledger'].get(parameter)
+        if record is None or slot.gradient is None:raise RuntimeError('Missing captured-slot ledger entry')
+        grad=slot.gradient;storage=grad.untyped_storage();identity=(int(storage._cdata),int(storage.data_ptr()))
+        expected_device=contract['device'] if record['tier']=='gpu' else torch.device('cpu')
+        if (slot.parameter is not parameter or slot.tier!=record['tier'] or grad.device!=expected_device
+                or grad.dtype!=torch.float32 or not grad.is_contiguous() or tuple(grad.shape)!=record['shape']
+                or grad.numel()*4!=record['bytes'] or id(grad)!=record['tensor_id']
+                or identity!=record['storage'] or slot._q38_captured_storage!=identity):
+            raise RuntimeError('Existing gradient slot differs from its capture ledger')
+
+    def _check_all_ledger_slots(self):
+        contract=self._q38_capture_contract
+        if contract is None:return
+        if len(self.slots)!=len(contract['slot_ledger']):raise RuntimeError('Gradient slot count changed')
+        gpu=cpu=0;seen=set()
+        for parameter,slot in self.slots.items():
+            self._check_ledger_slot(parameter,slot);r=contract['slot_ledger'][parameter]
+            if r['bytes']:
+                if r['storage'][0] in seen:raise RuntimeError('Two slots share a gradient storage')
+                seen.add(r['storage'][0])
+            if r['tier']=='gpu':gpu+=r['bytes']
+            else:cpu+=r['bytes']
+        if (seen!=contract['storage_ids'] or gpu!=self.retained_bytes or cpu!=self.cpu_spilled_bytes
+                or gpu!=contract['expected_gpu_bytes'] or cpu!=contract['expected_cpu_bytes']):
+            raise RuntimeError('Gradient slot ledger accounting changed')
+
+    def _wait_gpu_slot(self,parameter,slot):
+        contract=self._q38_capture_contract
+        if contract is None or slot.tier!='gpu':return
+        event=contract['slot_ledger'][parameter]['event'];stream=torch.cuda.current_stream(contract['device'])
+        stream.wait_event(event);slot.gradient.record_stream(stream)
+
+    def _record_gpu_slot(self,parameter,slot):
+        contract=self._q38_capture_contract
+        if contract is None or slot.tier!='gpu':return
+        stream=torch.cuda.current_stream(contract['device']);slot.gradient.record_stream(stream)
+        event=torch.cuda.Event();event.record(stream);contract['slot_ledger'][parameter]['event']=event
 
     @torch.no_grad()
     def capture_reduced(self, parameter, gradient, *, divide=None):
+        with self._lock:
+            try:
+                contract=self._q38_capture_contract;is_new=parameter not in self.slots
+                self._check_gpu_capture_contract(parameter,gradient)
+                if contract is not None and not is_new:self._wait_gpu_slot(parameter,self.slots[parameter])
+                result=self._capture_reduced_impl(parameter,gradient,divide=divide)
+                if contract is not None:
+                    slot=self.slots[parameter]
+                    if is_new:
+                        grad=slot.gradient;storage=grad.untyped_storage();identity=(int(storage._cdata),int(storage.data_ptr()))
+                        size=grad.numel()*4
+                        if size and identity[0] in contract['storage_ids']:
+                            raise RuntimeError('New captured slot aliases an existing gradient storage')
+                        if size:contract['storage_ids'].add(identity[0])
+                        contract['slot_ledger'][parameter]=dict(tensor_id=id(grad),shape=tuple(grad.shape),bytes=size,
+                            tier=slot.tier,storage=identity,event=None)
+                        key='expected_gpu_bytes' if slot.tier=='gpu' else 'expected_cpu_bytes';contract[key]+=size
+                    self._check_ledger_slot(parameter,slot)
+                    if (self.retained_bytes!=contract['expected_gpu_bytes']
+                            or self.cpu_spilled_bytes!=contract['expected_cpu_bytes']):
+                        raise RuntimeError('New gradient slot was not correctly charged')
+                    self._record_gpu_slot(parameter,slot)
+                return result
+            except BaseException:
+                if self._q38_capture_contract is not None:self._reuse_failed=True
+                raise
+
+    def _capture_reduced_impl(self, parameter, gradient, *, divide=None):
         value = local(parameter.detach())
         if gradient.dtype != torch.float32 or value.dtype not in (torch.bfloat16, torch.float32):
             raise ValueError('Capture must retain FP32 reduction, with BF16 policy storage')
@@ -283,8 +415,16 @@ class GradientStore:
     def clip_grad_norm(self, max_norm, *, expected_local_numel=None, expected_global_numel=None,
                        process_group=None, collective_device=None):
         with self._lock:
-            return self._clip_grad_norm(max_norm,expected_local_numel=expected_local_numel,
-                expected_global_numel=expected_global_numel,process_group=process_group,collective_device=collective_device)
+            try:
+                self._check_all_ledger_slots()
+                for parameter,slot in self.slots.items():self._wait_gpu_slot(parameter,slot)
+                result=self._clip_grad_norm(max_norm,expected_local_numel=expected_local_numel,
+                    expected_global_numel=expected_global_numel,process_group=process_group,collective_device=collective_device)
+                for parameter,slot in self.slots.items():self._record_gpu_slot(parameter,slot)
+                return result
+            except BaseException:
+                if self._q38_capture_contract is not None:self._reuse_failed=True
+                raise
 
     @torch.no_grad()
     def _clip_grad_norm(self, max_norm, *, expected_local_numel=None, expected_global_numel=None,
@@ -556,6 +696,9 @@ class Bf16CpuAdamW(torch.optim.Optimizer):
                     raise ValueError('Every optimizer input must be the actual matching FP32 reduced shard')
                 if not value.numel():
                     continue
+                if self.gradients._q38_capture_contract is not None:
+                    self.gradients._check_ledger_slot(parameter,slot)
+                    self.gradients._wait_gpu_slot(parameter,slot)
                 state = self.state[parameter]
                 if not state:
                     state['step'] = 0

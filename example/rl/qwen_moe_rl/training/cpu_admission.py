@@ -27,7 +27,8 @@ def eligible_inactive_file(stat):
 
 
 def evaluate(snapshot, peers, *, run_id, hostname, expected_cid, reserve=60*GIB,
-             expected_time_namespace,maximum_age_seconds=15, now=None,monotonic_now=None,reuse_enabled=False):
+             expected_time_namespace,maximum_age_seconds=15, now=None,monotonic_now=None,
+             phase='first_adam',reuse_enabled=False):
     """Return a detailed decision or raise on missing/untrusted accounting.
 
     peers must contain exactly four distinct rank reports on this host. The
@@ -59,18 +60,27 @@ def evaluate(snapshot, peers, *, run_id, hostname, expected_cid, reserve=60*GIB,
     allocated=sum(_nat(row['allocated_moment_bytes'],'allocated_moment_bytes') for row in peers)
     pending=sum(_nat(row['planned_moment_bytes'],'planned_moment_bytes') for row in peers)
     reuse=0
-    if reuse_enabled:
-        for row in peers:
-            amount=_nat(row.get('reusable_cpu_gradient_bytes'),'reusable_cpu_gradient_bytes')
-            if (row.get('reuse_plan_verified') is not True or not isinstance(row.get('reuse_plan_sha256'),str)
-                    or len(row['reuse_plan_sha256'])!=64 or any(ch not in '0123456789abcdef' for ch in row['reuse_plan_sha256'])
-                    or amount!=row['cpu_gradient_bytes']
-                    or amount>row['planned_moment_bytes']):
-                raise ValueError('Unverified or incomplete first-Adam reuse plan')
-            reuse+=amount
-        pending-=reuse
-    if allocated!=0:
-        raise ValueError('First-step admission forbids pre-existing moment allocation')
+    if phase=='first_adam':
+        if reuse_enabled:
+            for row in peers:
+                amount=_nat(row.get('reusable_cpu_gradient_bytes'),'reusable_cpu_gradient_bytes')
+                if (row.get('reuse_plan_verified') is not True or not isinstance(row.get('reuse_plan_sha256'),str)
+                        or len(row['reuse_plan_sha256'])!=64 or any(ch not in '0123456789abcdef' for ch in row['reuse_plan_sha256'])
+                        or amount!=row['cpu_gradient_bytes'] or amount>row['planned_moment_bytes']):
+                    raise ValueError('Unverified or incomplete first-Adam reuse plan')
+                reuse+=amount
+            pending-=reuse
+        if allocated!=0:
+            raise ValueError('First-step admission forbids pre-existing moment allocation')
+        pending_moments=pending;pending_gradients=0
+    elif phase=='next_backward':
+        if reuse_enabled:raise ValueError('First-Adam reuse credit cannot be applied to a later backward')
+        if spill!=0 or any(row['allocated_moment_bytes']!=row['planned_moment_bytes'] for row in peers):
+            raise ValueError('Next-backward requires complete resident moments and no retained gradients')
+        pending_moments=0
+        pending_gradients=sum(_nat(row['next_cpu_gradient_upper_bytes'],'next_cpu_gradient_upper_bytes') for row in peers)
+        pending=pending_gradients
+    else:raise ValueError('Unknown admission phase')
     groups=snapshot.get('cgroups')
     if not isinstance(groups,list) or not groups:
         raise ValueError('No cgroup sample')
@@ -115,7 +125,8 @@ def evaluate(snapshot, peers, *, run_id, hostname, expected_cid, reserve=60*GIB,
             reclaimable_inactive_upper_bytes=inactive_upper,credited_cache_bytes=0,
             non_state_charged_bytes=non_state,
             reserve_shortfall_bytes=reserve_shortfall,existing_cpu_gradient_bytes=spill,
-            existing_moment_bytes=allocated,pending_moment_bytes=pending,
+            existing_moment_bytes=allocated,pending_moment_bytes=pending_moments,
+            pending_gradient_upper_bytes=pending_gradients,admission_phase=phase,
             approved_reusable_cpu_gradient_bytes=reuse,
             required_bytes=required,headroom_bytes=limit-required,passed=required<=limit))
     return dict(passed=all(row['passed'] for row in decisions),run_id=run_id,hostname=hostname,

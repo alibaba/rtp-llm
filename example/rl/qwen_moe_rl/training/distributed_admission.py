@@ -62,8 +62,10 @@ def first_adam_admission(engine,dist,group,*,world=72):
         if len({row['rank'] for row in rows})!=world or any(row.get('error') for row in rows):
             raise MemoryError('A rank could not report state before bounded reclaim')
         from distributed_reclaim import reclaim_world
+        if not hasattr(engine,'_q38_reclaim_cursor_holder'):engine._q38_reclaim_cursor_holder={}
         reclaim_world(dist,group,local,rows,root=root,run_id=run_id,world=world,
-            reserve=int(os.environ.get('Q38_CPU_RESERVE_BYTES_PER_NODE',60*1024**3)))
+            reserve=int(os.environ.get('Q38_CPU_RESERVE_BYTES_PER_NODE',60*1024**3)),
+            cursor_holder=engine._q38_reclaim_cursor_holder)
     try:
         if {row['rank'] for row in rows}!=set(range(world)) or any(row.get('error') for row in rows):
             raise ValueError('At least one rank could not report its real state')
