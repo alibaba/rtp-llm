@@ -123,7 +123,7 @@ public class DecodeSelector {
                                                                             List<DecodeRoutingView> views) {
         Response failure = null;
         boolean uniformFailure = true;
-        List<Map<String, Object>> evidence = new ArrayList<>();
+        List<Map<String, Object>> evidence = new ArrayList<>(views.size());
         for (DecodeRoutingView view : views) {
             Response workerFailure;
             try (WorkerEndpoint.EndpointHold hold = workerDirectory.holdDecodeEndpoint(view)) {
