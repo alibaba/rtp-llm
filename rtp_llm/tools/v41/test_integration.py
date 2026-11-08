@@ -257,16 +257,12 @@ class IntegrationTest(unittest.TestCase):
                 options = dict(parent={}, kv_cache_sharded=True)
                 env = preset_env(role, "/weights", **options)
                 runtime = V41RuntimeConfig.from_env(env)
-                self.assertEqual(env["RTP_V41_PPU_MODEL_PATH"], "shared")
                 self.assertEqual(runtime.source_cp, 8)
                 self.assertTrue(runtime.kv_sharded)
-                with self.assertRaisesRegex(ValueError, "PPU model path must be shared"):
-                    preset_env(role, "/weights", ppu_model_path="legacy", **options)
                 with self.assertRaisesRegex(ValueError, "CP KV sharding requires CP8"):
                     preset_env(
                         role,
                         "/weights",
-                        ppu_model_path="shared",
                         prefill_parallel="dp",
                         **options,
                     )
@@ -315,7 +311,7 @@ class IntegrationTest(unittest.TestCase):
                     runtime = V41RuntimeConfig.from_env(env)
                     self.assertEqual(runtime.speculative, "DSPARK")
                     self.assertEqual(env["GEN_NUM_PER_CIRCLE"], str(gamma))
-                    self.assertEqual(env["SP_MODEL_TYPE"], "deepseek_v41_ppu_shared_dspark")
+                    self.assertEqual(env["SP_MODEL_TYPE"], "deepseek_v41_dspark")
                     self.assertEqual(
                         env["SP_DSPARK_VERIFY_MODE"],
                         "packed" if role == "decode" else "dense",
@@ -332,7 +328,11 @@ class IntegrationTest(unittest.TestCase):
             "/weights",
             "--print-command",
         ]
-        for extra, expected in (([], "65536"), (["--max-seq-len", "131072"], "131072")):
+        for extra, expected in (
+            ([], "65536"),
+            (["--max-seq-len", "131072"], "131072"),
+            (["--dspark-gamma", "3"], "65536"),
+        ):
             with self.subTest(extra=extra), patch.dict(
                 os.environ, {"MAX_SEQ_LEN": "65536"}, clear=True
             ), patch.object(sys, "argv", common + extra), redirect_stdout(
@@ -340,6 +340,7 @@ class IntegrationTest(unittest.TestCase):
             ) as stream:
                 self.assertEqual(main(), 0)
             self.assertIn(f"MAX_SEQ_LEN={expected}", stream.getvalue())
+            self.assertTrue(stream.getvalue().strip().endswith("-m rtp_llm.start_server"))
 
     def test_pd_handoff_accepts_long_matching_history_and_rejects_invalid_lengths(self):
         from rtp_llm.models_py.modules.dsv41.ppu.pd_handoff import (

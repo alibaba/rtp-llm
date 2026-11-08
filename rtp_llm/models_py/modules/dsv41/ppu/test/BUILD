@@ -3,22 +3,22 @@ package(default_visibility = ["//visibility:public"])
 filegroup(
     name = "shared_eplb_native_sources",
     srcs = [
-        "native_ced_role.py",
-        "native_dspark_role.py",
-        "native_shared_ced_suite.py",
-        "native_shared_contract.py",
-        "native_shared_eplb_graph.py",
-        "native_shared_eplb_role.py",
-        "native_shared_graph_batch.py",
-        "native_shared_role.py",
+        "service_fixture.py",
+        "dspark_workload.py",
+        "ced_rdma_suite.py",
+        "dspark_rdma_contract.py",
+        "eplb_graph_evidence.py",
+        "eplb_rdma_role.py",
+        "dspark_graph_batch.py",
+        "pd_rdma_role.py",
         "test_dspark_evidence.py",
     ],
 )
 
 py_test(
     name = "test_shared_eplb_contract",
-    srcs = ["test_shared_eplb.py"],
-    main = "test_shared_eplb.py",
+    srcs = ["test_eplb.py"],
+    main = "test_eplb.py",
     data = ["//rtp_llm/models_py:v41_ppu_shared_sources", "//rtp_llm:v41_runtime_contract", "//rtp_llm/tools/v41:tooling"],
     env = {"GPU_COUNT": "0"},
     tags = ["manual", "cpu"],
@@ -31,13 +31,12 @@ py_test(
 filegroup(
     name = "shared_dspark_modes_native_sources",
     srcs = [
-        "native_ced_role.py",
-        "native_dspark_role.py",
-        "native_shared_contract.py",
-        "native_shared_dspark_modes_role.py",
-        "native_shared_dspark_role.py",
-        "native_shared_graph_batch.py",
-        "native_shared_role.py",
+        "service_fixture.py",
+        "dspark_workload.py",
+        "dspark_rdma_contract.py",
+        "dspark_rdma_role.py",
+        "dspark_graph_batch.py",
+        "pd_rdma_role.py",
         "test_dspark_evidence.py",
     ],
 )
@@ -46,7 +45,7 @@ sh_test(
     name = "shared_dspark_modes_boundary_test",
     srcs = ["//example/deepseek_v41/ppu:test_functional.sh"],
     args = ["shared-dspark-modes-boundary"],
-    data = ["test_shared_dspark_modes.py", "//rtp_llm/models_py:v41_ppu_shared_sources"],
+    data = ["test_dspark_modes.py", "//rtp_llm/models_py:v41_ppu_shared_sources"],
     env = {"GPU_COUNT": "1"},
     tags = ["manual", "PPU-ZW890P"],
     timeout = "long",
@@ -59,13 +58,12 @@ sh_test(
 filegroup(
     name = "shared_sharded_native_sources",
     srcs = [
-        "native_ced_role.py",
-        "native_dspark_role.py",
-        "native_shared_ced_suite.py",
-        "native_shared_contract.py",
-        "native_shared_perf.py",
-        "native_shared_role.py",
-        "native_shared_sharded_role.py",
+        "service_fixture.py",
+        "dspark_workload.py",
+        "ced_rdma_suite.py",
+        "dspark_rdma_contract.py",
+        "rdma_perf.py",
+        "pd_rdma_role.py",
         "test_dspark_evidence.py",
     ],
 )
@@ -74,7 +72,7 @@ sh_test(
     name = "shared_sharded_boundary_test",
     srcs = ["//example/deepseek_v41/ppu:test_functional.sh"],
     args = ["shared-sharded-boundary"],
-    data = ["test_shared_sharded.py", "//rtp_llm/models_py:v41_ppu_shared_sources"],
+    data = ["test_cp_sharding.py", "//rtp_llm/models_py:v41_ppu_shared_sources"],
     env = {"GPU_COUNT": "1"},
     tags = ["manual", "PPU-ZW890P"],
     timeout = "long",
@@ -86,7 +84,7 @@ sh_test(
 
 filegroup(
     name = "shared_optimized_native_sources",
-    srcs = ["native_shared_optimized_role.py"],
+    srcs = ["optimized_smoke_role.py"],
 )
 
 sh_test(
@@ -94,9 +92,9 @@ sh_test(
     srcs = ["//example/deepseek_v41/ppu:test_functional.sh"],
     args = ["shared-optimized-boundary"],
     data = [
-        "test_shared_packed_attention.py",
-        "test_shared_fused_ops.py",
-        "test_shared_streams.py",
+        "test_packed_attention.py",
+        "test_fused_ops.py",
+        "test_projection_streams.py",
         "//rtp_llm/models_py:v41_ppu_shared_sources",
     ],
     env = {"GPU_COUNT": "1"},
@@ -110,17 +108,17 @@ sh_test(
 
 filegroup(
     name = "shared_native_sources",
-    srcs = ["native_shared_role.py", "native_ced_role.py", "native_shared_dspark_role.py"],
+    srcs = ["pd_rdma_role.py", "service_fixture.py", "dspark_rdma_role.py"],
 )
 
 filegroup(
     name = "shared_graph_native_sources",
-    srcs = ["native_shared_graph_role.py", "native_shared_role.py", "native_ced_role.py"],
+    srcs = ["graph_fidelity_role.py", "pd_rdma_role.py", "service_fixture.py"],
 )
 
 filegroup(
     name = "shared_graph_modes_native_sources",
-    srcs = ["native_shared_graph_modes_role.py", "native_shared_role.py", "native_ced_role.py"],
+    srcs = ["graph_modes_role.py", "pd_rdma_role.py", "service_fixture.py"],
 )
 
 filegroup(
@@ -130,8 +128,8 @@ filegroup(
 
 py_test(
     name = "test_shared_graph_contract",
-    srcs = ["test_shared_graph.py"],
-    main = "test_shared_graph.py",
+    srcs = ["test_decode_graph.py"],
+    main = "test_decode_graph.py",
     data = ["//rtp_llm/models_py:v41_ppu_shared_sources"],
     env = {"GPU_COUNT": "0"},
     tags = ["manual", "cpu"],
@@ -145,8 +143,8 @@ sh_test(
     name = "shared_prefill_adapter_test",
     srcs = ["//example/deepseek_v41/ppu:test_functional.sh"],
     args = ["shared-prefill-adapter"],
-    data = ["test_shared_prefill.py", "//rtp_llm/models_py:v41_ppu_shared_sources"],
-    env = {"GPU_COUNT": "1", "RTP_V41_PPU_MODEL_PATH": "shared"},
+    data = ["test_prefill_runtime.py", "//rtp_llm/models_py:v41_ppu_shared_sources"],
+    env = {"GPU_COUNT": "1"},
     tags = ["manual", "PPU-ZW890P"],
     timeout = "long",
     target_compatible_with = select({
@@ -160,12 +158,11 @@ sh_test(
     srcs = ["//example/deepseek_v41/ppu:test_functional.sh"],
     args = ["shared-model"],
     data = [
-        "test_shared_model.py",
+        "test_model.py",
         "//rtp_llm/models_py:v41_ppu_shared_sources",
     ],
     env = {
         "GPU_COUNT": "1",
-        "RTP_V41_PPU_MODEL_PATH": "shared",
         "RTP_V41_PPU_MOE_BACKEND": "grouped",
         "RTP_V41_PPU_MOE_PRECISION": "w4a8",
     },

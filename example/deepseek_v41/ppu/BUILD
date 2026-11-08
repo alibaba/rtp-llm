@@ -13,7 +13,6 @@ exports_files(["test_functional.sh"])
         ],
         env = {
             "GPU_COUNT": "8",
-            "RTP_V41_PPU_MODEL_PATH": "shared",
             "RTP_V41_PPU_MOE_BACKEND": "grouped",
             "RTP_V41_PPU_MOE_PRECISION": "w4a8",
         },
@@ -41,7 +40,6 @@ exports_files(["test_functional.sh"])
         ],
         env = {
             "GPU_COUNT": "8",
-            "RTP_V41_PPU_MODEL_PATH": "shared",
             "RTP_V41_PPU_MOE_BACKEND": "grouped",
             "RTP_V41_PPU_MOE_PRECISION": "w4a8",
         },
@@ -69,7 +67,6 @@ exports_files(["test_functional.sh"])
         ],
         env = {
             "GPU_COUNT": "8",
-            "RTP_V41_PPU_MODEL_PATH": "shared",
             "RTP_V41_PPU_MOE_BACKEND": "grouped",
             "RTP_V41_PPU_MOE_PRECISION": "w4a8",
         },
@@ -97,7 +94,6 @@ sh_test(
     ],
     env = {
         "GPU_COUNT": "8",
-        "RTP_V41_PPU_MODEL_PATH": "shared",
         "RTP_V41_PPU_MOE_BACKEND": "megamoe",
         "RTP_V41_PPU_MOE_PRECISION": "w4a4",
     },
@@ -119,7 +115,6 @@ sh_test(
     ],
     env = {
         "GPU_COUNT": "8",
-        "RTP_V41_PPU_MODEL_PATH": "shared",
         "RTP_V41_PPU_MOE_BACKEND": "megamoe",
         "RTP_V41_PPU_MOE_PRECISION": "w4a4",
     },
@@ -141,7 +136,6 @@ sh_test(
     ],
     env = {
         "GPU_COUNT": "8",
-        "RTP_V41_PPU_MODEL_PATH": "shared",
         "RTP_V41_PPU_MOE_BACKEND": "grouped",
         "RTP_V41_PPU_MOE_PRECISION": "w4a8",
     },
@@ -160,7 +154,6 @@ sh_test(
     data = ["//rtp_llm/models_py/modules/dsv41/ppu/test:shared_dspark_direct_native_sources"],
     env = {
         "GPU_COUNT": "8",
-        "RTP_V41_PPU_MODEL_PATH": "shared",
         "RTP_V41_PPU_MOE_BACKEND": "grouped",
         "RTP_V41_PPU_MOE_PRECISION": "w4a8",
     },
@@ -183,7 +176,6 @@ sh_test(
         ],
         env = {
             "GPU_COUNT": "8",
-            "RTP_V41_PPU_MODEL_PATH": "shared",
             "RTP_V41_PPU_MOE_BACKEND": "grouped",
             "RTP_V41_PPU_MOE_PRECISION": "w4a8",
         },

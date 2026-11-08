@@ -12,10 +12,10 @@ from rtp_llm.models_py.modules.dsv41.ppu import backend as provider
 
 class GetBackendTest(unittest.TestCase):
     def test_missing_framework_descriptor_base_is_rejected(self):
-        from rtp_llm.models_py.modules.dsv41.ppu.shared_weight import DeepSeekV41SharedPPUWeight
+        from rtp_llm.models_py.modules.dsv41.ppu.model_weights import DeepSeekV41PPUWeight
 
         with patch.object(
-            DeepSeekV41SharedPPUWeight, "framework_base_available", return_value=False
+            DeepSeekV41PPUWeight, "framework_base_available", return_value=False
         ):
             with self.assertRaisesRegex(
                 RuntimeError, "framework weight descriptor base"
@@ -30,11 +30,11 @@ class GetBackendTest(unittest.TestCase):
         self.assertEqual(backend.name, "ppu")
         self.assertIsInstance(backend.model_cls, type)
         self.assertIsInstance(backend.weight_cls, type)
-        from rtp_llm.models_py.modules.dsv41.ppu.shared_model import DeepSeekV41SharedPPUModel
-        from rtp_llm.models_py.modules.dsv41.ppu.shared_weight import DeepSeekV41SharedPPUWeight
+        from rtp_llm.models_py.modules.dsv41.ppu.model import DeepSeekV41PPUModel
+        from rtp_llm.models_py.modules.dsv41.ppu.model_weights import DeepSeekV41PPUWeight
 
-        self.assertIs(backend.model_cls, DeepSeekV41SharedPPUModel)
-        self.assertIs(backend.weight_cls, DeepSeekV41SharedPPUWeight)
+        self.assertIs(backend.model_cls, DeepSeekV41PPUModel)
+        self.assertIs(backend.weight_cls, DeepSeekV41PPUWeight)
         for name in b.OP_NAMES:
             self.assertTrue(callable(getattr(backend.ops, name)), name)
         self.assertTrue(callable(backend.check_capabilities))

@@ -28,7 +28,7 @@ if [[ "$v41_role" == graph-contracts ]]; then
         rtp_llm.tools.v41.test_integration \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_graph_cache \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_graph_engram \
-        rtp_llm.models_py.modules.dsv41.ppu.test.test_shared_graph
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_decode_graph
 fi
 if [[ "$v41_role" == graph-cache-device ]]; then
     export RTP_V41_TEST_GRAPH_DEVICE=1
@@ -42,66 +42,66 @@ if [[ "$v41_role" == mhc-integration ]]; then
 fi
 if [[ "$v41_role" == shared-prefill-adapter ]]; then
     exec "$v41_python" -B -m unittest \
-        rtp_llm.models_py.modules.dsv41.ppu.test.test_shared_prefill.SharedPrefillDevice
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_prefill_runtime.SharedPrefillDevice
 fi
 if [[ "$v41_role" == shared-sharded-boundary ]]; then
     exec "$v41_python" -B -m unittest \
-        rtp_llm.models_py.modules.dsv41.ppu.test.test_shared_sharded.SharedShardedBoundary
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_cp_sharding.SharedShardedBoundary
 fi
 if [[ "$v41_role" == shared-dspark-modes-boundary ]]; then
-    exec "$v41_python" -B rtp_llm/models_py/modules/dsv41/ppu/test/test_shared_dspark_modes.py --device
+    exec "$v41_python" -B rtp_llm/models_py/modules/dsv41/ppu/test/test_dspark_modes.py --device
 fi
 if [[ "$v41_role" == shared-optimized-boundary ]]; then
     exec "$v41_python" -B -m unittest \
-        rtp_llm.models_py.modules.dsv41.ppu.test.test_shared_packed_attention.SharedPackedAttentionDevice \
-        rtp_llm.models_py.modules.dsv41.ppu.test.test_shared_fused_ops.SharedFusedOpsDevice \
-        rtp_llm.models_py.modules.dsv41.ppu.test.test_shared_streams.SharedStreamsDevice
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_packed_attention.SharedPackedAttentionDevice \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_fused_ops.SharedFusedOpsDevice \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_projection_streams.SharedStreamsDevice
 fi
 : "${RTP_V41_TEST_CHECKPOINT:?checkpoint directory required}"
 if [[ "$v41_role" == shared-grouped-graph-decode ]]; then
     [[ "${RTP_V41_PPU_MOE_BACKEND:?select grouped explicitly}" == grouped ]]
     [[ "${RTP_V41_PPU_MOE_PRECISION:?select w4a8 explicitly}" == w4a8 ]]
-    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.native_shared_graph_modes_role
+    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.graph_modes_role
 fi
 if [[ "$v41_role" == shared-dspark-direct-graph ]]; then
     [[ "${RTP_V41_PPU_MOE_BACKEND:?select grouped explicitly}" == grouped ]]
     [[ "${RTP_V41_PPU_MOE_PRECISION:?select w4a8 explicitly}" == w4a8 ]]
-    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.native_shared_graph_modes_role --direct
+    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.graph_modes_role --direct
 fi
 if [[ "$v41_role" == shared-eplb-prefill || "$v41_role" == shared-eplb-decode ]]; then
     export RTP_V41_SHARED_ROLE=${v41_role##shared-eplb-}
-    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.native_shared_eplb_role
+    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.eplb_rdma_role
 fi
 if [[ "$v41_role" == shared-dspark-modes-prefill || "$v41_role" == shared-dspark-modes-decode ]]; then
     export RTP_V41_SHARED_ROLE=${v41_role##shared-dspark-modes-}
-    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.native_shared_dspark_modes_role
+    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.dspark_rdma_role --mode-from-env
 fi
 if [[ "$v41_role" == shared-sharded-prefill || "$v41_role" == shared-sharded-decode ]]; then
     export RTP_V41_SHARED_ROLE=${v41_role##shared-sharded-}
-    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.native_shared_sharded_role
+    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.pd_rdma_role --sharded
 fi
 if [[ "$v41_role" == shared-optimized ]]; then
     [[ "${RTP_V41_PPU_MOE_BACKEND:?select megamoe explicitly}" == megamoe ]]
     [[ "${RTP_V41_PPU_MOE_PRECISION:?select w4a4 explicitly}" == w4a4 ]]
-    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.native_shared_optimized_role
+    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.optimized_smoke_role
 fi
 if [[ "$v41_role" == shared-graph ]]; then
     [[ "${RTP_V41_PPU_MOE_BACKEND:?select megamoe explicitly}" == megamoe ]]
     [[ "${RTP_V41_PPU_MOE_PRECISION:?select w4a4 explicitly}" == w4a4 ]]
-    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.native_shared_graph_role
+    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.graph_fidelity_role
 fi
 if [[ "$v41_role" == shared-dspark-prefill || "$v41_role" == shared-dspark-decode ]]; then
     export RTP_V41_SHARED_ROLE=${v41_role##shared-dspark-}
-    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.native_shared_dspark_role
+    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.dspark_rdma_role
 fi
 if [[ "$v41_role" == shared-yoco140-prefill || "$v41_role" == shared-yoco140-decode ]]; then
     export RTP_V41_SHARED_ROLE=${v41_role##shared-yoco140-}
-    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.native_shared_role
+    exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.pd_rdma_role
 fi
 if [[ "$v41_role" == shared-model ]]; then
     exec "$v41_python" -B -m unittest \
-        rtp_llm.models_py.modules.dsv41.ppu.test.test_shared_model.TestSharedModelBoundaries \
-        rtp_llm.models_py.modules.dsv41.ppu.test.test_shared_model.TestSharedModelWeightsDevice.test_real_checkpoint_shared_consumer
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_model.TestSharedModelBoundaries \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_model.TestSharedModelWeightsDevice.test_real_checkpoint_shared_consumer
 fi
 printf 'Unknown V4.1 PPU functional role: %s\n' "$v41_role" >&2
 exit 2

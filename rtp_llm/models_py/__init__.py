@@ -44,12 +44,6 @@ try:
         attn_register.install()
         moe_register.install()
         linear_register.install()
-        from rtp_llm.model_factory_register import register_lazy_model
-
-        register_lazy_model(
-            "deepseek_v41_ppu_shared_dspark",
-            "rtp_llm.models_py.modules.dsv41.ppu.shared_registration",
-        )
 except Exception as exc:  # noqa: BLE001
     if _is_ppu:
         raise

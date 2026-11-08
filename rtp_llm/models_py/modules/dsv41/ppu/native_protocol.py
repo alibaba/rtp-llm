@@ -97,7 +97,7 @@ def native_cache_protocol(config=None):
 
 
 def _shared_dspark_contract(config):
-    from rtp_llm.models_py.modules.dsv41.ppu.shared_dspark_modes import SharedDSparkMode
+    from rtp_llm.models_py.modules.dsv41.ppu.dspark_modes import SharedDSparkMode
 
     mode = SharedDSparkMode.from_config(config)
     return mode.protocol() if mode is not None else None

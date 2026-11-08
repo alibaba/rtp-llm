@@ -223,12 +223,10 @@ class DeepSeekV41DSpark(DeepSeekV41, DeepSeekV4DSpark):
             kv_source_layer_ids=[], index_source_layer_ids=[], engram_layer_ids=[]
         )
         if v41_backend_for_config() == "ppu":
-            from rtp_llm.models_py.modules.dsv41.ppu.backend import model_path
-            from rtp_llm.models_py.modules.dsv41.ppu.shared_dspark_modes import (
+            from rtp_llm.models_py.modules.dsv41.ppu.dspark_modes import (
                 SharedDSparkMode,
             )
 
-            model_path()
             mode = SharedDSparkMode.from_config(text)
             if mode is not None:
                 config.dspark_sample_from_anchor = mode.sample_from_anchor
@@ -238,11 +236,11 @@ class DeepSeekV41DSpark(DeepSeekV41, DeepSeekV4DSpark):
 
     def _create_python_model(self):
         if v41_backend_for_config() == "ppu":
-            from rtp_llm.models_py.modules.dsv41.ppu.shared_dspark_model import (
-                DeepSeekV41SharedPPUDSparkModel,
+            from rtp_llm.models_py.modules.dsv41.ppu.dspark_model import (
+                DeepSeekV41PPUDSparkModel,
             )
 
-            self.py_model = DeepSeekV41SharedPPUDSparkModel(
+            self.py_model = DeepSeekV41PPUDSparkModel(
                 self.model_config,
                 self.parallelism_config,
                 self.weight,
@@ -275,11 +273,11 @@ class DeepSeekV41DSpark(DeepSeekV41, DeepSeekV4DSpark):
     @staticmethod
     def get_weight_cls():
         if v41_backend_for_config() == "ppu":
-            from rtp_llm.models_py.modules.dsv41.ppu.shared_dspark_weight import (
-                DeepSeekV41SharedPPUDSparkWeight,
+            from rtp_llm.models_py.modules.dsv41.ppu.dspark_weights import (
+                DeepSeekV41PPUDSparkWeight,
             )
 
-            return DeepSeekV41SharedPPUDSparkWeight
+            return DeepSeekV41PPUDSparkWeight
         return DeepSeekV41DSparkWeight
 
 

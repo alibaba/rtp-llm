@@ -258,9 +258,10 @@ def shared_grouped_graph_enabled(env=None):
 
 def validate_v41_server_config(config):
     model_type = config.model_args.model_type
-    if (model_type == "deepseek_v41_ppu_shared_eplb_smoke"
-            and os.environ.get("RTP_V41_N8_EPLB_FIXTURE") == "1"
-            and os.environ.get("RTP_V41_PPU_MODEL_PATH") == "shared"):
+    if (
+        model_type == "deepseek_v41_ppu_shared_eplb_smoke"
+        and os.environ.get("RTP_V41_N8_EPLB_FIXTURE") == "1"
+    ):
         model_type = "deepseek_v41"
     if not model_type or not model_type.startswith("deepseek_v41"):
         return

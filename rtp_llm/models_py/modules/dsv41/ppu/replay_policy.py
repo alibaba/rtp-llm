@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import asdict, dataclass
 
-from rtp_llm.models_py.modules.dsv41.ppu.shared_dspark_modes import SharedDSparkMode
+from rtp_llm.models_py.modules.dsv41.ppu.dspark_modes import SharedDSparkMode
 
 _CONFIG_KEY = "_ppu_prefill_policy"
 

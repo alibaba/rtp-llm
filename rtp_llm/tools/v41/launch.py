@@ -48,7 +48,6 @@ def preset_env(
     dspark_verify_budget=-1,
     dspark_budget_mode="fixed",
     fake_balance_expert=None,
-    ppu_model_path=None,
     yoco_keep_tokens=None,
     max_rollback_tokens=None,
     shared_decode_graph=False,
@@ -110,12 +109,6 @@ def preset_env(
         raise ValueError("DSpark options require positive gamma")
     cp_prefill = prefill_parallel == "cp"
     env = dict(os.environ if parent is None else parent)
-    model_path = ppu_model_path
-    if model_path is None:
-        model_path = env.get("RTP_V41_PPU_MODEL_PATH", "shared")
-    if not isinstance(model_path, str) or model_path.strip().lower() != "shared":
-        raise ValueError("PPU model path must be shared")
-    env["RTP_V41_PPU_MODEL_PATH"] = "shared"
     if type(shared_eplb) is not bool or type(eplb_rearrange_after_prefill) is not bool:
         raise ValueError("shared EPLB opt-in and after-prefill must be explicit booleans")
     if eplb_mode not in ("NONE", "STATS", "EPLB", "ALL"):
@@ -223,7 +216,7 @@ def preset_env(
     if dspark_gamma:
         env.update(
             SP_TYPE="dspark",
-            SP_MODEL_TYPE="deepseek_v41_ppu_shared_dspark",
+            SP_MODEL_TYPE="deepseek_v41_dspark",
             SP_CHECKPOINT_PATH=str(checkpoint),
             GEN_NUM_PER_CIRCLE=str(dspark_gamma),
             # P runs commit-only and does not rank proposals or verify rows.
@@ -238,7 +231,7 @@ def preset_env(
         )
         from dataclasses import asdict
 
-        from rtp_llm.models_py.modules.dsv41.ppu.shared_dspark_modes import (
+        from rtp_llm.models_py.modules.dsv41.ppu.dspark_modes import (
             ANCHOR_ENV,
             PROFILE_ENV,
             SharedDSparkMode,
@@ -406,7 +399,6 @@ def main():
     action.add_argument("--check-only", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--probe-allocations", action="store_true")
-    parser.add_argument("--ppu-model-path", choices=("shared",))
     parser.add_argument("--shared-eplb", action="store_true")
     parser.add_argument("--eplb-mode", choices=("NONE", "STATS", "EPLB", "ALL"), default="NONE")
     parser.add_argument("--redundant-experts", type=int, default=0)
@@ -442,7 +434,6 @@ def main():
         dspark_verify_budget=args.dspark_verify_budget,
         dspark_budget_mode=args.dspark_budget_mode,
         fake_balance_expert=args.fake_balance_expert,
-        ppu_model_path=args.ppu_model_path,
         shared_eplb=args.shared_eplb,
         eplb_mode=args.eplb_mode,
         redundant_experts=args.redundant_experts,
@@ -461,8 +452,6 @@ def main():
     if args.token_map_cache:
         env["RTP_V41_TOKEN_MAP_CACHE"] = str(args.token_map_cache)
     command = [sys.executable, "-m", "rtp_llm.start_server"]
-    if args.dspark_gamma:
-        command = [sys.executable, "-m", "rtp_llm.models_py.modules.dsv41.ppu.shared_server"]
     if args.print_command:
         # Only print preset-owned values; never expose inherited secrets.
         owned = preset_env(

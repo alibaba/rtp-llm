@@ -1374,7 +1374,7 @@ class EvidenceParserTest(unittest.TestCase):
                 )
 
     def test_only_contracts_retains_full_finite_model_input_plan(self):
-        from rtp_llm.models_py.modules.dsv41.ppu.test.native_dspark_role import (
+        from rtp_llm.models_py.modules.dsv41.ppu.test.dspark_workload import (
             configure_contract_logging,
         )
 
@@ -1437,7 +1437,7 @@ class EvidenceParserTest(unittest.TestCase):
         )
 
     def test_contract_logger_capacity_keeps_complete_32k_cp8_features(self):
-        from rtp_llm.models_py.modules.dsv41.ppu.test.native_dspark_role import (
+        from rtp_llm.models_py.modules.dsv41.ppu.test.dspark_workload import (
             configure_contract_logging,
         )
 
@@ -1873,45 +1873,6 @@ class EvidenceParserTest(unittest.TestCase):
                 ):
                     observer._specs(bridge, [0], [8192], "prefill", None)
 
-    def test_native_timeout_defaults_and_long_overrides(self):
-        from rtp_llm.models_py.modules.dsv41.ppu.test.native_dspark_role import (
-            native_timeout_limits,
-        )
-        from rtp_llm.tools.v41.launch import preset_env
-
-        cases = (
-            ({}, 3600, 1800000, 12600),
-            (
-                dict(
-                    RTP_V41_TEST_REQUEST_TIMEOUT_SECONDS="7200",
-                    RTP_V41_TEST_PREFILL_WAIT_TIMEOUT_MS="5400000",
-                    RTP_V41_TEST_DEADLINE_SECONDS="28800",
-                ),
-                7200,
-                5400000,
-                28800,
-            ),
-        )
-        for env, request, queue, global_seconds in cases:
-            with self.subTest(request=request):
-                limits = native_timeout_limits(env)
-                self.assertEqual(
-                    limits,
-                    dict(
-                        request_timeout_seconds=request,
-                        prefill_wait_timeout_ms=queue,
-                        deadline_seconds=global_seconds,
-                    ),
-                )
-                for role in ("prefill", "decode"):
-                    native = preset_env(
-                        role,
-                        "/unused-checkpoint",
-                        parent={},
-                        prefill_wait_timeout_ms=queue,
-                    )
-                    self.assertEqual(native["PREFILL_MAX_WAIT_TIMEOUT_MS"], str(queue))
-
     def test_native_queue_timeout_cli_default_override_and_invalid(self):
         from rtp_llm.tools.v41 import launch
 
@@ -1963,89 +1924,8 @@ class EvidenceParserTest(unittest.TestCase):
                     report.assert_not_called()
                     execute.assert_not_called()
 
-    def test_native_invalid_timeout_limits_reject_before_model_start(self):
-        from rtp_llm.models_py.modules.dsv41.ppu.test import native_dspark_role as role
-
-        bounds = (
-            ("RTP_V41_TEST_REQUEST_TIMEOUT_SECONDS", "86401"),
-            ("RTP_V41_TEST_PREFILL_WAIT_TIMEOUT_MS", "86400001"),
-            ("RTP_V41_TEST_DEADLINE_SECONDS", "172801"),
-        )
-        for name, excess in bounds:
-            for value in ("0", "-1", "nan", "inf", "0.0005", excess):
-                with self.subTest(name=name, value=value), patch.dict(
-                    os.environ, {name: value}, clear=True
-                ), patch.object(role.subprocess, "Popen") as start:
-                    with self.assertRaises(ValueError):
-                        role.main()
-                    start.assert_not_called()
-
-    def test_native_role_forwards_and_records_timeout_limits(self):
-        from rtp_llm.models_py.modules.dsv41.ppu.test import native_dspark_role as role
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source, runtime = root / "source", root / "runtime"
-            source.mkdir()
-            runtime.mkdir()
-            snapshot = dict(
-                snapshot_id="unit-only",
-                source_sha256="0" * 64,
-                public_commit="a" * 40,
-                internal_commit="b" * 40,
-            )
-            for tree in (source, runtime):
-                (tree / ".v41_snapshot.json").write_text(json.dumps(snapshot))
-            libraries = {}
-            for index in range(4):
-                name = f"unit-library-{index}"
-                content = name.encode()
-                (runtime / name).write_bytes(content)
-                libraries[name] = dict(
-                    runtime_path=name, sha256=hashlib.sha256(content).hexdigest()
-                )
-            (runtime / "native-runtime.json").write_text(
-                json.dumps(
-                    dict(source_sha256=snapshot["source_sha256"], libraries=libraries)
-                )
-            )
-            env = dict(
-                RTP_V41_DSPARK_ROLE="prefill",
-                RTP_V41_TEST_DSPARK_SUITE="contracts",
-                RTP_V41_TEST_SOURCE_ROOT=str(source),
-                RTP_V41_TEST_RUNTIME=str(runtime),
-                RTP_V41_DSPARK_OUTPUT=str(root / "output"),
-                RTP_V41_DSPARK_CONTROL=str(root / "control"),
-                RTP_V41_TEST_CHECKPOINT=str(root / "unused-checkpoint"),
-                RTP_V41_DSPARK_PREFILL_ADDRESS="127.0.0.1:8090",
-                RTP_V41_DSPARK_DECODE_ADDRESS="127.0.0.1:9090",
-                RTP_V41_TEST_REQUEST_TIMEOUT_SECONDS="7200",
-                RTP_V41_TEST_PREFILL_WAIT_TIMEOUT_MS="5400000",
-                RTP_V41_TEST_DEADLINE_SECONDS="28800",
-            )
-            with patch.dict(os.environ, env, clear=True), patch.object(
-                role.subprocess, "Popen", return_value=SimpleNamespace(pid=123)
-            ) as start, patch.object(
-                role, "write_json", side_effect=RuntimeError("captured launch only")
-            ) as evidence:
-                with self.assertRaisesRegex(RuntimeError, "captured launch only"):
-                    role.main()
-            argv = start.call_args.args[0]
-            self.assertEqual(
-                argv[argv.index("--prefill-wait-timeout-ms") + 1], "5400000"
-            )
-            self.assertEqual(evidence.call_args.args[0].name, "launch.json")
-            self.assertEqual(
-                evidence.call_args.args[1]["timeouts"],
-                dict(
-                    request_timeout_seconds=7200,
-                    prefill_wait_timeout_ms=5400000,
-                    deadline_seconds=28800,
-                ),
-            )
-
     def test_contract_request_deadline_bounds_query_and_http_timeout(self):
-        from rtp_llm.models_py.modules.dsv41.ppu.test import native_dspark_role as role
+        from rtp_llm.models_py.modules.dsv41.ppu.test import dspark_workload as role
 
         for requested, remaining, expected in (
             (3600, 10000, 3600),
@@ -2087,7 +1967,7 @@ class EvidenceParserTest(unittest.TestCase):
                 self.assertEqual(query["generate_config"]["random_seed"], 42)
 
     def test_contract_request_expired_deadline_never_dispatches(self):
-        from rtp_llm.models_py.modules.dsv41.ppu.test import native_dspark_role as role
+        from rtp_llm.models_py.modules.dsv41.ppu.test import dspark_workload as role
 
         for remaining in (0, -1, 0.0005):
             with self.subTest(
