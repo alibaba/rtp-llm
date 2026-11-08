@@ -71,11 +71,9 @@ class KimiK31ModelAdapter:
                     raise ValueError("natural outer requires a supported SFA split projection backend")
         if self.norm.weight.dtype != torch.bfloat16:
             raise ValueError("natural outer requires BF16 hidden states")
-        global_rows = self.config.moe_prefill_max_tokens_per_rank
-        if global_rows is None:
-            global_rows = self.config.max_seq_len
-        global_rows = max(int(global_rows), self._max_moe_tokens)
-        capacity = (global_rows + self.tp_size - 1) // self.tp_size + 2 * int(init_resource.max_context_batch_size)
+        # The model owner already includes chunking, per-request CP padding
+        # and unchunked startup work in this global physical-row bound.
+        capacity = self._max_moe_tokens // self.tp_size
         self._row_exchange = DirectedRowExchange(
             get_process_group(Group.TP), self.norm.weight.device,
             capacity, self.config.hidden_size, chunk_capacity=8192,
@@ -210,11 +208,7 @@ class KimiK31ModelAdapter:
             and getattr(init_resource, "is_speculative", False)
         ):
             return
-        global_rows = self.config.moe_prefill_max_tokens_per_rank
-        if global_rows is None:
-            global_rows = self.config.max_seq_len
-        requests = int(init_resource.max_context_batch_size)
-        capacity = (int(global_rows) + self.tp_size - 1) // self.tp_size + 2 * requests
+        capacity = self._max_moe_tokens // self.tp_size
         if capacity <= 0:
             raise ValueError("MTP Prefill hidden capacity must be positive")
         buffer = self._mtp_prefill_hidden_buffer

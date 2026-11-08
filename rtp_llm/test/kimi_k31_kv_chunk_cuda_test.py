@@ -5,7 +5,6 @@ import unittest
 from types import SimpleNamespace
 
 import torch
-from rtp_llm.ops import ParallelismConfig
 
 from rtp_llm.models_py.kernels.cuda.dsa_kv_chunk import (
     map_dsa_chunk_slots,
@@ -16,6 +15,7 @@ from rtp_llm.models_py.modules.dsv4.indexer_topk import TorchIndexerTopKBackend
 from rtp_llm.models_py.triton_kernels.mla.lse_merge import (
     merge_attention_states_in_place,
 )
+from rtp_llm.ops import KvCacheDataType, ParallelismConfig
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA component test")
@@ -61,6 +61,7 @@ class DsaKVChunkCudaTest(unittest.TestCase):
                 ),
             ),
             attn_config=SimpleNamespace(
+                kv_cache_dtype=KvCacheDataType.BASE,
                 head_num=96,
                 kv_lora_rank=512,
                 rope_head_dim=64,

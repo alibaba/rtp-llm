@@ -95,6 +95,8 @@ protected:
     size_t                          max_inited_kv_cache_streams_ = 0;
     int64_t                         prefill_chunk_size_      = 0;
     int64_t                         prefill_chunk_alignment_ = 0;
+    int64_t                         prefill_chunk_cp_size_   = 0;
+    int64_t                         prefill_chunk_padded_rows_ = 0;
     bool                            need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
     bool                            schedule_trigger_        = false;

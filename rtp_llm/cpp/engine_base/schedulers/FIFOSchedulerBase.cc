@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -85,6 +86,14 @@ FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runt
                                 "intermediate_chunk_alignment=%ld; requires 0 < alignment <= prefill_chunk_size",
                                 prefill_chunk_size_,
                                 prefill_chunk_alignment_);
+        const auto& cp = parallelism_config.prefill_cp_config;
+        if (pd_sep_config.role_type == RoleType::PREFILL && parallelism_config.dp_size == 1
+            && parallelism_config.tp_size > 1 && cp.is_enabled() && cp.preserve_tp_layout) {
+            prefill_chunk_cp_size_ = parallelism_config.tp_size;
+            // Match K3.1's MoE staging capacity for a scheduler-sized chunk.
+            prefill_chunk_padded_rows_ = getZigzagPaddedTokenCapacity(
+                prefill_chunk_size_, runtime_config.fifo_scheduler_config.max_context_batch_size, prefill_chunk_cp_size_);
+        }
         RTP_LLM_LOG_INFO("[chunked_prefill] token_budget=%ld, intermediate_chunk_alignment=%ld",
                          prefill_chunk_size_,
                          prefill_chunk_alignment_);
@@ -297,7 +306,8 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
         return active_streams;
     }
 
-    int64_t                      budget_left = prefill_chunk_size_;
+    int64_t                      budget_left        = prefill_chunk_size_;
+    int64_t                      padded_budget_left = prefill_chunk_padded_rows_;
     std::list<GenerateStreamPtr> selected;
 
     const auto finish_invalid_stream = [&active_streams](auto it, ErrorCode error_code, const std::string& reason) {
@@ -354,7 +364,13 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
             continue;
         }
 
-        const int64_t grant = computeChunkGrant(budget_left, rows, remaining, prefill_chunk_alignment_, reuse);
+        int64_t grant_budget = budget_left;
+        if (prefill_chunk_cp_size_ > 0) {
+            const auto stripe = 2 * prefill_chunk_cp_size_;
+            // Every expanded sequence needs its own complete Zigzag stripes.
+            grant_budget = std::min(grant_budget, padded_budget_left / rows / stripe * stripe * rows);
+        }
+        const int64_t grant = computeChunkGrant(grant_budget, rows, remaining, prefill_chunk_alignment_, reuse);
 
         if (grant <= 0) {
             if (!selected.empty()) {
@@ -374,6 +390,10 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
         stream->setChunkSize(static_cast<int>(grant));
         selected.push_back(stream);
         budget_left -= grant * rows;
+        if (prefill_chunk_cp_size_ > 0) {
+            const auto padded_rows = makeZigzagTokenLayout(grant, prefill_chunk_cp_size_).padded_token_count;
+            padded_budget_left -= static_cast<int64_t>(padded_rows) * rows;
+        }
         ++it;
 
         if (grant < remaining) {

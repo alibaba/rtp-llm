@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/model_utils/RopeCache.h"
+#include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
 #include "pybind11/stl.h"
@@ -112,6 +113,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register get_block_cache_keys function
     registerCommon(m);
     registerMultimodal(m);
+    m.def("get_zigzag_padded_token_capacity",
+          &getZigzagPaddedTokenCapacity,
+          py::arg("token_budget"),
+          py::arg("sequence_budget"),
+          py::arg("cp_size"));
 
     // Register enums
     py::enum_<HiddenStateCaptureDtype>(m, "HiddenStateCaptureDtype")

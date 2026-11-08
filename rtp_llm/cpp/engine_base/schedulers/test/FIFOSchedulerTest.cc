@@ -5879,6 +5879,33 @@ TEST_F(FIFOSchedulerTest, testChunkedGroupResumesAfterCacheLoadWithoutMixingLane
     ASSERT_TRUE(expectPrefillBatch(scheduler.schedule(), {next_group}, {2}));
 }
 
+TEST_F(FIFOSchedulerTest, testChunkedQueryCpPrefillFitsMoeStagingAfterPadding) {
+    ChunkSchedulerTestConfig config;
+    config.prefill_chunk_size = 64;
+    auto cache = rtp_llm::test::makeSimpleMhaCacheConfig(
+        1, config.block_num, config.seq_size_per_block, rtp_llm::DataType::TYPE_FP16, 1, 4);
+    ParallelismConfig parallelism;
+    parallelism.role_type                           = RoleType::PREFILL;
+    parallelism.tp_size                             = 8;
+    parallelism.world_size                          = 8;
+    parallelism.prefill_cp_config.method            = CPRotateMethod::ALL_GATHER;
+    parallelism.prefill_cp_config.preserve_tp_layout = true;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config, cache, parallelism);
+    env.runtime_config.fifo_scheduler_config.cp_force_single_prefill = false;
+    ASSERT_TRUE(env.init());
+
+    auto first  = env.makeStream(vector<int>(21, 1));
+    auto second = env.makeStream(vector<int>(21, 2));
+    auto third  = env.makeStream(vector<int>(21, 3));
+    ASSERT_TRUE(env.scheduler().enqueue(first).ok());
+    ASSERT_TRUE(env.scheduler().enqueue(second).ok());
+    ASSERT_TRUE(env.scheduler().enqueue(third).ok());
+
+    // The 63 logical tokens fit, but padding three 21-token inputs would take
+    // 96 rows. With an 80-row staging cap, the last input gets a 16-token grant.
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {first, second, third}, {21, 21, 16}));
+}
+
 TEST_F(FIFOSchedulerTest, testChunkedPrefillNeverReturnsMixedContextAndDecodeBatch) {
     ChunkSchedulerTestConfig config;
     config.role_type          = RoleType::PDFUSION;

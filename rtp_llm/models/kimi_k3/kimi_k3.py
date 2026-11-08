@@ -20,6 +20,7 @@ from rtp_llm.ops import (
     KVCacheSpecType,
     QuantAlgo,
     RoleType,
+    get_zigzag_padded_token_capacity,
 )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
@@ -522,7 +523,7 @@ class KimiK3(BaseModel):
                 )
 
         # SP pads complete requests. Cover decode, verify and MTP update, including
-        # capture buckets larger than the serving batch limit. K3 has no query CP.
+        # capture buckets larger than the serving batch limit.
         batch = self.max_generate_batch_size
         if hw.enable_cuda_graph:
             batch = max([batch, *hw.decode_capture_batch_sizes])
@@ -540,7 +541,30 @@ class KimiK3(BaseModel):
         prompt = max(
             map(len, self.kv_cache_config.multi_task_prompt_tokens.values()), default=0
         )
-        max_moe_tokens = (max(prefill, decode, prompt, 1) + tp - 1) // tp * tp
+        prefill = max(prefill, prompt)
+        cp = self.parallelism_config.prefill_cp_config
+        prefill_staging_tokens = None
+        transport_tokens = 0
+        if (
+            role == RoleType.PREFILL
+            and getattr(config.k3_runtime_config, "dsa", None) is not None
+            and cp.is_enabled()
+            and cp.preserve_tp_layout
+        ):
+            requests = (
+                runtime.fifo_scheduler_config.max_context_batch_size
+                if runtime is not None
+                else self.max_generate_batch_size
+            )
+            prefill = max(tp, get_zigzag_padded_token_capacity(prefill, int(requests), tp))
+            prefill_staging_tokens = prefill
+            if runtime is not None and scheduler.prefill_chunk_size > 0:
+                # Each logical token can occupy its own Zigzag stripe after fanout.
+                chunk = scheduler.prefill_chunk_size
+                transport_tokens = get_zigzag_padded_token_capacity(chunk, chunk, tp)
+        else:
+            prefill = (prefill + tp - 1) // tp * tp
+        max_moe_tokens = max(prefill, decode, tp, transport_tokens)
 
         # Release inactive blocks left by checkpoint loading before the expert
         # weight transform allocates its large temporary buffer.
@@ -553,6 +577,7 @@ class KimiK3(BaseModel):
             self.weight,
             max_generate_batch_size=self.max_generate_batch_size,
             max_moe_tokens=max_moe_tokens,
+            prefill_staging_tokens=prefill_staging_tokens,
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.hw_kernel_config,
             device_resource_config=self.device_resource_config,

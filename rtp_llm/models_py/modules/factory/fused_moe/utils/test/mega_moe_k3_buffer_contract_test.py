@@ -59,7 +59,12 @@ class _Backend:
         activation,
     ):
         self.calls.append(("k3", num_max_tokens_per_rank, mma_type, activation))
-        return object()
+        alignment = self._C.get_token_alignment_for_mega_moe_k3()
+        return types.SimpleNamespace(
+            num_max_tokens_per_rank=(
+                (num_max_tokens_per_rank + alignment - 1) // alignment * alignment
+            )
+        )
 
     def get_symm_buffer_for_mega_moe(
         self,
@@ -76,7 +81,7 @@ class _Backend:
         self.calls.append(
             ("generic", num_max_tokens_per_rank, use_fp8_dispatch, activation)
         )
-        return object()
+        return types.SimpleNamespace(num_max_tokens_per_rank=num_max_tokens_per_rank)
 
 
 class K3BufferContractTest(unittest.TestCase):
@@ -99,10 +104,20 @@ class K3BufferContractTest(unittest.TestCase):
 
     def test_k3_uses_its_factory_and_aligned_size_query(self):
         first = self.module._get_or_create_mega_buf(**self.shape, activation="situ")
-        reused = self.module._get_or_create_mega_buf(**self.shape, activation="situ")
+        aligned_shape = dict(self.shape, num_max_tokens_per_rank=32)
+        reused = self.module._get_or_create_mega_buf(**aligned_shape, activation="situ")
         self.assertIs(first, reused)
         self.assertEqual(self.backend.calls, [("k3", 17, "fp8xfp4", "situ")])
         self.assertEqual(self.backend.size_calls, [("k3", 32, "fp8xfp4", "situ")])
+
+    def test_smaller_draft_reuses_target_workspace(self):
+        target = dict(self.shape, num_max_tokens_per_rank=8194)
+        draft = dict(self.shape, num_max_tokens_per_rank=8192)
+        self.assertIs(
+            self.module._get_or_create_mega_buf(**target, activation="situ"),
+            self.module._get_or_create_mega_buf(**draft, activation="situ"),
+        )
+        self.assertEqual(self.backend.calls, [("k3", 8194, "fp8xfp4", "situ")])
 
     def test_different_shapes_do_not_reuse_the_same_buffer(self):
         first = self.module._get_or_create_mega_buf(**self.shape, activation="situ")
@@ -116,13 +131,17 @@ class K3BufferContractTest(unittest.TestCase):
 
     def test_generic_api_and_cache_remain_independent(self):
         generic = self.module._get_or_create_mega_buf(**self.shape, activation="swiglu")
-        k3 = self.module._get_or_create_mega_buf(**self.shape, activation="situ")
+        smaller = dict(self.shape, num_max_tokens_per_rank=16)
+        self.assertIs(
+            generic, self.module._get_or_create_mega_buf(**smaller, activation="swiglu")
+        )
+        k3 = self.module._get_or_create_mega_buf(**smaller, activation="situ")
         self.assertIsNot(generic, k3)
         self.assertEqual(
             self.backend.calls,
             [
                 ("generic", 17, True, "swiglu"),
-                ("k3", 17, "fp8xfp4", "situ"),
+                ("k3", 16, "fp8xfp4", "situ"),
             ],
         )
         self.assertEqual(self.backend.size_calls[0], ("generic", 17, True, "swiglu"))

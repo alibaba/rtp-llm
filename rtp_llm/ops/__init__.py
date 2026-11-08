@@ -180,6 +180,7 @@ try:
         check_rope_cache,
         get_rope_cache,
         get_rope_cache_once,
+        get_zigzag_padded_token_capacity,
     )
 
     # Alias for backward compatibility

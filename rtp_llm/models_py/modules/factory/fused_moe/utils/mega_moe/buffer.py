@@ -15,9 +15,7 @@ import logging
 
 import torch
 
-# Module-level cache for the Mega MoE symm-mem dispatch buffer. Keyed by the
-# shape parameters so different model configs in the same process don't
-# collide; in practice there's only ever one entry per process.
+# Key the dispatch buffer by layout and requested token capacity.
 _MEGA_BUF_CACHE: dict = {}
 _MEGA_OUTPUT_CACHE: dict = {}
 
@@ -85,10 +83,9 @@ def _get_or_create_mega_buf(
     if backend is None:
         import deep_gemm as backend
 
-    key = (
+    shape = (
         id(group),
         num_experts,
-        num_max_tokens_per_rank,
         num_topk,
         hidden,
         intermediate_hidden,
@@ -96,8 +93,18 @@ def _get_or_create_mega_buf(
         activation,
         id(backend),
     )
+    key = (shape, num_max_tokens_per_rank)
     cached = _MEGA_BUF_CACHE.get(key)
     buf = cached[1] if cached is not None else None
+    if buf is None:
+        # The backend may allocate more rows than the cache key requests.
+        for (cached_shape, _), (_, cached_buf) in _MEGA_BUF_CACHE.items():
+            if (
+                cached_shape == shape
+                and cached_buf.num_max_tokens_per_rank >= num_max_tokens_per_rank
+            ):
+                buf = cached_buf
+                break
     if buf is None:
         try:
             group_size = int(group.size())
