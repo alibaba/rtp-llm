@@ -20,6 +20,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 
 #include <cfloat>
 #include <cstdint>
@@ -235,16 +236,53 @@ __device__ __forceinline__ void cp_async_bulk(void* smem_dst,
       : "memory");
 }
 
+template <int H, int VEC, typename Packed>
+__device__ __forceinline__ void store_fp8_group(
+    const bf16_t* values, uint8_t* output, uint8_t* scales,
+    int row, int rows, int col) {
+  float amax = 1.e-4f;
+#pragma unroll
+  for (int j = 0; j < VEC; ++j) {
+    amax = fmaxf(amax, fabsf(__bfloat162float(values[j])));
+  }
+#pragma unroll
+  for (int offset = 128 / VEC / 2; offset > 0; offset >>= 1) {
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, offset, 128 / VEC));
+  }
+  // Match the standalone CUDA quantizer's ceil(log2(x)) on powers of two.
+  const uint32_t bits = __float_as_uint(amax * (1.f / 448.f));
+  const uint32_t scale_exp = (bits >> 23) + ((bits & 0x7fffff) != 0);
+  const float inv_scale = __uint_as_float((254 - scale_exp) << 23);
+  if (col % 128 == 0) {
+    const int group = col / 128;
+    const int aligned_rows = (rows + 3) & ~3;
+    uint8_t* group_scale = scales + ((long long)(group / 4) * aligned_rows + row) * 4 + group % 4;
+    *group_scale = scale_exp;
+    if (row == rows - 1) {
+      for (int i = 1; i <= aligned_rows - rows; ++i) {
+        group_scale[i * 4] = 127;
+      }
+    }
+  }
+  Packed packed = 0;
+#pragma unroll
+  for (int j = 0; j < VEC; ++j) {
+    const float value = fminf(fmaxf(__bfloat162float(values[j]) * inv_scale, -448.f), 448.f);
+    packed |= static_cast<Packed>(__nv_fp8_e4m3(value).__x) << (8 * j);
+  }
+  *reinterpret_cast<Packed*>(output + (long long)row * H + col) = packed;
+}
+
 template <int H, int N, int NC = N_CHUNK_DEFAULT, int B = 1,
           bool RELEASE_TMEM = false, bool STATIC_COMMON_PATH = false,
-          bool HAS_OUTPUT_NORM = false>
+          bool HAS_OUTPUT_NORM = false, bool STORE_FP8 = false>
 __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
     bf16_t* __restrict__ block_res, bf16_t* __restrict__ layer_res,
     const bf16_t* __restrict__ delta, const bf16_t* __restrict__ res_w,
     const bf16_t* __restrict__ rms_w, bf16_t* __restrict__ output, int T,
     int block_stride_m, int block_stride_r, float rms_eps,
     const bf16_t* __restrict__ output_norm_weight, float output_norm_eps,
-    int block_write_idx) {
+    int block_write_idx, uint8_t* fp8_output, uint8_t* fp8_scales) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && __CUDA_ARCH__ < 1100
   constexpr float LOG2_E = 1.4426950408889634f;
   constexpr int N_CHUNK = NC;
@@ -859,6 +897,9 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
                                              output_rsigma * weight);
               }
               *reinterpret_cast<uint2*>(out_ptr + h_base) = packed;
+              if constexpr (STORE_FP8) {
+                store_fp8_group<H, 4, uint32_t>(values, fp8_output, fp8_scales, tb, TB, h_base);
+              }
               continue;
             }
           }
@@ -874,6 +915,9 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
                 __float2bfloat16(acc32[si * VEC + j] * output_rsigma * weight);
           }
           *reinterpret_cast<uint4*>(out_ptr + h_base) = packed;
+          if constexpr (STORE_FP8) {
+            store_fp8_group<H, VEC, uint64_t>(values, fp8_output, fp8_scales, tb, TB, h_base);
+          }
         }
       }
     }
@@ -891,14 +935,15 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
 }
 
 template <int H, int N, int NC = N_CHUNK_DEFAULT, bool RELEASE_TMEM = false,
-          bool STATIC_COMMON_PATH = false, bool HAS_OUTPUT_NORM = false>
+          bool STATIC_COMMON_PATH = false, bool HAS_OUTPUT_NORM = false, bool STORE_FP8 = false>
 static void launch_fwd(bf16_t* block_residual, bf16_t* layer_residual,
                        const bf16_t* delta, const bf16_t* res_weight,
                        const bf16_t* rms_weight, bf16_t* output, int T,
                        float rms_eps, int num_sm, cudaStream_t stream,
                        const bf16_t* output_norm_weight = nullptr,
                        float output_norm_eps = 0.f, int block_stride_m = 0,
-                       int block_stride_r = 0, int block_write_idx = -1) {
+                       int block_stride_r = 0, int block_write_idx = -1,
+                       uint8_t* fp8_output = nullptr, uint8_t* fp8_scales = nullptr) {
   constexpr size_t smem_size =
       ((size_t)(CHUNK_DEPTH * (NC + 1) + (HAS_OUTPUT_NORM ? 1 : 0)) * H *
            sizeof(bf16_t) +
@@ -906,7 +951,7 @@ static void launch_fwd(bf16_t* block_residual, bf16_t* layer_residual,
       ~size_t(15);
   auto kernel =
       &attn_res_fwd_online_v2_kernel<H, N, NC, 1, RELEASE_TMEM,
-                                     STATIC_COMMON_PATH, HAS_OUTPUT_NORM>;
+                                     STATIC_COMMON_PATH, HAS_OUTPUT_NORM, STORE_FP8>;
   static bool attrs_set = false;
   if (!attrs_set) {
     if (smem_size > 48 * 1024) {
@@ -929,7 +974,7 @@ static void launch_fwd(bf16_t* block_residual, bf16_t* layer_residual,
   cudaLaunchKernelEx(&config, kernel, block_residual, layer_residual, delta,
                      res_weight, rms_weight, output, T, block_stride_m,
                      block_stride_r, rms_eps, output_norm_weight,
-                     output_norm_eps, block_write_idx);
+                     output_norm_eps, block_write_idx, fp8_output, fp8_scales);
 }
 
 }  // namespace fwd_prod_v2
@@ -943,7 +988,8 @@ void attn_res(at::Tensor& prefix,
                       std::optional<at::Tensor> output_norm_weight,
                       at::Tensor& output, int64_t num_blocks,
                       int64_t block_write_idx, double eps,
-                      double output_norm_eps) {
+                      double output_norm_eps, std::optional<at::Tensor> fp8_output,
+                      std::optional<at::Tensor> fp8_scales) {
   TORCH_CHECK(prefix.is_cuda() && prefix.dim() == 2 && prefix.scalar_type() == at::kBFloat16,
               "AttnRes prefix must be a CUDA BF16 matrix");
   auto check_tensor = [&](const at::Tensor& tensor, const char* name) {
@@ -972,6 +1018,18 @@ void attn_res(at::Tensor& prefix,
                 "AttnRes output norm shape mismatch");
   }
   int const num_tokens = static_cast<int>(prefix.size(0));
+  TORCH_CHECK(fp8_output.has_value() == fp8_scales.has_value(), "AttnRes requires both FP8 outputs");
+  if (fp8_output.has_value()) {
+    TORCH_CHECK(output_norm_weight.has_value() && fp8_output->device() == prefix.device() &&
+                fp8_output->scalar_type() == at::kFloat8_e4m3fn &&
+                fp8_output->sizes() == prefix.sizes() && fp8_output->is_contiguous(),
+                "AttnRes FP8 output must be contiguous E4M3 with output norm");
+    TORCH_CHECK(fp8_scales->device() == prefix.device() && fp8_scales->scalar_type() == at::kInt &&
+                fp8_scales->is_contiguous() && fp8_scales->dim() == 2 &&
+                fp8_scales->size(0) == (prefix.size(1) + 511) / 512 &&
+                fp8_scales->size(1) == ((num_tokens + 3) & ~3),
+                "AttnRes FP8 scales must be packed group-128 UE8M0");
+  }
   int const device = prefix.get_device();
   c10::cuda::CUDAGuard const device_guard(prefix.device());
   cudaDeviceProp const* properties = at::cuda::getDeviceProperties(device);
@@ -1002,13 +1060,13 @@ void attn_res(at::Tensor& prefix,
 
   using namespace sm100::fwd_prod_v2;
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(device);
-  auto dispatch_blocks = [&](auto static_common_path, auto has_output_norm) {
+  auto dispatch_blocks = [&](auto static_common_path, auto has_output_norm, auto store_fp8) {
     constexpr bool STATIC_COMMON_PATH = decltype(static_common_path)::value;
     constexpr bool HAS_OUTPUT_NORM = decltype(has_output_norm)::value;
     auto dispatch = [&](auto source_count) {
       constexpr int NUM_SOURCES = decltype(source_count)::value;
       launch_fwd<7168, NUM_SOURCES, 3, false, STATIC_COMMON_PATH,
-                 HAS_OUTPUT_NORM>(
+                 HAS_OUTPUT_NORM, decltype(store_fp8)::value>(
           static_cast<bf16_t*>(blocks.data_ptr()),
           static_cast<bf16_t*>(prefix.data_ptr()),
           delta.has_value() ? static_cast<bf16_t const*>(delta->data_ptr())
@@ -1023,7 +1081,9 @@ void attn_res(at::Tensor& prefix,
           static_cast<float>(output_norm_eps),
           static_cast<int>(blocks.stride(0)),
           static_cast<int>(blocks.stride(1)),
-          static_cast<int>(block_write_idx));
+          static_cast<int>(block_write_idx),
+          fp8_output ? static_cast<uint8_t*>(fp8_output->data_ptr()) : nullptr,
+          fp8_scales ? static_cast<uint8_t*>(fp8_scales->data_ptr()) : nullptr);
     };
     switch (num_blocks) {
       case 0:
@@ -1055,13 +1115,19 @@ void attn_res(at::Tensor& prefix,
         break;
     }
   };
-  if (delta.has_value() && output_norm_weight.has_value() &&
+  if (fp8_output.has_value()) {
+    if (delta.has_value() && block_write_idx < 0) {
+      dispatch_blocks(std::true_type{}, std::true_type{}, std::true_type{});
+    } else {
+      dispatch_blocks(std::false_type{}, std::true_type{}, std::true_type{});
+    }
+  } else if (delta.has_value() && output_norm_weight.has_value() &&
       block_write_idx < 0) {
-    dispatch_blocks(std::true_type{}, std::true_type{});
+    dispatch_blocks(std::true_type{}, std::true_type{}, std::false_type{});
   } else if (output_norm_weight.has_value()) {
-    dispatch_blocks(std::false_type{}, std::true_type{});
+    dispatch_blocks(std::false_type{}, std::true_type{}, std::false_type{});
   } else {
-    dispatch_blocks(std::false_type{}, std::false_type{});
+    dispatch_blocks(std::false_type{}, std::false_type{}, std::false_type{});
   }
   cudaError_t const error = cudaGetLastError();
   TORCH_CHECK(

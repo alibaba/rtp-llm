@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.dsa_kv_chunk_plan import (
+    fp8_sfa_prefill_query_shape,
     plan_dsa_kv_chunks,
     prefill_indexer_score_bytes,
 )
@@ -16,6 +17,21 @@ from rtp_llm.models_py.modules.factory.attention.mla_prefill_plan import (
 
 
 class DsaKVChunkPlanTest(unittest.TestCase):
+    def test_fp8_sfa_prefill_packs_full_query_shard_into_one_launch(self):
+        shared_memory = 227 * 1024
+        for rows, expected in (
+            (0, (0, 1)),
+            (8192, (8192, 1)),
+            (16384, (8192, 2)),
+            (16385, (8193, 2)),
+            (65536, (10923, 6)),
+        ):
+            with self.subTest(rows=rows):
+                batch, width = fp8_sfa_prefill_query_shape(rows, shared_memory)
+                self.assertEqual((batch, width), expected)
+                self.assertLessEqual(20 * batch + 4, shared_memory)
+                self.assertIn(batch * width - rows, range(width))
+
     def test_fp8_prefill_score_budget_includes_storage_padding(self):
         # The allocator snapshot has 8 MiB of row padding beyond the logical score.
         self.assertEqual(prefill_indexer_score_bytes(8192, 154624), 4840 * 2**20)

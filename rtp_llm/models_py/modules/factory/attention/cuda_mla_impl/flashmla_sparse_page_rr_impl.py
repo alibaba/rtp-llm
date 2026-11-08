@@ -72,6 +72,18 @@ class PageRRSparseMlaOp(SparseMlaOp):
                     topk=self.top_k,
                 )
             self._fp8_metadata, self._fp8_num_splits = self._fp8_schedules[key]
+        elif self.workspace_owner.sfa_use_fp8:
+            from rtp_llm.models_py.utils.flash_mla_legacy import get_mla_metadata
+
+            batch, query_width = params.sfa_execution.fp8_prefill_query_shape
+            self._fp8_prefill_schedule = get_mla_metadata(
+                cache_seqlens=None,
+                num_q_tokens_per_head_k=batch * query_width * self.kernel_heads,
+                num_heads_q=self.kernel_heads,
+                num_heads_k=1,
+                is_fp8_kvcache=True,
+                topk=self.top_k,
+            ) if batch else None
         self.mega_a2a = None
         if not params.is_prefill and getattr(self.workspace_owner, "mega_a2a", False):
             from rtp_llm.models_py.distributed.collective_torch import Group, get_process_group
@@ -86,30 +98,33 @@ class PageRRSparseMlaOp(SparseMlaOp):
 
     projects_values = True
 
-    def _attention(self, query, kv, slots):
+    def _attention(self, query, kv, slots, *, fp8_schedule=None, query_width=1):
         # Query CP/head gather and padding happen once, outside the KV loop.
         if not query.shape[0]:
             return query.new_empty(
                 (0, self.kernel_heads, self.kv_lora_rank)
             ), query.new_empty((0, self.kernel_heads), dtype=torch.float32)
-        if self.workspace_owner.sfa_use_fp8 and not self.params.is_prefill:
+        if fp8_schedule is not None or (self.workspace_owner.sfa_use_fp8 and not self.params.is_prefill):
             from rtp_llm.models_py.utils.flash_mla_legacy import flash_mla_with_kvcache
 
+            metadata, splits = (
+                fp8_schedule if fp8_schedule is not None
+                else (self._fp8_metadata, self._fp8_num_splits)
+            )
             output, lse = flash_mla_with_kvcache(
-                q=query.unsqueeze(1),
+                q=query.unflatten(0, (-1, query_width)),
                 k_cache=kv.view(torch.uint8).view(-1, self.params.kernel_page_size, 1, 656),
-                block_table=self.params.block_table,
+                block_table=None if fp8_schedule is not None else self.params.block_table,
                 cache_seqlens=None,
                 head_dim_v=self.kv_lora_rank,
-                tile_scheduler_metadata=self._fp8_metadata,
-                num_splits=self._fp8_num_splits,
+                tile_scheduler_metadata=metadata,
+                num_splits=splits,
                 is_fp8_kvcache=True,
-                indices=slots.unsqueeze(1),
+                indices=slots.unflatten(0, (-1, query_width)),
                 softmax_scale=self.scale,
             )
-            # The public decode result is natural-log LSE [rows, heads, 1].
-            # Keep the existing BF16 V-up and projected-state DCP merge.
-            return output.squeeze(1), lse.squeeze(-1)
+            # FlashMLA returns natural-log LSE as [batch, heads, query_width].
+            return output.flatten(0, 1), lse.transpose(1, 2).flatten(0, 1)
         output, _, lse = flash_mla_sparse_fwd(
             query, kv, slots.unsqueeze(1), self.scale, d_v=self.kv_lora_rank
         )
@@ -138,69 +153,71 @@ class PageRRSparseMlaOp(SparseMlaOp):
         rows, heads = query.shape[0], self.communicator.heads
         latent_dim, value_dim = self.kv_lora_rank, self.workspace_owner.value_dim
         chunked = execution.plan.chunked
-        slots = workspace("slots", (rows, self.top_k), torch.int32)
-        if chunked:
-            running = workspace("running", (rows, heads, latent_dim), torch.float32)
-            running_lse = workspace("running_lse", (rows, heads), torch.float32)
-            running.zero_()
-            running_lse.fill_(-float("inf"))
-        raw_cache = kv.view(-1, params.kernel_page_size, kv.shape[-1])
-        if self.workspace_owner.sfa_use_fp8:
-            raw_cache = raw_cache.view(torch.uint8)
-        for block in execution.blocks:
-            history = params.cache_adapter.read_prefix_chunk(
-                raw_cache, params.block_table, block.descriptor, workspace=workspace,
-                allow_reserved_block_zero=params.is_warmup,
-            )
-            if self.workspace_owner.sfa_use_fp8:
-                from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-                dense = workspace(
-                    "cache.dequant",
-                    (history.shape[0], self.kv_lora_rank + self.qk_rope_head_dim),
-                    torch.bfloat16,
-                )
-                table, lengths, starts = block.fp8_dequant_metadata
-                # Reuse the existing 656-byte codec on a canonical chunk;
-                # only this bounded BF16 chunk is materialized after transport.
-                with profile_scope("RTP::attention.dsa.sfa.kv_dequant"):
-                    rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache(
-                        history.view(1, history.shape[0], 656),
-                        dense[:, :self.kv_lora_rank], dense[:, self.kv_lora_rank:],
-                        table, lengths, starts, 1,
-                    )
-                history = dense
-            with profile_scope("RTP::attention.dsa.sfa.chunk_slot_map"):
-                map_dsa_chunk_slots(topk_indices, params, block, slots)
-            with profile_scope("RTP::attention.dsa.sfa.chunk_qk_pv"):
-                partial, lse = self._attention(query, history.unsqueeze(1), slots)
-            if chunked:
-                with profile_scope("RTP::attention.dsa.sfa.chunk_latent_lse_merge"):
-                    merge_mla_states_in_place(
-                        running, running_lse, partial[:, :heads], lse[:, :heads],
-                        raw_partial_lse=True,
-                    )
-                del partial, lse
-            else:
-                zero_sparse_empty_rows(partial, lse, heads)
-                # Keep the kernel's real-head view: no FP32 state or merge for
-                # a single block. Only empty rows were written above.
-                latent = partial[:, :heads]
-            del history
-        with profile_scope("RTP::attention.dsa.sfa.lse_check"):
-            check_sparse_lse(running_lse if chunked else lse[:, :heads])
-        if chunked:
-            # Reuses the now-dead KV arena; only one cast and V-up per layer.
-            latent = workspace("latent", (rows, heads, latent_dim), torch.bfloat16)
-            with profile_scope("RTP::attention.dsa.sfa.final_latent_cast"):
-                latent.copy_(running)
+        fp8 = self.workspace_owner.sfa_use_fp8
+        batch, query_width = execution.fp8_prefill_query_shape if fp8 else (rows, 1)
+        packed_rows = batch * query_width
+        slots = workspace("slots", (packed_rows, self.top_k), torch.int32)
+        if packed_rows > rows:
+            # Padding only rounds out the final scheduler item. Its slots are
+            # invalid for every KV block, and the output rows are discarded.
+            query = F.pad(query, (0, 0, 0, 0, 0, packed_rows - rows))
+            slots[rows:].fill_(-1)
+        schedule = self._fp8_prefill_schedule if fp8 else None
         output = workspace("output", (rows, heads, value_dim), torch.bfloat16)
-        with profile_scope("RTP::attention.dsa.sfa.final_v_up"):
-            torch.bmm(
-                latent.transpose(0, 1),
-                self.workspace_owner.value_weights[layer_id],
-                out=output.transpose(0, 1),
+        value_weights = self.workspace_owner.value_weights[layer_id]
+
+        def value_up(latent, destination):
+            with profile_scope("RTP::attention.dsa.sfa.v_up"):
+                torch.bmm(latent.transpose(0, 1), value_weights, out=destination.transpose(0, 1))
+
+        with profile_scope("RTP::attention.dsa.sfa_core"):
+            if chunked:
+                running = workspace("running", (rows, heads, latent_dim), torch.float32)
+                running_lse = workspace("running_lse", (rows, heads), torch.float32)
+                running.zero_()
+                running_lse.fill_(-float("inf"))
+            raw_cache = kv.view(-1, params.kernel_page_size, kv.shape[-1])
+            if fp8:
+                raw_cache = raw_cache.view(torch.uint8)
+            read_chunk = (
+                params.cache_adapter.gather_prefix_chunk if fp8 else params.cache_adapter.read_prefix_chunk
             )
+            for block in execution.blocks:
+                with profile_scope("RTP::attention.dsa.sfa.kv_cache_read"):
+                    history = read_chunk(
+                        raw_cache, params.block_table, block.descriptor, workspace=workspace,
+                        allow_reserved_block_zero=params.is_warmup,
+                    )
+                with profile_scope("RTP::attention.dsa.sfa.chunk_slot_map"):
+                    map_dsa_chunk_slots(topk_indices, params, block, slots[:rows], gathered_cache=fp8)
+                with profile_scope("RTP::attention.dsa.sfa.chunk_qk_pv"):
+                    partial, lse = self._attention(
+                        query, history.unsqueeze(1), slots,
+                        fp8_schedule=schedule, query_width=query_width,
+                    )
+                    partial, lse = partial[:rows], lse[:rows]
+                if chunked:
+                    with profile_scope("RTP::attention.dsa.sfa.chunk_latent_lse_merge"):
+                        merge_mla_states_in_place(
+                            running, running_lse, partial[:, :heads], lse[:, :heads],
+                            raw_partial_lse=True,
+                        )
+                else:
+                    # BF16 sparse Prefill already writes zero for empty rows.
+                    if fp8:
+                        zero_sparse_empty_rows(partial, lse, heads)
+                        final_lse = lse[:, :heads]
+                    latent = partial[:, :heads]
+                del partial, lse, history
+            if fp8:
+                with profile_scope("RTP::attention.dsa.sfa.lse_check"):
+                    check_sparse_lse(running_lse if chunked else final_lse)
+            if chunked:
+                # Reuses the now-dead KV arena; only one cast and V-up per layer.
+                latent = workspace("latent", (rows, heads, latent_dim), torch.bfloat16)
+                with profile_scope("RTP::attention.dsa.sfa.final_latent_cast"):
+                    latent.copy_(running)
+        value_up(latent, output)
         from rtp_llm.models_py.utils.smoke_evidence import completed_dsa_chunks
         completed_dsa_chunks("sfa", params, len(execution.blocks), rows)
         output = self.communicator.restore_queries(output)
@@ -416,7 +433,8 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
                 kv_cache, SimpleNamespace(slot_mapping=slots),
             )
 
-        params.ingress_plans["sfa"].run(values, write)
+        with profile_scope("RTP::attention.mla.kv_cache_write"):
+            params.ingress_plans["sfa"].run(values, write)
 
     def _apply_input_bmm(self, q, layer_id):
         params = self.page_rr_params
@@ -428,9 +446,12 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
 
         if q.shape[1] != self.workspace_owner.heads:
             raise ValueError("Sparse replicated Q must contain every attention head")
-        return absorbed_query(q, self.weights[layer_id][W.mla_kc],
-                              self.kv_lora_rank,
-                              self.fmha_impl.kernel_heads if query_cp else q.shape[1])
+        with profile_scope("RTP::attention.mla.absorb_q"):
+            return absorbed_query(
+                q, self.weights[layer_id][W.mla_kc], self.kv_lora_rank,
+                self.fmha_impl.kernel_heads if query_cp else q.shape[1],
+                fuse_suffix=query_cp,
+            )
 
     @property
     def requires_host_metadata(self):

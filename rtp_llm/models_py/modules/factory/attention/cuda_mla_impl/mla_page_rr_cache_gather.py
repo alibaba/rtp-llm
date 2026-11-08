@@ -306,8 +306,52 @@ class MlaPageRRCacheGather:
         workspace=None,
         indexer_fp8: bool = False,
         allow_reserved_block_zero: bool = False,
+        split_out: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Restore canonical rows, or write dense MLA latent and RoPE separately."""
+        if split_out is not None:
+            if indexer_fp8 or raw_cache.dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+                raise ValueError("split prefix restore requires BF16 or E4M3 MLA pages")
+            latent, rope = split_out
+            if (
+                any(
+                    output.ndim != 2
+                    or output.shape[0] != descriptor.total_tokens
+                    or output.shape[1] == 0
+                    or output.dtype != torch.bfloat16
+                    or output.device != raw_cache.device
+                    or not output.is_contiguous()
+                    for output in split_out
+                )
+                or latent.shape[1] + rope.shape[1] != descriptor.feature_width
+            ):
+                raise ValueError("split prefix outputs must match the descriptor and cache")
+
+        gathered = self.gather_prefix_chunk(
+            raw_cache, local_block_table, descriptor, workspace=workspace,
+            indexer_fp8=indexer_fp8, allow_reserved_block_zero=allow_reserved_block_zero,
+        )
+        if split_out is not None:
+            if descriptor.total_tokens:
+                from rtp_llm.models_py.triton_kernels.mla.page_rr import restore_prefix_cuda
+
+                restore_prefix_cuda(gathered, descriptor, latent, suffix=rope)
+            return split_out
+        shape = (descriptor.total_tokens, descriptor.feature_width)
+        out = None if workspace is None else workspace("cache.restore", shape, raw_cache.dtype)
+        return _restore_mla_page_rr_prefix(gathered, descriptor, out=out, indexer_fp8=indexer_fp8)
+
+    def gather_prefix_chunk(
+        self,
+        raw_cache: torch.Tensor,
+        local_block_table: torch.Tensor,
+        descriptor: MlaPageRRChunkDescriptor,
+        *,
+        workspace=None,
+        indexer_fp8: bool = False,
+        allow_reserved_block_zero: bool = False,
     ) -> torch.Tensor:
-        """Pack, AllGather, and restore one launch-local canonical chunk."""
+        """Return rank-major pages for consumers that address physical slots."""
 
         def buffer(name, shape):
             return (
@@ -335,12 +379,7 @@ class MlaPageRRCacheGather:
             gathered = payload.new_empty(gather_shape)
         if descriptor.total_local_pages:
             collective_torch.all_gather_into(payload, gathered.flatten(0, 1), Group.TP)
-        return _restore_mla_page_rr_prefix(
-            gathered,
-            descriptor,
-            out=buffer("restore", (descriptor.total_tokens, descriptor.feature_width)),
-            indexer_fp8=indexer_fp8,
-        )
+        return gathered
 
     def _pack_prefix_chunk(
         self,

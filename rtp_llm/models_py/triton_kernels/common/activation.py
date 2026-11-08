@@ -1700,6 +1700,7 @@ def _store_group128(values, out, scales, row, rows, width: tl.constexpr, block: 
 def _sigmoid_mul_group128_kernel(
     x,
     gate,
+    valid_rows,
     out,
     scales,
     rows,
@@ -1707,14 +1708,18 @@ def _sigmoid_mul_group128_kernel(
     x_row_stride: tl.constexpr,
     gate_row_stride: tl.constexpr,
     block: tl.constexpr,
+    masked: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, block)
-    a = tl.load(x + row * x_row_stride + columns, columns < width, other=0.0).to(
+    valid = columns < width
+    if masked:
+        valid = valid & tl.load(valid_rows + row)
+    a = tl.load(x + row * x_row_stride + columns, valid, other=0.0).to(
         tl.float32
     )
     b = tl.load(
-        gate + row * gate_row_stride + columns, columns < width, other=0.0
+        gate + row * gate_row_stride + columns, valid, other=0.0
     ).to(tl.float32)
     # Match BF16 eager gating: sigmoid rounds before the multiply, then the
     # grouped quantizer observes the BF16 product.
@@ -1723,7 +1728,7 @@ def _sigmoid_mul_group128_kernel(
 
 
 def sigmoid_mul_per_token_group_quant_fp8(
-    x: torch.Tensor, gate: torch.Tensor
+    x: torch.Tensor, gate: torch.Tensor, *, valid_rows: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return grouped E4M3 values and packed UE8M0 scales for ``x*sigmoid(gate)``.
 
@@ -1741,6 +1746,11 @@ def sigmoid_mul_per_token_group_quant_fp8(
     rows, width = x.shape
     if width == 0 or width % 128:
         raise ValueError("FP8 sigmoid-mul width must be divisible by 128")
+    if valid_rows is not None and (
+        valid_rows.shape != (rows,) or valid_rows.dtype != torch.bool
+        or valid_rows.device != x.device or not valid_rows.is_contiguous()
+    ):
+        raise ValueError("FP8 sigmoid-mul requires a contiguous CUDA bool row mask")
 
     out = torch.empty((rows, width), device=x.device, dtype=torch.float8_e4m3fn)
     scale_wire = torch.empty(
@@ -1752,6 +1762,7 @@ def sigmoid_mul_per_token_group_quant_fp8(
         _sigmoid_mul_group128_kernel[(rows,)](
             x,
             gate,
+            x if valid_rows is None else valid_rows,
             out,
             scale_wire,
             rows,
@@ -1759,6 +1770,7 @@ def sigmoid_mul_per_token_group_quant_fp8(
             x.stride(0),
             gate.stride(0),
             max(512, triton.next_power_of_2(width)),
+            valid_rows is not None,
         )
     return out, scale_wire.T[:rows, :]
 
@@ -1870,6 +1882,7 @@ def _quantize_strided_group128_kernel(
     rows,
     row_stride: tl.constexpr,
     block_rows: tl.constexpr,
+    fp32_scale: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64) * block_rows + tl.arange(0, block_rows)
     column = tl.arange(0, 128)
@@ -1879,31 +1892,55 @@ def _quantize_strided_group128_kernel(
         other=0,
     ).to(tl.float32)
     amax = tl.maximum(tl.max(tl.abs(values), axis=1), 1.0e-4)
-    scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(amax / 448.0, 1.0e-10))))
+    if fp32_scale:
+        # Same power-of-two scale as the native UE8M0 quantizer, without
+        # materializing packed exponent bytes just to unpack them later.
+        bits = (amax * (1.0 / 448.0)).to(tl.int32, bitcast=True)
+        exponent = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).to(tl.int32)
+        scale = (exponent << 23).to(tl.float32, bitcast=True)
+    else:
+        scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(amax / 448.0, 1.0e-10))))
     quantized = tl.minimum(tl.maximum(values / scale[:, None], -448.0), 448.0)
     tl.store(out + row[:, None] * 128 + column[None, :], quantized, row[:, None] < rows)
 
-    exponent = (scale.to(tl.int32, bitcast=True) >> 23) & 255
-    packed = tl.where(row < rows, exponent | 0x7F7F7F00, 0x7F7F7F7F)
-    tl.store(scales + row, packed, row < ((rows + 3) // 4) * 4)
+    if fp32_scale:
+        tl.store(scales + row, scale, row < rows)
+    else:
+        exponent = (scale.to(tl.int32, bitcast=True) >> 23) & 255
+        packed = tl.where(row < rows, exponent | 0x7F7F7F00, 0x7F7F7F7F)
+        tl.store(scales + row, packed, row < ((rows + 3) // 4) * 4)
 
 
-def quantize_strided_group128_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize a row-strided BF16 [M,128] view without a staging copy."""
+def quantize_strided_group128_fp8(
+    x: torch.Tensor, *, out: torch.Tensor | None = None,
+    out_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize BF16 [M,128]; an optional FP32 [M] destination bypasses packing."""
     if x.ndim != 2 or x.shape[1] != 128 or x.stride(1) != 1 or x.stride(0) < 128:
         raise ValueError("FP8 strided group128 input must be row-strided [M,128]")
     if not x.is_cuda or x.dtype != torch.bfloat16:
         raise ValueError("FP8 strided group128 input must be CUDA BF16")
     rows = x.shape[0]
-    out = torch.empty((rows, 128), dtype=torch.float8_e4m3fn, device=x.device)
-    scale_wire = torch.empty(
-        (1, triton.cdiv(rows, 4) * 4), dtype=torch.int32, device=x.device
-    ).T
+    if out is None:
+        out = torch.empty((rows, 128), dtype=torch.float8_e4m3fn, device=x.device)
+    elif (out.shape != x.shape or out.dtype != torch.float8_e4m3fn
+          or out.device != x.device or not out.is_contiguous()):
+        raise ValueError("group128 quantization requires a matching contiguous E4M3 output")
+    if out_scale is None:
+        scales = torch.empty(
+            (1, triton.cdiv(rows, 4) * 4), dtype=torch.int32, device=x.device
+        ).T
+    else:
+        if (out_scale.shape != (rows,) or out_scale.dtype != torch.float32
+                or out_scale.device != x.device or not out_scale.is_contiguous()):
+            raise ValueError("group128 quantization requires a contiguous FP32 [M] scale output")
+        scales = out_scale
     if rows:
-        _quantize_strided_group128_kernel[(triton.cdiv(rows, 4),)](
-            x, out, scale_wire, rows, x.stride(0), 4, num_warps=4
+        block_rows = 16 if out_scale is not None else 4
+        _quantize_strided_group128_kernel[(triton.cdiv(rows, block_rows),)](
+            x, out, scales, rows, x.stride(0), block_rows, out_scale is not None, num_warps=4,
         )
-    return out, scale_wire[:rows]
+    return out, scales[:rows] if out_scale is None else scales
 
 
 @triton.jit

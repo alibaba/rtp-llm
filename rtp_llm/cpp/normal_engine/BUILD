@@ -2,12 +2,6 @@ load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
-    name = "mtp_prefill_chunk_plan",
-    hdrs = ["speculative/MtpPrefillChunkPlan.h"],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "normal_engine",
     hdrs = glob([
         "*.h",

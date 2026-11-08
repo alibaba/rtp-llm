@@ -325,7 +325,77 @@ def gpu_main():
                       "checks": checks, "owned_outputs": len(held),
                       "resident_bytes": transport.resident_bytes}), flush=True)
     production_shape_regression(module, plans, group, device, assert_bits)
+    full_fp8_query_route_regression(module, plans, group, device, rank, size)
     dist.destroy_process_group()
+
+
+def full_fp8_query_route_regression(module, plans, group, device, rank, size):
+    """One receive callback past the 8K slot capacity, with packed scales and padding."""
+    from rtp_llm.models_py.distributed.collective_torch import Fp8Activation
+
+    hidden = 7168
+    lengths = (size * 8192 + 1, size * 8192 - 1)
+    plan = plans.NaturalZigzagPlan(lengths, size, rank)
+    rows = plan.local_rows
+    transport = module.DirectedRowExchange(group, device, rows + 4, hidden, chunk_capacity=8192)
+    transport.prepare_plan(plan)
+    assert rows > transport.chunk_capacity and rows % 4 == 2
+
+    def ids(start, count):
+        return torch.arange(start, start + count, device=device, dtype=torch.int32)
+
+    expected = []
+    start = 0
+    for padded in plan.padded_lengths:
+        half = padded // (2 * size)
+        expected.extend((ids(start + rank * half, half), ids(start + padded - (rank + 1) * half, half)))
+        start += padded
+    expected = torch.cat(expected)
+    source = ids(rank * rows, rows)
+    groups = ids(0, hidden // 512)
+
+    def encode_tags(rows, iteration):
+        return ((rows[:, None] >> torch.tensor([0, 7, 14], device=device)) & 127).to(torch.uint8) ^ iteration
+
+    def encode_scales(rows, iteration):
+        return 0x7F7F7F7F ^ ((rows[None, :] + groups[:, None] + iteration) & 31)
+
+    streams = [torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)]
+    outputs = []
+    for iteration, stream in enumerate(streams):
+        with torch.cuda.stream(stream):
+            values = torch.full((rows, hidden), 42 + iteration, device=device, dtype=torch.uint8)
+            values[:, :3].copy_(encode_tags(source, iteration))
+            scale_wire = torch.empty((len(groups), (rows + 3) // 4 * 4), device=device, dtype=torch.int32)
+            scale_wire[:, :rows].copy_(encode_scales(source, iteration))
+            activation = Fp8Activation(values.view(torch.float8_e4m3fn), scale_wire)
+            calls = []
+
+            def project_heads(out):
+                out.copy_(source[:, None].float() + iteration)
+
+            def consume(values, scales):
+                assert calls == ["prepare"]
+                calls.append("consume")
+                assert values.shape == (rows, hidden) and scales.shape == (rows, len(groups))
+                assert scales.stride() == (1, (rows + 3) // 4 * 4)
+                outputs.append((values.view(torch.uint8), scales))
+
+            heads = transport.consume_fp8(
+                activation, plan, consume, before_consume=lambda: calls.append("prepare"),
+                project_heads=project_heads,
+            )
+            assert calls == ["prepare", "consume"]
+            outputs[-1] += (heads,)
+
+    torch.cuda.synchronize(device)
+    for iteration, (values, scales, heads) in enumerate(outputs):
+        torch.testing.assert_close(values[:, :3], encode_tags(expected, iteration), rtol=0, atol=0)
+        assert (values[:, 3:] == 42 + iteration).all()
+        torch.testing.assert_close(scales.T, encode_scales(expected, iteration), rtol=0, atol=0)
+        torch.testing.assert_close(heads, (expected[:, None].float() + iteration).expand_as(heads), rtol=0, atol=0)
+    print(json.dumps(dict(proof="one_full_fp8_query_route", rank=rank, rows=rows, calls_per_forward=1)),
+          flush=True)
 
 
 def allocator_handoff_regression(module, plans, group, device, assert_bits):

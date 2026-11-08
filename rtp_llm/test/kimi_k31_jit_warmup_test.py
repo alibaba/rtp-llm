@@ -563,7 +563,7 @@ class KimiK31JitWarmupTest(unittest.TestCase):
             )
             torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
-    def test_absorbed_query_reuses_padding_kernel_across_token_counts(self):
+    def test_fused_absorbed_query_reuses_kernel_across_token_counts(self):
         import triton
         from rtp_llm.models_py.kernels.cuda.dsa_buffer_ops import absorbed_query
 
@@ -577,7 +577,7 @@ class KimiK31JitWarmupTest(unittest.TestCase):
             query[..., 128:] = (
                 torch.arange(64, device=self.device, dtype=query.dtype) / 64
             )
-            output = absorbed_query(query, weight, 512, 128)
+            output = absorbed_query(query, weight, 512, 128, fuse_suffix=True)
             expected = torch.zeros_like(output)
             # Each NoPE dot is 128 * 0.5 * ((column % 4) / 8), exactly representable.
             expected[:, :96, :512] = (
@@ -598,7 +598,7 @@ class KimiK31JitWarmupTest(unittest.TestCase):
             for rows in (34, 58, 176, 924):
                 run(rows)
             torch.cuda.synchronize()
-        self.assertEqual(misses, [], "token count introduced sparse-query padding JIT")
+        self.assertEqual(misses, [], "token count introduced fused sparse-query JIT")
 
     def test_model_warmup_does_not_change_live_kv(self):
         import triton

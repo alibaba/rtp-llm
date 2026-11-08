@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.dsv4.indexer_topk import (
 
 from ..mla_prefill_plan import prefill_kv_workspace_budget_bytes
 from .dsa_kv_chunk_plan import (
+    fp8_sfa_prefill_query_shape,
     indexer_selection_scratch_bytes,
     plan_dsa_kv_chunks,
     prefill_indexer_score_bytes,
@@ -34,23 +35,26 @@ class DsaPreparedKVBlock:
     native_table: object = None
     native_schedule: object = None
     indexer_decode_positions: object = None
-    fp8_dequant_metadata: object = None
 
 
-def _prefill_block_layout(block, request_count, device):
+def _prefill_block_layout(block, request_count, device, packed_page_offsets=None):
     # Generate token-sized metadata on the device. CPU staging is bounded
     # by request count and kept alive for its nonblocking H2D copy.
     positions, requests = [], []
     slices = [[0, 0, 0] for _ in range(request_count)]
     offset = 0
-    for request, start, length in zip(block.requests, block.starts, block.lengths):
+    for i, (request, start, length) in enumerate(zip(block.requests, block.starts, block.lengths)):
         positions.append(
             torch.arange(start, start + length, dtype=torch.int32, device=device)
         )
         requests.append(
             torch.full((length,), request, dtype=torch.int32, device=device)
         )
-        slices[request] = [start, start + length, offset]
+        # For gathered FP8 SFA, column 2 is a page offset in one rank's
+        # payload. Other consumers use the canonical request-major row offset.
+        slices[request] = [
+            start, start + length, offset if packed_page_offsets is None else packed_page_offsets[i]
+        ]
         offset += length
     host = torch.tensor(slices, dtype=torch.int32, device="cpu", pin_memory=True)
     return (
@@ -90,8 +94,7 @@ class DsaKVExecution:
             params.kernel_page_size,
             tuple(params.block_table.shape),
             lengths,
-            owner.budgets[name],
-            prefill_kv_workspace_budget_bytes() if prefill else None,
+            prefill_kv_workspace_budget_bytes() if prefill else owner.budgets[name],
             owner.other_resident_bytes(phase),
             owner.native_exact_topk,
             owner.indexer_use_fp8,
@@ -117,6 +120,7 @@ class DsaKVExecution:
             if self.prefill
             else params.positions_d.numel()
         )
+        fp8_prefill = self.prefill and self.fp8_sfa
         self.graph = params.is_cuda_graph
         self.batch = 1 if self.prefill else params.decode.local_causal_lens.shape[0]
         self.queries = self.rows // self.batch
@@ -188,10 +192,31 @@ class DsaKVExecution:
                     self.native_schedule_bytes = probe.numel() * probe.element_size()
         else:
             kernel_heads = 64 if owner.heads <= 64 else 128
+            partial_rows = capacity_rows
+            if fp8_prefill:
+                device = torch.cuda.get_device_properties(owner.device)
+                shared_memory = getattr(
+                    device, "shared_memory_per_block_optin", device.shared_memory_per_block
+                )
+                self.fp8_prefill_query_shape = fp8_sfa_prefill_query_shape(self.rows, shared_memory)
+                batch, query_width = self.fp8_prefill_query_shape
+                partial_rows = batch * query_width
+                padding = partial_rows - self.rows
+                if padding:
+                    # Padding a ragged shard creates a second, packed query.
+                    external += partial_rows * kernel_heads * (owner.latent_dim + owner.suffix_dim) * 2
+                if query_width > 1:
+                    # Restoring row-major LSE requires a contiguous result.
+                    external += partial_rows * kernel_heads * 4
+                # A split-kv slot contains every query in one scheduler item.
+                external += (
+                    (batch + device.multi_processor_count) * query_width
+                    * kernel_heads * (owner.latent_dim + 1) * 4
+                )
             external += (
                 capacity_rows * (3 * owner.heads + kernel_heads)
                 * (owner.latent_dim + owner.suffix_dim) * 2
-                + capacity_rows * kernel_heads * (owner.latent_dim * 2 + 8)
+                + partial_rows * kernel_heads * (owner.latent_dim * 2 + 8)
                 + capacity_rows * owner.heads * owner.value_dim * 4
                 + capacity_rows * owner.topk * 4
             )
@@ -220,13 +245,8 @@ class DsaKVExecution:
                     (self.shards, pages, params.page_size, features),
                     dtype,
                 )
-                add("cache.restore", (width, features), dtype)
-                if self.fp8_sfa:
-                    add(
-                        "cache.dequant",
-                        (width, owner.latent_dim + owner.suffix_dim),
-                        torch.bfloat16,
-                    )
+                if not fp8_prefill:
+                    add("cache.restore", (width, features), dtype)
             elif name == "indexer":
                 if self.fp8_indexer:
                     add("cache.native64", (1 + capacity_batch * (width // 64), 64, 1, 132), torch.uint8)
@@ -275,7 +295,7 @@ class DsaKVExecution:
                 add("merge.input_scores", (q, 2 * k), torch.float32)
                 add("merge.input_positions", (q, 2 * k), torch.int32)
             else:
-                add("slots", (capacity_rows, owner.topk), torch.int32)
+                add("slots", (partial_rows, owner.topk), torch.int32)
                 if not self.prefill:
                     add("lengths", (capacity_rows,), torch.int32)
                     add("partial_lse", (capacity_rows, owner.heads), torch.float32)
@@ -316,8 +336,8 @@ class DsaKVExecution:
                             (self.rows, owner.heads, owner.latent_dim),
                             torch.bfloat16,
                         )
-                    # Cache pack/gather/restore and final BF16 latent/output
-                    # never coexist. Reuse their arena after the last KV launch.
+                    # Reuse the arena after the final KV launch for buffers
+                    # that do not have to coexist with the cache.
                     return (s, final)
             return s
 
@@ -350,8 +370,6 @@ class DsaKVExecution:
             return selection + native
 
         def metadata_bytes(plan):
-            if self.fp8_sfa and self.prefill:
-                return len(plan.blocks) * 3 * 4
             if self.graph and not self.prefill:
                 # All capture buckets/cache groups remain live. Reserve their
                 # mutable metadata up front, not just the current bucket.
@@ -487,7 +505,8 @@ class DsaKVExecution:
 
                 _metadata(descriptor, device)
                 positions, requests, slices, host_slices = _prefill_block_layout(
-                    block, len(lengths), device
+                    block, len(lengths), device,
+                    packed_page_offsets=descriptor.local_page_offsets if fp8_prefill else None,
                 )
                 self.blocks.append(
                     DsaPreparedKVBlock(
@@ -498,13 +517,6 @@ class DsaKVExecution:
                         requests,
                         slices,
                         host_slices=host_slices,
-                        fp8_dequant_metadata=(
-                            (
-                                torch.zeros((1, 1), device=device, dtype=torch.int32),
-                                torch.full((1,), block.tokens, device=device, dtype=torch.int32),
-                                torch.zeros((1,), device=device, dtype=torch.int32),
-                            ) if self.fp8_sfa else None
-                        ),
                     )
                 )
             else:

@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["LOCAL_PAGES"])
 def _map_slots(
     Indices,
     Requests,
@@ -13,8 +13,10 @@ def _map_slots(
     Table,
     Slots,
     Lengths,
+    LOCAL_PAGES,
     TOPK: tl.constexpr,
     PREFILL: tl.constexpr,
+    GATHERED_CACHE: tl.constexpr,
     PAGE: tl.constexpr,
     SHARDS: tl.constexpr,
     RANK: tl.constexpr,
@@ -39,7 +41,13 @@ def _map_slots(
         end = tl.load(Slices + request * 3 + 1)
         offset = tl.load(Slices + request * 3 + 2)
         valid = (pos >= start) & (pos < end) & (pos >= 0)
-        slot = pos - start + offset
+        relative = pos - start
+        if GATHERED_CACHE:
+            owner = pos // PAGE % SHARDS
+            packed_page = offset + relative // (PAGE * SHARDS)
+            slot = (owner * LOCAL_PAGES + packed_page) * PAGE + relative % PAGE
+        else:
+            slot = relative + offset
     else:
         page = pos // PAGE
         local = (page // SHARDS) * PAGE + pos % PAGE
@@ -60,7 +68,9 @@ def _map_slots(
     tl.store(Slots + row * TOPK + col, tl.where(valid, slot, -1), col < TOPK)
 
 
-def map_dsa_chunk_slots(indices, params, block, out, *, block_table=None, lengths=None):
+def map_dsa_chunk_slots(
+    indices, params, block, out, *, block_table=None, lengths=None, gathered_cache=False
+):
     if indices.shape != out.shape or not indices.is_contiguous():
         raise ValueError("DSA final TopK must be contiguous [query,K]")
     requests = params.query_requests if params.is_prefill else params.batch_indice_d
@@ -78,8 +88,10 @@ def map_dsa_chunk_slots(indices, params, block, out, *, block_table=None, length
             block_table if block_table is not None else requests,
             out,
             lengths if lengths is not None else requests,
+            block.descriptor.total_local_pages if gathered_cache else 0,
             indices.shape[1],
             params.is_prefill,
+            gathered_cache,
             params.page_size,
             params.shard_size,
             params.shard_rank,

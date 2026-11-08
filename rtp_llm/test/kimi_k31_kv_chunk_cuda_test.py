@@ -201,6 +201,41 @@ class DsaKVChunkCudaTest(unittest.TestCase):
             consumed += (result >= 0).int()
         torch.testing.assert_close(consumed, expected)
 
+    def test_prefill_topk_addresses_rank_major_gathered_pages(self):
+        # Two requests start at different owners, include a partial final page,
+        # and reserve different numbers of packed pages on each rank.
+        page, shards, pages_per_rank = 4, 3, 3
+        starts, ends, offsets = (4, 12, 0), (19, 17, 0), (0, 2, 0)
+        positions = [
+            [-1, 3, 4, 7, 8, 11, 12, 15, 16, 18, 19],
+            [-1, 4, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+            [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        ]
+        indices = torch.tensor(positions, dtype=torch.int32, device=self.device)
+        params = SimpleNamespace(
+            is_prefill=True, page_size=page, shard_size=shards, shard_rank=0,
+            query_requests=torch.arange(3, dtype=torch.int32, device=self.device),
+        )
+        block = SimpleNamespace(
+            slices=torch.tensor(list(zip(starts, ends, offsets)), dtype=torch.int32, device=self.device),
+            descriptor=SimpleNamespace(total_local_pages=pages_per_rank),
+        )
+        slots_by_request = [{}, {}, {}]
+        for rank in range(shards):
+            for request, (start, end, offset) in enumerate(zip(starts, ends, offsets)):
+                owned_pages = [p for p in range(start, end, page) if p // page % shards == rank]
+                for packed_page, page_start in enumerate(owned_pages, offset):
+                    base = (rank * pages_per_rank + packed_page) * page
+                    for pos in range(page_start, min(end, page_start + page)):
+                        slots_by_request[request][pos] = base + pos - page_start
+        expected = torch.tensor(
+            [[slots.get(pos, -1) for pos in row] for slots, row in zip(slots_by_request, positions)],
+            dtype=torch.int32, device=self.device,
+        )
+        actual = torch.empty_like(indices)
+        map_dsa_chunk_slots(indices, params, block, actual, gathered_cache=True)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_latent_merge_then_one_value_up(self):
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
             flash_mla_sparse_fwd,

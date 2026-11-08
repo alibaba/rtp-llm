@@ -2,6 +2,8 @@
 
 from collections.abc import Mapping
 
+from rtp_llm.models_py.utils.module_profiler import profile_scope
+
 
 def resolve_mla_routes(fmha, cache, *, sparse: bool, attention_tag="default"):
     if not sparse:
@@ -40,7 +42,7 @@ def _publish_indexer_cache(inputs, cache):
 
 
 def run_prepared_sparse_indexer(indexer, query, weights, cache, fmha):
-    """Complete history once after natural K ingress and all query chunks.
+    """Complete history once after natural K ingress and query projection.
 
     The caller has already written K. Warmup/non-sparse routes still publish
     their cache exactly once, matching run_sparse_indexer's fast path.
@@ -49,8 +51,9 @@ def run_prepared_sparse_indexer(indexer, query, weights, cache, fmha):
         return None
     topk = None
     if fmha.is_sparse():
-        topk = indexer._compute_topk(
-            query, weights, cache, fmha.fmha_params, fmha.attn_inputs, fmha.cp_params,
-        )
+        with profile_scope("RTP::attention.dsa.indexer_core"):
+            topk = indexer._compute_topk(
+                query, weights, cache, fmha.fmha_params, fmha.attn_inputs, fmha.cp_params,
+            )
     _publish_indexer_cache(fmha.attn_inputs, cache)
     return topk

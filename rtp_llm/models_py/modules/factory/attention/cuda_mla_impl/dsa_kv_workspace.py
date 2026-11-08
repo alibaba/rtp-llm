@@ -1,19 +1,11 @@
 """Model-owned DSA scratch; target/draft and mutable Graph metadata stay isolated."""
 
 import math
-import os
 from functools import lru_cache
 
 import torch
 
 from rtp_llm.ops import KvCacheDataType
-
-
-def _budget(name, default_mib):
-    value = int(os.environ.get(name, default_mib))
-    if value <= 0:
-        raise ValueError(f"{name} must be a positive memory budget in MiB")
-    return value * 1024 * 1024
 
 
 @lru_cache(maxsize=None)
@@ -212,17 +204,10 @@ class DsaWorkspaceOwner:
         self.device = torch.device(device)
         from rtp_llm.models_py.modules.dsv4.indexer_topk import native_exact_topk_enabled
         self.native_exact_topk = native_exact_topk_enabled()
+        # Decode retains the original default phase capacities.
         self.budgets = {
-            "indexer": (
-                _budget("DSA_INDEXER_WORKSPACE_MB", 8192)
-                if indexer_budget_bytes is None
-                else indexer_budget_bytes
-            ),
-            "sfa": (
-                _budget("DSA_SFA_WORKSPACE_MB", 12288)
-                if sfa_budget_bytes is None
-                else sfa_budget_bytes
-            ),
+            "indexer": 8 * 1024**3 if indexer_budget_bytes is None else indexer_budget_bytes,
+            "sfa": 12 * 1024**3 if sfa_budget_bytes is None else sfa_budget_bytes,
         }
         if any(n <= 0 for n in self.budgets.values()):
             raise ValueError("DSA phase memory budgets must be positive")
@@ -302,12 +287,10 @@ class DsaWorkspaceOwner:
 
     def external_projection_bytes(self, tokens, *, indexer=False):
         if self.routing_plan is not None:
-            # Conservative simultaneous envelope. Q/gate and producer KV
-            # remain complete, only temporary Q-latent/Indexer projections
-            # are chunked. Residual, normalized H, O and reverse destination
-            # are charged separately from the persistent published source.
+            # Charge complete local projections before planning history KV
+            # chunks. Residual, normalized H, O and reverse destination are
+            # separate from the persistent published source.
             rows = tokens
-            chunk = min(rows, self.route_chunk_rows)
             full = rows * (
                 4 * self.hidden_dim * 2
                 + 2 * (self.latent_dim + self.suffix_dim) * 2
@@ -316,10 +299,12 @@ class DsaWorkspaceOwner:
                 + self.index_dim * 2
                 + self.index_heads * (self.index_dim + 4)
             )
-            temporary = chunk * (
-                2 * self.q_rank * 2
-                + self.heads * (self.nope_dim + self.suffix_dim + self.value_dim) * 2
-                + self.index_heads * (3 * self.index_dim + 16)
+            # Full receive activation and its FP8 encoding if needed, the
+            # latent columns retained by Gate, and raw BF16 Indexer Q.
+            temporary = rows * (
+                3 * self.hidden_dim + 4 * ((self.hidden_dim + 127) // 128)
+                + 2 * self.q_rank * 2
+                + self.index_heads * (2 * self.index_dim + 8)
             )
             anchors = rows * self.attn_res_blocks * self.hidden_dim * 2
             # TopK running arrays belong to Indexer phase specifications;

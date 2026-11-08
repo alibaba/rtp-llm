@@ -10,6 +10,7 @@ from rtp_llm.models_py.modules.base.cuda.indexer_kv_op import IndexerKVOp
 from rtp_llm.models_py.modules.dsv4.indexer_topk import NativeExactIndexerTopKBackend
 from rtp_llm.models_py.modules.base.cuda.fp8_indexer_score import NativeFp8IndexerScore
 from rtp_llm.models_py.modules.base.cuda.indexer_op import _unpack_ue8m0_scale
+from rtp_llm.models_py.utils.module_profiler import profile_scope
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -65,19 +66,32 @@ class Fp8IndexerOp(IndexerKVOp):
             return q.view(query.shape), scales
         return q.view(query.shape), _unpack_ue8m0_scale(scales).reshape(*query.shape[:-1], 1)
 
+    def encode_query_into(self, query, out, out_scale):
+        """Write one FP8 Q and FP32 UE8M0-derived scale per query head."""
+        from rtp_llm.models_py.triton_kernels.common.activation import quantize_strided_group128_fp8
+
+        if (query.ndim != 3 or query.shape[-1] != 128 or out.shape != query.shape
+                or out_scale.shape != (*query.shape[:-1], 1)):
+            raise ValueError("FP8 Indexer query destinations must match the chunk's tokens and heads")
+        quantize_strided_group128_fp8(
+            query.view(-1, 128), out=out.view(-1, 128), out_scale=out_scale.view(-1),
+        )
+
     def _score_prefill(self, query, gates, q_positions, keys, params,
                        execution, block, workspace, score):
-        raw = params.cache_adapter.read_prefix_chunk(
-            keys, params.block_table, block.descriptor,
-            workspace=workspace, indexer_fp8=True,
-            allow_reserved_block_zero=params.is_warmup,
-        )
-        key, scales = canonical_indexer_views(raw)
-        return self.native_score.dense(
-            query[0], key, scales, gates[0], block.indexer_starts,
-            block.indexer_ends, block.key_positions,
-            sanitize=not self._bounded_selection,
-        )
+        with profile_scope("RTP::attention.dsa.indexer.k_cache_read"):
+            raw = params.cache_adapter.read_prefix_chunk(
+                keys, params.block_table, block.descriptor,
+                workspace=workspace, indexer_fp8=True,
+                allow_reserved_block_zero=params.is_warmup,
+            )
+            key, scales = canonical_indexer_views(raw)
+        with profile_scope("RTP::attention.dsa.indexer.mqa_logits"):
+            return self.native_score.dense(
+                query[0], key, scales, gates[0], block.indexer_starts,
+                block.indexer_ends, block.key_positions,
+                sanitize=not self._bounded_selection,
+            )
 
     def _score_decode(self, query, gates, q_positions, keys, params,
                       execution, block, workspace, wire):

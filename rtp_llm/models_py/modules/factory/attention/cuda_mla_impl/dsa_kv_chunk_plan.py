@@ -4,6 +4,14 @@ from dataclasses import dataclass
 from typing import Callable, Sequence
 
 
+def fp8_sfa_prefill_query_shape(rows: int, shared_memory_bytes: int) -> tuple[int, int]:
+    """Pack independent queries into one FlashMLA launch per KV block."""
+    # The legacy scheduler needs five int32s per batch entry and one extra int32.
+    max_batch = (shared_memory_bytes - 4) // 20
+    query_width = max(1, (rows + max_batch - 1) // max_batch)
+    return (rows + query_width - 1) // query_width, query_width
+
+
 def prefill_indexer_score_bytes(rows: int, columns: int) -> int:
     """FP32 dense MQA storage, including SM100's extra K tile and row stride."""
     # Retain the planner's conservative row alignment across MQA backends.

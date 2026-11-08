@@ -105,7 +105,6 @@ public:
                                                             int64_t                             max_accept_length);
 
 protected:
-    GptModelOutputs forwardNativeMtpPrefillChunks(const GptModelInputs& inputs, int64_t budget);
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
     static bool dsparkDraftGraphAllowed(bool is_dspark, RoleType role_type);
     struct AcceptLenMetricsSnapshot {

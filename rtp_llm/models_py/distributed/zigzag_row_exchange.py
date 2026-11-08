@@ -15,11 +15,14 @@ import threading
 import torch
 import torch.distributed as dist
 
+from rtp_llm.models_py.utils.module_profiler import profile_scope
+
 
 _INSTANCE_COUNTS = {}
 _INSTANCE_LOCK = threading.Lock()
 _TIMEOUT_SECONDS = 120
 _PREPARED_PLAN_LIMIT = 16
+_HIDDEN_ROUTE_SCOPE = "RTP::attention.dsa.hidden_natural_to_zigzag"
 
 
 def _capacities(max_rows, hidden_size, chunk_capacity):
@@ -343,19 +346,40 @@ class DirectedRowExchange:
             if tensor.untyped_storage().data_ptr() == private.untyped_storage().data_ptr():
                 raise ValueError(f"{label} must not alias private transport storage")
 
-    def exchange(self, values, plan, direction, out=None):
+    def exchange(self, values, plan, direction, out=None, *, before_consume=None):
         """Return an independently owned complete local output, or validated out.
 
         The caller's stream joins the complete producer before publication.
         Reverse O routing therefore starts after the whole O producer, not an
         unfinished GEMM. Original-input aliasing is safe; private storage is not.
         """
-        return self._run(values, plan, direction, self.chunk_capacity, out=out)
+        return self._run(values, plan, direction, self.chunk_capacity, out=out,
+                         before_consume=before_consume)
 
     def consume_chunks(self, values, plan, direction, chunk_rows, consumer, *, before_consume=None):
         """Call consumer(start, slot) in destination order on the caller stream."""
         self._run(values, plan, direction, chunk_rows, consumer=consumer,
                   consuming=True, before_consume=before_consume)
+
+    def consume_fp8(self, activation, plan, consumer, *, before_consume, project_heads=None):
+        """Call consumer once with the complete Zigzag FP8 rows and scales."""
+        return self._run(
+            activation, plan, "to_zigzag", self.chunk_capacity, consumer=consumer,
+            consuming=True, before_consume=before_consume, fp8=True,
+            project_heads=project_heads,
+        )
+
+    def _fp8_views(self, storage, rows):
+        # These sections fit inside the BF16 allocation used by the inverse route.
+        raw = storage.view(torch.uint8).flatten()
+        values_bytes = rows * self.hidden_size
+        scale_rows = (rows + 3) // 4 * 4
+        groups = self.hidden_size // 512
+        scale_end = values_bytes + 4 * groups * scale_rows
+        values = raw[:values_bytes].view(torch.float8_e4m3fn).view(rows, self.hidden_size)
+        scales = raw[values_bytes:scale_end].view(torch.int32).view(groups, scale_rows)
+        heads = raw[scale_end:scale_end + rows * 128].view(torch.float32).view(rows, 32)
+        return values, scales, heads
 
     def produce_and_exchange(self, plan, direction, producer, out=None):
         """Queue a complete producer into owned publication storage, without staging copy."""
@@ -363,7 +387,8 @@ class DirectedRowExchange:
                          out=out, producer=producer)
 
     def _run(self, values, plan, direction, chunk_rows, *, out=None, consumer=None,
-             consuming=False, before_consume=None, producer=None):
+             consuming=False, before_consume=None, producer=None, fp8=False,
+             project_heads=None):
         with self._lock:
             if not self.enabled:
                 raise RuntimeError("directed exchange is disabled after a setup or asynchronous failure")
@@ -377,7 +402,11 @@ class DirectedRowExchange:
                         raise ValueError("chunk_rows exceeds fixed receive capacity")
                     validate_plan(plan, direction, self.size, self.rank, self.max_rows)
                     self._require_prepared(plan, chunk_rows)
-                    if producer is None:
+                    if fp8:
+                        if (self.hidden_size != 7168 or values.device != self.device
+                                or values.shape != (plan.local_rows, self.hidden_size)):
+                            raise ValueError("FP8 directed exchange requires local K3.1 hidden rows")
+                    elif producer is None:
                         self._validate_tensor(values, plan.local_rows, "values")
                     else:
                         if not callable(producer) or consuming:
@@ -399,6 +428,10 @@ class DirectedRowExchange:
                         if out is None:
                             out = torch.empty_like(values)
                         self._validate_tensor(out, plan.local_rows, "out")
+                    if fp8:
+                        return self._submit_fp8(
+                            values, plan, caller, consumer, before_consume, project_heads,
+                        )
                     self._submit(values, plan, direction, chunk_rows, caller, out, consumer,
                                  consuming, before_consume, producer is None)
             except Exception:
@@ -406,11 +439,81 @@ class DirectedRowExchange:
                 raise
             return out
 
+    def _submit_fp8(self, activation, plan, caller, consumer, before_consume, project_heads):
+        rows = plan.local_rows
+        comm = self._stream
+        source, source_scales, source_heads = self._fp8_views(self._source, self.max_rows)
+        peers = [self._fp8_views(peer, self.max_rows) for peer in self._peers]
+        # Allocate on the caller before recording entry so comm also waits
+        # for any earlier uses of memory recycled by the caller's allocator.
+        target = torch.empty_like(activation.values)
+        scales = activation.scale_wire.new_empty((source_scales.shape[0], (rows + 3) // 4 * 4))
+        self._entry.record(caller)
+        if project_heads is not None:
+            if not hasattr(self, "_heads_ready"):
+                self._heads_ready = torch.cuda.Event()
+            # Reuse the caller stream for projection. Comm can publish hidden
+            # from the entry event while this stream prepares the head weights.
+            caller.wait_event(self._readers_done)
+            project_heads(source_heads[:rows])
+            self._heads_ready.record(caller)
+            heads = torch.empty((rows, 32), device=self.device, dtype=torch.float32)
+        else:
+            heads = None
+
+        with torch.cuda.stream(comm), profile_scope(f"{_HIDDEN_ROUTE_SCOPE}.publish"):
+            comm.wait_event(self._done)
+            comm.wait_event(self._entry)
+            activation.values.record_stream(comm)
+            activation.scale_wire.record_stream(comm)
+            source[:rows].copy_(activation.values)
+            source_scales[:, :rows].copy_(activation.scale_wire[:, :rows])
+            self._handle.barrier(channel=0, timeout_ms=_TIMEOUT_SECONDS * 1000)
+        with torch.cuda.stream(comm), profile_scope(f"{_HIDDEN_ROUTE_SCOPE}.pull"):
+            target.record_stream(comm)
+            scales.record_stream(comm)
+            for segment in plan.to_zigzag:
+                src, dst, count = segment.source_offset, segment.destination_offset, segment.rows
+                remote, remote_scales, _ = peers[segment.peer]
+                target[dst:dst + count].copy_(remote[src:src + count])
+                scales[:, dst:dst + count].copy_(remote_scales[:, src:src + count])
+            scales[:, rows:].fill_(0x7F7F7F7F)
+            self._ready[0].record(comm)
+
+        if before_consume is not None:
+            result = before_consume()
+            if result is not None or torch.cuda.current_stream(self.device) != caller:
+                raise RuntimeError("before_consume must return None and keep the caller stream")
+        caller.wait_event(self._ready[0])
+        result = consumer(target, scales[:, :rows].T)
+        if result is not None or torch.cuda.current_stream(self.device) != caller:
+            raise RuntimeError("FP8 route consumer must return None and keep the caller stream")
+
+        with torch.cuda.stream(comm):
+            if heads is not None:
+                with profile_scope("RTP::attention.dsa.indexer.head_weights_natural_to_zigzag"):
+                    comm.wait_event(self._heads_ready)
+                    self._handle.barrier(channel=0, timeout_ms=_TIMEOUT_SECONDS * 1000)
+                    heads.record_stream(comm)
+                    for peer, src, dst, count in chunk_intersections(plan.to_zigzag, 0, rows):
+                        heads[dst:dst + count].copy_(peers[peer][2][src:src + count])
+            self._pulls_done.record(comm)
+            with profile_scope(f"{_HIDDEN_ROUTE_SCOPE}.peer_reads_done"):
+                self._handle.barrier(channel=1, timeout_ms=_TIMEOUT_SECONDS * 1000)
+                self._readers_done.record(comm)
+        caller.wait_event(self._pulls_done)
+        self._done.record(caller)
+        return heads
+
     def _submit(self, values, plan, direction, chunk_rows, caller, out, consumer, consuming,
                 before_consume=None, publish_source=True):
         comm = self._stream
+        route_scope = (
+            "RTP::row_exchange.natural_to_zigzag"
+            if direction == "to_zigzag" else "RTP::row_exchange.zigzag_to_natural"
+        )
         self._entry.record(caller)
-        with torch.cuda.stream(comm):
+        with torch.cuda.stream(comm), profile_scope(f"{route_scope}.publish"):
             comm.wait_event(self._done)
             comm.wait_event(self._entry)
             if publish_source:
@@ -426,10 +529,11 @@ class DirectedRowExchange:
                 if result is not None or torch.cuda.current_stream(self.device) != caller:
                     raise RuntimeError("before_consume must return None and keep the caller stream")
         slots_used = [False, False]
-        for number, start in enumerate(range(0, plan.local_rows, chunk_rows)):
-            end = min(start + chunk_rows, plan.local_rows)
+        pull_rows = chunk_rows if consuming else max(1, plan.local_rows)
+        for number, start in enumerate(range(0, plan.local_rows, pull_rows)):
+            end = min(start + pull_rows, plan.local_rows)
             slot = number % 2
-            with torch.cuda.stream(comm):
+            with torch.cuda.stream(comm), profile_scope(f"{route_scope}.pull"):
                 if consuming and slots_used[slot]:
                     comm.wait_event(self._free[slot])
                 target = self._slots[slot, :end - start] if consuming else out[start:end]
@@ -449,8 +553,9 @@ class DirectedRowExchange:
         with torch.cuda.stream(comm):
             self._pulls_done.record(comm)
             # Protect remote sources until every peer has finished its pulls.
-            self._handle.barrier(channel=1, timeout_ms=_TIMEOUT_SECONDS * 1000)
-            self._readers_done.record(comm)
+            with profile_scope(f"{route_scope}.peer_reads_done"):
+                self._handle.barrier(channel=1, timeout_ms=_TIMEOUT_SECONDS * 1000)
+                self._readers_done.record(comm)
         with torch.cuda.stream(caller):
             # Only local pulls are needed to consume the owned output. Keep
             # the global readers fence on comm, where it protects source reuse

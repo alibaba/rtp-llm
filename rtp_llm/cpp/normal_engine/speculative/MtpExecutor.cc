@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
-#include "rtp_llm/cpp/normal_engine/speculative/MtpPrefillChunkPlan.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -44,98 +43,6 @@
 #include <vector>
 
 namespace rtp_llm {
-
-GptModelOutputs MtpExecutor::forwardNativeMtpPrefillChunks(const GptModelInputs& full, int64_t budget) {
-    RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_query_chunks");
-    const auto host_i64 = [](const torch::Tensor& value) {
-        const auto host = value.to(torch::kCPU, torch::kLong).contiguous();
-        return std::vector<int64_t>(host.data_ptr<int64_t>(), host.data_ptr<int64_t>() + host.numel());
-    };
-    const auto lengths = host_i64(full.input_lengths);
-    const auto prefixes = host_i64(full.prefix_lengths);
-    const auto rounds = planMtpPrefillChunks(lengths, prefixes, budget, parallelism_config_.tp_size);
-    std::vector<torch::Tensor> terminal_logits, terminal_hidden, terminal_recurrent;
-    for (const auto& slices : rounds) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_query_chunk");
-        GptModelInputs chunk = full;
-        std::vector<torch::Tensor> tokens, hiddens, positions, masks, type_ids;
-        std::vector<int32_t> q_lengths, q_prefixes, output_indexes;
-        std::vector<int64_t> batch_rows;
-        int32_t packed = 0;
-        const auto append = [](std::vector<torch::Tensor>& parts, const torch::Tensor& tensor,
-                               const MtpPrefillSlice& slice) {
-            if (tensor.defined() && tensor.numel())
-                parts.push_back(tensor.narrow(0, slice.source_offset, slice.length));
-        };
-        const auto combine = [](const std::vector<torch::Tensor>& parts) {
-            return parts.empty() ? torch::Tensor() : parts.size() == 1 ? parts[0] : torch::cat(parts, 0);
-        };
-        for (const auto& slice : slices) {
-            append(tokens, full.combo_tokens, slice);
-            append(hiddens, full.last_hidden_states, slice);
-            append(positions, full.combo_position_ids, slice);
-            append(masks, full.text_tokens_mask, slice);
-            append(type_ids, full.combo_tokens_type_ids, slice);
-            batch_rows.push_back(slice.request);
-            q_lengths.push_back(slice.length);
-            q_prefixes.push_back(slice.prefix);
-            if (slice.terminal) output_indexes.push_back(packed + slice.length - 1);
-            packed += slice.length;
-        }
-        chunk.combo_tokens = combine(tokens);
-        chunk.last_hidden_states = combine(hiddens);
-        chunk.combo_position_ids = combine(positions);
-        chunk.text_tokens_mask = combine(masks);
-        chunk.combo_tokens_type_ids = combine(type_ids);
-        // CPU metadata is pinned and kept alive by PyWrappedModel's holder.
-        const auto pinned_i32 = [](const std::vector<int32_t>& values) {
-            auto out = torch::empty({static_cast<int64_t>(values.size())},
-                                    torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
-            if (!values.empty()) std::memcpy(out.data_ptr(), values.data(), values.size() * sizeof(int32_t));
-            return out;
-        };
-        chunk.input_lengths = pinned_i32(q_lengths);
-        chunk.prefix_lengths = pinned_i32(q_prefixes);
-        chunk.sequence_lengths = pinned_i32({});
-        chunk.lm_output_indexes = pinned_i32(output_indexes);
-        auto index_host = torch::tensor(batch_rows, torch::kLong);
-        const auto select = [&index_host](const torch::Tensor& table, int64_t dim) {
-            if (!table.defined() || !table.numel()) return table;
-            auto selected = table.index_select(dim, index_host.to(table.device()));
-            return selected.device().is_cpu() ? selected.pin_memory() : selected;
-        };
-        chunk.kv_cache_block_id = select(full.kv_cache_block_id, full.kv_cache_block_id.dim() == 3 ? 1 : 0);
-        chunk.kv_cache_kernel_block_id = select(full.kv_cache_kernel_block_id,
-                                               full.kv_cache_kernel_block_id.dim() == 3 ? 1 : 0);
-        chunk.request_id = select(full.request_id, 0);
-        chunk.request_pd_separation = select(full.request_pd_separation, 0);
-        chunk.cache_store_publish_start_tokens = select(full.cache_store_publish_start_tokens, 0);
-        chunk.cache_keys = select(full.cache_keys, 0);
-        chunk.sp_logical_requests = 0;
-        chunk.sp_logical_tokens = 0;
-        chunk.need_all_logits = false;
-        chunk.need_all_hidden_states = false;
-        chunk.skip_lm_head = output_indexes.empty();
-        chunk.mtp_prefill_terminal_output = true;
-        auto output = forwardModel(draft_model_.get(), chunk, ModelInputsModelRole::DRAFT);
-        if (!output_indexes.empty()) {
-            terminal_logits.push_back(std::move(output.logits));
-            terminal_hidden.push_back(std::move(output.hidden_states));
-            terminal_recurrent.push_back(std::move(output.mtp_target_hidden_states));
-        }
-        // Drop the attention plan after its output has been consumed, before
-        // constructing the next round. Decode graph storage is untouched.
-        draft_model_->releaseBuffers();
-    }
-    GptModelOutputs result;
-    result.logits = torch::cat(terminal_logits, 0);
-    result.hidden_states = torch::cat(terminal_hidden, 0);
-    result.mtp_target_hidden_states = torch::cat(terminal_recurrent, 0);
-    result.all_hidden_states = result.mtp_target_hidden_states;
-    RTP_LLM_CHECK_WITH_INFO(result.logits.size(0) == static_cast<int64_t>(lengths.size()),
-                            "Native MTP chunk terminal coverage mismatch");
-    return result;
-}
 
 void MtpExecutor::recordSmokeForward(const char* event, const GptModelInputs& inputs,
                                      const StreamGroups* streams, bool prefill) {
@@ -1507,40 +1414,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             (void)forwardModel(sp_prefill_draft_model_.get(), model_input, ModelInputsModelRole::DRAFT_PREFILL);
             draft_model_output = GptModelOutputs();
         } else {
-            static const int64_t mtp_chunk_budget = [] {
-                const char* value = std::getenv("KIMI_K3_MTP_PREFILL_CHUNK_TOKENS");
-                if (!value) return int64_t{8192};
-                char* end = nullptr;
-                const auto budget = std::strtoll(value, &end, 10);
-                RTP_LLM_CHECK_WITH_INFO(end != value && *end == '\0' && budget >= 0,
-                                        "Invalid KIMI_K3_MTP_PREFILL_CHUNK_TOKENS");
-                return static_cast<int64_t>(budget);
-            }();
-            // Native K3.1 has global natural-order draft queries, independent
-            // of target CP. PD/MM retain their existing publication/layout path.
-            const bool chunk_topology = global_mla_draft_hidden && mtp_chunk_budget > 0
-                && nativeMtpPrefillChunkTopologySupported(parallelism_config_.tp_size,
-                                                          parallelism_config_.ep_size,
-                                                          parallelism_config_.dp_size);
-            bool request_pd_supported = false;
-            if (chunk_topology) {
-                const auto& flags = model_input.request_pd_separation;
-                const bool has_flags = flags.defined() && flags.numel() > 0
-                    && flags.numel() == model_input.input_lengths.numel();
-                const bool any_request_pd = has_flags && flags.to(torch::kCPU).any().item<bool>();
-                request_pd_supported = nativeMtpPrefillChunkPdSupported(
-                    model_input.pd_separation, has_flags, any_request_pd);
-            }
-            const bool native_chunks = chunk_topology && request_pd_supported
-                && model_input.sequence_lengths.numel() == 0
-                && (!model_input.multimodal_features || model_input.multimodal_features->empty())
-                && (!model_input.engram_token_windows.defined() || !model_input.engram_token_windows.numel());
-            if (native_chunks) {
-                draft_model_output = forwardNativeMtpPrefillChunks(model_input, mtp_chunk_budget);
-                draft_last_hidden_states = draft_model_output.mtp_target_hidden_states;
-            } else {
-                draft_model_output = std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
-            }
+            // The scheduler already chose this Prefill step's token range.
+            draft_model_output = forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT);
         }
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }

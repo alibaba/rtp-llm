@@ -11,7 +11,13 @@ import triton.language as tl
 MAX_K = 8192
 
 @triton.jit
-def _fused_logits_head_gate_kernel(x_ptr, w_ptr, qs_ptr, out_ptr, scale_const, T, K: tl.constexpr, N: tl.constexpr, stride_x_t, stride_w_n, stride_w_k, stride_qs_t, stride_o_t, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_N: tl.constexpr, W_IS_TRANSPOSED: tl.constexpr, TILE_HEADS: tl.constexpr = False):
+def _fused_logits_head_gate_kernel(
+    x_ptr, w_ptr, qs_ptr, out_ptr, scale_const, T, K: tl.constexpr, N: tl.constexpr,
+    stride_x_t, stride_w_n, stride_w_k, stride_qs_t, stride_o_t,
+    BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_N: tl.constexpr,
+    W_IS_TRANSPOSED: tl.constexpr, TILE_HEADS: tl.constexpr = False,
+    APPLY_SCALE: tl.constexpr = True,
+):
     pid_m = tl.program_id(0).to(tl.int64)
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
     mask_m = offs_m < T
@@ -30,9 +36,29 @@ def _fused_logits_head_gate_kernel(x_ptr, w_ptr, qs_ptr, out_ptr, scale_const, T
         else:
             w = tl.load(w_ptr + offs_n[:, None] * stride_w_n + offs_k[None, :] * stride_w_k, mask=mask_n[:, None] & mask_k[None, :], other=0.0).to(tl.float32)
             acc += tl.dot(x, tl.trans(w), out_dtype=tl.float32, input_precision='ieee')
-    qs = tl.load(qs_ptr + offs_m[:, None] * stride_qs_t + offs_n[None, :], mask=mask_m[:, None] & mask_n[None, :], other=0.0)
-    out = acc * qs * scale_const
-    tl.store(out_ptr + offs_m[:, None] * stride_o_t + offs_n[None, :], out, mask=mask_m[:, None] & mask_n[None, :])
+    if APPLY_SCALE:
+        qs = tl.load(qs_ptr + offs_m[:, None] * stride_qs_t + offs_n[None, :], mask=mask_m[:, None] & mask_n[None, :], other=0.0)
+        acc = acc * qs * scale_const
+    tl.store(out_ptr + offs_m[:, None] * stride_o_t + offs_n[None, :], acc, mask=mask_m[:, None] & mask_n[None, :])
+
+
+def project_prefill_head_weights(x: torch.Tensor, weight: torch.Tensor, out: torch.Tensor) -> None:
+    """Write the same FP32 dot products before the Indexer Q scale exists."""
+    rows, width = x.shape
+    heads = weight.shape[0]
+    if (x.dtype != torch.bfloat16 or weight.dtype != torch.float32
+            or not x.is_cuda or not x.is_contiguous() or width > MAX_K
+            or weight.shape[1] != width or weight.device != x.device
+            or out.shape != (rows, heads) or out.dtype != torch.float32
+            or out.device != x.device or not out.is_contiguous()):
+        raise ValueError("invalid FP32 Indexer head projection buffers")
+    _fused_logits_head_gate_kernel[(triton.cdiv(rows, 32),)](
+        x, weight, x, out, 1.0, rows, width, heads,
+        x.stride(0), weight.stride(0), weight.stride(1), 0, out.stride(0),
+        BLOCK_M=32, BLOCK_K=128, BLOCK_N=triton.next_power_of_2(max(heads, 16)),
+        W_IS_TRANSPOSED=weight.stride(0) < weight.stride(1), APPLY_SCALE=False,
+        num_warps=4, num_stages=3,
+    )
 
 @triton.jit
 def _fused_logits_head_gate_small_t_kernel(x_ptr, w_ptr, qs_ptr, out_ptr, scale_const, K: tl.constexpr, stride_x_t, stride_w_n, stride_w_k, stride_qs_t, stride_o_t, BLOCK_K: tl.constexpr):

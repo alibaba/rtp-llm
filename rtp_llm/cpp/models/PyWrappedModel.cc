@@ -1318,13 +1318,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
         py_model_inputs.capture_hidden_states  = capture_hidden_states;
         py_model_inputs.need_all_logits        = inputs.need_all_logits;
         py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;
-        if (inputs.mtp_prefill_terminal_output) {
-            RTP_LLM_CHECK_WITH_INFO(has_context_request && !device_props_.enable_prefill_cp
-                                    && !capture_hidden_states,
-                                    "MTP terminal rows require an eager non-query-CP prefill");
-            py_model_inputs.mtp_prefill_output_indexes =
-                raw_inputs.lm_output_indexes.to(token_ids.device(), torch::kLong, false, true);
-        }
         if (inputs.engram_token_windows.defined()) {
             buffer_holder_.hold_host(inputs.engram_token_windows);
             py_model_inputs.engram_token_windows = inputs.engram_token_windows.to(torch::kCUDA, /*non_blocking=*/true);
@@ -1385,12 +1378,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
             hidden_states = py_model_outputs.hidden_states.clone();
         }
 
-        if (sequence_parallel_padding_enabled_ && !py_model_outputs.lm_output_already_selected) {
+        if (sequence_parallel_padding_enabled_) {
             hidden_states = hidden_states.narrow(0, 0, raw_inputs.combo_tokens.numel());
         }
         if (py_model_outputs.mtp_target_hidden_states.defined()) {
             auto& mtp_hidden = py_model_outputs.mtp_target_hidden_states;
-            if (sequence_parallel_padding_enabled_ && !py_model_outputs.lm_output_already_selected) {
+            if (sequence_parallel_padding_enabled_) {
                 mtp_hidden = mtp_hidden.narrow(0, 0, raw_inputs.combo_tokens.numel());
             }
             // Graph replay reuses its output storage. Each forward result owns
@@ -1407,13 +1400,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
             }
             return outputs;
         };
-        if (py_model_outputs.lm_output_already_selected) {
-            RTP_LLM_CHECK_WITH_INFO(inputs.mtp_prefill_terminal_output
-                                    && hidden_states.size(0) == raw_inputs.lm_output_indexes.numel(),
-                                    "Unexpected MTP terminal output geometry");
-            return with_generation_prefill_cuda_graph_status(
-                attach_mtp_target_hidden_states(forwardPostLayersLastHidden(hidden_states, post_inputs)));
-        }
         if (dspark_model_role_ != DSparkModelRole::NONE) {
             if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
                 // Python returns normalized [B*gamma, hidden_dim]. Reuse the

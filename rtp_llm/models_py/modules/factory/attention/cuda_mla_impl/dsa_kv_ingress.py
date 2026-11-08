@@ -1,10 +1,13 @@
 """Budgeted new-KV transport from query CP producers to PageRR owners."""
 
 import math
+
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather_into
 from rtp_llm.models_py.utils.module_profiler import profile_scope
+
+from ..mla_prefill_plan import prefill_kv_workspace_budget_bytes
 
 
 class DsaKVIngress:
@@ -13,18 +16,19 @@ class DsaKVIngress:
         owner, layout = params.workspace_owner, params.producer_layout
         self.workspace = owner.phase(phase + "_ingress")
         rows, shards = layout.local_rows, params.shard_size
-        fixed = owner.external_projection_bytes(rows, indexer=phase == "indexer")
-        # Complete local projected values, routing metadata, explicit pack /
-        # gather, and native write input are charged before selecting capacity.
-        fixed += rows * features * 2 + layout.physical_rows * 24 + 64 * 1024 * 1024
-        available = owner.budgets[phase] - fixed - owner.other_resident_bytes(self.workspace)
+        # Charge routing metadata and pack/gather scratch. The projected KV
+        # rows already produced by the model follow the scheduler's token budget.
+        fixed = layout.physical_rows * 24 + 64 * 1024 * 1024
+        available = prefill_kv_workspace_budget_bytes() - fixed
         per_row = features * 2 * (1 + shards) + shards * 24
         maximum = available // per_row
         page = params.kernel_page_size
         required = math.ceil(rows / page) * page
         capacity = min(required, maximum // page * page)
         if capacity < page:
-            raise ValueError("DSA ingress budget cannot hold one aligned KV block")
+            raise ValueError(
+                "RTP_PREFILL_KV_WORKSPACE_BUDGET_GIB cannot hold one aligned DSA KV ingress block"
+            )
         self.capacity = capacity
         self.shapes = {
             "send": ((capacity, features), torch.bfloat16),
@@ -47,7 +51,7 @@ class DsaKVIngress:
                 allow_reserved_block_zero=params.is_warmup,
             )
             self.blocks.append((start, count, slots))
-        self.required_bytes = fixed + owner.other_resident_bytes(self.workspace) + capacity * per_row
+        self.required_bytes = fixed + capacity * per_row
         self.ready = torch.cuda.Event()
         self.ready.record(torch.cuda.current_stream(owner.device))
 
