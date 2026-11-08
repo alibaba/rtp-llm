@@ -382,6 +382,7 @@ def load_checkpoint_shards(model, full_state, device_mesh=None, cpu_offload=None
     total = torch.tensor(owned, device=device, dtype=torch.int64); dist.all_reduce(total)
     if total.item() != POLICY_NUMEL:raise RuntimeError('Actual shards do not cover the policy exactly once')
     audit = {'schema': 'qwen38-flat-sharded-checkpoint-v1', 'rank': dist.get_rank(),
+             'run_id': os.environ.get('Q38_RUN_ID'), 'run_root': os.environ.get('Q38_RUN_ROOT'),
              'world_size': WORLD_SIZE, 'hostname': socket.gethostname(), 'pid': os.getpid(),
              'started_unix': started, 'finished_unix': time.time(), 'loaded_local_numel': owned,
              'global_policy_numel': total.item(), 'source_keys': len(canonical),

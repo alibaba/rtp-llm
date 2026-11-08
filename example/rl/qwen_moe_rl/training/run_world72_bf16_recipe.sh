@@ -33,6 +33,7 @@ if [[ "${Q38_INITIAL_POLICY_REPLAY:-0}" != 0 ]]; then
   echo 'Short-sequence candidate requires fresh rollout; replay is forbidden' >&2
   exit 2
 fi
+export Q38_INITIAL_POLICY_REPLAY=0
 unset Q38_INITIAL_POLICY_REPLAY_MANIFEST Q38_INITIAL_POLICY_REPLAY_MANIFEST_SHA256
 # Reclaim's current-run source whitelist requires full byte verification independently of episode replay.
 export Q38_REPLAY_VERIFY_FULL_SHARD_BYTES=1
