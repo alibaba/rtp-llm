@@ -7,7 +7,8 @@ global cache controls, writes model bytes, or assumes advice released memory.
 """
 from pathlib import Path
 from bisect import bisect_right
-import ctypes,hashlib,json,mmap,os,struct,time
+from collections import deque
+import ctypes,hashlib,json,mmap,os,struct,threading,time
 from source_range_planner import tensor_intervals,page_aligned_union,subtract_intervals
 
 INDEX_SHA='e36c40d4e99b2714fff821218a0433bda2dec46afdb1ebee8ce96ced997928ee'
@@ -18,6 +19,10 @@ MAX_TOTAL=512*1024**3
 MAX_SAMPLE_READ_BYTES=64*1024**2
 MAX_WIDE_SCAN=5*1024**4
 MAX_SCAN_WINDOW=2*1024**3
+# Bound metadata/syscall overhead independently of byte budgets. A wide round
+# may combine many small authorized intervals, but scans at most 2 GiB total.
+MAX_WIDE_WINDOWS_PER_BATCH=32
+MAX_ADVICE_RANGES_PER_BATCH=32
 
 def _sha(data):return hashlib.sha256(data).hexdigest()
 
@@ -152,7 +157,8 @@ def advise_one_batch(plan,offset_intervals,*,model=MODEL,max_bytes=MAX_BATCH):
         # Each source range consumes its own page again when the verification
         # read is followed by a second DONTNEED. Count both syscalls toward
         # the exact same hard cap; advice bytes are not released bytes.
-        if remaining<2*page or (len(batch)+1)*2*page>MAX_SAMPLE_READ_BYTES:break
+        if (remaining<2*page or len(batch)>=MAX_ADVICE_RANGES_PER_BATCH
+                or (len(batch)+1)*2*page>MAX_SAMPLE_READ_BYTES):break
         take=min(end-start,remaining-page);take=(take//page)*page
         if take:
             batch.append((name,start,start+take));remaining-=take+page
@@ -176,6 +182,7 @@ def advise_one_batch(plan,offset_intervals,*,model=MODEL,max_bytes=MAX_BATCH):
                 sample_sha256_before=first,sample_sha256_after=second))
         finally:os.close(fd)
     return dict(schema='q38-bounded-source-cache-advice-v1',advised_bytes=total,ranges=result,
+        advice_range_count=len(result),advice_range_limit=MAX_ADVICE_RANGES_PER_BATCH,
         sample_read_bytes=2*len(result)*page,re_advised_sample_bytes=len(result)*page,
         syscall_advised_bytes=total+len(result)*page,
         elapsed_seconds=time.monotonic()-started,read_only_fd=True,
@@ -189,19 +196,75 @@ class ReclaimCursor:
         root=Path(plan['run_root'])
         if root.name!=plan['run_id']:raise ValueError('Run root mismatch')
         self.plan=plan;self.max_total=max_total;self.index=0;self.cursor=None;self.total=0;self.round=0
+        self._failed=False;self._lock=threading.Lock();self._owner_pid=os.getpid()
         self.exact_count=len(plan['intervals'])
         self.segments=plan['intervals']+plan.get('wider_only_intervals',[])
         self.wide_scan_limit=sum(end-start for _,start,end in plan.get('wider_only_intervals',[]))
         if self.wide_scan_limit>MAX_WIDE_SCAN:raise ValueError('Wider plan exceeds official-model scan ceiling')
         self.wide_scanned=0
-        self.pending_resident=[];self.pending_window_end=None
+        self.pending_resident=deque()
         self.directory=root/'cpu-reclaim';self.directory.mkdir(parents=True,exist_ok=True)
         claim=dict(schema='q38-node-reclaim-exclusive-claim-v1',run_id=plan['run_id'],hostname=plan['hostname'],
             coordinator_pid=os.getpid(),ranks=plan['ranks'],max_total_bytes=max_total,created_unix=time.time())
-        with (self.directory/'CLAIM.json').open('x') as stream:json.dump(claim,stream,indent=2);stream.write('\n')
+        claim_text=json.dumps(claim,indent=2)+'\n'
+        with (self.directory/'CLAIM.json').open('x') as stream:
+            stream.write(claim_text);stream.flush();claim_stat=os.fstat(stream.fileno())
+        self._claim_identity=(claim_stat.st_dev,claim_stat.st_ino)
+        self._claim_size=len(claim_text.encode('utf-8'))
+        self._claim_sha256=_sha(claim_text.encode('utf-8'))
+
+    def _verify_owner_claim(self):
+        if os.getpid()!=self._owner_pid:
+            raise RuntimeError('Reclaim cursor used outside its original coordinator process')
+        if os.path.lexists(self.directory/'FAILED.json'):
+            raise RuntimeError('A reclaim failure marker forbids further advice')
+        fd=os.open(self.directory/'CLAIM.json',os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW)
+        try:
+            stat=os.fstat(fd)
+            if (stat.st_dev,stat.st_ino)!=self._claim_identity:
+                raise RuntimeError('Exclusive reclaim claim identity changed')
+            if stat.st_size!=self._claim_size:
+                raise RuntimeError('Exclusive reclaim claim size changed')
+            with os.fdopen(fd,'rb',closefd=False) as stream:raw=stream.read(self._claim_size+1)
+            if _sha(raw)!=self._claim_sha256:
+                raise RuntimeError('Exclusive reclaim claim contents changed')
+        finally:os.close(fd)
 
     def next_batch(self,*,model=MODEL,max_bytes=MAX_BATCH):
-        if self.max_total-self.total<2*self.plan['page_size'] or self.index>=len(self.segments):return None
+        with self._lock:
+            return self._next_batch_once(model=model,max_bytes=max_bytes)
+
+    def _next_batch_once(self,*,model=MODEL,max_bytes=MAX_BATCH):
+        if self._failed:
+            raise RuntimeError('Reclaim cursor failed; its exclusive claim forbids all replay')
+        try:
+            self._verify_owner_claim()
+            return self._next_batch(model=model,max_bytes=max_bytes)
+        except BaseException as error:
+            # Some irreversible advice calls may have succeeded before the
+            # exception and before normal accounting or the receipt. Neither
+            # this object nor a new object may retry ambiguous work.
+            self._failed=True
+            try:
+                with (self.directory/'FAILED.json').open('x') as stream:
+                    json.dump(dict(schema='q38-reclaim-cursor-failed-no-replay-v1',
+                        run_id=self.plan['run_id'],hostname=self.plan['hostname'],
+                        coordinator_pid=self._owner_pid,failure_observer_pid=os.getpid(),completed_rounds=self.round,
+                        completed_syscall_advised_bytes=self.total,
+                        partial_current_batch_may_have_executed=True,
+                        failure_type=type(error).__name__,failed_unix=time.time()),stream,indent=2)
+                    stream.write('\n')
+            except BaseException:
+                # The original exclusive claim and in-memory poison remain;
+                # failure to record a receipt must never make retry legal.
+                pass
+            raise
+
+    def _next_batch(self,*,model=MODEL,max_bytes=MAX_BATCH):
+        if (not isinstance(max_bytes,int) or isinstance(max_bytes,bool) or max_bytes>MAX_BATCH
+                or max_bytes<2*self.plan['page_size'] or max_bytes%self.plan['page_size']):
+            raise ValueError('Invalid per-batch advice limit')
+        if self.max_total-self.total<2*self.plan['page_size'] or (self.index>=len(self.segments) and not self.pending_resident):return None
         budget=min(max_bytes,self.max_total-self.total)
         if self.index<self.exact_count:
             remaining=[]
@@ -222,29 +285,41 @@ class ReclaimCursor:
                 elif self.cursor>end:raise RuntimeError('Advice escaped source interval')
             result.update(stage='exact_completed_source_ranges',wide_scanned_bytes=0)
         else:
-            name,start,end=self.segments[self.index]
-            start=start if self.cursor is None else self.cursor
-            window=0
+            scanned=0;windows=0
             if not self.pending_resident:
-                if self.wide_scanned>=self.wide_scan_limit:return None
-                window=min(end-start,MAX_SCAN_WINDOW,self.wide_scan_limit-self.wide_scanned)
-                window=(window//self.plan['page_size'])*self.plan['page_size']
-                if not window:return None
-                self.pending_resident=resident_runs(self.plan,name,start,start+window,model=model)
-                self.pending_window_end=start+window;self.wide_scanned+=window
+                # Advance scan position only after each mincore succeeds. Keep
+                # selected runs queued until fully advised; no window is ever
+                # rescanned or crossed into a different planned interval.
+                while (self.index<len(self.segments) and scanned<MAX_SCAN_WINDOW
+                       and windows<MAX_WIDE_WINDOWS_PER_BATCH):
+                    name,start,end=self.segments[self.index]
+                    start=start if self.cursor is None else self.cursor
+                    window=min(end-start,MAX_SCAN_WINDOW-scanned,
+                               self.wide_scan_limit-self.wide_scanned)
+                    window=(window//self.plan['page_size'])*self.plan['page_size']
+                    if not window:raise RuntimeError('Invalid wider scan progress')
+                    selected=resident_runs(self.plan,name,start,start+window,model=model)
+                    previous=start
+                    for selected_name,left,right in selected:
+                        if (selected_name!=name or left<previous or left>=right or right>start+window
+                                or left%self.plan['page_size'] or right%self.plan['page_size']):
+                            raise RuntimeError('Resident selector escaped or reordered its authorized window')
+                        previous=right
+                    self.pending_resident.extend(selected)
+                    self.wide_scanned+=window;scanned+=window;windows+=1
+                    self.cursor=start+window
+                    if self.cursor==end:self.index+=1;self.cursor=None
+                    elif self.cursor>end:raise RuntimeError('Wider scan escaped policy tensor')
             result=advise_one_batch(self.plan,self.pending_resident,model=model,max_bytes=budget)
             for record in result['ranges']:
                 n,left,right=self.pending_resident[0]
                 if record['file']!=n or record['offset']!=left:raise RuntimeError('Non-monotonic resident advice')
                 consumed=left+record['length']
-                if consumed==right:self.pending_resident.pop(0)
+                if consumed==right:self.pending_resident.popleft()
                 elif consumed<right:self.pending_resident[0]=(n,consumed,right)
                 else:raise RuntimeError('Advice escaped selected resident run')
-            if not self.pending_resident:
-                self.cursor=self.pending_window_end;self.pending_window_end=None
-                if self.cursor==end:self.index+=1;self.cursor=None
-                elif self.cursor>end:raise RuntimeError('Wider scan escaped policy tensor')
-            result.update(stage='wider_closed_policy_tensor_pages',wide_scanned_bytes=window,
+            result.update(stage='wider_closed_policy_tensor_pages',wide_scanned_bytes=scanned,
+                wide_scanned_windows=windows,wide_windows_limit=MAX_WIDE_WINDOWS_PER_BATCH,
                 resident_selector_is_not_reclaim_proof=True,shared_cache_IO_impact_possible=True)
         self.total+=result['syscall_advised_bytes'];self.round+=1
         result.update(run_id=self.plan['run_id'],round=self.round,total_advised_bytes=self.total,
