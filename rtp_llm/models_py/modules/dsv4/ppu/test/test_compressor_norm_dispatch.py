@@ -20,8 +20,6 @@ class CompressorNormDispatchTest(unittest.TestCase):
                     positions = torch.tensor([3], dtype=torch.int64)
                     with (
                         patch.object(compressor, kernel_name) as kernel,
-                        patch.object(compressor, "validate_slot_mapping"),
-                        patch.object(compressor, "_validate_fused_state_block_table"),
                     ):
                         compressor.run_fused_compress_kv_write(
                             state_cache=torch.zeros(1, 16, 4 * head_dim),

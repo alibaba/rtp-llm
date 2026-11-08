@@ -28,8 +28,6 @@ def _configure_deepep_nccl_root() -> None:
     no loaded libnccl is mapped yet, leave the env unset and let deep_ep
     auto-detect with its own sys.path-priority logic.
     """
-    if "EP_NCCL_ROOT_DIR" in os.environ:
-        return
     try:
         loaded_nccl = sorted(
             {

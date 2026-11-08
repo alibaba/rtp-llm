@@ -16,8 +16,6 @@ public:
     explicit PrefillCacheHitMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter);
     ~PrefillCacheHitMetricsReporter();
 
-    static bool enabled();
-
     void record(const BatchKVCacheResource&          resource,
                 const std::shared_ptr<CPSlotMapper>& cp_mapper,
                 int64_t                              request_id,

@@ -2,8 +2,10 @@
 
 This runtime intentionally lives outside DashSc: main, frontend/backend, and
 DashSc processes use the same file-configured hooks so cross-process incidents
-can be diagnosed with one mechanism. It remains dormant unless
-``RTP_HOT_HOOK`` is explicitly enabled.
+can be diagnosed with one mechanism. It stays dormant unless a hot-hook config
+path is provided (--hot_hook_config / RTP_HOT_HOOK_CONFIG); the JSON it points
+to carries both the hook spec and the loader sub-parameters (hook_file,
+dump_dir, allow_local_mutation).
 """
 
 import ctypes
@@ -27,11 +29,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 _LOGGER = logging.getLogger(__name__)
 
-_ENV_ENABLE = "RTP_HOT_HOOK"
-_ENV_HOOK_FILE = "RTP_HOT_HOOK_FILE"
-_ENV_CONFIG = "RTP_HOT_HOOK_CONFIG"
-_ENV_DUMP_DIR = "RTP_HOT_HOOK_DUMP_DIR"
-_ENV_ALLOW_LOCAL_MUTATION = "RTP_HOT_HOOK_ALLOW_LOCAL_MUTATION"
 _SAFE_NAME_MAX_BYTES = 100
 
 
@@ -177,9 +174,9 @@ class HookContext:
         return self.frame.f_locals
 
     def set_local(self, name: str, value: Any) -> None:
-        if not _truthy(os.environ.get(_ENV_ALLOW_LOCAL_MUTATION)):
+        if not bool(self.runtime.config.get("allow_local_mutation")):
             raise RuntimeError(
-                f"{_ENV_ALLOW_LOCAL_MUTATION}=1 is required to mutate frame locals"
+                "'allow_local_mutation': true is required in the hot hook config to mutate frame locals"
             )
         if self.frame is None:
             raise RuntimeError("set_local is only available for line hooks")
@@ -285,14 +282,20 @@ class HotHookRuntime:
             self._dump_index += 1
             return self._dump_index
 
-    def install_if_enabled(self) -> bool:
-        if not _truthy(os.environ.get(_ENV_ENABLE)):
+    def install_from_config(self, config_path: Optional[str]) -> bool:
+        """Enable the runtime from a hot-hook JSON config path.
+
+        Presence of the config path is the switch: a missing/empty path keeps
+        the runtime disabled (no separate master flag). The JSON carries both
+        the hook definitions and the loader-level sub-parameters:
+        ``{"hook_file": str|null, "dump_dir": str|null,
+        "allow_local_mutation": bool, "enabled": bool, ...hook spec...}``.
+        """
+        if not config_path:
             return False
         with self._lock:
             self.enabled = True
-            self._hook_file = os.environ.get(_ENV_HOOK_FILE)
-            self._config_file = os.environ.get(_ENV_CONFIG)
-            self.dump_dir = os.environ.get(_ENV_DUMP_DIR, self.dump_dir)
+            self._config_file = config_path
             if not self.reload(force=True):
                 return False
             self._update_trace_state()
@@ -302,13 +305,11 @@ class HotHookRuntime:
         if not self.enabled:
             return False
         with self._lock:
-            hook_file = os.environ.get(_ENV_HOOK_FILE, self._hook_file)
-            config_file = os.environ.get(_ENV_CONFIG, self._config_file)
-            dump_dir = os.environ.get(_ENV_DUMP_DIR, self.dump_dir)
-            self._hook_file = hook_file
-            self._config_file = config_file
-            self.dump_dir = dump_dir
+            hook_file = self._hook_file
+            config_file = self._config_file
 
+            # Hot-reload signal: either the config file or the hook file changed
+            # on disk (editing the hooks file alone must reload too).
             hook_mtime = self._mtime(hook_file)
             config_mtime = self._mtime(config_file)
             if (
@@ -331,8 +332,14 @@ class HotHookRuntime:
                     self._last_hook_mtime = hook_mtime
                     return True
 
+                # Loader-level sub-parameters live inside the config JSON:
+                # {"hook_file": ..., "dump_dir": ..., "allow_local_mutation": ...}
+                hook_file = new_config.get("hook_file")
+                dump_dir = new_config.get("dump_dir")
                 if not hook_file:
-                    raise RuntimeError(f"{_ENV_HOOK_FILE} is required when hooks are enabled")
+                    raise RuntimeError("'hook_file' is required in the hot hook config when hooks are enabled")
+                if dump_dir:
+                    self.dump_dir = dump_dir
                 new_hook_module = self._load_hook_module(hook_file)
                 new_function_hooks = self._parse_function_hooks(new_config)
                 new_line_hooks = self._parse_line_hooks(new_config)
@@ -340,6 +347,8 @@ class HotHookRuntime:
                 self._validate_callbacks(new_hook_module, new_function_hooks, new_line_hooks)
                 self.config = new_config
                 self.case = str(new_config.get("case", "default"))
+                self._hook_file = hook_file
+                self._last_hook_mtime = self._mtime(hook_file)
                 self._hook_module = new_hook_module
                 self._function_hooks = new_function_hooks
                 self._line_hooks = new_line_hooks
@@ -657,8 +666,8 @@ class HotHookRuntime:
 _RUNTIME = HotHookRuntime()
 
 
-def install_if_enabled() -> bool:
-    return _RUNTIME.install_if_enabled()
+def install_from_config(config_path: Optional[str]) -> bool:
+    return _RUNTIME.install_from_config(config_path)
 
 
 def reset_for_test() -> None:

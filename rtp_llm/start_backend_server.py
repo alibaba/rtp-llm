@@ -35,12 +35,21 @@ from rtp_llm.utils.util import copy_gemm_config
 setup_logging()
 
 
-def _install_hot_hook_runtime(role: str) -> None:
-    try:
-        from rtp_llm.utils.hot_hook_runtime import install_if_enabled
+def _install_hot_hook_runtime(role: str, py_env_configs) -> None:
+    """Install the hot hook runtime from the parsed config.
 
-        if install_if_enabled():
-            logging.info("RTP hot hook runtime installed for %s", role)
+    The single switch is the hot-hook config path (--hot_hook_config /
+    RTP_HOT_HOOK_CONFIG): a non-empty path pointing at a loadable JSON enables
+    the runtime; no path means no install.
+    """
+    try:
+        from rtp_llm.utils.hot_hook_runtime import install_from_config
+
+        config_path = py_env_configs.hot_hook_config.config_path
+        if config_path and install_from_config(config_path):
+            logging.info(
+                "RTP hot hook runtime installed for %s (config=%s)", role, config_path
+            )
     except Exception as e:
         logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
 
@@ -67,7 +76,7 @@ def local_rank_start(
     """Start local rank with proper signal handling for graceful shutdown"""
     if expected_parent_pid is not None:
         arm_parent_death_sigkill(expected_parent_pid)
-    _install_hot_hook_runtime(f"backend_rank_{world_rank}")
+    _install_hot_hook_runtime(f"backend_rank_{world_rank}", py_env_configs)
     backend_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
 

@@ -247,11 +247,8 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     }
 
     if (pd_sep_config_.role_type == RoleType::PREFILL) {
-        if (PrefillCacheHitMetricsReporter::enabled()) {
-            prefill_cache_hit_metrics_reporter_ = std::make_unique<PrefillCacheHitMetricsReporter>(metrics_reporter_);
-        } else {
-            RTP_LLM_LOG_INFO("prefill recent-cache-key metrics disabled by PREFILL_CACHE_HIT_METRIC_ENABLE");
-        }
+        prefill_cache_hit_metrics_reporter_ =
+            std::make_unique<PrefillCacheHitMetricsReporter>(metrics_reporter_);
     }
 
     RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_size=%dB, seq_size_per_block=%zu",

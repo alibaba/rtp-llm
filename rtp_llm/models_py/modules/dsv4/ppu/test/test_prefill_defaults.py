@@ -202,18 +202,9 @@ class PrefillDefaultsTest(unittest.TestCase):
         moe.gate = lambda *a, **k: (None, None)
         moe._forward_serial = Mock(return_value="result")
         moe._forward_phased = Mock()
-        recorder = SimpleNamespace(should_record_layer=lambda _: False)
-        with patch.dict(
-            "sys.modules",
-            {
-                "rtp_llm.models_py.modules.dsv4": SimpleNamespace(
-                    _record_tensor=recorder
-                )
-            },
-        ):
-            for rows in (1, 1023, 65537):
-                x = SimpleNamespace(is_cuda=True, shape=(rows, 4096))
-                self.assertEqual(moe._forward_local_chunk(x, None), "result")
+        for rows in (1, 1023, 65537):
+            x = SimpleNamespace(is_cuda=True, shape=(rows, 4096))
+            self.assertEqual(moe._forward_local_chunk(x, None), "result")
         self.assertEqual(moe._forward_serial.call_count, 3)
         moe._forward_phased.assert_not_called()
 

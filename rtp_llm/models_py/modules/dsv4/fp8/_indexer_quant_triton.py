@@ -41,11 +41,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
-    trap_invalid_kv_access_enabled,
-    validate_slot_mapping,
-)
-
 INDEXER_HEAD_DIM = 128
 INDEXER_ENTRY_BYTES = 132  # 128 FP8 + 4 fp32 scale (per token, total)
 FP8_E4M3_MAX = 448.0
@@ -159,13 +154,6 @@ def quantize_indexer_k(
         return
     cache_block_size = kv_cache_packed.shape[1]
     cache_stride_b = cache_block_size * INDEXER_ENTRY_BYTES
-    validate_slot_mapping(
-        "indexer.quantize_k.slot_mapping",
-        slot_mapping,
-        block_size=int(cache_block_size),
-        num_blocks=int(kv_cache_packed.shape[0]),
-        negative_mode="skip_any",
-    )
 
     _indexer_k_quant_kernel[(T,)](
         k_bf16,
@@ -177,7 +165,7 @@ def quantize_indexer_k(
         cache_stride_b=cache_stride_b,
         num_cache_blocks=int(kv_cache_packed.shape[0]),
         fp8_max=FP8_E4M3_MAX,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
         num_warps=4,
     )
 
@@ -267,13 +255,6 @@ def dequantize_indexer_k(
 
     cache_block_size = kv_cache_packed.shape[1]
     cache_stride_b = cache_block_size * INDEXER_ENTRY_BYTES
-    validate_slot_mapping(
-        "indexer.dequantize_k.slot_mapping",
-        slot_mapping,
-        block_size=int(cache_block_size),
-        num_blocks=int(kv_cache_packed.shape[0]),
-        negative_mode="skip_any",
-    )
 
     _OUT_DTYPE = {
         torch.float32: tl.float32,
@@ -290,7 +271,7 @@ def dequantize_indexer_k(
         cache_stride_b=cache_stride_b,
         num_cache_blocks=int(kv_cache_packed.shape[0]),
         OUT_DTYPE=_OUT_DTYPE,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
         num_warps=4,
     )
     return out

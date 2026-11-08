@@ -112,11 +112,6 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
         env = patch.dict(os.environ, _ENV)
         env.start()
         self.addCleanup(env.stop)
-        tracing = patch.object(
-            transition._record_tensor, "should_record_layer", return_value=False
-        )
-        tracing.start()
-        self.addCleanup(tracing.stop)
         self.hidden = torch.randn(2, 5, 4, 8, dtype=torch.bfloat16)
         self.ids = torch.arange(10).reshape(2, 5)
 
@@ -184,13 +179,6 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
         for variable in _ENV:
             with patch.dict(os.environ, {variable: "0"}):
                 self.assertFalse(transition.can_defer_decode_post(left, right, False))
-        for recorded in (left.layer_id, right.layer_id):
-            with patch.object(
-                transition._record_tensor,
-                "should_record_layer",
-                side_effect=lambda index: index == recorded,
-            ):
-                self.assertFalse(transition.can_defer_decode_post(left, right, False))
         right.attn_hc.set_previous(left.attn_hc)
         self.assertFalse(transition.can_defer_decode_post(left, right, False))
 
@@ -228,7 +216,7 @@ class CrossLayerMHCCudaTest(unittest.TestCase):
             raise unittest.SkipTest("mega_mhc requires Blackwell")
 
     def setUp(self):
-        env = patch.dict(os.environ, {**_ENV, "MOEDBG": "0"})
+        env = patch.dict(os.environ, {**_ENV})
         env.start()
         self.addCleanup(env.stop)
 

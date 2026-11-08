@@ -41,10 +41,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
-    trap_invalid_kv_access_enabled,
-)
-
 INDEXER_HEAD_DIM = 128
 INDEXER_ENTRY_BYTES = 132  # 128 FP8 + 4 fp32 scale (per token, total)
 FP8_E4M3_MAX = 448.0
@@ -150,7 +146,7 @@ def quantize_indexer_k(
         cache_stride_b=cache_stride_b,
         num_cache_blocks=int(kv_cache_packed.shape[0]),
         fp8_max=FP8_E4M3_MAX,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
         num_warps=4,
     )
 
@@ -247,7 +243,7 @@ def dequantize_indexer_k(
         cache_stride_b=cache_stride_b,
         num_cache_blocks=int(kv_cache_packed.shape[0]),
         OUT_DTYPE=_OUT_DTYPE,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        TRAP_INVALID_KV_ACCESS=True,
         num_warps=4,
     )
     return out

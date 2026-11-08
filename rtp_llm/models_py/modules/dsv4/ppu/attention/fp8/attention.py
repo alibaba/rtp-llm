@@ -46,7 +46,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
-from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
@@ -926,8 +925,6 @@ class AttentionFP8(_BaseAttentionFP8):
             qkv = self._prefill_compute_qkv(
                 x, common, shared_input_quant=shared_input_quant
             )
-        if self.compress_ratio == 4 and _rt.should_record_layer(self.layer_id):
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_csa_qr", qkv.qr)
 
         # Phase-Z overlap dispatch: hoist the SWA write into the orchestrator
         # so it can run on the default stream while the compressor NCCL
@@ -1106,10 +1103,6 @@ class AttentionFP8(_BaseAttentionFP8):
                     post_gather_stream=indexer_post_stream,
                 )
                 nested_pending = None
-                if _rt.should_record_layer(self.layer_id):
-                    _rt.record_if_level(
-                        2, f"L{self.layer_id:02d}_csa_indexer_topk", raw
-                    )
             if main_pending is not None:
                 with record_function_range(
                     "dsv4.fp8.attn.csa_overlap.finish_main_compressor"
@@ -1181,12 +1174,6 @@ class AttentionFP8(_BaseAttentionFP8):
         # compressor just above; overlap already drained via finish_prefill in
         # the orchestrator before reaching here (_skip_compressor_write=True).
         qkv = self._materialize_prefill_q(qkv, common)
-        if (
-            self.compress_ratio == 4
-            and qkv.q is not None
-            and _rt.should_record_layer(self.layer_id)
-        ):
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_csa_q_materialized", qkv.q)
 
         if workspace_meta is None:
             # Warmup forward: pool not bound. Fall back to BF16 ``kv_full``
@@ -1555,13 +1542,6 @@ class AttentionFP8(_BaseAttentionFP8):
                     )
                 swa_prefix_pending = None
 
-            if self.compress_ratio == 4 and _rt.should_record_layer(self.layer_id):
-                prefix = f"L{self.layer_id:02d}_csa"
-                _rt.record_if_level(2, f"{prefix}_cmp_topk", cmp_topk)
-                _rt.record_if_level(2, f"{prefix}_combined_indices", combined_indices)
-                _rt.record_if_level(2, f"{prefix}_combined_lens", combined_lens)
-                _rt.record_if_level(2, f"{prefix}_attention_workspace", workspace)
-
             return self._flash_mla_sparse_fwd_chunked_projected(
                 q=qkv.q,
                 kv=kv_view,
@@ -1853,8 +1833,6 @@ class AttentionFP8(_BaseAttentionFP8):
                     attn_sink=self.attn_sink,
                     topk_length=topk_length[start:end],
                 )
-            if self.compress_ratio == 4 and _rt.should_record_layer(self.layer_id):
-                _rt.record_if_level(2, f"L{self.layer_id:02d}_csa_flash_out", o_part)
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
                 self._prefill_output_proj_into(
                     o_part,
@@ -1864,8 +1842,6 @@ class AttentionFP8(_BaseAttentionFP8):
             dispose_tensor(o_part)
 
         self._prefill_output_all_reduce(out)
-        if self.compress_ratio == 4 and _rt.should_record_layer(self.layer_id):
-            _rt.record_if_level(2, f"L{self.layer_id:02d}_csa_projected_out", out)
         return out
 
     def _prefill_output_proj_into(
