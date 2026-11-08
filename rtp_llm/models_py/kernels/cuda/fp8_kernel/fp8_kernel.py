@@ -212,6 +212,26 @@ def sgl_per_token_group_quant_fp8(
     return x_q, x_s
 
 
+# Per-device accumulators for the dynamic per-tensor path. The quant kernel
+# reduces with atomicMax, which needs a zero initial value, so the buffer is
+# reset with zero_() instead of allocating a fresh zeros(1) per call —
+# serving profiles count one such allocation per fp8 GEMM input (hundreds of
+# 0-dim aten::zeros per step). Buffer identity is per process per device;
+# the forward pass is single-threaded per rank, and the reset + two kernel
+# launches stay stream-ordered.
+_dynamic_scale_accumulators: "dict" = {}
+
+
+def _dynamic_scale_accumulator(device: torch.device) -> torch.Tensor:
+    buf = _dynamic_scale_accumulators.get(device)
+    if buf is None:
+        buf = torch.zeros(1, device=device, dtype=torch.float32)
+        _dynamic_scale_accumulators[device] = buf
+    else:
+        buf.zero_()
+    return buf
+
+
 def scaled_fp8_per_tensor_quant(
     input: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
@@ -229,7 +249,7 @@ def scaled_fp8_per_tensor_quant(
 
     if scale is None:
         # dynamic quant
-        scale = torch.zeros(1, device=input.device, dtype=torch.float32)
+        scale = _dynamic_scale_accumulator(input.device)
         per_tensor_quant_fp8(input, output, scale, False)
     else:
         # static quant
