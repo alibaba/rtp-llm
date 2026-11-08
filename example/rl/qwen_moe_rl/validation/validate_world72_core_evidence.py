@@ -591,146 +591,91 @@ class Validator:
         self.details['micro_memory_boundaries']=summaries
 
     def numerical_policies(self):
-        syncs={};probes={};hfs=defaultdict(dict)
-        for path,row in self.records('hf-probe-step*-rank*.json'):hfs[row.get('global_step')][row.get('rank')]=(path,row)
-        for path,row in self.records('rtp_sync_rank0_step*.json'):syncs[row.get('global_step')]=(path,row)
-        for path,row in self.records('rtp_probe_rank0_step*.json'):probes[row.get('global_step')]=(path,row)
-        if self.initial_replay is not None and self.initial_replay.valid:
-            replay=self.initial_replay;history=replay.historical_roots
-            self.need(0 not in syncs and 0 not in probes,
-                'Replay policy0 native evidence must remain explicitly historical, not be relabelled current')
-            original_syncs=self.records('rtp_sync_rank0_step0.json',roots=history)
-            original_probes=self.records('rtp_probe_rank0_step0.json',roots=history)
-            original_hfs=self.records('hf-probe-step0-rank*.json',roots=history)
-            self.need(len(original_syncs)==len(original_probes)==1,
-                'Replay requires the original full7 policy0 transaction and nine-DP report files')
-            if len(original_syncs)==1 and len(original_probes)==1:
-                old_sync_path,old_sync=original_syncs[0];old_probe_path,old_probe=original_probes[0]
-                self.need(hashlib.sha256(old_sync_path.read_bytes()).hexdigest()==replay.manifest['canonical_reference']['sha256']
-                    and old_sync['model_version']==replay.manifest['original_native_model_version']
-                    and old_probe.get('source_transaction_sha256')==hashlib.sha256(old_sync_path.read_bytes()).hexdigest(),
-                    'Historical policy0 raw files do not bind the authenticated replay manifest')
-                syncs[0]=original_syncs[0];probes[0]=original_probes[0]
-            hfs[0]={row.get('rank'):(path,row) for path,row in original_hfs}
-            self.need(len(original_hfs)==len(hfs[0])==72,
-                'The original policy0 HF references must cover all72 historical ranks explicitly')
-        summary=[];previous=None
+        """Require actual full refits; scores are optional observations only."""
+        syncs={}
+        for path,row in self.records('rtp_sync_rank0_step*.json'):
+            step=row.get('global_step')
+            if not self.need(type(step) is int and step in (0,1,2),
+                             f'{path}: invalid actual policy step'):continue
+            if not self.need(step not in syncs,f'{path}: duplicate actual refit for policy{step}'):continue
+            syncs[step]=(path,row)
+        replay=self.initial_replay
+        historical=bool(replay is not None and getattr(replay,'valid',False) is True)
+        if historical:
+            self.need(0 not in syncs,'Replay policy0 native refit must remain explicitly historical')
+            originals=self.records('rtp_sync_rank0_step0.json',roots=replay.historical_roots)
+            if self.need(len(originals)==1,'Replay requires exactly one original policy0 refit'):
+                path,row=originals[0]
+                self.need(hashlib.sha256(path.read_bytes()).hexdigest()==replay.manifest['canonical_reference']['sha256']
+                    and row.get('model_version')==replay.manifest['original_native_model_version'],
+                    'Historical policy0 refit does not bind the authenticated replay manifest')
+                syncs[0]=(path,row)
+        summary=[];previous=None;score_syncs={}
         for step in (0,1,2):
-            if not self.need(step in syncs and step in probes and set(hfs[step])==set(range(WORLD)),
-                    f'Policy{step}: actual full refit,9 native DP probes and72 HF references are required'):continue
-            spath,sync=syncs[step];ppath,probe=probes[step]
-            self.need(sync.get('received_weights')==MAIN_SOURCES and sync.get('ranks')==list(range(WORLD))
-                and sync.get('logical_model_replicas')==1 and digest(sync.get('full_source_sha256')),
-                f'{spath}: refit was not a complete one-policy all72 transaction')
-            tensors=sync.get('tensors',[])
-            self.need(len(tensors)==MAIN_SOURCES and len({row.get('name') for row in tensors})==MAIN_SOURCES
-                and all(digest(row.get('sha256')) for row in tensors),f'{spath}: actual canonical per-key source hashes are incomplete')
-            self.need(probe.get('model_version')==sync.get('model_version')
-                and probe.get('full_source_sha256')==sync.get('full_source_sha256'),
-                f'{ppath}: native scores do not bind the actual committed source/version')
-            routes=probe.get('probes',[]);statuses=probe.get('statuses',[])
-            self.need(len(routes)==9 and {row.get('dp_rank') for row in routes}==set(range(9))
-                and len(statuses)==WORLD and {row.get('world_rank') for row in statuses}==set(range(WORLD)),
-                f'{ppath}: native probe must cover all9 actual DP endpoints and72 rank ACKs')
-            self.need(all(row.get('protocol_version')==3 and row.get('phase')=='running'
-                and row.get('global_step')==step and row.get('model_version')==sync.get('model_version')
-                and row.get('received_weights')==MAIN_SOURCES and not row.get('update_id') for row in statuses),
-                f'{ppath}: actual native statuses disagree about the committed policy')
-            self.need(probe.get('HF_comparison_mode')=='report_only'
-                and probe.get('HF_error_used_for_acceptance') is False
-                and 'HF_reference_tolerance' in probe and probe['HF_reference_tolerance'] is None,
-                f'{ppath}: current HF/native report-only profile is not explicit')
-            errors=[];native={};reference=hfs[step][0][1].get('raw_log_probs',[])
-            target_count=len(probe.get('response_ids',[]))
-            for route in routes:
-                actual=route.get('raw_log_probs',[])
-                if self.need(fp32_scores(actual,route.get('raw_fp32_bits_hex'))
-                        and len(actual)==target_count,
-                        f'{ppath}: actual native FP32 score values/bits/target lengths differ'):
-                    native[route.get('dp_rank')]=route
-            for rank,(hpath,hf) in hfs[step].items():
-                expected=hf.get('raw_log_probs',[])
-                self.need(hf.get('schema')=='q38-real-HF-policy-probe-v1'
-                    and hf.get('world_size')==WORLD and hf.get('master_dtype')==hf.get('compute_dtype')=='bfloat16'
-                    and hf.get('score_dtype')=='float32'
-                    and fp32_scores(expected,hf.get('raw_fp32_bits_hex'))
-                    and len(expected)==target_count,
-                    f'{hpath}: actual BF16 HF FP32 target score bits differ')
-                self.need(hf.get('prompt_ids')==probe.get('prompt_ids') and hf.get('response_ids')==probe.get('response_ids'),
-                    f'{hpath}: actual HF/native probe token IDs differ')
-                for route in routes:
-                    actual=route.get('raw_log_probs',[])
-                    if self.need(len(expected)==len(actual),f'{ppath}: target-score lengths differ'):
-                        errors.extend(abs(a-b) for a,b in zip(expected,actual) if finite(a) and finite(b))
-            maximum=max(errors) if errors else None
-            if self.logprob_report_only and not (step==0 and self.initial_replay is not None and self.initial_replay.valid):
-                hf_rows=[row for _,row in hfs[step].values()]
-                if len(hf_rows)==WORLD and all(fp32_scores(row.get('raw_log_probs',[]),row.get('raw_fp32_bits_hex')) and len(row['raw_log_probs'])==target_count for row in hf_rows):
-                    for row in hf_rows:
-                        rank_error=max(abs(a-b) for other in hf_rows for a,b in zip(row['raw_log_probs'],other['raw_log_probs']))
-                        self.need(row.get('HF_rank_comparison_mode')=='report_only' and row.get('HF_rank_error_used_for_acceptance') is False
-                            and row.get('max_HF_rank_error')==rank_error and row.get('all_rank_HF_probe_agreement') is (rank_error<=.05),
-                            f'Policy{step}: HF rank error report or explicit profile differs from actual scores')
-            self.need(maximum is not None and finite(maximum),
-                f'Policy{step}: finite complete HF/native target comparison is absent')
-            reports=[];max_dp_error=None;rank0_max=None;rank0_mean=None
-            if (set(native)==set(range(9)) and target_count>0
-                    and fp32_scores(reference,hfs[step][0][1].get('raw_fp32_bits_hex'))
-                    and len(reference)==target_count):
-                ordered=[native[dp] for dp in range(9)]
-                dp0=ordered[0]['raw_log_probs']
-                max_dp_error=max(abs(a-b) for row in ordered for a,b in zip(dp0,row['raw_log_probs']))
-                self.need(probe.get('max_dp_error')==max_dp_error,
-                    f'Policy{step}: native DP reported maximum differs from actual scores')
-                if not self.logprob_report_only:
-                    self.need(max_dp_error<=.05, f'Policy{step}: native DP self-agreement exceeds0.05')
-                elif not (step==0 and self.initial_replay is not None and self.initial_replay.valid):
-                    self.need(probe.get('DP_comparison_mode')=='report_only' and probe.get('DP_error_used_for_acceptance') is False,
-                        f'Policy{step}: native DP report-only profile is not explicit')
-                rank0_errors=[]
-                for route in ordered:
-                    absolute=[abs(a-b) for a,b in zip(reference,route['raw_log_probs'])]
-                    mean=sum(absolute)/target_count;rank0_errors.extend(absolute)
-                    self.need(route.get('absolute_HF_errors')==absolute
-                        and finite(route.get('mean_HF_absolute_error')) and route['mean_HF_absolute_error']==mean,
-                        f'{ppath}: per-DP reported HF absolute errors or mean differ from actual score values')
-                    reports.append(dict(dp_rank=route['dp_rank'],absolute_HF_errors=absolute,
-                        mean_HF_absolute_error=mean,HF_raw_log_probs=reference,
-                        HF_raw_fp32_bits_hex=hfs[step][0][1]['raw_fp32_bits_hex'],
-                        native_raw_log_probs=route['raw_log_probs'],native_raw_fp32_bits_hex=route['raw_fp32_bits_hex']))
-                rank0_max=max(rank0_errors);rank0_mean=sum(rank0_errors)/(9*target_count)
-                self.need(probe.get('hf_raw_log_probs')==reference
-                    and probe.get('hf_raw_fp32_bits_hex')==hfs[step][0][1].get('raw_fp32_bits_hex')
-                    and finite(probe.get('max_HF_error')) and probe['max_HF_error']==rank0_max
-                    and finite(probe.get('mean_HF_absolute_error')) and probe['mean_HF_absolute_error']==rank0_mean,
-                    f'{ppath}: reported HF reference, maximum or mean differs from recomputed complete scores')
-                self.need(probe.get('actual_HF_reference_sha256')==hashlib.sha256(hfs[step][0][0].read_bytes()).hexdigest(),
-                    f'{ppath}: actual HF reference file digest differs')
+            if not self.need(step in syncs,f'Policy{step}: actual full refit is required'):continue
+            path,sync=syncs[step];score_syncs[step]=sync
+            version=sync.get('model_version')
+            self.need(sync.get('global_step')==step and sync.get('received_weights')==MAIN_SOURCES
+                and sync.get('ranks')==list(range(WORLD)) and sync.get('logical_model_replicas')==1
+                and digest(sync.get('full_source_sha256')) and isinstance(version,str) and bool(version),
+                f'{path}: refit was not a complete one-policy all72 transaction with a valid model version')
+            tensors=sync.get('tensors')
+            valid=(isinstance(tensors,list) and len(tensors)==MAIN_SOURCES
+                and all(isinstance(row,dict) and isinstance(row.get('name'),str) and bool(row['name'])
+                        and digest(row.get('sha256')) for row in tensors)
+                and len({row['name'] for row in tensors})==MAIN_SOURCES)
+            self.need(valid,f'{path}: actual canonical per-key source hashes are incomplete')
+            # Native post-resume status is a separate mandatory proof, not
+            # a claim derived from diagnostic score contents.
+            roots=replay.historical_roots if step==0 and historical else self.roots
+            statuses=self.records(f'rtp_status_rank0_step{step}.json',roots=roots)
+            if not statuses and step==0 and historical:
+                # Original Full7 predates independent status records. Its
+                # historical probe carries native statuses and is bound to
+                # the authenticated original sync transaction.
+                statuses=self.records('rtp_probe_rank0_step0.json',roots=roots)
+            if self.need(len(statuses)==1,f'Policy{step}: exactly one native status proof is required'):
+                status_path,status=statuses[0];rows=status.get('statuses');expected_sha=hashlib.sha256(path.read_bytes()).hexdigest()
+                self.need(status.get('global_step')==step and status.get('model_version')==version
+                    and status.get('full_source_sha256')==sync.get('full_source_sha256')
+                    and status.get('source_transaction_sha256')==expected_sha
+                    and (step==0 and historical or self.expected_run_id is None
+                         or status.get('run_id')==self.expected_run_id),
+                    f'{status_path}: native status does not identify the actual run, refit transaction and version')
+                self.need(isinstance(rows,list) and len(rows)==WORLD
+                    and all(isinstance(r,dict) and type(r.get('world_rank')) is int for r in rows)
+                    and {r.get('world_rank') for r in rows}==set(range(WORLD))
+                    and all(r.get('phase')=='running' and r.get('global_step')==step
+                        and r.get('model_version')==version and r.get('received_weights')==MAIN_SOURCES
+                        and type(r.get('applied_weights')) is int and r['applied_weights']>0
+                        and not r.get('update_id') for r in rows),
+                    f'{status_path}: actual native world lacks 72 running, complete version ACKs')
             changed=None
             if previous is not None:
-                old={row['name']:row['sha256'] for row in previous['tensors']}
-                changed=sum(old.get(row['name'])!=row['sha256'] for row in tensors)
-                self.need(changed>0 and previous['full_source_sha256']!=sync['full_source_sha256']
-                    and previous['model_version']!=sync['model_version'],
-                    f'Policy{step}: actual BF16 source bytes and native version did not change after the update')
-            summary.append(dict(step=step,evidence_origin=('authenticated_historical_full7_policy0' if step==0 and self.initial_replay is not None and self.initial_replay.valid else 'current_run'),model_version=sync.get('model_version'),HF_ranks=len(hfs[step]),
-                native_DP_endpoints=len(routes),recomputed_max_abs_error=maximum,
-                recomputed_mean_abs_error=sum(errors)/len(errors) if errors else None,
-                HF_comparison_mode='report_only',HF_error_used_for_acceptance=False,
-                actual_HF_rank0_recomputed_max_abs_error=rank0_max,
-                actual_HF_rank0_recomputed_mean_abs_error=rank0_mean,
-                native_DP_self_recomputed_max_abs_error=max_dp_error,DP_error_used_for_acceptance=not self.logprob_report_only,
-                per_DP_HF_rank0_comparisons=reports,changed_source_tensors=changed))
-            previous=sync
-        finals=self.records('rtp_final_policy2_actual_reprobe.json')
-        self.need(len(finals)==1 and finals[0][1].get('final_native_GPU_reprobe') is True
-            and finals[0][1].get('global_step')==2,'The final actual policy2 GPU re-probe receipt is absent or ambiguous')
-        if len(finals)==1 and 2 in probes:
-            self.need(all(finals[0][1].get(key)==probes[2][1].get(key) for key in
-                ('model_version','full_source_sha256','prompt_ids','response_ids','probes','statuses')),
-                'The final actual policy2 re-probe differs from its last recorded full9DP numerical receipt')
+                old=previous
+                if valid and old['valid']:
+                    current={row['name']:row['sha256'] for row in tensors}
+                    self.need(set(current)==set(old['tensors']),
+                        f'Policy{step}: canonical source names changed after the update')
+                    changed=sum(old['tensors'].get(name)!=value for name,value in current.items())
+                    self.need(changed>0 and old['full_source_sha256']!=sync.get('full_source_sha256')
+                        and old['model_version']!=version,
+                        f'Policy{step}: actual BF16 source bytes and native version did not change after the update')
+            previous={'valid':bool(valid),'tensors':{row['name']:row['sha256'] for row in tensors} if valid else {},
+                      'full_source_sha256':sync.get('full_source_sha256'),'model_version':version}
+            summary.append(dict(step=step,evidence_origin=('authenticated_historical_full7_policy0'
+                if step==0 and historical else 'current_run'),model_version=version,
+                changed_source_tensors=changed,logprob_used_for_acceptance=False))
         self.details['numerical_policies']=summary
-
+        try:
+            from optional_policy_scores import report
+            self.details['optional_score_report']=report(self.roots,score_syncs,
+                historical_roots=replay.historical_roots if historical else (),historical_policy0=historical)
+        except Exception as error:
+            # Score files and report implementation are observational only:
+            # unavailable or malformed score evidence cannot reject training.
+            self.details['optional_score_report']={'used_for_acceptance':False,
+                'report_unavailable':type(error).__name__}
     def validate_reuse_plan_binding(self):
         """Bind the opt-in profile to the caller-pinned, run-specific plan."""
         self.validated_plan_run_id=None

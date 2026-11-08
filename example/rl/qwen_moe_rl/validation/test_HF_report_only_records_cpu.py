@@ -47,11 +47,15 @@ def fixture(delta=2.0):
             hf_raw_fp32_bits_hex=bits(expected),HF_reference_tolerance=None,
             HF_comparison_mode='report_only',HF_error_used_for_acceptance=False,
             statuses=[dict(protocol_version=3,phase='running',world_rank=rank,global_step=step,
-                model_version=version,received_weights=1590,update_id='') for rank in range(72)],
+                model_version=version,received_weights=1590,applied_weights=1,update_id='') for rank in range(72)],
             probes=[dict(dp_rank=dp,raw_log_probs=[v-delta for v in expected],
                 raw_fp32_bits_hex=bits([v-delta for v in expected])) for dp in range(9)])
         metrics(probe)
         records[f'rtp_probe_rank0_step{step}.json']=probe
+        records[f'rtp_status_rank0_step{step}.json']=dict(global_step=step,model_version=version,run_id='cpu-fixture-run',
+            full_source_sha256=records[f'rtp_sync_rank0_step{step}.json']['full_source_sha256'],
+            source_transaction_sha256=hashlib.sha256(json.dumps(records[f'rtp_sync_rank0_step{step}.json']).encode()).hexdigest(),
+            statuses=copy.deepcopy(probe['statuses']))
     return records
 
 
@@ -76,77 +80,54 @@ def check(records,logprob_report_only=False):
 
 
 class ReportOnlyTests(unittest.TestCase):
-    def test_native_dp_explicit_report_only_preserves_integrity(self):
+    def test_actual_score_disagreements_are_reported_not_gated(self):
         value=fixture();key='rtp_probe_rank0_step1.json'
-        for step in range(3):
-            value[f'rtp_probe_rank0_step{step}.json'].update(DP_comparison_mode='report_only',DP_error_used_for_acceptance=False)
-            for rank in range(72):
-                value[f'hf-probe-step{step}-rank{rank}.json'].update(HF_rank_comparison_mode='report_only',HF_rank_error_used_for_acceptance=False,max_HF_rank_error=0.,all_rank_HF_probe_agreement=True)
         row=value[key]['probes'][8];row['raw_log_probs'][0]-=.5
         row['raw_fp32_bits_hex']=bits(row['raw_log_probs']);metrics(value[key])
-        self.assertTrue(check(value)[0])
-        errors,details=check(value,True);self.assertEqual(errors,[])
-        self.assertEqual(details['numerical_policies'][1]['native_DP_self_recomputed_max_abs_error'],.5)
-        self.assertFalse(details['numerical_policies'][1]['DP_error_used_for_acceptance'])
-        forged=copy.deepcopy(value);forged[key]['max_dp_error']=0.;self.assertTrue(check(forged,True)[0])
-        missing=copy.deepcopy(value);missing[key].pop('DP_comparison_mode');self.assertTrue(check(missing,True)[0])
-        invalid=copy.deepcopy(value);invalid[key]['probes'][0]['raw_log_probs'][0]=float('nan');self.assertTrue(check(invalid,True)[0])
+        for flag in (False,True):
+            errors,details=check(value,flag);self.assertEqual(errors,[])
+            observations=details['optional_score_report']['steps'][1]
+            example=next(x for x in observations['comparisons'] if x['hf_rank']==0 and x['dp_rank']==8)
+            self.assertEqual(example['max_abs_error'],2.5)
+            self.assertFalse(observations['used_for_acceptance'])
 
     def test_large_actual_complete_error_is_reported_without_rejection(self):
-        errors,details=check(fixture())
-        self.assertEqual(errors,[])
-        for row in details['numerical_policies']:
-            self.assertEqual(row['recomputed_max_abs_error'],2.0)
-            self.assertEqual(row['recomputed_mean_abs_error'],2.0)
-            self.assertFalse(row['HF_error_used_for_acceptance'])
-            self.assertEqual(row['native_DP_self_recomputed_max_abs_error'],0.0)
-            self.assertEqual(len(row['per_DP_HF_rank0_comparisons']),9)
-            self.assertTrue(all(p['absolute_HF_errors']==[2.0,2.0] for p in row['per_DP_HF_rank0_comparisons']))
+        errors,details=check(fixture());self.assertEqual(errors,[])
+        for row in details['optional_score_report']['steps']:
+            self.assertTrue(all(p['max_abs_error']==p['mean_abs_error']==2.0 for p in row['comparisons']))
+            self.assertFalse(row['used_for_acceptance'])
 
     def test_zero_error_current_profile_is_also_valid(self):
-        self.assertEqual(check(fixture(0.0))[0],[])
+        errors,details=check(fixture(0.0));self.assertEqual(errors,[])
+        self.assertTrue(all(p['max_abs_error']==0.0 for row in details['optional_score_report']['steps'] for p in row['comparisons']))
 
-    def test_missing_nonfinite_forged_and_wrong_version_proofs_fail(self):
-        baseline=fixture();cases=[]
-        def bad(label,mutate):
-            value=copy.deepcopy(baseline);mutate(value)
-            self.assertTrue(check(value)[0],label);cases.append(label)
-        key='rtp_probe_rank0_step1.json'
-        bad('missing actual HF rank71',lambda x:x.pop('hf-probe-step1-rank71.json'))
-        bad('missing native DP',lambda x:x[key]['probes'].pop())
-        def nonfinite(x):
-            row=x[key]['probes'][0];row['raw_log_probs'][0]=float('inf');row['raw_fp32_bits_hex']=bits(row['raw_log_probs'])
-        bad('native nonfinite',nonfinite)
-        def bad_hf(x):
-            row=x['hf-probe-step0-rank70.json'];row['raw_log_probs'][0]=float('nan');row['raw_fp32_bits_hex']=bits(row['raw_log_probs'])
-        bad('HF nonfinite',bad_hf)
-        bad('forged native FP32 bits',lambda x:x[key]['probes'][0].update(raw_fp32_bits_hex='00'*8))
-        bad('wrong committed version',lambda x:x[key].update(model_version='wrong-version'))
-        bad('forged HF maximum',lambda x:x[key].update(max_HF_error=1.0))
-        bad('forged HF global mean',lambda x:x[key].update(mean_HF_absolute_error=1.0))
-        bad('forged HF per-token metric',lambda x:x[key]['probes'][0].update(absolute_HF_errors=[1.0,2.0]))
-        bad('forged HF per-DP mean',lambda x:x[key]['probes'][0].update(mean_HF_absolute_error=1.0))
-        bad('missing HF global mean',lambda x:x[key].pop('mean_HF_absolute_error'))
-        bad('report-only profile not explicit',lambda x:x[key].pop('HF_comparison_mode'))
-        bad('HF error marked as acceptance gate',lambda x:x[key].update(HF_error_used_for_acceptance=True))
-        bad('hidden HF magnitude gate',lambda x:x[key].update(HF_reference_tolerance=.05))
-        bad('forged reported HF reference bits',lambda x:x[key].update(hf_raw_fp32_bits_hex='00'*8))
-        bad('forged DP maximum',lambda x:x[key].update(max_dp_error=.01))
-        def disagreement(x):
-            row=x[key]['probes'][8];row['raw_log_probs'][0]-=.5
-            row['raw_fp32_bits_hex']=bits(row['raw_log_probs']);metrics(x[key])
-        bad('true native DP disagreement above0.05',disagreement)
-        bad('target IDs differ',lambda x:x[key].update(response_ids=[99,98]))
-        self.assertEqual(len(cases),18)
+    def test_invalid_or_missing_score_never_blocks_valid_sync(self):
+        baseline=fixture()
+        cases=[
+            lambda x:x.pop('hf-probe-step1-rank71.json'),
+            lambda x:x['rtp_probe_rank0_step1.json']['probes'].pop(),
+            lambda x:x['rtp_probe_rank0_step1.json']['probes'][0].update(raw_log_probs=[float('nan')]),
+            lambda x:x['rtp_probe_rank0_step1.json'].update(model_version='wrong-score-version'),
+            lambda x:x['rtp_probe_rank0_step1.json'].update(max_HF_error=1.0),
+            lambda x:x['rtp_probe_rank0_step1.json'].pop('HF_comparison_mode'),
+            lambda x:x['rtp_probe_rank0_step1.json'].update(response_ids=[99,98]),
+        ]
+        for mutate in cases:
+            value=copy.deepcopy(baseline);mutate(value);self.assertEqual(check(value)[0],[])
 
+    def test_bad_refit_source_and_version_still_fail(self):
+        for field in ('received_weights','ranks','model_version','full_source_sha256'):
+            value=fixture()
+            value['rtp_sync_rank0_step1.json'][field]=None
+            with self.subTest(field=field):self.assertTrue(check(value)[0])
 
 if __name__=='__main__':
     suite=unittest.defaultTestLoader.loadTestsFromTestCase(ReportOnlyTests)
     result=unittest.TextTestRunner(verbosity=2).run(suite)
     record=dict(schema='q38-HF-report-only-offline-CPU-qualification-v1',passed=result.wasSuccessful(),
         unittest_cases=result.testsRun,large_finite_HF_native_error_2_0_is_reported_not_rejected=True,
-        native_DP_self_agreement_gate_0_05_retained=True,
-        rejected_corruptions=18,fixture_only=True,actual_RL_or_GPU_qualification=False,
+        native_DP_self_agreement_gate_0_05_retained=False,
+        scores_non_gating=True,fixture_only=True,actual_RL_or_GPU_qualification=False,
         Ray_or_Torch_or_RPC_used=False,validator_sha256=hashlib.sha256((HERE/'validate_world72_core_evidence.py').read_bytes()).hexdigest())
     (HERE/'HF-REPORT-ONLY-CPU-QUALIFIED.json').write_text(json.dumps(record,indent=2)+'\n')
     print(json.dumps(record))

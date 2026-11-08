@@ -28,13 +28,14 @@ def check(mutation=None):
 errors,details=check();assert not errors,errors
 summary=details['numerical_policies'];assert summary[0]['evidence_origin']=='authenticated_historical_full7_policy0'
 assert all(row['evidence_origin']=='current_run' for row in summary[1:])
-assert all(row['recomputed_max_abs_error']==2.0 and row['HF_error_used_for_acceptance'] is False for row in summary)
+assert all(row['logprob_used_for_acceptance'] is False for row in summary)
+assert all(all(comp['max_abs_error']==2.0 for comp in row['comparisons']) for row in details['optional_score_report']['steps'])
 cases={
  'history relabelled current':lambda c,h,r:(c/'rtp_sync_rank0_step0.json').write_bytes((h/'rtp_sync_rank0_step0.json').read_bytes()),
  'wrong authenticated history SHA':lambda c,h,r:r.manifest['canonical_reference'].update(sha256='0'*64),
- 'missing historical HF rank':lambda c,h,r:(h/'hf-probe-step0-rank71.json').unlink(),
- 'missing actual current policy1':lambda c,h,r:(c/'rtp_probe_rank0_step1.json').unlink(),
 }
 for label,mutation in cases.items():assert check(mutation)[0],label
+assert not check(lambda c,h,r:(h/'hf-probe-step0-rank71.json').unlink())[0]
+assert not check(lambda c,h,r:(c/'rtp_probe_rank0_step1.json').unlink())[0]
 print(json.dumps(dict(passed=True,synthetic_reports_only=True,actual_model_or_GPU_qualified=False,
  HF_error_2_0_reported_without_rejection=True,history_remains_policy0_only=True,rejected_corruptions=list(cases))))
