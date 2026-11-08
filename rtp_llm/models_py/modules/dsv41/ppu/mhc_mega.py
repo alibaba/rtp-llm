@@ -1,7 +1,8 @@
-"""PPU eager attention-post / FFN-pre / RMSNorm transition.
+"""PPU attention-post / FFN-pre / RMSNorm transition.
 
 The normalized tensor has its own result type: PPUStepMix.hidden always
-means an unnormalized readout. No cross-layer, Graph or draft fusion.
+means an unnormalized readout. Mega-mHC is enabled by default in ordinary
+Decode Graph.
 """
 
 from __future__ import annotations
@@ -16,9 +17,12 @@ from pathlib import Path
 
 import torch
 
+from rtp_llm.config.v41_runtime import env_bool
+
 from .mhc import MHCConfig
 
 MHC_BACKEND_ENV = "RTP_V41_PPU_MHC_BACKEND"
+GRAPH_MEGA_MHC_ENV = "RTP_V41_PPU_GRAPH_MEGA_MHC"
 QUALIFIED_EXTENSION_SHA256 = (
     "816ff22272d7636c8ee57b960189ada869910af74016f35d53638248fcdc3942"
 )
@@ -66,6 +70,8 @@ class PPUMegaMHC:
         self.backend = os.environ.get(MHC_BACKEND_ENV, "mega").strip().lower()
         if self.backend not in ("legacy", "mega"):
             raise ValueError(f"{MHC_BACKEND_ENV} must be legacy or mega")
+        self.graph_enabled = env_bool(os.environ, GRAPH_MEGA_MHC_ENV, default=True)
+        self.graph_capture_calls = 0
         self.calls = Counter()
         self.fallbacks = Counter()
 
@@ -74,13 +80,15 @@ class PPUMegaMHC:
             "backend": self.backend,
             "calls": dict(self.calls),
             "fallbacks": dict(self.fallbacks),
+            "graph_capture_calls": self.graph_capture_calls,
             "extension_sha256": QUALIFIED_EXTENSION_SHA256 if self.calls else None,
         }
 
     def _reason(self, branch, residual, state, parameters, norm, eps, config, phase):
         if self.backend != "mega":
             return "legacy_selected"
-        if phase not in ("prefill", "decode"):
+        graph = phase == "graph" and self.graph_enabled
+        if not graph and phase not in ("prefill", "decode"):
             return "unqualified_phase"
         if (
             config.hc_mult != 4
@@ -97,11 +105,12 @@ class PPUMegaMHC:
 
         if residual.device.type != "cuda" or not is_ppu():
             return "not_ppu"
-        with torch.cuda.device(residual.device):
-            if torch.cuda.is_current_stream_capturing():
-                return "graph_capture"
-            if torch.cuda.current_stream() != torch.cuda.default_stream():
-                return "unqualified_stream"
+        if not graph:
+            with torch.cuda.device(residual.device):
+                if torch.cuda.is_current_stream_capturing():
+                    return "graph_capture"
+                if torch.cuda.current_stream() != torch.cuda.default_stream():
+                    return "unqualified_stream"
         if residual.ndim != 3 or tuple(residual.shape[1:]) != (4, 5120):
             return "layout"
         rows = residual.shape[0]
@@ -154,6 +163,9 @@ class PPUMegaMHC:
         # reads the new BF16 residual; new FFN pre is only for the next readout.
         # Once native execution begins, all errors propagate; never retry.
         with torch.cuda.device(residual.device):
+            # The runner warms this bucket on the capture stream. The native
+            # operator allocates capture-private workspace from the graph pool.
+            capturing = phase == "graph" and torch.cuda.is_current_stream_capturing()
             operation(
                 x=branch,
                 residual=residual,
@@ -179,4 +191,5 @@ class PPUMegaMHC:
                 y_bf16=normalized,
             )
         self.calls[phase] += 1
+        self.graph_capture_calls += int(capturing)
         return PPUMegaMHCTransition(updated, normalized, pre.view(rows, 4), post, comb)

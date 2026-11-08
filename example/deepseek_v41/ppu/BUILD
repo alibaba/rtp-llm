@@ -127,6 +127,19 @@ sh_test(
 )
 
 sh_test(
+    name = "graph_packed_attention_device_test",
+    srcs = ["test_functional.sh"],
+    args = ["graph-packed-boundary"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual", "PPU-ZW890P"],
+    timeout = "long",
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+sh_test(
     name = "shared_grouped_graph_decode_test",
     srcs = ["test_functional.sh"],
     args = ["shared-grouped-graph-decode"],
@@ -217,6 +230,19 @@ sh_test(
 sh_test(
     name = "megamoe_decode_perf_test",
     srcs = ["test_perf.sh"],
+    env = {"GPU_COUNT": "8"},
+    tags = ["manual", "PPU-ZW890P"],
+    timeout = "eternal",
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+sh_test(
+    name = "dp8_graph_attention_ab_test",
+    srcs = ["test_perf.sh"],
+    args = ["graph-attention-ab"],
     env = {"GPU_COUNT": "8"},
     tags = ["manual", "PPU-ZW890P"],
     timeout = "eternal",

@@ -6,6 +6,7 @@ capture; the same forward is used for capture and graph-safe eager.
 """
 
 import weakref
+from collections import Counter
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -54,6 +55,7 @@ class SharedGraphRuntime:
         self.moe_calls = torch.zeros_like(self.layer_calls)
         self.engram_calls = torch.zeros_like(self.layer_calls)
         self.routed_rows_device = torch.zeros_like(self.layer_calls)
+        self.attention_capture_calls = Counter()
         self._pointers = self._storage_signature()
 
     def _storage_signature(self):
@@ -100,6 +102,9 @@ class SharedGraphRuntime:
             engram_calls=self.engram_calls, routed_rows_device=self.routed_rows_device,
             grouped_moe=self.grouped,
             verify=getattr(impl, "mode", None) in ("dense", "packed"),
+            packed_attention=getattr(impl, "packed_attention", None),
+            visible_indexer=getattr(impl, "visible_indexer", False),
+            attention_calls=Counter(),
         )
         native.current = state
         try:
@@ -138,6 +143,8 @@ class SharedGraphRuntime:
                 ids, metadata, expert_token_counts=inputs.expert_token_counts,
                 kv_cache=model.kv_cache,
             )
+            if state.attention_calls and torch.cuda.is_current_stream_capturing():
+                self.attention_capture_calls.update(state.attention_calls)
             if state.verify:
                 aux = model.v4._mtp_hidden_buffer
                 if aux is not None:

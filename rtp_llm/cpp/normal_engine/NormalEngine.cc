@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <list>
 #include <memory>
@@ -45,6 +46,8 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+constexpr size_t kMaxReferencePerfSteps = 4096;
+
 // This terminal protocol covers one intra-node TP group only. Preserve the old
 // path for cross-node/NCCL, DP/PP collectives and FFN-disaggregate coordination.
 bool shouldCoordinateCpuTpShutdown(const ParallelismConfig& parallelism, const FfnDisAggregateConfig& ffn) {
@@ -94,6 +97,12 @@ bool ppuCoordinatedStopEnabled() {
     const char* backend = std::getenv("RTP_V41_BACKEND");
     return enabled != nullptr && std::strcmp(enabled, "1") == 0 && backend != nullptr
            && std::strcmp(backend, "ppu") == 0;
+}
+
+int64_t referencePerfClockNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
 }
 
 #if USING_CUDA
@@ -158,6 +167,11 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    if (const char* directory = std::getenv("RTP_V41_REFERENCE_PERF_DIR");
+        directory && *directory && ppuCoordinatedStopEnabled() && parallelism_config.tp_rank == 0) {
+        reference_perf_dir_ = directory;
+        reference_perf_steps_.reserve(kMaxReferencePerfSteps);
+    }
     // Claim before warmup/initExecutor can consume this shared CPU TP channel.
     // A deferred start_loop=false engine owns the session during preparation too.
     if (shouldCoordinateCpuTpShutdown(parallelism_config, ffn_disaggregate_config)) {
@@ -339,7 +353,8 @@ void NormalEngine::initScheduler() {
                                                   resource_context_.cache_manager,
                                                   metrics_reporter_,
                                                   parallelism_config.dp_rank,
-                                                  pd_sep_config.role_type));
+                                                  pd_sep_config.role_type,
+                                                  !reference_perf_dir_.empty()));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else if (pdfusion_scheduler_mode == PDFusionSchedulerMode::RATIO
                && pd_sep_config.role_type == RoleType::PDFUSION) {
@@ -751,6 +766,7 @@ absl::Status NormalEngine::stop() {
         loop_thread_->join();
         loop_thread_.reset();
     }
+    flushReferencePerfSteps();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     const auto finalize_status = scheduler_->finalizeStop();
@@ -922,6 +938,27 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     return {std::move(enqueue_successes), std::move(streams)};
 }
 
+void NormalEngine::flushReferencePerfSteps() {
+    if (reference_perf_steps_.empty()) {
+        return;
+    }
+    const auto path = reference_perf_dir_ + "/step-rank" + std::to_string(parallelism_config.dp_rank) + ".jsonl";
+    std::ofstream output(path);
+    for (const auto& row : reference_perf_steps_) {
+        output << "{\"step\":" << row.index << ",\"start_ns\":" << row.start_ns << ",\"end_ns\":" << row.end_ns
+               << ",\"batch\":" << row.batch << ",\"context_batch\":" << row.context_batch
+               << ",\"input_min\":" << row.input_min << ",\"input_max\":" << row.input_max
+               << ",\"prefix_min\":" << row.prefix_min << ",\"prefix_max\":" << row.prefix_max
+               << ",\"fresh_tokens\":" << row.fresh_tokens << ",\"emitted_tokens\":" << row.emitted_tokens
+               << ",\"batch_identity\":" << row.batch_identity << ",\"output_max\":" << row.output_max << "}\n";
+    }
+    output.close();
+    if (!output) {
+        RTP_LLM_LOG_ERROR("failed to write PPU reference benchmark steps to %s", path.c_str());
+    }
+    reference_perf_steps_.clear();
+}
+
 absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
     while (pause_ && running_) {
@@ -964,6 +1001,30 @@ absl::Status NormalEngine::step() try {
         }
     }
 
+    ReferencePerfStep perf_step;
+    const bool capture_perf = !reference_perf_dir_.empty();
+    if (capture_perf) {
+        perf_step.index = ++reference_perf_index_;
+        for (const auto& stream : streams) {
+            if (stream->isFakeStream()) {
+                continue;
+            }
+            const int input = stream->inputLength();
+            const int prefix = stream->prefixLength();
+            perf_step.input_min = perf_step.batch ? std::min(perf_step.input_min, input) : input;
+            perf_step.input_max = std::max(perf_step.input_max, input);
+            perf_step.prefix_min = perf_step.batch ? std::min(perf_step.prefix_min, prefix) : prefix;
+            perf_step.prefix_max = std::max(perf_step.prefix_max, prefix);
+            ++perf_step.batch;
+            perf_step.batch_identity = perf_step.batch_identity * 1099511628211ULL + stream->streamId();
+            perf_step.emitted_tokens -= static_cast<int64_t>(stream->outputTokenLen());
+            if (stream->isContextStream()) {
+                ++perf_step.context_batch;
+                perf_step.fresh_tokens += stream->contextLength();
+            }
+        }
+        perf_step.start_ns = referencePerfClockNs();
+    }
     {
         // NormalExecutor drives startStep/finishStep via callbacks; MtpExecutor
         // has no callbacks yet, so bracket the propose path here on the engine
@@ -975,6 +1036,19 @@ absl::Status NormalEngine::step() try {
         status = executor_->process(streams, tps_schedule_time_us);
         if (propose_params_) {
             step_profiler_.finishStep();
+        }
+    }
+    if (capture_perf && perf_step.batch && status.ok()) {
+        perf_step.end_ns = referencePerfClockNs();
+        for (const auto& stream : streams) {
+            if (!stream->isFakeStream()) {
+                const auto emitted = static_cast<int>(stream->outputTokenLen());
+                perf_step.emitted_tokens += emitted;
+                perf_step.output_max = std::max(perf_step.output_max, emitted);
+            }
+        }
+        if (reference_perf_steps_.size() < kMaxReferencePerfSteps) {
+            reference_perf_steps_.push_back(perf_step);
         }
     }
 

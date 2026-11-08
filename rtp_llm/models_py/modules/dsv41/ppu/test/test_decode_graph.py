@@ -1,12 +1,19 @@
 """N4 stdlib boundary checks; these do not qualify device computation."""
 
 import ast
+import os
 import runpy
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from rtp_llm.config.v41_runtime import env_bool
 
 PPU = Path(__file__).resolve().parents[1]
+PACKED_SWITCH = "RTP_V41_PPU_GRAPH_PACKED_ATTENTION"
+INDEXER_SWITCH = "RTP_V41_PPU_GRAPH_VISIBLE_INDEXER"
+PACKED_RECEIPT = "RTP_V41_PPU_PACKED_DEPENDENCY"
 
 
 def _class(path, name, namespace):
@@ -19,13 +26,24 @@ def _class(path, name, namespace):
 class MetadataProtocol:
     def __init__(self, config, native, tagged, **kwargs):
         self.bound = config, native, tagged, kwargs
+        self.cache = object()
 
 
 class SharedGraphBoundaryTest(unittest.TestCase):
     def setUp(self):
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in (PACKED_SWITCH, INDEXER_SWITCH, PACKED_RECEIPT):
+            os.environ.pop(name, None)
         self.impl_class = _class(PPU / "decode_graph.py", "SharedPPUDecodeGraphImpl", {
             "PPUDecodeGraphImpl": MetadataProtocol,
             "as_tagged_attention_inputs": lambda value: value,
+            "os": os, "env_bool": env_bool,
+            "GRAPH_PACKED_ATTENTION_ENV": PACKED_SWITCH,
+            "GRAPH_VISIBLE_INDEXER_ENV": INDEXER_SWITCH,
+            "DEPENDENCY_ENV": PACKED_RECEIPT,
+            "GraphPackedAttention": lambda cache, geometry: (cache, geometry),
         })
         ns = types.SimpleNamespace
         self.attn = ns(is_prefill=False, input_lengths=ns(numel=lambda: 1))
@@ -35,7 +53,7 @@ class SharedGraphBoundaryTest(unittest.TestCase):
         self.model = ns(
             _is_decode_role=True, _is_speculative=False, kv_cache=object(),
             _v4_args=ns(dp_size=8, ep_size=8, tp_size=1, max_seq_len=512),
-            shared_weight_views=ns(config={"origin": "ModelWeights"}),
+            shared_weight_views=ns(config={"origin": "ModelWeights"}, geometry=object()),
             shared_graph_runtime=ns(
                 device="ppu", max_batch_size=1, grouped=None,
                 validate=lambda: self.validated.append(True),
@@ -50,6 +68,20 @@ class SharedGraphBoundaryTest(unittest.TestCase):
         self.assertEqual(kwargs, {"device": "ppu", "batch_size": 1})
         self.assertEqual(config["max_position_embeddings"], 512)
         self.assertEqual(self.validated, [True])
+        self.assertIsNone(impl.packed_attention)
+        self.assertTrue(impl.visible_indexer)
+
+    def test_qualified_graph_defaults_allow_independent_opt_out(self):
+        with patch.dict(os.environ, {PACKED_RECEIPT: "/fixture/packed.json"}):
+            for overrides, expected in (
+                ({}, (True, True)),
+                ({PACKED_SWITCH: "0"}, (False, True)),
+                ({INDEXER_SWITCH: "0"}, (True, False)),
+                ({PACKED_SWITCH: "0", INDEXER_SWITCH: "0"}, (False, False)),
+            ):
+                with self.subTest(overrides=overrides), patch.dict(os.environ, overrides):
+                    impl = self.impl_class(self.model, self.inputs)
+                    self.assertEqual((impl.packed_attention is not None, impl.visible_indexer), expected)
 
     def test_n4_excludes_prefill_verify_other_topology_and_bucket(self):
         for obj, name, bad in (

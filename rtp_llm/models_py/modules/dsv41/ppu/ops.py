@@ -31,6 +31,7 @@ from .engram import (
     LocalEnpmGroup,
 )
 from .engram import engram_lookup as _engram_lookup
+from .indexer import dense_fp4_index_score
 from .indexer import index_score as _index_score
 from .kv_codec import decode_kv as _decode_kv
 from .kv_codec import encode_kv as _encode_kv
@@ -170,11 +171,17 @@ class PPUOps(V41BackendOps):
         head_weights: torch.Tensor,
         *,
         layer_id: int,
-        candidate_blocks: torch.Tensor,
-        key_positions: torch.Tensor,
+        candidate_blocks: Optional[torch.Tensor],
+        key_positions: Optional[torch.Tensor],
         context: Optional[V41StepContext] = None,
+        ratio: Optional[int] = None,
+        dense_fp4: bool = False,
         **kwargs,
     ) -> torch.Tensor:
+        if dense_fp4:
+            if context is None or ratio is None:
+                raise ValueError("dense FP4 Prefill requires request positions and a compression ratio")
+            return dense_fp4_index_score(q, k, head_weights, context, ratio)
         return _index_score(
             q,
             k,
@@ -183,6 +190,7 @@ class PPUOps(V41BackendOps):
             candidate_blocks=candidate_blocks,
             key_positions=key_positions,
             context=context,
+            ratio=ratio,
             **kwargs,
         )
 

@@ -115,6 +115,30 @@ def _visible_counts(
     return visible
 
 
+def dense_fp4_index_score(q, k, head_weights, context, ratio):
+    """Score one request-local tile using the CUDA Prefill FP4 ABI."""
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_indexer import (
+        score_indexer_chunk,
+    )
+
+    count = k.values.shape[0]
+    ends = ((context.positions + 1) // ratio).clamp(0, count).to(torch.int32)
+    logits = score_indexer_chunk(
+        q.values,
+        q.scales,
+        k.values,
+        k.scales,
+        head_weights,
+        ends,
+        bounds=(torch.zeros_like(ends), ends),
+        return_bf16=True,
+    )
+    # The request-local DeepGEMM ABI can leave the tail unwritten. Both token
+    # TopK and candidate block pooling below this boundary need a masked tile.
+    columns = torch.arange(count, device=logits.device)
+    return logits.masked_fill_(columns[None] >= ends[:, None], NEG_INF)
+
+
 def index_score(
     q: V41QuantizedTensor,
     k: V41QuantizedTensor,

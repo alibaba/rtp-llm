@@ -3,6 +3,8 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <string>
+#include <vector>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
@@ -73,6 +75,7 @@ private:
     static bool   shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size, bool enable_ffn_disaggregate);
     static bool   shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size);
     void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+    void          flushReferencePerfSteps();
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
@@ -81,6 +84,24 @@ private:
     bool isDSpark() override;
 
 private:
+    struct ReferencePerfStep {
+        int64_t index = 0;
+        int64_t start_ns = 0;
+        int64_t end_ns = 0;
+        int64_t fresh_tokens = 0;
+        int64_t emitted_tokens = 0;
+        uint64_t batch_identity = 0;
+        int batch = 0;
+        int context_batch = 0;
+        int input_min = 0;
+        int input_max = 0;
+        int prefix_min = 0;
+        int prefix_max = 0;
+        int output_max = 0;
+    };
+    std::string                                   reference_perf_dir_;
+    std::vector<ReferencePerfStep>                reference_perf_steps_;
+    int64_t                                       reference_perf_index_ = 0;
     struct PpuLoopStopState {
         std::atomic<bool> requested{false};
         std::atomic<bool> observed{false};

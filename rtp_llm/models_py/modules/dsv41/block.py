@@ -784,11 +784,9 @@ class Block(nn.Module):
                     x_pre[dbg_pos_mask].contiguous(),
                 )
 
-        # AttentionFP8 is flat-native: takes [T, dim] + per-token positions,
-        # no padding / per-request scalars. The runtime kv-cache dtype flag can
-        # be false while this branch still constructs AttentionFP8, so dispatch
-        # on the module type instead of only the cache config.
-        if isinstance(self.attn, AttentionFP8):
+        # Flat-native implementations consume [T, dim] and per-token positions.
+        # Padding a CP batch here would break its rank-local row metadata.
+        if isinstance(self.attn, AttentionFP8) or getattr(self.attn, "supports_flat_prefill", False):
             if shared_input_quant is not None:
                 attn_out = self.attn.forward_with_shared_input_quant(
                     x_pre,

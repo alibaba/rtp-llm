@@ -195,11 +195,45 @@ class TestSweepPlan(unittest.TestCase):
         self.assertEqual([c["input_len"] for c in job["cases"]], [4097, 4097])
         self.assertEqual(job["cases"][0]["context_length"], 4096)
         self.assertEqual(job["cases"][0]["output_tokens_per_request"], 33)
+        switch = "RTP_V41_PPU_GRAPH_MEGA_MHC"
+        self.assertEqual(job["environment"][switch], "0")
         graph = perf.build_plan(self.args("graph"))["jobs"][0]
         self.assertTrue(graph["graph"])
+        self.assertEqual(graph["environment"][switch], "1")
         self.assertEqual(graph["cases"][0]["output_tokens_per_request"], 8)
         command = graph["command"]
         self.assertEqual(command[command.index("--decode_capture_config") + 1], "1,2")
+        with patch.dict(os.environ, {switch: "0"}):
+            graph = perf.build_plan(self.args("graph"))["jobs"][0]
+            self.assertEqual(graph["environment"][switch], "0")
+            graph = perf.build_plan(self.args("graph", "--graph-mega-mhc"))["jobs"][0]
+            self.assertEqual(graph["environment"][switch], "1")
+        graph = perf.build_plan(self.args("graph", "--no-graph-mega-mhc"))["jobs"][0]
+        self.assertEqual(graph["environment"][switch], "0")
+        with patch.dict(os.environ, {"RTP_V41_PPU_MHC_BACKEND": "legacy"}):
+            graph = perf.build_plan(self.args("graph"))["jobs"][0]
+            self.assertEqual(graph["environment"][switch], "0")
+
+    def test_graph_attention_defaults_follow_dependency_and_overrides(self):
+        packed = "RTP_V41_PPU_GRAPH_PACKED_ATTENTION"
+        indexer = "RTP_V41_PPU_GRAPH_VISIBLE_INDEXER"
+
+        def switches(*argv):
+            job = perf.build_plan(self.args(*argv))["jobs"][0]
+            return job["environment"][packed], job["environment"][indexer]
+
+        self.assertEqual(switches("graph"), ("0", "1"))
+        with patch.dict(os.environ, {"RTP_V41_PPU_PACKED_DEPENDENCY": "/fixture/packed.json"}):
+            self.assertEqual(switches("decode"), ("0", "0"))
+            self.assertEqual(switches("graph"), ("1", "1"))
+            self.assertEqual(switches("graph", "--no-graph-packed-attention"), ("0", "1"))
+            self.assertEqual(switches("graph", "--no-graph-visible-indexer"), ("1", "0"))
+            with patch.dict(os.environ, {packed: "0", indexer: "0"}):
+                self.assertEqual(switches("graph"), ("0", "0"))
+                self.assertEqual(
+                    switches("graph", "--graph-packed-attention", "--graph-visible-indexer"),
+                    ("1", "1"),
+                )
 
     def test_invalid_grids_fail_before_model_start(self):
         invalid = [
@@ -214,6 +248,7 @@ class TestSweepPlan(unittest.TestCase):
             ["--decode-tokens", "1"],
             ["--decode-graph", "--batches", "64", "--capture-batches", "1"],
             ["--decode-graph", "--moe-backend", "grouped"],
+            ["--graph-mega-mhc"],
         ]
         for argv in invalid:
             with self.subTest(argv=argv), redirect_stderr(
@@ -470,6 +505,7 @@ class TestResults(unittest.TestCase):
                 "world_size": 8,
                 "model_layers": [40],
                 "decode_graph_replays": 2,
+                "mega_mhc": [{"graph_capture_calls": 0, "fallbacks": {}}],
                 "engines": [
                     {
                         "layers": 40,
@@ -487,6 +523,16 @@ class TestResults(unittest.TestCase):
         (directory / "moe-rank7.json").write_text(json.dumps(report))
         with self.assertRaisesRegex(ValueError, "rank 7"):
             perf.check_graph_evidence(job)
+
+        job["environment"]["RTP_V41_PPU_GRAPH_MEGA_MHC"] = "1"
+        with self.assertRaisesRegex(ValueError, "rank 0: incomplete Mega-mHC"):
+            perf.check_graph_evidence(job)
+        report["decode_graph_replays"] = 2
+        report["mega_mhc"][0]["graph_capture_calls"] = 80
+        for rank in range(8):
+            report["rank"] = rank
+            (directory / f"moe-rank{rank}.json").write_text(json.dumps(report))
+        perf.check_graph_evidence(job)
 
 
 class TestStandardFramework(unittest.TestCase):

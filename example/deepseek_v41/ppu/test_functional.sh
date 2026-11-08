@@ -57,6 +57,11 @@ if [[ "$v41_role" == shared-optimized-boundary ]]; then
         rtp_llm.models_py.modules.dsv41.ppu.test.test_fused_ops.SharedFusedOpsDevice \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_projection_streams.SharedStreamsDevice
 fi
+if [[ "$v41_role" == graph-packed-boundary ]]; then
+    exec "$v41_python" -B -m unittest \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_packed_attention.SharedPackedAttentionDevice.test_decode_graph_reads_live_packed_pool_and_lengths \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_graph_indexer
+fi
 : "${RTP_V41_TEST_CHECKPOINT:?checkpoint directory required}"
 if [[ "$v41_role" == shared-grouped-graph-decode ]]; then
     [[ "${RTP_V41_PPU_MOE_BACKEND:?select grouped explicitly}" == grouped ]]

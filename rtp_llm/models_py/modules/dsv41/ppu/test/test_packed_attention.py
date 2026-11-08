@@ -355,6 +355,122 @@ def _assert_csa_ring(test, device):
 
 class SharedPackedAttentionDevice(unittest.TestCase):
     @torch.inference_mode()
+    def test_decode_graph_reads_live_packed_pool_and_lengths(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import position_slots
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_packed_attention import GraphPackedAttention
+
+        torch.manual_seed(5107)
+        device = torch.device("cuda:0")
+        geometry = NS(window=128, head_dim=512, n_heads=64, sm_scale=lambda: 512 ** -0.5)
+        stream = torch.cuda.Stream(device=device)
+        for ratio in (0, 1, 2):
+            with self.subTest(ratio=ratio):
+                pools = {}
+                decoded = {}
+                layouts = [("swa_kv", 528, 130, 256)]
+                if ratio:
+                    layouts.append((f"global_kv_{ratio}", 288, 128 // ratio, 128))
+                for tag, width, entries, span in layouts:
+                    pool, values = _pool(tag, width, entries, span, [2, 1] * 5)
+                    pool.table = torch.cat((pool.table, pool.table.flip(-1)))
+                    pools[tag], decoded[tag] = pool, values
+
+                def slots(owner, tag, positions):
+                    pool = pools[tag]
+                    return position_slots(
+                        positions, pool.table, span=pool.span, entries=pool.entries,
+                        ratio=ratio if tag != "swa_kv" else 1, full=tag != "swa_kv",
+                        pool_blocks=pool.tensor.shape[0],
+                    )
+
+                cache = NS(
+                    device=device, geometry=NS(pool_keys=lambda: [(2, tag) for tag in pools]),
+                    pool=lambda owner, tag: pools[tag].tensor, slots=slots,
+                    _table_tag=lambda owner, tag: tag,
+                    entries={tag: pool.entries for tag, pool in pools.items()},
+                )
+                op = GraphPackedAttention(cache, geometry)
+                attn = NS(
+                    layer_id=2, index_source_layer_id=2, kv_source_layer_id=2,
+                    compress_ratio=ratio, geometry=geometry,
+                    attn_sink=torch.zeros(64, device=device),
+                )
+                q = torch.randn(2, 64, 512, device=device, dtype=torch.bfloat16)
+                metadata = NS(
+                    positions=torch.tensor([0, 127], device=device),
+                    valid_mask=torch.tensor([True, False], device=device),
+                )
+                selected = torch.arange(512, device=device, dtype=torch.int32).repeat(2, 1) if ratio else None
+                graph = torch.cuda.CUDAGraph()
+                stream.wait_stream(torch.cuda.current_stream(device))
+                with torch.cuda.stream(stream):
+                    op.forward(attn, q, selected, metadata, {})
+                torch.cuda.synchronize(device)
+                with torch.cuda.graph(graph, stream=stream):
+                    actual = op.forward(attn, q, selected, metadata, {})
+
+                before = {tag: pool.tensor.clone() for tag, pool in pools.items()}
+                for positions, valid in (([129, 257], [True, True]), ([1025, 0], [True, False]), ([1, 128], [False, True])):
+                    q.mul_(-0.75)
+                    metadata.positions.copy_(torch.tensor(positions, device=device))
+                    metadata.valid_mask.copy_(torch.tensor(valid, device=device))
+                    if selected is not None:
+                        selected[:, 1] = -1
+                    for pool in pools.values():
+                        pool.table.copy_(pool.table.flip(-1))
+                    default_eager = op.forward(attn, q, selected, metadata, {})
+                    stream.wait_stream(torch.cuda.current_stream(device))
+                    with torch.cuda.stream(stream):
+                        eager = op.forward(attn, q, selected, metadata, {})
+                        repeated = op.forward(attn, q, selected, metadata, {})
+                        graph.replay()
+                        replay = actual.clone()
+                        graph.replay()
+                    stream.synchronize()
+                    # The pinned split-KV provider can vary in the last BF16 bits
+                    # across repeated eager calls. Report this separately from
+                    # the independent numerical check for every output below.
+                    comparisons = {
+                        "eager_stream": (default_eager, eager),
+                        "eager_repeat": (eager, repeated),
+                        "replay_repeat": (replay, actual),
+                        "replay_eager": (actual, eager),
+                    }
+                    for name, (left, right) in comparisons.items():
+                        print("packed-replay", ratio, positions, name,
+                              int((left != right).sum()), float((left.float() - right.float()).abs().max()),
+                              flush=True)
+
+                    bank = torch.cat(tuple(decoded.values()))[:, None]
+                    indices = torch.full((2, 1, 640), -1, device=device, dtype=torch.int32)
+                    for row, position in enumerate(positions):
+                        if not valid[row]:
+                            continue
+                        swa = pools["swa_kv"]
+                        live = [int(swa.table[row, raw // swa.span]) * swa.entries + raw % swa.entries
+                                for raw in range(max(0, position - 127), position + 1)]
+                        if ratio:
+                            extra = pools[f"global_kv_{ratio}"]
+                            for key in range(min(512, (position + 1) // ratio)):
+                                if key != 1:
+                                    raw = key * ratio
+                                    live.append(decoded["swa_kv"].shape[0] +
+                                                int(extra.table[row, raw // extra.span]) * extra.entries +
+                                                raw % extra.span // ratio)
+                        indices[row, 0, :len(live)] = torch.tensor(live, device=device, dtype=torch.int32)
+                    reference, _ = _attention_cpu64(
+                        q.cpu(), bank.cpu(), indices.cpu(), geometry.sm_scale(), attn.attn_sink.cpu(),
+                    )
+                    outputs = {"default_eager": default_eager, "eager": eager, "repeated": repeated,
+                               "first_replay": replay, "second_replay": actual}
+                    for name, output in outputs.items():
+                        with self.subTest(positions=positions, output=name):
+                            torch.testing.assert_close(output.cpu().double(), reference["pv"], rtol=0.005, atol=0.005)
+                            self.assertEqual(int(torch.count_nonzero(output[~metadata.valid_mask])), 0)
+                for tag, pool in pools.items():
+                    self.assertTrue(torch.equal(pool.tensor, before[tag]))
+
+    @torch.inference_mode()
     def test_prefill_decode_and_physical_boundary(self):
         diagnostic_directory = _diagnostic_directory()
         numerical_failures = []

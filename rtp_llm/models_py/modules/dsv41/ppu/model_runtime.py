@@ -14,7 +14,7 @@ import torch.distributed as dist
 
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_tagged_attention_inputs
 from rtp_llm.models_py.modules.dsv41.ppu.engram import EngramHashParams, compute_engram_hash_ids
-from rtp_llm.models_py.modules.dsv41.ppu.native_model import _NATIVE_RUNNERS, _native_shutdown_group
+from rtp_llm.models_py.modules.dsv41.ppu.native_model import _NATIVE_RUNNERS, _native_shutdown_group, record_reference_prefill
 from rtp_llm.models_py.modules.dsv41.ppu.native_protocol import native_cache_protocol
 from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import SharedPrefillPolicy
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache
@@ -454,6 +454,8 @@ class SharedNativeRuntime:
                 json.dump({"schema": "v41-ppu-shared-dspark-event-v1", "rank": rank, "event": kind, **payload}, writer, indent=2)
 
     def report(self, state):
+        if state.prefill and not state.idle and os.environ.get("RTP_V41_REFERENCE_PERF_DIR"):
+            record_reference_prefill(state)
         directory = os.environ.get("RTP_V41_SHARED_EVIDENCE_DIR")
         if not directory:
             return

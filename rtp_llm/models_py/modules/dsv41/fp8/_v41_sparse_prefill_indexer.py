@@ -90,7 +90,7 @@ def _get_deep_gemm():
     return deep_gemm
 
 
-def _plan_supported(candidates, visible, key_count, block_size):
+def _plan_supported(candidates, visible, key_count, block_size, *, ppu=False):
     if not (
         torch.version.hip is None
         and candidates.is_cuda
@@ -111,7 +111,7 @@ def _plan_supported(candidates, visible, key_count, block_size):
     ):
         return False
     return (
-        torch.cuda.get_device_capability(candidates.device)[0] == 10
+        (ppu or torch.cuda.get_device_capability(candidates.device)[0] == 10)
         and _get_deep_gemm() is not None
     )
 
@@ -307,6 +307,7 @@ def prepare_plan(
     request_start: int = 0,
     request_stop: int | None = None,
     positions_ratio: int | None = None,
+    ppu: bool = False,
 ) -> SparsePrefillPlan | None:
     """Expand/sort/deduplicate one request-local chunk and build its DG schedule.
 
@@ -334,7 +335,7 @@ def prepare_plan(
     ):
         return None
     if not _plan_supported(
-        candidates, visible, key_count, block_size
+        candidates, visible, key_count, block_size, ppu=ppu
     ) or not _row_keys_supported(candidates, row_key_offsets, row_key_counts):
         return None
     lookup = request_ids is not None or request_key_counts is not None

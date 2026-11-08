@@ -198,17 +198,27 @@ class SharedNativeCache(NativeCacheBridge):
     def read_csa(self, layer, request, positions):
         return self._copy_rows((layer, "csa_state"), request, positions)
 
-    def stage_swa(self, layer, positions, requests, packed, prefixes, *, retain_rows=True):
-        """Preserve prefix tails and fresh rows before any ring is overwritten."""
+    def stage_swa(
+        self, layer, positions, requests, packed, prefixes, *, retain_rows=True, retain_prefix_tail=True
+    ):
+        """Preserve the SWA rows visible to this forward before ring writes."""
         for rid in range(len(self.lengths)):
             key = layer, rid
             chosen = requests == rid
             fresh_pos, fresh = positions[chosen], packed[chosen]
             if retain_rows:
                 prefix = int(prefixes[rid])
-                old_pos = torch.arange(max(0, prefix - self.geometry.window + 1), prefix, device=self.device)
-                old = self._copy_rows((layer, "swa_kv"), rid, old_pos)
-                self._fresh_swa[key] = (torch.cat((old_pos, fresh_pos)), torch.cat((old, fresh)))
+                if retain_prefix_tail and prefix:
+                    old_pos = torch.arange(max(0, prefix - self.geometry.window + 1), prefix, device=self.device)
+                    try:
+                        old = self._copy_rows((layer, "swa_kv"), rid, old_pos)
+                    except ValueError as error:
+                        raise ValueError(f"SWA layer {layer}, request {rid}, prefix {prefix}: {error}") from error
+                    fresh_pos_and_tail = torch.cat((old_pos, fresh_pos))
+                    fresh_and_tail = torch.cat((old, fresh))
+                    self._fresh_swa[key] = (fresh_pos_and_tail, fresh_and_tail)
+                else:
+                    self._fresh_swa[key] = (fresh_pos, fresh)
             pool = self.pools[layer, "swa_kv"]
             # One write per ring slot; retain each allocated block's checkpoint.
             column_end = ((fresh_pos // pool.span + 1) * pool.span).clamp_max(self.lengths[rid])

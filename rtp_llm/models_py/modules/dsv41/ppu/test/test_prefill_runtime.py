@@ -89,7 +89,10 @@ class SharedPrefillDevice(unittest.TestCase):
                 inputs = SimpleNamespace(input_ids=marker.long(), need_all_logits=False, need_all_hidden_states=False)
                 state = SharedForwardState(runtime, inputs, None, None, prefill=True, idle=False, prefixes=(0,), lengths=(257,))
                 state.plan, state.original_context = plan, original
-                state.shared.update(topk={20: marker[:, None].int()}, candidates=marker[:, None].int())
+                state.shared.update(
+                    topk={20: marker[:, None].int()}, candidates=marker[:, None].int(),
+                    prefill_kv_workspace=object(),
+                )
                 hidden = marker[:, None, None].expand(-1, 4, 5120).bfloat16().contiguous()
                 saved = hidden.clone()
                 compact, ids, positions, cu = state.before_block(SimpleNamespace(layer_id=21), hidden, marker.long(), marker.long(), torch.tensor([0, 257], device=device))
@@ -101,6 +104,7 @@ class SharedPrefillDevice(unittest.TestCase):
                     self.assertTrue(torch.equal(getattr(hc.state, field.name), getattr(carry, field.name).index_select(0, mapping)))
                 self.assertTrue(torch.equal(hc.pre_mix_out, hc.state.pre_mix))
                 self.assertTrue(torch.equal(state.shared["topk"][20].flatten(), mapping.int()))
+                self.assertNotIn("prefill_kv_workspace", state.shared)
                 aux = mapping.float()[:, None].expand(-1, 6)
                 v4._mtp_hidden_buffer[:query.chunk_length].copy_(aux)
                 restored = state.restore_head(compact[:, 0])

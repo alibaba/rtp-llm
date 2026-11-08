@@ -81,8 +81,8 @@ def load_packed_backend():
     return _load_packed_backend(str(path.resolve()))
 
 
-def enabled(name):
-    value = os.environ.get(name, "0")
+def enabled(name, *, default=False):
+    value = os.environ.get(name, "1" if default else "0")
     if value not in ("0", "1"):
         raise ValueError(f"{name} must be explicitly 0 or 1")
     return value == "1"

@@ -31,7 +31,9 @@ public:
                          const std::shared_ptr<KVCacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr     metrics_reporter,
                          int                                    dp_rank   = 0,
-                         RoleType                               role_type = RoleType::DECODE) {
+                         RoleType                               role_type = RoleType::DECODE,
+                         bool                                   real_requests = false):
+        real_requests_(real_requests) {
         cache_manager_    = cache_manager;
         metrics_reporter_ = metrics_reporter;
         batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
@@ -230,6 +232,9 @@ public:
     }
 
     void initRunningStreams() {
+        if (real_requests_) {
+            return;
+        }
         // set kvcache block
         for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
             (*it)->setPerfTest(true);
@@ -338,6 +343,7 @@ private:
     std::list<GenerateStreamPtr> loading_cache_streams_;
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
+    const bool                   real_requests_;
     bool                         reorder_request_;
     uint32_t                     current_step_         = 0;
     bool                         draining_mixed_modes_ = false;

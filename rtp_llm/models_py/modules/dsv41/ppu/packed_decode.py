@@ -1,4 +1,4 @@
-"""Ordinary eager decode over the framework's original packed KV pools.
+"""Ordinary decode over the framework's original packed KV pools.
 
 The shared coordinator owns support checks and physical-slot construction.
 This adapter consumes its zero-copy 528B SWA / 288B global views directly;
@@ -20,9 +20,8 @@ def packed_decode(q, plan, *, softmax_scale, attn_sink):
 
     ``plan`` retains every cache view, physical index tensor and actual live
     prefix length until this current-stream launch has been submitted. Each
-    row is one independent ordinary decode query. Graph, verify, DSpark,
-    idle and nonresident SWA histories are rejected before writes by the
-    caller; there is deliberately no exception-triggered retry here.
+    row is one independent ordinary decode query. The caller validates the
+    pool layout and masks invalid rows. Native errors propagate to the caller.
     """
     if q.ndim != 3 or q.shape[-1] != 512 or q.dtype != torch.bfloat16:
         raise ValueError("packed decode requires BF16 [rows, heads, 512] Q")

@@ -142,6 +142,61 @@ class MegaIntegrationTest(unittest.TestCase):
                 )
             self.assertEqual(native.call_count, 1)
 
+    def test_graph_enabled_by_default_with_explicit_opt_out(self):
+        with patch.dict(os.environ, {"RTP_V41_PPU_MHC_BACKEND": "mega"}):
+            os.environ.pop("RTP_V41_PPU_GRAPH_MEGA_MHC", None)
+            self.assertTrue(PPUMegaMHC().graph_enabled)
+            os.environ["RTP_V41_PPU_GRAPH_MEGA_MHC"] = "0"
+            adapter = PPUMegaMHC()
+        self.assertIsNone(
+            adapter.try_transition(
+                None, None, None, {}, None, 1e-20, MHCConfig(), phase="graph"
+            )
+        )
+        self.assertEqual(adapter.execution_stats()["fallbacks"], {"graph:unqualified_phase": 1})
+
+    @unittest.skipUnless(os.environ.get("RTP_V41_TEST_MHC_DEVICE") == "1", "PPU only")
+    def test_device_graph_replay_matches_current_inputs(self):
+        with patch.dict(os.environ, {"RTP_V41_PPU_MHC_BACKEND": "mega"}):
+            os.environ.pop("RTP_V41_PPU_GRAPH_MEGA_MHC", None)
+            adapter = PPUMegaMHC()
+        device = torch.device("cuda:0")
+        stream = torch.cuda.Stream(device=device)
+        config = MHCConfig(rms_eps=1e-20)
+
+        def transition(inputs):
+            state = PPUStepMix(
+                hidden=None, pre_mix=inputs["shifted_prev_mix"].squeeze(-1),
+                post_mix=inputs["post_mix"], residual_mix=inputs["comb_res_mix"],
+            )
+            return adapter.try_transition(
+                inputs["x"], inputs["residual"], state,
+                {"fn": inputs["fn"], "base": inputs["mix_bases"], "scale": inputs["mix_scales"]},
+                inputs["rmsnorm_weight"], 1e-20, config, phase="graph",
+            )
+
+        captures = []
+        for rows in (1, 2):
+            inputs, _, _, _ = _make_case(torch, rows, device, "normal")
+            stream.wait_stream(torch.cuda.current_stream(device))
+            with torch.cuda.stream(stream):
+                self.assertIsNotNone(transition(inputs))
+            torch.cuda.current_stream(device).wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                actual = transition(inputs)
+            captures.append((graph, inputs, actual))
+        for _ in range(2):
+            for graph, inputs, actual in reversed(captures):
+                inputs["x"].neg_()
+                inputs["residual"].mul_(0.5)
+                expected = transition(inputs)
+                graph.replay()
+                for name, value in vars(actual).items():
+                    torch.testing.assert_close(value, getattr(expected, name), rtol=0, atol=0)
+        self.assertEqual(adapter.execution_stats()["graph_capture_calls"], 2)
+        self.assertFalse(adapter.execution_stats()["fallbacks"])
+
     @unittest.skipUnless(os.environ.get("RTP_V41_TEST_MHC_DEVICE") == "1", "PPU only")
     def test_device_transition_state_and_consumers(self):
         reports, first_rows = [], {}

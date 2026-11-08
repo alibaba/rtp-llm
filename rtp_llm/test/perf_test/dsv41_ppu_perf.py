@@ -18,6 +18,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+from rtp_llm.config.v41_runtime import env_bool
+
 SCHEMA_VERSION = 1
 WORLD_SIZE = 8
 
@@ -75,6 +77,7 @@ def parse_args(argv=None):
         help="Prefill input tokens / Decode initial synthetic KV tokens; K=1024",
     )
     parser.add_argument("--decode-tokens", type=int, default=None)
+    parser.add_argument("--greedy", action="store_true", help="Use top_k=1 in the native request config")
     parser.add_argument(
         "--warmup-runs", type=int, default=int(env.get("RTP_V41_PERF_WARMUP_RUNS", "1"))
     )
@@ -91,6 +94,22 @@ def parse_args(argv=None):
         "--decode-graph",
         action="store_true",
         default=env.get("RTP_V41_TEST_DECODE_GRAPH") == "1",
+    )
+    parser.add_argument(
+        "--graph-mega-mhc",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable the PPU Mega-mHC transition (default for ordinary Decode Graph)",
+    )
+    parser.add_argument(
+        "--graph-packed-attention", action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Read packed SWA and compressed KV directly (default with a FlashMLA receipt)",
+    )
+    parser.add_argument(
+        "--graph-visible-indexer", action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use visible-length scoring and selection (default for Decode Graph)",
     )
     parser.add_argument(
         "--capture-batches",
@@ -156,7 +175,25 @@ def parse_args(argv=None):
         )
     if args.decode_graph and (args.phase == "prefill" or args.moe_backend != "megamoe"):
         parser.error("Graph requires DP8 Decode with MegaMoE/W4A4")
+    if args.graph_mega_mhc and not args.decode_graph:
+        parser.error("--graph-mega-mhc requires --decode-graph")
+    if (args.graph_packed_attention or args.graph_visible_indexer) and not args.decode_graph:
+        parser.error("Graph attention switches require --decode-graph")
     try:
+        if args.graph_mega_mhc is None:
+            mhc_backend = env.get("RTP_V41_PPU_MHC_BACKEND", "mega").strip().lower()
+            args.graph_mega_mhc = args.decode_graph and env_bool(
+                env, "RTP_V41_PPU_GRAPH_MEGA_MHC", default=mhc_backend == "mega"
+            )
+        if args.graph_packed_attention is None:
+            args.graph_packed_attention = args.decode_graph and env_bool(
+                env, "RTP_V41_PPU_GRAPH_PACKED_ATTENTION",
+                default=bool(env.get("RTP_V41_PPU_PACKED_DEPENDENCY")),
+            )
+        if args.graph_visible_indexer is None:
+            args.graph_visible_indexer = args.decode_graph and env_bool(
+                env, "RTP_V41_PPU_GRAPH_VISIBLE_INDEXER", default=True
+            )
         build_plan(args)
     except ValueError as error:
         parser.error(str(error))
@@ -214,6 +251,9 @@ def build_plan(args):
             "MAX_SEQ_LEN": str(maximum),
             "KV_CACHE_MEM_MB": str(args.kv_cache_mem_mb),
             "ENABLE_CUDA_GRAPH": str(int(decode and args.decode_graph)),
+            "RTP_V41_PPU_GRAPH_MEGA_MHC": str(int(decode and args.graph_mega_mhc)),
+            "RTP_V41_PPU_GRAPH_PACKED_ATTENTION": str(int(decode and args.graph_packed_attention)),
+            "RTP_V41_PPU_GRAPH_VISIBLE_INDEXER": str(int(decode and args.graph_visible_indexer)),
             "RTP_V41_PPU_MOE_BACKEND": args.moe_backend,
             "RTP_V41_PPU_MOE_PRECISION": (
                 "w4a4" if args.moe_backend == "megamoe" else "w4a8"
@@ -271,7 +311,7 @@ def build_plan(args):
             "--model_warm_up",
             "0",
             "--generate_config",
-            '{"force_sp_accept":false}',
+            json.dumps({"force_sp_accept": False, **({"top_k": 1} if args.greedy else {})}),
             "--frontend_pre_stop_drain_seconds",
             "0",
             "--dash_sc_grpc_pre_stop_drain_seconds",
@@ -565,6 +605,11 @@ def phase_environment(args, job):
 
 def check_graph_evidence(job):
     directory = Path(job["environment"]["RTP_V41_PERF_EVIDENCE_DIR"])
+    graph_mega_mhc = job["environment"].get("RTP_V41_PPU_GRAPH_MEGA_MHC") == "1"
+    attention_switches = {
+        route: job["environment"].get(f"RTP_V41_PPU_GRAPH_{route.upper()}") == "1"
+        for route in ("packed_attention", "visible_indexer")
+    }
     assignments = 0
     for rank in range(WORLD_SIZE):
         report = json.loads((directory / f"moe-rank{rank}.json").read_text())
@@ -590,6 +635,25 @@ def check_graph_evidence(job):
             raise ValueError(
                 f"rank {rank}: unexpected MoE backend or missing native calls"
             )
+        mhc = report.get("mega_mhc", [])
+        captured = sum(stats["graph_capture_calls"] for stats in mhc)
+        if graph_mega_mhc and (
+            captured < 40
+            or captured % 40
+            or any(
+                name.startswith("graph:")
+                for stats in mhc
+                for name in stats["fallbacks"]
+            )
+        ):
+            raise ValueError(f"rank {rank}: incomplete Mega-mHC Graph capture: {mhc}")
+        if not graph_mega_mhc and captured:
+            raise ValueError(f"rank {rank}: Mega-mHC ran in the Graph control arm")
+        attention = report.get("attention_graph_capture_calls", [])
+        for route, enabled in attention_switches.items():
+            calls = sum(stats.get(route, 0) for stats in attention)
+            if (calls > 0) != enabled or (route == "packed_attention" and calls % 40):
+                raise ValueError(f"rank {rank}: wrong {route} Graph capture count: {calls}")
         assignments += sum(e["mega_received_assignments"] for e in engines)
     if not assignments:
         raise ValueError("Graph reports contain no received expert assignments")
@@ -689,6 +753,9 @@ def main(argv=None):
                 topology=job["topology"],
                 synthetic_kv=job["synthetic_kv"],
                 graph=job["graph"],
+                graph_mega_mhc=job["environment"]["RTP_V41_PPU_GRAPH_MEGA_MHC"] == "1",
+                graph_packed_attention=job["environment"]["RTP_V41_PPU_GRAPH_PACKED_ATTENTION"] == "1",
+                graph_visible_indexer=job["environment"]["RTP_V41_PPU_GRAPH_VISIBLE_INDEXER"] == "1",
                 moe_backend=args.moe_backend,
                 moe_precision=job["environment"]["RTP_V41_PPU_MOE_PRECISION"],
                 max_seq_len=int(job["environment"]["MAX_SEQ_LEN"]),

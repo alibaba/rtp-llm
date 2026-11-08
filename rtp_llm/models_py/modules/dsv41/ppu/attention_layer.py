@@ -18,16 +18,27 @@ from rtp_llm.models_py.modules.dsv41.cp import (
     cp_all_gather_full,
     cp_swa_replay_starts,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._indexer_score import has_fp8_fp4_mqa_logits
+from rtp_llm.models_py.modules.dsv41.fp8 import (
+    _v41_sparse_prefill_indexer as sparse_prefill_indexer,
+)
+from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_indexer import (
+    PrefillIndexerKeys,
+    logits_chunk_rows,
+)
 from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import (
+    _prefill_sparse_plan,
     mask_candidate_logits,
     select_candidate_blocks,
 )
+from rtp_llm.models_py.modules.dsv41.ppu._quant import _bytes_to_sf, is_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.attention import flash_mla_sparse_fwd_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.prefill import (
     _build_reference_workspace,
     _produce_global,
     _quantized_indexer_query,
     _rope_tail,
+    build_cp_prefill_workspace,
     build_step_context,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.layers import PPUAttentionProjections
@@ -43,6 +54,8 @@ from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import (
 
 OPTIMIZED_DIAGNOSTICS_ENV = "RTP_V41_PPU_OPTIMIZED_DIAGNOSTICS"
 OPTIMIZED_LATE_FOCUS_ENV = "RTP_V41_PPU_OPTIMIZED_LATE_FOCUS"
+PREFILL_DENSE_FP4_SCORE_ENV = "RTP_V41_PPU_PREFILL_DENSE_FP4_SCORE"
+PREFILL_SPARSE_FP4_SCORE_ENV = "RTP_V41_PPU_PREFILL_SPARSE_FP4_SCORE"
 _OPTIMIZED_LATE_FOCUS_LAYERS = (16, 20, 20, 20, 21, 20, 22, 20)
 
 
@@ -379,6 +392,8 @@ class _Meta(NamedTuple):
 
 
 class SharedPPUAttention(PPUAttentionProjections):
+    supports_flat_prefill = True
+
     def __init__(self, views, layer_id, ops):
         super().__init__(views, layer_id)
         self.geometry, self.ops = views.geometry, ops
@@ -404,13 +419,25 @@ class SharedPPUAttention(PPUAttentionProjections):
             index_k_norm=getattr(self, "index_k_norm", None),
         )
 
-    def _select(self, x, qr, context, cache, shared):
+    def _select(self, x, qr, context, cache, shared, *, prefill=False):
         g, source = self.geometry, self.kv_source_layer_id
         if not self.is_index_source:
             return shared["topk"][self.index_source_layer_id]
-        counts = [n // g.ratio(source) for n in cache.lengths]
+        reference_perf = prefill and os.environ.get("RTP_V41_REFERENCE_PERF_DIR")
+        ratio = g.ratio(source)
+        counts = [n // ratio for n in cache.lengths]
+        dense_fp4 = (
+            prefill
+            and self.layer_id in (2, 8, 14, 20)
+            and enabled(PREFILL_DENSE_FP4_SCORE_ENV, default=True)
+            and x.is_cuda
+            and g.index_n_heads in (32, 64)
+            and g.index_head_dim == 128
+            and has_fp8_fp4_mqa_logits()
+        )
         out = torch.full((x.shape[0], g.index_topk), -1, dtype=torch.int32, device=x.device)
-        publish = self.layer_id == int(self.v41_config.get("candidate_source_layer_id", -1))
+        candidate_source = int(self.v41_config.get("candidate_source_layer_id", -1))
+        publish = self.layer_id == candidate_source
         shared.setdefault("candidates", None)
         block = int(self.v41_config.get("candidate_block_size", 0))
         candidate_k = int(self.v41_config.get("candidate_topk_blocks", 0))
@@ -419,9 +446,22 @@ class SharedPPUAttention(PPUAttentionProjections):
                 torch.full((x.shape[0], candidate_k), -1, dtype=torch.int32, device=x.device)
                 if block > 0 and candidate_k > 0 and max(counts, default=0) > block * candidate_k else None
             )
+        candidates = shared["candidates"]
+        sparse_enabled = (
+            prefill
+            and self.layer_id in (24, 28, 32, 36)
+            and source == candidate_source == 20
+            and candidates is not None
+            and (ratio, block, candidate_k) == (1, 8, 2048)
+            and (g.index_n_heads, g.index_head_dim, g.index_topk) == (32, 128, 512)
+            and x.is_cuda
+            and enabled(PREFILL_SPARSE_FP4_SCORE_ENV, default=True)
+            and is_ppu()
+            and sparse_prefill_indexer._get_deep_gemm() is not None
+        )
         if max(counts, default=0) <= g.index_topk:
             ids = torch.arange(g.index_topk, device=x.device, dtype=torch.int32)
-            out = torch.where(ids[None] < ((context.positions + 1) // g.ratio(source))[:, None], ids, -1)
+            out = torch.where(ids[None] < ((context.positions + 1) // ratio)[:, None], ids, -1)
         else:
             index_q = self.index_wq(qr).reshape(-1, g.index_n_heads, g.index_head_dim)
             index_q = _rope_tail(index_q, self.runtime.freqs_for(self.layer_id)[context.positions])
@@ -433,23 +473,85 @@ class SharedPPUAttention(PPUAttentionProjections):
                 if not rows.numel() or not count:
                     continue
                 packed = cache.read_source(source, rid, global_entries=count)[1]
-                keys = x.new_empty((count, g.index_head_dim))
-                self.ops.decode_kv(packed, pool_tag="indexer_kv", descriptor=cache.descriptors(source)["indexer_kv"], out=keys)
-                sub = build_step_context(context.positions[rows], context.request_ids[rows], context.request_offsets)
-                logits = self.ops.index_score(
-                    _quantized_indexer_query(index_q[rows]), V41QuantizedTensor(keys, None, "bf16"), weights[rows],
-                    layer_id=self.layer_id, candidate_blocks=None,
-                    key_positions=torch.arange(count, device=x.device) * g.ratio(source), context=sub, ratio=g.ratio(source),
+                sparse_fp4 = sparse_enabled and block * candidate_k < count <= 1 << 20
+                native_fp4 = dense_fp4 or sparse_fp4
+                if native_fp4:
+                    # read_source has already reconstructed the request's logical
+                    # rows from the planar cache pages on all CP ranks.
+                    width = g.index_head_dim // 2
+                    keys = V41QuantizedTensor(
+                        packed[:, :width].contiguous().view(torch.int8),
+                        _bytes_to_sf(packed[:, width:]),
+                        "fp4_ue8m0",
+                    )
+                    chunk_rows = logits_chunk_rows(
+                        block * candidate_k if sparse_fp4 else count
+                    )
+                else:
+                    decoded = x.new_empty((count, g.index_head_dim))
+                    self.ops.decode_kv(packed, pool_tag="indexer_kv", descriptor=cache.descriptors(source)["indexer_kv"], out=decoded)
+                    keys = V41QuantizedTensor(decoded, None, "bf16")
+                    chunk_rows = rows.numel()
+                key_positions = (
+                    None if native_fp4 else torch.arange(count, device=x.device) * ratio
                 )
-                candidates = shared.get("candidates")
-                if candidates is not None:
-                    if publish:
-                        chosen = select_candidate_blocks(logits, (sub.positions + 1) // g.ratio(source), block, candidate_k)
-                        candidates[rows, :chosen.shape[-1]] = chosen
-                    elif self.layer_id > int(self.v41_config.get("candidate_source_layer_id", -1)):
-                        mask_candidate_logits(logits, candidates[rows], block)
-                scores, chosen = logits.topk(min(g.index_topk, count), dim=-1)
-                out[rows, :chosen.shape[-1]] = torch.where(torch.isfinite(scores), chosen, -1).int()
+                for chunk_index, chunk in enumerate(rows.split(chunk_rows)):
+                    q = _quantized_indexer_query(index_q[chunk])
+                    if sparse_fp4:
+                        visible = (context.positions[chunk] + 1) // ratio
+                        plan = _prefill_sparse_plan(
+                            shared,
+                            (rid, chunk_index, chunk.numel(), count, ratio, block),
+                            candidates[chunk],
+                            visible,
+                            count,
+                            block,
+                            ppu=True,
+                        )
+                        logits = sparse_prefill_indexer.score(
+                            q.values,
+                            q.scales,
+                            PrefillIndexerKeys(keys.values, keys.scales),
+                            weights[chunk],
+                            plan,
+                        )
+                        if logits is None:
+                            raise RuntimeError("PPU sparse Prefill scorer rejected a supported tile")
+                        if reference_perf:
+                            shared.setdefault("reference_sparse_fp4", set()).add(self.layer_id)
+                        columns = torch.arange(plan.sparse_columns, device=x.device)
+                        logits.masked_fill_(
+                            columns[None, :] >= plan.end[:, None], -torch.inf
+                        )
+                        selected = logits.topk(g.index_topk, dim=-1).indices.to(torch.int32)
+                        out[chunk] = sparse_prefill_indexer.remap(selected, plan, logits=logits)
+                        del logits
+                        continue
+                    sub = build_step_context(
+                        context.positions[chunk], context.request_ids[chunk], context.request_offsets
+                    )
+                    logits = self.ops.index_score(
+                        q,
+                        keys,
+                        weights[chunk],
+                        layer_id=self.layer_id,
+                        candidate_blocks=None,
+                        key_positions=key_positions,
+                        context=sub,
+                        ratio=ratio,
+                        dense_fp4=dense_fp4,
+                    )
+                    if reference_perf and dense_fp4:
+                        shared.setdefault("reference_dense_fp4", set()).add(self.layer_id)
+                    if candidates is not None:
+                        if publish:
+                            chosen = select_candidate_blocks(logits, (sub.positions + 1) // ratio, block, candidate_k)
+                            candidates[chunk, :chosen.shape[-1]] = chosen
+                        elif self.layer_id > candidate_source:
+                            mask_candidate_logits(logits, candidates[chunk], block)
+                    scores, chosen = logits.topk(min(g.index_topk, count), dim=-1)
+                    out[chunk, :chosen.shape[-1]] = torch.where(torch.isfinite(scores), chosen, -1).int()
+                    del logits
         shared.setdefault("topk", {})[self.layer_id] = out
         return out
 
@@ -529,36 +631,41 @@ class SharedPPUAttention(PPUAttentionProjections):
                 return cp_all_gather_full(value.contiguous(), cp)
             return value
 
-        full_kv = gather(kv)
-        full_pos, full_req, real = state.full_rows(cp)
-        packed = self.ops.encode_kv(full_kv[real], pool_tag="swa_kv")
-        cache.stage_swa(
-            self.layer_id, full_pos[real], full_req[real], packed, state.query_prefixes,
-            retain_rows=plan is None,
-        )
-        if self.is_kv_source:
-            values = gather(self.global_wkv(x))
-            scores = gather(self.global_wgate(x)) if self.global_wgate is not None else None
-            _produce_global(
-                ops=self.ops, layer=self._layer_weights(), geometry=g,
-                freqs=self.runtime.freqs_for(self.layer_id),
-                values=values[real], scores=scores[real] if scores is not None else None,
-                positions=full_pos[real], request_ids=full_req[real], cache=cache,
-                slots=cache.slots, layer_id=self.layer_id, append_starts=state.append_starts,
-            )
-            shared.setdefault("global", {})[self.layer_id] = source_identity(cache, self.layer_id)
-        if self.compress_ratio:
-            cache.prepare_source(self.kv_source_layer_id)
-        selected = self._select(x, qr, context, cache, shared) if self.compress_ratio else None
         starts = cp_swa_replay_starts(cp)
         swa_starts = (
             {rid: state.query_prefixes[rid] + start for rid, start in enumerate(starts)}
             if starts is not None and self.layer_id >= 21 else None
         )
         if state.prefill and self.runtime.policy.mode == "compact" and self.layer_id >= 21 and swa_starts is None:
-            # Decoder SWA is live state, excluded from immutable prefix reuse.
-            # A no-compaction/full-output fallback still begins at fresh rows.
+            # Bounded decoder SWA pools contain this request's fresh rows only.
             swa_starts = dict(enumerate(state.query_prefixes))
+
+        full_kv = gather(kv)
+        full_pos, full_req, real = state.full_rows(cp)
+        packed = self.ops.encode_kv(full_kv[real], pool_tag="swa_kv")
+        cache.stage_swa(
+            self.layer_id, full_pos[real], full_req[real], packed, state.query_prefixes,
+            retain_rows=plan is None, retain_prefix_tail=swa_starts is None,
+        )
+        if self.is_kv_source:
+            values = gather(self.global_wkv(x))
+            scores = gather(self.global_wgate(x)) if self.global_wgate is not None else None
+            prefill_layout = None
+            if state.prefill and (cp is None or cp.gather_restore_positions is None):
+                prefill_layout = (state.query_prefixes, state.lengths)
+            _produce_global(
+                ops=self.ops, layer=self._layer_weights(), geometry=g,
+                freqs=self.runtime.freqs_for(self.layer_id),
+                values=values[real], scores=scores[real] if scores is not None else None,
+                positions=full_pos[real], request_ids=full_req[real], cache=cache,
+                slots=cache.slots, layer_id=self.layer_id, append_starts=state.append_starts,
+                prefill_layout=prefill_layout,
+            )
+            shared.setdefault("global", {})[self.layer_id] = source_identity(cache, self.layer_id)
+        use_cp_workspace = cache.sharded and cp is not None and cp.cp_size > 1 and diagnostic is None
+        if self.compress_ratio and (not use_cp_workspace or self.is_index_source):
+            cache.prepare_source(self.kv_source_layer_id)
+        selected = self._select(x, qr, context, cache, shared, prefill=state.prefill) if self.compress_ratio else None
         if diagnostic is not None:
             diagnostic_swa_before = cache._copy_rows((self.layer_id, "swa_kv"), 0, full_pos[real])
             diagnostic_global_before = None
@@ -596,10 +703,16 @@ class SharedPPUAttention(PPUAttentionProjections):
                 if plan.global_pool is not None else None,
             )
         else:
-            kv_rows, indices, lengths = _build_reference_workspace(
-                ops=self.ops, cache=cache, layer_id=self.layer_id, geometry=g, context=context,
-                selected_blocks=selected, window=g.window, swa_starts=swa_starts,
-            )
+            if use_cp_workspace:
+                kv_rows, indices, lengths = build_cp_prefill_workspace(
+                    ops=self.ops, cache=cache, layer_id=self.layer_id, geometry=g, context=context,
+                    selected_blocks=selected, window=g.window, swa_starts=swa_starts, cp=cp, shared=shared,
+                )
+            else:
+                kv_rows, indices, lengths = _build_reference_workspace(
+                    ops=self.ops, cache=cache, layer_id=self.layer_id, geometry=g, context=context,
+                    selected_blocks=selected, window=g.window, swa_starts=swa_starts,
+                )
             output, _, _ = flash_mla_sparse_fwd_ppu(q.contiguous(), kv_rows, indices, g.sm_scale(), attn_sink=self.attn_sink, topk_length=lengths)
             route["bf16_kv_workspace"] = True
         partition_probe = None

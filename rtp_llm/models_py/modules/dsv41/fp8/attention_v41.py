@@ -502,7 +502,7 @@ def _apply_prefill_candidates(
             mask_candidate_logits(logits, candidates[rows], block_size)
 
 
-def _prefill_sparse_plan(shared, key, candidates, visible, key_count, block_size):
+def _prefill_sparse_plan(shared, key, candidates, visible, key_count, block_size, *, ppu=False):
     """Forward-local, byte-bounded reuse across the four HCA index sources.
 
     ``key`` identifies request, row range, logical K width and compression.
@@ -518,7 +518,7 @@ def _prefill_sparse_plan(shared, key, candidates, visible, key_count, block_size
     if key in cache[1]:
         return cache[1][key]
     plan = sparse_prefill_indexer.prepare_plan(
-        candidates, visible, key_count, block_size
+        candidates, visible, key_count, block_size, **({"ppu": True} if ppu else {})
     )
     if plan is None:
         raise RuntimeError("sparse prefill preparation rejected a supported request")

@@ -14,6 +14,25 @@ from rtp_llm.models_py.modules.dsv41.ppu.attention import flash_mla_sparse_fwd_p
 from rtp_llm.models_py.modules.dsv41.ppu.indexer import _bf16_rounding_reduce
 
 
+def score_indexer_entries(query, head_weights, *, cache, source_layer, ratio, positions, valid_mask, entries):
+    """Score explicit logical key entries through the cache's current view."""
+    batch, columns = query.shape[0], entries.shape[-1]
+    raw_positions = entries.expand(batch, columns) * ratio
+    visible = (positions + 1) // ratio
+    valid = valid_mask[:, None] & (entries < visible[:, None])
+    slots = cache.slots(source_layer, "indexer_kv", torch.where(valid, raw_positions, -1))
+    packed = cache.read_rows(source_layer, "indexer_kv", slots)
+    keys = _quant.dequantize_mx_fp4_rows(
+        packed[..., :64].contiguous().view(torch.int8),
+        _quant._bytes_to_sf(packed[..., 64:].reshape(-1, 4).contiguous()).reshape(batch, columns),
+    )
+    payload, scales = _quant.quantize_indexer_q(query)
+    query = _quant.dequantize_mx_fp4_rows(payload, scales)
+    dots = torch.bmm(query.float(), keys.float().transpose(1, 2))
+    scores = _bf16_rounding_reduce(dots, head_weights.to(torch.bfloat16))
+    return scores.masked_fill(~valid | (slots < 0), float("-inf"))
+
+
 def indexer_topk(
     query: torch.Tensor,
     head_weights: torch.Tensor,
@@ -33,26 +52,12 @@ def indexer_topk(
     rounding chain. Invalid/padded keys never become selected entries. The
     fixed capacity is a Graph geometry bound, not this step's visible length.
     """
-    batch = query.shape[0]
     capacity = max(1, int(max_seq_len) // int(ratio))
     entries = torch.arange(capacity, dtype=torch.int64, device=query.device)
-    raw_positions = entries.unsqueeze(0).expand(batch, capacity) * ratio
-    slots = cache.slots(source_layer, "indexer_kv", raw_positions)
-    visible = ((positions + 1) // ratio).clamp(min=0, max=capacity)
-    valid = valid_mask[:, None] & (entries[None, :] < visible[:, None])
-    slots = torch.where(valid, slots, -1)
-    packed = cache.read_rows(source_layer, "indexer_kv", slots)
-    keys = _quant.dequantize_mx_fp4_rows(
-        packed[..., :64].contiguous().view(torch.int8),
-        _quant._bytes_to_sf(packed[..., 64:].reshape(-1, 4).contiguous()).reshape(
-            batch, capacity
-        ),
+    scores = score_indexer_entries(
+        query, head_weights, cache=cache, source_layer=source_layer, ratio=ratio,
+        positions=positions, valid_mask=valid_mask, entries=entries,
     )
-    payload, scales = _quant.quantize_indexer_q(query)
-    query = _quant.dequantize_mx_fp4_rows(payload, scales)
-    dots = torch.bmm(query.float(), keys.float().transpose(1, 2))
-    scores = _bf16_rounding_reduce(dots, head_weights.to(torch.bfloat16))
-    scores = scores.masked_fill(~valid | (slots < 0), float("-inf"))
     if scores_only:
         return scores
     width = min(int(topk), capacity)

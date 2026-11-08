@@ -63,6 +63,8 @@ _DSV41_PPU_SHARED_MODULES = [
     "modules/dsv41/ppu/decode_graph.py",
     "modules/dsv41/ppu/graph_runtime.py",
     "modules/dsv41/ppu/graph_attention_layer.py",
+    "modules/dsv41/ppu/graph_indexer.py",
+    "modules/dsv41/ppu/graph_packed_attention.py",
     "modules/dsv41/ppu/graph_metadata.py",
     "modules/dsv41/ppu/graph_moe.py",
     "modules/dsv41/ppu/dspark_graph.py",

@@ -73,7 +73,10 @@ class SharedPPUBlock(Block):
     def forward_decode(self, x, attn_metadata, input_ids, expert_load=None, **kwargs):
         state = self.attn.runtime.current
         if getattr(state, "is_graph", False):
-            self.bind_execution_context("decode", is_cuda_graph=True)
+            self.bind_execution_context(
+                "decode", is_cuda_graph=True,
+                speculative=self.attn.runtime.model._is_speculative,
+            )
             state.layer_calls[self.layer_id].add_(1)
             return super().forward_decode(
                 x, attn_metadata, input_ids, expert_load=expert_load, **kwargs
@@ -91,10 +94,10 @@ class SharedPPUBlock(Block):
     def bind_execution_context(
         self, phase, *, ced=False, speculative=False, is_cuda_graph=False
     ):
-        """N2+ must name actual execution, without broadening Mega eligibility."""
+        """Report the actual execution phase to the PPU mHC adapter."""
         self._mhc_phase = (
-            "graph" if is_cuda_graph else
             "dspark" if speculative else
+            "graph" if is_cuda_graph else
             "ced" if ced else phase
         )
 

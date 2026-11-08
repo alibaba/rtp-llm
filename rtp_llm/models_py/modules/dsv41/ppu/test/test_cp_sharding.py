@@ -11,6 +11,11 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache import _FULL, _WIDTH
+from rtp_llm.models_py.modules.dsv41.ppu.prefill import (
+    _build_reference_workspace,
+    build_cp_prefill_workspace,
+    build_step_context,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache
 
@@ -53,6 +58,54 @@ class _BoundaryPools:
 
 
 class SharedShardedBoundary(unittest.TestCase):
+    @torch.inference_mode()
+    def test_batched_workspace_preserves_keys_and_refreshes_only_swa(self):
+        for device in ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",):
+            with self.subTest(device=device):
+                prepared = []
+                geometry = NS(head_dim=4, ratio=lambda layer: 2, kv_source_for=lambda layer: 20)
+                cache = NS(
+                    request_length=(11, 0, 17).__getitem__,
+                    prepare_source=prepared.append,
+                    descriptors=lambda layer: {"swa_kv": None, "global_kv_2": None},
+                    read_source=lambda source, rid, global_entries: (
+                        (torch.arange(global_entries, device=device) + 30 * rid)[:, None].expand(-1, 4),
+                    ),
+                    read_swa=lambda layer, rid, positions: (
+                        positions + 50 * rid + layer
+                    )[:, None].expand(-1, 4),
+                )
+                ops = NS(decode_kv=lambda packed, *, pool_tag, descriptor, out: out.copy_(packed))
+                cp = NS(chunk_lengths_per_req=(3, 0, 2))
+                # Keep the empty request in the CP geometry and exercise
+                # zigzag positions, padding, duplicates, and holes in TopK.
+                positions = torch.tensor([1, 10, 5, 12, 12], device=device)
+                requests = torch.tensor([0, 0, 0, 2, 2], device=device)
+                context = build_step_context(
+                    positions, requests, torch.tensor([0, 3, 3, 5], device=device),
+                    valid_mask=torch.tensor([True, True, True, True, False], device=device),
+                )
+                selected = torch.tensor(
+                    [[0, 1, -1], [4, -1, 0], [2, 2, 1], [3, -1, 1], [7, 4, 2]],
+                    device=device,
+                )
+                args = dict(ops=ops, cache=cache, geometry=geometry, context=context,
+                            selected_blocks=selected, window=4, swa_starts={2: 10})
+                shared = {}
+                first = build_cp_prefill_workspace(**args, layer_id=20, cp=cp, shared=shared)
+                expected = _build_reference_workspace(**args, layer_id=20)
+                for actual, reference in zip(first, expected):
+                    torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+
+                next_layer = build_cp_prefill_workspace(**args, layer_id=21, cp=cp, shared=shared)
+                expected = _build_reference_workspace(**args, layer_id=21)
+                for actual, reference in zip(next_layer, expected):
+                    torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+                self.assertEqual(first[0].data_ptr(), next_layer[0].data_ptr())
+                self.assertIs(first[1], next_layer[1])
+                self.assertIs(first[2], next_layer[2])
+                self.assertEqual(prepared, [20])
+
     @torch.inference_mode()
     def test_prefill_sparse_history_retains_fresh_rows_and_requires_live_blocks(self):
         self.assertTrue(torch.cuda.is_available(), "this boundary requires a PPU")
@@ -97,6 +150,12 @@ class SharedShardedBoundary(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "read refers to an unallocated physical block"):
                 cache._copy_rows((0, "swa_kv"), 0, positions[:1])
             self.assertEqual(gather.call_count, 1)
+
+        suffix = positions[64:]
+        with self.assertRaisesRegex(ValueError, "read refers to an unallocated physical block"):
+            cache.stage_swa(0, suffix, requests[64:], fresh[64:], (64,))
+        cache.stage_swa(0, suffix, requests[64:], fresh[64:], (64,), retain_prefix_tail=False)
+        self.assertTrue(torch.equal(cache.read_swa(0, 0, suffix), fresh[64:]))
 
         swa.table[0, -1] = csa.table[0, -1] = -1
         with self.assertRaisesRegex(ValueError, "missing a live ring block"):

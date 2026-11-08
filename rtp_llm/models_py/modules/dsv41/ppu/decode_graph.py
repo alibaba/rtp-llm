@@ -1,9 +1,18 @@
 """PPU metadata adapter for the unchanged native Graph preparation protocol."""
 
+import os
+
 import torch
 
+from rtp_llm.config.v41_runtime import env_bool
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_tagged_attention_inputs
 from rtp_llm.models_py.modules.dsv41.ppu.graph_cache import PPUDecodeGraphImpl
+from rtp_llm.models_py.modules.dsv41.ppu.graph_packed_attention import (
+    GRAPH_PACKED_ATTENTION_ENV,
+    GRAPH_VISIBLE_INDEXER_ENV,
+    GraphPackedAttention,
+)
+from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import DEPENDENCY_ENV
 
 
 class SharedPPUDecodeGraphImpl(PPUDecodeGraphImpl):
@@ -37,6 +46,16 @@ class SharedPPUDecodeGraphImpl(PPUDecodeGraphImpl):
         config = dict(views.config, max_position_embeddings=int(args.max_seq_len))
         super().__init__(config, model.kv_cache, inputs.attention_inputs,
                          device=self.runtime.device, batch_size=batch)
+        megamoe_graph = self.runtime.grouped is None
+        packed_default = megamoe_graph and bool(os.environ.get(DEPENDENCY_ENV))
+        self.packed_attention = (
+            GraphPackedAttention(self.cache, views.geometry)
+            if env_bool(os.environ, GRAPH_PACKED_ATTENTION_ENV, default=packed_default)
+            else None
+        )
+        self.visible_indexer = env_bool(
+            os.environ, GRAPH_VISIBLE_INDEXER_ENV, default=megamoe_graph
+        )
         if self.runtime.grouped is not None:
             # Native runner warmup owns only block zero. The first real replay
             # fills the count on the prepare stream.

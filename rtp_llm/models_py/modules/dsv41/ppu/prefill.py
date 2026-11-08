@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.dsv41.backend import V41QuantizedTensor, V41StepC
 from rtp_llm.models_py.modules.dsv41.ppu import _quant
 from rtp_llm.models_py.modules.dsv41.ppu.attention import COMBINED_WIDTH
 from rtp_llm.models_py.modules.dsv41.ppu.cache import PPUKVCache, PPURequestSlots
+from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import compact_prefix
 from rtp_llm.models_py.modules.dsv41.ppu.weight import V41Geometry
 
 
@@ -200,6 +201,88 @@ def _build_reference_workspace(
     return kv, indices, lengths
 
 
+class _CPPrefillWorkspace:
+    """One CP query layout and immutable global bank within a forward."""
+
+    def __init__(self, ops, cache, geometry, context, cp, source, ratio, window, starts):
+        positions = context.positions
+        chunks = positions.split(cp.chunk_lengths_per_req)
+        active = [rid for rid, chunk in enumerate(chunks) if chunk.numel()]
+        bounds = torch.stack([
+            torch.stack((chunks[rid].min(), chunks[rid].max())) for rid in active
+        ]).tolist() if active else []
+
+        layout = [(0, 0, 0, 0)] * len(chunks)
+        self.swa_ranges = []
+        self.global_ranges = []
+        offset = 0
+        for rid, (first, last) in zip(active, bounds):
+            count = cache.request_length(rid) // ratio if ratio else 0
+            swa_first = max(0, starts.get(rid, 0), first - window + 1)
+            swa_rows = torch.arange(swa_first, max(swa_first, last + 1), device=positions.device)
+            swa_offset = offset + count
+            layout[rid] = (offset, count, swa_offset, swa_first)
+            if count:
+                self.global_ranges.append((rid, offset, count))
+            self.swa_ranges.append((rid, swa_offset, swa_rows))
+            offset = swa_offset + swa_rows.numel()
+
+        self.kv = torch.empty((offset, geometry.head_dim), dtype=torch.bfloat16, device=positions.device)
+        meta = torch.tensor(layout, dtype=torch.int64, device=positions.device).reshape(-1, 4)
+        self.row_meta = meta.index_select(0, context.request_ids.long())
+        self.selection = None
+        self.index_plan = None
+        if source is not None:
+            cache.prepare_source(source)
+            tag = "global_kv_2" if ratio == 2 else "global_kv_1"
+            descriptor = cache.descriptors(source)[tag]
+            for rid, begin, count in self.global_ranges:
+                packed = cache.read_source(source, rid, global_entries=count)[0]
+                ops.decode_kv(packed, pool_tag=tag, descriptor=descriptor, out=self.kv[begin:begin + count])
+
+    def indices(self, positions, selected, ratio, window):
+        if self.index_plan is None or self.selection is not selected:
+            gbase, count, sbase, swa_first = self.row_meta.unbind(dim=1)
+            swpos = positions[:, None] - window + 1 + torch.arange(window, device=positions.device)
+            swa = torch.where(swpos >= swa_first[:, None], sbase[:, None] + swpos - swa_first[:, None], -1)
+            if selected is not None:
+                columns = torch.arange(selected.shape[1], device=positions.device)
+                live = (columns < ((positions + 1) // ratio)[:, None])
+                live = live & (selected >= 0) & (selected < count[:, None])
+                global_indices = torch.where(live, gbase[:, None] + selected, -1)
+                swa = torch.cat((global_indices, swa), dim=1)
+            indices, lengths = compact_prefix(swa.int())
+            self.index_plan = F.pad(indices, (0, COMBINED_WIDTH - indices.shape[-1]), value=-1), lengths
+            self.selection = selected
+        return self.index_plan
+
+    def refresh_swa(self, ops, cache, layer_id):
+        descriptor = cache.descriptors(layer_id)["swa_kv"]
+        for rid, begin, positions in self.swa_ranges:
+            packed = cache.read_swa(layer_id, rid, positions)
+            ops.decode_kv(packed, pool_tag="swa_kv", descriptor=descriptor,
+                          out=self.kv[begin:begin + positions.numel()])
+
+
+def build_cp_prefill_workspace(
+    *, ops, cache, layer_id, geometry, context, selected_blocks, window, swa_starts, cp, shared
+):
+    """Reuse global rows and indices, refreshing only this layer's SWA rows."""
+    ratio = geometry.ratio(layer_id)
+    source = geometry.kv_source_for(layer_id) if ratio else None
+    starts = swa_starts or {}
+    layout = (source, ratio, window, starts)
+    cached = shared.get("prefill_kv_workspace")
+    if cached is None or cached[0] is not cp or cached[1] != layout:
+        workspace = _CPPrefillWorkspace(ops, cache, geometry, context, cp, source, ratio, window, starts)
+        shared["prefill_kv_workspace"] = (cp, layout, workspace)
+    else:
+        workspace = cached[2]
+    workspace.refresh_swa(ops, cache, layer_id)
+    indices, lengths = workspace.indices(context.positions, selected_blocks, ratio, window)
+    return workspace.kv.unsqueeze(1), indices, lengths
+
+
 def _compress_pairs(
     values: torch.Tensor, scores: torch.Tensor, norm, eps: float
 ) -> torch.Tensor:
@@ -209,6 +292,33 @@ def _compress_pairs(
     # projections and unfinished-pair state retain FP32 separately.
     latent = (values.float() * weights).sum(-2).to(torch.bfloat16)
     return _rms_norm(latent, norm, eps).to(torch.bfloat16)
+
+
+def _global_write_ranges(positions, request_ids, append_starts, prefill_layout):
+    """Return each request's input range, absolute bounds and append rows."""
+    if prefill_layout is not None:
+        prefixes, lengths = prefill_layout
+        if len(prefixes) != len(lengths) or sum(lengths) != positions.numel():
+            raise ValueError("global KV Prefill layout does not match the restored rows")
+        offset = 0
+        for rid, (start, length) in enumerate(zip(prefixes, lengths)):
+            if length:
+                end = start + length
+                append = append_starts.get(rid, start)
+                rows = slice(offset, offset + length)
+                state_rows = slice(offset + max(0, append - start), offset + length)
+                yield rid, start, end, append, rows, state_rows
+            offset += length
+        return
+
+    # Eager decode and compacted layouts do not have the full Prefill ranges.
+    host_positions = positions.tolist()
+    for rid, indices in _request_rows(request_ids).items():
+        start = host_positions[indices[0]]
+        end = max(host_positions[row] for row in indices) + 1
+        append = append_starts.get(rid, start)
+        state_rows = [row for row in indices if host_positions[row] >= append]
+        yield rid, start, end, append, list(indices), state_rows
 
 
 def _produce_global(
@@ -225,6 +335,7 @@ def _produce_global(
     slots: Dict[int, PPURequestSlots],
     layer_id: int,
     append_starts: Optional[dict] = None,
+    prefill_layout=None,
 ) -> None:
     """Produce + write global KV, indexer K and CSA states for one layer.
 
@@ -236,68 +347,51 @@ def _produce_global(
     Ratio 2 pairs are aligned to absolute-position parity (pair = even|odd
     absolute positions, rope position = the pair's even start); a chunk that
     begins at an odd position reads its left token from ``csa_state``.
+    Full Prefill supplies host (prefixes, lengths) in restored request order.
     """
     ratio = geometry.ratio(layer_id)
     tag = "global_kv_2" if ratio == 2 else "global_kv_1"
-    per_request = _request_rows(request_ids)
-
-    for rid, row_indices in per_request.items():
+    ranges = _global_write_ranges(positions, request_ids, append_starts or {}, prefill_layout)
+    for rid, start, end, append, rows, state_rows in ranges:
         handle = slots[rid]
-        start = int(positions[row_indices[0]])
-        end = int(max(int(positions[row]) for row in row_indices)) + 1
         begin, stop = start // ratio, end // ratio
         if ratio == 1:
             latent = _rms_norm(
-                values[list(row_indices)], layer.compressor_norm, geometry.norm_eps
+                values[rows], layer.compressor_norm, geometry.norm_eps
             ).to(torch.bfloat16)
-            entry_positions = positions[list(row_indices)]
+            entry_positions = positions[rows]
+        elif begin == stop:
+            latent = values.new_zeros((0, geometry.head_dim), dtype=torch.bfloat16)
+            entry_positions = positions.new_zeros(0)
         else:
-            boundaries = [p for p in range(start, end) if p % 2 == 1]
-            left_values, right_values = [], []
-            left_scores, right_scores = [], []
-            left_positions = []
-            for boundary in boundaries:
-                left_pos = boundary - 1
-                if left_pos >= start:
-                    index = row_indices[left_pos - start]
-                    left_values.append(values[index])
-                    left_scores.append(scores[index])
-                else:
-                    state = cache.read_csa(
-                        layer_id, rid, torch.tensor([left_pos], dtype=torch.int64)
+            request_values, request_scores = values[rows], scores[rows]
+            odd_start = start % 2
+            left = slice(odd_start, end - start - 1, 2)
+            right = slice(1 - odd_start, end - start, 2)
+            left_values, left_scores = request_values[left], request_scores[left]
+            if odd_start:
+                left_pos = start - 1
+                state = cache.read_csa(
+                    layer_id, rid, torch.tensor([left_pos], dtype=torch.int64)
+                )
+                if not bool(state.any()):
+                    raise RuntimeError(
+                        f"ratio-2 chunk of request {rid} starts at odd "
+                        f"position {start} without a prior csa_state entry "
+                        f"at {left_pos}; the compression phase is missing"
                     )
-                    if not bool(state.any()):
-                        raise RuntimeError(
-                            f"ratio-2 chunk of request {rid} starts at odd "
-                            f"position {start} without a prior csa_state entry "
-                            "at "
-                            f"{left_pos}; the compression phase is missing"
-                        )
-                    left_values.append(state[0, :512].to(values.dtype))
-                    left_scores.append(state[0, 512:].to(scores.dtype))
-                right_index = row_indices[boundary - start]
-                right_values.append(values[right_index])
-                right_scores.append(scores[right_index])
-                left_positions.append(left_pos)
-            if not boundaries:
-                latent = values.new_zeros((0, geometry.head_dim), dtype=torch.bfloat16)
-                entry_positions = positions.new_zeros(0)
-            else:
-                pair_values = torch.stack(
-                    (torch.stack(left_values, 0), torch.stack(right_values, 0)), dim=1
-                )
-                pair_scores = torch.stack(
-                    (torch.stack(left_scores, 0), torch.stack(right_scores, 0)), dim=1
-                )
-                latent = _compress_pairs(
-                    pair_values,
-                    pair_scores,
-                    layer.compressor_norm,
-                    geometry.norm_eps,
-                )
-                entry_positions = torch.tensor(
-                    left_positions, dtype=torch.int64, device=positions.device
-                )
+                previous_values, previous_scores = state.split(geometry.head_dim, dim=-1)
+                left_values = torch.cat((previous_values.to(values.dtype), left_values))
+                left_scores = torch.cat((previous_scores.to(scores.dtype), left_scores))
+            latent = _compress_pairs(
+                torch.stack((left_values, request_values[right]), dim=1),
+                torch.stack((left_scores, request_scores[right]), dim=1),
+                layer.compressor_norm,
+                geometry.norm_eps,
+            )
+            entry_positions = torch.arange(
+                begin * ratio, stop * ratio, ratio, device=positions.device
+            )
         entry_count = stop - begin
         if latent.shape[0] != entry_count:
             raise RuntimeError(
@@ -307,7 +401,7 @@ def _produce_global(
         safe_positions = entry_positions.clamp_max(freqs.shape[0] - 1)
         global_keys = _rope_tail(latent, freqs[safe_positions])
         packed_global = ops.encode_kv(global_keys, pool_tag=tag)
-        first_write = max(begin, int((append_starts or {}).get(rid, start)) // ratio)
+        first_write = max(begin, append // ratio)
         write_offset = first_write - begin
         cache.insert_rows(
             layer_id,
@@ -328,23 +422,11 @@ def _produce_global(
         )
         if ratio == 2:
             # CSA states at RAW positions: [values | scores] fp32.
-            state_indices = [
-                row
-                for row in row_indices
-                if int(positions[row]) >= int((append_starts or {}).get(rid, start))
-            ]
-            if not state_indices:
+            state_positions = positions[state_rows]
+            if not state_positions.numel():
                 continue
-            state = torch.cat(
-                (
-                    values[state_indices],
-                    scores[state_indices],
-                ),
-                dim=-1,
-            ).float()
-            state_slots = cache.slots_at_positions(
-                layer_id, "csa_state", rid, positions[state_indices]
-            )
+            state = torch.cat((values[state_rows], scores[state_rows]), dim=-1).float()
+            state_slots = cache.slots_at_positions(layer_id, "csa_state", rid, state_positions)
             cache.insert_rows(layer_id, "csa_state", state_slots, state)
 
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 import weakref
 
 import torch
@@ -10,6 +12,31 @@ import torch
 logger = logging.getLogger(__name__)
 _SHUTDOWN_GROUP = None
 _NATIVE_RUNNERS = weakref.WeakSet()
+_REFERENCE_PREFILLS = []
+
+
+def record_reference_prefill(state):
+    if len(_REFERENCE_PREFILLS) < 4096:
+        _REFERENCE_PREFILLS.append({
+            "stamp_ns": time.monotonic_ns(),
+            "lengths": list(state.lengths), "prefixes": list(state.query_prefixes),
+            "plan": state.plan_reason, "compacted": state.compacted,
+            "dense_fp4_layers": sorted(state.shared.get("reference_dense_fp4", ())),
+            "sparse_fp4_layers": sorted(state.shared.get("reference_sparse_fp4", ())),
+            "mega_mhc_transitions": state.normalization["mega_transitions"],
+        })
+
+
+def _flush_reference_prefills(directory, rank):
+    import json
+    from pathlib import Path
+
+    if not _REFERENCE_PREFILLS:
+        return
+    with (Path(directory) / f"prefill-rank{rank}.jsonl").open("x") as output:
+        for record in _REFERENCE_PREFILLS:
+            output.write(json.dumps(record) + "\n")
+    _REFERENCE_PREFILLS.clear()
 
 def _native_shutdown_group():
     from datetime import timedelta
@@ -33,12 +60,18 @@ def drain_native_parallel():
             if runner.observer is not None:
                 runner.observer.close()
         _write_perf_evidence()
+        reference_dir = os.environ.get("RTP_V41_REFERENCE_PERF_DIR")
+        if reference_dir:
+            if os.environ.get("ROLE_TYPE") == "DECODE":
+                from rtp_llm.models_py.modules.dsv41.ppu.dspark_graph import flush_reference_replays
+
+                flush_reference_replays(reference_dir, dist.get_rank())
+            else:
+                _flush_reference_prefills(reference_dir, dist.get_rank())
         logger.info("V4.1 native role engine device work drained")
 
 
 def _write_perf_evidence():
-    import os
-
     evidence = os.environ.get("RTP_V41_PERF_EVIDENCE_DIR")
     if not evidence:
         return
@@ -61,6 +94,17 @@ def _write_perf_evidence():
                 "model_layers": sorted(
                     {r.core.geometry.num_layers for r in _NATIVE_RUNNERS}
                 ),
+                "mega_mhc": [
+                    model._shared_ops.mhc_execution_stats()
+                    for runner in _NATIVE_RUNNERS
+                    if (model := runner.model) is not None
+                ],
+                "attention_graph_capture_calls": [
+                    dict(graph.attention_capture_calls)
+                    for runner in _NATIVE_RUNNERS
+                    if (model := runner.model) is not None
+                    and (graph := model.shared_graph_runtime) is not None
+                ],
                 "engines": [
                     {"layers": len(engine._weights), **engine.execution_stats()}
                     for engine in engines

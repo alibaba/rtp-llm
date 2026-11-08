@@ -105,11 +105,24 @@ def select_indices(attn, x, qr, state, freqs):
     positions, valid = state.metadata.positions, state.metadata.valid_mask
     query = _rope_tail(attn.index_wq(qr).reshape(-1, g.index_n_heads, g.index_head_dim), freqs)
     weights = F.linear(x, attn.index_weights).float() * (g.index_head_dim * g.index_n_heads) ** -0.5
-    scores = indexer_topk(
-        query, weights, cache=state.cache, source_layer=source, ratio=ratio,
-        positions=positions, valid_mask=valid, topk=g.index_topk,
-        max_seq_len=state.cache.max_seq_len, scores_only=True,
-    )
+    use_visible_indexer = getattr(state, "visible_indexer", False)
+    if use_visible_indexer:
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_indexer import (
+            indexer_scores, select_topk, verify_indexer_scores,
+        )
+
+        score = verify_indexer_scores if getattr(state, "verify", False) else indexer_scores
+        scores = score(
+            query, weights, cache=state.cache, source_layer=source, ratio=ratio,
+            positions=positions, valid_mask=valid,
+        )
+        state.attention_calls["visible_indexer"] += 1
+    else:
+        scores = indexer_topk(
+            query, weights, cache=state.cache, source_layer=source, ratio=ratio,
+            positions=positions, valid_mask=valid, topk=g.index_topk,
+            max_seq_len=state.cache.max_seq_len, scores_only=True,
+        )
     visible = (positions + 1) // ratio
     config = attn.v41_config
     candidate_source = int(config.get("candidate_source_layer_id", -1))
@@ -121,6 +134,8 @@ def select_indices(attn, x, qr, state, freqs):
     elif attn.layer_id > candidate_source and "candidates" in state.shared:
         masked = mask_candidate_logits(scores.clone(), state.shared["candidates"], block)
         scores = torch.where(state.shared["candidate_active"][:, None], masked, scores)
+    if use_visible_indexer:
+        return select_topk(scores, visible, valid, g.index_topk)
     width = min(g.index_topk, scores.shape[-1])
     values, indices = scores.topk(width, dim=-1)
     selected = torch.where(torch.isfinite(values), indices.int(), -1)
@@ -154,12 +169,17 @@ def forward_graph_attention(attn, x, state):
             state.shared[attn.layer_id] = selected
         else:
             selected = state.shared[attn.index_source_layer_id]
-    output = _shared_decode_attention(
-        q, selected, cache=cache, layer_id=attn.layer_id,
-        source_layer=attn.kv_source_layer_id, ratio=attn.compress_ratio,
-        positions=positions, valid_mask=valid, window=g.window,
-        sm_scale=g.sm_scale(), attn_sink=attn.attn_sink,
-    )
+    packed = getattr(state, "packed_attention", None)
+    if packed is None:
+        output = _shared_decode_attention(
+            q, selected, cache=cache, layer_id=attn.layer_id,
+            source_layer=attn.kv_source_layer_id, ratio=attn.compress_ratio,
+            positions=positions, valid_mask=valid, window=g.window,
+            sm_scale=g.sm_scale(), attn_sink=attn.attn_sink,
+        )
+    else:
+        output = packed.forward(attn, q, selected, state.metadata, state.shared)
+        state.attention_calls["packed_attention"] += 1
     output = _rope_tail(output, freqs, inverse=True).reshape(-1, g.o_groups, g.n_heads * g.head_dim // g.o_groups)
     projected = torch.stack([
         F.linear(output[:, i].contiguous(), attn.wo_a.weight[i * g.o_lora_rank:(i + 1) * g.o_lora_rank].contiguous())

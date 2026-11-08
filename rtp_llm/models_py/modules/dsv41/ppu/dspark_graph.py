@@ -18,7 +18,22 @@ from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import (
     device_rows,
     require_device_tables,
 )
+from rtp_llm.models_py.modules.dsv41.ppu.graph_packed_attention import GRAPH_VISIBLE_INDEXER_ENV
+from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import enabled
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import map_context_rows
+
+
+_REFERENCE_REPLAYS = []
+
+
+def flush_reference_replays(directory, rank):
+    if not _REFERENCE_REPLAYS:
+        return
+    path = Path(directory) / f"replay-rank{rank}.jsonl"
+    with path.open("x") as output:
+        for replay in _REFERENCE_REPLAYS:
+            output.write(json.dumps(replay) + "\n")
+    _REFERENCE_REPLAYS.clear()
 
 
 class SharedDSparkGraphImpl:
@@ -39,6 +54,7 @@ class SharedDSparkGraphImpl:
         if not model._is_decode_role or model.kv_cache is None:
             raise ValueError("DSpark Graph requires D's native cache")
         self.mode, self.runtime = mode, runtime
+        self.visible_indexer = mode in ("dense", "packed") and enabled(GRAPH_VISIBLE_INDEXER_ENV)
         self._model = weakref.ref(model)
         self.device = model.shared_runtime.device
         attn = primary_attention_inputs(inputs.attention_inputs, model.kv_cache)
@@ -161,6 +177,10 @@ class SharedDSparkGraphImpl:
             model.shared_runtime.stage_graph_verify(
                 inputs, self, outputs.mtp_target_hidden_states, native_replay=True
             )
+        reference_dir = os.environ.get("RTP_V41_REFERENCE_PERF_DIR")
+        if reference_dir and not inputs.warmup and not inputs.is_fake_stream:
+            if len(_REFERENCE_REPLAYS) < 16384:
+                _REFERENCE_REPLAYS.append((time.monotonic_ns(), self.mode, self.batch_size, self.visible_indexer))
         directory = os.environ.get("RTP_V41_SHARED_EVIDENCE_DIR")
         if not directory or inputs.warmup or (inputs.is_fake_stream and self._reported_idle):
             return
