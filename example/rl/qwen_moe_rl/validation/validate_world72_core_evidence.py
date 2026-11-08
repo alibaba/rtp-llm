@@ -90,6 +90,8 @@ class Validator:
         self.production_plan_path=production_plan
         self.production_plan_sha256=production_plan_sha256
         self.expected_run_id=expected_run_id
+        self.validated_plan_run_id=None
+        self.validated_plan_reuse_enabled=None
         self.errors=[];self.inventory={};self.details={}
         self.reuse_pre={}
         self.initial_replay=None
@@ -102,6 +104,23 @@ class Validator:
     def need(self,value,message):
         if not value:self.errors.append(message)
         return bool(value)
+
+    def reuse_run_identity(self):
+        """Use the pinned current plan, and cross-check replay when present."""
+        replay=self.initial_replay
+        replay_id=None
+        if replay is not None:
+            root=getattr(replay,'current_root',None)
+            path=Path(root) if isinstance(root,str) else None
+            if (getattr(replay,'valid',False) is True and path is not None
+                    and path.is_absolute() and path.parent.name=='runs' and '..' not in path.parts):
+                replay_id=path.name
+            else:
+                return None
+        plan_id=self.validated_plan_run_id
+        if replay_id is not None and plan_id is not None and replay_id!=plan_id:
+            return None
+        return plan_id or replay_id
 
     def records(self,pattern,roots=None):
         values=[];seen={}
@@ -190,13 +209,12 @@ class Validator:
             self.need(enabled==has_commit and (not self.first_adam_reuse_required or enabled)
                 and (step!=1 or rank not in reuse_pre or enabled),
                 f'{path}: reuse configuration, commit and pre-update evidence disagree')
+            if step==1 and self.validated_plan_reuse_enabled is not None:
+                self.need(enabled is self.validated_plan_reuse_enabled,
+                    f'{path}: actual reuse mode differs from the pinned production plan')
             if opt.get('first_adam_reuse_enabled') is True:
-                replay=self.initial_replay
-                root=getattr(replay,'current_root',None)
-                root_path=Path(root) if isinstance(root,str) else None
-                expected_run_id=root_path.name if (getattr(replay,'valid',False) is True and root_path is not None
-                    and root_path.is_absolute() and root_path.parent.name=='runs' and '..' not in root_path.parts) else None
-                self.need(expected_run_id is not None,f'{path}: validated current-run replay identity is missing')
+                expected_run_id=self.reuse_run_identity()
+                self.need(expected_run_id is not None,f'{path}: validated current-run plan or replay identity is missing or inconsistent')
                 marker=world_commits.get((step,rank),(None,{}))[1];votes=marker.get('post_update_votes',[])
                 self.need(marker.get('schema')=='q38-reuse-world-update-vote-v1' and marker.get('rank')==rank
                     and expected_run_id is not None and marker.get('run_id')==expected_run_id
@@ -399,13 +417,12 @@ class Validator:
             cross_node_wall_clocks_not_used_to_infer_step_order=True)
 
     def micro_memory_boundaries(self,updates,loads):
-        if self.initial_replay is None:
-            if any(value is not None for value in (self.production_plan_path,self.production_plan_sha256,self.expected_run_id)):
-                self.errors.append('A run-bound gradient-cache plan requires validated current-run replay lineage')
+        plan_args=(self.production_plan_path,self.production_plan_sha256,self.expected_run_id)
+        if self.initial_replay is None and not any(value is not None for value in plan_args):
             return
         budget=75*GIB
         expected_pid=None
-        plan_args=(self.production_plan_path,self.production_plan_sha256,self.expected_run_id)
+        expected_loaded_end=None
         if any(value is not None for value in plan_args):
             # A locally supplied digest is a caller-pinned input, not proof of
             # where the bytes came from. The separate deployment/source-lock
@@ -418,6 +435,7 @@ class Validator:
                 if hashlib.sha256(raw).hexdigest()!=self.production_plan_sha256:
                     raise ValueError('Pinned production plan SHA256 mismatch')
                 plan=json.loads(raw);run_id=plan['run_id'];root=plan['run_root'];env=plan['environment']
+                if not isinstance(env,dict):raise ValueError('Production plan environment must be a mapping')
                 b=plan['gradient_cache_bytes'];env_budget=env['Q38_GPU_GRADIENT_CACHE_BYTES']
                 root_path=PurePosixPath(root)
                 if (not isinstance(run_id,str) or not run_id or '/' in run_id or run_id in ('.','..')
@@ -426,17 +444,51 @@ class Validator:
                     or env.get('Q38_RUN_ID')!=run_id or env.get('Q38_RUN_ROOT')!=root
                     or type(b) is not int or b<=0 or not isinstance(env_budget,str) or env_budget!=str(b)):
                     raise ValueError('Pinned plan run identity, root or gradient budget is inconsistent')
-                if getattr(self.initial_replay,'valid',False) is not True:
-                    raise ValueError('Run-specific budget requires validated current-run replay lineage')
-                worlds=self.records('initial-policy-replay-world72.json')
-                if len(worlds)!=1 or worlds[0][1].get('current_run_root')!=root:
-                    raise ValueError('Production plan does not bind the current world72 run root')
-                proofs=self.by_rank(self.records('initial-policy-replay-rank*.json'),'budget current-run proof')
-                if (len(proofs)!=WORLD or any(row.get('schema')!='q38-fresh-initial-policy-replay-worker-v1'
-                    or row.get('world_size')!=WORLD or row.get('current_run_root')!=root
-                    or type(row.get('pid')) is not int or row['pid']<=0 for _,row in proofs.values())):
-                    raise ValueError('All72 run-bound replay worker identities are required')
-                expected_pid={rank:row['pid'] for rank,(_,row) in proofs.items()}
+                if self.initial_replay is not None:
+                    if getattr(self.initial_replay,'valid',False) is not True:
+                        raise ValueError('Run-specific budget requires validated current-run replay lineage')
+                    worlds=self.records('initial-policy-replay-world72.json')
+                    if len(worlds)!=1 or worlds[0][1].get('current_run_root')!=root:
+                        raise ValueError('Production plan does not bind the current world72 run root')
+                    proofs=self.by_rank(self.records('initial-policy-replay-rank*.json'),'budget current-run proof')
+                    if (len(proofs)!=WORLD or any(row.get('schema')!='q38-fresh-initial-policy-replay-worker-v1'
+                        or row.get('world_size')!=WORLD or row.get('current_run_root')!=root
+                        or type(row.get('pid')) is not int or row['pid']<=0 for _,row in proofs.values())):
+                        raise ValueError('All72 run-bound replay worker identities are required')
+                    expected_pid={rank:row['pid'] for rank,(_,row) in proofs.items()}
+                else:
+                    if env.get('Q38_INITIAL_POLICY_REPLAY')!='0' or env.get('Q38_REPLAY_VERIFY_FULL_SHARD_BYTES')!='1':
+                        raise ValueError('Fresh-run plan must explicitly disable replay and verify every source byte')
+                    if set(loads)!=set(range(WORLD)):
+                        raise ValueError('Fresh-run budget requires all72 current checkpoint load ranks')
+                    rows=[loads[rank][1] for rank in range(WORLD)]
+                    if (any(row.get('schema')!='qwen38-flat-sharded-checkpoint-v1'
+                            or row.get('rank')!=rank or row.get('world_size')!=WORLD
+                            or row.get('run_id')!=run_id or row.get('run_root')!=root
+                            or not isinstance(row.get('hostname'),str) or not row['hostname']
+                            or type(row.get('pid')) is not int or row['pid']<=0
+                            or not finite(row.get('started_unix')) or not finite(row.get('finished_unix'))
+                            or row['started_unix']>row['finished_unix']
+                            for rank,row in enumerate(rows))
+                            or len({(row['hostname'],row['pid']) for row in rows})!=WORLD):
+                        raise ValueError('Fresh-run load identities do not cover all72 current rank processes')
+                    for row in rows:
+                        slices=row.get('source_slices')
+                        if (row.get('source_provider')!='platform_mounted' or row.get('runtime_parameters')!=7324
+                                or not isinstance(slices,list) or len(slices)!=7324
+                                or any(item.get('source_coordinates_verified') is not True
+                                    or item.get('full_destination_BF16_bytes_verified') is not True
+                                    or type(item.get('local_numel')) is not int or item['local_numel']<0
+                                    or item.get('local_bytes')!=item['local_numel']*2
+                                    or type(item.get('source_reads')) is not int or item['source_reads']<0
+                                    or (item['local_numel']>0 and item['source_reads']==0)
+                                    or not isinstance(item.get('full_slice_bytes_sha256'),list)
+                                    or len(item['full_slice_bytes_sha256'])!=item['source_reads']
+                                    or not all(digest(value) for value in item['full_slice_bytes_sha256'])
+                                    for item in slices)):
+                            raise ValueError('Fresh-run load is missing complete verified source/destination slice bytes')
+                    expected_pid={rank:row['pid'] for rank,row in enumerate(rows)}
+                    expected_loaded_end={rank:row['finished_unix'] for rank,row in enumerate(rows)}
                 self.inventory[str(path.resolve())]=dict(bytes=len(raw),sha256=self.production_plan_sha256)
                 self.details['gradient_cache_budget_source']=dict(kind='caller_pinned_production_plan',
                     run_id=run_id,run_root=root,sha256=self.production_plan_sha256,bytes=b,
@@ -473,6 +525,9 @@ class Validator:
             if expected_pid is not None:
                 self.need(row.get('pid')==expected_pid.get(rank),
                     f'{path}: micro record does not belong to the plan-bound current rank process')
+            if expected_loaded_end is not None:
+                self.need(type(row.get('time_ns')) is int and row['time_ns']/1e9>=expected_loaded_end.get(rank,float('inf')),
+                    f'{path}: micro record precedes its current rank checkpoint load')
             self.need(event in ('before-cache-release','enter-forward','exit-forward-before-backward'),
                 f'{path}: a failed or unknown training-forward boundary remains')
             actual=updates.get(step,{}).get(rank)
@@ -678,6 +733,8 @@ class Validator:
 
     def validate_reuse_plan_binding(self):
         """Bind the opt-in profile to the caller-pinned, run-specific plan."""
+        self.validated_plan_run_id=None
+        self.validated_plan_reuse_enabled=None
         args=(self.production_plan_path,self.production_plan_sha256,self.expected_run_id)
         if not any(value is not None for value in args):
             self.need(not self.first_adam_reuse_required,'Required first-Adam reuse needs a pinned current-run plan')
@@ -689,6 +746,7 @@ class Validator:
             if hashlib.sha256(raw).hexdigest()!=self.production_plan_sha256:
                 raise ValueError('pinned plan SHA256 mismatch')
             plan=json.loads(raw);run_id=plan['run_id'];root=plan['run_root'];env=plan['environment']
+            if not isinstance(env,dict):raise ValueError('Production plan environment must be a mapping')
             root_path=PurePosixPath(root)
             if (not isinstance(run_id,str) or not run_id or '/' in run_id or run_id in ('.','..')
                     or run_id!=self.expected_run_id or not root_path.is_absolute() or '..' in root_path.parts
@@ -698,7 +756,9 @@ class Validator:
             mode=env.get('Q38_FIRST_ADAM_REUSE_CPU_SPILL','0')
             if mode not in ('0','1') or type(mode) is not str:
                 raise ValueError('plan reuse mode must be the string 0 or 1')
+            self.validated_plan_run_id=run_id
             required=mode=='1'
+            self.validated_plan_reuse_enabled=required
             if required:
                 # Enforce evidence mode even when the caller forgot the CLI flag.
                 caller_required=self.first_adam_reuse_required

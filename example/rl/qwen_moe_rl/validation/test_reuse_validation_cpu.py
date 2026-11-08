@@ -94,6 +94,97 @@ class ValidationTest(unittest.TestCase):
             errors=[e for e in result['errors'] if 'world update/audit vote' in e]
             self.assertEqual(bool(errors),not should_pass,result['errors'])
 
+    def test_fresh_world_vote_binds_pinned_plan_without_replay(self):
+        with tempfile.TemporaryDirectory() as folder:
+            plan_path=Path(folder)/'plan.json'
+            plan=dict(run_id='run',run_root='/tmp/runs/run',environment=dict(
+                Q38_RUN_ID='run',Q38_RUN_ROOT='/tmp/runs/run',Q38_FIRST_ADAM_REUSE_CPU_SPILL='1'))
+            raw=json.dumps(plan).encode();plan_path.write_bytes(raw);sha=hashlib.sha256(raw).hexdigest()
+            for marker_run,pinned_hash,should_pass in [('run',sha,True),('other',sha,False),('run','0'*64,False)]:
+                with self.subTest(marker_run=marker_run,pinned_hash=pinned_hash):
+                    v=Validator([],first_adam_reuse_required=True,production_plan=plan_path,
+                        production_plan_sha256=pinned_hash,expected_run_id='run')
+                    row=dict(rank=0,pid=55,world_size=72,time_ns=101,phase='train',optimizer=dict(
+                        steps=[1],first_adam_reuse_enabled=True,first_adam_reuse_commit={},gradient_store={}))
+                    marker=dict(schema='q38-reuse-world-update-vote-v1',run_id=marker_run,rank=0,pid=55,
+                        world_size=72,step=1,recorded_ns=102,post_update_votes=[dict(rank=i,
+                        phase='post-update-audit-and-clear',passed=True) for i in range(72)])
+                    v.records=lambda pattern: ([(Path('/marker'),marker)] if pattern=='reuse-world-commit-rank*.json' else
+                        [(Path('/step'),row)] if pattern=='optimizer-step-rank*.json' else [])
+                    v.source_loads_and_plans=lambda:{}
+                    errors=v.run()['errors']
+                    failures=[e for e in errors if 'world update/audit vote' in e]
+                    self.assertEqual(bool(failures),not should_pass,errors)
+
+    def test_replay_and_pinned_plan_must_identify_same_run(self):
+        class Replay:
+            valid=True
+            current_root='/tmp/runs/run'
+        v=Validator([]);v.initial_replay=Replay();v.validated_plan_run_id='run'
+        self.assertEqual(v.reuse_run_identity(),'run')
+        v.validated_plan_run_id='other'
+        self.assertIsNone(v.reuse_run_identity())
+        v.initial_replay.current_root='/tmp/runs/../other'
+        self.assertIsNone(v.reuse_run_identity())
+
+    def test_actual_reuse_mode_must_match_pinned_plan(self):
+        with tempfile.TemporaryDirectory() as folder:
+            plan_path=Path(folder)/'plan.json'
+            plan=dict(run_id='run',run_root='/tmp/runs/run',environment=dict(
+                Q38_RUN_ID='run',Q38_RUN_ROOT='/tmp/runs/run',Q38_FIRST_ADAM_REUSE_CPU_SPILL='0'))
+            raw=json.dumps(plan).encode();plan_path.write_bytes(raw)
+            v=Validator([],production_plan=plan_path,production_plan_sha256=hashlib.sha256(raw).hexdigest(),
+                expected_run_id='run')
+            row=dict(rank=0,pid=55,world_size=72,time_ns=101,phase='train',optimizer=dict(
+                steps=[1],first_adam_reuse_enabled=True,first_adam_reuse_commit={},gradient_store={}))
+            v.records=lambda pattern:[(Path('/step'),row)] if pattern=='optimizer-step-rank*.json' else []
+            v.source_loads_and_plans=lambda:{}
+            self.assertTrue(any('actual reuse mode differs' in e for e in v.run()['errors']))
+
+    def test_fresh_micro_boundaries_bind_all_current_loads_and_budget(self):
+        import test_micro_memory_records_cpu as micro
+        from validate_world72_core_evidence import GIB
+        with tempfile.TemporaryDirectory() as folder:
+            plan_path=Path(folder)/'plan.json'
+            root='/tmp/runs/run';budget=72*GIB
+            plan=dict(run_id='run',run_root=root,gradient_cache_bytes=budget,environment=dict(
+                Q38_RUN_ID='run',Q38_RUN_ROOT=root,Q38_GPU_GRADIENT_CACHE_BYTES=str(budget),
+                Q38_INITIAL_POLICY_REPLAY='0',Q38_REPLAY_VERIFY_FULL_SHARD_BYTES='1',
+                Q38_FIRST_ADAM_REUSE_CPU_SPILL='1'))
+            raw=json.dumps(plan).encode();plan_path.write_bytes(raw);sha=hashlib.sha256(raw).hexdigest()
+            def check(case):
+                records,loads,updates=micro.fixture()
+                source=dict(source_coordinates_verified=True,full_destination_BF16_bytes_verified=True,
+                    local_numel=1,local_bytes=2,source_reads=1,full_slice_bytes_sha256=['a'*64])
+                for rank in range(72):
+                    loads[rank][1].update(schema='qwen38-flat-sharded-checkpoint-v1',rank=rank,world_size=72,
+                        run_id='run',run_root=root,hostname='node'+str(rank//4),pid=1000+rank,
+                        started_unix=1e-8,finished_unix=1e-7,source_provider='platform_mounted',
+                        runtime_parameters=7324,source_slices=[source]*7324)
+                for _,row in records:
+                    if 'gradient_store' in row:row['gradient_store']['retained_budget_bytes']=budget
+                if case=='missing-rank':del loads[71]
+                elif case=='duplicate-identity':loads[1][1]['pid']=loads[0][1]['pid']
+                elif case=='wrong-load-run':loads[0][1]['run_id']='old'
+                elif case=='wrong-load-pid':loads[0][1]['pid']=9999
+                elif case=='wrong-update-pid':updates[2][0][1]['pid']=9999
+                elif case=='wrong-budget':micro.row(records,rank=0,actual_training_micro_index=1,event='enter-forward')['gradient_store']['retained_budget_bytes']=75*GIB
+                elif case=='bad-source':loads[0][1]['source_slices']=[dict(source,full_destination_BF16_bytes_verified=False)]*7324
+                elif case=='unread-source':loads[0][1]['source_slices']=[dict(source,source_reads=0,full_slice_bytes_sha256=[])]*7324
+                elif case=='early-micro':loads[0][1]['finished_unix']=1.0
+                elif case=='duplicate-rank':loads[1][1]['rank']=0
+                v=Validator([],production_plan=plan_path,production_plan_sha256='0'*64 if case=='bad-hash' else sha,
+                    expected_run_id='run')
+                v.records=lambda pattern:[(Path(name),row) for name,row in records if Path(name).match(pattern)]
+                v.micro_memory_boundaries(updates,loads)
+                return v.errors,v.details
+            errors,details=check('valid')
+            self.assertEqual(errors,[])
+            self.assertEqual([row['ranks_with_micro_records'] for row in details['micro_memory_boundaries']],[72,72])
+            for case in ('missing-rank','duplicate-identity','wrong-load-run','wrong-load-pid','wrong-update-pid',
+                    'wrong-budget','bad-source','unread-source','early-micro','duplicate-rank','bad-hash'):
+                with self.subTest(case=case):self.assertTrue(check(case)[0])
+
     def test_pinned_plan_requires_matching_cli_and_valid_identity(self):
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)/'plan.json'
@@ -115,6 +206,12 @@ class ValidationTest(unittest.TestCase):
                 _,errors=run(mode,required);self.assertTrue(errors,(mode,required))
             for kwargs in [dict(wrong_hash=True),dict(wrong_run=True)]:
                 _,errors=run('1',True,**kwargs);self.assertTrue(errors)
+            malformed=json.dumps(dict(run_id='run',run_root='/tmp/runs/run',environment='not-a-mapping')).encode()
+            path.write_bytes(malformed)
+            v=Validator([],first_adam_reuse_required=True,production_plan=path,
+                production_plan_sha256=hashlib.sha256(malformed).hexdigest(),expected_run_id='run')
+            v.source_loads_and_plans=lambda:{}
+            self.assertTrue(any('environment must be a mapping' in e for e in v.run()['errors']))
             v=Validator([],first_adam_reuse_required=True);v.source_loads_and_plans=lambda:{}
             self.assertTrue(any('needs a pinned current-run plan' in e for e in v.run()['errors']))
 
