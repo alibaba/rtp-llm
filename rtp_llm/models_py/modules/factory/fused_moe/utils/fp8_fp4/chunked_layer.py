@@ -337,6 +337,26 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
                     f"max_tokens_per_rank={max_tokens}"
                 )
             return False
+        if (
+            self.chunking_enabled
+            and tokens > max_tokens
+            and getattr(self, "enable_cuda_graph", False)
+            and self.strategy_name in _COLLECTIVE_CHUNK_STRATEGIES
+        ):
+            # Under CUDA graphs the chunk plan and the per-layer sync are
+            # skipped for every forward (graph-replaying ranks never join
+            # them), so an oversized eager prefill would chunk by its local
+            # token count and desynchronize the per-layer peer collectives
+            # across ranks.  Surface the contract violation instead of
+            # hanging, matching the decode/capture branches.
+            raise ValueError(
+                f"CUDA-graph-enabled MoE input tokens={tokens} exceeds "
+                f"max_tokens_per_rank={max_tokens} on collective strategy "
+                f"{self.strategy_name!r}: cross-rank chunk alignment is "
+                "skipped under graphs, so the oversized prefill cannot be "
+                "chunked locally. Raise the per-rank MoE capacity, disable "
+                "CUDA graphs, or pick a non-collective strategy."
+            )
         return self.chunking_enabled and tokens > max_tokens
 
     def _synchronized_chunk_tokens(

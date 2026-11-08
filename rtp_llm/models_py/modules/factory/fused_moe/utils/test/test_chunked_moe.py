@@ -370,6 +370,37 @@ class ChunkedMoeTest(unittest.TestCase):
         self.assertEqual(layer._moe.token_chunks, [3, 0, 0])
         self.assertTrue(torch.equal(output, torch.full((3, 4), 3.0)))
 
+    def test_graph_enabled_collective_prefill_rejects_oversized_tokens(self):
+        # Under graphs the chunk plan is skipped, so an oversized eager
+        # prefill would chunk by its local token count and desynchronize
+        # the per-layer peer collectives; the violation must fail fast.
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "fp8_per_block_pure_dp"
+        layer.enable_cuda_graph = True
+        with self.assertRaisesRegex(
+            ValueError, "CUDA-graph-enabled MoE input tokens=9"
+        ):
+            layer(torch.ones(9, 4), torch.arange(9))
+        self.assertEqual(layer._moe.token_chunks, [])
+
+    def test_graph_enabled_non_collective_prefill_still_chunks(self):
+        # No per-invocation peer collectives, so local chunking stays safe.
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "fp8_per_block_no_dp"
+        layer.enable_cuda_graph = True
+        output = layer(torch.ones(9, 4), torch.arange(9))
+        self.assertEqual(layer._moe.token_chunks, [4, 4, 1])
+        self.assertTrue(torch.equal(output, torch.full((9, 4), 3.0)))
+
+    def test_graph_disabled_collective_prefill_still_chunks(self):
+        # Without graphs the plan aligns chunk counts across ranks, so
+        # oversized prefill keeps its chunked behavior.
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "fp8_per_block_pure_dp"
+        output = layer(torch.ones(9, 4), torch.arange(9))
+        self.assertEqual(layer._moe.token_chunks, [4, 4, 1])
+        self.assertTrue(torch.equal(output, torch.full((9, 4), 3.0)))
+
     def test_layer_forwards_parallelism_config_to_the_moe_layer(self):
         # TP-sharded weights need the runtime config to see the real
         # parallelism object; a None fallback would assume tp_size=1 and
