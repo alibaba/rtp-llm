@@ -243,6 +243,17 @@ if [ -z $SETENV_SETTED ]; then
         SERVICE_JVM_XMS=${FLEXLB_JVM_XMS:-${MASTER_JVM_XMS:-${FLEXLB_HEAP_SIZE:-${DEFAULT_JVM_XMS}}}}
         SERVICE_JVM_XMX=${FLEXLB_JVM_XMX:-${MASTER_JVM_XMX:-${FLEXLB_HEAP_SIZE:-${DEFAULT_JVM_XMX}}}}
         validate_jvm_memory_budget "$memTotal" "$SERVICE_JVM_XMS" "$SERVICE_JVM_XMX" || exit 1
+        heapMaxMb=$(jvm_memory_mb "$SERVICE_JVM_XMX")
+        largeHeapG1TuningEnabled=false
+        if [[ "$JAVA_VERSION" -ge 21 && ( "$heapMaxMb" -eq 49152 || "$heapMaxMb" -eq 65536 ) ]]; then
+            largeHeapG1TuningEnabled=true
+            # JDK 21 rounds the concurrent worker count instead of truncating it:
+            # 24 CPUs use 18/5 parallel/concurrent workers; 32 CPUs use 23/6.
+            concGCThreads=$(((parallelGCThreads + 2) / 4))
+            if [ "$concGCThreads" -lt 1 ]; then
+                concGCThreads=1
+            fi
+        fi
         echo "INFO: JVM heap config: -Xms${SERVICE_JVM_XMS} -Xmx${SERVICE_JVM_XMX}"
         SERVICE_OPTS="${SERVICE_OPTS} -Xms${SERVICE_JVM_XMS} -Xmx${SERVICE_JVM_XMX}"
 
@@ -254,13 +265,22 @@ if [ -z $SETENV_SETTED ]; then
         SERVICE_OPTS="${SERVICE_OPTS} -XX:MaxGCPauseMillis=150"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:InitiatingHeapOccupancyPercent=40"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:G1HeapRegionSize=32M"
-        SERVICE_OPTS="${SERVICE_OPTS} -XX:G1NewSizePercent=20"
+        if [ "$largeHeapG1TuningEnabled" = true ]; then
+            # Pre-touch the initial heap before serving requests. Keep evacuation
+            # headroom and let G1 shrink the young generation to its default 5% floor.
+            SERVICE_OPTS="${SERVICE_OPTS} -XX:+AlwaysPreTouch -XX:G1ReservePercent=20"
+        else
+            SERVICE_OPTS="${SERVICE_OPTS} -XX:G1NewSizePercent=20"
+        fi
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+ExplicitGCInvokesConcurrent"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:SurvivorRatio=8"
         SERVICE_OPTS="${SERVICE_OPTS} -Dsun.rmi.dgc.server.gcInterval=2592000000 -Dsun.rmi.dgc.client.gcInterval=2592000000"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:ParallelGCThreads=${parallelGCThreads} -XX:ConcGCThreads=${concGCThreads}"
         if [[ "$JAVA_VERSION" -lt 9 ]]; then
             SERVICE_OPTS="${SERVICE_OPTS} -Xloggc:${MIDDLEWARE_LOGS}/gc.log -XX:+PrintGCDetails -XX:+PrintGCDateStamps"
+        elif [ "$largeHeapG1TuningEnabled" = true ]; then
+            # Include safepoint entry/stop times to correlate scheduler stalls.
+            SERVICE_OPTS="${SERVICE_OPTS} -Xlog:gc*,safepoint=info:${MIDDLEWARE_LOGS}/gc.log:time,uptime,level,tags:filecount=5,filesize=20M"
         else
             SERVICE_OPTS="${SERVICE_OPTS} -Xlog:gc*:${MIDDLEWARE_LOGS}/gc.log:time"
         fi

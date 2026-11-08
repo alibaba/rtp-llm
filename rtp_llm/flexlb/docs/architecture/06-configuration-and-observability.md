@@ -27,6 +27,16 @@ native allocation 的实际占用仍取决于负载。
 配置的 MB 数按 JVM 的字节语义使用。GC 线程数优先采用有效的正整数 CPU 配额；无效或缺失时
 读取系统 CPU 数，仍不可用时使用 1，确保 G1 的并行 GC 线程数至少为 1。
 
+仅在 JDK 21+ 且最终 Xmx 为 48GiB 或 64GiB 时启用大堆 G1 调优（等价的 `m/k` 单位也支持）。
+其他堆大小保留原有年轻代 20% 下限、GC 线程数和日志配置。所有规格保持 150ms 暂停软目标、
+32MiB region 和初始 IHOP 40；IHOP 后续自适应调整。
+大堆配置使用默认 5% 年轻代下限，设置 `G1ReservePercent=20` 为对象转移保留堆内余量，
+并启用 `AlwaysPreTouch` 预触初始堆，以启动耗时和更早提交物理内存换取运行期间更少的堆缺页。
+大堆并发 GC 线程数按 JDK 21 的 `(ParallelGCThreads + 2) / 4` 取整，至少为 1：
+24 核使用 18/5 个并行/并发线程，32 核使用 23/6；原有规格分别保持 18/4、23/5。
+使用 `FLEXLB_JVM_HEAP_SIZE=48g` 或 `64g` 可同时设置 Xms/Xmx，仍需通过容器预算校验。
+大堆 `gc.log` 同时记录 GC 和 safepoint 时间，按 20MiB 轮转并保留 5 个归档文件。
+
 ## FlexlbConfig 加载与动态更新
 
 `ConfigService` 是统一读取入口。`ConfigSourceSelection` 在启动时根据 FlexLB 进程的
