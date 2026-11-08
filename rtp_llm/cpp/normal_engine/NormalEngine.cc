@@ -290,7 +290,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
-    step_profiler_.configureFromConfig(profiling_debug_logging_config);
     (void)startLoop();
     (void)construction_guard.release();
 }
@@ -837,6 +836,8 @@ absl::Status NormalEngine::startLoop() {
         THROW_IF_STATUS_ERROR(initSystemPrompt());
         RTP_LLM_LOG_INFO("init system prompt done");
     }
+    // System prompts run on the constructor thread; keep Kineto on the engine loop.
+    step_profiler_.configureFromConfig(profiling_debug_logging_config);
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_     = true;
     loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
@@ -846,7 +847,7 @@ absl::Status NormalEngine::startLoop() {
 absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
-    RETURN_IF_STATUS_ERROR(scheduler_->stop());
+    const auto scheduler_status = scheduler_->stop();
     // Ask rank 0 to stop at a step boundary. Receivers must finish all model
     // collectives for inputs that rank 0 has already published before exiting.
     CpuTpBroadcaster::instance().requestStop();
@@ -854,7 +855,7 @@ absl::Status NormalEngine::stop() {
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();
-    return absl::OkStatus();
+    return scheduler_status;
 }
 
 void NormalEngine::loop() {

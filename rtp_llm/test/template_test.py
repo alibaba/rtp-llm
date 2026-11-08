@@ -410,7 +410,7 @@ class TemplateTest(TestCase):
                 (None, {"enable_thinking": False}, True),
                 (None, {"thinking_mode": "disabled"}, True),
                 (True, {}, False),
-                (None, {}, False),
+                (None, {}, renderer_cls is Qwen4Renderer),
             ):
                 with self.subTest(
                     model_type=model_type, top_level=top_level, kwargs=kwargs
@@ -424,6 +424,36 @@ class TemplateTest(TestCase):
                     ).rendered_prompt
                     self.assertTrue(
                         prompt.endswith(
+                            "<think>\n\n</think>\n\n" if disabled else "<think>\n"
+                        )
+                    )
+
+    def test_qwen4_template_uses_resolved_service_thinking_mode(self):
+        for default_mode in ("disabled", "enabled", "adaptive"):
+            config = GenerateEnvConfig()
+            config.think_mode = default_mode
+            renderer = Qwen4Renderer(
+                _Qwen35DefaultTemplateTokenizer(),
+                RendererParams(
+                    model_type="qwen4_exp",
+                    max_seq_len=1024,
+                    eos_token_id=0,
+                    stop_word_ids_list=[],
+                ),
+                config,
+                RenderConfig(),
+            )
+            for explicit in (None, False, True):
+                with self.subTest(default_mode=default_mode, explicit=explicit):
+                    request = ChatCompletionRequest(
+                        messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+                        enable_thinking=explicit,
+                    )
+                    disabled = (
+                        default_mode == "disabled" if explicit is None else not explicit
+                    )
+                    self.assertTrue(
+                        renderer.render_chat(request).rendered_prompt.endswith(
                             "<think>\n\n</think>\n\n" if disabled else "<think>\n"
                         )
                     )

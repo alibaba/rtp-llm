@@ -48,6 +48,16 @@ class Qwen35Renderer(Qwen3CoderRenderer, Qwen2VLRenderer):
 
 
 class Qwen4Renderer(Qwen35Renderer):
+    def _render_messages(
+        self, request: ChatCompletionRequest, add_vision_id: bool
+    ) -> PromptWithMMInput:
+        return Qwen2VLRenderer._render_messages(
+            self,
+            request,
+            add_vision_id,
+            self.resolve_thinking_mode(request) != ThinkingMode.DISABLED,
+        )
+
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         # QSA side caches currently retain text positions only. Reject before
         # image preprocessing/RPC so a request cannot stop the backend loop.
