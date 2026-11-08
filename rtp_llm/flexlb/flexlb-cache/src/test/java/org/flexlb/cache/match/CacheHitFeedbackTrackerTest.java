@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.flexlb.cache.WorkerStatusTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -176,7 +177,7 @@ class CacheHitFeedbackTrackerTest {
 
                 var results = tracker.observe(worker, status);
                 assertEquals(1, results.size());
-                org.junit.jupiter.api.Assertions.assertFalse(results.getFirst().isDone());
+                assertFalse(results.getFirst().isDone());
                 theory.complete(60L);
                 var result = results.getFirst().get(2, TimeUnit.SECONDS);
                 assertEquals(60L, result.theoryHitTokens());

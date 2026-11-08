@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Formats the lines of FlexLB Java files that differ from HEAD, using eclipse-java-formatter.xml.
+# Formats changed FlexLB Java lines and normalizes changed JUnit assertion calls in test sources.
 # Files added after HEAD are formatted completely; lines unchanged since HEAD are left as written.
 #
 # Usage: format-changed-lines.sh [file ...]
@@ -41,5 +41,9 @@ for file in $files; do
 done
 
 [ ${#targets[@]} -gt 0 ] || exit 0
-java -cp "$(cat "$classpath_file")" "$tool_dir/FormatChangedLines.java" \
+classes_dir=$(mktemp -d "$tool_dir/target/classes.XXXXXX")
+trap 'rm -rf "$classes_dir"' EXIT
+javac -cp "$(cat "$classpath_file")" -d "$classes_dir" \
+    "$tool_dir/FormatChangedLines.java" "$tool_dir/TestAssertionImports.java"
+java -cp "$classes_dir:$(cat "$classpath_file")" FormatChangedLines \
     "$flexlb_dir/eclipse-java-formatter.xml" "${targets[@]}"

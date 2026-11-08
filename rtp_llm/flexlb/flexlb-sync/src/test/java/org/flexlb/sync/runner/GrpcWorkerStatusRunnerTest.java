@@ -19,6 +19,7 @@ import org.mockito.ArgumentCaptor;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -146,7 +147,7 @@ class GrpcWorkerStatusRunnerTest {
         var observed = ArgumentCaptor.forClass(WorkerStatus.StepMetrics.class);
         verify(reporter, org.mockito.Mockito.times(2)).reportWorkerStepMetrics(
                 org.mockito.Mockito.eq(status), observed.capture());
-        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(42L, 43L),
+        assertEquals(java.util.List.of(42L, 43L),
                 observed.getAllValues().stream().map(WorkerStatus.StepMetrics::stepId).toList());
     }
 

@@ -163,6 +163,9 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 提交时 `tools/format-changed-lines/git-pre-commit.sh` 对暂存的 FlexLB Java 文件执行上述格式化并重新暂存；
 暂存文件同时有未暂存修改时终止提交，需先全部暂存或 stash。在 git `pre-commit` hook 中调用该脚本即可启用。
 
+修改格式工具后运行 `python3 tools/format-changed-lines/test_format_changed_lines.py`，验证改动行边界、
+断言 import 转换及提交钩子的格式化与重新暂存。
+
 主要规则：
 
 - 每行最多 120 列；换行后的内容放得下一行时合并回一行。
@@ -175,6 +178,10 @@ public static DecodeSelection of(ServerStatus status,
 ```
 
 - `if` / `else` 的执行语句不与条件写在同一行。
+- **测试断言使用显式 static import。** 在测试源码中直接调用 `assertTrue(...)`、`assertEquals(...)`
+  等 JUnit 方法，并导入对应静态方法；存在同名方法冲突时保留限定调用，确保断言绑定不变。
+  改动行格式工具会转换测试中改动涉及的限定断言调用、补齐 import，并移除不再使用的 `Assertions`
+  类导入；继承方法、其他类的静态通配符导入等无法确认绑定的情况留给人工处理。
 
 ## Java Javadoc 格式
 

@@ -6,10 +6,15 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.discovery.ServiceDiscoveryType;
 import org.flexlb.service.config.parser.ModelServiceConfigParser;
 import org.flexlb.util.JsonUtils;
-import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ServiceRouteTest {
     private static final String ROUTE_JSON = """
@@ -53,8 +58,8 @@ class ServiceRouteTest {
 
         var json = objectMapper.valueToTree(route);
 
-        Assertions.assertTrue(json.has("role_endpoints"));
-        Assertions.assertFalse(json.has("roleEndpoints"));
+        assertTrue(json.has("role_endpoints"));
+        assertFalse(json.has("roleEndpoints"));
         assertStandardRoute(objectMapper.treeToValue(json, ServiceRoute.class));
     }
 
@@ -64,25 +69,25 @@ class ServiceRouteTest {
                 ModelServiceConfigParser.parse(ROUTE_JSON.replaceFirst("\\{", "{\"service_id\":\"legacy-service\","));
 
         assertStandardRoute(route);
-        Assertions.assertFalse(JsonUtils.strictValueToTree(route).has("service_id"));
+        assertFalse(JsonUtils.strictValueToTree(route).has("service_id"));
     }
 
     private static void assertStandardRoute(ServiceRoute serviceRoute) {
-        Assertions.assertEquals(1, serviceRoute.getRoleEndpoints().size());
+        assertEquals(1, serviceRoute.getRoleEndpoints().size());
         GroupRoleEndPoint roleEndpoint = serviceRoute.getRoleEndpoints().getFirst();
-        Assertions.assertEquals("ea119_PPU_ZW810E_16TP_decode64", roleEndpoint.getGroup());
+        assertEquals("ea119_PPU_ZW810E_16TP_decode64", roleEndpoint.getGroup());
         Endpoint prefillEndpoint = new Endpoint();
         prefillEndpoint.setAddress("com.aicheng.whale.pre.deepseek_dp_tp_test");
         prefillEndpoint.setProtocol("http");
         prefillEndpoint.setPath("/");
         prefillEndpoint.setGroup("ea119_PPU_ZW810E_16TP_decode64");
-        Assertions.assertEquals(prefillEndpoint, roleEndpoint.getPrefillEndpoint());
+        assertEquals(prefillEndpoint, roleEndpoint.getPrefillEndpoint());
         Endpoint decodeEndpoint = new Endpoint();
         decodeEndpoint.setAddress("com.aicheng.whale.pre.test_pd_gang2.decode");
         decodeEndpoint.setProtocol("http");
         decodeEndpoint.setPath("/");
         decodeEndpoint.setGroup("ea119_PPU_ZW810E_16TP_decode64");
-        Assertions.assertEquals(decodeEndpoint, roleEndpoint.getDecodeEndpoint());
+        assertEquals(decodeEndpoint, roleEndpoint.getDecodeEndpoint());
     }
 
     @Test
@@ -96,18 +101,17 @@ class ServiceRouteTest {
         ModelMetaConfig config = new ModelMetaConfig(route);
 
         var prefill = config.endpointsWithGroup(RoleType.PREFILL);
-        Assertions.assertEquals(List.of("g1", "g2"), prefill.stream().map(pair -> pair.getLeft()).toList());
-        Assertions.assertEquals(List.of("p1", "p2"),
-                prefill.stream().map(pair -> pair.getRight().getAddress()).toList());
-        Assertions.assertEquals(List.of(RoleType.DECODE, RoleType.PREFILL), config.requiredRoles());
-        Assertions.assertTrue(config.endpointsWithGroup(RoleType.ENCODER).isEmpty());
-        Assertions.assertTrue(config.endpointsWithGroup(null).isEmpty());
+        assertEquals(List.of("g1", "g2"), prefill.stream().map(pair -> pair.getLeft()).toList());
+        assertEquals(List.of("p1", "p2"), prefill.stream().map(pair -> pair.getRight().getAddress()).toList());
+        assertEquals(List.of(RoleType.DECODE, RoleType.PREFILL), config.requiredRoles());
+        assertTrue(config.endpointsWithGroup(RoleType.ENCODER).isEmpty());
+        assertTrue(config.endpointsWithGroup(null).isEmpty());
         var decode = config.endpointsWithGroup(RoleType.DECODE);
-        Assertions.assertEquals("d1", decode.getFirst().getRight().getAddress());
-        Assertions.assertNull(decode.getLast().getRight());
+        assertEquals("d1", decode.getFirst().getRight().getAddress());
+        assertNull(decode.getLast().getRight());
 
         prefill.clear();
-        Assertions.assertEquals(2, config.endpointsWithGroup(RoleType.PREFILL).size());
+        assertEquals(2, config.endpointsWithGroup(RoleType.PREFILL).size());
     }
 
     @Test
@@ -124,10 +128,9 @@ class ServiceRouteTest {
 
         ServiceRoute serviceRoute = objectMapper.readValue(json, ServiceRoute.class);
 
-        Assertions.assertTrue(serviceRoute.getAllRoleTypes().containsAll(
-                List.of(RoleType.PDFUSION, RoleType.VIT)));
-        Assertions.assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.PDFUSION).size());
-        Assertions.assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.VIT).size());
+        assertTrue(serviceRoute.getAllRoleTypes().containsAll(List.of(RoleType.PDFUSION, RoleType.VIT)));
+        assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.PDFUSION).size());
+        assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.VIT).size());
     }
 
     @Test
@@ -145,13 +148,12 @@ class ServiceRouteTest {
         ServiceRoute route = objectMapper.readValue(json, ServiceRoute.class);
         ModelMetaConfig config = new ModelMetaConfig(route);
 
-        Assertions.assertEquals(List.of(RoleType.VIT, RoleType.ENCODER), config.requiredRoles());
-        Assertions.assertEquals("encoder", route.getRoleEndpoints(RoleType.ENCODER).getFirst().getAddress());
-        Assertions.assertEquals("g1", route.getRoleEndpoints(RoleType.ENCODER).getFirst().getGroup());
-        Assertions.assertEquals("vit", route.getRoleEndpoints(RoleType.VIT).getFirst().getAddress());
-        Assertions.assertEquals(RoleType.ENCODER, RoleType.fromString("ENCODER"));
-        Assertions.assertEquals(StrategyErrorType.NO_ENCODER_WORKER,
-                RoleType.ENCODER.getErrorType());
+        assertEquals(List.of(RoleType.VIT, RoleType.ENCODER), config.requiredRoles());
+        assertEquals("encoder", route.getRoleEndpoints(RoleType.ENCODER).getFirst().getAddress());
+        assertEquals("g1", route.getRoleEndpoints(RoleType.ENCODER).getFirst().getGroup());
+        assertEquals("vit", route.getRoleEndpoints(RoleType.VIT).getFirst().getAddress());
+        assertEquals(RoleType.ENCODER, RoleType.fromString("ENCODER"));
+        assertEquals(StrategyErrorType.NO_ENCODER_WORKER, RoleType.ENCODER.getErrorType());
     }
 
     @Test
@@ -165,9 +167,7 @@ class ServiceRouteTest {
 
         Endpoint endpoint = objectMapper.readValue(json, Endpoint.class);
 
-        Assertions.assertEquals(
-                DiscoveryConfig.DEFAULT_DASHSCOPE_BASE_URL,
-                endpoint.getDiscovery().getBaseUrl());
+        assertEquals(DiscoveryConfig.DEFAULT_DASHSCOPE_BASE_URL, endpoint.getDiscovery().getBaseUrl());
     }
 
     @Test
@@ -185,31 +185,23 @@ class ServiceRouteTest {
 
         ServiceRoute serviceRoute = objectMapper.readValue(json, ServiceRoute.class);
 
-        Assertions.assertNotNull(serviceRoute.getKvcm());
-        Assertions.assertEquals("v-kvcm", serviceRoute.getKvcm().getAddress());
-        Assertions.assertEquals("vllm-test-0", serviceRoute.getKvcm().getNamespace());
-        Assertions.assertEquals("grpc", serviceRoute.getKvcm().toEndpoint().getProtocol());
-        Assertions.assertEquals(
-                KvcmConfig.DEFAULT_BOOTSTRAP_PORT,
-                serviceRoute.getKvcm().getPort());
+        assertNotNull(serviceRoute.getKvcm());
+        assertEquals("v-kvcm", serviceRoute.getKvcm().getAddress());
+        assertEquals("vllm-test-0", serviceRoute.getKvcm().getNamespace());
+        assertEquals("grpc", serviceRoute.getKvcm().toEndpoint().getProtocol());
+        assertEquals(KvcmConfig.DEFAULT_BOOTSTRAP_PORT, serviceRoute.getKvcm().getPort());
     }
 
     private void assertServiceRoute(ServiceRoute serviceRoute) {
-        Assertions.assertEquals(1, serviceRoute.getRoleEndpoints().size());
-        Assertions.assertEquals(
-                "ea119_PPU_ZW810E_16TP_decode64",
-                serviceRoute.getRoleEndpoints().getFirst().getGroup());
-        Assertions.assertEquals(
-                vipServerEndpoint("com.aicheng.whale.pre.deepseek_dp_tp_test"),
+        assertEquals(1, serviceRoute.getRoleEndpoints().size());
+        assertEquals("ea119_PPU_ZW810E_16TP_decode64", serviceRoute.getRoleEndpoints().getFirst().getGroup());
+        assertEquals(vipServerEndpoint("com.aicheng.whale.pre.deepseek_dp_tp_test"),
                 serviceRoute.getRoleEndpoints().getFirst().getPrefillEndpoint());
-        Assertions.assertEquals(
-                vipServerEndpoint("com.aicheng.whale.pre.test_pd_gang2.decode"),
+        assertEquals(vipServerEndpoint("com.aicheng.whale.pre.test_pd_gang2.decode"),
                 serviceRoute.getRoleEndpoints().getFirst().getDecodeEndpoint());
-        Assertions.assertEquals(
-                "ea119_PPU_ZW810E_16TP_decode64",
+        assertEquals("ea119_PPU_ZW810E_16TP_decode64",
                 serviceRoute.getRoleEndpoints().getFirst().getPrefillEndpoint().getGroup());
-        Assertions.assertEquals(
-                "ea119_PPU_ZW810E_16TP_decode64",
+        assertEquals("ea119_PPU_ZW810E_16TP_decode64",
                 serviceRoute.getRoleEndpoints().getFirst().getDecodeEndpoint().getGroup());
     }
 

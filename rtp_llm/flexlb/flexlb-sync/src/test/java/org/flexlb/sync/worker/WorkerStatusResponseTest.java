@@ -9,11 +9,12 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.util.JsonUtils;
-import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WorkerStatusResponseTest {
 
@@ -22,11 +23,11 @@ class WorkerStatusResponseTest {
         String TEST_JSON = "{\"role\":\"PREFILL\",\"available_concurrency\":1637,\"running_task_info\":{},\"finished_task_info\":{},\"step_latency_ms\":36.636,\"iterate_count\":1,\"dp_size\":1,\"tp_size\":1,\"alive\":true,\"version\":1,\"status_version\":1752025357566,\"cache_status\":{\"available_kv_cache\":82944,\"total_kv_cache\":82944,\"block_size\":256,\"version\":-1},\"waiting_query_len\":0,\"running_query_len\":0,\"max_seq_len\":131072,\"max_batch_tokens_size\":262144}";
         WorkerStatusResponse workerStatusResponse = JsonUtils.toObject(TEST_JSON, new TypeReference<WorkerStatusResponse>() {
         });
-        Assertions.assertEquals(RoleType.PREFILL, workerStatusResponse.getRole());
-        Assertions.assertTrue(workerStatusResponse.isAlive());
-        Assertions.assertEquals(1637, workerStatusResponse.getAvailableConcurrency());
-        Assertions.assertEquals(131072, workerStatusResponse.getMaxSeqLen());
-        Assertions.assertEquals(262144, workerStatusResponse.getMaxBatchTokensSize());
+        assertEquals(RoleType.PREFILL, workerStatusResponse.getRole());
+        assertTrue(workerStatusResponse.isAlive());
+        assertEquals(1637, workerStatusResponse.getAvailableConcurrency());
+        assertEquals(131072, workerStatusResponse.getMaxSeqLen());
+        assertEquals(262144, workerStatusResponse.getMaxBatchTokensSize());
     }
 
     @Test
@@ -39,9 +40,9 @@ class WorkerStatusResponseTest {
 
         StatusObservation response = convert(proto);
 
-        Assertions.assertEquals(RoleType.PREFILL, response.role());
-        Assertions.assertEquals(131072L, response.engine().maxSeqLen());
-        Assertions.assertEquals(262144L, response.engine().maxBatchTokensSize());
+        assertEquals(RoleType.PREFILL, response.role());
+        assertEquals(131072L, response.engine().maxSeqLen());
+        assertEquals(262144L, response.engine().maxBatchTokensSize());
     }
 
     @Test
@@ -167,11 +168,10 @@ class WorkerStatusResponseTest {
         StatusObservation response = convert(proto);
         var converted = response.finishedTasks().get("8429001");
 
-        Assertions.assertEquals(RoleType.PREFILL, response.role());
-        Assertions.assertNotNull(converted);
-        Assertions.assertEquals(PriorityPreemptionProgress.CANCELED,
-                converted.priorityPreemptionProgress());
-        Assertions.assertEquals(8429L, converted.errorCode());
+        assertEquals(RoleType.PREFILL, response.role());
+        assertNotNull(converted);
+        assertEquals(PriorityPreemptionProgress.CANCELED, converted.priorityPreemptionProgress());
+        assertEquals(8429L, converted.errorCode());
     }
 
     private static StatusObservation convert(

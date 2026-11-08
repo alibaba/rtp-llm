@@ -22,6 +22,7 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_TIMEOUT_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT;
 import static org.flexlb.constant.MetricConstant.REQUEST_LIFECYCLE_FAILURES_TOTAL;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -125,7 +126,7 @@ class RequestSchedulerReporterTest {
             }
             String metric = invocation.getArgument(0);
             FlexPriorityType priority = invocation.getArgument(2);
-            org.junit.jupiter.api.Assertions.assertEquals(FlexPriorityType.NORMAL, priority, metric);
+            assertEquals(FlexPriorityType.NORMAL, priority, metric);
         }
     }
 

@@ -12,6 +12,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -598,12 +600,8 @@ class FormulaPredictorTest {
         FormulaPredictor different = new FormulaPredictor(
                 "sum(computeTokens) + 2*batchSize");
 
-        org.junit.jupiter.api.Assertions.assertSame(
-                first.evaluator().snapshotIdentity(),
-                second.evaluator().snapshotIdentity());
-        org.junit.jupiter.api.Assertions.assertNotSame(
-                first.evaluator().snapshotIdentity(),
-                different.evaluator().snapshotIdentity());
+        assertSame(first.evaluator().snapshotIdentity(), second.evaluator().snapshotIdentity());
+        assertNotSame(first.evaluator().snapshotIdentity(), different.evaluator().snapshotIdentity());
     }
 
     // ---- helpers ----

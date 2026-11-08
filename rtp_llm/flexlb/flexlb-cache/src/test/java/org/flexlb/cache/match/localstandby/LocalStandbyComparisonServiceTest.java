@@ -205,7 +205,7 @@ class LocalStandbyComparisonServiceTest {
         comparisonService.trackLocalStandbyPrediction(query);
         var result = comparisonService.captureComparison("request-1", RoleType.PREFILL)
                 .apply(feedback(worker, 8000));
-        org.junit.jupiter.api.Assertions.assertFalse(result.isDone());
+        assertFalse(result.isDone());
         pendingMatch.complete(new CacheMatchResult(
                 Map.of(worker.getLogicalIpPort(), HostCacheMatch.local(1)),
                 CacheMatchSource.LOCAL_STANDBY, 10, 2192));

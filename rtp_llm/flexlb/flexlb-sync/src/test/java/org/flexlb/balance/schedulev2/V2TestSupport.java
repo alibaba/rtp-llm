@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -143,10 +144,10 @@ public final class V2TestSupport {
     public static void dispatch(PrefillQueue queue, DispatchedRequest record) {
         Request request = record.request();
         choose(request, queue.endpoint(), 0L, record.predictedMs());
-        org.junit.jupiter.api.Assertions.assertTrue(request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING));
+        assertTrue(request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING));
         queue.addWaiting(request);
         queue.addDispatched(record);
-        org.junit.jupiter.api.Assertions.assertTrue(request.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING));
+        assertTrue(request.moveTo(Stage.PREFILL_WAITING, Stage.DECODE_WAITING));
         queue.removeWaiting(request);
     }
 

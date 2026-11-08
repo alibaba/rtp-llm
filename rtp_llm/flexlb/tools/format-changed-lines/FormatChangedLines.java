@@ -38,6 +38,7 @@ import java.util.regex.Pattern;
  * A changed line is widened to the whole statement or declaration header that contains it, so wrapped
  * parameters and conditions are aligned as one unit; block bodies below that header stay as written.
  * A changed one-line Javadoc such as "/** text *&#47;" is expanded to the multi-line form.
+ * Changed JUnit assertion calls in test sources use static imports when their names are unambiguous.
  */
 public class FormatChangedLines {
     private static final Pattern SETTING = Pattern.compile("<setting id=\"([^\"]+)\" value=\"([^\"]*)\"");
@@ -55,6 +56,12 @@ public class FormatChangedLines {
             TreeSet<Integer> changed = changedLines(args[i].substring(separator + 1), lines.size());
             changed = expandJavadoc(lines, changed);
             source = String.join("\n", lines);
+            if (file.toAbsolutePath().normalize().toString().replace('\\', '/').contains("/src/test/")) {
+                TestAssertionImports.Result result =
+                        TestAssertionImports.update(source, changed, parse(source, options));
+                source = result.source();
+                changed = result.changedLines();
+            }
             String formatted = format(formatter, options, source, changed);
             if (!formatted.equals(Files.readString(file))) {
                 Files.writeString(file, formatted);

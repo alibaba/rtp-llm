@@ -61,9 +61,12 @@ public final class PrefillQueue {
      * 只保护记录增删和预测工作量更新，不包含状态扫描、容量释放或通知。
      */
     private final Object requestRecordsLock = new Object();
+    /**
+     * waiting 与 dispatched 的累计预测工作量；所有加减由 requestRecordsLock 保护，volatile 供选路线程无锁读取。
+     */
     private volatile long totalPredictedWorkMs;
     /**
-     * 等待请求或已 dispatch 记录每变一次加一，选 Prefill 时用来判断负载视图有没有变。
+     * 请求记录或引擎状态变化时递增，供负载视图标识版本；引擎状态更新在 requestRecordsLock 外，递增必须是原子的。
      */
     private final AtomicLong changeVersion = new AtomicLong();
     /**

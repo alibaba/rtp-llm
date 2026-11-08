@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RequestTest {
 
@@ -17,7 +18,7 @@ class RequestTest {
                 "{\"media_keys\":[\"image\"],\"vit_route_only\":true}"}) {
             Request request = objectMapper.readValue(payload, Request.class);
             assertEquals(java.util.List.of("image"), request.getCacheAffinityKeys());
-            org.junit.jupiter.api.Assertions.assertTrue(request.isVitRouteOnly());
+            assertTrue(request.isVitRouteOnly());
             String output = objectMapper.writeValueAsString(request);
             assertFalse(output.contains("media_keys"));
         }

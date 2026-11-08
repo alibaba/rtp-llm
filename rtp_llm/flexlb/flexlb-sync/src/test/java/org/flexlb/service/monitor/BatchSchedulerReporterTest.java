@@ -35,6 +35,7 @@ import static org.flexlb.constant.MetricConstant.SHARED_SUBQUEUE_LIMIT;
 import static org.flexlb.constant.MetricConstant.SHARED_SUBQUEUE_WAITING;
 import static org.flexlb.constant.MetricConstant.TOTAL_QUEUE_WAITING;
 import static org.flexlb.constant.MetricConstant.TRACKED_REQUEST_COUNT;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.eq;
@@ -235,8 +236,8 @@ class BatchSchedulerReporterTest {
         }
         for (var invocation : org.mockito.Mockito.mockingDetails(monitor).getInvocations()) {
             FlexMetricTags tags = invocation.getArgument(1);
-            org.junit.jupiter.api.Assertions.assertFalse(tags.getTags().containsKey("engineIp"));
-            org.junit.jupiter.api.Assertions.assertFalse(tags.getTags().containsKey("endpoint"));
+            assertFalse(tags.getTags().containsKey("engineIp"));
+            assertFalse(tags.getTags().containsKey("endpoint"));
         }
     }
 

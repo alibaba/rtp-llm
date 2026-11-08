@@ -7,6 +7,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TrafficPolicyConfigTest {
 
@@ -53,7 +54,7 @@ class TrafficPolicyConfigTest {
 
         String first = config.resolveTargetGroup(request).orElseThrow();
         assertEquals(first, config.resolveTargetGroup(request).orElseThrow());
-        org.junit.jupiter.api.Assertions.assertTrue(Set.of("blue", "green").contains(first));
+        assertTrue(Set.of("blue", "green").contains(first));
     }
 
     @Test

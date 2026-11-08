@@ -1918,7 +1918,7 @@ class FlexlbServiceImplTest {
                             .setRequestIdStr("991").build(), observer));
             CompletableFuture.runAsync(() -> {
                 if (forwarded) {
-                    org.junit.jupiter.api.Assertions.assertNull(captured.get().getResponse());
+                    assertNull(captured.get().getResponse());
                     remote.complete(FlexlbGrpcForwarder.MasterForwardResult.forwarded(wire.build(), "10.0.0.2:7001"));
                 } else {
                     Response response = new Response();
@@ -1948,11 +1948,11 @@ class FlexlbServiceImplTest {
             assertEquals(forwarded ? null : 10L, data.getAttributes().get(
                     io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.route_submit_ms")));
             if (forwarded || missingAck) {
-                org.junit.jupiter.api.Assertions.assertNull(data.getAttributes().get(
-                        io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.ack_to_response_ms")));
+                assertNull(data.getAttributes()
+                        .get(io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.ack_to_response_ms")));
             }
-            org.junit.jupiter.api.Assertions.assertNull(data.getAttributes().get(
-                    io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.enqueue_batch_ms")));
+            assertNull(data.getAttributes()
+                    .get(io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.enqueue_batch_ms")));
         }
     }
 
