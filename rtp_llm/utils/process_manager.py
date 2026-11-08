@@ -255,6 +255,8 @@ class ProcessManager:
     ) -> str:
         """Block until SIGTERM'd `processes` exit, or a terminal condition fires.
 
+        A positive child exit status during shutdown ends the wait immediately.
+
         Per-tick state machine (priority order):
           1. ALL_EXITED        → every target proc dead; graceful drain succeeded.
           2. DEADLINE_REACHED  → timeout elapsed; caller will SIGKILL survivors.
@@ -271,6 +273,8 @@ class ProcessManager:
 
         while True:
             alive_pids = [p.pid for p in processes if p.is_alive()]
+            if self.shutdown_requested and any((p.exitcode or 0) > 0 for p in processes):
+                return "child_failed"
             if not alive_pids:
                 return "all_exited"  # 1. ALL_EXITED
             if self._drain_deadline_passed(deadline, group_name, alive_pids):
@@ -512,7 +516,7 @@ class ProcessManager:
                     group_name,
                     abort_if_dead_groups=set(self.DEFERRED_GROUPS),
                 )
-                if result == "dependency_lost":
+                if result in ("dependency_lost", "child_failed"):
                     dependency_lost = True
         return dependency_lost
 
@@ -771,22 +775,16 @@ class ProcessManager:
             self._monitor_processes_health()
             self._join_all_processes()
 
-            # All children may have exited before the monitor loop first ran
-            # (race at startup) or during it without tripping the in-loop
-            # dead-detection branch (e.g. simultaneous death between
-            # iterations). Inspect final exitcodes to surface silent crashes
-            # the monitor missed.
-            if not self.shutdown_requested and not self.failure_detected:
+            # Catch missed exits, including explicit failures during shutdown.
+            if not self.failure_detected:
                 unexpected_exits = [
                     (p.name, p.exitcode)
                     for p in self.processes
                     if p.exitcode is not None
+                    and (not self.shutdown_requested or p.exitcode > 0)
                 ]
                 if unexpected_exits:
-                    logging.error(
-                        "Children exited without shutdown request: "
-                        f"{unexpected_exits}"
-                    )
+                    logging.error(f"Unexpected child exit codes: {unexpected_exits}")
                     self.failure_detected = True
         else:
             logging.info("No processes to monitor")

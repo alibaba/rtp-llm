@@ -34,9 +34,12 @@
 #include <random>
 #include <stdexcept>
 
+#if USING_CUDA || USING_ROCM
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#endif
+
 #if USING_CUDA
 #include "c10/cuda/CUDACachingAllocator.h"
-#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 #include "c10/cuda/CUDAGuard.h"
 #endif
@@ -49,6 +52,7 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+constexpr uint64_t kLoopStopBit = uint64_t{1} << 63;
 // 释放glibc缓存的host内存，将其归还给操作系统
 // 在模型加载完成后调用，可以显著减少常驻内存占用
 void releaseHostMemoryCache() {
@@ -852,15 +856,70 @@ absl::Status NormalEngine::startLoop() {
     return absl::OkStatus();
 }
 
+bool NormalEngine::hasCrossDpExpertParallelism() const {
+    return model_config_.moe_style && parallelism_config.dp_size > 1
+           && parallelism_config.ep_size > parallelism_config.tp_size;
+}
+
 absl::Status NormalEngine::stop() {
+    std::lock_guard<std::mutex> stop_lock(stop_mutex_);
+    if (!running_) {
+        return absl::OkStatus();
+    }
     RTP_LLM_LOG_INFO("stop normal engine");
+    const bool coupled_ep = hasCrossDpExpertParallelism();
+    if (coupled_ep) {
+        try {
+            // A peer may already have entered a round that all EP ranks must finish.
+            const auto entered = loop_step_.fetch_or(kLoopStopBit, std::memory_order_relaxed) & ~kLoopStopBit;
+            {
+                py::gil_scoped_acquire gil;
+                const auto last = py::module_::import("rtp_llm.models_py.distributed.collective_torch")
+                                      .attr("sync_engine_stop")(entered, false).cast<uint64_t>();
+                stop_after_step_.store(last, std::memory_order_release);
+                RTP_LLM_LOG_INFO("engine shutdown rounds: entered=%lu, final=%lu", entered, last);
+            }
+            loop_thread_->join();
+            setCurrentThreadDevice(getDeviceId());
+            executor_->drainForShutdown();
+#if USING_CUDA || USING_ROCM
+            cuda_graph::graphDeviceSynchronize();
+#endif
+            // Keep IPC/model storage alive until every peer has drained its GPU.
+            py::gil_scoped_acquire gil;
+            py::module_::import("rtp_llm.models_py.distributed.collective_torch")
+                .attr("sync_engine_stop")(0, true);
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_ERROR("coupled EP shutdown failed: %s", error.what());
+            // Peers may still be using shared buffers. Unwinding could retry
+            // shutdown or destroy them before peer GPU work finishes.
+            std::_Exit(EXIT_FAILURE);
+        }
+    }
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
-    loop_thread_->join();
+    if (!coupled_ep) {
+        loop_thread_->join();
+    }
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();
     return absl::OkStatus();
+}
+
+bool NormalEngine::claimLoopStep() {
+    // The stop thread snapshots the round count when it sets kLoopStopBit.
+    // After that point, the loop may enter only rounds needed by its peers.
+    const auto step = loop_step_.fetch_add(1, std::memory_order_relaxed);
+    if (!(step & kLoopStopBit)) {
+        return true;
+    }
+    auto last = stop_after_step_.load(std::memory_order_acquire);
+    while (last == UINT64_MAX) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        last = stop_after_step_.load(std::memory_order_acquire);
+    }
+    return (step & ~kLoopStopBit) < last;
 }
 
 void NormalEngine::loop() try {
@@ -868,7 +927,8 @@ void NormalEngine::loop() try {
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
-    while (running_) {
+    const bool coupled_ep = hasCrossDpExpertParallelism();
+    while (coupled_ep ? claimLoopStep() : running_.load(std::memory_order_relaxed)) {
         auto status = step();
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());

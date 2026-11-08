@@ -56,7 +56,7 @@ def request_events(rows, event, request_id):
             and row.get("request_id") == request_id]
 
 
-def read_events(directory, engine, ranks=range(8)):
+def read_events(directory, engine, ranks=range(8), *, start=None, end=None):
     events = {rank: [] for rank in ranks}
     for rank in ranks:
         path = Path(directory) / f"main_{rank}.log"
@@ -74,7 +74,23 @@ def read_events(directory, engine, ranks=range(8)):
         if any(type(row.get("time_ns")) is not int for row in rows):
             raise ValueError("execution evidence lacks timestamps")
         rows.sort(key=lambda row: row["time_ns"])
-    return {rank: IndexedEvents(rows) for rank, rows in events.items()}
+    for boundary in (start, end):
+        if boundary is None:
+            continue
+        if set(boundary) != {str(rank) for rank in ranks}:
+            raise ValueError("phase boundary must include every rank")
+        for rank, rows in events.items():
+            marker = boundary[str(rank)]
+            count = marker["count"]
+            if (type(count) is not int or not 0 <= count <= len(rows)
+                    or marker["last"] != (rows[count - 1] if count else None)):
+                raise ValueError("execution events changed across the phase boundary")
+    if start is not None and end is not None and any(
+            start[str(rank)]["count"] > end[str(rank)]["count"] for rank in ranks):
+        raise ValueError("phase event boundaries are reversed")
+    return {rank: IndexedEvents(rows[(start[str(rank)]["count"] if start else 0):
+                                    (end[str(rank)]["count"] if end else len(rows))])
+            for rank, rows in events.items()}
 
 
 def group_evidence(events, root, tp_size):
@@ -377,6 +393,7 @@ def main():
     for key in ("result", "prefill-logs", "prefill-engine", "decode-logs", "decode-engine", "output"):
         parser.add_argument("--"+key, required=True, type=Path)
     parser.add_argument("--decode-tp", type=int, choices=(4,8), required=True)
+    parser.add_argument("--prefill-event-end", type=Path)
     for key in ('prefill-logits', 'decode-logits', 'precision-reference', 'precision-contract'):
         parser.add_argument('--'+key, type=Path)
     args = parser.parse_args()
@@ -393,7 +410,8 @@ def main():
         precision = ((args.prefill_logits, args.decode_logits,
                       k31_last_n_precision.read_descriptor(args.precision_reference),
                       json.loads(args.precision_contract.read_text())) if args.precision_contract is not None else None)
-        proof = audit(result, read_events(args.prefill_logs,args.prefill_engine),
+        boundary = json.loads(args.prefill_event_end.read_text()) if args.prefill_event_end else None
+        proof = audit(result, read_events(args.prefill_logs,args.prefill_engine, end=boundary),
                       read_events(args.decode_logs,args.decode_engine), args.decode_tp,
                       prefill_full_pages=prefill_full_pages, last_n_precision=precision)
         rows = {row["name"]:row for row in result["cases"]}

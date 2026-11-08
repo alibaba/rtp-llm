@@ -65,6 +65,10 @@ NormalExecutor::~NormalExecutor() {
     cudaProfilerEnd();
 }
 
+void NormalExecutor::drainForShutdown() {
+    dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+}
+
 NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                const std::shared_ptr<KVCacheManager>& cache_manager,
                                bool                                   warm_up,

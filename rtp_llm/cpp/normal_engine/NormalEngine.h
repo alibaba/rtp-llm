@@ -1,8 +1,10 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
@@ -62,6 +64,8 @@ private:
     void                            initLoadBalance();
     absl::Status                    trySaveStepError() const;
     void                            loop();
+    bool                            claimLoopStep();
+    bool                            hasCrossDpExpertParallelism() const;
     void                            normalizeSystemPromptCacheConfig();
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
     static void                     initializeAndPublishCacheManager(ResourceContext&                            resource_context,
@@ -89,6 +93,9 @@ private:
 
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
+    std::mutex                                    stop_mutex_;
+    std::atomic<uint64_t>                         loop_step_{0};
+    std::atomic<uint64_t>                         stop_after_step_{UINT64_MAX};
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     py::object                                    custom_output_selector_;

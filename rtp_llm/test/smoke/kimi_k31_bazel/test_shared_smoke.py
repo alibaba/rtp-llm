@@ -11,6 +11,12 @@ from rtp_llm.test.smoke.kimi_k31_bazel import server_launcher, worker
 
 
 class SharedSmokeTest(unittest.TestCase):
+    def test_ci_uses_the_traditional_service_configuration(self):
+        from rtp_llm.test.smoke.kimi_k3 import k31_two_host_smoke
+        from rtp_llm.test.smoke.kimi_k31_bazel import k31_ci
+
+        self.assertIs(k31_ci.smoke_config, k31_two_host_smoke.smoke_config)
+
     def test_split_large_cohort_still_fails_the_shared_strict_gate(self):
         stage = dict(name="orthogonal_decode_00_batch_63",
                      case_names=[str(i) for i in range(63)])

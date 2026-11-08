@@ -19,6 +19,7 @@ from pathlib import Path
 
 from rtp_llm.test.smoke.kimi_k3 import k31_full_smoke
 from rtp_llm.test.smoke.kimi_k3.k31_smoke_capacity import device_pool_usable_blocks
+from rtp_llm.test.smoke.kimi_k3.k31_two_host_smoke import smoke_config
 from rtp_llm.test.smoke.kimi_k31_bazel.worker import Worker
 
 MAX_WIRE_BYTES = 16 * 1024**2
@@ -67,38 +68,6 @@ def audit_service_cleanup(directory, supervisor_exitcode):
         "backend_rank_exitcodes_verified": False,
         "graceful_backend_shutdown_verified": False,
     }
-
-
-def smoke_config(base):
-    """Size one CI service lifecycle for both traditional request programs."""
-    from rtp_llm.test.smoke.kimi_k3.k31_smoke_capacity import (
-        LONG_INPUT_TOKENS,
-        MAX_OUTPUT_TOKENS,
-        MTP_RESERVE_TOKENS,
-    )
-    from rtp_llm.test.smoke.kimi_k3.k31_two_host_smoke import stage_config
-
-    config = stage_config(base, "regular")
-    config.pop("k31_smoke_stage")
-    config.update(run_id=base["run_id"], smoke_profile="k31")
-    if config["decode_dp"] != 2:
-        raise ValueError("CI smoke requires Decode DP2/TP4")
-    prefill, decode = config["prefill"], config["decode"]
-    prefill["test_block_num"] = 140
-    prefill.setdefault("prefill_token_capacity", 65536)
-    if prefill["prefill_token_capacity"] != 65536:
-        raise ValueError("CI smoke retains the regular 64K Prefill forward budget")
-    prefill.setdefault("reuse_cache_tail_blocks", 5)
-    if prefill["reuse_cache_tail_blocks"] != 5:
-        raise ValueError("CI smoke uses Prefill Last-5 retention")
-    prefill.setdefault("linear_pool_blocks", 128)
-    decode["test_block_num"] = max(272, decode.get("test_block_num", 0))
-    decode.setdefault("linear_pool_blocks", 192)
-    for role in ("prefill", "decode"):
-        limit = config[role].setdefault("max_seq_len", LONG_INPUT_TOKENS + 4096)
-        if limit < LONG_INPUT_TOKENS + MAX_OUTPUT_TOKENS + MTP_RESERVE_TOKENS:
-            raise ValueError(f"{role}: CI smoke must admit the exact 1M continuation")
-    return config
 
 
 def runtime_geometry(engine, launch, source_revision, *, prefill_tail_blocks=None):

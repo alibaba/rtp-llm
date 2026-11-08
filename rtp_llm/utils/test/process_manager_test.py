@@ -272,6 +272,10 @@ class TestProcessManager(unittest.TestCase):
             def is_alive(self):
                 return self._alive
 
+            @property
+            def exitcode(self):
+                return None if self._alive else 0
+
             def terminate(self):
                 events.append(f"term:{self.name}")
                 if self.name == "backend":
@@ -403,6 +407,7 @@ class TestProcessManager(unittest.TestCase):
         # Mock a process that won't die
         mock_proc = Mock()
         mock_proc.is_alive.return_value = True
+        mock_proc.exitcode = None
         mock_proc.pid = 12345
         # Mark it as a mock to skip in teardown
         mock_proc._mock_name = "mock_proc"
@@ -1788,6 +1793,27 @@ class TestFailureShutdownPaths(unittest.TestCase):
 
         self.assertTrue(self.manager.failure_detected)
         mock_exit.assert_called_once_with(1)
+
+    def test_child_error_during_requested_shutdown_exits_parent_nonzero(self):
+        self.manager.shutdown_requested = True
+        self.manager.add_process(_FakeProc("backend", alive=False, exitcode=1))
+
+        with patch("os._exit") as mock_exit:
+            self.manager.monitor_and_release_processes()
+
+        self.assertTrue(self.manager.failure_detected)
+        mock_exit.assert_called_once_with(1)
+
+    def test_rank_error_interrupts_unlimited_backend_drain(self):
+        self.manager.shutdown_requested = True
+        failed_rank = _FakeProc("rank0", alive=False, exitcode=1)
+        stuck_rank = _FakeProc("rank1")
+        with _watchdog(5, "backend drain kept waiting after rank failure"):
+            result = self.manager._wait_process_list_exit(
+                [failed_rank, stuck_rank], None, "deferred"
+            )
+
+        self.assertEqual(result, "child_failed")
 
     # --- normal SIGTERM with alive backend keeps -1 semantics ---------------
 
