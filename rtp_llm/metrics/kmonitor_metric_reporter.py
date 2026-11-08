@@ -101,6 +101,46 @@ class AccMetrics(Enum):
     DASH_SC_TPM_RECHECK_LIMIT_QPS_METRIC = "py_rtp_dash_sc_tpm_recheck_limit_qps"
     DASH_SC_TPM_RECHECK_ERROR_QPS_METRIC = "py_rtp_dash_sc_tpm_recheck_error_qps"
 
+    # Remote tier only. Read status: hit/miss/admission_skip/timeout/error.
+    # Misses and admission skips are not failures. Error QPS includes timeouts.
+    VIT_REMOTE_EMB_READ_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_read_qps"
+    VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_read_error_qps"
+    )
+    VIT_REMOTE_EMB_WRITE_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_write_qps"
+    VIT_REMOTE_EMB_WRITE_ERROR_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_write_error_qps"
+    )
+    VIT_REMOTE_EMB_SKIP_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_skip_qps"
+
+    # Creation is distinct from per-operation acquisition of a shared client.
+    VIT_REMOTE_EMB_CLIENT_CREATE_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_client_create_qps"
+    )
+    VIT_REMOTE_EMB_CLIENT_CREATE_ERROR_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_client_create_error_qps"
+    )
+    VIT_REMOTE_EMB_METADATA_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_metadata_qps"
+    )
+    # One inspection-approved ViT result, not one LLM response or remote read.
+    VIT_REMOTE_EMB_RESULT_ACCEPTED_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_result_accepted_qps"
+    )
+
+    # Bounded operation/stage/status tags; no object IDs or exception text.
+    VIT_REMOTE_EMB_STAGE_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_stage_qps"
+    VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_stage_error_qps"
+    )
+    # Accumulated bytes are exported as B/s, not as an average object size.
+    VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_sdk_object_bytes_per_second"
+    )
+    VIT_REMOTE_EMB_PAYLOAD_BYTES_PER_SECOND_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_payload_bytes_per_second"
+    )
+
 
 class GaugeMetrics(Enum):
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
@@ -140,6 +180,35 @@ class GaugeMetrics(Enum):
     # serialization. source distinguishes mm_embedding_cpp/get_embedding_result;
     # status is success/error. Async submission ACKs are deliberately excluded.
     VIT_REQUEST_RT_METRIC = "py_rtp_vit_request_rt"
+    # Milliseconds, one observation per admitted remote operation. Read includes
+    # queueing, SDK calls, deserialization and device restoration enqueue, without
+    # CUDA synchronization. Write includes queueing, packing and SDK save.
+    VIT_REMOTE_EMB_READ_RT_METRIC = "py_rtp_vit_remote_embedding_cache_read_rt"
+    VIT_REMOTE_EMB_WRITE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_write_rt"
+
+    VIT_REMOTE_EMB_STAGE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_stage_rt_ms"
+    VIT_REMOTE_EMB_CLIENT_CREATE_RT_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_client_create_rt_ms"
+    )
+    # Enqueue to worker start; canceled-before-start work has no observation.
+    VIT_REMOTE_EMB_QUEUE_WAIT_METRIC = "py_rtp_vit_remote_embedding_cache_queue_wait_ms"
+    # Logical object bytes for completed SDK calls and bytes / SDK wall time.
+    # An existing-key save may succeed without IO; reads may use local replicas.
+    # These are API volume, not transferred/network bytes. PACE reports actual IO.
+    VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_sdk_object_bytes"
+    )
+    VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_sdk_effective_mib_per_second"
+    )
+    # Only caller-accepted reads / completed writes. A late SDK read after a
+    # caller timeout contributes to transfer metrics, never to payload metrics.
+    VIT_REMOTE_EMB_PAYLOAD_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_payload_bytes"
+    )
+    VIT_REMOTE_EMB_EFFECTIVE_SPEED_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_effective_mib_per_second"
+    )
     # Milliseconds per non-empty inspection group, including OSS/HTTP work,
     # excluding input preparation, source handoff wait and GPU embedding.
     GREENNET_RT_METRIC = "py_rtp_greennet_rt"
