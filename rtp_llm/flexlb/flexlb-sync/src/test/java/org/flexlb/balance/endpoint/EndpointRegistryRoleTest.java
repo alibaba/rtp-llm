@@ -211,6 +211,25 @@ class EndpointRegistryRoleTest {
     }
 
     @Test
+    void decode_routing_snapshot_stays_read_only_across_registry_changes() {
+        String address = "127.0.0.1:8030";
+        WorkerStatus first = status(RoleType.DECODE, 8030);
+        EndpointTestSupport.publishEndpoint(registry, RoleType.DECODE, address, first);
+        var snapshots = registry.decodeRoutingSnapshot();
+        var firstView = snapshots.getFirst();
+
+        assertThrows(UnsupportedOperationException.class, () -> snapshots.removeFirst());
+        EndpointTestSupport.publishEndpoint(registry, RoleType.DECODE, "127.0.0.1:8031",
+                status(RoleType.DECODE, 8031));
+        retire(RoleType.DECODE, address, first);
+
+        assertEquals(List.of(firstView), snapshots);
+        assertNull(registry.holdDecodeEndpoint(firstView));
+        assertEquals(List.of("127.0.0.1:8031"),
+                registry.decodeRoutingSnapshot().stream().map(view -> view.address()).toList());
+    }
+
+    @Test
     void decode_routing_view_captures_only_its_exact_same_address_generation() {
         String address = "decode-replacement-alias";
         WorkerStatus oldStatus = status(RoleType.DECODE, 8020);

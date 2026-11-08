@@ -7,6 +7,7 @@ import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.util.ReadOnlyListFilter;
 import org.slf4j.Logger;
 import org.springframework.stereotype.Component;
 
@@ -277,15 +278,14 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         if (dpGroups.isEmpty()) {
             return directory;
         }
-        ArrayList<EndpointRegistry.PrefillRoutingEntry> matching = new ArrayList<>(directory.size());
-        for (EndpointRegistry.PrefillRoutingEntry entry : directory) {
+        ReadOnlyListFilter<EndpointRegistry.PrefillRoutingEntry> matching = new ReadOnlyListFilter<>(directory);
+        for (int index = 0; index < directory.size(); index++) {
+            EndpointRegistry.PrefillRoutingEntry entry = directory.get(index);
             String masterAddress = entry.endpoint().getStatus()
                     .committedEngineObservation().dpMasterAddress();
-            if (masterAddress == null || dpGroups.get(masterAddress).hasAllRanks()) {
-                matching.add(entry);
-            }
+            matching.keepIf(index, masterAddress == null || dpGroups.get(masterAddress).hasAllRanks());
         }
-        return List.copyOf(matching);
+        return matching.toList();
     }
 
     /**
@@ -304,6 +304,7 @@ public final class WorkerDirectory implements WorkerStatusProvider {
             return snapshots;
         }
         Map<String, DpGroupMembers> dpGroups = new HashMap<>();
+        // 先统计完整目录的 DP ranks，再过滤流量 group，避免把同一 DP 组的其他 rank 提前排除。
         for (DecodeEndpoint.DecodeRoutingView snapshot : snapshots) {
             WorkerStatus.EngineObservation engine = snapshot.workerStatus().fields();
             if (engine.dpMasterAddress() != null) {
@@ -314,17 +315,14 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         if (group == null && dpGroups.isEmpty()) {
             return snapshots;
         }
-        ArrayList<DecodeEndpoint.DecodeRoutingView> matching = new ArrayList<>(snapshots.size());
-        for (DecodeEndpoint.DecodeRoutingView snapshot : snapshots) {
-            if (group != null && !group.equals(snapshot.topology().group())) {
-                continue;
-            }
+        ReadOnlyListFilter<DecodeEndpoint.DecodeRoutingView> matching = new ReadOnlyListFilter<>(snapshots);
+        for (int index = 0; index < snapshots.size(); index++) {
+            DecodeEndpoint.DecodeRoutingView snapshot = snapshots.get(index);
             String masterAddress = snapshot.workerStatus().fields().dpMasterAddress();
-            if (masterAddress == null || dpGroups.get(masterAddress).hasAllRanks()) {
-                matching.add(snapshot);
-            }
+            matching.keepIf(index, (group == null || group.equals(snapshot.topology().group()))
+                    && (masterAddress == null || dpGroups.get(masterAddress).hasAllRanks()));
         }
-        return List.copyOf(matching);
+        return matching.toList();
     }
 
     /**

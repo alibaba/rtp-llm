@@ -16,6 +16,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.AbstractList;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -276,12 +277,14 @@ public class EndpointRegistry {
      */
     public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot() {
         List<Map.Entry<String, DecodeEndpoint>> directory = decodeDirectory;
-        List<DecodeEndpoint.DecodeRoutingView> snapshot =
-                new ArrayList<>(directory.size());
+        if (directory.isEmpty()) {
+            return List.of();
+        }
+        List<DecodeEndpoint.DecodeRoutingView> snapshot = new ArrayList<>(directory.size());
         for (Map.Entry<String, DecodeEndpoint> entry : directory) {
             snapshot.add(entry.getValue().routingViewSnapshot(entry.getKey()));
         }
-        return List.copyOf(snapshot);
+        return Collections.unmodifiableList(snapshot);
     }
 
     /**

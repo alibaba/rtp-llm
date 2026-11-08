@@ -31,6 +31,7 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
+import org.flexlb.util.ReadOnlyListFilter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -132,14 +133,14 @@ public class CostBasedPrefillStrategy {
         if (discovery.candidates().isEmpty()) {
             return classifyAdmissionFailure(discovery, context.getPriority(), role, group, 0L);
         }
-        Map<PrefillEndpoint, PrefillCandidateWork> prepared = new IdentityHashMap<>(inputs.candidates().size());
-        for (PrefillCandidateWork candidate : inputs.candidates()) {
-            prepared.put(candidate.endpoint(), candidate);
-        }
+        boolean sameOrder = hasSameEndpointOrder(discovery.candidates(), inputs.candidates());
+        Map<PrefillEndpoint, PrefillCandidateWork> prepared =
+                sameOrder ? Map.of() : indexPreparedCandidates(inputs.candidates());
         PrefillCandidateSet candidates = new PrefillCandidateSet();
         candidates.reset(discovery.candidates().size());
-        for (EndpointRegistry.PrefillRoutingEntry entry : discovery.candidates()) {
-            PrefillCandidateWork candidate = prepared.get(entry.endpoint());
+        for (int index = 0; index < discovery.candidates().size(); index++) {
+            EndpointRegistry.PrefillRoutingEntry entry = discovery.candidates().get(index);
+            PrefillCandidateWork candidate = sameOrder ? inputs.candidates().get(index) : prepared.get(entry.endpoint());
             if (candidate == null) {
                 return PlacementResult.blocked(role);
             }
@@ -163,12 +164,13 @@ public class CostBasedPrefillStrategy {
         if (current.candidates().size() != inputs.candidates().size()) {
             return false;
         }
-        Map<PrefillEndpoint, String> prepared = new IdentityHashMap<>(inputs.candidates().size());
-        for (PrefillCandidateWork candidate : inputs.candidates()) {
-            prepared.put(candidate.endpoint(), candidate.address());
-        }
-        for (EndpointRegistry.PrefillRoutingEntry candidate : current.candidates()) {
-            if (candidate.endpoint().isRetired() || !candidate.address().equals(prepared.get(candidate.endpoint()))) {
+        boolean sameOrder = hasSameEndpointOrder(current.candidates(), inputs.candidates());
+        Map<PrefillEndpoint, PrefillCandidateWork> prepared =
+                sameOrder ? Map.of() : indexPreparedCandidates(inputs.candidates());
+        for (int index = 0; index < current.candidates().size(); index++) {
+            EndpointRegistry.PrefillRoutingEntry candidate = current.candidates().get(index);
+            PrefillCandidateWork work = sameOrder ? inputs.candidates().get(index) : prepared.get(candidate.endpoint());
+            if (candidate.endpoint().isRetired() || work == null || !candidate.address().equals(work.address())) {
                 return false;
             }
         }
@@ -176,13 +178,35 @@ public class CostBasedPrefillStrategy {
     }
 
     /**
+     * 注册目录未变化时，材料和当前候选通常保持相同顺序，可直接按索引读取而不必建表。
+     * 比较 endpoint 对象本身，避免把同地址新一代节点当成原节点；乱序时仍按对象身份查找。
+     */
+    private boolean hasSameEndpointOrder(List<EndpointRegistry.PrefillRoutingEntry> current,
+                                         List<PrefillCandidateWork> prepared) {
+        if (current.size() != prepared.size()) {
+            return false;
+        }
+        for (int index = 0; index < current.size(); index++) {
+            if (current.get(index).endpoint() != prepared.get(index).endpoint()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private Map<PrefillEndpoint, PrefillCandidateWork> indexPreparedCandidates(List<PrefillCandidateWork> candidates) {
+        Map<PrefillEndpoint, PrefillCandidateWork> prepared = new IdentityHashMap<>(candidates.size());
+        for (PrefillCandidateWork candidate : candidates) {
+            prepared.put(candidate.endpoint(), candidate);
+        }
+        return prepared;
+    }
+
+    /**
      * V2 只排除已开始下线的节点，所有仍可接收请求的候选都参与缓存匹配。
      */
     private EndpointDiscovery discoverActiveEndpoints(RoleType role, String group) {
-        EndpointDiscovery discovery = discoverAvailableEndpoints(role, group);
-        List<EndpointRegistry.PrefillRoutingEntry> active =
-                discovery.candidates().stream().filter(entry -> !entry.endpoint().isRetired()).toList();
-        return new EndpointDiscovery(discovery.directory(), active, discovery.registeredCount());
+        return discoverEndpoints(role, group, true);
     }
 
     private PlacementResult<SelectedRole, RoleType> finishSelection(BalanceContext balanceContext,
@@ -630,19 +654,24 @@ public class CostBasedPrefillStrategy {
     }
 
     private EndpointDiscovery discoverAvailableEndpoints(RoleType roleType, String group) {
-        List<EndpointRegistry.PrefillRoutingEntry> directory =
-                workerDirectory.prefillRoutingSnapshot(roleType);
-        List<EndpointRegistry.PrefillRoutingEntry> matching = new ArrayList<>();
+        return discoverEndpoints(roleType, group, false);
+    }
+
+    private EndpointDiscovery discoverEndpoints(RoleType roleType, String group, boolean excludeRetired) {
+        List<EndpointRegistry.PrefillRoutingEntry> directory = workerDirectory.prefillRoutingSnapshot(roleType);
+        ReadOnlyListFilter<EndpointRegistry.PrefillRoutingEntry> filtered = new ReadOnlyListFilter<>(directory);
         int registered = 0;
-        for (EndpointRegistry.PrefillRoutingEntry entry : directory) {
+        for (int index = 0; index < directory.size(); index++) {
+            EndpointRegistry.PrefillRoutingEntry entry = directory.get(index);
             PrefillEndpoint endpoint = entry.endpoint();
-            if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) {
-                continue;
+            boolean matchesGroup = group == null || group.equals(endpoint.getStatus().topologySnapshot().group());
+            if (matchesGroup) {
+                // 同组但已退役的节点仍计入注册数，是否进入候选集合另行判断。
+                registered++;
             }
-            registered++;
-            matching.add(entry);
+            filtered.keepIf(index, matchesGroup && (!excludeRetired || !endpoint.isRetired()));
         }
-        return new EndpointDiscovery(directory, matching, registered);
+        return new EndpointDiscovery(directory, filtered.toList(), registered);
     }
 
     private CacheMatchResult getCacheMatchResult(

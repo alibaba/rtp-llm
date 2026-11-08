@@ -13,6 +13,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 import org.slf4j.LoggerFactory;
 
@@ -219,6 +220,39 @@ class WorkerDirectoryTest {
         publishDecode(rankOne);
 
         assertEquals(2, workerDirectory.decodeRoutingSnapshot("routing-a").size());
+    }
+
+    @Test
+    void decodeSnapshotReusesTheReadOnlyListWhenEveryNodeMatches() {
+        publishDecode(decodeMember("routing-a", "10.0.0.1", 0, 2, 8450));
+        publishDecode(decodeMember("routing-a", "10.0.0.1", 1, 2, 8451));
+        var snapshots = registry.decodeRoutingSnapshot();
+        EndpointRegistry fixedRegistry = Mockito.mock(EndpointRegistry.class);
+        Mockito.when(fixedRegistry.decodeRoutingSnapshot()).thenReturn(snapshots);
+        WorkerDirectory directory = new WorkerDirectory(fixedRegistry);
+
+        assertSame(snapshots, directory.decodeRoutingSnapshot("routing-a"));
+        assertSame(snapshots, directory.decodeRoutingSnapshot(null));
+        assertThrows(UnsupportedOperationException.class, () -> snapshots.removeFirst());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2})
+    void filteredDecodeSnapshotPreservesOrderAndRemainsReadOnly(int excludedIndex) {
+        for (int index = 0; index < 3; index++) {
+            publishDecode(decodeMember(index == excludedIndex ? "routing-b" : "routing-a", null, 0, 1,
+                    8460 + index));
+        }
+        var expected = registry.decodeRoutingSnapshot().stream()
+                .filter(view -> "routing-a".equals(view.topology().group())).toList();
+        var snapshots = workerDirectory.decodeRoutingSnapshot("routing-a");
+
+        assertEquals(expected, snapshots);
+        assertThrows(UnsupportedOperationException.class, () -> snapshots.removeFirst());
+        publishDecode(decodeMember("routing-a", null, 0, 1, 8463));
+        assertEquals(expected, snapshots);
+        assertEquals(3, workerDirectory.decodeRoutingSnapshot("routing-a").size());
+        assertTrue(workerDirectory.decodeRoutingSnapshot("missing-group").isEmpty());
     }
 
     @Test
