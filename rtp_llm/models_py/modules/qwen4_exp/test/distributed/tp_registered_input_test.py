@@ -12,6 +12,99 @@ from rtp_llm.models_py.modules.qwen4_exp import tp_reduce
 
 
 class TpRegisteredInputTest(unittest.TestCase):
+    def test_resource_close_retains_workspace_once_and_stops_registration(self):
+        from rtp_llm.models_py.distributed import flashinfer_ipc_all_reduce
+
+        workspace = MagicMock()
+        retained = []
+        with patch.object(
+            flashinfer_ipc_all_reduce, "FlashInferIpcAllReduce", return_value=workspace
+        ):
+            resource = tp_reduce.Qwen4ReduceResource(
+                SimpleNamespace(group=object(), device="cuda:0"), max_bytes=327680
+            )
+        with patch.object(tp_reduce, "_PROCESS_LIFETIME_REDUCE_WORKSPACES", retained):
+            resource.finish_graph_capture()
+            resource.close()
+            resource.close()
+            resource.finish_graph_capture()
+        self.assertTrue(resource.closed)
+        self.assertIsNone(resource.workspace)
+        self.assertEqual(retained, [workspace])
+        workspace.finish_graph_capture.assert_called_once()
+        workspace.destroy.assert_not_called()
+
+    def test_target_policy_keeps_active_gate_and_closed_fallback(self):
+        from rtp_llm.models_py.distributed import flashinfer_ipc_all_reduce
+
+        value = SimpleNamespace(
+            is_cuda=True,
+            dtype=torch.bfloat16,
+            ndim=2,
+            shape=(64, 2560),
+            is_contiguous=lambda: True,
+            data_ptr=lambda: 4096,
+        )
+        workspace = MagicMock()
+        custom = object()
+        fallback = object()
+        workspace.all_reduce.return_value = custom
+        with patch.object(
+            flashinfer_ipc_all_reduce, "FlashInferIpcAllReduce", return_value=workspace
+        ):
+            reducer = tp_reduce.Qwen4TargetReduce(
+                SimpleNamespace(group=object(), device="cuda:0")
+            )
+        with (
+            patch.object(
+                tp_reduce, "all_reduce_with_graph_input", return_value=fallback
+            ),
+            patch.object(tp_reduce, "_PROCESS_LIFETIME_REDUCE_WORKSPACES", []),
+        ):
+            self.assertIs(reducer(value, tp_reduce.collective_torch.Group.TP), fallback)
+            reducer.active = True
+            self.assertIs(reducer(value, tp_reduce.collective_torch.Group.TP), custom)
+            reducer.close()
+            self.assertFalse(reducer.active)
+            self.assertIs(reducer(value, tp_reduce.collective_torch.Group.TP), fallback)
+
+    def test_prefill_policy_preserves_exact_rows_and_capture_fallback(self):
+        from rtp_llm.models_py.distributed import flashinfer_ipc_all_reduce
+
+        workspace = MagicMock()
+        custom = object()
+        fallback = object()
+        workspace.all_reduce.return_value = custom
+        with patch.object(
+            flashinfer_ipc_all_reduce, "FlashInferIpcAllReduce", return_value=workspace
+        ):
+            reducer = tp_reduce.Qwen4PrefillReduce(
+                SimpleNamespace(group=object(), device="cuda:0")
+            )
+        value = SimpleNamespace(
+            is_cuda=True,
+            dtype=torch.bfloat16,
+            ndim=2,
+            is_contiguous=lambda: True,
+            data_ptr=lambda: 4096,
+        )
+        for rows, capturing, want_custom in (
+            (4096, False, True),
+            (4096, True, False),
+            (4097, False, False),
+        ):
+            value.shape = (rows, 2560)
+            with (
+                patch("torch.cuda.is_current_stream_capturing", return_value=capturing),
+                patch.object(
+                    tp_reduce, "all_reduce_with_graph_input", return_value=fallback
+                ),
+            ):
+                self.assertIs(
+                    reducer(value, tp_reduce.collective_torch.Group.TP),
+                    custom if want_custom else fallback,
+                )
+
     def workspace(self, enabled):
         workspace = FlashInferIpcAllReduce.__new__(FlashInferIpcAllReduce)
         workspace.registered_graph_inputs = enabled
@@ -164,7 +257,7 @@ class TpRegisteredInputTest(unittest.TestCase):
             ),
             patch.object(tp_reduce.collective_torch, "all_reduce") as reduce,
         ):
-            tp_reduce.all_reduce_target_graph(tensor, group)
+            tp_reduce.all_reduce_with_graph_input(tensor, group)
             reduce.assert_called_once_with(tensor, group, inplace=False)
         communicator.should_use_registered_graph_input.return_value = False
         with (
@@ -173,13 +266,13 @@ class TpRegisteredInputTest(unittest.TestCase):
             ),
             patch.object(tp_reduce.collective_torch, "all_reduce") as reduce,
         ):
-            tp_reduce.all_reduce_target_graph(tensor, group)
+            tp_reduce.all_reduce_with_graph_input(tensor, group)
             reduce.assert_called_once_with(tensor, group)
         with (
             patch.object(tp_reduce, "get_flashinfer_allreduce", return_value=None),
             patch.object(tp_reduce.collective_torch, "all_reduce") as reduce,
         ):
-            tp_reduce.all_reduce_target_graph(tensor, group)
+            tp_reduce.all_reduce_with_graph_input(tensor, group)
             reduce.assert_called_once_with(tensor, group)
 
     def test_installer_reaches_actual_routed_finalizer_and_keeps_other_routers(self):
@@ -190,13 +283,17 @@ class TpRegisteredInputTest(unittest.TestCase):
         router = PureTpRouterNvfp4Cutlass.__new__(PureTpRouterNvfp4Cutlass)
         attention = SimpleNamespace()
         mlp = SimpleNamespace(fused_moe=SimpleNamespace(router=router))
-        tp_reduce.install_target_graph_all_reduce(attention, mlp)
-        self.assertIs(attention.tp_all_reduce, tp_reduce.all_reduce_target_graph)
-        self.assertIs(mlp.tp_all_reduce, tp_reduce.all_reduce_target_graph)
-        self.assertIs(router.tp_all_reduce, tp_reduce.all_reduce_target_graph)
+        tp_reduce.install_tp_all_reduce(
+            attention, mlp, tp_reduce.all_reduce_with_graph_input
+        )
+        self.assertIs(attention.tp_all_reduce, tp_reduce.all_reduce_with_graph_input)
+        self.assertIs(mlp.tp_all_reduce, tp_reduce.all_reduce_with_graph_input)
+        self.assertIs(router.tp_all_reduce, tp_reduce.all_reduce_with_graph_input)
         other = SimpleNamespace()
         mlp.fused_moe.router = other
-        tp_reduce.install_target_graph_all_reduce(attention, mlp)
+        tp_reduce.install_tp_all_reduce(
+            attention, mlp, tp_reduce.all_reduce_with_graph_input
+        )
         self.assertFalse(hasattr(other, "tp_all_reduce"))
 
     def test_routed_finalizer_uses_scoped_dispatch_but_preserves_skip_and_tp1(self):

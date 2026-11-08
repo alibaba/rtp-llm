@@ -237,11 +237,9 @@ def _layer(pc, source, executor):
 
 
 def _install(layer, dispatch):
-    from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
-        install_target_graph_all_reduce,
-    )
+    from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import install_tp_all_reduce
 
-    install_target_graph_all_reduce(SimpleNamespace(), layer, dispatch)
+    install_tp_all_reduce(SimpleNamespace(), layer, dispatch)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("router reduced before shared merge")

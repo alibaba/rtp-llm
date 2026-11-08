@@ -1,4 +1,4 @@
-"""Qwen4-owned reduction dispatch; draft and eager paths keep their contract."""
+"""Qwen4 TP resource lifetime and independently selected reduction policies."""
 
 import os
 
@@ -10,16 +10,15 @@ from rtp_llm.models_py.distributed.flashinfer_all_reduce import get_flashinfer_a
 
 # Model close can also run on a single rank after partial initialization.
 # Retain IPC mappings until process exit rather than freeing a peer's input.
-_PROCESS_LIFETIME_TARGET_REDUCE = []
+_PROCESS_LIFETIME_REDUCE_WORKSPACES = []
 
 
-def install_target_graph_all_reduce(attention, mlp, dispatch=None):
+def install_tp_all_reduce(attention, mlp, dispatch):
     """Include the actual routed finalizer, even when shared FFN is unsharded."""
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
         PureTpRouterNvfp4Cutlass,
     )
 
-    dispatch = all_reduce_target_graph if dispatch is None else dispatch
     attention.tp_all_reduce = dispatch
     mlp.tp_all_reduce = dispatch
     router = getattr(getattr(mlp, "fused_moe", None), "router", None)
@@ -27,15 +26,15 @@ def install_target_graph_all_reduce(attention, mlp, dispatch=None):
         router.tp_all_reduce = dispatch
 
 
-class Qwen4TargetReduce:
-    """Model-owned workspace for TP2 target-verify rows 33..256.
+class Qwen4ReduceResource:
+    """Model-owned IPC workspace lifetime, independent of dispatch policy.
 
-    All ranks construct this eagerly and register graph pointers after capture.
-    The caller enables it only during target verification. Generic collectives
-    and the draft keep their existing dispatch and workspace.
+    All ranks create the resource before use and register pointers after
+    capture. Closing detaches the owner but retains mappings until process exit
+    because shutdown or partial initialization need not be rank-symmetric.
     """
 
-    def __init__(self, communicator, *, max_bytes=256 * 2560 * 2):
+    def __init__(self, communicator, *, max_bytes):
         from rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce import (
             FlashInferIpcAllReduce,
         )
@@ -43,8 +42,25 @@ class Qwen4TargetReduce:
         self.workspace = FlashInferIpcAllReduce(
             communicator.group, communicator.device, max_bytes=max_bytes
         )
-        self.active = False
         self.closed = False
+
+    def finish_graph_capture(self):
+        if not self.closed:
+            self.workspace.finish_graph_capture()
+
+    def close(self):
+        if not self.closed:
+            _PROCESS_LIFETIME_REDUCE_WORKSPACES.append(self.workspace)
+            self.workspace = None
+            self.closed = True
+
+
+class Qwen4TargetReduce(Qwen4ReduceResource):
+    """Target-verify policy for TP2 rows33..256, enabled by the caller."""
+
+    def __init__(self, communicator):
+        super().__init__(communicator, max_bytes=256 * 2560 * 2)
+        self.active = False
 
     def __call__(self, tensor, group):
         if (
@@ -60,18 +76,11 @@ class Qwen4TargetReduce:
             and tensor.data_ptr() % 16 == 0
         ):
             return self.workspace.all_reduce(tensor)
-        return all_reduce_target_graph(tensor, group)
-
-    def finish_graph_capture(self):
-        if not self.closed:
-            self.workspace.finish_graph_capture()
+        return all_reduce_with_graph_input(tensor, group)
 
     def close(self):
-        if not self.closed:
-            _PROCESS_LIFETIME_TARGET_REDUCE.append(self.workspace)
-            self.workspace = None
-            self.active = False
-            self.closed = True
+        super().close()
+        self.active = False
 
 
 def prepare_target_reduce(config, parallelism):
@@ -100,12 +109,11 @@ def prepare_target_reduce(config, parallelism):
     return Qwen4TargetReduce(communicator)
 
 
-class Qwen4PrefillReduce(Qwen4TargetReduce):
+class Qwen4PrefillReduce(Qwen4ReduceResource):
     """Dedicated eager staging for the measured TP2 long-Prefill rows."""
 
     def __init__(self, communicator):
         super().__init__(communicator, max_bytes=16384 * 2560 * 2)
-        self.active = True
 
     def __call__(self, tensor, group):
         if (
@@ -121,7 +129,7 @@ class Qwen4PrefillReduce(Qwen4TargetReduce):
             and not torch.cuda.is_current_stream_capturing()
         ):
             return self.workspace.all_reduce(tensor)
-        return all_reduce_target_graph(tensor, group)
+        return all_reduce_with_graph_input(tensor, group)
 
 
 def prepare_prefill_reduce(config, parallelism):
@@ -141,7 +149,8 @@ def prepare_prefill_reduce(config, parallelism):
     return Qwen4PrefillReduce(communicator)
 
 
-def all_reduce_target_graph(tensor, group):
+def all_reduce_with_graph_input(tensor, group):
+    """Use out-of-place reduction when a registered Graph input is admitted."""
     if tensor.is_cuda and group == collective_torch.Group.TP:
         communicator = get_flashinfer_allreduce()
         if communicator is not None and communicator.should_use_registered_graph_input(

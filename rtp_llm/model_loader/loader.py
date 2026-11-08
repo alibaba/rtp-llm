@@ -817,7 +817,11 @@ class ModelLoader:
 
         embedding_weight = weight.global_weights.get(W.embedding, None)
         if embedding_weight != None:
-            self._weights_info.model_config.embedding_size = embedding_weight.shape[0]
+            # A draft may alias a vocabulary-sharded owner. Its logical
+            # vocabulary remains full-sized even though each rank holds rows.
+            self._weights_info.model_config.embedding_size = getattr(
+                embedding_weight, "_rtp_embedding_vocab_size", embedding_weight.shape[0]
+            )
             logging.info(
                 f"embedding_size is {self._weights_info.model_config.embedding_size}, vocab size is {self._weights_info.model_config.vocab_size}"
             )
