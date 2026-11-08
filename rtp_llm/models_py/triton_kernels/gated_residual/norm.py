@@ -86,8 +86,9 @@ def grouped_rms_norm_triton(
 
 @triton.jit
 def _norm_fp8_scale(
-    AMAX, SCALE, N: tl.constexpr, BLOCK: tl.constexpr, ROUND_DIV: tl.constexpr = False
+    AMAX, SCALE, N, BLOCK: tl.constexpr, ROUND_DIV: tl.constexpr = False
 ):
+    # Keep request-dependent N dynamic within each power-of-two BLOCK bucket.
     offsets = tl.arange(0, BLOCK)
     maximum = tl.max(tl.load(AMAX + offsets, offsets < N, other=0.0), 0)
     if ROUND_DIV:
