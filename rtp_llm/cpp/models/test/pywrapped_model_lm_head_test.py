@@ -449,14 +449,14 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
         try:
             scoring = torch.tensor([0, 2, 3], dtype=torch.int32, pin_memory=True)
             labels = torch.tensor([7, -1, 4], dtype=torch.int32, pin_memory=True)
-            kwargs = dict(
-                need_all_logits=True,
-                all_logits_row_indexes=scoring,
-                all_logits_row_labels=labels,
-                all_logits_top_k=3,
-                tp_size=2,
-                output_vocab_size=29,
-            )
+            kwargs = {
+                "need_all_logits": True,
+                "all_logits_row_indexes": scoring,
+                "all_logits_row_labels": labels,
+                "all_logits_top_k": 3,
+                "tp_size": 2,
+                "output_vocab_size": 29,
+            }
             with torch.no_grad():
                 whole = run_lm_head(
                     self.model, self.packed, self.hidden, self.indexes, **kwargs
@@ -534,14 +534,14 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
 
             register_comm_ops(lambda *args: None, lambda *args: None, gather)
             try:
-                kwargs = dict(
-                    need_all_logits=True,
-                    all_logits_row_indexes=scoring,
-                    all_logits_row_labels=labels,
-                    all_logits_top_k=k,
-                    tp_size=2,
-                    output_vocab_size=29,
-                )
+                kwargs = {
+                    "need_all_logits": True,
+                    "all_logits_row_indexes": scoring,
+                    "all_logits_row_labels": labels,
+                    "all_logits_top_k": k,
+                    "tp_size": 2,
+                    "output_vocab_size": 29,
+                }
                 if chunk_rows is not None:
                     kwargs["scoring_partial_chunk_rows"] = chunk_rows
                 with torch.no_grad():
