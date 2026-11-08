@@ -1176,6 +1176,11 @@ class _NaviSchedScheduler:
             except Exception:
                 observer._stdio_probe_install_failures += 1
 
+    @property
+    def __wrapped__(self):
+        """Expose the native scheduler for framework initialization and profiling."""
+        return self._scheduler
+
     def __getattr__(self, name):
         return getattr(self._scheduler, name)
 
