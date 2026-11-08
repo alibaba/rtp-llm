@@ -61,36 +61,7 @@ class SourceModel(FakeMultiModalEmbeddingInterface):
         return torch.tensor([[len(data[0])]], dtype=torch.float32), None
 
 
-class SourceProvider(GreenNetProvider):
-    def __init__(self, passed=True, hold=False):
-        self.passed = passed
-        self.release = threading.Event()
-        if not hold:
-            self.release.set()
-        self.calls = []
-        self.request_ids = []
-
-    def is_enabled(self):
-        return True
-
-    async def preprocess_and_submit(self, *args):
-        raise AssertionError("worker-source path must not use URL rewriting")
-
-    async def submit_sources(self, request, mm_inputs, sources):
-        self.calls.append(([item.url for item in mm_inputs], list(sources)))
-        self.request_ids.append(request.id)
-        provider = self
-
-        class Handle(GreenNetHandle):
-            async def wait_result(self):
-                while not provider.release.is_set():
-                    await asyncio.sleep(0.001)
-                return GreenNetVerdict(provider.passed, 1 if provider.passed else 2)
-
-            def cancel(self):
-                pass
-
-        return Handle()
+from rtp_llm.multimodal.test.remote_embedding_test_helpers import SourceProvider
 
 
 class ControlledExecutor(PreprocessExecutor):
@@ -512,6 +483,17 @@ class InspectionPipelineTest(TestCase):
         )
         self.assertAlmostEqual(values[GaugeMetrics.VIT_PREPROCESS_RETURN_RT_METRIC], 50)
 
+    def test_preprocess_benchmark_logger_failure_does_not_change_result(self):
+        payload = PreprocessTaskResult(None, 50, 10, [], 10.3, 10.35)
+        item = SimpleNamespace(
+            preprocess_submitted_at=10.0, preprocess_received_at=10.4
+        )
+        with patch.dict(os.environ, {"MM_EMB_BENCHMARK_TIMING": "1"}), patch(
+            "rtp_llm.multimodal.mm_preprocess.logging.info",
+            side_effect=RuntimeError("sink"),
+        ), patch("rtp_llm.metrics.kmonitor.report"):
+            _report_result_path(item, payload)
+
     def test_sources_are_optional_and_survive_worker_pickle(self):
         model = SourceModel()
         media = [self._make_input("https://example.com/a.jpg")]
@@ -555,7 +537,20 @@ class InspectionPipelineTest(TestCase):
             engine.stop()
 
     def test_waiting_for_audit_releases_thread_but_not_admission(self):
-        model, provider = SourceModel(), SourceProvider(hold=True)
+        class ReinspectionProvider(SourceProvider):
+            async def preprocess_and_submit(self, request, inputs):
+                # Once async work finishes, dev re-inspects cached results for
+                # the consuming request. The first inspection must still use
+                # the original worker sources.
+                if request.id not in self.request_ids:
+                    raise AssertionError("initial inspection skipped worker sources")
+                handle = await self.submit_sources(
+                    request, inputs, [item.url.encode() for item in inputs]
+                )
+                handle.rewritten_inputs = inputs
+                return handle
+
+        model, provider = SourceModel(), ReinspectionProvider(hold=True)
         engine = self._make_engine(model)
         engine._inspection._greennet_provider = provider
         engine._async_compute_executor.shutdown()
@@ -640,6 +635,74 @@ class InspectionPipelineTest(TestCase):
         finally:
             release.set()
             engine.stop()
+
+
+class RemoteIdentityWorkerTest(TestCase):
+    def test_actual_decoder_identity_crosses_spawn_without_original_bytes(self):
+        import base64
+        import hashlib
+        import io
+
+        from PIL import Image
+
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            V41ImageProcessorConfig,
+        )
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision import (
+            DeepSeekV41VisionEmbedding,
+        )
+
+        image = io.BytesIO()
+        Image.new("RGB", (42, 42), "red").save(image, format="PNG")
+        media = image.getvalue()
+        context = multiprocessing.get_context("spawn")
+        release, cancelled = context.Event(), context.Event()
+        records = context.Queue()
+        config = VitConfig()
+        config.mm_preprocess_max_workers = 1
+        config.mm_remote_cache_enable = True
+        config.url_cache_item_num = config.mm_cache_item_num = 0
+        executor = MultiprocessPreprocessExecutor(
+            context,
+            config,
+            dict(processor_config=V41ImageProcessorConfig(vision_min_pixels=1764)),
+            DeepSeekV41VisionEmbedding.preprocess_input,
+            inspection_factory=partial(
+                WorkerSourceProvider, release, records, cancelled
+            ),
+        )
+        item = MMWorkItem(
+            [
+                helpers.MMProcessEngineGreenNetTest._make_input(
+                    self, "data:image/png;base64," + base64.b64encode(media).decode()
+                )
+            ],
+            deadline=time.monotonic() + 30,
+        )
+        item.capture_inspection_sources = True
+        item.inspection_request = SimpleNamespace(id="identity", input_index_offset=0)
+        try:
+            executor.submit(item)
+            wire_result = item.future.get(timeout=30).result
+            self.assertEqual(wire_result.inspection_sources, [])
+            self.assertEqual(
+                wire_result.source_identity.sha256, hashlib.sha256(media).hexdigest()
+            )
+            self.assertEqual(wire_result.source_identity.nbytes, len(media))
+            executor.get_result(item)
+            self.assertEqual(item.source_identity, wire_result.source_identity)
+            self.assertIsNone(item.inspection_sources)
+            self.assertFalse(item.inspection_future.done())
+            worker_record = records.get(timeout=5)
+            self.assertNotEqual(worker_record[0], os.getpid())
+            self.assertEqual(worker_record[4], [media])
+            release.set()
+            self.assertTrue(item.inspection_future.result(5).passed)
+        finally:
+            release.set()
+            executor.shutdown()
+            records.close()
+            records.join_thread()
 
 
 if __name__ == "__main__":

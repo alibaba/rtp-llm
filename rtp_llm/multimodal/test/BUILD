@@ -202,14 +202,14 @@ py_library(
 py_test(
     name = "mm_inspection_pipeline_test",
     srcs = ["mm_inspection_pipeline_test.py"],
-    deps = [":process_engine_test_helpers"],
+    deps = [":remote_embedding_test_helpers", ":process_engine_test_helpers"],
     data = [":testdata"],
 )
 
 py_test(
     name = "mm_remote_embedding_cache_test",
     srcs = ["mm_remote_embedding_cache_test.py"],
-    deps = [":process_engine_test_helpers"],
+    deps = [":remote_embedding_test_helpers", ":process_engine_test_helpers"],
     exec_properties = {"gpu": "A10_CU13"},
     tags = ["A10_CU13"],
 )
@@ -371,4 +371,44 @@ cuda13_sm100_py_test(
     deps = ["//rtp_llm:testlib"],
     size = "large",
     env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
+)
+
+py_test(
+    name = "mm_remote_embedding_engine_test",
+    srcs = ["mm_remote_embedding_engine_test.py"],
+    deps = [":remote_embedding_test_helpers", "//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_kvcm_emb_client_integration_test",
+    timeout = "long",
+    srcs = [
+        "mm_kvcm_emb_client_integration_test.py",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+cuda13_sm100_py_test(
+    name = "registered_object_transport_test",
+    srcs = ["registered_object_transport_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
+)
+
+py_library(
+    name = "remote_embedding_test_helpers",
+    testonly = True,
+    srcs = ["remote_embedding_test_helpers.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "registered_object_transport_failure_test",
+    srcs = ["registered_object_transport_test.py"],
+    main = "registered_object_transport_test.py",
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "GPU_COUNT": "0"},
 )
