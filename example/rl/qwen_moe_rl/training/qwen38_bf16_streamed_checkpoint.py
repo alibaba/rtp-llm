@@ -244,6 +244,83 @@ class LocalPinnedShardProvider:
                 'local_snapshot_integrity_must_be_verified_externally':True}
 
 
+def prepare_initial_master_allocator(model):
+    """Opt-in training storage layout, while all already-sharded weights are meta.
+
+    Keep the process/native IPC environment unchanged. The original verl naive
+    update still switches to False before the independent CanonicalExport CUDA
+    backing exists, and restores True after the real transaction/consumer.
+    """
+    if os.environ.get('Q38_INITIAL_MASTER_EXPANDABLE_SEGMENTS')!='1':return None
+    import hashlib,inspect,torch
+    import verl.utils.device as device_utils
+    expected_device='52c5dd8dc3e4afc3e0d67756d3d4995282246b98b767be080c28448353c1ad11'
+    expected_to_empty='994daf3cc973b29eea288cd6207676a4069d8fe962d48a84bbe1dfe8ac85bbb7'
+    if (hashlib.sha256(Path(device_utils.__file__).read_bytes()).hexdigest()!=expected_device
+            or hashlib.sha256(inspect.getsource(torch.nn.Module.to_empty).encode()).hexdigest()!=expected_to_empty
+            or inspect.unwrap(type(model).to_empty) is not torch.nn.Module.to_empty):
+        raise RuntimeError('Review the exact initial-shard allocation and allocator setter sources')
+    parameters=list(model.parameters())
+    if (not parameters or any(not p.to_local().is_meta or p.dtype!=torch.bfloat16 for p in parameters)
+            or not torch.cuda.is_initialized() or torch.cuda.memory.get_allocator_backend()!='native'
+            or os.environ.get('PYTORCH_ALLOC_CONF')!='backend:native,expandable_segments:False'
+            or os.environ.get('PYTORCH_CUDA_ALLOC_CONF')):
+        raise RuntimeError('Initial expandable training allocation requires fresh BF16 meta shards and the unchanged native IPC environment')
+    before=torch._C._accelerator_getAllocatorSettings()
+    torch.cuda.synchronize();torch.cuda.empty_cache()
+    device_utils.set_expandable_segments(True)
+    after=torch._C._accelerator_getAllocatorSettings()
+    if 'expandable_segments:True' not in after.replace(' ',''):
+        raise RuntimeError('Initial training allocation did not switch to expandable segments')
+    return dict(schema='q38-initial-BF16-shard-training-allocator-v1',
+        after_FSDP_sharding_before_first_to_empty=True,all_parameter_local_shards_meta_before=True,
+        parameter_count=len(parameters),local_parameter_numel=sum(p.to_local().numel() for p in parameters),
+        active_allocator_settings_before=before,active_allocator_settings_after=after,
+        initial_training_expandable_segments=True,IPC_allocator_environment=os.environ['PYTORCH_ALLOC_CONF'],
+        allocator_backend='native',setter_source_sha256=expected_device,to_empty_source_sha256=expected_to_empty,
+        original_naive_native_False_then_independent_backing_then_True_unchanged=True)
+
+
+def audit_initial_master_segments(model):
+    """Read actual storage/segment metadata; never copy policy tensor values."""
+    import bisect,torch
+    segments=[s for s in torch.cuda.memory_snapshot() if s['device']==torch.cuda.current_device()]
+    segments.sort(key=lambda row:row['address']);addresses=[s['address'] for s in segments]
+    totals={'expandable':0,'nonexpandable':0,'unknown':0};counts={k:0 for k in totals};large_false=[];examples=[]
+    local_numel=0
+    for name,p in model.named_parameters():
+        value=p.to_local();local_numel+=value.numel()
+        if not value.numel():continue
+        pointer=value.data_ptr();end=pointer+value.numel()*value.element_size()
+        index=bisect.bisect_right(addresses,pointer)-1
+        segment=segments[index] if index>=0 else None
+        if segment is None or end>segment['address']+segment['total_size']:
+            category='unknown'
+        else:
+            flag=segment.get('is_expandable')
+            category='expandable' if flag is True else 'nonexpandable' if flag is False else 'unknown'
+        size=value.numel()*value.element_size();totals[category]+=size;counts[category]+=1
+        # Torch's small-pool boundary includes requests exactly one MiB. An
+        # existing live control allocation can keep that small segment alive.
+        if category=='nonexpandable' and size>1024**2:large_false.append(name)
+        if category!='expandable' and len(examples)<16:
+            examples.append(dict(name=name,pointer=pointer,end=end,local_parameter_bytes=size,
+                actual_device=str(value.device),category=category,
+                segment=None if segment is None else {key:segment.get(key) for key in ('address','total_size','device','is_expandable','segment_type','stream')}))
+    record=dict(schema='q38-initial-master-real-storage-segments-v1',
+        local_parameter_numel=local_numel,local_parameter_bytes_by_segment_type=totals,
+        parameter_count_by_segment_type=counts,large_nonexpandable_master_parameters=large_false,
+        small_preexisting_control_pool_parameter_bytes_allowed_at_most=64*1024**2,
+        actual_segment_count=len(segments),actual_expandable_segment_count=sum(s.get('is_expandable') is True for s in segments),
+        active_allocator_settings=torch._C._accelerator_getAllocatorSettings(),
+        bounded_nonexpanded_or_unknown_examples=examples,
+        no_weight_tensor_values_copied_by_observer=True,IPC_environment_not_modified=True)
+    model._q38_initial_master_segment_diagnostic=record
+    if totals['unknown'] or large_false or totals['nonexpandable']>64*1024**2:
+        raise RuntimeError('Initial BF16 shard storage did not use the requested expandable training layout: '+json.dumps(record))
+    return record
+
+
 def load_checkpoint_shards(model, full_state, device_mesh=None, cpu_offload=None):
     import torch
     import torch.distributed as dist
@@ -266,7 +343,9 @@ def load_checkpoint_shards(model, full_state, device_mesh=None, cpu_offload=None
     if coverage.tolist() != [WORLD_SIZE*(WORLD_SIZE+1)//2, WORLD_SIZE]:
         raise RuntimeError('Actual training-group communication preflight failed before weight-file open')
     saved, aliases = save_buffers(model); started = time.time()
+    initial_allocator=prepare_initial_master_allocator(model)
     model.to_empty(device=device)
+    initial_segments=audit_initial_master_segments(model) if initial_allocator is not None else None
     records = [];files=defaultdict(list)
     for name,parameter in model.named_parameters():
         mapped=sources.get(name);canonical_name=mapped['canonical_name'] if mapped else name
@@ -315,6 +394,8 @@ def load_checkpoint_shards(model, full_state, device_mesh=None, cpu_offload=None
              'all_master_dtype': 'bfloat16', 'official_source_dtype': 'bfloat16',
              'maximum_source_slice_bytes': max(row['maximum_source_slice_bytes'] for row in records),
              'buffer_values_and_aliases_verified': True, 'source_slices': records}
+    audit['initial_master_allocator']=initial_allocator
+    audit['initial_master_storage_segments']=initial_segments
     target = Path(os.environ['Q38_TRAINING_AUDIT_DIR']); target.mkdir(parents=True, exist_ok=True)
     with (target/f'checkpoint-load-rank{dist.get_rank()}.json').open('x') as stream:
         json.dump(audit, stream);stream.write('\n')

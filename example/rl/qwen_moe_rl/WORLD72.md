@@ -66,6 +66,16 @@ is 857362857856 bytes (798.481384 GiB), including a 96 GiB reserve. This is a st
 accepted full-model peak; clean checkpoint page cache must remain reclaimable.
 The BF16 master/moment precision and bounded FP32 optimizer math are unchanged.
 
+The recipe sets `Q38_INITIAL_MASTER_EXPANDABLE_SEGMENTS=1` before the first
+CUDA materialization of the already-sharded BF16 policy. The loader verifies
+the original allocator setter and `Module.to_empty`, then records each shard
+against actual allocator segment metadata. Only a bounded existing small
+control pool may remain non-expandable. The native IPC environment stays
+False: the original naive sync switches to False before separately allocating
+the CanonicalExport backing, and restores True after the actual transaction.
+Four-GPU HF/FSDP update and independent CudaIpcV2-consumer qualification does
+not establish full-model memory capacity or cross-node compatibility.
+
 `Q38_OOM_ALLOCATOR_AUDIT=1` records allocator block metadata only after an
 actual CUDA OOM. It preserves the original exception and does not add CUDA
 operations to the successful path or save model, gradient or optimizer tensor

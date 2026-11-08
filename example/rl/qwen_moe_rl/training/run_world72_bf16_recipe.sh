@@ -19,6 +19,8 @@ export Q38_HF_RTP_REPORT_ONLY=1
 export Q38_MICRO_BOUNDARY_RELEASE_CACHE=1
 # On a genuine CUDA OOM only, preserve allocator block-state statistics before unwinding.
 export Q38_OOM_ALLOCATOR_AUDIT=1
+# Training master shards start expandable; native IPC keeps its original False transaction boundary.
+export Q38_INITIAL_MASTER_EXPANDABLE_SEGMENTS=1
 # Optional authenticated recovery of original initial-policy episodes; never fabricate rollouts.
 if [[ "${Q38_INITIAL_POLICY_REPLAY:-0}" == 1 ]]; then
   : "${Q38_INITIAL_POLICY_REPLAY_MANIFEST:?Pin the immutable original-episode manifest}"
