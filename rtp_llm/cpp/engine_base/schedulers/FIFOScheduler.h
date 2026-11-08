@@ -52,9 +52,9 @@ private:
         GROUP,
     };
 
-    // Per-round admission accounting for admitWaitingStreams(). Only streams that actually
-    // made scheduling progress contribute, so a stream whose KV malloc failed and stayed
-    // WAITING does not consume this round's token budget.
+    // Per-round admission accounting for admitWaitingStreams(). Continuous prefill
+    // also includes outstanding reservations from earlier rounds; a failed KV
+    // malloc never owns a reservation.
     struct ScheduleRuntime {
         size_t admitted_stream_count                     = 0;
         size_t admitted_prefill_token_size_with_cache    = 0;
@@ -62,6 +62,7 @@ private:
         size_t admitted_prefill_sequence_count           = 0;
         size_t admitted_prefill_token_size_without_cache = 0;
         size_t newly_inited_kv_streams                   = 0;
+        bool   includes_running_streams                  = false;
     };
 
     const char* schedulerName() const override {
@@ -79,7 +80,9 @@ private:
                                   size_t                   admitted_tokens,
                                   size_t                   admitted_max_seq_len,
                                   size_t                   admitted_sequence_count,
-                                  const GenerateStreamPtr& candidate) const;
+                                  const GenerateStreamPtr& candidate,
+                                  bool                     running_included = false) const;
+    bool   usesChunkedPrefillAdmission() const;
     size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
     size_t prefillSeqLenWithCache(const GenerateStreamPtr& stream) const;
     size_t prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
@@ -96,7 +99,8 @@ private:
     // finalized. FIFOSchedulerBase::evaluateWaitingStreams() is left untouched for the other
     // FIFOSchedulerBase subclasses.
     void admitWaitingStreams(std::list<GenerateStreamPtr>&       waiting_streams,
-                             const std::list<GenerateStreamPtr>& already_admitted_streams);
+                             const std::list<GenerateStreamPtr>& already_admitted_streams,
+                             bool                                prepared_only = false);
 
     void cancelGroups(StreamGroupQueue& group_queue);
     void evaluateWaitingGroupQueue();
