@@ -2,7 +2,7 @@
 import hashlib,json,os,time
 from pathlib import Path
 from cpu_admission import evaluate
-from bounded_reclaim import build_plan,ReclaimCursor,PinnedSources
+from bounded_reclaim import build_plan,ReclaimCursor,PinnedSources,_safe_failure
 
 MAX_ROUNDS=4096
 
@@ -95,6 +95,19 @@ def _reclaim_world(dist,group,local,all_rows,*,root,run_id,world,reserve,
                     finished_unix=time.time(),finished_monotonic=time.monotonic())
             except Exception as exc:
                 action['error']=type(exc).__name__+': '+str(exc)
+                # The action may have failed before the cursor created its
+                # own FAILED marker. Persist only fixed safe diagnostics in
+                # this run's exclusive directory; never mask the original.
+                try:
+                    directory=root/'cpu-reclaim';directory.mkdir(parents=True,exist_ok=True)
+                    record=dict(schema='q38-reclaim-action-failed-no-replay-v1',run_id=run_id,
+                        hostname=host,coordinator_pid=os.getpid(),phase=phase,
+                        failure_type=type(exc).__name__,failed_unix=time.time(),
+                        partial_current_batch_may_have_executed=cursor is not None,
+                        source_close_error_type=action.get('source_close_error_type'),**_safe_failure(exc))
+                    with (directory/'ACTION-FAILED.json').open('x') as stream:
+                        json.dump(record,stream,indent=2);stream.write('\n')
+                except BaseException:pass
         actions=_gather(dist,action_group,action,world)
         if any(row.get('error') for row in actions):raise MemoryError('A node reclaim action failed; no Adam update')
         local_actions=[row for row in actions if row['hostname']==host and row.get('leader')]

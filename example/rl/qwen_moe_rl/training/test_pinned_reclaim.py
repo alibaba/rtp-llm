@@ -76,4 +76,11 @@ class PinnedReclaimTest(unittest.TestCase):
         with patch('bounded_reclaim.os.listdir',return_value=[]),patch('bounded_reclaim.resource.getrlimit',return_value=(100,100)):
             with self.assertRaisesRegex(RuntimeError,'Insufficient file descriptor reserve'):PinnedSources()
 
+    def test_prior_action_failure_prevents_a_fresh_cursor(self):
+        with tempfile.TemporaryDirectory() as td:
+            model,run,name,pin,plan=self.setup_plan(Path(td))
+            directory=run/'cpu-reclaim';directory.mkdir();(directory/'ACTION-FAILED.json').write_text('{}')
+            with self.assertRaisesRegex(RuntimeError,'action failure marker'):ReclaimCursor(plan,pinned=pin)
+            pin.close()
+
 if __name__=='__main__':unittest.main()

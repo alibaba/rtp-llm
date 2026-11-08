@@ -44,6 +44,14 @@ SAFE_FAILURE_MESSAGES=frozenset({
     'Invalid per-batch advice limit','Invalid wider scan progress',
     'Wider scan escaped policy tensor','No progress within exact source plan',
     'Pinned checkpoint root differs',
+    'Official index SHA mismatch','Incomplete or mismatched current-run checkpoint receipt',
+    'A current source/destination slice is not fully verified',
+    'Complete current source hash list is missing','Canonical source differs from official index',
+    'Incomplete safetensors prefix','Invalid header length','Incomplete safetensors header',
+    'Source read count cannot cover fragments','Receipt shard byte total mismatch',
+    'Current receipt key/file completion mismatch','Four completed ranks disagree on canonical source keys',
+    'Four completed ranks disagree on source files','Wider tensor outside file',
+    'Insufficient file descriptor reserve for pinned checkpoint sources',
 })
 
 def _safe_failure(error):
@@ -310,6 +318,8 @@ class ReclaimCursor:
         self.wide_scanned=0
         self.pending_resident=deque()
         self.directory=root/'cpu-reclaim';self.directory.mkdir(parents=True,exist_ok=True)
+        if os.path.lexists(self.directory/'ACTION-FAILED.json'):
+            raise RuntimeError('A reclaim action failure marker forbids a new claim')
         claim=dict(schema='q38-node-reclaim-exclusive-claim-v1',run_id=plan['run_id'],hostname=plan['hostname'],
             coordinator_pid=os.getpid(),ranks=plan['ranks'],max_total_bytes=max_total,created_unix=time.time())
         claim_text=json.dumps(claim,indent=2)+'\n'
@@ -328,6 +338,8 @@ class ReclaimCursor:
             raise RuntimeError('Reclaim cursor used outside its original coordinator process')
         if os.path.lexists(self.directory/'FAILED.json'):
             raise RuntimeError('A reclaim failure marker forbids further advice')
+        if os.path.lexists(self.directory/'ACTION-FAILED.json'):
+            raise RuntimeError('A reclaim action failure marker forbids further advice')
         fd=os.open(self.directory/'CLAIM.json',os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW)
         try:
             stat=os.fstat(fd)

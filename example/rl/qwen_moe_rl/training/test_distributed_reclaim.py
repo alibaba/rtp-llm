@@ -97,6 +97,12 @@ class ReclaimWorldTest(unittest.TestCase):
                 for t in threads:t.join(8)
             self.assertEqual(len(result),4);self.assertTrue(all(not t.is_alive() for t in threads))
             if mode in ('plan_failure','plan_close_failure'):source.return_value.close.assert_called_once_with()
+            if mode in ('plan_failure','plan_close_failure'):
+                failure=json.loads((root/'cpu-reclaim'/'ACTION-FAILED.json').read_text())
+                self.assertEqual(failure['failure_type'],'ValueError');self.assertIsNone(failure['failure_message'])
+                self.assertTrue(failure['failure_message_redacted']);self.assertNotIn('plan failed',json.dumps(failure))
+                self.assertFalse(failure['partial_current_batch_may_have_executed'])
+                self.assertEqual(failure['source_close_error_type'],'OSError' if mode=='plan_close_failure' else None)
             if mode=='plan_close_failure':
                 self.assertEqual(captured[0]['error'],'ValueError: plan failed')
                 self.assertEqual(captured[0]['source_close_error_type'],'OSError')

@@ -20,6 +20,7 @@ export Q38_LOGPROB_REPORT_ONLY=1
 export Q38_OPTIONAL_NUMERICAL_PROBES="${Q38_OPTIONAL_NUMERICAL_PROBES:-2}"
 export Q38_RUN_ID="${Q38_RUN_ID:?Supply the unique run identifier}"
 export Q38_CPU_FIRST_ADAM_ADMISSION_REQUIRED=1 Q38_CPU_CACHE_RECLAIM_ENABLED=1
+export Q38_CPU_RECLAIM_ACTION_TIMEOUT_SECONDS=600
 # Preserve BF16 Adam state through the verified first-step reuse path and
 # require the world-synchronized CPU admission before later training batches.
 export Q38_FIRST_ADAM_REUSE_CPU_SPILL=1 Q38_NEXT_BATCH_CPU_ADMISSION_REQUIRED=1
