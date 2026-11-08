@@ -121,3 +121,12 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "tokenizer_prefix_cache_test",
+    srcs = ["tokenizer_prefix_cache_test.py"],
+    deps = [
+        "//rtp_llm:rtp_llm_frontend_lib",
+        "//rtp_llm:testlib",
+    ],
+)

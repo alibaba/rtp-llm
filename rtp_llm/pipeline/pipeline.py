@@ -72,9 +72,11 @@ class Pipeline(object):
         parallelism_config=None,
         prefill_cp_config=None,
         model_config: Optional[Any] = None,  # ModelConfig; drives cache-key routing seed
+        prefix_cache: Optional[Any] = None,  # TokenizerPrefixCache; append-only prompt reuse
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
+        self._prefix_cache = prefix_cache
         self._special_tokens: SpecialTokens = special_tokens
         self._mm_token: str = ""
         if mm_related_params:
@@ -103,6 +105,8 @@ class Pipeline(object):
 
     def encode(self, prompt: str):
         assert self.tokenizer is not None
+        if self._prefix_cache is not None:
+            return self._prefix_cache.encode(prompt)
         return self.tokenizer.encode(prompt)
 
     def decode(self, token_id: int):
@@ -230,7 +234,7 @@ class Pipeline(object):
         # 在 tokenizer.encode(prompt) 之前解析及填充 banned_combo_token_ids，
         # 避免重复编码 prompt。
         parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
-        token_ids = self.tokenizer.encode(prompt)
+        token_ids = self.encode(prompt)
 
         # Prompt scoring constraints (max_new_tokens=1, non-streaming, no reuse/PD-sep) are
         # already enforced by validate() → enforce_prompt_scoring_constraints() during config creation.
@@ -685,7 +689,7 @@ class Pipeline(object):
                     ExceptionType.EMPTY_PROMPT_ERROR,
                     "prompt should have at least one token!",
                 )
-            token_ids = self.tokenizer.encode(prompt)
+            token_ids = self.encode(prompt)
 
             if generate_config.return_prompt_logits:
                 prompt_len = len(token_ids)
