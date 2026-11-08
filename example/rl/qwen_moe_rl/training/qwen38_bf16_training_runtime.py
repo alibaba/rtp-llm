@@ -25,20 +25,85 @@ _INSTALLED=False
 def _is_target(engine):return is_qwen38(engine.model_config.hf_config)
 
 
-def _optimizer_step_after_global_clip(engine,norm,reduce_changed):
+def _optimizer_step_after_global_clip(engine,norm,reduce_changed,update_vote=None):
     """Opt-in acceptance gate; leave valid optimizer arithmetic untouched."""
     required=os.environ.get('RLLM_REQUIRE_REAL_UPDATE')=='1'
     engine._q38_last_real_update_gate=dict(enabled=required,global_gradient_norm=float(norm),
                                           global_changed_weight_elements=None)
     if required and (not math.isfinite(float(norm)) or norm<=0):
         raise RuntimeError('RLLM_REQUIRE_REAL_UPDATE refuses nonpositive/nonfinite global gradients before Adam allocation/scan')
-    engine.optimizer.step()
+    error=None
+    try:engine.optimizer.step()
+    except BaseException as exc:error=exc
+    if update_vote is not None:update_vote('optimizer',error)
+    if error is not None:raise error
     if required:
         changed=int(reduce_changed(int(engine.optimizer.changed_weight_elements)))
         engine._q38_last_real_update_gate['global_changed_weight_elements']=changed
         if changed<=0:
             raise RuntimeError('RLLM_REQUIRE_REAL_UPDATE refuses a successful step with no globally changed BF16 weights')
         engine._q38_last_real_update_gate['changed_count_world_size']=WORLD_SIZE
+
+
+def _poison_reuse_engine(engine):
+    engine._q38_update_poisoned=True
+    engine._q38_gradient_store._reuse_failed=True
+    engine.optimizer._reuse_failed=True
+    engine._q38_phases.phase='failed'
+
+
+def _require_unpoisoned(engine):
+    if getattr(engine,'_q38_update_poisoned',False) or engine._q38_phases.phase=='failed':
+        raise RuntimeError('Failed optimizer state forbids training, export and refit')
+
+
+def _reuse_world_vote(dist,group,phase,error,world):
+    rank=dist.get_rank();rows=[None]*world
+    value=dict(rank=rank,phase=phase,passed=error is None,error=None if error is None else type(error).__name__+': '+str(error))
+    dist.all_gather_object(rows,value,group=group)
+    if ({r.get('rank') for r in rows}!=set(range(world)) or any(r.get('phase')!=phase or r.get('passed') is not True for r in rows)):
+        raise RuntimeError('A rank failed '+phase+'; partial updates are not rolled back')
+    return rows
+
+
+def _write_reuse_world_commit(engine,rank,world,votes):
+    directory=Path(os.environ['Q38_TRAINING_AUDIT_DIR']);directory.mkdir(parents=True,exist_ok=True)
+    steps=engine.optimizer.audit()['steps']
+    if len(steps)!=1:raise RuntimeError('World commit needs exactly one Adam step')
+    record=dict(schema='q38-reuse-world-update-vote-v1',run_id=os.environ['Q38_RUN_ID'],rank=rank,pid=os.getpid(),
+        world_size=world,step=steps[0],post_update_votes=votes,recorded_ns=time.time_ns(),
+        partial_failure_is_not_rolled_back=True)
+    path=directory/f'reuse-world-commit-rank{rank}-step{steps[0]}-{record["recorded_ns"]}.json'
+    with path.open('x') as stream:json.dump(record,stream);stream.write('\n')
+    return str(path)
+
+
+def _run_reuse_update(engine,norm,reduce_changed,audit,dist,world,commit_writer=None):
+    """No rank leaves for refit until step and audit/clear votes succeed."""
+    group=engine._q38_cpu_admission_group
+    vote=lambda phase,error:_reuse_world_vote(dist,group,phase,error,world)
+    failure=None
+    try:
+        _optimizer_step_after_global_clip(engine,norm,reduce_changed,update_vote=vote)
+        audit(engine,'optimizer-step')
+        if engine._q38_gradient_store._reuse_frozen:
+            engine.optimizer.clear_first_reuse_before_world_vote()
+        else:engine.optimizer.zero_grad()
+    except BaseException as exc:failure=exc
+    try:
+        rows=vote('post-update-audit-and-clear',failure)
+        if failure is not None:raise failure
+        commit_error=None;commit_path=None
+        try:commit_path=(commit_writer or _write_reuse_world_commit)(engine,dist.get_rank(),world,rows)
+        except BaseException as exc:commit_error=exc
+        vote('world-commit-evidence',commit_error)
+        if commit_error is not None:raise commit_error
+        if engine._q38_gradient_store._reuse_frozen:
+            engine.optimizer.release_first_reuse_after_world_commit()
+        engine._q38_reuse_world_commit=commit_path
+    except BaseException:
+        _poison_reuse_engine(engine)
+        raise
 
 
 def _audit(engine, boundary):
@@ -92,6 +157,7 @@ def install():
     original_step=Engine.optimizer_step
     original_to=Engine.to
     original_export=Engine.get_per_tensor_param
+    original_save=Engine.save_checkpoint
 
     def factory(hf_config):
         base=original_factory(hf_config)
@@ -211,6 +277,11 @@ def install():
         if set(overrides)-{'lr','betas','eps','weight_decay','maximize'}:
             raise ValueError('Review unsupported optimizer overrides instead of silently dropping them')
         options.update(overrides)
+        reuse=os.environ.get('Q38_FIRST_ADAM_REUSE_CPU_SPILL')=='1'
+        if reuse and os.environ.get('Q38_CPU_FIRST_ADAM_ADMISSION_REQUIRED')!='1':
+            raise ValueError('First-Adam reuse requires the world-wide CPU admission gate')
+        options['reuse_cpu_spill']=reuse
+        options['require_reuse_evidence']=reuse
         active=Bf16CpuAdamW(params,gradients=gradients,moments=moments,**options)
         self._q38_gradient_store=gradients
         self._q38_owned_numel=sum(local(p).numel() for p in params)
@@ -228,7 +299,7 @@ def install():
         module.register_forward_pre_hook(lambda _module,_inputs:self._q38_phases.require_training())
         return active
 
-    def step(self):
+    def _step_candidate(self):
         if not _is_target(self):return original_step(self)
         self._q38_phases.require_training()
         if self.scaler is not None:raise RuntimeError('A loss scaler changes the reviewed BF16 gradient path')
@@ -246,6 +317,9 @@ def install():
             changed=torch.tensor(count,device=torch.device('cuda',torch.cuda.current_device()),dtype=torch.int64)
             dist.all_reduce(changed,op=dist.ReduceOp.SUM)
             return changed.item()
+        if os.environ.get('Q38_FIRST_ADAM_REUSE_CPU_SPILL')=='1':
+            _run_reuse_update(self,norm,reduce_changed,_audit,dist,WORLD_SIZE)
+            return norm
         _optimizer_step_after_global_clip(self,norm,reduce_changed)
         _audit(self,'optimizer-step')
         # This is the committed optimizer boundary; the fixed initial profile
@@ -254,9 +328,18 @@ def install():
         self.optimizer.zero_grad()
         return norm
 
+    def step(self):
+        if not _is_target(self):return original_step(self)
+        _require_unpoisoned(self)
+        try:return _step_candidate(self)
+        except BaseException:
+            if os.environ.get('Q38_FIRST_ADAM_REUSE_CPU_SPILL')=='1':_poison_reuse_engine(self)
+            raise
+
     def to(self,device,model=True,optimizer=True,grad=True):
         if not _is_target(self) or not hasattr(self,'_q38_phases'):
             return original_to(self,device,model=model,optimizer=optimizer,grad=grad)
+        _require_unpoisoned(self)
         if str(device)=='cpu':
             if model and self._q38_phases.phase=='train':
                 if self._q38_gradient_store.slots:
@@ -274,6 +357,7 @@ def install():
 
     def export(self,*args,**kwargs):
         if not _is_target(self):return original_export(self,*args,**kwargs)
+        _require_unpoisoned(self)
         if self._q38_phases.phase=='train':
             audit_policy_before_rollout(self)
             self._q38_phases.prepare_rollout();self._q38_native_contexts_released=False
@@ -284,6 +368,10 @@ def install():
         # carries no Tensor/source view and therefore cannot pin the backing.
         self._q38_exporter.confirm_native_cleanup=self.q38_confirm_native_cleanup
         return self._q38_exporter,None
+
+    def save_checkpoint(self,*args,**kwargs):
+        if _is_target(self):_require_unpoisoned(self)
+        return original_save(self,*args,**kwargs)
 
     def confirm_cleanup(self,proof):
         if not _is_target(self):raise ValueError('Qwen3.8 cleanup proof applies only to its dedicated actor')
@@ -311,6 +399,7 @@ def install():
     BaseEngineCtx._context_switch=context_switch
     Engine._build_optimizer=optimizer;Engine.optimizer_step=step;Engine.to=to
     Engine.get_per_tensor_param=export;Engine.q38_confirm_native_cleanup=confirm_cleanup
+    Engine.save_checkpoint=save_checkpoint
     # Actual verl's naive worker calls resume(weights) BEFORE it asks the
     # model engine for exported parameters. Offload masters before that resume
     # can allocate the native policy; otherwise 125GiB+native cannot fit.
@@ -320,6 +409,7 @@ def install():
     async def update_before_native_resume(self,global_steps=None,mode='auto'):
         actor=getattr(self,'actor',None);active=getattr(actor,'engine',None)
         if active is not None and _is_target(active):
+            _require_unpoisoned(active)
             effective=mode if mode!='auto' else self.config.rollout.checkpoint_engine.backend
             if effective!='naive':
                 raise ValueError('The single-instance leased source path requires direct colocated naive transfer')

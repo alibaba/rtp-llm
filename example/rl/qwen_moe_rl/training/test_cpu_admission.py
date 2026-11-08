@@ -27,6 +27,21 @@ def decide(s=None,p=None):
                     expected_cid=CID,expected_time_namespace='time:[1]',now=NOW,monotonic_now=MONO)
 
 class AdmissionTest(unittest.TestCase):
+    def test_first_step_reuse_credits_only_exact_verified_cpu_slots(self):
+        p=peers()
+        for row in p:row.update(reuse_plan_verified=True,reusable_cpu_gradient_bytes=20*GIB,reuse_plan_sha256='a'*64)
+        result=evaluate(snapshot(),p,run_id=RUN,hostname=HOST,expected_cid=CID,
+            expected_time_namespace='time:[1]',now=NOW,monotonic_now=MONO,reuse_enabled=True)
+        for row in result['cgroups']:
+            self.assertEqual(row['pending_moment_bytes'],80*GIB)
+            self.assertEqual(row['approved_reusable_cpu_gradient_bytes'],80*GIB)
+            self.assertEqual(row['required_bytes'],380*GIB)
+        self.assertEqual(decide(snapshot(),p)['cgroups'][0]['pending_moment_bytes'],160*GIB)
+        for key,value in [('reuse_plan_verified',False),('reusable_cpu_gradient_bytes',19*GIB),('reuse_plan_sha256','z'*64)]:
+            bad=copy.deepcopy(p);bad[0][key]=value
+            with self.assertRaises(ValueError):
+                evaluate(snapshot(),bad,run_id=RUN,hostname=HOST,expected_cid=CID,
+                    expected_time_namespace='time:[1]',now=NOW,monotonic_now=MONO,reuse_enabled=True)
     def test_current_already_includes_non_state_reserve(self):
         result=decide();self.assertTrue(result['passed'])
         for row in result['cgroups']:

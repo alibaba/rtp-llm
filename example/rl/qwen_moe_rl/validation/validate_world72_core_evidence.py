@@ -25,6 +25,55 @@ def finite(value):return type(value) in (float,int) and math.isfinite(value)
 def digest(value):return isinstance(value,str) and len(value)==64 and all(c in '0123456789abcdef' for c in value)
 
 
+def validate_first_reuse_evidence(pre,raw_sha,opt,*,rank,pid,loaded_numel,update_time_ns,expected_run_id):
+    """Validate pre-overwrite FP32 facts and post-overwrite ownership separately."""
+    commit=opt.get('first_adam_reuse_commit') or {};link=commit.get('pre_update_evidence') or {}
+    store=pre.get('gradient_store') or {};plan=pre.get('slot_plan') or {};post=opt.get('gradient_store') or {}
+    if (not isinstance(expected_run_id,str) or not expected_run_id or pre.get('run_id')!=expected_run_id
+            or pre.get('schema')!='q38-first-adam-pre-update-gradient-v1' or pre.get('rank')!=rank
+            or pre.get('pid')!=pid or pre.get('world_size')!=WORLD or pre.get('captured_before_any_optimizer_write') is not True
+            or pre.get('tensor_payload_included') is not False or link.get('pre_update_sha256')!=raw_sha
+            or pre.get('generation')!=plan.get('generation') or commit.get('pre_update_generation')!=pre.get('generation')
+            or pre.get('expected_local_numel')!=loaded_numel or store.get('gradient_numel')!=loaded_numel
+            or not finite(pre.get('recorded_unix')) or type(update_time_ns) is not int or pre['recorded_unix']>=update_time_ns/1e9
+            or store.get('all_gradients_clipped') is not True or commit.get('complete') is not True
+            or commit.get('consumed_gradients_still_resident_as_fp32') is not False):
+        raise ValueError('Missing, stale or inconsistent pre-overwrite gradient evidence')
+    slots=plan.get('slots');consumed=commit.get('consumed_slots')
+    if not isinstance(slots,list) or not isinstance(consumed,list):raise ValueError('Missing slot metadata')
+    if len({row.get('name') for row in slots})!=len(slots):raise ValueError('Duplicate planned slot names')
+    if (any(type(row.get('numel')) is not int or row['numel']<0 or row.get('bytes')!=row['numel']*4 for row in slots)
+            or sum(row['numel'] for row in slots)!=loaded_numel or plan.get('planned_moment_bytes')!=loaded_numel*4):
+        raise ValueError('Pre-update slot elements do not cover the actual shard')
+    present=[row for row in slots if row.get('tier')!='empty' or row.get('slot_present') is True]
+    contributions=[row.get('contributions') for row in present]
+    if (any(type(n) is not int or n<1 for n in contributions) or len(present)!=store.get('gradient_count')
+            or min(contributions,default=0)!=store.get('microbatch_contributions_min')
+            or max(contributions,default=0)!=store.get('microbatch_contributions_max')
+            or store.get('retained_bytes')+store.get('cpu_spilled_bytes')!=loaded_numel*4):
+        raise ValueError('Pre-update contribution or physical gradient bytes differ from slot metadata')
+    cpu=[row for row in slots if row.get('tier')=='cpu']
+    if any(row.get('numel',0)<=0 or row.get('device')!='cpu' or row.get('storage_nbytes')!=row.get('bytes')
+            or row.get('storage_offset')!=0 or row.get('storage_use_count')!=2 or row.get('tensor_use_count')!=1
+            for row in cpu):raise ValueError('Unverified or nonexclusive CPU source slot')
+    if len(consumed)!=len(cpu):raise ValueError('Consumed slot count differs from plan')
+    for old,new in zip(cpu,consumed):
+        if (old.get('name')!=new.get('name') or old.get('bytes')!=new.get('gradient_bytes')
+                or old.get('storage_id')!=new.get('storage_id') or old.get('storage_pointer')!=new.get('storage_pointer')
+                or old.get('contributions')!=new.get('contributions') or new.get('all_chunks_read_before_overwrite') is not True
+                or new.get('first_dtype')!='bfloat16' or new.get('second_dtype')!='bfloat16'
+                or new.get('first_stride')!=[2] or new.get('second_stride')!=[2]):
+            raise ValueError('Consumed BF16 state does not bind its original CPU gradient slot')
+    reused=plan.get('reusable_bytes')
+    if (type(reused) is not int or reused<0 or reused!=sum(row['gradient_bytes'] for row in consumed)
+            or reused!=commit.get('consumed_cpu_gradient_bytes') or reused!=store.get('cpu_spilled_bytes')
+            or reused!=opt.get('moments',{}).get('cpu_moment_bytes_reusing_gradient')
+            or post.get('cpu_spilled_bytes')!=0 or post.get('consumed_gradient_slots')!=len(consumed)
+            or post.get('gradient_numel')+reused//4!=store.get('gradient_numel')):
+        raise ValueError('Physical reuse byte accounting differs from pre/post evidence')
+    return store
+
+
 def fp32_scores(values,bits):
     if not isinstance(values,list) or not values or not all(finite(v) for v in values):return False
     try:
@@ -34,14 +83,15 @@ def fp32_scores(values,bits):
 
 
 class Validator:
-    def __init__(self,roots,*,replay_manifest=None,replay_sha256=None,historical_roots=(),logprob_report_only=False,
-                 production_plan=None,production_plan_sha256=None,expected_run_id=None):
+    def __init__(self,roots,*,replay_manifest=None,replay_sha256=None,historical_roots=(),logprob_report_only=False,first_adam_reuse_required=False,production_plan=None,production_plan_sha256=None,expected_run_id=None):
         self.roots=[root.resolve() for root in roots]
         self.logprob_report_only=logprob_report_only
-        self.errors=[];self.inventory={};self.details={}
+        self.first_adam_reuse_required=first_adam_reuse_required
         self.production_plan_path=production_plan
         self.production_plan_sha256=production_plan_sha256
         self.expected_run_id=expected_run_id
+        self.errors=[];self.inventory={};self.details={}
+        self.reuse_pre={}
         self.initial_replay=None
         if replay_manifest is not None:
             from initial_replay_contract import InitialReplay
@@ -117,12 +167,45 @@ class Validator:
 
     def optimizer_updates(self,loads):
         grouped=defaultdict(dict)
+        reuse_pre=self.reuse_pre={}
+        for prepath,pre in self.records('pre-adam-reuse-rank*.json'):
+            rank=pre.get('rank')
+            self.need(rank not in reuse_pre,f'{prepath}: duplicate pre-Adam reuse record')
+            reuse_pre[rank]=(prepath,pre)
+        world_commits={}
+        for commitpath,commit in self.records('reuse-world-commit-rank*.json'):
+            key=(commit.get('step'),commit.get('rank'))
+            self.need(key not in world_commits,f'{commitpath}: duplicate reuse world commit')
+            world_commits[key]=(commitpath,commit)
         for path,row in self.records('optimizer-step-rank*.json'):
             opt=row.get('optimizer',{});steps=opt.get('steps',[])
             if not self.need(len(steps)==1 and type(steps[0]) is int and steps[0] in (1,2),f'{path}: expected actual optimizer step1 or2 only'):continue
             step=steps[0];rank=row.get('rank')
             self.need(rank not in grouped[step],f'{path}: duplicate optimizer update for rank{rank}/step{step}')
             grouped[step][rank]=(path,row)
+            enabled=opt.get('first_adam_reuse_enabled') is True
+            has_commit=opt.get('first_adam_reuse_commit') is not None
+            self.need('first_adam_reuse_enabled' not in opt or type(opt['first_adam_reuse_enabled']) is bool,
+                f'{path}: reuse mode must be a boolean')
+            self.need(enabled==has_commit and (not self.first_adam_reuse_required or enabled)
+                and (step!=1 or rank not in reuse_pre or enabled),
+                f'{path}: reuse configuration, commit and pre-update evidence disagree')
+            if opt.get('first_adam_reuse_enabled') is True:
+                replay=self.initial_replay
+                root=getattr(replay,'current_root',None)
+                root_path=Path(root) if isinstance(root,str) else None
+                expected_run_id=root_path.name if (getattr(replay,'valid',False) is True and root_path is not None
+                    and root_path.is_absolute() and root_path.parent.name=='runs' and '..' not in root_path.parts) else None
+                self.need(expected_run_id is not None,f'{path}: validated current-run replay identity is missing')
+                marker=world_commits.get((step,rank),(None,{}))[1];votes=marker.get('post_update_votes',[])
+                self.need(marker.get('schema')=='q38-reuse-world-update-vote-v1' and marker.get('rank')==rank
+                    and expected_run_id is not None and marker.get('run_id')==expected_run_id
+                    and marker.get('pid')==row.get('pid') and marker.get('world_size')==WORLD
+                    and marker.get('step')==step and type(marker.get('recorded_ns')) is int
+                    and marker['recorded_ns']>row.get('time_ns',marker['recorded_ns'])
+                    and len(votes)==WORLD and {vote.get('rank') for vote in votes}==set(range(WORLD))
+                    and all(vote.get('phase')=='post-update-audit-and-clear' and vote.get('passed') is True for vote in votes),
+                    f'{path}: complete world update/audit vote is missing')
             self.need(row.get('schema')=='qwen38-BF16-state-engine-boundary-v1' and row.get('world_size')==WORLD
                 and row.get('phase')=='train' and type(row.get('pid')) is int and row['pid']>0,
                 f'{path}: optimizer commit was not observed in the real train phase')
@@ -130,6 +213,13 @@ class Validator:
                 and opt.get('persistent_FP32_master_bytes')==opt.get('persistent_FP32_moment_bytes')==opt.get('disk_offload_bytes')==0,
                 f'{path}: persistent state precision/storage differs from the requested BF16 path')
             gradients=opt.get('gradient_store',{})
+            if step==1 and opt.get('first_adam_reuse_commit') is not None:
+                try:
+                    prepath,pre=reuse_pre[rank]
+                    gradients=validate_first_reuse_evidence(pre,hashlib.sha256(prepath.read_bytes()).hexdigest(),
+                        opt,rank=rank,pid=row['pid'],loaded_numel=loads[rank][1]['loaded_local_numel'],update_time_ns=row['time_ns'],expected_run_id=expected_run_id if enabled else None)
+                except (KeyError,TypeError,ValueError) as error:
+                    self.need(False,f'{path}: invalid first-Adam reuse evidence: {error}')
             self.need(gradients.get('stored_gradient_dtype')=='float32'
                 and gradients.get('independent_gradient_storage') is True
                 and gradients.get('captured_before_original_parameter_dtype_cast') is True
@@ -168,6 +258,12 @@ class Validator:
                     retained=rollout[-1].get('gpu_master_bytes')
                     self.need(type(before) is int and type(retained) is int and before<=retained+4*GIB,
                         f'{path}: unexplained CUDA allocation before restore can conceal a live32GiB refit backing')
+        for rank in set(grouped[1]) & set(grouped[2]):
+            first=grouped[1][rank][1].get('optimizer',{})
+            second=grouped[2][rank][1].get('optimizer',{})
+            self.need(first.get('first_adam_reuse_enabled')==second.get('first_adam_reuse_enabled')
+                and first.get('first_adam_reuse_commit')==second.get('first_adam_reuse_commit'),
+                f'rank{rank}: first-Adam reuse mode or historical commit changed between steps')
         summary=[]
         for step in (1,2):
             ranks=grouped[step]
@@ -423,6 +519,8 @@ class Validator:
                     if type(cpu) is int:spilled.append(cpu)
                 actual=updates.get(step,{}).get(rank)
                 store=actual[1].get('optimizer',{}).get('gradient_store',{}) if actual else {}
+                if step==1 and rank in self.reuse_pre and actual and actual[1].get('optimizer',{}).get('first_adam_reuse_commit') is not None:
+                    store=self.reuse_pre[rank][1].get('gradient_store',{})
                 self.need(store.get('microbatch_contributions_min')==store.get('microbatch_contributions_max')==count,
                     f'Update{step}/rank{rank}: actual optimizer did not consume every original micro contribution exactly once')
                 valid_ranks+=1
@@ -578,7 +676,41 @@ class Validator:
                 'The final actual policy2 re-probe differs from its last recorded full9DP numerical receipt')
         self.details['numerical_policies']=summary
 
+    def validate_reuse_plan_binding(self):
+        """Bind the opt-in profile to the caller-pinned, run-specific plan."""
+        args=(self.production_plan_path,self.production_plan_sha256,self.expected_run_id)
+        if not any(value is not None for value in args):
+            self.need(not self.first_adam_reuse_required,'Required first-Adam reuse needs a pinned current-run plan')
+            return
+        try:
+            if not all(value is not None for value in args) or not digest(self.production_plan_sha256):
+                raise ValueError('plan, SHA256 and run ID must be supplied together')
+            raw=Path(self.production_plan_path).read_bytes()
+            if hashlib.sha256(raw).hexdigest()!=self.production_plan_sha256:
+                raise ValueError('pinned plan SHA256 mismatch')
+            plan=json.loads(raw);run_id=plan['run_id'];root=plan['run_root'];env=plan['environment']
+            root_path=PurePosixPath(root)
+            if (not isinstance(run_id,str) or not run_id or '/' in run_id or run_id in ('.','..')
+                    or run_id!=self.expected_run_id or not root_path.is_absolute() or '..' in root_path.parts
+                    or root_path.parent.name!='runs' or root_path.name!=run_id
+                    or env.get('Q38_RUN_ID')!=run_id or env.get('Q38_RUN_ROOT')!=root):
+                raise ValueError('plan identity does not match the current run')
+            mode=env.get('Q38_FIRST_ADAM_REUSE_CPU_SPILL','0')
+            if mode not in ('0','1') or type(mode) is not str:
+                raise ValueError('plan reuse mode must be the string 0 or 1')
+            required=mode=='1'
+            if required:
+                # Enforce evidence mode even when the caller forgot the CLI flag.
+                caller_required=self.first_adam_reuse_required
+                self.first_adam_reuse_required=True
+                self.need(caller_required,'Pinned plan enables first-Adam reuse but the required CLI flag is missing')
+            else:
+                self.need(not self.first_adam_reuse_required,'Pinned plan disables first-Adam reuse but the CLI requires it')
+        except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as error:
+            self.need(False,f'Invalid first-Adam reuse plan binding: {error}')
+
     def run(self):
+        self.validate_reuse_plan_binding()
         for label,method in (('load_and_plans',self.source_loads_and_plans),):
             try:loads=method()
             except BaseException as error:self.errors.append(f'{label}: {error!r}');loads={}
@@ -607,10 +739,11 @@ if __name__=='__main__':
     parser.add_argument('--initial-policy-replay-sha256')
     parser.add_argument('--historical-evidence-root',type=Path,action='append',default=[])
     parser.add_argument('--logprob-report-only',action='store_true',help='Report native DP score differences without a magnitude gate')
+    parser.add_argument('--require-first-adam-reuse',action='store_true',help='Require the explicit first-Adam reuse evidence profile')
     parser.add_argument('--production-plan',type=Path,help='Exact run plan; authenticate its SHA against deployment/source-lock evidence')
     parser.add_argument('--production-plan-sha256',help='Caller-pinned SHA256 of the exact plan bytes')
     parser.add_argument('--expected-run-id',help='Expected current run ID, independently known by the caller')
-    args=parser.parse_args();result=Validator(args.evidence_root,replay_manifest=args.initial_policy_replay_manifest,replay_sha256=args.initial_policy_replay_sha256,historical_roots=args.historical_evidence_root,logprob_report_only=args.logprob_report_only,production_plan=args.production_plan,production_plan_sha256=args.production_plan_sha256,expected_run_id=args.expected_run_id).run()
+    args=parser.parse_args();result=Validator(args.evidence_root,replay_manifest=args.initial_policy_replay_manifest,replay_sha256=args.initial_policy_replay_sha256,historical_roots=args.historical_evidence_root,logprob_report_only=args.logprob_report_only,first_adam_reuse_required=args.require_first_adam_reuse,production_plan=args.production_plan,production_plan_sha256=args.production_plan_sha256,expected_run_id=args.expected_run_id).run()
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(result,indent=2,allow_nan=False)+'\n')
     print(json.dumps(dict(core_checks_passed=result['core_checks_passed'],full_RL_acceptance=False,

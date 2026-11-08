@@ -1,6 +1,6 @@
 """First-Adam world-wide CPU cgroup admission, using an explicit Gloo group."""
 from pathlib import Path
-import json,os,socket,time
+import hashlib,json,os,socket,time
 from cpu_admission import evaluate
 
 def _exchange(dist,group,value,world):
@@ -21,6 +21,8 @@ def first_adam_admission(engine,dist,group,*,world=72):
         raise RuntimeError('Admission metadata requires a CPU Gloo group')
     rank=dist.get_rank();host=socket.gethostname();run_id=os.environ['Q38_RUN_ID']
     root=Path(os.environ['Q38_RUN_ROOT']);audit_dir=Path(os.environ['Q38_TRAINING_AUDIT_DIR'])
+    reuse_enabled=os.environ.get('Q38_FIRST_ADAM_REUSE_CPU_SPILL')=='1'
+    reuse_plan=None
     try:
         snapshot=json.loads((root/'cpu-monitor/CURRENT.json').read_text())
         nodes=json.loads(Path(os.environ['Q38_NODES_FILE']).read_text())['nodes']
@@ -32,6 +34,27 @@ def first_adam_admission(engine,dist,group,*,world=72):
             allocated_moment_bytes=engine.optimizer.moments.bytes,
             cpu_gradient_bytes=engine._q38_gradient_store.cpu_spilled_bytes,
             snapshot=snapshot,error=None)
+        if reuse_enabled:
+            reuse_plan=engine.optimizer.prepare_reuse_plan()
+            if reuse_plan['planned_moment_bytes']!=local['planned_moment_bytes'] or reuse_plan['reusable_bytes']!=local['cpu_gradient_bytes']:
+                raise ValueError('Actual reusable slots differ from planned moments/CPU spill')
+            engine.optimizer.bind_reuse_plan(reuse_plan)
+            audit_dir.mkdir(parents=True,exist_ok=True)
+            gradients=engine._q38_gradient_store.audit()
+            if (not gradients['all_gradients_clipped'] or gradients['gradient_numel']!=engine._q38_owned_numel
+                    or gradients['cpu_spilled_bytes']!=reuse_plan['reusable_bytes']):
+                raise ValueError('Pre-update complete clipped gradient audit differs from frozen plan')
+            record=dict(schema='q38-first-adam-pre-update-gradient-v1',run_id=run_id,rank=rank,pid=os.getpid(),
+                world_size=world,recorded_unix=time.time(),generation=reuse_plan['generation'],
+                expected_local_numel=engine._q38_owned_numel,gradient_store=gradients,slot_plan=reuse_plan,
+                captured_before_any_optimizer_write=True,tensor_payload_included=False)
+            raw=(json.dumps(record,sort_keys=True,indent=2)+'\n').encode()
+            path=audit_dir/f'pre-adam-reuse-rank{rank}-{time.time_ns()}.json'
+            with path.open('xb') as stream:stream.write(raw)
+            digest=hashlib.sha256(raw).hexdigest()
+            engine.optimizer.attach_reuse_evidence(digest,path)
+            local.update(reuse_plan_verified=True,reusable_cpu_gradient_bytes=reuse_plan['reusable_bytes'],
+                reuse_plan_sha256=digest,reuse_plan_path=str(path))
     except Exception as exc:
         local=dict(rank=rank,hostname=host,error=type(exc).__name__+': '+str(exc))
     rows=_exchange(dist,group,local,world)
@@ -56,7 +79,7 @@ def first_adam_admission(engine,dist,group,*,world=72):
         # reuse the initial pre-reclaim snapshot.
         current=json.loads((root/'cpu-monitor/CURRENT.json').read_text())
         decision=evaluate(current,peers,run_id=run_id,hostname=host,expected_cid=local['container_id'],
-            expected_time_namespace=os.readlink('/proc/self/ns/time'),
+            expected_time_namespace=os.readlink('/proc/self/ns/time'),reuse_enabled=reuse_enabled,
             reserve=int(os.environ.get('Q38_CPU_RESERVE_BYTES_PER_NODE',60*1024**3)))
         result=dict(rank=rank,hostname=host,passed=decision['passed'],decision=decision,error=None)
     except Exception as exc:
@@ -81,10 +104,12 @@ def first_adam_admission(engine,dist,group,*,world=72):
     # No assumed reclaim is deducted; both this final sample and its age are
     # checked immediately before a final world-wide vote.
     try:
+        if reuse_enabled and engine.optimizer.prepare_reuse_plan()!=reuse_plan:
+            raise ValueError('First-Adam reuse slot identity changed before final vote')
         final_snapshot=json.loads((root/'cpu-monitor/CURRENT.json').read_text())
         final=evaluate(final_snapshot,peers,run_id=run_id,hostname=host,expected_cid=local['container_id'],
             expected_time_namespace=os.readlink('/proc/self/ns/time'),
-            reserve=int(os.environ.get('Q38_CPU_RESERVE_BYTES_PER_NODE',60*1024**3)),maximum_age_seconds=5)
+            reserve=int(os.environ.get('Q38_CPU_RESERVE_BYTES_PER_NODE',60*1024**3)),maximum_age_seconds=5,reuse_enabled=reuse_enabled)
         final_vote=dict(rank=rank,passed=final['passed'],decision=final,snapshot=final_snapshot,error=None)
     except Exception as exc:
         final_vote=dict(rank=rank,passed=False,error=type(exc).__name__+': '+str(exc))

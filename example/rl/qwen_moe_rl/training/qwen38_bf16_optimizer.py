@@ -6,10 +6,13 @@ states live in CPU BF16 memory, with no mapped files or disk fallback.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from bisect import bisect_right
 import functools
 import hashlib
+import json
 import inspect
 import math
+from pathlib import Path
 import threading
 import weakref
 
@@ -18,6 +21,26 @@ import torch
 TORCH_FOREACH_REDUCE_SHA256 = 'cc2a17ca7325d89e14b7d262c7900b1d27187f0f7321b6b7c6e6bb11f8ef17f9'
 _REDUCED_OWNERS = {}
 _ORIGINAL_REDUCE = None
+
+
+def _private_anonymous_mappings():
+    """Linux-only conservative proof: do not credit file/shared-backed state."""
+    rows=[]
+    for line in Path('/proc/self/maps').read_text().splitlines():
+        fields=line.split(maxsplit=5);left,right=(int(v,16) for v in fields[0].split('-'))
+        path=fields[5] if len(fields)>5 else ''
+        anonymous=(fields[4]=='0' and (not path or path=='[heap]' or path.startswith('[anon:')))
+        rows.append((left,right,fields[1]=='rw-p' and anonymous))
+    rows.sort();return rows,[row[0] for row in rows]
+
+
+def _require_private_anonymous(pointer,size,maps):
+    rows,starts=maps;index=bisect_right(starts,pointer)-1;end=pointer+size;current=pointer
+    while current<end:
+        if index<0 or index>=len(rows):raise RuntimeError('CPU storage is not fully mapped')
+        left,right,safe=rows[index]
+        if not safe or not left<=current<right:raise RuntimeError('CPU storage is not private anonymous memory')
+        current=min(end,right);index+=1
 
 
 def local(tensor):
@@ -171,6 +194,7 @@ class GradientStore:
         self._params = []
         self._lock = threading.RLock()
         self._cleared_contributions = {}
+        self._reuse_failed = False;self._reuse_frozen=False
 
     @torch.no_grad()
     def capture_reduced(self, parameter, gradient, *, divide=None):
@@ -181,10 +205,12 @@ class GradientStore:
             raise ValueError('Reduced gradient must match the real local parameter shard')
         size = gradient.numel() * 4
         with self._lock:
+            if self._reuse_failed or self._reuse_frozen:raise RuntimeError('Frozen or poisoned gradient store cannot accept gradients')
             if self.clipped_generation == self.generation:
                 raise RuntimeError('Backward cannot append to already clipped gradients')
             if parameter in self.slots:
                 slot = self.slots[parameter]
+                if slot.gradient is None:raise RuntimeError('Consumed gradient slot cannot accept gradients before clear')
                 previous = slot.gradient.reshape(-1)
                 incoming = gradient.reshape(-1)
                 for begin in range(0, previous.numel(), self.accumulation_chunk_numel):
@@ -200,7 +226,10 @@ class GradientStore:
                 if divide is not None:
                     captured.div_(divide)
                 name = getattr(parameter, '_qwen36_parameter_name', 'parameter-' + str(id(parameter)))
-                self.slots[parameter] = GradientSlot(parameter, captured, 'gpu' if keep else 'cpu', name)
+                slot=GradientSlot(parameter, captured, 'gpu' if keep else 'cpu', name)
+                source_storage=captured.untyped_storage()
+                slot._q38_captured_storage=(int(source_storage._cdata),int(source_storage.data_ptr()))
+                self.slots[parameter] = slot
                 if keep:
                     self.retained_bytes += size
                 else:
@@ -211,6 +240,11 @@ class GradientStore:
             self.peak_spilled_bytes = max(self.peak_spilled_bytes, self.cpu_spilled_bytes)
 
     def _clear_shadow_gradient(self, parameter):
+        with self._lock:return self._clear_shadow_gradient_locked(parameter)
+
+    def _clear_shadow_gradient_locked(self, parameter):
+        if self._reuse_failed or self._reuse_frozen:
+            raise RuntimeError('Frozen or poisoned gradient store cannot clear shadow gradients')
         if parameter not in self.slots:
             raise RuntimeError('A BF16 .grad appeared without a preceding FP32 reduction capture')
         count = self.slots[parameter].contributions
@@ -248,6 +282,15 @@ class GradientStore:
     @torch.no_grad()
     def clip_grad_norm(self, max_norm, *, expected_local_numel=None, expected_global_numel=None,
                        process_group=None, collective_device=None):
+        with self._lock:
+            return self._clip_grad_norm(max_norm,expected_local_numel=expected_local_numel,
+                expected_global_numel=expected_global_numel,process_group=process_group,collective_device=collective_device)
+
+    @torch.no_grad()
+    def _clip_grad_norm(self, max_norm, *, expected_local_numel=None, expected_global_numel=None,
+                       process_group=None, collective_device=None):
+        if self._reuse_failed or self._reuse_frozen or any(slot.gradient is None for slot in self.slots.values()):
+            raise RuntimeError('Consumed or poisoned gradients cannot be clipped')
         if not math.isfinite(float(max_norm)) or max_norm <= 0:
             raise ValueError('A finite positive clipping bound is required')
         owned = sum(slot.gradient.numel() for slot in self.slots.values())
@@ -282,6 +325,13 @@ class GradientStore:
         return norm
 
     def clear(self):
+        with self._lock:return self._clear_locked()
+
+    def _clear_locked(self):
+        if self._reuse_failed or self._reuse_frozen:raise RuntimeError('Frozen or poisoned gradient store cannot be reused')
+        self._clear_contents_locked()
+
+    def _clear_contents_locked(self):
         self.slots.clear()
         self._cleared_contributions.clear()
         self.retained_bytes = self.cpu_spilled_bytes = 0
@@ -289,8 +339,12 @@ class GradientStore:
         self.clipped_generation = None
 
     def audit(self):
-        return dict(gradient_numel=sum(slot.gradient.numel() for slot in self.slots.values()),
-                    gradient_count=len(self.slots), retained_bytes=self.retained_bytes,
+        with self._lock:return self._audit_locked()
+
+    def _audit_locked(self):
+        return dict(gradient_numel=sum(slot.gradient.numel() for slot in self.slots.values() if slot.gradient is not None),
+                    gradient_count=sum(slot.gradient is not None for slot in self.slots.values()), retained_bytes=self.retained_bytes,
+                    consumed_gradient_slots=sum(slot.gradient is None for slot in self.slots.values()),
                     cpu_spilled_bytes=self.cpu_spilled_bytes, peak_retained_bytes=self.peak_retained_bytes,
                     peak_cpu_spilled_bytes=self.peak_spilled_bytes, retained_budget_bytes=self.limit,
                     stored_gradient_dtype='float32', independent_gradient_storage=True,
@@ -308,6 +362,7 @@ class CpuBf16Moments:
         self.limit = cpu_budget_bytes
         self.bytes = 0
         self.handles = []
+        self.reused_gradient_bytes = 0
 
     def plan(self, named_parameters):
         elements = sum(local(parameter).numel() for _, parameter in named_parameters if parameter.requires_grad)
@@ -329,8 +384,24 @@ class CpuBf16Moments:
         self.handles.append(handle)
         return handle
 
+    def allocate_reusing_gradient(self, name, gradient):
+        if gradient.device.type!='cpu' or gradient.dtype!=torch.float32 or not gradient.is_contiguous():
+            raise ValueError('Reuse requires a contiguous CPU FP32 gradient')
+        count=gradient.numel();size=count*4
+        storage=gradient.untyped_storage()
+        if (not count or self.bytes+size>self.limit or gradient.storage_offset()!=0
+                or storage.nbytes()!=size or gradient.data_ptr()!=storage.data_ptr() or gradient.data_ptr()%4
+                or gradient._base is not None):
+            raise ValueError('Reuse requires one exclusive, aligned, whole-storage gradient')
+        halves=gradient.view(-1).view(torch.bfloat16)
+        first=halves[0::2].view(gradient.shape);second=halves[1::2].view(gradient.shape)
+        handle=dict(first=first,second=second,name=name,tier='cpu_reused_gradient',dtype='bfloat16')
+        self.bytes+=size;self.reused_gradient_bytes+=size;self.handles.append(handle)
+        return handle
+
     def audit(self):
         return dict(cpu_moment_bytes=self.bytes, cpu_budget_bytes=self.limit,
+                    cpu_moment_bytes_reusing_gradient=self.reused_gradient_bytes,
                     persistent_moment_dtype='bfloat16', disk_offload_bytes=0,
                     persistent_FP32_moment_bytes=0, handles=len(self.handles))
 
@@ -350,7 +421,7 @@ class Bf16CpuAdamW(torch.optim.Optimizer):
     """BF16 persistent weights/m/v, FP32 gradient and bounded update arithmetic."""
     def __init__(self, params, *, gradients, moments, lr=1e-6, betas=(0.9, 0.999),
                  eps=1e-8, weight_decay=0.0, maximize=False, chunk_bytes=8 * 1024**2,
-                 rounding_seed=20261106, require_clipped=True):
+                 rounding_seed=20261106, require_clipped=True,reuse_cpu_spill=False,require_reuse_evidence=False):
         if chunk_bytes < 4 or chunk_bytes % 4:
             raise ValueError('The FP32 temporary chunk size must be a positive multiple of four')
         if not (0 <= lr and 0 <= eps and 0 <= betas[0] < 1 and 0 <= betas[1] < 1):
@@ -364,15 +435,110 @@ class Bf16CpuAdamW(torch.optim.Optimizer):
         self.require_clipped = require_clipped
         self.last_chunk_peak_numel = 0
         self.changed_weight_elements = 0
+        self.reuse_cpu_spill=bool(reuse_cpu_spill);self._reuse_plan=None;self._reuse_failed=False
+        self.require_reuse_evidence=bool(require_reuse_evidence);self._reuse_evidence=None;self._reuse_commit=None
+        self._reuse_poststep_clear=False
+
+    def prepare_reuse_plan(self):
+        """Bind every slot to one optimizer-owned storage, without tensor data."""
+        with self.gradients._lock:return self._prepare_reuse_plan_locked()
+
+    def _prepare_reuse_plan_locked(self):
+        if not self.reuse_cpu_spill or self._reuse_failed or self.gradients._reuse_failed:
+            raise RuntimeError('First-step reuse is disabled or poisoned')
+        if self.state or self.moments.bytes or self.gradients.clipped_generation!=self.gradients.generation:
+            raise RuntimeError('Reuse requires first step and complete clipped gradients')
+        params=[p for group in self.param_groups for p in group['params'] if p.requires_grad]
+        if len(params)!=len(set(map(id,params))):raise RuntimeError('Duplicate optimizer parameter')
+        required={p for p in params if local(p).numel()}
+        actual=set(self.gradients.slots)
+        if not required.issubset(actual) or not actual.issubset(set(params)):
+            raise RuntimeError('Optimizer and gradient slot ownership differs')
+        rows=[];seen=set();reusable=0
+        maps=_private_anonymous_mappings()
+        for parameter in params:
+            value=local(parameter.detach());slot=self.gradients.slots.get(parameter)
+            if not value.numel():
+                if parameter.grad is not None:raise RuntimeError('Zero shard retains an unexpected shadow gradient')
+                if slot is not None and (slot.parameter is not parameter or slot.gradient is None
+                        or slot.gradient.shape!=value.shape or slot.gradient.dtype!=torch.float32
+                        or slot.gradient.numel()!=0 or slot.contributions<1):
+                    raise RuntimeError('Invalid zero-shard gradient slot')
+                rows.append(dict(name=getattr(parameter,'_qwen36_parameter_name','parameter-'+str(id(parameter))),
+                    tier='empty',numel=0,bytes=0,slot_present=slot is not None,
+                    contributions=slot.contributions if slot is not None else None))
+                continue
+            grad=slot.gradient
+            if (grad is None or parameter.grad is not None or grad.dtype!=torch.float32
+                    or slot.parameter is not parameter or grad.shape!=value.shape or not grad.is_contiguous() or slot.contributions<1):
+                raise RuntimeError('Invalid or incomplete clipped gradient slot')
+            storage=grad.untyped_storage();identity=(str(grad.device),storage._cdata)
+            if identity in seen:raise RuntimeError('Gradient slots alias one storage')
+            seen.add(identity);size=grad.numel()*4
+            storage_uses=torch._C._storage_Use_Count(storage._cdata)
+            tensor_uses=grad._use_count()
+            if (getattr(slot,'_q38_captured_storage',None)!=(int(storage._cdata),int(storage.data_ptr()))
+                    or storage_uses!=2 or tensor_uses!=1):
+                raise RuntimeError('Slot storage is not the unique capture-owned TensorImpl')
+            if slot.tier=='cpu':
+                if (grad.device.type!='cpu' or grad.storage_offset()!=0 or storage.nbytes()!=size
+                        or grad.data_ptr()!=storage.data_ptr() or grad.data_ptr()%4 or grad._base is not None or storage.is_shared()):
+                    raise RuntimeError('CPU slot is not an eligible whole owned allocation')
+                _require_private_anonymous(storage.data_ptr(),size,maps)
+                reusable+=size
+            elif slot.tier!='gpu' or grad.device.type!='cuda':
+                raise RuntimeError('Unexpected gradient tier/device')
+            rows.append(dict(name=slot.name,tier=slot.tier,numel=grad.numel(),bytes=size,
+                storage_id=int(storage._cdata),storage_pointer=int(storage.data_ptr()),
+                storage_nbytes=storage.nbytes(),storage_offset=grad.storage_offset(),
+                device=str(grad.device),shape=list(grad.shape),stride=list(grad.stride()),
+                storage_use_count=storage_uses,tensor_use_count=tensor_uses,
+                gradient_version=grad._version,contributions=slot.contributions))
+        if reusable!=self.gradients.cpu_spilled_bytes:
+            raise RuntimeError('Not every accounted CPU gradient is safely reusable')
+        if len({row['name'] for row in rows})!=len(rows):raise RuntimeError('Ambiguous gradient names')
+        return dict(schema='q38-first-adam-reuse-cpu-slot-plan-v1',generation=self.gradients.generation,
+                    reusable_bytes=reusable,planned_moment_bytes=sum(r['bytes'] for r in rows),slots=rows)
+
+    def bind_reuse_plan(self,plan):
+        with self.gradients._lock:
+            if self._prepare_reuse_plan_locked()!=plan:raise RuntimeError('First-step reuse plan changed before binding')
+            self._reuse_plan=plan;self.gradients._reuse_frozen=True
+
+    def attach_reuse_evidence(self,sha256,path):
+        with self.gradients._lock:
+            if self._reuse_plan is None or not self.gradients._reuse_frozen:
+                raise RuntimeError('Reuse evidence requires a frozen plan')
+            if not isinstance(sha256,str) or len(sha256)!=64 or any(c not in '0123456789abcdef' for c in sha256):
+                raise ValueError('Invalid pre-update evidence SHA')
+            self._reuse_evidence=dict(pre_update_sha256=sha256,pre_update_path=str(path))
 
     @torch.no_grad()
     def step(self, closure=None):
+        if self._reuse_failed:raise RuntimeError('Poisoned first Adam cannot be replayed')
+        if any(slot.gradient is None for slot in self.gradients.slots.values()):
+            raise RuntimeError('Consumed gradients must be cleared before another optimizer step')
+        first_reuse=self.reuse_cpu_spill and not self.state
+        if first_reuse:
+            if self._reuse_plan is None or self.prepare_reuse_plan()!=self._reuse_plan:
+                raise RuntimeError('Unbound or changed first-Adam reuse plan')
+            if self.require_reuse_evidence and self._reuse_evidence is None:
+                raise RuntimeError('Missing complete pre-update gradient evidence')
+        try:
+            return self._step_impl(closure,first_reuse=first_reuse)
+        except BaseException:
+            if self.reuse_cpu_spill:self._reuse_failed=True;self.gradients._reuse_failed=True
+            raise
+
+    @torch.no_grad()
+    def _step_impl(self, closure=None, *, first_reuse=False):
         if closure is not None:
             raise ValueError('This GRPO actor path has no optimizer closure')
         if self.require_clipped and self.gradients.clipped_generation != self.gradients.generation:
             raise RuntimeError('Complete global FP32 gradient clipping must precede this update')
         self.changed_weight_elements = 0
         self.last_chunk_peak_numel = 0
+        consumed=[]
         for group in self.param_groups:
             beta1, beta2 = group['betas']
             for parameter in group['params']:
@@ -393,7 +559,8 @@ class Bf16CpuAdamW(torch.optim.Optimizer):
                 state = self.state[parameter]
                 if not state:
                     state['step'] = 0
-                    state['moments'] = self.moments.allocate(slot.name, value.shape)
+                    state['moments'] = (self.moments.allocate_reusing_gradient(slot.name,slot.gradient)
+                        if first_reuse and slot.tier=='cpu' else self.moments.allocate(slot.name, value.shape))
                 previous = state['step']
                 step = previous + 1
                 handle = state['moments']
@@ -429,7 +596,43 @@ class Bf16CpuAdamW(torch.optim.Optimizer):
                     del active_weight, active_gradient, mean, variance, denominator
                     del rounded_weight, rounded_first, rounded_second
                 state['step'] = step
+                if first_reuse and slot.tier=='cpu':
+                    storage=slot.gradient.untyped_storage();size=slot.gradient.numel()*4
+                    if (first.untyped_storage()._cdata!=storage._cdata or second.untyped_storage()._cdata!=storage._cdata
+                            or first.data_ptr()!=storage.data_ptr() or second.data_ptr()!=storage.data_ptr()+2):
+                        raise RuntimeError('Reused BF16 states do not bind their original FP32 storage')
+                    consumed.append(dict(name=slot.name,gradient_bytes=size,storage_id=int(storage._cdata),
+                        storage_pointer=int(storage.data_ptr()),first_dtype='bfloat16',second_dtype='bfloat16',
+                        first_stride=list(first.stride()),second_stride=list(second.stride()),
+                        all_chunks_read_before_overwrite=True,contributions=slot.contributions))
+                    self.gradients.cpu_spilled_bytes-=slot.gradient.numel()*4
+                    slot.gradient=None
+        if first_reuse:
+            expected=[row for row in self._reuse_plan['slots'] if row['tier']=='cpu']
+            if ([row['name'] for row in consumed]!=[row['name'] for row in expected]
+                    or sum(row['gradient_bytes'] for row in consumed)!=self._reuse_plan['reusable_bytes']):
+                raise RuntimeError('Consumed slots do not match frozen first-step plan')
+            self._reuse_commit=dict(schema='q38-first-adam-reuse-commit-v1',complete=True,
+                pre_update_evidence=self._reuse_evidence,pre_update_generation=self._reuse_plan['generation'],
+                consumed_cpu_gradient_bytes=self._reuse_plan['reusable_bytes'],consumed_slots=consumed,
+                consumed_gradients_still_resident_as_fp32=False)
+            self._reuse_plan=None
         return None
+
+    def clear_first_reuse_before_world_vote(self):
+        with self.gradients._lock:
+            if (self._reuse_failed or self.gradients._reuse_failed or not self.gradients._reuse_frozen
+                    or self._reuse_commit is None or self._reuse_poststep_clear):
+                raise RuntimeError('First-reuse internal clear is not authorized')
+            super().zero_grad(set_to_none=True)
+            self.gradients._clear_contents_locked();self._reuse_poststep_clear=True
+
+    def release_first_reuse_after_world_commit(self):
+        with self.gradients._lock:
+            if (self._reuse_failed or self.gradients._reuse_failed or not self.gradients._reuse_frozen
+                    or not self._reuse_poststep_clear or self.gradients.slots):
+                raise RuntimeError('First-reuse freeze cannot be released')
+            self.gradients._reuse_frozen=False
 
     def zero_grad(self, set_to_none=True):
         if not set_to_none:
@@ -450,4 +653,5 @@ class Bf16CpuAdamW(torch.optim.Optimizer):
                     disk_offload_bytes=0, rounding_seed=self.rounding_seed,
                     rounding='SplitMix64(global runtime-parameter coordinate, named state, step, seed)',
                     changed_weight_elements_last_step=self.changed_weight_elements,
-                    gradient_store=self.gradients.audit(), moments=self.moments.audit())
+                    gradient_store=self.gradients.audit(), moments=self.moments.audit(),
+                    first_adam_reuse_enabled=self.reuse_cpu_spill,first_adam_reuse_commit=self._reuse_commit)

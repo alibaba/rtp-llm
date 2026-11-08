@@ -24,7 +24,7 @@ class FakeDist:
         self.barrier.wait()
 
 class AdmissionConcurrencyTest(unittest.TestCase):
-    def run_world(self,*,deny=False,broken_audit=False,final_one_rank_denies=False,old_before_reclaim=False):
+    def run_world(self,*,deny=False,broken_audit=False,final_one_rank_denies=False,old_before_reclaim=False,reuse=False,bad_reuse_rank=None):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);(root/'cpu-monitor').mkdir()
             stats=dict(anon=100*GIB,file=0,inactive_file=0,file_dirty=0,file_writeback=0,file_mapped=0,shmem=0,unevictable=0)
@@ -40,6 +40,7 @@ class AdmissionConcurrencyTest(unittest.TestCase):
             audit=root/'audit'
             if broken_audit:audit.write_text('not a directory')
             env=dict(Q38_RUN_ID='run',Q38_RUN_ROOT=str(root),Q38_TRAINING_AUDIT_DIR=str(audit),Q38_NODES_FILE=str(nodes),Q38_CPU_CACHE_RECLAIM_ENABLED='0')
+            env['Q38_FIRST_ADAM_REUSE_CPU_SPILL']='1' if reuse else '0'
             if old_before_reclaim:env['Q38_CPU_CACHE_RECLAIM_ENABLED']='1'
             dist=FakeDist(4);results=[]
             def worker(rank):
@@ -47,6 +48,16 @@ class AdmissionConcurrencyTest(unittest.TestCase):
                 engine=SimpleNamespace(_q38_planned_moment_bytes=10*GIB,
                     _q38_gradient_store=SimpleNamespace(cpu_spilled_bytes=GIB),
                     optimizer=SimpleNamespace(moments=SimpleNamespace(bytes=0)))
+                if reuse:
+                    plan=dict(planned_moment_bytes=10*GIB,reusable_bytes=GIB,generation=3,slots=[dict(rank=rank)])
+                    def prepare():
+                        if rank==bad_reuse_rank:raise ValueError('ineligible reuse fixture')
+                        return plan
+                    engine.optimizer.prepare_reuse_plan=prepare
+                    engine.optimizer.bind_reuse_plan=lambda plan: None
+                    engine.optimizer.attach_reuse_evidence=lambda digest,path: None
+                    engine._q38_owned_numel=20
+                    engine._q38_gradient_store.audit=lambda:dict(all_gradients_clipped=True,gradient_numel=20,cpu_spilled_bytes=GIB)
                 try:first_adam_admission(engine,dist,object(),world=4);results.append((rank,'admitted'))
                 except Exception as exc:results.append((rank,type(exc).__name__))
             original=distributed_admission.evaluate;calls={};lock=threading.Lock()
@@ -79,5 +90,8 @@ class AdmissionConcurrencyTest(unittest.TestCase):
         self.assertEqual(self.run_world(final_one_rank_denies=True),['MemoryError']*4)
     def test_old_pre_reclaim_sample_is_not_reused(self):
         self.assertEqual(self.run_world(old_before_reclaim=True),['admitted']*4)
+    def test_reuse_requires_all_ranks_to_verify_before_admission(self):
+        self.assertEqual(self.run_world(reuse=True),['admitted']*4)
+        self.assertEqual(self.run_world(reuse=True,bad_reuse_rank=2),['MemoryError']*4)
 
 if __name__=='__main__':unittest.main()

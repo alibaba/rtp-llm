@@ -27,7 +27,7 @@ def eligible_inactive_file(stat):
 
 
 def evaluate(snapshot, peers, *, run_id, hostname, expected_cid, reserve=60*GIB,
-             expected_time_namespace,maximum_age_seconds=15, now=None,monotonic_now=None):
+             expected_time_namespace,maximum_age_seconds=15, now=None,monotonic_now=None,reuse_enabled=False):
     """Return a detailed decision or raise on missing/untrusted accounting.
 
     peers must contain exactly four distinct rank reports on this host. The
@@ -58,6 +58,17 @@ def evaluate(snapshot, peers, *, run_id, hostname, expected_cid, reserve=60*GIB,
     spill=sum(_nat(row['cpu_gradient_bytes'],'cpu_gradient_bytes') for row in peers)
     allocated=sum(_nat(row['allocated_moment_bytes'],'allocated_moment_bytes') for row in peers)
     pending=sum(_nat(row['planned_moment_bytes'],'planned_moment_bytes') for row in peers)
+    reuse=0
+    if reuse_enabled:
+        for row in peers:
+            amount=_nat(row.get('reusable_cpu_gradient_bytes'),'reusable_cpu_gradient_bytes')
+            if (row.get('reuse_plan_verified') is not True or not isinstance(row.get('reuse_plan_sha256'),str)
+                    or len(row['reuse_plan_sha256'])!=64 or any(ch not in '0123456789abcdef' for ch in row['reuse_plan_sha256'])
+                    or amount!=row['cpu_gradient_bytes']
+                    or amount>row['planned_moment_bytes']):
+                raise ValueError('Unverified or incomplete first-Adam reuse plan')
+            reuse+=amount
+        pending-=reuse
     if allocated!=0:
         raise ValueError('First-step admission forbids pre-existing moment allocation')
     groups=snapshot.get('cgroups')
@@ -105,6 +116,7 @@ def evaluate(snapshot, peers, *, run_id, hostname, expected_cid, reserve=60*GIB,
             non_state_charged_bytes=non_state,
             reserve_shortfall_bytes=reserve_shortfall,existing_cpu_gradient_bytes=spill,
             existing_moment_bytes=allocated,pending_moment_bytes=pending,
+            approved_reusable_cpu_gradient_bytes=reuse,
             required_bytes=required,headroom_bytes=limit-required,passed=required<=limit))
     return dict(passed=all(row['passed'] for row in decisions),run_id=run_id,hostname=hostname,
         sample_unix=sample,evaluated_unix=now,sample_started_monotonic=started,

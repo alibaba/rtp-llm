@@ -39,7 +39,8 @@ def reclaim_world(dist,group,local,all_rows,*,root,run_id,world,reserve):
                 if time.monotonic()>=deadline:raise TimeoutError('No fresh post-advice cgroup sample')
                 time.sleep(.2)
             decision=evaluate(sample,peers,run_id=run_id,hostname=host,expected_cid=local['container_id'],
-                              expected_time_namespace=os.readlink('/proc/self/ns/time'),reserve=reserve,maximum_age_seconds=5)
+                              expected_time_namespace=os.readlink('/proc/self/ns/time'),reserve=reserve,maximum_age_seconds=5,
+                              reuse_enabled=os.environ.get('Q38_FIRST_ADAM_REUSE_CPU_SPILL')=='1')
             vote=dict(rank=rank,hostname=host,passed=decision['passed'],error=None,decision=decision)
         except Exception as exc:
             vote=dict(rank=rank,hostname=host,passed=False,error=type(exc).__name__+': '+str(exc))
