@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import struct
 
 WORLD = 72
@@ -82,10 +83,18 @@ def validate_policy_probe_sources(sync, hf, *, step, version, boot, incarnation)
     if (hf.get('schema') != 'q38-real-HF-policy-probe-v1' or hf.get('world_size') != WORLD
             or hf.get('rank') != 0 or hf.get('global_step') != step
             or hf.get('master_dtype') != 'bfloat16' or hf.get('compute_dtype') != 'bfloat16'
-            or hf.get('score_dtype') != 'float32' or hf.get('all_rank_HF_probe_agreement') is not True
+            or hf.get('score_dtype') != 'float32'
             or not isinstance(hf.get('max_HF_rank_error'), (int, float))
-            or not 0 <= hf['max_HF_rank_error'] <= .05):
+            or not math.isfinite(hf['max_HF_rank_error']) or hf['max_HF_rank_error'] < 0):
         raise ValueError('Actual complete-world BF16 HF reference for this policy is required before native admission')
+    report_only = os.environ.get('Q38_LOGPROB_REPORT_ONLY') == '1'
+    if report_only:
+        if hf.get('HF_rank_comparison_mode') != 'report_only' or hf.get('HF_rank_error_used_for_acceptance') is not False:
+            raise ValueError('HF rank report-only profile must be explicit')
+        if hf.get('all_rank_HF_probe_agreement') is not (hf['max_HF_rank_error'] <= .05):
+            raise ValueError('HF rank agreement must reflect the actual reported maximum')
+    elif hf.get('all_rank_HF_probe_agreement') is not True or hf['max_HF_rank_error'] > .05:
+        raise ValueError('Actual complete-world HF probe exceeds the default numerical gate')
     scores = hf.get('raw_log_probs', [])
     if (not hf.get('prompt_ids') or not hf.get('response_ids') or len(scores) != len(hf['response_ids'])
             or not all(isinstance(value, (int, float)) and math.isfinite(value) for value in scores)

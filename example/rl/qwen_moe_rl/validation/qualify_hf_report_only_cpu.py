@@ -20,10 +20,13 @@ def main():
     p.add_argument('--old', required=True)
     p.add_argument('--new', required=True)
     p.add_argument('--output', required=True)
+    p.add_argument('--dp-report-only', action='store_true')
     a = p.parse_args()
     reports = []
 
     async def run(source, kind, native_values, report_only):
+        if kind == 'new' and report_only and a.dp_report_only: os.environ['Q38_LOGPROB_REPORT_ONLY'] = '1'
+        else: os.environ.pop('Q38_LOGPROB_REPORT_ONLY', None)
         if report_only: os.environ['Q38_HF_RTP_REPORT_ONLY'] = '1'
         else: os.environ.pop('Q38_HF_RTP_REPORT_ONLY', None)
         tree = ast.parse(source)
@@ -109,7 +112,7 @@ def main():
                 assert audit['acceptance_proven_here'] is False
                 assert audit['generation_admission_granted_here'] is False
                 assert audit['numeric_gates_not_yet_evaluated'] is True
-                assert audit['native_DP_tolerance'] == .05 and len(audit['probes']) == 9
+                assert audit['native_DP_tolerance'] == (None if report_only and a.dp_report_only else .05) and len(audit['probes']) == 9
                 assert audit['HF_comparison_mode'] == ('report_only' if report_only else 'absolute_error_gate')
                 assert audit['HF_error_used_for_acceptance'] is not report_only
                 assert audit['hf_raw_fp32_bits_hex'] == hf['raw_fp32_bits_hex']
@@ -149,7 +152,7 @@ def main():
         for name, values in cases:
             left = asyncio.run(run(old, 'old', values, report_only))
             right = asyncio.run(run(new, 'new', values, report_only))
-            if report_only and name in ('HF_mismatch', 'large_HF_mismatch'):
+            if report_only and ((not a.dp_report_only and name in ('HF_mismatch', 'large_HF_mismatch')) or (a.dp_report_only and name == 'DP_mismatch')):
                 assert left['passed'] is False and right['passed'] is True
                 assert right['generation_ready'] is True and right['accepted_file_written'] is True
                 assert right['record']['max_HF_error'] > .05

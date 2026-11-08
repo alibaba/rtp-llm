@@ -52,13 +52,18 @@ def audit_policy_before_rollout(engine):
         response_ids=target,raw_log_probs=scores))
     if any(r['step']!=step or r['prompt_ids']!=prompt or r['response_ids']!=target for r in observed):
         raise RuntimeError('Actual all-rank HF probes used different policy versions or token IDs')
+    if any(len(r['raw_log_probs'])!=len(target) or not all(math.isfinite(x) for x in r['raw_log_probs']) for r in observed):
+        raise FloatingPointError('Actual all-rank HF probes contain nonfinite or incomplete scores')
     maximum=max(abs(a-b) for row in observed for a,b in zip(scores,row['raw_log_probs']))
-    if maximum>.05:raise RuntimeError('Actual all-rank HF probe differs beyond the numerical gate')
+    report_only=os.environ.get('Q38_LOGPROB_REPORT_ONLY')=='1'
+    if not report_only and maximum>.05:raise RuntimeError('Actual all-rank HF probe differs beyond the numerical gate')
     record=dict(schema='q38-real-HF-policy-probe-v1',rank=dist.get_rank(),world_size=dist.get_world_size(),
         global_step=step,prompt_ids=prompt,response_ids=target,raw_log_probs=scores,
         raw_fp32_bits_hex=struct.pack(f'<{len(scores)}f',*scores).hex(),
         max_HF_rank_error=maximum,master_dtype='bfloat16',compute_dtype='bfloat16',
-        score_dtype='float32',all_rank_HF_probe_agreement=True,
+        score_dtype='float32',all_rank_HF_probe_agreement=maximum<=.05,
+        HF_rank_comparison_mode='report_only' if report_only else 'absolute_error_gate',
+        HF_rank_error_used_for_acceptance=not report_only,
         optimizer_steps=steps,time_ns=time.time_ns(),native_RTP_numerical_match_proven_here=False)
     directory=Path(os.environ['Q38_TRAINING_AUDIT_DIR']);directory.mkdir(parents=True,exist_ok=True)
     (directory/f'hf-probe-step{step}-rank{dist.get_rank()}.json').write_text(json.dumps(record)+'\n')

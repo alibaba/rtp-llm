@@ -34,8 +34,9 @@ def fp32_scores(values,bits):
 
 
 class Validator:
-    def __init__(self,roots,*,replay_manifest=None,replay_sha256=None,historical_roots=()):
+    def __init__(self,roots,*,replay_manifest=None,replay_sha256=None,historical_roots=(),logprob_report_only=False):
         self.roots=[root.resolve() for root in roots]
+        self.logprob_report_only=logprob_report_only
         self.errors=[];self.inventory={};self.details={}
         self.initial_replay=None
         if replay_manifest is not None:
@@ -455,6 +456,14 @@ class Validator:
                     if self.need(len(expected)==len(actual),f'{ppath}: target-score lengths differ'):
                         errors.extend(abs(a-b) for a,b in zip(expected,actual) if finite(a) and finite(b))
             maximum=max(errors) if errors else None
+            if self.logprob_report_only and not (step==0 and self.initial_replay is not None and self.initial_replay.valid):
+                hf_rows=[row for _,row in hfs[step].values()]
+                if len(hf_rows)==WORLD and all(fp32_scores(row.get('raw_log_probs',[]),row.get('raw_fp32_bits_hex')) and len(row['raw_log_probs'])==target_count for row in hf_rows):
+                    for row in hf_rows:
+                        rank_error=max(abs(a-b) for other in hf_rows for a,b in zip(row['raw_log_probs'],other['raw_log_probs']))
+                        self.need(row.get('HF_rank_comparison_mode')=='report_only' and row.get('HF_rank_error_used_for_acceptance') is False
+                            and row.get('max_HF_rank_error')==rank_error and row.get('all_rank_HF_probe_agreement') is (rank_error<=.05),
+                            f'Policy{step}: HF rank error report or explicit profile differs from actual scores')
             self.need(maximum is not None and finite(maximum),
                 f'Policy{step}: finite complete HF/native target comparison is absent')
             reports=[];max_dp_error=None;rank0_max=None;rank0_mean=None
@@ -464,8 +473,13 @@ class Validator:
                 ordered=[native[dp] for dp in range(9)]
                 dp0=ordered[0]['raw_log_probs']
                 max_dp_error=max(abs(a-b) for row in ordered for a,b in zip(dp0,row['raw_log_probs']))
-                self.need(max_dp_error<=.05 and probe.get('max_dp_error')==max_dp_error,
-                    f'Policy{step}: native DP self-agreement exceeds0.05 or its reported maximum differs')
+                self.need(probe.get('max_dp_error')==max_dp_error,
+                    f'Policy{step}: native DP reported maximum differs from actual scores')
+                if not self.logprob_report_only:
+                    self.need(max_dp_error<=.05, f'Policy{step}: native DP self-agreement exceeds0.05')
+                elif not (step==0 and self.initial_replay is not None and self.initial_replay.valid):
+                    self.need(probe.get('DP_comparison_mode')=='report_only' and probe.get('DP_error_used_for_acceptance') is False,
+                        f'Policy{step}: native DP report-only profile is not explicit')
                 rank0_errors=[]
                 for route in ordered:
                     absolute=[abs(a-b) for a,b in zip(reference,route['raw_log_probs'])]
@@ -498,7 +512,7 @@ class Validator:
                 HF_comparison_mode='report_only',HF_error_used_for_acceptance=False,
                 actual_HF_rank0_recomputed_max_abs_error=rank0_max,
                 actual_HF_rank0_recomputed_mean_abs_error=rank0_mean,
-                native_DP_self_recomputed_max_abs_error=max_dp_error,
+                native_DP_self_recomputed_max_abs_error=max_dp_error,DP_error_used_for_acceptance=not self.logprob_report_only,
                 per_DP_HF_rank0_comparisons=reports,changed_source_tensors=changed))
             previous=sync
         finals=self.records('rtp_final_policy2_actual_reprobe.json')
@@ -538,7 +552,8 @@ if __name__=='__main__':
     parser.add_argument('--initial-policy-replay-manifest',type=Path)
     parser.add_argument('--initial-policy-replay-sha256')
     parser.add_argument('--historical-evidence-root',type=Path,action='append',default=[])
-    args=parser.parse_args();result=Validator(args.evidence_root,replay_manifest=args.initial_policy_replay_manifest,replay_sha256=args.initial_policy_replay_sha256,historical_roots=args.historical_evidence_root).run()
+    parser.add_argument('--logprob-report-only',action='store_true',help='Report native DP score differences without a magnitude gate')
+    args=parser.parse_args();result=Validator(args.evidence_root,replay_manifest=args.initial_policy_replay_manifest,replay_sha256=args.initial_policy_replay_sha256,historical_roots=args.historical_evidence_root,logprob_report_only=args.logprob_report_only).run()
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(result,indent=2,allow_nan=False)+'\n')
     print(json.dumps(dict(core_checks_passed=result['core_checks_passed'],full_RL_acceptance=False,

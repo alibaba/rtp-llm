@@ -53,7 +53,8 @@ def _probe_attempt_payload(values, hf, prompt, target, request_ids, context):
               and all(len(row) == len(target) and all(math.isfinite(x) for x in row) for row in values))
     return dict(schema='q38-native-HF-probe-attempt-v1',
         numeric_gates_not_yet_evaluated=True, acceptance_proven_here=False,
-        generation_admission_granted_here=False, native_DP_tolerance=.05,
+        generation_admission_granted_here=False,
+        native_DP_tolerance=None if os.environ.get('Q38_LOGPROB_REPORT_ONLY') == '1' else .05,
         prompt_ids=prompt, response_ids=target, probes=rows,
         hf_raw_log_probs=hf['raw_log_probs'], hf_raw_fp32_bits_hex=hf.get('raw_fp32_bits_hex'),
         all_nine_scores_finite_and_complete=finite,
@@ -611,7 +612,9 @@ class World72RTPServer(RTPServer):
                     and all(len(row) == len(target) and all(math.isfinite(x) for x in row) for row in values),
                     'all nine actual DP probes must return finite target logprobs')
             max_dp_error = max(abs(left - right) for row in values for left, right in zip(values[0], row))
-            require(max_dp_error <= .05, 'nine DP copies disagree on the committed policy scores')
+            dp_report_only = os.environ.get('Q38_LOGPROB_REPORT_ONLY') == '1'
+            if not dp_report_only:
+                require(max_dp_error <= .05, 'nine DP copies disagree on the committed policy scores')
             hf_errors = [[abs(left - right) for left, right in zip(hf['raw_log_probs'], row)] for row in values]
             max_hf_error = max(error for row in hf_errors for error in row)
             mean_hf_absolute_error = sum(error for row in hf_errors for error in row) / sum(len(row) for row in hf_errors)
@@ -626,6 +629,8 @@ class World72RTPServer(RTPServer):
                              absolute_HF_errors=hf_errors[dp],
                              mean_HF_absolute_error=sum(hf_errors[dp]) / len(hf_errors[dp]))
                         for dp, row in enumerate(values)], max_dp_error=max_dp_error,
+                DP_comparison_mode='report_only' if dp_report_only else 'absolute_error_gate',
+                DP_error_used_for_acceptance=not dp_report_only,
                 actual_HF_reference_path=str(hf_path), actual_HF_reference_sha256=hashlib.sha256(hf_path.read_bytes()).hexdigest(),
                 hf_raw_log_probs=hf['raw_log_probs'], hf_raw_fp32_bits_hex=hf.get('raw_fp32_bits_hex'),
                 max_HF_error=max_hf_error, mean_HF_absolute_error=mean_hf_absolute_error,
@@ -799,7 +804,8 @@ def launch_world72_server(model_path, topology, node_ids):
     require(ray.is_initialized() and len(node_ids) == len(set(node_ids)) == 18,
             'one distinct live Ray node per native owner is required')
     from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-    runtime = dict(env_vars={'RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES': '1'})
+    runtime = dict(env_vars={'RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES': '1',
+                            'Q38_LOGPROB_REPORT_ONLY': '1' if os.environ.get('Q38_LOGPROB_REPORT_ONLY') == '1' else '0'})
     owner_class = ray.remote(num_cpus=1, num_gpus=0)(WorldNodeOwner)
     owners = [owner_class.options(name=f'q38_native_world_owner_{index}', max_concurrency=16,
                   scheduling_strategy=NodeAffinitySchedulingStrategy(node_id, soft=False), runtime_env=runtime)

@@ -55,7 +55,7 @@ def fixture(delta=2.0):
     return records
 
 
-def check(records):
+def check(records,logprob_report_only=False):
     records=copy.deepcopy(records)
     with tempfile.TemporaryDirectory(prefix='q38-HF-report-only-CPU-fixture-') as folder:
         root=Path(folder)
@@ -71,11 +71,27 @@ def check(records):
         records['rtp_final_policy2_actual_reprobe.json']=final
         for name,value in records.items():
             (root/name).write_text(json.dumps(value))
-        validator=MODULE.Validator([root]);validator.numerical_policies()
+        validator=MODULE.Validator([root],logprob_report_only=logprob_report_only);validator.numerical_policies()
         return validator.errors,validator.details
 
 
 class ReportOnlyTests(unittest.TestCase):
+    def test_native_dp_explicit_report_only_preserves_integrity(self):
+        value=fixture();key='rtp_probe_rank0_step1.json'
+        for step in range(3):
+            value[f'rtp_probe_rank0_step{step}.json'].update(DP_comparison_mode='report_only',DP_error_used_for_acceptance=False)
+            for rank in range(72):
+                value[f'hf-probe-step{step}-rank{rank}.json'].update(HF_rank_comparison_mode='report_only',HF_rank_error_used_for_acceptance=False,max_HF_rank_error=0.,all_rank_HF_probe_agreement=True)
+        row=value[key]['probes'][8];row['raw_log_probs'][0]-=.5
+        row['raw_fp32_bits_hex']=bits(row['raw_log_probs']);metrics(value[key])
+        self.assertTrue(check(value)[0])
+        errors,details=check(value,True);self.assertEqual(errors,[])
+        self.assertEqual(details['numerical_policies'][1]['native_DP_self_recomputed_max_abs_error'],.5)
+        self.assertFalse(details['numerical_policies'][1]['DP_error_used_for_acceptance'])
+        forged=copy.deepcopy(value);forged[key]['max_dp_error']=0.;self.assertTrue(check(forged,True)[0])
+        missing=copy.deepcopy(value);missing[key].pop('DP_comparison_mode');self.assertTrue(check(missing,True)[0])
+        invalid=copy.deepcopy(value);invalid[key]['probes'][0]['raw_log_probs'][0]=float('nan');self.assertTrue(check(invalid,True)[0])
+
     def test_large_actual_complete_error_is_reported_without_rejection(self):
         errors,details=check(fixture())
         self.assertEqual(errors,[])

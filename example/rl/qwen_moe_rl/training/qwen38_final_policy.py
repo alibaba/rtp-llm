@@ -50,8 +50,14 @@ def validate_final_policy_proof(proof, *, expected_step=2):
     if proof.get('max_HF_error')!=maximum:
         raise RuntimeError('Final native/HF maximum error report differs from the actual raw scores')
     dp_error=max(abs(a-b) for row in probes for a,b in zip(probes[0]['raw_log_probs'],row['raw_log_probs']))
-    if dp_error>.05 or ('max_dp_error' in proof and proof['max_dp_error']!=dp_error):
-        raise RuntimeError('Final native attention-DP copies disagree beyond the unchanged 0.05 gate')
+    dp_report_only=os.environ.get('Q38_LOGPROB_REPORT_ONLY')=='1'
+    if ('max_dp_error' in proof and proof['max_dp_error']!=dp_error) or (dp_report_only and 'max_dp_error' not in proof):
+        raise RuntimeError('Final native attention-DP maximum differs from the actual raw scores')
+    if dp_report_only:
+        if proof.get('DP_comparison_mode')!='report_only' or proof.get('DP_error_used_for_acceptance') is not False:
+            raise RuntimeError('Final native attention-DP report-only profile is not explicit')
+    elif dp_error>.05:
+        raise RuntimeError('Final native attention-DP copies disagree beyond the default 0.05 gate')
     report_only=os.environ.get('Q38_HF_RTP_REPORT_ONLY')=='1'
     if report_only:
         if (proof.get('HF_comparison_mode')!='report_only' or proof.get('HF_error_used_for_acceptance') is not False

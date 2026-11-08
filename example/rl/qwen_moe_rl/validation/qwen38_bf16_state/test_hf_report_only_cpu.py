@@ -59,6 +59,14 @@ def run():
         changed=copy.deepcopy(actual);mutate(changed);rejected(changed)
     # Even an accurately reported large DP discrepancy remains a failure.
     rejected(proof_fixture(dp_mismatch=True))
+    os.environ['Q38_LOGPROB_REPORT_ONLY']='1'
+    large=proof_fixture(dp_mismatch=True)
+    large.update(DP_comparison_mode='report_only',DP_error_used_for_acceptance=False)
+    assert module.validate_final_policy_proof(large) is large
+    forged=copy.deepcopy(large);forged['max_dp_error']=0.;rejected(forged)
+    missing=copy.deepcopy(large);missing.pop('DP_comparison_mode');rejected(missing)
+    broken=copy.deepcopy(large);broken['probes'][0]['raw_log_probs'][0]=float('nan');rejected(broken)
+    os.environ.pop('Q38_LOGPROB_REPORT_ONLY')
     os.environ.pop('Q38_HF_RTP_REPORT_ONLY')
     rejected(proof_fixture(report_only=False))
     rejected(actual)
