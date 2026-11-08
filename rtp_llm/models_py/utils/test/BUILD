@@ -50,3 +50,14 @@ py_test (
     },
     tags = ["L20_CU13"],
 )
+
+# SM120 arch cases split out of arch_test.py.
+py_test(
+    name = "arch_sm120_test",
+    srcs = ["arch_sm120_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)
