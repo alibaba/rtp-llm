@@ -10,7 +10,7 @@ from collections import defaultdict
 import hashlib
 import json
 import math
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import struct
 import sys
 
@@ -34,10 +34,14 @@ def fp32_scores(values,bits):
 
 
 class Validator:
-    def __init__(self,roots,*,replay_manifest=None,replay_sha256=None,historical_roots=(),logprob_report_only=False):
+    def __init__(self,roots,*,replay_manifest=None,replay_sha256=None,historical_roots=(),logprob_report_only=False,
+                 production_plan=None,production_plan_sha256=None,expected_run_id=None):
         self.roots=[root.resolve() for root in roots]
         self.logprob_report_only=logprob_report_only
         self.errors=[];self.inventory={};self.details={}
+        self.production_plan_path=production_plan
+        self.production_plan_sha256=production_plan_sha256
+        self.expected_run_id=expected_run_id
         self.initial_replay=None
         if replay_manifest is not None:
             from initial_replay_contract import InitialReplay
@@ -299,7 +303,54 @@ class Validator:
             cross_node_wall_clocks_not_used_to_infer_step_order=True)
 
     def micro_memory_boundaries(self,updates,loads):
-        if self.initial_replay is None:return
+        if self.initial_replay is None:
+            if any(value is not None for value in (self.production_plan_path,self.production_plan_sha256,self.expected_run_id)):
+                self.errors.append('A run-bound gradient-cache plan requires validated current-run replay lineage')
+            return
+        budget=75*GIB
+        expected_pid=None
+        plan_args=(self.production_plan_path,self.production_plan_sha256,self.expected_run_id)
+        if any(value is not None for value in plan_args):
+            # A locally supplied digest is a caller-pinned input, not proof of
+            # where the bytes came from. The separate deployment/source-lock
+            # acceptance must authenticate that digest for the actual run.
+            budget=None
+            try:
+                if not all(value is not None for value in plan_args) or not digest(self.production_plan_sha256):
+                    raise ValueError('An explicit plan, pinned SHA256 and expected run ID are required together')
+                path=Path(self.production_plan_path);raw=path.read_bytes()
+                if hashlib.sha256(raw).hexdigest()!=self.production_plan_sha256:
+                    raise ValueError('Pinned production plan SHA256 mismatch')
+                plan=json.loads(raw);run_id=plan['run_id'];root=plan['run_root'];env=plan['environment']
+                b=plan['gradient_cache_bytes'];env_budget=env['Q38_GPU_GRADIENT_CACHE_BYTES']
+                root_path=PurePosixPath(root)
+                if (not isinstance(run_id,str) or not run_id or '/' in run_id or run_id in ('.','..')
+                    or run_id!=self.expected_run_id or not root_path.is_absolute()
+                    or '..' in root_path.parts or root_path.name!=run_id or root_path.parent.name!='runs'
+                    or env.get('Q38_RUN_ID')!=run_id or env.get('Q38_RUN_ROOT')!=root
+                    or type(b) is not int or b<=0 or not isinstance(env_budget,str) or env_budget!=str(b)):
+                    raise ValueError('Pinned plan run identity, root or gradient budget is inconsistent')
+                if getattr(self.initial_replay,'valid',False) is not True:
+                    raise ValueError('Run-specific budget requires validated current-run replay lineage')
+                worlds=self.records('initial-policy-replay-world72.json')
+                if len(worlds)!=1 or worlds[0][1].get('current_run_root')!=root:
+                    raise ValueError('Production plan does not bind the current world72 run root')
+                proofs=self.by_rank(self.records('initial-policy-replay-rank*.json'),'budget current-run proof')
+                if (len(proofs)!=WORLD or any(row.get('schema')!='q38-fresh-initial-policy-replay-worker-v1'
+                    or row.get('world_size')!=WORLD or row.get('current_run_root')!=root
+                    or type(row.get('pid')) is not int or row['pid']<=0 for _,row in proofs.values())):
+                    raise ValueError('All72 run-bound replay worker identities are required')
+                expected_pid={rank:row['pid'] for rank,(_,row) in proofs.items()}
+                self.inventory[str(path.resolve())]=dict(bytes=len(raw),sha256=self.production_plan_sha256)
+                self.details['gradient_cache_budget_source']=dict(kind='caller_pinned_production_plan',
+                    run_id=run_id,run_root=root,sha256=self.production_plan_sha256,bytes=b,
+                    deployment_lock_must_authenticate_caller_supplied_sha256=True)
+                budget=b
+            except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as error:
+                self.errors.append(f'Invalid run-bound gradient-cache plan: {error}')
+        else:
+            self.details['gradient_cache_budget_source']=dict(kind='historical_default',bytes=budget)
+        configured_budget=budget
         minis=defaultdict(list)
         for path,row in self.records('global-minibatch-step*.json'):
             minis[row.get('trainer_global_step')].append(row)
@@ -323,6 +374,9 @@ class Validator:
                 and row.get('world_size')==72 and row.get('tensors_loss_rewards_gradients_modified') is False
                 and row.get('CPU_cgroup_limit_or_peak_inferred') is False,
                 f'{path}: live tensor/cgroup boundaries were misrepresented')
+            if expected_pid is not None:
+                self.need(row.get('pid')==expected_pid.get(rank),
+                    f'{path}: micro record does not belong to the plan-bound current rank process')
             self.need(event in ('before-cache-release','enter-forward','exit-forward-before-backward'),
                 f'{path}: a failed or unknown training-forward boundary remains')
             actual=updates.get(step,{}).get(rank)
@@ -360,10 +414,10 @@ class Validator:
                         and store.get('microbatch_contributions_min')==store.get('microbatch_contributions_max')==local_micro,
                         f'Update{step}/rank{rank}/micro{micro}: preceding complete FP32 contribution was dropped or duplicated')
                     budget=store.get('retained_budget_bytes');gpu=store.get('retained_bytes');cpu=store.get('cpu_spilled_bytes')
-                    self.need(type(budget) is int and budget==75*GIB
+                    self.need(type(budget) is int and budget==configured_budget
                         and type(gpu) is int and type(cpu) is int and 0<=gpu<=budget and cpu>=0
                         and type(numel) is int and gpu+cpu==numel*4,
-                        f'Update{step}/rank{rank}/micro{micro}: FP32 slot bytes or dedicated75GiB cache differ')
+                        f'Update{step}/rank{rank}/micro{micro}: FP32 slot bytes or pinned gradient-cache budget differ')
                     if type(numel) is int:gradient_elements.append(numel)
                     if type(gpu) is int:retained.append(gpu)
                     if type(cpu) is int:spilled.append(cpu)
@@ -553,7 +607,10 @@ if __name__=='__main__':
     parser.add_argument('--initial-policy-replay-sha256')
     parser.add_argument('--historical-evidence-root',type=Path,action='append',default=[])
     parser.add_argument('--logprob-report-only',action='store_true',help='Report native DP score differences without a magnitude gate')
-    args=parser.parse_args();result=Validator(args.evidence_root,replay_manifest=args.initial_policy_replay_manifest,replay_sha256=args.initial_policy_replay_sha256,historical_roots=args.historical_evidence_root,logprob_report_only=args.logprob_report_only).run()
+    parser.add_argument('--production-plan',type=Path,help='Exact run plan; authenticate its SHA against deployment/source-lock evidence')
+    parser.add_argument('--production-plan-sha256',help='Caller-pinned SHA256 of the exact plan bytes')
+    parser.add_argument('--expected-run-id',help='Expected current run ID, independently known by the caller')
+    args=parser.parse_args();result=Validator(args.evidence_root,replay_manifest=args.initial_policy_replay_manifest,replay_sha256=args.initial_policy_replay_sha256,historical_roots=args.historical_evidence_root,logprob_report_only=args.logprob_report_only,production_plan=args.production_plan,production_plan_sha256=args.production_plan_sha256,expected_run_id=args.expected_run_id).run()
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(result,indent=2,allow_nan=False)+'\n')
     print(json.dumps(dict(core_checks_passed=result['core_checks_passed'],full_RL_acceptance=False,
