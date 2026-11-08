@@ -5,6 +5,206 @@ exports_files(["test_functional.sh"])
 [
     sh_test(
         name = name,
+        srcs = ["test_functional.sh"],
+        args = [role],
+        data = [
+            "//rtp_llm/models_py:v41_ppu_shared_sources",
+            "//rtp_llm/models_py/modules/dsv41/ppu/test:shared_eplb_native_sources",
+        ],
+        env = {
+            "GPU_COUNT": "8",
+            "RTP_V41_PPU_MODEL_PATH": "shared",
+            "RTP_V41_PPU_MOE_BACKEND": "grouped",
+            "RTP_V41_PPU_MOE_PRECISION": "w4a8",
+        },
+        tags = ["manual", "PPU-ZW890P"],
+        timeout = "eternal",
+        target_compatible_with = select({
+            "@//:using_ppu": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for name, role in [
+        ("shared_eplb_prefill_test", "shared-eplb-prefill"),
+        ("shared_eplb_decode_test", "shared-eplb-decode"),
+    ]
+]
+
+[
+    sh_test(
+        name = name,
+        srcs = ["test_functional.sh"],
+        args = [role],
+        data = [
+            "//rtp_llm/models_py:v41_ppu_shared_sources",
+            "//rtp_llm/models_py/modules/dsv41/ppu/test:shared_dspark_modes_native_sources",
+        ],
+        env = {
+            "GPU_COUNT": "8",
+            "RTP_V41_PPU_MODEL_PATH": "shared",
+            "RTP_V41_PPU_MOE_BACKEND": "grouped",
+            "RTP_V41_PPU_MOE_PRECISION": "w4a8",
+        },
+        tags = ["manual", "PPU-ZW890P"],
+        timeout = "eternal",
+        target_compatible_with = select({
+            "@//:using_ppu": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for name, role in [
+        ("shared_dspark_modes_prefill_test", "shared-dspark-modes-prefill"),
+        ("shared_dspark_modes_decode_test", "shared-dspark-modes-decode"),
+    ]
+]
+
+[
+    sh_test(
+        name = name,
+        srcs = ["test_functional.sh"],
+        args = [role],
+        data = [
+            "//rtp_llm/models_py:v41_ppu_shared_sources",
+            "//rtp_llm/models_py/modules/dsv41/ppu/test:shared_sharded_native_sources",
+        ],
+        env = {
+            "GPU_COUNT": "8",
+            "RTP_V41_PPU_MODEL_PATH": "shared",
+            "RTP_V41_PPU_MOE_BACKEND": "grouped",
+            "RTP_V41_PPU_MOE_PRECISION": "w4a8",
+        },
+        tags = ["manual", "PPU-ZW890P"],
+        timeout = "eternal",
+        target_compatible_with = select({
+            "@//:using_ppu": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for name, role in [
+        ("shared_sharded_prefill_test", "shared-sharded-prefill"),
+        ("shared_sharded_decode_test", "shared-sharded-decode"),
+    ]
+]
+
+sh_test(
+    name = "shared_optimized_smoke_test",
+    srcs = ["test_functional.sh"],
+    args = ["shared-optimized"],
+    data = [
+        "//rtp_llm/models_py:v41_ppu_shared_sources",
+        "//rtp_llm/models_py/modules/dsv41/ppu/test:shared_optimized_native_sources",
+        "//rtp_llm/models_py/modules/dsv41/ppu/test:shared_graph_native_sources",
+    ],
+    env = {
+        "GPU_COUNT": "8",
+        "RTP_V41_PPU_MODEL_PATH": "shared",
+        "RTP_V41_PPU_MOE_BACKEND": "megamoe",
+        "RTP_V41_PPU_MOE_PRECISION": "w4a4",
+    },
+    tags = ["manual", "PPU-ZW890P"],
+    timeout = "eternal",
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+sh_test(
+    name = "shared_decode_graph_smoke_test",
+    srcs = ["test_functional.sh"],
+    args = ["shared-graph"],
+    data = [
+        "//rtp_llm/models_py:v41_ppu_shared_sources",
+        "//rtp_llm/models_py/modules/dsv41/ppu/test:shared_graph_native_sources",
+    ],
+    env = {
+        "GPU_COUNT": "8",
+        "RTP_V41_PPU_MODEL_PATH": "shared",
+        "RTP_V41_PPU_MOE_BACKEND": "megamoe",
+        "RTP_V41_PPU_MOE_PRECISION": "w4a4",
+    },
+    tags = ["manual", "PPU-ZW890P"],
+    timeout = "eternal",
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+sh_test(
+    name = "shared_grouped_graph_decode_test",
+    srcs = ["test_functional.sh"],
+    args = ["shared-grouped-graph-decode"],
+    data = [
+        "//rtp_llm/models_py:v41_ppu_shared_sources",
+        "//rtp_llm/models_py/modules/dsv41/ppu/test:shared_graph_modes_native_sources",
+    ],
+    env = {
+        "GPU_COUNT": "8",
+        "RTP_V41_PPU_MODEL_PATH": "shared",
+        "RTP_V41_PPU_MOE_BACKEND": "grouped",
+        "RTP_V41_PPU_MOE_PRECISION": "w4a8",
+    },
+    tags = ["manual", "PPU-ZW890P"],
+    timeout = "eternal",
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+sh_test(
+    name = "shared_dspark_direct_graph_test",
+    srcs = ["test_functional.sh"],
+    args = ["shared-dspark-direct-graph"],
+    data = ["//rtp_llm/models_py/modules/dsv41/ppu/test:shared_dspark_direct_native_sources"],
+    env = {
+        "GPU_COUNT": "8",
+        "RTP_V41_PPU_MODEL_PATH": "shared",
+        "RTP_V41_PPU_MOE_BACKEND": "grouped",
+        "RTP_V41_PPU_MOE_PRECISION": "w4a8",
+    },
+    tags = ["manual", "PPU-ZW890P"],
+    timeout = "eternal",
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+[
+    sh_test(
+        name = name,
+        srcs = ["test_functional.sh"],
+        args = [role],
+        data = [
+            "//rtp_llm/models_py:v41_ppu_shared_sources",
+            "//rtp_llm/models_py/modules/dsv41/ppu/test:shared_native_sources",
+        ],
+        env = {
+            "GPU_COUNT": "8",
+            "RTP_V41_PPU_MODEL_PATH": "shared",
+            "RTP_V41_PPU_MOE_BACKEND": "grouped",
+            "RTP_V41_PPU_MOE_PRECISION": "w4a8",
+        },
+        tags = ["manual", "PPU-ZW890P"],
+        timeout = "eternal",
+        target_compatible_with = select({
+            "@//:using_ppu": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for name, role in [
+        ("shared_yoco140_prefill_test", "shared-yoco140-prefill"),
+        ("shared_yoco140_decode_test", "shared-yoco140-decode"),
+        ("shared_dspark_prefill_test", "shared-dspark-prefill"),
+        ("shared_dspark_decode_test", "shared-dspark-decode"),
+    ]
+]
+
+[
+    sh_test(
+        name = name,
         srcs = ["test_perf.sh"],
         args = [phase],
         env = {"GPU_COUNT": "8"},
@@ -77,35 +277,3 @@ sh_test(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
 )
-
-sh_test(
-    name = "decode_graph_fidelity_test",
-    srcs = ["test_functional.sh"],
-    args = ["graph-fidelity"],
-    env = {"GPU_COUNT": "8"},
-    tags = ["manual", "PPU-ZW890P"],
-    timeout = "eternal",
-    target_compatible_with = select({
-        "@//:using_ppu": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
-)
-
-[
-    sh_test(
-        name = name,
-        srcs = ["test_functional.sh"],
-        args = [role],
-        env = {"GPU_COUNT": "8"},
-        tags = ["manual", "PPU-ZW890P"],
-        timeout = "eternal",
-        target_compatible_with = select({
-            "@//:using_ppu": [],
-            "//conditions:default": ["@platforms//:incompatible"],
-        }),
-    )
-    for name, role in [
-        ("cp8_prefill_test", "prefill"),
-        ("dp8_decode_test", "decode"),
-    ]
-]

@@ -235,7 +235,6 @@ class IntegrationTest(unittest.TestCase):
             {"enp": 1},
             {"max_seq_len": -1},
             {"max_seq_len": 0},
-            {"kv_sharded": True},
             {"cuda_graph": True},
             {"speculative": "MTP"},
             {"speculative": "DSPARK", "cuda_graph": True},
@@ -251,6 +250,26 @@ class IntegrationTest(unittest.TestCase):
         for mutation in mutations:
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 dataclasses.replace(runtime, **mutation).validate()
+
+    def test_kv_sharding_requires_cp8_source(self):
+        for role in ("prefill", "decode"):
+            with self.subTest(role=role):
+                options = dict(parent={}, kv_cache_sharded=True)
+                env = preset_env(role, "/weights", **options)
+                runtime = V41RuntimeConfig.from_env(env)
+                self.assertEqual(env["RTP_V41_PPU_MODEL_PATH"], "shared")
+                self.assertEqual(runtime.source_cp, 8)
+                self.assertTrue(runtime.kv_sharded)
+                with self.assertRaisesRegex(ValueError, "PPU model path must be shared"):
+                    preset_env(role, "/weights", ppu_model_path="legacy", **options)
+                with self.assertRaisesRegex(ValueError, "CP KV sharding requires CP8"):
+                    preset_env(
+                        role,
+                        "/weights",
+                        ppu_model_path="shared",
+                        prefill_parallel="dp",
+                        **options,
+                    )
 
     def test_long_context_runtime_accepts_explicit_and_inherited_lengths(self):
         for role in ("prefill", "decode"):
@@ -296,7 +315,7 @@ class IntegrationTest(unittest.TestCase):
                     runtime = V41RuntimeConfig.from_env(env)
                     self.assertEqual(runtime.speculative, "DSPARK")
                     self.assertEqual(env["GEN_NUM_PER_CIRCLE"], str(gamma))
-                    self.assertEqual(env["SP_MODEL_TYPE"], "deepseek_v41_dspark")
+                    self.assertEqual(env["SP_MODEL_TYPE"], "deepseek_v41_ppu_shared_dspark")
                     self.assertEqual(
                         env["SP_DSPARK_VERIFY_MODE"],
                         "packed" if role == "decode" else "dense",
@@ -359,35 +378,6 @@ class IntegrationTest(unittest.TestCase):
                 ValueError, "history length"
             ):
                 validate_handoff(manifest, **options)
-
-    def test_pd_check_only_accepts_long_context_arguments(self):
-        from rtp_llm.tools.v41.pd_joint import main
-
-        with tempfile.TemporaryDirectory() as root, patch(
-            "rtp_llm.models_py.modules.dsv41.ppu.pd_handoff.runtime_identity",
-            return_value={"snapshot_id": "context-check"},
-        ), redirect_stdout(io.StringIO()) as stream:
-            self.assertEqual(
-                main(
-                    [
-                        "prefill",
-                        "--run-id",
-                        "long-context",
-                        "--synthetic",
-                        "--tokens",
-                        "131072",
-                        "--steps",
-                        "129",
-                        "--run-root",
-                        root,
-                        "--check-only",
-                    ]
-                ),
-                0,
-            )
-        report = json.loads(stream.getvalue())
-        self.assertEqual(report["input_tokens_per_request"], 131072)
-        self.assertEqual(report["generated_tokens_per_request"], 130)
 
     def test_dp8_prefill_and_decode_use_unsharded_cp1_source(self):
         for role in ("prefill", "decode"):

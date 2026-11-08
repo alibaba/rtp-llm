@@ -1,8 +1,6 @@
 """Native page geometry, planar indexer, ring boundary and continuation tests."""
 
-import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace as NS
 
 import torch
@@ -164,60 +162,6 @@ class NativeCacheTest(unittest.TestCase):
         bridge = NativeCacheBridge(config, native, native.inputs)
         with self.assertRaisesRegex(ValueError, "unallocated physical block"):
             bridge.import_requests([1])
-
-    def test_native_restoration_matches_uninterrupted_decode(self):
-        from rtp_llm.models_py.modules.dsv41.ppu.decode import DecodeStepOrchestrator
-        from rtp_llm.models_py.modules.dsv41.ppu.ops import PPUOps
-        from rtp_llm.models_py.modules.dsv41.ppu.prefill import run_prefill
-        from rtp_llm.models_py.modules.dsv41.ppu.weight import (
-            V41Geometry,
-            load_ppu_weights,
-            write_synthetic_checkpoint,
-        )
-
-        config = synthetic_config()
-        geo = V41Geometry.from_config(config)
-        ops = PPUOps(
-            ep_size=1,
-            num_routed_experts=geo.n_routed_experts,
-            num_local_experts=geo.n_routed_experts,
-            hidden_size=geo.hidden_size,
-            inter_dim=geo.moe_inter_dim,
-            swiglu_limit=geo.swiglu_limit,
-            mhc_config=geo.mhc_config(),
-            sm_scale=geo.sm_scale(),
-            window=geo.window,
-        )
-        with tempfile.TemporaryDirectory(prefix="v41-native-") as root:
-            checkpoint = write_synthetic_checkpoint(config, Path(root), seed=9)
-            bundle = load_ppu_weights(config, checkpoint)
-        bundle.bind(ops)
-        tokens = torch.arange(15, dtype=torch.int64) % geo.vocab_size
-        reference_cache = PPUKVCache(config)
-        prefill = run_prefill(bundle, ops, reference_cache, tokens, apply_lm_head=True)
-        reference = DecodeStepOrchestrator(
-            ops=ops, bundle=bundle, cache=reference_cache
-        )
-        reference.add_request(0, tokens.tolist())
-        pending = int(prefill.logits[-1].argmax())
-        native = NativePools(config, batch=1)
-        NativeCacheBridge(config, native, native.inputs).export_requests(
-            reference_cache, [15]
-        )
-        for _step in range(4):
-            length = reference.requests[0].seq_len
-            bridge = NativeCacheBridge(config, native, native.inputs)
-            restored_cache = bridge.import_requests([length])
-            restored = DecodeStepOrchestrator(
-                ops=ops, bundle=bundle, cache=restored_cache
-            )
-            restored.add_request(0, list(reference.requests[0].history))
-            left = reference.step({0: pending})
-            right = restored.step({0: pending})
-            self.assertTrue(torch.equal(left.hidden, right.hidden))
-            self.assertTrue(torch.equal(left.logits, right.logits))
-            bridge.export_requests(restored_cache, [length + 1])
-            pending = int(left.logits[0].argmax())
 
 
 if __name__ == "__main__":

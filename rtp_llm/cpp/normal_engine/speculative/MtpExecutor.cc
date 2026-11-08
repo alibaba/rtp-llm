@@ -2102,7 +2102,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
         }
     } ppu_verify_abort_guard{is_dspark_ ? model_.get() : nullptr};
-    torch::Tensor ppu_verify_position_ids;
 #endif
     const auto engram_anchor_windows = model_input.engram_token_windows;
 
@@ -2520,13 +2519,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 ++row;
             }
             model_->finishSpeculativeForward(model_input.request_id, model_input.prefix_lengths, accepted);
-            ppu_verify_position_ids = model_input.combo_position_ids;
-            batch_stream_processor_->updateDecodePostDSparkCommitInput(
-                model_input, model_output.all_hidden_states, batch_size, accepted);
-#else
+#endif
             batch_stream_processor_->updateDecodePostDSparkCommitInput(
                 model_input, model_output.all_hidden_states, batch_size);
-#endif
         } else {
             batch_stream_processor_->updateDecodePostDraftModelInput(
                 model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
@@ -2696,11 +2691,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     torch::Tensor next_history;
     auto dispatch_position_ids = packed_target_layout.packed_to_dense.defined() ?
                                      packed_target_layout.dense_position_ids : model_input.combo_position_ids;
-#if USE_PPU
-    if (is_dspark_ && !packed_target_layout.packed_to_dense.defined()) {
-        dispatch_position_ids = ppu_verify_position_ids;
-    }
-#endif
     auto          dispatch_result =
         dispatchDecodeOutput(stream_groups,
                              streams,
@@ -2876,13 +2866,6 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
 }
 
 void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_input) {
-#if USE_PPU
-    if (is_dspark_) {
-        // Acceptance compacts commit rows; preparing the full rejected tail
-        // here would retain stale row boundaries in the eager model wrapper.
-        return;
-    }
-#endif
     if (!useAsyncPrepare()) {
         return;
     }

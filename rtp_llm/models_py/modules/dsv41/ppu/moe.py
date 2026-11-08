@@ -1425,6 +1425,7 @@ class PPUMoE:
         self,
         *,
         num_routed_experts: int = 384,
+        num_physical_experts: Optional[int] = None,
         num_local_experts: int = 48,
         ep_rank: int = 0,
         ep_size: int = 1,
@@ -1434,6 +1435,9 @@ class PPUMoE:
         group: Optional[object] = None,
     ):
         self.num_routed_experts = int(num_routed_experts)
+        self.num_physical_experts = int(
+            num_routed_experts if num_physical_experts is None else num_physical_experts
+        )
         self.num_local_experts = int(num_local_experts)
         self.ep_rank = int(ep_rank)
         self.ep_size = int(ep_size)
@@ -1455,20 +1459,26 @@ class PPUMoE:
         self._fake_balance_config = None
         self._fake_balance_op = None
         self.group = group
-        if self.num_routed_experts % self.num_local_experts != 0:
+        if self.num_physical_experts < self.num_routed_experts:
+            raise ValueError("physical expert slots must cover logical experts")
+        if self.num_local_experts <= 0 or self.num_physical_experts % self.num_local_experts != 0:
             raise ValueError(
-                "num_routed_experts must be divisible by num_local_experts"
+                "num_physical_experts must be divisible by num_local_experts"
             )
-        if self.ep_size * self.num_local_experts != self.num_routed_experts:
+        if self.ep_size * self.num_local_experts != self.num_physical_experts:
             raise ValueError(
-                f"ep_size * num_local_experts must equal num_routed_experts, "
+                f"ep_size * num_local_experts must equal num_physical_experts, "
                 f"got {self.ep_size} * {self.num_local_experts} != "
-                f"{self.num_routed_experts}"
+                f"{self.num_physical_experts}"
             )
         self.local_expert_start = self.ep_rank * self.num_local_experts
         self.local_expert_end = self.local_expert_start + self.num_local_experts
         self._weights: Dict[int, Tuple[torch.Tensor, ...]] = {}
         self._processed: Dict[Tuple[int, torch.device], Tuple[torch.Tensor, ...]] = {}
+        self._eplb_layers = {}
+        self._eplb_inventory = {}
+        self._eplb_invariants = {}
+        self._eplb_routes = {}
         self._current_layer: Optional[int] = None
         self._grouped_path: Optional[bool] = None
         if self.backend == "megamoe":
@@ -1528,10 +1538,11 @@ class PPUMoE:
             # CPU reference of RTP's existing fakeBalanceExpertKernel mapping.
             index = torch.arange(ids.numel(), device=ids.device).reshape(ids.shape)
             rank_offset = self.ep_size * dp_rank // dp_size
-            local_offset = int(dp_rank * max(self.num_local_experts / dp_size, 1.0))
+            logical_local = self.num_routed_experts // self.ep_size
+            local_offset = int(dp_rank * max(logical_local / dp_size, 1.0))
             rank = (rank_offset + index % self.ep_size) % self.ep_size
-            local = (local_offset + index // self.ep_size) % self.num_local_experts
-            ids.copy_(rank * self.num_local_experts + local)
+            local = (local_offset + index // self.ep_size) % logical_local
+            ids.copy_(rank * logical_local + local)
             weights.fill_(1.0)
         ids = torch.where(valid, ids, original)
         weights = torch.where(valid, weights, torch.zeros_like(weights))
@@ -1546,6 +1557,8 @@ class PPUMoE:
         w2_pair: Tuple[torch.Tensor, torch.Tensor],
     ) -> None:
         """Bind one layer's local FP4 routed-expert weight shard."""
+        if int(layer_id) in self._eplb_layers:
+            raise RuntimeError("live EPLB executor allocations cannot be rebound")
         w13_weight, w13_scale = w13_pair
         w2_weight, w2_scale = w2_pair
         two_i, half_k = 2 * self.inter_dim, self.hidden_size // 2
@@ -1644,6 +1657,8 @@ class PPUMoE:
         cached = self._processed.get(key)
         if cached is not None:
             return cached
+        if layer_id in self._eplb_layers:
+            raise RuntimeError("live EPLB must reuse its bound preprocessed executor tensors")
         w13_w, w13_s, w2_w, w2_s = self._layer_weights(layer_id)
         w13_u = _packed_weight_uint8(w13_w)
         w2_u = _packed_weight_uint8(w2_w)
@@ -1681,6 +1696,18 @@ class PPUMoE:
 
     # -- forward ----------------------------------------------------------
 
+    def _map_expert_ids(self, ids, weights, layer_id):
+        if not self._eplb_layers:
+            return ids
+        layer = self._eplb_layers.get(self._resolve_layer_id(layer_id))
+        if layer is None:
+            return ids
+        physical = layer.map_ids(ids)
+        # Borrow the actual dispatched tensors for bounded native diagnostics.
+        # Graph capture retains these same device buffers; no host reads here.
+        self._eplb_routes[layer.layer_id] = (ids, physical, weights)
+        return physical
+
     def forward(
         self,
         x: torch.Tensor,
@@ -1688,6 +1715,7 @@ class PPUMoE:
         expert_weights: torch.Tensor,
         *,
         layer_id: Optional[int] = None,
+        expert_load=None,
     ) -> torch.Tensor:
         """Routed-expert forward: BF16 ``[T, hidden]`` in, BF16 ``[T, hidden]`` out.
 
@@ -1698,24 +1726,68 @@ class PPUMoE:
         expert_ids, expert_weights = self._apply_fake_balance(
             expert_ids, expert_weights
         )
+        expert_ids = self._map_expert_ids(expert_ids, expert_weights, layer_id)
         if self.backend == "megamoe":
             # Empty owners must still enter MegaMoE's cross-rank protocol.
-            return self._forward_megamoe(x, expert_ids, expert_weights, layer_id)
+            return self._forward_megamoe(
+                x, expert_ids, expert_weights, layer_id, expert_load
+            )
         if x.size(0) == 0:
             if self._use_deepep_dispatch():
                 # Collective participation: dispatch + combine still run.
-                return self._forward_deepep(x, expert_ids, expert_weights, layer_id)
+                return self._forward_deepep(
+                    x, expert_ids, expert_weights, layer_id, expert_load
+                )
             return torch.empty((0, self.hidden_size), dtype=x.dtype, device=x.device)
         if self._use_deepep_dispatch():
-            return self._forward_deepep(x, expert_ids, expert_weights, layer_id)
+            return self._forward_deepep(
+                x, expert_ids, expert_weights, layer_id, expert_load
+            )
         if self.ep_size == 1 or self._offline_single_process():
-            return self._forward_local(x, expert_ids, expert_weights, layer_id)
+            return self._forward_local(
+                x, expert_ids, expert_weights, layer_id, expert_load
+            )
         raise RuntimeError(
             "ep_size > 1 requires deep_ep for dispatch/combine, but deep_ep is "
             "not importable and no DeepEPWrapper is initialized"
         )
 
     __call__ = forward
+
+    def _expert_load_counts(self, expert_load, device):
+        counts = expert_load.expert_token_counts
+        if (
+            counts.ndim != 1
+            or counts.numel() != self.num_local_experts
+            or counts.dtype != torch.int32
+            or not counts.is_contiguous()
+            or counts.device != device
+        ):
+            raise ValueError(
+                "PPU expert counts must be contiguous int32 [local_experts] "
+                "on the receiving device"
+            )
+        return counts
+
+    def _record_expert_load(self, local_ids, expert_load):
+        """Accumulate received assignments without the CUDA-only native op."""
+        if expert_load is None:
+            return
+        counts = self._expert_load_counts(expert_load, local_ids.device)
+        if local_ids.dtype not in (torch.int32, torch.int64) or local_ids.ndim not in (
+            1,
+            2,
+        ):
+            raise ValueError(
+                "PPU expert IDs must be int32/int64 with one or two dimensions"
+            )
+        ids = local_ids.reshape(-1)
+        experts = torch.arange(counts.numel(), dtype=ids.dtype, device=ids.device)
+        # Equality excludes -1 and out-of-range sentinels. Fixed-size chunks
+        # bound scratch memory and avoid data-dependent indexing or CPU reads.
+        for start in range(0, ids.numel(), 4096):
+            matches = ids[start : start + 4096, None] == experts[None, :]
+            counts.add_(matches.sum(dim=0).to(counts.dtype))
 
     def _get_mega_module(self):
         if self._mega_module is None:
@@ -1783,7 +1855,7 @@ class PPUMoE:
             self._mega_device = x.device
             self._mega_buffer = self._get_mega_module().get_symm_buffer_for_mega_moe(
                 group,
-                self.num_routed_experts,
+                self.num_physical_experts,
                 required,
                 COMM_SLOTS,
                 self.hidden_size,
@@ -1799,7 +1871,36 @@ class PPUMoE:
                 )
         return self._mega_buffer
 
-    def _forward_megamoe(self, x, expert_ids, expert_weights, layer_id):
+    def prepare_shared_graph(self, x, layer_ids):
+        """Graph-external allocation/weight preparation; never run in capture."""
+        if self.backend != "megamoe" or self.precision != "w4a4":
+            raise ValueError("shared Graph requires MegaMoE/W4A4")
+        if self._fake_balance_config and self._fake_balance_config[0]:
+            raise ValueError("shared Graph fake balance belongs to N9")
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("shared Graph resources must be prepared outside capture")
+        self._validate_megamoe_input(x)
+        self._ensure_mega_buffer(x)
+        for layer_id in layer_ids:
+            self._processed_weights(layer_id, x.device)
+
+    def forward_shared_graph(self, x, expert_ids, expert_weights, *, layer_id, expert_load=None):
+        """Fixed workspace path for capture AND graph-safe eager reference."""
+        if (self.backend, self.precision) != ("megamoe", "w4a4"):
+            raise ValueError("shared Graph requires MegaMoE/W4A4")
+        if (layer_id, x.device) not in self._processed or self._mega_buffer is None:
+            raise RuntimeError("shared Graph weights/workspace were not prepared")
+        if x.shape[0] > self._mega_capacity:
+            raise ValueError("shared Graph exceeds its fixed MegaMoE capacity")
+        expert_ids = self._map_expert_ids(expert_ids, expert_weights, layer_id)
+        return self._forward_megamoe(
+            x, expert_ids, expert_weights, layer_id, expert_load,
+            graph_buffer=self._mega_buffer,
+        )
+
+    def _forward_megamoe(
+        self, x, expert_ids, expert_weights, layer_id, expert_load=None, *, graph_buffer=None
+    ):
         self._validate_megamoe_input(x)
         layer_id = self._resolve_layer_id(layer_id)
         w13, s13, w2, s2, _, _ = self._processed_weights(layer_id, x.device)
@@ -1808,8 +1909,14 @@ class PPUMoE:
             expert_weights.to(torch.float32),
             slots=COMM_SLOTS,
         )
-        buffer = self._ensure_mega_buffer(x)
+        buffer = self._ensure_mega_buffer(x) if graph_buffer is None else graph_buffer
         mega = self._get_mega_module()
+        counts = (
+            self._expert_load_counts(expert_load, x.device)
+            if expert_load is not None
+            else None
+        )
+        previous_counts = self._mega_recv_stats.clone() if counts is not None else None
         mega.mega_moe_pre_dispatch(
             x.contiguous(), ids.contiguous(), weights.contiguous(), buffer
         )
@@ -1827,6 +1934,9 @@ class PPUMoE:
             activation_clamp=self.swiglu_limit if self.swiglu_limit > 0 else None,
             fast_math=True,
         )
+        if counts is not None:
+            # The fused dispatch exposes destination counts rather than IDs.
+            counts.add_(self._mega_recv_stats - previous_counts)
         self.mega_moe_calls += 1
         return y
 
@@ -1966,6 +2076,7 @@ class PPUMoE:
         expert_ids: torch.Tensor,
         expert_weights: torch.Tensor,
         layer_id: Optional[int],
+        expert_load=None,
     ) -> torch.Tensor:
         """DeepEP normal dispatch -> local compute -> combine (rtp pattern)."""
         buffer = self._get_deepep_buffer()
@@ -1980,7 +2091,7 @@ class PPUMoE:
             num_tokens_per_expert,
             is_token_in_rank,
             _,
-        ) = buffer.get_dispatch_layout(ids_p, self.num_routed_experts)
+        ) = buffer.get_dispatch_layout(ids_p, self.num_physical_experts)
         (
             recv_x,
             recv_topk_idx,
@@ -2000,6 +2111,9 @@ class PPUMoE:
             # PPU: expert_alignment=1 for compatibility (sglang deepep.py:813).
             expert_alignment=1,
         )
+        # DeepEP has converted GLOBAL source IDs to destination LOCAL IDs.
+        # Record once even on idle source ranks, which may receive real work.
+        self._record_expert_load(recv_topk_idx, expert_load)
         m = recv_x.size(0)
         if m > 0:
             # recv ids are LOCAL ([-1] for tokens not destined here); keep -1.
@@ -2211,10 +2325,18 @@ class PPUMoE:
         expert_ids: torch.Tensor,
         expert_weights: torch.Tensor,
         layer_id: Optional[int],
+        expert_load=None,
     ) -> torch.Tensor:
         """LOCAL path: ep_size == 1, no dispatch. Weights applied explicitly."""
         ids = expert_ids.to(torch.int64)
         weights = expert_weights.to(torch.float32)
+        if expert_load is not None:
+            local_ids = torch.where(
+                (ids >= self.local_expert_start) & (ids < self.local_expert_end),
+                ids - self.local_expert_start,
+                torch.full_like(ids, -1),
+            )
+            self._record_expert_load(local_ids, expert_load)
         return self._forward_reference_tokens(x, ids, weights, layer_id)
 
     def _forward_reference_tokens(

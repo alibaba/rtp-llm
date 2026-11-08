@@ -2496,8 +2496,7 @@ void MtpBatchStreamProcessor::expandDSparkTargetVerifyPositionIdsFromProposal(Gp
 
 void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
                                                                 const torch::Tensor& target_features,
-                                                                size_t               batch_size,
-                                                                const torch::Tensor& accepted_rows) {
+                                                                size_t               batch_size) {
     RTP_LLM_CHECK_WITH_INFO(target_features.defined(),
                             "dspark decode tail: target MTP hidden buffer did not provide aux features");
     RTP_LLM_CHECK_WITH_INFO(model_input.combo_tokens.defined() && model_input.input_lengths.defined()
@@ -2507,42 +2506,6 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs& 
                             "dspark decode tail: aux rows %ld != verify token rows %ld",
                             target_features.size(0),
                             model_input.combo_tokens.numel());
-
-#if USE_PPU
-    if (accepted_rows.defined()) {
-        auto lengths = model_input.input_lengths.to(torch::kCPU).to(torch::kLong).contiguous();
-        auto counts = accepted_rows.to(torch::kCPU).to(torch::kLong).contiguous();
-        RTP_LLM_CHECK_WITH_INFO(counts.numel() == static_cast<int64_t>(batch_size), "PPU accepted row batch mismatch");
-        std::vector<int64_t> selected;
-        int64_t offset = 0;
-        for (int64_t row = 0; row < static_cast<int64_t>(batch_size); ++row) {
-            const auto length = lengths[row].item<int64_t>();
-            const auto count = counts[row].item<int64_t>();
-            RTP_LLM_CHECK_WITH_INFO(count >= 0 && count <= length, "PPU commit count exceeds verified rows");
-            for (int64_t column = 0; column < count; ++column) {
-                selected.push_back(offset + column);
-            }
-            offset += length;
-        }
-        auto indices = torch::tensor(selected, torch::TensorOptions().dtype(torch::kLong))
-                           .to(model_input.combo_tokens.device());
-        const auto old_rows = model_input.combo_tokens.numel();
-        model_input.combo_tokens = model_input.combo_tokens.index_select(0, indices);
-        model_input.last_hidden_states = target_features.index_select(0, indices.to(target_features.device()));
-        if (model_input.combo_position_ids.defined()) {
-            model_input.combo_position_ids = model_input.combo_position_ids.reshape({old_rows, -1})
-                                                 .index_select(0, indices).reshape({-1});
-        }
-        model_input.input_lengths = counts.to(model_input.input_lengths.options());
-        model_input.lm_output_indexes = torch::arange(model_input.combo_tokens.numel(), model_input.combo_tokens.options());
-        model_input.sequence_lengths_plus_1 = torch::Tensor();
-        model_input.is_target_verify = true;
-        model_input.is_packed_target_verify = true;
-        return;
-    }
-#else
-    (void)accepted_rows;
-#endif
 
     // Commit reuses dense or packed target verify geometry verbatim, independent
     // of rejection. Later rounds overwrite rows beyond the accepted prefix.

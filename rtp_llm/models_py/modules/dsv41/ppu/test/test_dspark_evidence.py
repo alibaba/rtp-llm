@@ -556,7 +556,7 @@ def read_model_inputs(directory):
     return records
 
 
-def assert_first_anchors(records, events, cases):
+def assert_first_anchors(records, events, cases, *, terminal_prefetch_rows=0):
     finished = defaultdict(list)
     computed = defaultdict(list)
     for row in events:
@@ -698,6 +698,17 @@ def assert_first_anchors(records, events, cases):
             ),
             "model-input dump omitted a native business transaction",
         )
+        terminal_prefetch = []
+        end = prompt + len(outputs) - 1
+        if (
+            terminal_prefetch_rows
+            and not case.get("intentionally_disconnected")
+            and len(outputs) == case["query"]["generate_config"]["max_new_tokens"]
+        ):
+            # The C++ stream can complete while an async input is in flight.
+            # The scheduler and compute evidence above still covers that input.
+            while chain[-1][1] == 0 and end <= chain[-1][0] <= end + terminal_prefetch_rows:
+                terminal_prefetch.append(chain.pop()[0])
         for previous, following in zip(chain, chain[1:]):
             require(
                 following[0] == previous[0] + previous[1],
@@ -714,7 +725,7 @@ def assert_first_anchors(records, events, cases):
         )
         if not case.get("intentionally_disconnected"):
             require(
-                chain[-1][0] + chain[-1][1] == prompt + len(outputs) - 1,
+                chain[-1][0] + chain[-1][1] == end,
                 "final committed input prefix is off by one",
             )
         observed_owners.add(chain[0][2])
@@ -723,9 +734,11 @@ def assert_first_anchors(records, events, cases):
                 trace_id=trace,
                 owner=chain[0][2],
                 request_id=chain[0][3],
-                rounds=len(chain),
+                rounds=len(chain) + len(terminal_prefetch),
             )
         )
+        if terminal_prefetch:
+            evidence[-1]["terminal_zero_publication_prefixes"] = terminal_prefetch[::-1]
     require(observed_owners == set(range(8)), "first-anchor proof misses D owners")
     return evidence
 

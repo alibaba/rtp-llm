@@ -346,6 +346,9 @@ py::object CudaGraphRunner::prepareFmhaImpl(const PyModelInputs& inputs, bool is
             throw;
         }
     }
+    if (is_cuda_graph && py::hasattr(py_instance_, "prepare_fmha_impl_for_graph")) {
+        return py_instance_.attr("prepare_fmha_impl_for_graph")(inputs, forward_method_name_);
+    }
     return py_attn_pyobj_method_(inputs, is_cuda_graph);
 }
 
@@ -1323,9 +1326,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inpu
         }
     } flag_guard{prepared_attention_inputs_};
 
-#if USING_CUDA
     const auto graph_idx = is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     auto&      instance  = graph_instances_[graph_idx];
+#if USING_CUDA
     // An async prepare, an alias fallback, or a different input layout must not
     // replay the preceding round's pointers. Every forward starts disabled.
     disableCudaGraphPrepareReplay(instance.prepare_replay_);
@@ -1344,11 +1347,7 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inpu
     } else {
         prepareInputData(inputs, state);
     }
-    {
-        const size_t graph_idx =
-            is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
-        checkGraphInputStable(inputs, graph_instances_[graph_idx].mem_hold_.py_model_inputs_);
-    }
+    checkGraphInputStable(inputs, instance.mem_hold_.py_model_inputs_);
     if (is_prefill_cuda_graph_mode_) {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
@@ -1400,6 +1399,10 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inpu
         if (dspark_confidence_hidden_logits.defined()) {
             outputs.dspark_confidence_hidden_logits = dspark_confidence_hidden_logits.slice(0, 0, state.seq_len_sum);
         }
+    }
+    const auto& impl = instance.mem_hold_.attn_pyobj_;
+    if (impl && py::hasattr(impl, "finish_cuda_graph_replay")) {
+        impl.attr("finish_cuda_graph_replay")(inputs, outputs);
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());

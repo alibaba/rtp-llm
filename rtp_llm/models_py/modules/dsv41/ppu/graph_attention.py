@@ -25,6 +25,7 @@ def indexer_topk(
     valid_mask: torch.Tensor,
     topk: int,
     max_seq_len: int,
+    scores_only: bool = False,
 ) -> torch.Tensor:
     """Score each request's own fixed-capacity planar Indexer K bank.
 
@@ -52,6 +53,8 @@ def indexer_topk(
     dots = torch.bmm(query.float(), keys.float().transpose(1, 2))
     scores = _bf16_rounding_reduce(dots, head_weights.to(torch.bfloat16))
     scores = scores.masked_fill(~valid | (slots < 0), float("-inf"))
+    if scores_only:
+        return scores
     width = min(int(topk), capacity)
     values, indices = torch.topk(scores, width, dim=-1)
     selected = torch.where(

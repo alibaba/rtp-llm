@@ -24,6 +24,7 @@ py_library(
         "modules/dsv41/ppu/native_protocol.py",
         "modules/dsv41/ppu/pd_handoff.py",
         "modules/dsv41/ppu/replay_policy.py",
+        "modules/dsv41/ppu/shared_dspark_modes.py",
     ],
     visibility = ["//visibility:public"],
 )
@@ -38,6 +39,54 @@ py_library(
         ":v41_ppu_contract",
         "//rtp_llm:torch",
     ],
+    visibility = ["//visibility:public"],
+)
+
+_DSV41_PPU_SHARED_MODULES = [
+    "modules/dsv41/ppu/shared_model.py",
+    "modules/dsv41/ppu/shared_weight.py",
+    "modules/dsv41/ppu/shared_eplb.py",
+    "modules/dsv41/ppu/shared_transformer.py",
+    "modules/dsv41/ppu/shared_block.py",
+    "modules/dsv41/ppu/shared_modules.py",
+    "modules/dsv41/ppu/shared_attention.py",
+    "modules/dsv41/ppu/shared_prefill.py",
+    "modules/dsv41/ppu/shared_ced.py",
+    "modules/dsv41/ppu/shared_native.py",
+    "modules/dsv41/ppu/shared_sharded.py",
+    "modules/dsv41/ppu/shared_runtime.py",
+    "modules/dsv41/ppu/shared_dspark_model.py",
+    "modules/dsv41/ppu/shared_dspark_modes.py",
+    "modules/dsv41/ppu/shared_dspark_weight.py",
+    "modules/dsv41/ppu/shared_dspark_attention.py",
+    "modules/dsv41/ppu/shared_verify.py",
+    "modules/dsv41/ppu/shared_registration.py",
+    "modules/dsv41/ppu/shared_server.py",
+    "modules/dsv41/ppu/shared_graph.py",
+    "modules/dsv41/ppu/shared_graph_runtime.py",
+    "modules/dsv41/ppu/shared_graph_attention.py",
+    "modules/dsv41/ppu/shared_graph_metadata.py",
+    "modules/dsv41/ppu/shared_graph_moe.py",
+    "modules/dsv41/ppu/shared_dspark_graph.py",
+    "modules/dsv41/ppu/tools/driver_shared_graph_dp8.py",
+    "modules/dsv41/ppu/tools/driver_shared_graph_modes.py",
+    "modules/dsv41/ppu/shared_packed_attention.py",
+    "modules/dsv41/ppu/shared_packed_prefill.py",
+    "modules/dsv41/ppu/shared_packed_decode.py",
+    "modules/dsv41/ppu/shared_fused_ops.py",
+    "modules/dsv41/ppu/shared_streams.py",
+    "modules/dsv41/ppu/tools/driver_shared_optimized.py",
+    "modules/dsv41/ppu/tools/driver_shared_sharded.py",
+    "modules/dsv41/ppu/tools/driver_shared_dspark_modes.py",
+    "modules/dsv41/ppu/tools/driver_shared_eplb.py",
+]
+
+filegroup(
+    name = "v41_ppu_shared_sources",
+    srcs = select({
+        "@//:using_ppu": _DSV41_PPU_SHARED_MODULES,
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 
@@ -152,6 +201,12 @@ filegroup(
 _DSV4_PPU_MODULES = [
     "modules/dsv4/ppu/**/*.py",
     "modules/factory/linear/ppu_impl/fp8_linear.py",
+] + _DSV41_PPU_SHARED_MODULES + [
+    "modules/dsv41/ppu/test/test_shared_model.py",
+    "modules/dsv41/ppu/test/test_shared_graph.py",
+    "modules/dsv41/ppu/test/native_shared_graph_role.py",
+    "modules/dsv41/ppu/test/test_shared_sharded.py",
+    "modules/dsv41/ppu/test/native_shared_sharded_role.py",
 ]
 _DSV4_PPU_KERNELS = [
     "kernels/ppu/attention/**/*.py", "kernels/ppu/moe/**/*.py",

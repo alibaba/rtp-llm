@@ -83,6 +83,8 @@ class V41RuntimeConfig:
     strategy: str = PPU_STRATEGY
     moe_backend: str = "grouped"
     moe_precision: str = "w4a8"
+    shared_eplb: bool = False
+    shared_grouped_graph: bool = False
 
     @property
     def attention_cp(self):
@@ -114,29 +116,36 @@ class V41RuntimeConfig:
             errors.append("world_size=EP=ENP=8 (separate P/D worlds)")
         if self.max_seq_len <= 0:
             errors.append("max_seq_len must be positive and cover input + output")
-        if self.kv_sharded or self.low_latency:
-            errors.append("KV sharding and low-latency EP must be disabled")
+        if self.kv_sharded and (self.source_cp != 8 or (self.role == "PREFILL" and self.physical_tp != 8)):
+            errors.append("sharded native cache requires CP8 source; DP8P retains full local cache")
+        if self.low_latency:
+            errors.append("low-latency EP must be disabled")
         if self.bounded_replay and not self.ced:
             errors.append("DSV41_SWA_BOUNDED_REPLAY requires DSV41_CED=1")
         if self.encoder_replay and not self.bounded_replay:
             errors.append("encoder SWA recovery requires decoder bounded replay")
-        if self.cuda_graph and (
-            self.role != "DECODE"
-            or self.moe_backend != "megamoe"
-            or self.moe_precision != "w4a4"
+        if self.shared_grouped_graph:
+            if (not self.cuda_graph or self.role != "DECODE"
+                or (self.moe_backend, self.moe_precision) != ("grouped", "w4a8")):
+                errors.append("shared grouped PPU Graph requires DP8 DECODE with grouped W4A8")
+        elif self.cuda_graph and (
+            self.role != "DECODE" or (self.moe_backend, self.moe_precision) != ("megamoe", "w4a4")
         ):
             errors.append("PPU Graph requires DP8 DECODE with MegaMoE/W4A4")
         if self.speculative not in ("NONE", "DSPARK"):
             errors.append("PPU speculative execution supports DSpark or NONE")
-        if self.speculative == "DSPARK" and self.cuda_graph:
+        if self.speculative == "DSPARK" and self.cuda_graph and not self.shared_grouped_graph:
+            errors.append("PPU DSpark Graph requires shared grouped W4A8 Decode")
+        if self.eplb not in ("NONE", "STATS", "EPLB", "ALL"):
+            errors.append("EPLB mode must be NONE, STATS, EPLB or ALL")
+        if (self.eplb != "NONE" or self.redundant_experts != 0) and not self.shared_eplb:
+            errors.append("EPLB/redundancy requires explicit isolated shared PPU EPLB opt-in")
+        if (not 0 <= self.redundant_experts <= 384 or self.ep <= 0
+                or (384 + self.redundant_experts) % self.ep):
+            errors.append("target physical E384+R requires R in [0,384] and EP divisibility")
+        if not self.normal_ep or self.all_gather_moe:
             errors.append(
-                "PPU DSpark requires explicit eager mode; Graph support belongs to S4"
-            )
-        if self.eplb != "NONE":
-            errors.append("dynamic EPLB must be NONE")
-        if self.redundant_experts != 0 or not self.normal_ep or self.all_gather_moe:
-            errors.append(
-                "normal DeepEP without redundant experts or all-gather MoE is required"
+                "normal DeepEP without all-gather MoE is required"
             )
         if self.strategy != PPU_STRATEGY:
             errors.append(f"release strategy must be {PPU_STRATEGY}")
@@ -149,7 +158,9 @@ class V41RuntimeConfig:
             asdict(self),
             attention_tp=1,
             attention_cp=self.attention_cp,
-            local_experts=48,
+            logical_experts=384,
+            physical_experts=384 + self.redundant_experts,
+            local_experts=(384 + self.redundant_experts) // self.ep,
             model_top_k=6,
             communication_slots=8,
         )
@@ -161,6 +172,9 @@ class V41RuntimeConfig:
             moe_backend,
             moe_precision,
         )
+
+        shared_eplb = env_bool(env, "RTP_V41_PPU_EPLB")
+        shared_grouped_graph = shared_grouped_graph_enabled(env)
 
         return cls(
             role=env.get("ROLE_TYPE", "").upper(),
@@ -174,8 +188,10 @@ class V41RuntimeConfig:
             max_seq_len=int(env.get("MAX_SEQ_LEN", "32768")),
             kv_sharded=env_bool(env, "PREFILL_CP_KV_CACHE_SHARDED"),
             cuda_graph=env_bool(env, "ENABLE_CUDA_GRAPH"),
+            shared_grouped_graph=shared_grouped_graph,
             speculative=(env.get("SP_TYPE") or "NONE").upper(),
             eplb=env.get("EPLB_MODE", "NONE").upper(),
+            shared_eplb=shared_eplb,
             low_latency=env_bool(env, "USE_DEEPEP_LOW_LATENCY"),
             ced=env_bool(env, "DSV41_CED"),
             bounded_replay=env_bool(env, "DSV41_SWA_BOUNDED_REPLAY"),
@@ -198,6 +214,10 @@ class V41RuntimeConfig:
         p = config.parallelism_config
         cp = p.prefill_cp_config
         env = os.environ
+        shared_eplb = env_bool(env, "RTP_V41_PPU_EPLB")
+        shared_grouped_graph = shared_grouped_graph_enabled(env)
+        if shared_grouped_graph and getattr(config.py_hw_kernel_config, "generation_prefill_capture_token_buckets", None):
+            raise ValueError("shared grouped PPU Graph keeps generation Prefill eager")
         if config.model_args.max_seq_len is None:
             raise ValueError("V4.1 PPU requires explicit positive --max_seq_len")
         if p.local_world_size != 8:
@@ -214,8 +234,10 @@ class V41RuntimeConfig:
             max_seq_len=int(config.model_args.max_seq_len),
             kv_sharded=cp.kv_cache_sharded,
             cuda_graph=config.py_hw_kernel_config.enable_cuda_graph,
+            shared_grouped_graph=shared_grouped_graph,
             speculative=enum_name(config.sp_config.type),
             eplb=enum_name(config.eplb_config.eplb_mode),
+            shared_eplb=shared_eplb,
             low_latency=config.moe_config.use_deepep_low_latency,
             ced=env_bool(env, "DSV41_CED"),
             bounded_replay=env_bool(env, "DSV41_SWA_BOUNDED_REPLAY"),
@@ -229,8 +251,17 @@ class V41RuntimeConfig:
         ).validate()
 
 
+def shared_grouped_graph_enabled(env=None):
+    env = os.environ if env is None else env
+    return env_bool(env, "RTP_V41_PPU_SHARED_GROUPED_GRAPH")
+
+
 def validate_v41_server_config(config):
     model_type = config.model_args.model_type
+    if (model_type == "deepseek_v41_ppu_shared_eplb_smoke"
+            and os.environ.get("RTP_V41_N8_EPLB_FIXTURE") == "1"
+            and os.environ.get("RTP_V41_PPU_MODEL_PATH") == "shared"):
+        model_type = "deepseek_v41"
     if not model_type or not model_type.startswith("deepseek_v41"):
         return
     if v41_backend_for_config() != "ppu":

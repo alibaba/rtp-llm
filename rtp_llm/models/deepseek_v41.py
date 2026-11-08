@@ -222,23 +222,40 @@ class DeepSeekV41DSpark(DeepSeekV41, DeepSeekV4DSpark):
         text.update(
             kv_source_layer_ids=[], index_source_layer_ids=[], engram_layer_ids=[]
         )
+        if v41_backend_for_config() == "ppu":
+            from rtp_llm.models_py.modules.dsv41.ppu.backend import model_path
+            from rtp_llm.models_py.modules.dsv41.ppu.shared_dspark_modes import (
+                SharedDSparkMode,
+            )
+
+            model_path()
+            mode = SharedDSparkMode.from_config(text)
+            if mode is not None:
+                config.dspark_sample_from_anchor = mode.sample_from_anchor
+                text = mode.freeze(text)
         config.deepseek_v41_config = text
         return config
 
     def _create_python_model(self):
         if v41_backend_for_config() == "ppu":
-            from rtp_llm.models_py.modules.dsv41.ppu.dspark_model import (
-                DeepSeekV41PPUDSparkModel,
+            from rtp_llm.models_py.modules.dsv41.ppu.shared_dspark_model import (
+                DeepSeekV41SharedPPUDSparkModel,
             )
 
-            self.py_model = DeepSeekV41PPUDSparkModel(
+            self.py_model = DeepSeekV41SharedPPUDSparkModel(
                 self.model_config,
                 self.parallelism_config,
                 self.weight,
                 self.moe_config,
                 max_generate_batch_size=self.max_generate_batch_size,
+                fmha_config=self.fmha_config,
                 py_hw_kernel_config=self.hw_kernel_config,
+                device_resource_config=self.device_resource_config,
             )
+            owner = self._weight_alias_owner
+            if owner is None:
+                raise ValueError("PPU DSpark requires the framework's target vocab owner")
+            self.py_model.shared_vocab_owner = owner.weight
             return
         from rtp_llm.models_py.model_desc.deepseek_v41_dspark_model import (
             DeepSeekV41DSparkModel,
@@ -258,19 +275,12 @@ class DeepSeekV41DSpark(DeepSeekV41, DeepSeekV4DSpark):
     @staticmethod
     def get_weight_cls():
         if v41_backend_for_config() == "ppu":
-            return DeepSeekV41PPUDSparkWeight
+            from rtp_llm.models_py.modules.dsv41.ppu.shared_dspark_weight import (
+                DeepSeekV41SharedPPUDSparkWeight,
+            )
+
+            return DeepSeekV41SharedPPUDSparkWeight
         return DeepSeekV41DSparkWeight
-
-
-class DeepSeekV41PPUDSparkWeight(DeepSeekV41DSparkWeight):
-    """C++ owns shared vocab/Markov; PPU loads private draft tensors once."""
-
-    def _get_weight_info(self):
-        info = super()._get_weight_info()
-        info.layer_weights = [[] for _ in range(self._num_layers)]
-        private = {W.v4_dspark_main_norm, W.v4_dspark_main_proj_w}
-        info.weights = [w for w in info.weights if w.name not in private]
-        return info
 
 
 register_model("deepseek_v41", DeepSeekV41, ["DeepseekV41ForCausalLM"])

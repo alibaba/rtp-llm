@@ -596,10 +596,10 @@ def check_graph_evidence(job):
 
 
 def prepare_token_map(args, directory):
-    from rtp_llm.models_py.modules.dsv41.ppu.tools.driver_prefill import _load_token_map
+    from rtp_llm.models_py.modules.dsv41.ppu.engram import load_token_map
 
     path = directory / "token-map.json"
-    _load_token_map(str(Path(args.checkpoint_path) / "tokenizer.json"), str(path))
+    load_token_map(str(Path(args.checkpoint_path) / "tokenizer.json"), str(path))
     return str(path)
 
 

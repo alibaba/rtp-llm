@@ -35,6 +35,7 @@ device is present) and CPU hosts keep plain tensors.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import types
@@ -557,6 +558,37 @@ def compressed_vocab_map(tokenizer) -> tuple[list[int], int]:
             keys[key] = len(keys)
         lookup.append(keys[key])
     return lookup, len(keys)
+
+
+def load_token_map(tokenizer_path: str, cache_path=None) -> list[int]:
+    """Load the tokenizer's Engram compressed-vocab map with optional JSON caching."""
+    if cache_path and os.path.exists(cache_path):
+        with open(cache_path) as handle:
+            return json.load(handle)
+
+    try:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            os.path.dirname(os.path.abspath(tokenizer_path)), trust_remote_code=False
+        )
+    except Exception:
+        from tokenizers import Tokenizer
+
+        class FastTokenizer:
+            backend_tokenizer = Tokenizer.from_file(tokenizer_path)
+
+            def __len__(self):
+                return self.backend_tokenizer.get_vocab_size(with_added_tokens=True)
+
+        tokenizer = FastTokenizer()
+
+    lookup, _ = compressed_vocab_map(tokenizer)
+    if cache_path:
+        os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
+        with open(cache_path, "w") as handle:
+            json.dump(lookup, handle)
+    return lookup
 
 
 def build_token_windows(

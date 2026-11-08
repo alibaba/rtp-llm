@@ -2231,45 +2231,6 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGe
     EXPECT_TRUE(model_input.is_target_verify);
 }
 
-#if USE_PPU
-TEST_F(MtpBatchStreamProcessorTest, testPpuDSparkCommitSelectsOnlyAcceptedVerifyInputs) {
-    ModelConfig model_config;
-    PDSepConfig pd_sep_config;
-    ProfilingDebugLoggingConfig profiling;
-    CacheConfig cache_config = makeProcessorCacheConfig();
-    SpeculativeExecutionConfig sp_config;
-    sp_config.type = SP_TYPE_DSPARK;
-    sp_config.gen_num_per_cycle = 3;
-    MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling, cache_config, sp_config, false);
-    for (const auto& lengths : std::vector<std::vector<int32_t>>{{4, 4}, {1, 3}}) {
-        for (const auto& counts : std::vector<std::vector<int32_t>>{{0, 0}, {1, 2}, {0, 3}}) {
-            const auto rows = lengths[0] + lengths[1];
-            GptModelInputs input;
-            const auto ints = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-            auto tokens = torch::arange(rows, ints) + 11;
-            auto positions = torch::arange(rows, ints) + 100;
-            auto features = torch::arange(rows * 6, ints.dtype(torch::kFloat32)).reshape({rows, 6});
-            input.combo_tokens = tokens;
-            input.combo_position_ids = positions;
-            input.input_lengths = torch::tensor(lengths, ints);
-            input.prefix_lengths = torch::tensor({7, 15}, ints);
-            processor.updateDecodePostDSparkCommitInput(input, features, 2, torch::tensor(counts, torch::kInt32));
-            std::vector<int64_t> selected;
-            for (int64_t row = 0, offset = 0; row < 2; offset += lengths[row++]) {
-                for (int64_t column = 0; column < counts[row]; ++column) { selected.push_back(offset + column); }
-            }
-            auto indices = torch::tensor(selected, ints.dtype(torch::kLong));
-            EXPECT_TRUE(torch::equal(input.combo_tokens, tokens.index_select(0, indices)));
-            EXPECT_TRUE(torch::equal(input.last_hidden_states, features.index_select(0, indices)));
-            EXPECT_TRUE(torch::equal(input.combo_position_ids, positions.index_select(0, indices)));
-            EXPECT_EQ(toVec<int32_t>(input.input_lengths), counts);
-            EXPECT_EQ(toVec<int32_t>(input.prefix_lengths), std::vector<int32_t>({7, 15}));
-            EXPECT_TRUE(input.is_packed_target_verify);
-        }
-    }
-}
-#endif
-
 TEST_F(MtpBatchStreamProcessorTest, testDSparkPackedVerifyPreservesPerRequestRowsAndCommitGeometry) {
     constexpr int32_t           gamma = 3;
     ModelConfig                 model_config;

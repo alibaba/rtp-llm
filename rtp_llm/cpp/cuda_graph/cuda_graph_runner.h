@@ -117,8 +117,9 @@ public:
         for (auto& counter : generation_prefill_cuda_graph_fallback_log_counts_) {
             counter.store(0, std::memory_order_relaxed);
         }
-        py_attn_pyobj_method_                                  = py_instance_.attr("prepare_fmha_impl");
-        py_forward_method_                                     = py_instance_.attr(forward_method_name);
+        py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
+        py_forward_method_    = py_instance_.attr(forward_method_name);
+        forward_method_name_  = forward_method_name;
         capture_mem_hold_.py_model_inputs_.expert_token_counts = graph_params.expert_token_counts;
         options_cuda_int32_ = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
@@ -253,6 +254,7 @@ private:
     void                    initCaptureAttentionInputsPost();
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
+    std::string             forward_method_name_;
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};

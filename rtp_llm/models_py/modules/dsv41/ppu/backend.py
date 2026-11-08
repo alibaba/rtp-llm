@@ -3,7 +3,7 @@
 The shared compute ops (L1) and the model/weight wiring (L2, this batch) are
 integrated: ``get_backend()`` returns the complete ``V41Backend`` —
 ``name="ppu"``, ``strategy=PPU_STRATEGY``, bound ops, ``model_cls =
-DeepSeekV41PPUModel`` and ``weight_cls = DeepSeekV41PPUWeight`` — and
+DeepSeekV41SharedPPUModel`` and ``weight_cls = DeepSeekV41SharedPPUWeight`` — and
 ``check_capabilities`` probes the accelerator kernel surface exactly as the
 preflight does.
 
@@ -23,6 +23,7 @@ run it on a CPU host.
 from __future__ import annotations
 
 import importlib
+import os
 
 from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
     moe_backend,
@@ -31,6 +32,17 @@ from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
 )
 
 PROVIDER_NAME = "ppu"
+MODEL_PATH_ENV = "RTP_V41_PPU_MODEL_PATH"
+
+
+def model_path(env=None):
+    """Validate the inherited runtime selector used by existing launchers."""
+    env = os.environ if env is None else env
+    value = env.get(MODEL_PATH_ENV, "shared").strip().lower()
+    if value != "shared":
+        raise ValueError(f"{MODEL_PATH_ENV} must be shared, got {value!r}")
+    return value
+
 
 COMMON_KERNEL_SYMBOLS = (
     ("deep_ep", ("Buffer",)),
@@ -123,6 +135,40 @@ def _not_integrated(reason: str) -> RuntimeError:
     )
 
 
+def _native_graph_smoke_selected(env=None):
+    """Exact isolated fixture opt-in; no change to normal provider selection."""
+    env = os.environ if env is None else env
+    selector = "RTP_V41_N4_NATIVE_GRAPH_SMOKE"
+    if selector not in env:
+        return False
+    expected = {
+        selector: "1", "RTP_V41_BACKEND": "ppu", MODEL_PATH_ENV: "shared",
+        "MODEL_TYPE": "deepseek_v41", "ROLE_TYPE": "DECODE",
+        "RTP_V41_PPU_MOE_BACKEND": "megamoe", "RTP_V41_PPU_MOE_PRECISION": "w4a4",
+    }
+    if any(env.get(key) != value for key, value in expected.items()):
+        raise ValueError("N4 native Graph smoke requires exact explicit PPU/shared/deepseek_v41/DECODE/MegaMoE/W4A4 selection")
+    return True
+
+
+def _native_optimized_smoke_selected(env=None):
+    """N5 fixture uses the same explicit canonical-provider seam as N4."""
+    env = os.environ if env is None else env
+    selector = "RTP_V41_N5_NATIVE_OPTIMIZED_SMOKE"
+    if selector not in env:
+        return False
+    expected = {
+        selector: "1", "RTP_V41_BACKEND": "ppu", MODEL_PATH_ENV: "shared",
+        "MODEL_TYPE": "deepseek_v41", "ROLE_TYPE": "DECODE",
+        "RTP_V41_PPU_MOE_BACKEND": "megamoe", "RTP_V41_PPU_MOE_PRECISION": "w4a4",
+    }
+    if any(env.get(key) != value for key, value in expected.items()):
+        raise ValueError("N5 native smoke requires exact explicit PPU/shared/deepseek_v41/DECODE/MegaMoE/W4A4 selection")
+    if "RTP_V41_N4_NATIVE_GRAPH_SMOKE" in env:
+        raise ValueError("N4 and N5 isolated native fixture selectors are exclusive")
+    return True
+
+
 def get_backend():
     """Return the complete V41Backend for the PPU provider.
 
@@ -139,12 +185,31 @@ def get_backend():
     from rtp_llm.config.v41_runtime import PPU_STRATEGY
     from rtp_llm.models_py.modules.dsv41.backend import V41Backend
 
+    model_path()
+    native_graph_smoke = _native_graph_smoke_selected()
+    native_optimized_smoke = _native_optimized_smoke_selected()
     try:
-        from rtp_llm.models_py.modules.dsv41.ppu.model import DeepSeekV41PPUModel
-        from rtp_llm.models_py.modules.dsv41.ppu.weight import DeepSeekV41PPUWeight
+        from rtp_llm.models_py.modules.dsv41.ppu.shared_model import DeepSeekV41SharedPPUModel
+        from rtp_llm.models_py.modules.dsv41.ppu.shared_weight import DeepSeekV41SharedPPUWeight
+
+        model_cls = DeepSeekV41SharedPPUModel
+        if native_graph_smoke:
+            if not is_ppu():
+                raise ValueError("native Graph smoke requires an actual PPU device")
+            from rtp_llm.models_py.modules.dsv41.ppu.test.native_shared_graph_role import native_smoke_model_class
+
+            model_cls = native_smoke_model_class()
+        elif native_optimized_smoke:
+            if not is_ppu():
+                raise ValueError("native optimized smoke requires an actual PPU device")
+            from rtp_llm.models_py.modules.dsv41.ppu.test.native_shared_optimized_role import native_smoke_model_class
+
+            model_cls = native_smoke_model_class()
     except Exception as error:  # noqa: BLE001 - report any import failure
-        raise _not_integrated(f"model/weight wiring import failed ({error})") from error
-    if not DeepSeekV41PPUWeight.framework_base_available():
+        raise _not_integrated(
+            f"shared model/weight wiring import failed ({error})"
+        ) from error
+    if not DeepSeekV41SharedPPUWeight.framework_base_available():
         raise _not_integrated("framework weight descriptor base is unavailable")
     return V41Backend(
         name=PROVIDER_NAME,
@@ -152,7 +217,7 @@ def get_backend():
         # Representative ops instance for contract validation; the model
         # constructor builds the rank-configured PPUOps (real EP/ENP groups).
         ops=get_ops(ep_size=8),
-        model_cls=DeepSeekV41PPUModel,
-        weight_cls=DeepSeekV41PPUWeight,
+        model_cls=model_cls,
+        weight_cls=DeepSeekV41SharedPPUWeight,
         check_capabilities=check_capabilities,
     )

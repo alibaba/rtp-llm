@@ -48,6 +48,21 @@ def preset_env(
     dspark_verify_budget=-1,
     dspark_budget_mode="fixed",
     fake_balance_expert=None,
+    ppu_model_path=None,
+    yoco_keep_tokens=None,
+    max_rollback_tokens=None,
+    shared_decode_graph=False,
+    shared_grouped_graph=False,
+    shared_graph_async=False,
+    kv_cache_sharded=False,
+    dspark_sample_from_anchor=True,
+    shared_eplb=False,
+    eplb_mode="NONE",
+    redundant_experts=0,
+    eplb_update_time=0,
+    eplb_stats_window_size=100,
+    eplb_rearrange_after_prefill=False,
+    eplb_rearrange_p2p_groups=1,
 ):
     if role not in ("prefill", "decode"):
         raise ValueError("role must be prefill or decode")
@@ -68,6 +83,8 @@ def preset_env(
         raise ValueError("encoder SWA recovery requires --ced-mode bounded")
     if dspark_gamma < 0:
         raise ValueError("DSpark gamma must be nonnegative (zero disables it)")
+    if type(dspark_sample_from_anchor) is not bool or (not dspark_gamma and not dspark_sample_from_anchor):
+        raise ValueError("anchor option requires a boolean and enabled DSpark")
     if dspark_confidence not in ("off", "observe", "bounded"):
         raise ValueError("invalid DSpark confidence mode")
     if dspark_verify_mode not in ("dense", "packed") or dspark_budget_mode not in (
@@ -93,6 +110,35 @@ def preset_env(
         raise ValueError("DSpark options require positive gamma")
     cp_prefill = prefill_parallel == "cp"
     env = dict(os.environ if parent is None else parent)
+    model_path = ppu_model_path
+    if model_path is None:
+        model_path = env.get("RTP_V41_PPU_MODEL_PATH", "shared")
+    if not isinstance(model_path, str) or model_path.strip().lower() != "shared":
+        raise ValueError("PPU model path must be shared")
+    env["RTP_V41_PPU_MODEL_PATH"] = "shared"
+    if type(shared_eplb) is not bool or type(eplb_rearrange_after_prefill) is not bool:
+        raise ValueError("shared EPLB opt-in and after-prefill must be explicit booleans")
+    if eplb_mode not in ("NONE", "STATS", "EPLB", "ALL"):
+        raise ValueError("invalid EPLB mode")
+    if (eplb_mode != "NONE" or redundant_experts) and not shared_eplb:
+        raise ValueError("EPLB/redundancy requires --shared-eplb")
+    if (type(eplb_update_time) is not int or eplb_update_time < 0
+            or type(eplb_stats_window_size) is not int or eplb_stats_window_size < 0
+            or (eplb_update_time and not 1 <= eplb_stats_window_size <= eplb_update_time)
+            or type(eplb_rearrange_p2p_groups) is not int or eplb_rearrange_p2p_groups <= 0):
+        raise ValueError("invalid EPLB interval/window/P2P group configuration")
+    if type(kv_cache_sharded) is not bool:
+        raise ValueError("kv_cache_sharded must be an explicit boolean")
+    if kv_cache_sharded and not cp_prefill:
+        raise ValueError("CP KV sharding requires CP8 Prefill")
+    if yoco_keep_tokens is not None:
+        env["RTP_V41_PPU_YOCO_KEEP_TOKENS"] = str(yoco_keep_tokens)
+    # A fresh ordinary/Graph launch must not inherit a previous DSpark profile.
+    if env.pop("RTP_V41_PPU_DSPARK_PROFILE", None) is not None:
+        env.pop("RTP_V41_PPU_MAX_ROLLBACK_TOKENS", None)
+    env.pop("RTP_V41_PPU_DSPARK_SAMPLE_FROM_ANCHOR", None)
+    if max_rollback_tokens is not None:
+        env["RTP_V41_PPU_MAX_ROLLBACK_TOKENS"] = str(max_rollback_tokens)
     env.update(
         {
             "RTP_V41_BACKEND": "ppu",
@@ -116,7 +162,7 @@ def preset_env(
                 else "DISABLED"
             ),
             "PREFILL_CP_SIZE": "8" if cp_prefill else "1",
-            "PREFILL_CP_KV_CACHE_SHARDED": "0",
+            "PREFILL_CP_KV_CACHE_SHARDED": str(int(kv_cache_sharded)),
             "MAX_SEQ_LEN": str(
                 max_seq_len
                 if max_seq_len is not None
@@ -133,7 +179,12 @@ def preset_env(
             "SP_DSPARK_VERIFY_MODE": "dense",
             "SP_DSPARK_VERIFY_BUDGET": "-1",
             "SP_DSPARK_VERIFY_BUDGET_MODE": "fixed",
-            "EPLB_MODE": "NONE",
+            "RTP_V41_PPU_EPLB": str(int(shared_eplb)),
+            "EPLB_MODE": eplb_mode,
+            "EPLB_UPDATE_TIME": str(eplb_update_time),
+            "EPLB_STATS_WINDOW_SIZE": str(eplb_stats_window_size),
+            "EPLB_REARRANGE_AFTER_PREFILL": str(int(eplb_rearrange_after_prefill)),
+            "EPLB_REARRANGE_P2P_GROUPS": str(eplb_rearrange_p2p_groups),
             "REUSE_CACHE": "1" if encoder_swa_replay else "0",
             "DSV41_CED": "0" if ced_mode == "off" else "1",
             "DSV41_SWA_BOUNDED_REPLAY": "1" if ced_mode == "bounded" else "0",
@@ -150,7 +201,7 @@ def preset_env(
             "USE_MORI_EP": "0",
             "MOE_STRATEGY": "auto",
             "FAKE_BALANCE_EXPERT": str(int(fake_balance_expert)),
-            "REDUNDANT_EXPERT": "0",
+            "REDUNDANT_EXPERT": str(redundant_experts),
             "CACHE_STORE_RDMA_MODE": "1" if rdma else "0",
             "START_PORT": str(start_port or (8090 if role == "prefill" else 9090)),
             "WARM_UP": "0",
@@ -172,7 +223,7 @@ def preset_env(
     if dspark_gamma:
         env.update(
             SP_TYPE="dspark",
-            SP_MODEL_TYPE="deepseek_v41_dspark",
+            SP_MODEL_TYPE="deepseek_v41_ppu_shared_dspark",
             SP_CHECKPOINT_PATH=str(checkpoint),
             GEN_NUM_PER_CIRCLE=str(dspark_gamma),
             # P runs commit-only and does not rank proposals or verify rows.
@@ -185,6 +236,24 @@ def preset_env(
                 dspark_budget_mode if role == "decode" else "fixed"
             ),
         )
+        from dataclasses import asdict
+
+        from rtp_llm.models_py.modules.dsv41.ppu.shared_dspark_modes import (
+            ANCHOR_ENV,
+            PROFILE_ENV,
+            SharedDSparkMode,
+        )
+
+        mode = SharedDSparkMode(
+            dspark_gamma, dspark_confidence, dspark_verify_mode, dspark_verify_budget,
+            dspark_budget_mode, dspark_sample_from_anchor,
+        ).validate()
+        # Both roles freeze the selected D profile. P remains commit-only.
+        env[PROFILE_ENV] = json.dumps(asdict(mode), sort_keys=True)
+        env[ANCHOR_ENV] = str(int(mode.sample_from_anchor))
+        if max_rollback_tokens is not None and max_rollback_tokens != mode.max_verified_rows:
+            raise ValueError("verify rollback must cover gamma+1 input rows, including cancellation")
+        env["RTP_V41_PPU_MAX_ROLLBACK_TOKENS"] = str(mode.max_verified_rows)
     if bool(prefill_address) != bool(decode_address):
         raise ValueError("both prefill and decode addresses are required")
     if prefill_address:
@@ -237,6 +306,31 @@ def preset_env(
             },
             separators=(",", ":"),
         )
+    if shared_decode_graph and shared_grouped_graph:
+        raise ValueError("choose one shared PPU Decode Graph backend")
+    if shared_graph_async and not shared_grouped_graph:
+        raise ValueError("Graph async requires the explicit grouped PPU Graph profile")
+    # Prevent a parent N9 profile from leaking into eager/legacy launches.
+    env.pop("RTP_V41_PPU_SHARED_GROUPED_GRAPH", None)
+    if shared_decode_graph or shared_grouped_graph:
+        from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import moe_backend, moe_precision
+
+        if (role != "decode" or (dspark_gamma and not shared_grouped_graph)
+            or fake_balance_expert):
+            raise ValueError("shared Decode Graph requires shared DP8 Decode without fake balance")
+        expected = ("grouped", "w4a8") if shared_grouped_graph else ("megamoe", "w4a4")
+        if (moe_backend(env), moe_precision(env)) != expected:
+            raise ValueError(f"shared Decode Graph requires {expected[0]}/{expected[1]}")
+        env.update(ENABLE_CUDA_GRAPH="1", DECODE_CAPTURE_CONFIG="1",
+                   RTP_LLM_STREAM_ASYNC=str(int(shared_graph_async)))
+        if shared_grouped_graph:
+            env["RTP_V41_PPU_SHARED_GROUPED_GRAPH"] = "1"
+            env["RTP_LLM_DEVICE_INPUT"] = str(int(shared_graph_async))
+            env.pop("GENERATION_PREFILL_CAPTURE_CONFIG", None)
+    if not cp_prefill:
+        # The public string parser has no DISABLED spelling. Omitting the
+        # variable selects its typed DISABLED default on both DP8 roles.
+        env.pop("CP_ROTATE_METHOD", None)
     V41RuntimeConfig.from_env(env)
     return env
 
@@ -259,6 +353,7 @@ def main():
         help="Prefill queue wait limit in [1, 86400000] ms; default30 minutes",
     )
     parser.add_argument("--dspark-gamma", type=int, default=0)
+    parser.add_argument("--dspark-sample-from-anchor", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--fake-balance-expert",
         action=argparse.BooleanOptionalAction,
@@ -311,6 +406,24 @@ def main():
     action.add_argument("--check-only", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--probe-allocations", action="store_true")
+    parser.add_argument("--ppu-model-path", choices=("shared",))
+    parser.add_argument("--shared-eplb", action="store_true")
+    parser.add_argument("--eplb-mode", choices=("NONE", "STATS", "EPLB", "ALL"), default="NONE")
+    parser.add_argument("--redundant-experts", type=int, default=0)
+    parser.add_argument("--eplb-update-time", type=int, default=0)
+    parser.add_argument("--eplb-stats-window-size", type=int, default=100)
+    parser.add_argument("--eplb-rearrange-after-prefill", action="store_true")
+    parser.add_argument("--eplb-rearrange-p2p-groups", type=int, default=1)
+    parser.add_argument("--yoco-keep-tokens", type=int)
+    parser.add_argument("--max-rollback-tokens", type=int)
+    parser.add_argument("--shared-decode-graph", action="store_true",
+                        help="explicit shared MegaMoE/W4A4 synchronous Decode bucket1")
+    parser.add_argument("--shared-grouped-graph", action="store_true",
+                        help="explicit shared grouped W4A8 Decode bucket1")
+    parser.add_argument("--shared-graph-async", action="store_true",
+                        help="enable the public stream-async executor with grouped Decode Graph")
+    parser.add_argument("--kv-cache-sharded", action="store_true",
+                        help="explicit native per-tag CP8 source placement; set on both P and D")
     args = parser.parse_args()
     options = dict(
         rdma=args.rdma,
@@ -323,16 +436,33 @@ def main():
         max_seq_len=args.max_seq_len,
         prefill_wait_timeout_ms=args.prefill_wait_timeout_ms,
         dspark_gamma=args.dspark_gamma,
+        dspark_sample_from_anchor=args.dspark_sample_from_anchor,
         dspark_confidence=args.dspark_confidence,
         dspark_verify_mode=args.dspark_verify_mode,
         dspark_verify_budget=args.dspark_verify_budget,
         dspark_budget_mode=args.dspark_budget_mode,
         fake_balance_expert=args.fake_balance_expert,
+        ppu_model_path=args.ppu_model_path,
+        shared_eplb=args.shared_eplb,
+        eplb_mode=args.eplb_mode,
+        redundant_experts=args.redundant_experts,
+        eplb_update_time=args.eplb_update_time,
+        eplb_stats_window_size=args.eplb_stats_window_size,
+        eplb_rearrange_after_prefill=args.eplb_rearrange_after_prefill,
+        eplb_rearrange_p2p_groups=args.eplb_rearrange_p2p_groups,
+        yoco_keep_tokens=args.yoco_keep_tokens,
+        max_rollback_tokens=args.max_rollback_tokens,
+        shared_decode_graph=args.shared_decode_graph,
+        shared_grouped_graph=args.shared_grouped_graph,
+        shared_graph_async=args.shared_graph_async,
+        kv_cache_sharded=args.kv_cache_sharded,
     )
     env = preset_env(args.role, args.checkpoint_path, **options)
     if args.token_map_cache:
         env["RTP_V41_TOKEN_MAP_CACHE"] = str(args.token_map_cache)
     command = [sys.executable, "-m", "rtp_llm.start_server"]
+    if args.dspark_gamma:
+        command = [sys.executable, "-m", "rtp_llm.models_py.modules.dsv41.ppu.shared_server"]
     if args.print_command:
         # Only print preset-owned values; never expose inherited secrets.
         owned = preset_env(
@@ -373,11 +503,9 @@ def main():
     # Build once before forking eight model ranks; workers reuse the checked
     # tokenizer cache rather than rebuilding the 131k-token map independently.
     if args.token_map_cache:
-        from rtp_llm.models_py.modules.dsv41.ppu.tools.driver_prefill import (
-            _load_token_map,
-        )
+        from rtp_llm.models_py.modules.dsv41.ppu.engram import load_token_map
 
-        _load_token_map(
+        load_token_map(
             str(args.checkpoint_path / "tokenizer.json"), str(args.token_map_cache)
         )
     os.execvpe(command[0], command, env)

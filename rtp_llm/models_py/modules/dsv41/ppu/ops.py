@@ -62,6 +62,7 @@ class PPUOps(V41BackendOps):
         ep_rank: int = 0,
         ep_size: int = 1,
         num_routed_experts: int = 384,
+        num_physical_experts: Optional[int] = None,
         num_local_experts: int = 48,
         hidden_size: int = 5120,
         inter_dim: int = 2048,
@@ -74,6 +75,7 @@ class PPUOps(V41BackendOps):
     ) -> None:
         self._moe = PPUMoE(
             num_routed_experts=num_routed_experts,
+            num_physical_experts=num_physical_experts,
             num_local_experts=num_local_experts,
             ep_rank=ep_rank,
             ep_size=ep_size,
@@ -155,8 +157,11 @@ class PPUOps(V41BackendOps):
         *,
         layer_id: int,
         context: Optional[V41StepContext] = None,
+        expert_load=None,
     ) -> torch.Tensor:
-        return self._moe.forward(x, expert_ids, expert_weights, layer_id=layer_id)
+        return self._moe.forward(
+            x, expert_ids, expert_weights, layer_id=layer_id, expert_load=expert_load
+        )
 
     def index_score(
         self,

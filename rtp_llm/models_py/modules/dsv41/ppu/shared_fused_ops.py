@@ -1,0 +1,122 @@
+"""Experimental PPU horizontal fusion of the shared Attention Q/K RoPE.
+
+The inputs have already landed in BF16 after Q-b and KV normalization. This
+kernel intentionally has no normalization, quantization, or cache side effects.
+Its reference is ``ppu.prefill._rope_tail`` on each input independently.
+Existing ``_rope_only_triton`` has a single in-place output; the fused public
+QKV cache kernel additionally normalizes/quantizes/stores with a different
+rounding boundary. Neither supplies this two-output, nonaliasing contract.
+
+Triton imports and JIT construction are lazy. Experimental selection and
+model/phase eligibility belong to the shared Attention caller.
+"""
+
+from functools import lru_cache
+
+import torch
+
+
+def is_supported(q, kv, freqs):
+    """Check the complete tensor contract without allocation or device work."""
+    if not all(isinstance(value, torch.Tensor) for value in (q, kv, freqs)):
+        return False
+    return (
+        q.is_cuda
+        and q.dtype == torch.bfloat16
+        and q.ndim == 3
+        and q.shape[-1] == 512
+        and q.shape[1] > 0
+        and kv.dtype == torch.bfloat16
+        and kv.shape == (q.shape[0], 512)
+        and freqs.dtype == torch.complex64
+        and freqs.ndim == 2
+        and freqs.shape[0] == q.shape[0]
+        and 0 < freqs.shape[1] <= 256
+        and not freqs.is_conj()
+        and kv.device == q.device
+        and freqs.device == q.device
+        and all(value.is_contiguous() for value in (q, kv, freqs))
+        and not any(value.requires_grad for value in (q, kv, freqs))
+    )
+
+
+@lru_cache(maxsize=1)
+def _kernel():
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def rotate_row(
+        source,
+        destination,
+        frequencies,
+        TOKEN,
+        HALF_ROPE: tl.constexpr,
+    ):
+        # All 256 complex pairs cover both unchanged NoPE and the RoPE tail.
+        # NoPE is copied inside this same launch, not through a clone kernel.
+        pair = tl.arange(0, 256)
+        real = tl.load(source + pair * 2).to(tl.float32)
+        imag = tl.load(source + pair * 2 + 1).to(tl.float32)
+        frequency_pair = pair - (256 - HALF_ROPE)
+        rotates = frequency_pair >= 0
+        address = frequencies + TOKEN * (2 * HALF_ROPE) + frequency_pair * 2
+        cosine = tl.load(address, mask=rotates, other=1.0)
+        sine = tl.load(address + 1, mask=rotates, other=0.0)
+        # Match accepted PPU Torch complex multiply: round the sine products,
+        # then contract the cosine products independently for real and imag.
+        # Keep implicit contraction disabled around these explicit FP32 FMAs.
+        rotated_real = tl.fma(real, cosine, -(imag * sine))
+        rotated_imag = tl.fma(imag, cosine, real * sine)
+        tl.store(destination + pair * 2, tl.where(rotates, rotated_real, real))
+        tl.store(destination + pair * 2 + 1, tl.where(rotates, rotated_imag, imag))
+
+    @triton.jit
+    def fused_qk_rope(
+        Q,
+        KV,
+        Frequencies,
+        QOut,
+        KVOut,
+        HEADS: tl.constexpr,
+        HALF_ROPE: tl.constexpr,
+    ):
+        token = tl.program_id(0).to(tl.int64)
+        head = tl.program_id(1).to(tl.int64)
+        if head < HEADS:
+            offset = (token * HEADS + head) * 512
+            rotate_row(Q + offset, QOut + offset, Frequencies, token, HALF_ROPE)
+        else:
+            offset = token * 512
+            rotate_row(KV + offset, KVOut + offset, Frequencies, token, HALF_ROPE)
+
+    return fused_qk_rope
+
+
+def qk_rope(q, kv, freqs):
+    """Return new Q and KV tensors after one launch, preserving BF16 landings.
+
+    Unsupported input fails before output allocation or launch. There is no
+    post-launch retry. The caller must select its serial reference in advance.
+    Frequency rows already correspond to each token's absolute position.
+    """
+    if not is_supported(q, kv, freqs):
+        raise ValueError("shared PPU Q/K RoPE requires contiguous BF16/complex64 inputs")
+    q_out = torch.empty_like(q)
+    kv_out = torch.empty_like(kv)
+    if q.shape[0] == 0:
+        return q_out, kv_out
+    # view_as_real is a zero-copy view of the existing complex64 frequency
+    # rows. Both outputs are fresh and disjoint from all completed inputs.
+    _kernel()[(q.shape[0], q.shape[1] + 1)](
+        q,
+        kv,
+        torch.view_as_real(freqs),
+        q_out,
+        kv_out,
+        HEADS=q.shape[1],
+        HALF_ROPE=freqs.shape[1],
+        num_warps=4,
+        enable_fp_fusion=False,
+    )
+    return q_out, kv_out
