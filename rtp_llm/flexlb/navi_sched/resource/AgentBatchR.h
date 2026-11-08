@@ -303,6 +303,7 @@ public:
     CoreStepStats takeCoreStepWindowStats() const;
     CacheHitPathStats getCacheHitPathStats() const;
     int64_t getExecutionBusyTimeUs(int64_t currentTimeUs) const;
+    bool setBackendExecutionPipelineStages(size_t stages);
     bool beginBackendExecution(int64_t eventTimeUs = 0, int32_t requestCount = 0);
     void updateBackendWaitingRequests(
         int32_t requestCount, int32_t runningRequests = 0,
@@ -441,6 +442,7 @@ private:
     mutable autil::ThreadMutex _backendExecutionLock;
     int64_t _backendExecutionBusyTimeUs = 0;
     int64_t _backendExecutionBusyStartTimeUs = 0;
+    BackendPipelineOccupancy _backendPipelineOccupancy;
     size_t _activeBackendExecutionCount = 0;
     bool _backendExecutionObserved = false;
     size_t _activeCallbackCount = 0;

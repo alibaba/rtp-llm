@@ -48,6 +48,7 @@ public:
         const NaviSchedWorkloadSnapshot &snapshot,
         const std::vector<int64_t> &coveredNativeBatchIds = {},
         const std::vector<uint64_t> *waitingRequestIds = nullptr) const;
+    bool setBackendExecutionPipelineStages(size_t stages) const;
     bool beginObservedBackendExecution(int64_t eventTimeUs = 0, int32_t requestCount = 0) const;
     bool endObservedBackendExecution(int64_t eventTimeUs = 0) const;
     bool reportObservedExecutionStep(double elapsedMs, int64_t prefillTokens,

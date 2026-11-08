@@ -31,6 +31,48 @@ struct ClusterExecutionUtilization {
     }
 };
 
+// Integrates the fraction of native pipeline slots occupied by real executions.
+// The separate union clock remains available for execution latency training.
+class BackendPipelineOccupancy {
+public:
+    bool setStages(size_t stages)
+    {
+        if (stages == 0 || _started) return false;
+        _stages = stages;
+        return true;
+    }
+
+    void advance(int64_t nowMonoUs, size_t activeExecutions)
+    {
+        if (!_started) {
+            _lastMonoUs = nowMonoUs;
+            _started = true;
+            return;
+        }
+        if (nowMonoUs <= _lastMonoUs) return;
+        _busyUs += static_cast<long double>(nowMonoUs - _lastMonoUs) *
+                   std::min(activeExecutions, _stages) / _stages;
+        _lastMonoUs = nowMonoUs;
+    }
+
+    int64_t busyTimeUs(int64_t nowMonoUs, size_t activeExecutions) const
+    {
+        const auto elapsedUs =
+            _started ? std::max<int64_t>(0, nowMonoUs - _lastMonoUs) : 0;
+        return static_cast<int64_t>(_busyUs + static_cast<long double>(elapsedUs) *
+                                                  std::min(activeExecutions, _stages) /
+                                                  _stages);
+    }
+
+    size_t stages() const { return _stages; }
+
+private:
+    size_t _stages = 1;
+    bool _started = false;
+    int64_t _lastMonoUs = 0;
+    long double _busyUs = 0.0;
+};
+
 class ExecutionUtilizationWindow {
 public:
     bool sample(int64_t nowMonoUs, int64_t totalBusyUs)

@@ -6,6 +6,33 @@ using namespace navi_sched;
 
 class ExecutionUtilizationControllerTest : public TESTBASE {};
 
+TEST_F(ExecutionUtilizationControllerTest, testPipelineOccupancyRetainsFractionalTime)
+{
+    BackendPipelineOccupancy clock;
+    EXPECT_FALSE(clock.setStages(0));
+    ASSERT_TRUE(clock.setStages(4));
+    clock.advance(100, 0);
+    for (int64_t t = 101; t <= 104; ++t) clock.advance(t, 1);
+    EXPECT_EQ(1, clock.busyTimeUs(104, 0));
+    EXPECT_EQ(2, clock.busyTimeUs(108, 1));
+    EXPECT_EQ(1, clock.busyTimeUs(104, 0));
+    EXPECT_FALSE(clock.setStages(1));
+    clock.advance(104, 4);
+    clock.advance(103, 4);
+    EXPECT_EQ(1, clock.busyTimeUs(104, 0));
+}
+
+TEST_F(ExecutionUtilizationControllerTest, testSingleStageOccupancyCountsOverlapOnce)
+{
+    BackendPipelineOccupancy clock;
+    clock.advance(100, 0);
+    clock.advance(200, 1);
+    clock.advance(300, 2);
+    EXPECT_EQ(300, clock.busyTimeUs(400, 1));
+    clock.advance(500, 1);
+    EXPECT_EQ(400, clock.busyTimeUs(700, 0));
+}
+
 TEST_F(ExecutionUtilizationControllerTest,
        testPeriodicWindowClearsBusyValueWithoutRequests)
 {

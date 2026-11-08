@@ -1690,6 +1690,11 @@ bool NaviSchedAgentImpl::reportObservedWorkload(
     return revision > 0;
 }
 
+bool NaviSchedAgentImpl::setBackendExecutionPipelineStages(size_t stages) const
+{
+    return _agentBatchR && _agentBatchR->setBackendExecutionPipelineStages(stages);
+}
+
 bool NaviSchedAgentImpl::beginObservedBackendExecution(int64_t eventTimeUs, int32_t requestCount) const
 {
     return _agentBatchR && _agentBatchR->beginBackendExecution(eventTimeUs, requestCount);
@@ -2846,6 +2851,11 @@ bool NaviSchedAgent::reportObservedWorkload(
 {
     return _impl && _impl->reportObservedWorkload(snapshot, coveredNativeBatchIds,
                                                   &waitingRequestIds);
+}
+
+bool NaviSchedAgent::setBackendExecutionPipelineStages(size_t stages) const
+{
+    return _impl && _impl->setBackendExecutionPipelineStages(stages);
 }
 
 bool NaviSchedAgent::beginObservedBackendExecution(int64_t eventTimeUs, int32_t requestCount) const

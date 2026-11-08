@@ -1852,6 +1852,7 @@ class VLLMEngineObserver:
                 "NaviSched native engine step loop: %s",
                 getattr(engine_core.step_fn, "__qualname__", type(engine_core.step_fn).__name__),
             )
+        self._bind_backend_pipeline_stages(engine_core)
         self._engine_core = engine_core
         _execution_timing_probe.bind_engine_loop_audit(self, engine_core)
         if self._native_ingress:
@@ -1876,6 +1877,25 @@ class VLLMEngineObserver:
             daemon=True,
         )
         self._forward_thread.start()
+
+    def _bind_backend_pipeline_stages(self, engine_core) -> None:
+        stepper = getattr(getattr(engine_core, "step_fn", None), "__self__", None)
+        module = sys.modules.get("vllm_torchtpu.core.pp_lazy_step")
+        stepper_type = getattr(module, "LazyPushStepper", None)
+        if stepper_type is None or not isinstance(stepper, stepper_type):
+            return
+        stages = stepper.stages
+        if (
+            type(stages) is not int
+            or stages <= 0
+            or stages != engine_core.vllm_config.parallel_config.pipeline_parallel_size
+            or stepper.core is not engine_core
+            or engine_core.batch_queue is not stepper.in_flight
+        ):
+            raise RuntimeError("inconsistent native pipeline execution slots")
+        if not self._bridge.set_backend_execution_pipeline_stages(stages):
+            raise RuntimeError("failed to bind native pipeline execution slots")
+        logger.info("NaviSched backend execution pipeline stages: %d", stages)
 
     def _bind_v6d_cache_source(self, engine_core) -> None:
         if not self._native_ingress:

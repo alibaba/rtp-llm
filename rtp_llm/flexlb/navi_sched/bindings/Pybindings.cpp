@@ -762,6 +762,11 @@ public:
         return result;
     }
 
+    bool setBackendExecutionPipelineStages(size_t stages) const
+    {
+        return _agent && _agent->setBackendExecutionPipelineStages(stages);
+    }
+
     bool beginBackendExecution(int64_t eventTimeUs, int32_t requestCount) const
     {
         return _agent && _agent->beginObservedBackendExecution(eventTimeUs, requestCount);
@@ -1174,6 +1179,9 @@ void bindNaviSchedData(py::module_ &m)
                     py::arg("policy"), py::arg("ordered_requests"),
                     py::arg("max_projection_steps"), py::arg("all_cache_resolved"),
                     py::call_guard<py::gil_scoped_release>())
+        .def("set_backend_execution_pipeline_stages",
+             &VLLMAgentBridge::setBackendExecutionPipelineStages, py::arg("stages"),
+             py::call_guard<py::gil_scoped_release>())
         .def("begin_backend_execution", &VLLMAgentBridge::beginBackendExecution,
              py::arg("event_time_us") = 0, py::arg("request_count") = 0,
              py::call_guard<py::gil_scoped_release>())

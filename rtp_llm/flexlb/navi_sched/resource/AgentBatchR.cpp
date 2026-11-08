@@ -1600,6 +1600,13 @@ int64_t AgentBatchR::getExecutionBusyTimeUs(int64_t currentTimeUs) const
     return busyTimeUs;
 }
 
+bool AgentBatchR::setBackendExecutionPipelineStages(size_t stages)
+{
+    autil::ScopedLock lock(_backendExecutionLock);
+    if (_backendExecutionObserved) return false;
+    return _backendPipelineOccupancy.setStages(stages);
+}
+
 bool AgentBatchR::beginBackendExecution(int64_t eventTimeUs, int32_t requestCount)
 {
     if (eventTimeUs <= 0) {
@@ -1612,6 +1619,7 @@ bool AgentBatchR::beginBackendExecution(int64_t eventTimeUs, int32_t requestCoun
             previous > 0 ? previous + 0.1 * (requestCount - previous) : requestCount,
             std::memory_order_relaxed);
     }
+    _backendPipelineOccupancy.advance(eventTimeUs, _activeBackendExecutionCount);
     _backendExecutionObserved = true;
     if (0 == _activeBackendExecutionCount++) {
         _backendExecutionBusyStartTimeUs = eventTimeUs;
@@ -1630,6 +1638,7 @@ bool AgentBatchR::endBackendExecution(int64_t eventTimeUs)
     if (0 == _activeBackendExecutionCount) {
         return false;
     }
+    _backendPipelineOccupancy.advance(eventTimeUs, _activeBackendExecutionCount);
     if (0 == --_activeBackendExecutionCount) {
         _backendExecutionBusyTimeUs +=
             std::max<int64_t>(0, eventTimeUs - _backendExecutionBusyStartTimeUs);
@@ -1644,21 +1653,20 @@ bool AgentBatchR::sampleBackendExecutionUtilization(int64_t nowMonoUs)
 {
     autil::ScopedLock lock(_backendExecutionLock);
     if (nowMonoUs <= 0) nowMonoUs = autil::TimeUtility::monotonicTimeUs();
-    auto busyUs = _backendExecutionBusyTimeUs;
-    if (_activeBackendExecutionCount > 0) {
-        busyUs += std::max<int64_t>(0, nowMonoUs - _backendExecutionBusyStartTimeUs);
-    }
+    const auto busyUs =
+        _backendPipelineOccupancy.busyTimeUs(nowMonoUs, _activeBackendExecutionCount);
     if (!_executionUtilizationWindow.sample(nowMonoUs, busyUs)) return false;
     _backendExecutionUtilization->store(_executionUtilizationWindow.value(),
                                         std::memory_order_relaxed);
     refreshExecutionUtilizationLocked();
     NAVI_LOG(INFO,
              "[navi-execution-utilization] phase=periodic_sample mono_us=%ld "
-             "sample_busy_us=%ld sample_elapsed_us=%ld active=%lu busy_window=%.9f "
+             "sample_busy_us=%ld sample_elapsed_us=%ld active=%lu pipeline_stages=%lu "
+             "busy_window=%.9f "
              "effective=%.9f",
              nowMonoUs, _executionUtilizationWindow.busyUs(),
              _executionUtilizationWindow.elapsedUs(), _activeBackendExecutionCount,
-             _executionUtilizationWindow.value(),
+             _backendPipelineOccupancy.stages(), _executionUtilizationWindow.value(),
              _executionUtilization->load(std::memory_order_relaxed));
     return true;
 }
