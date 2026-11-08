@@ -81,9 +81,9 @@ struct CustomConfig {
     int                                        prefill_chunk_size             = 0;
     int64_t                                    max_context_batch_size         = 128;
     std::shared_ptr<std::vector<ForwardShape>> forward_shapes;
-    int                                        tokens_per_block            = 2;
-    bool                                       enable_batch_record         = false;
-    double                                     record_decode_sample_rate   = 1.0;
+    int                                        tokens_per_block          = 2;
+    bool                                       enable_batch_record       = false;
+    double                                     record_decode_sample_rate = 1.0;
 };
 
 inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
@@ -184,16 +184,16 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::ProfilingDebugLoggingConfig profiling_debug_logging_config;
     profiling_debug_logging_config.enable_batch_record       = config.enable_batch_record;
     profiling_debug_logging_config.record_decode_sample_rate = config.record_decode_sample_rate;
-    rtp_llm::HWKernelConfig              hw_kernel_config;
-    rtp_llm::MoeConfig                   moe_config;
-    rtp_llm::SpeculativeExecutionConfig  sp_config;
+    rtp_llm::HWKernelConfig             hw_kernel_config;
+    rtp_llm::MoeConfig                  moe_config;
+    rtp_llm::SpeculativeExecutionConfig sp_config;
     sp_config.type                   = config.speculative_enabled ? SP_TYPE_VANILLA : SP_TYPE_NONE;
     runtime_config.warm_up_with_loss = config.warm_up_with_loss;
-    rtp_llm::CacheStoreConfig      cache_store_config;
-    rtp_llm::MiscellaneousConfig   misc_config;
-    rtp_llm::ArpcConfig            arpc_config;
-    rtp_llm::GrpcConfig            grpc_config;
-    rtp_llm::VitConfig             vit_config;
+    rtp_llm::CacheStoreConfig    cache_store_config;
+    rtp_llm::MiscellaneousConfig misc_config;
+    rtp_llm::ArpcConfig          arpc_config;
+    rtp_llm::GrpcConfig          grpc_config;
+    rtp_llm::VitConfig           vit_config;
     runtime_config.output_dispatcher_worker_count = config.output_dispatcher_worker_count;
     pd_sep_config.role_type                       = config.role_type;
 

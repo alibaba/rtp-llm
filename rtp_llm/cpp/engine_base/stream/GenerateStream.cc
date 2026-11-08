@@ -1171,7 +1171,9 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     }
 }
 
-void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
+void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
+                                RecordedTokenTiming*        timings,
+                                size_t                      timing_count) {
     // Worker-thread MTP bookkeeping updates tokens/output and finish checks
     // before the next async dispatch. The speculative propose_step+1 window
     // already covers stop/EOS/max-token boundaries.
@@ -1210,6 +1212,18 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 
     int nxt_cached_len   = seqLength() - 1;
     int accept_token_num = nxt_cached_len - cur_cached_len;
+
+    // Speculative verify rows: backfill the pre-verify cached length and the
+    // accepted token count while holding the stream lock. Guarded by
+    // speculative_propose_step so prefill updates (always zero) never
+    // overwrite the gather-sourced kv_len of prefill rows. Early returns
+    // above leave both null: omitted means unknown, not zero.
+    if (timings && timing_count && update_info.speculative_propose_step > 0) {
+        for (size_t i = 0; i < timing_count; ++i) {
+            timings[i].kv_len     = cur_cached_len;
+            timings[i].accept_len = accept_token_num;
+        }
+    }
 
     // The stream token history is authoritative. Advance every processor exactly
     // once before mutating speculative buffers, cache layout or published output.
@@ -1295,6 +1309,14 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   torch::Tensor(),
                   update_info.update_remote_generate,
                   update_info.force_update_info});
+
+    // Freeze TTFT after output update while holding the stream lock; mirrors
+    // update(). Later speculative steps re-freeze the same first-token value.
+    if (timings && timing_count && seqLength() > inputLength()) {
+        for (size_t i = 0; i < timing_count; ++i) {
+            timings[i].ttft_us = complete_token_ids_->firstTokenLatencyUs();
+        }
+    }
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info, RecordedTokenTiming* timings, size_t timing_count) {

@@ -76,9 +76,6 @@ protected:
     bool has_engram_ = false;
     void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);
     void prepareGrpcNormalDeviceState(const StreamGroups& stream_groups);
-    // Decode-step recording sampling; advances the credit only when called
-    // (decode gate in process()), so non-decode steps never consume samples.
-    bool sampleDecodeStep();
 
     // Mirror the use_normal_device_state condition in processDecodeStreams.
     // When false, gather falls back to host accessors still mutated by the
@@ -105,16 +102,7 @@ private:
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
-    bool enable_detail_log_       = false;
-    // Batch recording decode sampling ratio, from ProfilingDebugLoggingConfig.
-    double record_decode_sample_rate_ = 1.0;
-    // Deterministic decode-step sampling credit (Bresenham-style): each
-    // decode step adds record_decode_sample_rate_; crossing 1.0 records the
-    // step and spends one unit, keeping the long-run recorded fraction exact
-    // without an RNG. process() runs only on the engine loop thread, so this
-    // plain state needs no lock; warmup/propose/non-tp0 executors never
-    // advance it (short-circuit && in process()).
-    double record_decode_sample_credit_ = 0.0;
+    bool enable_detail_log_ = false;
 
     bool                  is_propose_          = false;
     int                   propose_model_index_ = 0;

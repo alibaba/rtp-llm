@@ -49,56 +49,6 @@ void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inpu
     holder.hold_host(inputs.cum_log_probs);
 }
 
-// Length values were frozen by the input gatherer, before H2D/async dispatch.
-// Recording must not re-read mutable stream lengths or synchronize CUDA.
-std::shared_ptr<RecordedBatch> recordBatchInputs(const GptModelInputs& inputs, const StreamGroups& groups) {
-    auto& recorder = ExecutionRecorder::instance();
-    if (!recorder.enabled() || !inputs.record_execution_id)
-        return nullptr;
-    if (!inputs.record_lengths)
-        throw std::runtime_error("batch CPU length snapshot missing");
-    const auto& lengths = *inputs.record_lengths;
-    using Json          = ExecutionRecorder::Json;
-    std::vector<Json> rows;
-    auto              append = [&](const auto& streams, const char* phase) {
-        for (const auto& stream : streams) {
-            const auto request = stream->recordedRequest();
-            for (int i = 0; i < stream->currentBatchSize(); ++i) {
-                Json row{{"phase", std::string(phase)},
-                                      {"input_len", stream->inputLength()},
-                                      {"reuse_len", stream->initialReuseLength()}};
-                if (request)
-                    row["request_id"] = "r" + std::to_string(request->id());
-                if (i != 0)
-                    row["sequence_id"] = i;
-                if (stream->isFakeStream())
-                    row["is_fake"] = true;
-                rows.push_back(std::move(row));
-            }
-        }
-    };
-    append(groups.decodeStreams(), "decode");
-    append(groups.contextStreams(), "prefill");
-    if (rows.size() != lengths.q_tokens.size() || rows.size() != lengths.kv_tokens_before.size()
-        || rows.size() != static_cast<size_t>(inputs.input_lengths.numel())
-        || groups.totalDecodeBatchSize() != static_cast<size_t>(inputs.sequence_lengths.numel())
-        || groups.totalContextBatchSize() != static_cast<size_t>(inputs.prefix_lengths.numel()))
-        throw std::runtime_error("batch snapshot slot/length count mismatch");
-    // JSON numbers lose int64 precision in JavaScript and other double-based consumers.
-    Json record{
-        {"schema_version", 1}, {"owner_id", recorder.owner()}, {"exec_id", std::to_string(inputs.record_execution_id)}};
-    for (size_t i = 0; i < rows.size(); ++i) {
-        // Preserve every batch slot; omitted lengths mean unknown, not zero.
-        if (lengths.q_tokens[i] > 0) {
-            rows[i]["q_len"] = lengths.q_tokens[i];
-        }
-        if (lengths.kv_tokens_before[i] >= 0) {
-            rows[i]["kv_len"] = lengths.kv_tokens_before[i];
-        }
-    }
-    return std::make_shared<RecordedBatch>(recorder, std::move(record), std::move(rows));
-}
-
 }  // namespace
 
 NormalExecutor::ModelFactory NormalExecutor::test_model_factory = nullptr;
@@ -131,7 +81,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     has_engram_        = !params.model_config_.attn_config.v41_kv_source_layer_ids.empty();
     enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
     // Defensively clamp values arriving outside the arg parser (direct C++
-    // construction or older pickles keep 1.0).
+    // construction or older pickles use the config default).
     record_decode_sample_rate_ = std::clamp(params.profiling_debug_logging_config.record_decode_sample_rate, 0.0, 1.0);
     tp_rank_                   = params.parallelism_config.tp_rank;
     parallelism_config_        = params.parallelism_config;
@@ -140,23 +90,26 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     // null/disabled config leaves the recorder Disabled.
     auto& recorder = ExecutionRecorder::instance(&params.profiling_debug_logging_config);
     if (!warm_up_ && !is_propose_ && recorder.needsConfiguration()) {
+        ExecutionRecorder::Json metadata{{"tp_size", parallelism_config_.tp_size},
+                                         {"dp_size", parallelism_config_.dp_size},
+                                         {"world_size", parallelism_config_.world_size},
+                                         {"num_layers", params.model_config_.num_layers},
+                                         {"vocab_size", params.model_config_.vocab_size},
+                                         {"max_seq_len", params.model_config_.max_seq_len},
+                                         {"model_config", params.model_config_.to_string()},
+                                         {"record_decode_sample_rate", record_decode_sample_rate_},
+                                         {"decode_filter_policy", std::string("decode_step_sampling")},
+                                         {"model_fingerprint", ExecutionRecorder::JsonValue()},
+                                         {"scope", std::string("normal_executor")}};
+        // Cache details are optional metadata; recording also supports executors without a cache manager.
+        if (cache_manager_) {
+            const auto& cache_config       = cache_manager_->cacheConfig();
+            metadata["cache_block_tokens"] = cache_config.seq_size_per_block;
+            metadata["cache_groups"]       = cache_config.groupNums();
+            metadata["cache_config"]       = cache_config.debugString();
+        }
         const bool configured =
-            recorder.configure(parallelism_config_.world_rank,
-                               parallelism_config_.dp_rank,
-                               {{"tp_size", parallelism_config_.tp_size},
-                                {"dp_size", parallelism_config_.dp_size},
-                                {"world_size", parallelism_config_.world_size},
-                                {"num_layers", params.model_config_.num_layers},
-                                {"vocab_size", params.model_config_.vocab_size},
-                                {"max_seq_len", params.model_config_.max_seq_len},
-                                {"cache_block_tokens", cache_manager_->cacheConfig().seq_size_per_block},
-                                {"cache_groups", cache_manager_->cacheConfig().groupNums()},
-                                {"model_config", params.model_config_.to_string()},
-                                {"cache_config", cache_manager_->cacheConfig().debugString()},
-                                {"record_decode_sample_rate", record_decode_sample_rate_},
-                                {"decode_filter_policy", std::string("skip_entire_batch_containing_decode")},
-                                {"model_fingerprint", ExecutionRecorder::JsonValue()},
-                                {"scope", std::string("normal_executor")}});
+            recorder.configure(parallelism_config_.world_rank, parallelism_config_.dp_rank, std::move(metadata));
         if (!configured) {
             RTP_LLM_LOG_WARNING("batch recorder initialization failed; configuration was not published");
         }
@@ -287,18 +240,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     cudaProfilerBegin();
 }
 
-bool NormalExecutor::sampleDecodeStep() {
-    // Deterministic ratio sampling: accumulate the rate per decode step and
-    // record whenever the credit crosses 1.0 (Bresenham-style). rate=1.0
-    // records every step (legacy behavior), 0.0 records none, and any rate
-    // keeps an exact recorded fraction over the long run with even spacing.
-    record_decode_sample_credit_ += record_decode_sample_rate_;
-    if (record_decode_sample_credit_ < 1.0)
-        return false;
-    record_decode_sample_credit_ -= 1.0;
-    return true;
-}
-
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (schedule_time_us <= 0) {
@@ -357,10 +298,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     // the short-circuit chain: warmup/propose/non-tp0 or batch-less steps
     // never spend credit.
     const bool    decode_batch = stream_groups.totalDecodeBatchSize() > 0;
-    const int64_t record_id    = record_owner && has_request_stream && stream_groups.totalModelBatchSize() > 0
+    const int64_t record_id = shouldRecordBatch(record_owner, has_request_stream, stream_groups.totalModelBatchSize())
                                       && (!decode_batch || sampleDecodeStep()) ?
-                                     execution_recorder.nextId() :
-                                     0;
+                                  execution_recorder.nextId() :
+                                  0;
     {
         RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -510,6 +451,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     StreamGroups::TokenCountsByPriority token_counts_by_priority;
     if (metrics_reporter_ && tp_rank_ == 0) {
         token_counts_by_priority = stream_groups.tokenCountsByPriority();
+    }
+    if (recorded_batch) {
+        recorded_batch->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us);
     }
     if (useStreamAsync() && is_decode_only && single_sequence_streams && !zero_token_batch) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");

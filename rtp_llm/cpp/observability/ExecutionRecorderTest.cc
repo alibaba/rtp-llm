@@ -3,6 +3,7 @@
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstdlib>
@@ -41,6 +42,37 @@ static std::string readFile(const std::string& path) {
     std::ostringstream contents;
     contents << input.rdbuf();
     return contents.str();
+}
+
+// The callback runs after all earlier tasks and their manifest updates.
+static void waitForRecorder(rtp_llm::ExecutionRecorder& recorder) {
+    std::promise<void> reached;
+    auto               ready = reached.get_future();
+    assert(recorder.submitBatch([&] {
+        reached.set_value();
+        return std::string("{}");
+    }));
+    assert(ready.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+}
+
+static void configureWarnings(const std::string& path) {
+    // configureBatch deliberately sets a tiny printf-message limit. A zero
+    // config value leaves that limit unchanged, so explicitly restore it.
+    const auto config = "alog.max_msg_len=4096\nalog.logger.engine=WARN, recorderWarnings\n"
+                        "inherit.engine=false\nalog.logger.console=WARN, recorderWarnings\n"
+                        "inherit.console=false\nalog.appender.recorderWarnings=FileAppender\n"
+                        "alog.appender.recorderWarnings.fileName="
+                        + path
+                        + "\n"
+                          "alog.appender.recorderWarnings.layout=PatternLayout\n"
+                          "alog.appender.recorderWarnings.layout.LogPattern=%%m\n";
+    alog::Configurator::configureLoggerFromString(config.c_str());
+}
+
+static std::string readWarnings(const std::string& path) {
+    alog::Logger::getLogger("engine")->flush();
+    alog::Logger::getLogger("console")->flush();
+    return readFile(path);
 }
 
 static void testMultiprocessConfig(const std::string& directory) {
@@ -110,9 +142,10 @@ static void testConfigDrivenInstance(const std::string& directory) {
         setenv("LOG_PATH", log_root.c_str(), 1);
         configureBatch(log_root.string() + "/batches.log");
         rtp_llm::ProfilingDebugLoggingConfig config;
-        config.enable_batch_record = true;
-        config.record_queue_size   = 0;  // non-positive falls back to the default
-        auto& recorder = rtp_llm::ExecutionRecorder::instance(&config);
+        assert(config.record_decode_sample_rate == 0.1);
+        assert(config.enable_batch_record);
+        config.record_queue_size = 0;  // non-positive falls back to the default
+        auto& recorder           = rtp_llm::ExecutionRecorder::instance(&config);
         assert(recorder.needsConfiguration());
         assert(recorder.configure(0, 0, {}));
         assert(recorder.enabled());
@@ -136,14 +169,15 @@ int main(int argc, char** argv) {
     testMultiprocessConfig(directory);
     testConfigDrivenInstance(directory);
     {
-        // First use without config (or with decode-side knobs only) stays
-        // Disabled: decode sampling alone must never enable recording.
+        // First use without config stays Disabled. An explicitly disabled
+        // config with decode sampling must not activate recording either.
         auto& idle = rtp_llm::ExecutionRecorder::instance();
         assert(!idle.enabled());
         assert(!idle.needsConfiguration());
         rtp_llm::ProfilingDebugLoggingConfig decode_only;
+        decode_only.enable_batch_record       = false;
         decode_only.record_decode_sample_rate = 0.5;
-        auto& silent = rtp_llm::ExecutionRecorder::instance(&decode_only);
+        auto& silent                          = rtp_llm::ExecutionRecorder::instance(&decode_only);
         assert(&silent == &idle);
         assert(!silent.enabled());
         assert(!silent.submitBatch("{}"));
@@ -456,15 +490,74 @@ int main(int argc, char** argv) {
     {
         const auto path = std::string(directory) + "/producer-error.log";
         configureBatch(path);
+        configureWarnings(path + ".warnings");
         ExecutionRecorder recorder(std::string(directory) + "/producer_error");
         assert(recorder.configure(0, 0, {}));
         assert(recorder.submitBatch([]() -> std::string { throw std::runtime_error("snapshot failed"); }));
+        waitForRecorder(recorder);
+        assert(recorder.enabled());
+        assert(recorder.submitBatch([]() -> std::string { throw 42; }));
+        waitForRecorder(recorder);
+        assert(recorder.enabled());
+        assert(recorder.submitBatch("{\"recovered\":true}"));
         recorder.close();
         const auto manifest =
             readFile(std::string(directory) + "/producer_error/owner-" + recorder.owner() + "/manifest.json");
-        assert(manifest.find("\"errors\":1") != std::string::npos);
-        assert(manifest.find("\"submitted_to_alog\":0") != std::string::npos);
-        assert(readFile(path).empty());
+        assert(manifest.find("\"errors\":2") != std::string::npos);
+        assert(manifest.find("\"dropped\":2") != std::string::npos);
+        assert(manifest.find("\"submitted_to_alog\":3") != std::string::npos);
+        assert(readFile(path) == "{}\n{}\n{\"recovered\":true}\n");
+        const auto warnings = readWarnings(path + ".warnings");
+        const auto first    = warnings.find("batch recording serialization failed: snapshot failed");
+        assert(first != std::string::npos);
+        assert(warnings.find("batch recording ", first + 1) == std::string::npos);
+    }
+    {
+        const auto path = std::string(directory) + "/manifest-error.log";
+        configureBatch(path);
+        configureWarnings(path + ".warnings");
+        ExecutionRecorder recorder(std::string(directory) + "/manifest_error");
+        assert(recorder.configure(0, 0, {}));
+        const auto owner_dir     = std::string(directory) + "/manifest_error/owner-" + recorder.owner();
+        const auto manifest_path = owner_dir + "/manifest.json";
+        // A directory at the temporary file path deterministically prevents writes,
+        // including when tests run as root. The existing manifest remains intact.
+        std::filesystem::create_directory(owner_dir + "/manifest.json.tmp");
+        for (int i = 0; i < 64; ++i)
+            assert(recorder.submitBatch("{}"));
+        waitForRecorder(recorder);
+        assert(recorder.enabled());
+        assert(readFile(manifest_path).find("\"submitted_to_alog\":0") != std::string::npos);
+        std::filesystem::remove(owner_dir + "/manifest.json.tmp");
+        // 64 records plus the barrier above: the next update is at submission 128.
+        for (int i = 0; i < 63; ++i)
+            assert(recorder.submitBatch("{}"));
+        waitForRecorder(recorder);
+        const auto recovered_manifest = readFile(manifest_path);
+        assert(recovered_manifest.find("\"submitted_to_alog\":128") != std::string::npos);
+        assert(recovered_manifest.find("\"errors\":1") != std::string::npos);
+        assert(recovered_manifest.find("\"dropped\":0") != std::string::npos);
+        recorder.close();
+        const auto manifest = readFile(manifest_path);
+        assert(manifest.find("\"submitted_to_alog\":129") != std::string::npos);
+        assert(manifest.find("\"closed\":true") != std::string::npos);
+        const auto batches = readFile(path);
+        assert(std::count(batches.begin(), batches.end(), '\n') == 129);
+        assert(readWarnings(path + ".warnings").find("batch recording manifest update failed:") != std::string::npos);
+    }
+    {
+        const auto path = std::string(directory) + "/close-manifest-error.log";
+        configureBatch(path);
+        configureWarnings(path + ".warnings");
+        ExecutionRecorder recorder(std::string(directory) + "/close_manifest_error");
+        assert(recorder.configure(0, 0, {}));
+        const auto owner_dir = std::string(directory) + "/close_manifest_error/owner-" + recorder.owner();
+        std::filesystem::create_directory(owner_dir + "/manifest.json.tmp");
+        assert(recorder.submitBatch("{}"));
+        recorder.close();
+        assert(!recorder.enabled());
+        assert(readFile(path) == "{}\n");
+        assert(readWarnings(path + ".warnings").find("batch recording manifest update failed:") != std::string::npos);
     }
     alog::Logger::getRootLogger()->flush();
     assert(readFile(root_path).empty());  // Recorder JSON never inherits the engine/root appender.

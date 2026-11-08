@@ -113,10 +113,10 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         env_name="RTP_LLM_ENABLE_BATCH_RECORD",
         bind_to=(profiling_debug_config, "enable_batch_record"),
         type=str2bool,
-        default=False,
+        default=True,
         help=(
             "批量录制总开关：记录 batch 调度与请求时序到 alog batch_schedule 日志，"
-            "manifest 写入 LOG_PATH/batch_record，日志按 256MB×160/进程滚动。默认为 False"
+            "manifest 写入 LOG_PATH/batch_record，日志按 256MB×160/进程滚动。默认为 True"
         ),
     )
     profile_debug_logging_group.add_argument(
@@ -132,10 +132,12 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         env_name="RTP_LLM_RECORD_DECODE_SAMPLE_RATE",
         bind_to=(profiling_debug_config, "record_decode_sample_rate"),
         type=str2ratio,
-        default=1.0,
+        default=0.1,
         help=(
             "decode 批录制采样率，取值 [0.0, 1.0]，随 --enable_batch_record 生效："
             "按确定性间隔采样仅录制该比例的 decode step（如 0.1 表示约每 10 个 decode step 录 1 个），"
-            "prefill 批始终全量录制。1.0 表示录制全部 decode step，0.0 表示不录制 decode step。默认为 1.0"
+            "纯 prefill 批始终全量录制；同时含 prefill 和 decode 的混合批整体参与采样，"
+            "未采中时其中的 prefill 记录也会跳过。"
+            "1.0 表示录制全部批次，0.0 表示仅录制纯 prefill 批。默认为 0.1（10%）"
         ),
     )

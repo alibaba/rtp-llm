@@ -92,7 +92,7 @@ public:
                                                              bool drop_broad_sync,
                                                              bool linear_attention,
                                                              bool cache_snapshot_ready = false);
-    static int selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
+    static int               selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len);
 
 protected:
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
@@ -130,6 +130,14 @@ protected:
                              int64_t                             schedule_time_us);
 
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
+
+    // Phase-2 speculative recording: build the sp_verify record rows (one per
+    // request slot, decode streams first then context streams to match
+    // updateStreams timing slices). q_len is the verify width constant;
+    // kv_len/accept_len are backfilled at dispatch via RecordedTokenTiming.
+    // Must run after waitPreviousBookkeepingBeforeStreamPreparation (stream
+    // state stable). Throws on stream-state anomalies; caller contains it.
+    std::shared_ptr<RecordedBatch> buildSpVerifyRecord(int64_t record_id, const StreamGroups& groups) const;
 
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
     // owns a single phase (prepare, forward, broadcast, dispatch) and
@@ -169,7 +177,8 @@ protected:
                                       GptModelOutputs                              draft_prefill_model_output,
                                       SamplerOutput                                draft_prefill_sampler_output,
                                       std::shared_ptr<torch::Event>                rejection_event,
-                                      std::shared_ptr<torch::Event>                draft_event);
+                                      std::shared_ptr<torch::Event>                draft_event,
+                                      std::shared_ptr<RecordedBatch>               recorded_batch = nullptr);
 
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
@@ -251,8 +260,8 @@ private:
     std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
     std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
-    bool                                                                     enable_detail_log_       = false;
-    int                                                                      tp_rank_                 = 0;
+    bool                                                                     enable_detail_log_ = false;
+    int                                                                      tp_rank_           = 0;
     ParallelismConfig                                                        parallelism_config_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
@@ -315,8 +324,8 @@ private:
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
 
-    torch::Stream dspark_cache_store_sync_stream_;
-    torch::Tensor dspark_cache_store_status_;
+    torch::Stream             dspark_cache_store_sync_stream_;
+    torch::Tensor             dspark_cache_store_status_;
     std::function<bool(bool)> dspark_cache_store_status_reducer_for_test_;
 };
 }  // namespace rtp_llm

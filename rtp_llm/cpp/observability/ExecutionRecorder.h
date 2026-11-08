@@ -23,7 +23,7 @@ public:
     using Json      = autil::legacy::json::JsonMap;
     using JsonArray = autil::legacy::json::JsonArray;
     using JsonValue = autil::legacy::Any;
-    static std::string        toJson(const JsonValue& value);
+    static std::string toJson(const JsonValue& value);
     // The singleton is built on first call. The first call normally happens
     // during single-threaded engine init (NormalExecutor ctor) and may carry
     // the engine's ProfilingDebugLoggingConfig (already arg+env resolved on
@@ -74,10 +74,12 @@ private:
     };
     void run();
     void manifest(bool closed);
+    void tryWriteManifest(bool closed) noexcept;
+    void reportError(const char* operation, const char* message) noexcept;
     using Task = std::function<std::string()>;
     std::string             directory_, owner_;
     Json                    metadata_;
-    int                     rank_ = 0, dp_rank_ = 0;
+    int                     rank_ = 0, dp_rank_     = 0;
     size_t                  capacity_, total_bytes_ = 0;
     std::atomic<State>      state_{State::Disabled};
     std::atomic<int64_t>    next_id_{1};
@@ -93,6 +95,11 @@ private:
 // Filled under the stream update lock; never read by the JSON writer until frozen.
 struct RecordedTokenTiming {
     std::optional<int64_t> ttft_us;
+    // Speculative verify rows only (guarded by speculative_propose_step > 0
+    // in specUpdate): pre-verify cached length and accepted token count are
+    // backfilled at dispatch under the stream lock, same pattern as ttft_us.
+    std::optional<int64_t> kv_len;
+    std::optional<int64_t> accept_len;
 };
 
 // Per-forward ownership, not a global ID lookup. Last owner submits even on
@@ -103,9 +110,30 @@ public:
                   ExecutionRecorder::Json              record,
                   std::vector<ExecutionRecorder::Json> rows);
     ~RecordedBatch() noexcept;
-    RecordedBatch(const RecordedBatch&)                              = delete;
-    RecordedBatch&                   operator=(const RecordedBatch&) = delete;
-    void                             markTimingError() noexcept;
+    RecordedBatch(const RecordedBatch&)            = delete;
+    RecordedBatch& operator=(const RecordedBatch&) = delete;
+    void           markTimingError() noexcept;
+    // Slice the timing window [batch_idx_in, batch_idx_in + cur_batch_size) for
+    // stream->update/specUpdate. Returns nullptr and marks a timing error when
+    // the window falls outside the recorded rows.
+    RecordedTokenTiming* sliceTimings(int64_t batch_idx_in, size_t cur_batch_size) {
+        if (batch_idx_in >= 0 && static_cast<size_t>(batch_idx_in) + cur_batch_size <= timings.size())
+            return timings.data() + batch_idx_in;
+        markTimingError();
+        return nullptr;
+    }
+
+    // Record the executor step's own wall duration in microseconds: from the
+    // step's entry on the executor thread to the output-dispatch handoff
+    // (gather, forward and sampling included; the async bookkeeping tail that
+    // overlaps the next step is excluded by construction). Called by the
+    // owning executor once compute is done and before the batch record moves
+    // into dispatch; early-exit submissions leave it unset (omitted means
+    // unknown). Sampled decode streams can use it together with kv_len
+    // deltas to derive per-step timing offline.
+    void setStepDurationUs(int64_t step_duration_us) {
+        record_["step_duration_us"] = step_duration_us;
+    }
     std::vector<RecordedTokenTiming> timings;
 
 private:

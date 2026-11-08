@@ -1,8 +1,10 @@
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "alog/Configurator.h"
 #include <filesystem>
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <set>
@@ -17,7 +19,72 @@ public:
     void runEmptyAlignmentRoundNotRecorded();
     void runFakeOnlyBatchNotRecorded();
     void runDecodeSampleRateThinsDecodeRecords();
+    void runRecordingWithoutCacheManager(bool speculative);
 };
+
+void RecordingEngineTest::runRecordingWithoutCacheManager(bool speculative) {
+    DeviceTestBase::SetUp();
+    char directory[] = "/tmp/rtp-recording-no-cache-XXXXXX";
+    ASSERT_NE(mkdtemp(directory), nullptr);
+    setenv("LOG_PATH", directory, 1);
+    EngineInitParams params;
+    params.model_id                                = 0;
+    params.model_config_.max_seq_len               = 8;
+    params.model_config_.vocab_size                = 10;
+    params.model_config_.num_layers                = 1;
+    params.model_config_.attn_config.head_num      = 2;
+    params.model_config_.attn_config.kv_head_num   = 2;
+    params.model_config_.attn_config.size_per_head = 64;
+    params.model_config_.hidden_size               = 128;
+    params.py_model                                = py::none();
+    params.py_sp_model                             = py::none();
+    ASSERT_TRUE(params.profiling_debug_logging_config.enable_batch_record);
+    std::unique_ptr<NormalExecutor> normal_executor;
+    std::unique_ptr<MtpExecutor>    mtp_executor;
+    if (speculative) {
+        auto draft_params = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+        draft_params->push_back(std::make_unique<EngineInitParams>(params));
+        auto propose_params = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_MTP, 2, std::move(draft_params));
+        mtp_executor        = std::make_unique<MtpExecutor>(params, propose_params, nullptr);
+    } else {
+        normal_executor = std::make_unique<NormalExecutor>(params, nullptr);
+    }
+    auto& recorder = ExecutionRecorder::instance();
+    ASSERT_TRUE(recorder.enabled());
+    recorder.close();
+    std::ifstream file(std::filesystem::path(directory) / "batch_record" / ("owner-" + recorder.owner())
+                       / "manifest.json");
+    ASSERT_TRUE(file.good());
+    const std::string manifest((std::istreambuf_iterator<char>(file)), {});
+    const auto        scope = speculative ? "mtp_executor" : "normal_executor";
+    EXPECT_NE(manifest.find(std::string("\"scope\":\"") + scope + "\""), std::string::npos) << manifest;
+    EXPECT_NE(manifest.find("\"vocab_size\":10"), std::string::npos) << manifest;
+    for (const auto* field : {"cache_block_tokens", "cache_groups", "cache_config"}) {
+        EXPECT_EQ(manifest.find(std::string("\"") + field + "\":"), std::string::npos) << manifest;
+    }
+}
+
+TEST_F(RecordingEngineTest, RecordingWithoutCacheManager) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    ASSERT_EXIT(
+        {
+            runRecordingWithoutCacheManager(false);
+            _exit(::testing::Test::HasFailure() ? 1 : 0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+}
+
+TEST_F(RecordingEngineTest, SpeculativeRecordingWithoutCacheManager) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    ASSERT_EXIT(
+        {
+            runRecordingWithoutCacheManager(true);
+            _exit(::testing::Test::HasFailure() ? 1 : 0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+}
 
 void RecordingEngineTest::runLifecycleAndSnapshot() {
     DeviceTestBase::SetUp();
@@ -82,7 +149,13 @@ void RecordingEngineTest::runLifecycleAndSnapshot() {
     EXPECT_NE(batches.find("\"kv_len\":0"), std::string::npos) << batches;
     EXPECT_NE(batches.find("\"ttft_us\":"), std::string::npos) << batches;
     EXPECT_EQ(batches.find("\"ttft_us\":null"), std::string::npos) << batches;
-    // Decode recording follows enable_batch_record (rate defaults to 1.0):
+    // Every submitted record carries the executor step's own wall duration.
+    {
+        const auto key_pos = batches.find("\"step_duration_us\":");
+        ASSERT_NE(key_pos, std::string::npos) << batches;
+        ASSERT_GT(std::stoull(batches.substr(key_pos + strlen("\"step_duration_us\":"), 12)), 0u) << batches;
+    }
+    // The mock config explicitly uses rate 1.0 for full decode coverage:
     // a 4-token streaming request records its prefill plus every decode step.
     EXPECT_NE(batches.find("\"phase\":\"decode\""), std::string::npos) << batches;
     EXPECT_NE(batches.find("\"q_len\":1"), std::string::npos) << batches;
@@ -90,8 +163,14 @@ void RecordingEngineTest::runLifecycleAndSnapshot() {
     bool manifest_found = false;
     for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(directory) / "batch_record")) {
         if (entry.path().filename().string().rfind("owner-", 0) == 0
-            && std::filesystem::exists(entry.path() / "manifest.json"))
+            && std::filesystem::exists(entry.path() / "manifest.json")) {
             manifest_found = true;
+            std::ifstream     manifest_file(entry.path() / "manifest.json");
+            const std::string manifest((std::istreambuf_iterator<char>(manifest_file)), {});
+            for (const auto* field : {"cache_block_tokens", "cache_groups", "cache_config"}) {
+                EXPECT_NE(manifest.find(std::string("\"") + field + "\":"), std::string::npos) << manifest;
+            }
+        }
     }
     EXPECT_TRUE(manifest_found);
 }

@@ -178,7 +178,9 @@ public:
         return GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     }
     void update(const StreamUpdateInfo& update_info, RecordedTokenTiming* timings = nullptr, size_t timing_count = 0);
-    void specUpdate(const StreamSpecUpdateInfo& update_info);
+    void specUpdate(const StreamSpecUpdateInfo& update_info,
+                    RecordedTokenTiming*        timings      = nullptr,
+                    size_t                      timing_count = 0);
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {

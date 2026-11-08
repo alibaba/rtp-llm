@@ -1887,12 +1887,12 @@ class BatchRecordArgsTest(TestCase):
         "record_decode_sample_rate": "RTP_LLM_RECORD_DECODE_SAMPLE_RATE",
     }
     DEFAULTS = {
-        "enable_batch_record": False,
+        "enable_batch_record": True,
         "record_queue_size": 4096,
-        "record_decode_sample_rate": 1.0,
+        "record_decode_sample_rate": 0.1,
     }
     SAMPLES = {
-        "enable_batch_record": True,
+        "enable_batch_record": False,
         "record_queue_size": 8192,
         "record_decode_sample_rate": 0.25,
     }
@@ -1946,9 +1946,7 @@ class BatchRecordArgsTest(TestCase):
 
     def test_cli_overrides_environment(self):
         env = {
-            self.ENV_BY_FIELD[name]: str(
-                type(value)() if isinstance(value, bool) else 0
-            )
+            self.ENV_BY_FIELD[name]: str(not value if isinstance(value, bool) else 0)
             for name, value in self.SAMPLES.items()
         }
         for equals in (False, True):

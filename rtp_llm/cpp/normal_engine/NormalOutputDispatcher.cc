@@ -507,15 +507,9 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     RTP_LLM_LOG_DEBUG("stream [%ld], new_tokens size = [%ld]", stream->streamId(), new_tokens.numel());
 
-    RecordedTokenTiming* recorded_timings = nullptr;
-    if (merge_outputs.recorded_batch) {
-        auto& timings = merge_outputs.recorded_batch->timings;
-        if (batch_idx_in >= 0 && static_cast<size_t>(batch_idx_in) + cur_batch_size <= timings.size()) {
-            recorded_timings = timings.data() + batch_idx_in;
-        } else {
-            merge_outputs.recorded_batch->markTimingError();
-        }
-    }
+    RecordedTokenTiming* recorded_timings =
+        merge_outputs.recorded_batch ? merge_outputs.recorded_batch->sliceTimings(batch_idx_in, cur_batch_size) :
+                                       nullptr;
     StreamUpdateInfo update_info{has_beam_search ? batch_new_all_token_ids : new_tokens,
                                  1,
                                  batch_hidden_states,

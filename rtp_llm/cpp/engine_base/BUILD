@@ -54,10 +54,14 @@ cc_library(
     hdrs = [
         "Executor.h",
     ],
+    srcs = [
+        "Executor.cc",
+    ],
     deps = [
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/engine_base/stream:stream",
         "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/observability:execution_recorder",
         "//:rtp_compute_ops",
         "@com_google_absl//absl/status",
     ],

@@ -38,11 +38,10 @@ ExecutionRecorder& ExecutionRecorder::instance(const ProfilingDebugLoggingConfig
 }
 
 ExecutionRecorder::ExecutionRecorder(std::string directory, size_t capacity):
-    directory_(std::move(directory)),
-    capacity_(capacity) {
+    directory_(std::move(directory)), capacity_(capacity) {
     if (directory_.empty() || !capacity_)
         return;
-    owner_ = std::to_string(getpid()) + "-" + std::to_string(unixNs());
+    owner_   = std::to_string(getpid()) + "-" + std::to_string(unixNs());
     next_id_ = unixNs();
     directory_ += "/owner-" + owner_;
     state_.store(State::Unconfigured, std::memory_order_release);
@@ -128,6 +127,15 @@ void ExecutionRecorder::manifest(bool closed) {
     out.close();
     std::filesystem::rename(directory_ + "/manifest.json.tmp", directory_ + "/manifest.json");
 }
+void ExecutionRecorder::tryWriteManifest(bool closed) noexcept {
+    try {
+        manifest(closed);
+    } catch (const std::exception& e) {
+        reportError("manifest update", e.what());
+    } catch (...) {
+        reportError("manifest update", "unknown exception");
+    }
+}
 void ExecutionRecorder::run() {
     for (;;) {
         Task task;
@@ -139,30 +147,40 @@ void ExecutionRecorder::run() {
             task = std::move(queue_.front());
             queue_.pop_front();
         }
+        const char* operation = "logger lookup";
         try {
             auto* batch_logger = Logger::getBatchScheduleLogger();
             if (!batch_logger->isLevelEnabled(alog::LOG_LEVEL_INFO)) {
                 ++dropped_;
                 continue;
             }
+            operation       = "serialization";
             const auto line = task();
             // Sink configuration, asynchronous flush and rotation belong to alog.conf.
             // Submission does not imply durable delivery.
+            operation = "log submission";
             batch_logger->logBinaryMessage(alog::LOG_LEVEL_INFO, line);
             total_bytes_ += line.size() + 1;
             ++submitted_;
-            if (submitted_ % 64 == 0)
-                manifest(false);
+        } catch (const std::exception& e) {
+            ++dropped_;
+            reportError(operation, e.what());
+            continue;
         } catch (...) {
-            ++errors_;
-            state_.store(State::Failed, std::memory_order_release);
-            try {
-                manifest(false);
-            } catch (...) {}
+            ++dropped_;
+            reportError(operation, "unknown exception");
+            continue;
         }
+        // Metadata failures do not invalidate a submitted batch or disable
+        // recording. Retry at the next periodic update, not on every batch.
+        if (submitted_ % 64 == 0)
+            tryWriteManifest(false);
     }
 }
 void ExecutionRecorder::reportSnapshotError(const char* message) noexcept {
+    reportError("snapshot", message);
+}
+void ExecutionRecorder::reportError(const char* operation, const char* message) noexcept {
     markError();
     const auto now =
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
@@ -171,7 +189,8 @@ void ExecutionRecorder::reportSnapshotError(const char* message) noexcept {
     if (now >= next
         && next_warning_ns_.compare_exchange_strong(next, now + 60LL * 1000 * 1000 * 1000, std::memory_order_relaxed)) {
         try {
-            RTP_LLM_LOG_WARNING("batch recording snapshot failed: %s (warnings limited to once per minute)", message);
+            RTP_LLM_LOG_WARNING(
+                "batch recording %s failed: %s (warnings limited to once per minute)", operation, message);
         } catch (...) {
             // Observability failures must not interrupt inference.
         }
@@ -190,13 +209,14 @@ void ExecutionRecorder::close() {
         try {
             // Flush the batch sink only, never shut down global alog.
             Logger::getBatchScheduleLogger()->flush();
-            manifest(true);
+        } catch (const std::exception& e) {
+            reportError("log flush", e.what());
         } catch (...) {
-            ++errors_;
+            reportError("log flush", "unknown exception");
         }
+        // Preserve final counters even if flushing the log sink failed.
+        tryWriteManifest(true);
     }
-    // Draining queued work may have reported a failure after close began.
-    state_.store(State::Closed, std::memory_order_release);
 }
 
 RecordedBatch::RecordedBatch(ExecutionRecorder&                   recorder,
@@ -219,6 +239,10 @@ RecordedBatch::~RecordedBatch() noexcept {
                 for (size_t i = 0; i < rows.size(); ++i) {
                     if (timings[i].ttft_us)
                         rows[i]["ttft_us"] = *timings[i].ttft_us;
+                    if (timings[i].kv_len)
+                        rows[i]["kv_len"] = *timings[i].kv_len;
+                    if (timings[i].accept_len)
+                        rows[i]["accept_len"] = *timings[i].accept_len;
                     requests.emplace_back(std::move(rows[i]));
                 }
                 record["requests"] = std::move(requests);

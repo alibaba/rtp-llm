@@ -552,7 +552,6 @@ void DashScGrpcConfig::from_json(const std::string& json_str) {
     parse_grpc_client_server_maps_json(json_str, client_config, server_config);
 }
 
-
 // PDSepConfig
 std::string PDSepConfig::to_string() const {
     std::ostringstream oss;
