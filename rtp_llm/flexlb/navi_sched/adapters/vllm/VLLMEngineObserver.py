@@ -5742,6 +5742,9 @@ class VLLMEngineObserver:
             snapshot["peer_cache_read_available"] for snapshot in snapshots
         )
         common = None
+        # PP nodes return the same object metadata. Parse each distinct value
+        # once per snapshot round; residency still comes from every node.
+        parsed_identities: dict[str, tuple[int, tuple[bytes, ...]]] = {}
         for snapshot in snapshots:
             groups = {}
             for obj in snapshot["objects"]:
@@ -5750,15 +5753,22 @@ class VLLMEngineObserver:
                 identity = obj["meta"].get("navi_sched_cache")
                 if identity is None:
                     continue
-                identity = json.loads(identity)
-                group_id = identity["group_id"]
-                if type(group_id) is not int or not 0 <= group_id < len(
-                    self._cache_policy.group_roles
-                ):
-                    raise ValueError("invalid V6D cache group")
-                hashes = [bytes.fromhex(value) for value in identity["block_hashes"]]
-                if not hashes or any(len(value) != 32 for value in hashes):
-                    raise ValueError("invalid V6D source block hash")
+                parsed = parsed_identities.get(identity)
+                if parsed is None:
+                    metadata = json.loads(identity)
+                    group_id = metadata["group_id"]
+                    if type(group_id) is not int or not 0 <= group_id < len(
+                        self._cache_policy.group_roles
+                    ):
+                        raise ValueError("invalid V6D cache group")
+                    hashes = tuple(
+                        bytes.fromhex(value) for value in metadata["block_hashes"]
+                    )
+                    if not hashes or any(len(value) != 32 for value in hashes):
+                        raise ValueError("invalid V6D source block hash")
+                    parsed = (group_id, hashes)
+                    parsed_identities[identity] = parsed
+                group_id, hashes = parsed
                 groups.setdefault(group_id, set()).update(hashes)
             if common is None:
                 common = groups
