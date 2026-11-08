@@ -7,6 +7,7 @@ import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.metric.FlexStatisticsType;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -132,7 +133,7 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_MATCH_STANDBY_FALLBACK_QPS, FlexMetricType.QPS, FlexPriorityType.NORMAL);
 
         // Cache service response time metrics
-        monitor.register(CACHE_FIND_MATCHING_ENGINES_RT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_FIND_MATCHING_ENGINES_RT, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         monitor.register(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, FlexMetricType.GAUGE);
 
         // Cache diff related metrics

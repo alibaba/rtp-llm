@@ -8,6 +8,7 @@ import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.metric.FlexStatisticsType;
 import org.flexlb.metric.MicrometerFlexMonitor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,6 +23,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_DECISION;
 import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_OVER_CAP_MS;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_FIND_MATCHING_ENGINES_RT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_PREDICTED_RATIO;
@@ -74,6 +76,13 @@ class CacheMetricsReporterTest {
         verify(monitor).register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
         verify(monitor).register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
         verify(monitor).register(CACHE_AFFINITY_OVER_CAP_MS, FlexMetricType.TIMER);
+    }
+
+    @Test
+    void shouldRegisterCacheMatchLatencyWithKMonitorSummary() {
+        reporter.init();
+
+        verify(monitor).register(CACHE_FIND_MATCHING_ENGINES_RT, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
     }
 
     @Test
