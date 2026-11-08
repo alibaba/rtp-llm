@@ -5,6 +5,7 @@
 namespace navi_sched {
 
 void bindNaviSched(pybind11::module_ &module);
+void bindPPCacheCollector(pybind11::module_ &module);
 void bindNaviSchedModule(pybind11::module_ &module, const char *description);
 
 }

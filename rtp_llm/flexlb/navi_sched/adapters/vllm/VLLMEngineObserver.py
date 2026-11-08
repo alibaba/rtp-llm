@@ -13,7 +13,7 @@ from collections.abc import Callable
 from concurrent.futures import CancelledError, Future
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
-from functools import lru_cache, partial
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -42,7 +42,6 @@ _STALLED_RUNNING_LOG_INTERVAL_NS = 60_000_000_000
 _STALLED_RUNNING_MAX_LOGS_PER_SCAN = 4
 _SLOW_ENGINE_STAGE_NS = 100_000_000
 _SEVERE_ENGINE_STAGE_NS = 1_000_000_000
-_CACHE_SNAPSHOT_INTERVAL_NS = 100_000_000
 _SLOW_ENGINE_STAGE_LOG_INTERVAL_NS = 5_000_000_000
 
 _LATENCY_PARAMETER_LEARNING_RATE_SCALES = (
@@ -70,21 +69,6 @@ _LATENCY_PARAMETER_LEARNING_RATE_SCALES = (
 
 class _MediaPreprocessingError(ValueError):
     pass
-
-
-@lru_cache(maxsize=4096)
-def _parse_v6d_cache_identity(
-    identity: str, group_count: int
-) -> tuple[int, tuple[bytes, ...]]:
-    """Decode stable object metadata into immutable group/hash values."""
-    metadata = json.loads(identity)
-    group_id = metadata["group_id"]
-    if type(group_id) is not int or not 0 <= group_id < group_count:
-        raise ValueError("invalid V6D cache group")
-    hashes = tuple(bytes.fromhex(value) for value in metadata["block_hashes"])
-    if not hashes or any(len(value) != 32 for value in hashes):
-        raise ValueError("invalid V6D source block hash")
-    return group_id, hashes
 
 
 def _v6d_peer_cache_enabled(scheduler) -> bool:
@@ -701,6 +685,7 @@ class _ExecutionStep:
     resumed_request_count: int = 0
     workload_counts_collected: bool = False
     batch_progress: list[Any] = field(default_factory=list)
+    pp_request_completions: tuple[tuple[str, tuple[int, int]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1206,8 +1191,20 @@ class _NaviSchedScheduler:
     def add_request(self, request):
         started_ns = time.perf_counter_ns()
         timing = {"phase": "admission", "forwarded_requests": 0}
+        pp_completion = getattr(self._observer, "_pp_request_completion", None)
+        pp_ticket = (
+            pp_completion.begin(
+                request.request_id, self._observer._navi_request_id(request)
+            )
+            if pp_completion is not None
+            else None
+        )
         try:
             return self._add_request(request, timing)
+        except BaseException:
+            if pp_completion is not None:
+                pp_completion.fail_admission(request.request_id, pp_ticket)
+            raise
         finally:
             finished_ns = time.perf_counter_ns()
             if finished_ns - started_ns >= _SLOW_ENGINE_STAGE_NS:
@@ -1428,6 +1425,9 @@ class _NaviSchedScheduler:
             self._observer._abort_forward_requests(state, cancelled_ids)
 
         native_results = self._scheduler.finish_requests(request_ids, finished_status)
+        pp_completion = getattr(self._observer, "_pp_request_completion", None)
+        if pp_completion is not None:
+            pp_completion.finish_requests(requested, finished_status)
         native_ids = {request.request_id for request in native_results}
         changed_request_ids = set(native_ids)
         if requested is None:
@@ -1529,6 +1529,9 @@ class _RoutingOutputQueue:
     def put_nowait(self, item):
         if isinstance(item, tuple) and len(item) == 2:
             client_index, outputs = item
+            pp_completion = getattr(self._observer, "_pp_request_completion", None)
+            if pp_completion is not None:
+                pp_completion.observe_outputs(outputs)
             scheduler_stats = getattr(outputs, "scheduler_stats", None)
             if scheduler_stats is not None:
                 outputs.scheduler_stats = None
@@ -1588,8 +1591,6 @@ class VLLMEngineObserver:
         self._v6d_scheduler = None
         self._v6d_publication_restore = []
         self._v6d_unpublished_candidates = {}
-        self._v6d_snapshot_future = None
-        self._next_v6d_snapshot_poll_ns = 0
         self._block_size = self._cache_policy.block_size
         if os.environ.get("PYTHONHASHSEED") != "0":
             raise ValueError("NaviSched requires PYTHONHASHSEED=0")
@@ -1681,6 +1682,7 @@ class VLLMEngineObserver:
         self._request_audit_failures = 0
         self._vllm_config = vllm_config
         self._agent = None
+        self._pp_request_completion = None
         self._bridge = None
         self._agent_options = dict(
             biz_name=config.biz_name,
@@ -1846,8 +1848,24 @@ class VLLMEngineObserver:
         logger.info(
             "NaviSched peer cache capability: enabled=%s", options["peer_cache_enabled"]
         )
+        if self._native_ingress:
+            from .V6DPPCollectorRuntime import make_pp_cache_agent_config
+
+            pp_cache = make_pp_cache_agent_config(
+                scheduler, self._vllm_config, naviSchedModule()
+            )
+            self._pp_cache_agent_config = pp_cache
+            if pp_cache is not None:
+                options["pp_cache_collector"] = pp_cache
         self._agent = NaviSchedAgent(**options)
         self._agent.init()
+        if getattr(self, "_pp_cache_agent_config", None) is not None:
+            from vllm.v1.engine import FinishReason
+            from .V6DPPCollectorRuntime import PPRequestCompletionObserver
+
+            self._pp_request_completion = PPRequestCompletionObserver(
+                self._agent, naviSchedModule(), FinishReason
+            )
         self._bridge = naviSchedModule()._VLLMAgentBridge(
             self._agent, pd_separated=self._native_ingress
         )
@@ -1867,6 +1885,15 @@ class VLLMEngineObserver:
                 "NaviSched native engine step loop: %s",
                 getattr(engine_core.step_fn, "__qualname__", type(engine_core.step_fn).__name__),
             )
+        pp_cache = getattr(self, "_pp_cache_agent_config", None)
+        if pp_cache is not None:
+            from .V6DPPCollectorRuntime import verify_pp_cache_handshake
+
+            try:
+                verify_pp_cache_handshake(pp_cache, engine_core.scheduler)
+            except BaseException:
+                self.shutdown()
+                raise
         self._bind_backend_pipeline_stages(engine_core)
         self._engine_core = engine_core
         _execution_timing_probe.bind_engine_loop_audit(self, engine_core)
@@ -2128,30 +2155,6 @@ class VLLMEngineObserver:
         self._v6d_publication_restore.clear()
         self._v6d_unpublished_candidates.clear()
 
-    def _poll_v6d_cache_source(self) -> None:
-        if self._forward_stop.is_set() or self._v6d_scheduler is None:
-            return
-        future = self._v6d_snapshot_future
-        if future is not None:
-            if not future.done():
-                return
-            self._v6d_snapshot_future = None
-            try:
-                self.on_v6d_cache_snapshots(future.result())
-            except Exception:
-                # Observation failure is not an upstream circuit-state update.
-                logger.exception("failed to read V6D resident cache snapshot")
-        now = time.monotonic_ns()
-        if now >= self._next_v6d_snapshot_poll_ns:
-            self._next_v6d_snapshot_poll_ns = now + _CACHE_SNAPSHOT_INTERVAL_NS
-            try:
-                self._v6d_snapshot_future = (
-                    self._v6d_scheduler.submit_local_cache_snapshots()
-                )
-            except Exception:
-                # Keep the last state explicitly supplied by the upstream cache.
-                logger.exception("failed to submit V6D resident cache snapshot")
-
     def _log_native_forward_wait(self) -> None:
         now_ns = time.perf_counter_ns()
         if now_ns < getattr(self, "_next_forward_wait_log_ns", 0):
@@ -2200,7 +2203,6 @@ class VLLMEngineObserver:
 
         decoder = MsgpackDecoder(forward_request_type(EngineCoreRequest))
         while True:
-            self._poll_v6d_cache_source()
             if not self._drain_cancelled_requests(EngineCoreRequestType):
                 if self._forward_stop.wait(0.1):
                     return
@@ -2776,7 +2778,13 @@ class VLLMEngineObserver:
         return dict(zip(request_ids, cache_hits, strict=True))
 
     def _fail_forward_responses(self, request_ids, error_message: str) -> None:
+        pp_completion = getattr(self, "_pp_request_completion", None)
         for request_id in request_ids:
+            if pp_completion is not None:
+                with self._response_lock:
+                    external_id = self._response_request_ids.get(int(request_id))
+                if external_id is not None:
+                    pp_completion.fail_requests((external_id,))
             try:
                 if not self._bridge.fail_forward_response(
                     int(request_id), error_message
@@ -3317,6 +3325,9 @@ class VLLMEngineObserver:
             self._release_forward_batch(state)
             raise
         if cancelled_before_admission:
+            pp_completion = getattr(self, "_pp_request_completion", None)
+            if pp_completion is not None:
+                pp_completion.cancel_requests((external_request_id,))
             self._remove_response_requests((request_id,))
         return admitted_state
 
@@ -4361,6 +4372,11 @@ class VLLMEngineObserver:
             started_ns=time.perf_counter_ns(),
             scheduler_output_key=id(scheduler_output),
         )
+        pp_completion = getattr(self, "_pp_request_completion", None)
+        if pp_completion is not None:
+            execution_step.pp_request_completions = pp_completion.capture_requests(
+                scheduler_output.num_scheduled_tokens
+            )
         _execution_timing_probe.mark_entry(execution_step)
         with self._execution_lock:
             scheduled_work_registered = (
@@ -4415,6 +4431,10 @@ class VLLMEngineObserver:
             execution_step.submitted_ns = time.perf_counter_ns()
             future = execute_model(scheduler_output, non_block=non_block)
         except BaseException:
+            if pp_completion is not None:
+                pp_completion.finish_execution_error(
+                    execution_step.pp_request_completions, cancelled=False
+                )
             self._finish_execution_tracking(execution_step)
             self._end_backend_execution(execution_step)
             self._abort_execution_step(execution_step)
@@ -4604,6 +4624,13 @@ class VLLMEngineObserver:
             and future.result() is None
         ):
             return
+        pp_completion = getattr(self, "_pp_request_completion", None)
+        if pp_completion is not None and future.done():
+            cancelled = future.cancelled()
+            if cancelled or future.exception() is not None:
+                pp_completion.finish_execution_error(
+                    execution_step.pp_request_completions, cancelled=cancelled
+                )
         if execution_step.backend_completion_recorded:
             return
         execution_step.backend_completion_recorded = True
@@ -5744,52 +5771,6 @@ class VLLMEngineObserver:
             self._mark_forward_batch_released(state)
         self._cleanup_released_forward_batch(state)
 
-    def on_v6d_cache_snapshots(self, snapshots: list[dict]) -> None:
-        """Feed existing resident-object snapshots into the original KV path."""
-        if not snapshots:
-            raise ValueError("V6D snapshot requires every physical node")
-        if any(
-            type(snapshot["peer_cache_read_available"]) is not bool
-            for snapshot in snapshots
-        ):
-            raise ValueError("invalid V6D peer cache read availability")
-        peer_cache_read_available = all(
-            snapshot["peer_cache_read_available"] for snapshot in snapshots
-        )
-        common = None
-        # Reuse immutable metadata decoding across PP nodes and poll rounds.
-        # Resident membership comes from every current node snapshot.
-        parsed_identities: dict[str, tuple[int, tuple[bytes, ...]]] = {}
-        for snapshot in snapshots:
-            groups = {}
-            for obj in snapshot["objects"]:
-                if obj["tier"] != "vineyard" or obj["sealedResident"] is not True:
-                    continue
-                identity = obj["meta"].get("navi_sched_cache")
-                if identity is None:
-                    continue
-                parsed = parsed_identities.get(identity)
-                if parsed is None:
-                    parsed = _parse_v6d_cache_identity(
-                        identity, len(self._cache_policy.group_roles)
-                    )
-                    parsed_identities[identity] = parsed
-                group_id, hashes = parsed
-                groups.setdefault(group_id, set()).update(hashes)
-            if common is None:
-                common = groups
-            else:
-                for group_id in common:
-                    common[group_id].intersection_update(groups.get(group_id, ()))
-        self.on_block_lifecycle_event(
-            "snapshot",
-            None,
-            {group_id: tuple(sorted(hashes)) for group_id, hashes in common.items()},
-            cause="v6d_resident_snapshot",
-            cache_key_type=1,
-        )
-        self._bridge.report_peer_cache_read_available(peer_cache_read_available)
-
     def on_block_lifecycle_event(
         self,
         event_type: str,
@@ -5944,9 +5925,6 @@ class VLLMEngineObserver:
         for thread in (self._forward_thread,):
             if thread is not None and thread is not threading.current_thread():
                 thread.join()
-        if self._v6d_snapshot_future is not None:
-            self._v6d_snapshot_future.cancel()
-            self._v6d_snapshot_future = None
         self._restore_v6d_publication_observers()
         for state in self._matching_forward_batches(None):
             self._fail_forward_responses(
@@ -5983,6 +5961,10 @@ class VLLMEngineObserver:
             self._pd_output_completed_ns.clear()
             self._pd_output_geometry.clear()
             self._pd_ready_finishes.clear()
+        pp_completion = getattr(self, "_pp_request_completion", None)
+        if pp_completion is not None:
+            pp_completion.close()
+            self._pp_request_completion = None
         if self._agent is not None:
             try:
                 self._agent.stop()

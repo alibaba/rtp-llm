@@ -343,6 +343,8 @@ struct NaviSchedMasterConfig {
     int64_t latencyModelPoolPersistIntervalMs = 10000;
 };
 
+struct PPCacheAgentConfig;
+
 struct NaviSchedAgentConfig {
     NaviSchedConfig service;
     NaviSchedRuntimeConfig runtime;
@@ -361,6 +363,7 @@ struct NaviSchedAgentConfig {
     bool executionCacheSourceEnabled = false;
     bool peerCacheEnabled = false;
     TPUPrefillExecutionPolicyConfig prefillExecutionPolicy;
+    std::shared_ptr<PPCacheAgentConfig> ppCacheCollector;
 };
 
 }

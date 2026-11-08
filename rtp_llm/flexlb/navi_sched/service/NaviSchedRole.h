@@ -64,6 +64,7 @@ protected:
 private:
     friend class NaviSchedAgentImpl;
     friend class NaviSchedClient;
+    friend class NaviSchedCollector;
     friend class NaviSchedMaster;
     friend class NaviSchedRoleRuntimeAccess;
 

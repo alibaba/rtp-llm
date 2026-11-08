@@ -1,3 +1,4 @@
+#include "aios/navi_sched/collector/PPCacheAgentConfig.h"
 #include "aios/navi_sched/service/NaviSchedAgent.h"
 #include "aios/navi_sched/data/NaviSchedRequestTrace.h"
 #include "aios/navi_sched/navi_sched_git_version.h"
@@ -416,11 +417,11 @@ struct NaviSchedBatchFinishReporter::State {
                                              NaviSchedCacheKeyType::V6D);
                 }
             }
-            if (!batchR->finishBatch(
-                    batchId, requests, executionState, &completedRequests,
-                    nativePreparationMs,
-                    backendExecutionSample ? backendExecutionSample->executionFinishTimeUs
-                                           : 0)) {
+            if (!batchR->finishBatch(batchId, requests, executionState,
+                                     &completedRequests, nativePreparationMs,
+                                     backendExecutionSample
+                                         ? backendExecutionSample->executionFinishTimeUs
+                                         : 0)) {
                 return false;
             }
             finished = true;
@@ -450,7 +451,8 @@ struct NaviSchedBatchFinishReporter::State {
         const bool pendingCompleted = reportR->reportNativeBatchCompleted(
             batchId,
             executionState.localBatch.pendingCacheTracked
-                ? executionState.localBatch.localBatchId : 0,
+                ? executionState.localBatch.localBatchId
+                : 0,
             executionState.pendingCacheTypes);
         const auto inflight = removeTrackedRequests(
             inflightState, executionState.requestIds, reportR, "batch_finished");
@@ -840,7 +842,8 @@ bool NaviSchedBatchFinishReporter::finishBatchWithExecutionGeometry(
         sample.admissionToFirstExecutionTimeUs =
             static_cast<int64_t>(admissionToFirstExecutionMs * 1000.0);
     }
-    return _state && _state->finish(requests, &sample, nullptr, -1.0, nativePreparationMs);
+    return _state &&
+           _state->finish(requests, &sample, nullptr, -1.0, nativePreparationMs);
 }
 
 bool NaviSchedBatchFinishReporter::finishBatchWithProjectedExecutionGeometry(
@@ -878,7 +881,8 @@ bool NaviSchedBatchFinishReporter::finishBatchWithProjectedExecutionGeometry(
         sample.admissionToFirstExecutionTimeUs =
             static_cast<int64_t>(admissionToFirstExecutionMs * 1000.0);
     }
-    return _state && _state->finish(requests, &sample, nullptr, -1.0, nativePreparationMs);
+    return _state &&
+           _state->finish(requests, &sample, nullptr, -1.0, nativePreparationMs);
 }
 
 bool NaviSchedBatchFinishReporter::finishBatchWithUnifiedLatency(
@@ -948,15 +952,18 @@ NaviSchedAgentImpl::NaviSchedAgentImpl(const NaviSchedAgentConfig &agentConfig,
                                        int32_t serverPort, const std::string &serverIp,
                                        int64_t totalBlocks)
     : NaviSchedRole(agentConfig.service)
-    , _agentBatchR(std::make_shared<AgentBatchR>(agentConfig.service.batchTimeoutMs,
-                                                 agentConfig.service.closedBatchKeepMs,
-                                                 agentConfig.pdSeparated &&
-                                                     !agentConfig.unifiedLatencyPrediction))
+    , _agentBatchR(std::make_shared<AgentBatchR>(
+          agentConfig.service.batchTimeoutMs, agentConfig.service.closedBatchKeepMs,
+          agentConfig.pdSeparated && !agentConfig.unifiedLatencyPrediction))
     , _agentLatencyInputR(std::make_shared<AgentLatencyInputR>())
     , _agentReportBridgeR(std::make_shared<AgentReportBridgeR>())
     , _agentRequestR(std::make_shared<AgentRequestR>())
     , _agentResponseR(std::make_shared<AgentResponseR>())
     , _agentConfig(agentConfig.runtime)
+    , _ppCacheConfig(
+          agentConfig.ppCacheCollector
+              ? std::make_shared<const PPCacheAgentConfig>(*agentConfig.ppCacheCollector)
+              : nullptr)
     , _latencyModelFingerprint(agentConfig.latencyModelFingerprint)
     , _latencyHistoryFingerprint(agentConfig.latencyHistoryFingerprint.empty()
                                      ? agentConfig.latencyModelFingerprint
@@ -999,11 +1006,14 @@ bool NaviSchedAgentImpl::applyConfig(const std::string &configStr)
         !resourceMap->addResource(_agentResponseR)) {
         return false;
     }
+    if (_ppCacheMerge && !resourceMap->addResource(_ppCacheMerge)) return false;
+    if (_ppRequestFinished && !resourceMap->addResource(_ppRequestFinished)) return false;
     return update(configStr, resourceMap);
 }
 
 bool NaviSchedAgentImpl::init()
 {
+    if (_ppCacheConfig && (!_pdSeparated || !_ppCacheConfig->valid())) return false;
     if ((_executionGeometryEnabled &&
          (!_pdSeparated || _unifiedLatencyPrediction ||
           !TPUPrefillExecutionPolicy::validate(
@@ -1021,6 +1031,60 @@ bool NaviSchedAgentImpl::init()
     _agentBizName = _agentConfig.bizName;
     if (!_agentBatchR->setBatchTimeoutMs(getConfig().batchTimeoutMs)) {
         return false;
+    }
+    if (_ppCacheConfig) {
+        _ppCacheMerge = std::make_shared<PPCacheMergeR>();
+        const auto bridge = _agentReportBridgeR;
+        const auto config = _ppCacheConfig;
+        if (!_ppCacheMerge->initialize(
+                config->ppGroup, config->pipelineParallelSize,
+                [bridge, config](const PPCacheCollectorChanges &changes) {
+                    const auto report = bridge->getAgentReportR();
+                    if (!report) return;
+                    if (changes.peerCacheReadAvailable >= 0)
+                        report->reportPeerCacheReadAvailable(changes.peerCacheReadAvailable == 1);
+                    if (changes.addedFull.empty() && changes.removedFull.empty() &&
+                        changes.addedTail.empty() && changes.removedTail.empty())
+                        return;
+                    const auto &policy = config->policy;
+                    const auto hashes = [](const std::vector<uint64_t> &values)
+                        -> NaviSchedBlockHashesConstPtr {
+                        return values.empty()
+                                   ? nullptr
+                                   : std::make_shared<const NaviSchedBlockHashes>(values);
+                    };
+                    NaviSchedCacheUpdate update;
+                    update.cacheKeyType = NaviSchedCacheKeyType::V6D;
+                    update.totalBlocks = config->totalBlocks;
+                    update.blockSize = policy.blockSize;
+                    update.linearStep = policy.linearStep;
+                    update.hybridTailRequired = policy.hybridTailRequired;
+                    update.fullAttentionQueryDropTokens =
+                        policy.fullAttentionQueryDropTokens;
+                    update.mambaReplayStopShift = policy.mambaReplayStopShift;
+                    update.mambaRetentionInterval = policy.mambaRetentionInterval;
+                    update.mambaAlign = policy.mambaAlign;
+                    update.eventTimeUs = autil::TimeUtility::currentTime();
+                    if (policy.hybridTailRequired) {
+                        update.addedFullReadyBlockHashes = hashes(changes.addedFull);
+                        update.removedFullReadyBlockHashes = hashes(changes.removedFull);
+                    } else {
+                        update.addedBlockHashes = hashes(changes.addedFull);
+                        update.removedBlockHashes = hashes(changes.removedFull);
+                    }
+                    update.addedTailReadyBlockHashes = hashes(changes.addedTail);
+                    update.removedTailReadyBlockHashes = hashes(changes.removedTail);
+                    report->reportCacheUpdated(update);
+                }))
+            return false;
+        _ppRequestFinished = std::make_shared<PPRequestFinishedR>();
+        const auto merge = _ppCacheMerge;
+        if (!_ppRequestFinished->initialize(
+                config->ppGroup, config->pipelineParallelSize,
+                [merge](uint32_t shard, uint64_t generation) {
+                    merge->disconnect(shard, generation);
+                }))
+            return false;
     }
     NaviSchedConfigBuilder::NamedConfigs kernelConfigs;
     autil::legacy::json::JsonMap latencyKernelConfig;
@@ -1098,8 +1162,20 @@ bool NaviSchedAgentImpl::init()
         getConfig().latencyZeroAnchorMinSamples;
     resourceConfigs[LatencyModelR::RESOURCE_ID] =
         autil::legacy::ToJsonString(latencyModelConfig, true);
+    auto runtime = _agentConfig;
+    if (_ppCacheConfig) {
+        kernels.push_back("^navi_sched\\.pp_cache_merge_k$");
+        kernels.push_back("^navi_sched\\.pp_request_finished_source_k$");
+        for (const auto &shard : _ppCacheConfig->shards) {
+            NaviSchedLocalNode node;
+            node.bizName = shard.bizName;
+            node.ip = shard.host;
+            node.grpcPort = shard.grpcPort;
+            runtime.localNodes.push_back(std::move(node));
+        }
+    }
     auto configStr = NaviSchedConfigBuilder::build(
-        _agentConfig, kernels, false, kernelConfigs, resourceConfigs,
+        runtime, kernels, bool(_ppCacheConfig), kernelConfigs, resourceConfigs,
         {AgentInstanceR::RESOURCE_ID, AgentSchedulerConfigR::RESOURCE_ID,
          AgentReportR::RESOURCE_ID});
     if (!configStr.empty() && applyConfig(configStr)) {
@@ -1690,12 +1766,54 @@ bool NaviSchedAgentImpl::reportObservedWorkload(
     return revision > 0;
 }
 
+uint64_t NaviSchedAgentImpl::beginPPCacheRequest(uint64_t requestId)
+{
+    std::lock_guard<std::mutex> lock(_ppRequestMutex);
+    if (!requestId || !_ppCacheGraph || _ppActiveRequests.count(requestId) ||
+        _nextPPCacheAttempt == std::numeric_limits<uint64_t>::max())
+        return 0;
+    const auto attemptId = ++_nextPPCacheAttempt;
+    if (!_ppCacheMerge->beginRequest({requestId, attemptId}).accepted) return 0;
+    _ppActiveRequests.emplace(requestId, attemptId);
+    return attemptId;
+}
+
+bool NaviSchedAgentImpl::finishPPCacheRequest(uint64_t requestId, uint64_t attemptId,
+                                              PPShardRequestStatus status)
+{
+    if (status < PPShardRequestStatus::SUCCEEDED || status > PPShardRequestStatus::CANCELLED)
+        return false;
+    std::shared_ptr<PPCacheCollectGraph> graph;
+    {
+        std::lock_guard<std::mutex> lock(_ppRequestMutex);
+        const auto found = _ppActiveRequests.find(requestId);
+        if (!attemptId || found == _ppActiveRequests.end() || found->second != attemptId)
+            return false;
+        _ppActiveRequests.erase(found);
+        graph = _ppCacheGraph;
+    }
+    if (graph) graph->publishRequestFinished({{requestId, attemptId}, status});
+    return true;
+}
+
+void NaviSchedAgentImpl::stopPPCacheCollection()
+{
+    std::shared_ptr<PPCacheCollectGraph> graph;
+    {
+        std::lock_guard<std::mutex> lock(_ppRequestMutex);
+        graph = std::move(_ppCacheGraph);
+        _ppActiveRequests.clear();
+    }
+    if (graph) graph->stop();
+}
+
 bool NaviSchedAgentImpl::setBackendExecutionPipelineStages(size_t stages) const
 {
     return _agentBatchR && _agentBatchR->setBackendExecutionPipelineStages(stages);
 }
 
-bool NaviSchedAgentImpl::beginObservedBackendExecution(int64_t eventTimeUs, int32_t requestCount) const
+bool NaviSchedAgentImpl::beginObservedBackendExecution(int64_t eventTimeUs,
+                                                       int32_t requestCount) const
 {
     return _agentBatchR && _agentBatchR->beginBackendExecution(eventTimeUs, requestCount);
 }
@@ -1925,6 +2043,7 @@ NaviSchedBatchFinishReporterPtr NaviSchedAgentImpl::makeBatchFinishReporter(
 
 void NaviSchedAgentImpl::stop()
 {
+    stopPPCacheCollection();
     stopSnapshot();
     setForwardBatchHandler({});
     _agentResponseR->finishAll("agent stopped");
@@ -1963,6 +2082,7 @@ void NaviSchedAgentImpl::stop()
 
 void NaviSchedAgentImpl::onUpdating()
 {
+    stopPPCacheCollection();
     if (_agentGraph) {
         _agentGraph->stop();
         _agentGraph.reset();
@@ -1991,6 +2111,27 @@ bool NaviSchedAgentImpl::onUpdated()
     if (!_agentGraph->start()) {
         _agentGraph.reset();
         return false;
+    }
+    if (_ppCacheConfig) {
+        const auto &policy = _ppCacheConfig->policy;
+        NaviSchedCacheUpdate initial;
+        initial.cacheKeyType = NaviSchedCacheKeyType::V6D;
+        initial.fullSnapshot = true;
+        initial.totalBlocks = _ppCacheConfig->totalBlocks;
+        initial.blockSize = policy.blockSize;
+        initial.linearStep = policy.linearStep;
+        initial.hybridTailRequired = policy.hybridTailRequired;
+        initial.fullAttentionQueryDropTokens = policy.fullAttentionQueryDropTokens;
+        initial.mambaReplayStopShift = policy.mambaReplayStopShift;
+        initial.mambaRetentionInterval = policy.mambaRetentionInterval;
+        initial.mambaAlign = policy.mambaAlign;
+        initial.eventTimeUs = autil::TimeUtility::currentTime();
+        _agentReportR->reportCacheUpdated(initial);
+        auto graph = std::make_shared<PPCacheCollectGraph>(
+            navi, _agentBizName, _ppCacheConfig->ppGroup, _ppCacheMerge, _ppRequestFinished);
+        if (!graph->start(_ppCacheConfig->shards)) return false;
+        std::lock_guard<std::mutex> lock(_ppRequestMutex);
+        _ppCacheGraph = std::move(graph);
     }
     return true;
 }
@@ -2853,12 +2994,24 @@ bool NaviSchedAgent::reportObservedWorkload(
                                                   &waitingRequestIds);
 }
 
+uint64_t NaviSchedAgent::beginPPCacheRequest(uint64_t requestId)
+{
+    return _impl ? _impl->beginPPCacheRequest(requestId) : 0;
+}
+
+bool NaviSchedAgent::finishPPCacheRequest(uint64_t requestId, uint64_t attemptId,
+                                          PPShardRequestStatus status)
+{
+    return _impl && _impl->finishPPCacheRequest(requestId, attemptId, status);
+}
+
 bool NaviSchedAgent::setBackendExecutionPipelineStages(size_t stages) const
 {
     return _impl && _impl->setBackendExecutionPipelineStages(stages);
 }
 
-bool NaviSchedAgent::beginObservedBackendExecution(int64_t eventTimeUs, int32_t requestCount) const
+bool NaviSchedAgent::beginObservedBackendExecution(int64_t eventTimeUs,
+                                                   int32_t requestCount) const
 {
     return _impl && _impl->beginObservedBackendExecution(eventTimeUs, requestCount);
 }

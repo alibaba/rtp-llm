@@ -12,6 +12,7 @@ _navi_sched = naviSchedModule()
 
 
 class NaviSchedAgent(_navi_sched.NaviSchedAgent):
+
     def __init__(
         self,
         biz_name: str,
@@ -28,6 +29,7 @@ class NaviSchedAgent(_navi_sched.NaviSchedAgent):
         execution_cache_source_enabled: bool = False,
         prefill_execution_policy=None,
         peer_cache_enabled: bool = False,
+        pp_cache_collector=None,
         mamba_replay_stop_shift: bool = False,
         full_attention_query_drop_tokens: int = 0,
         mamba_retention_interval: int = -1,
@@ -86,6 +88,12 @@ class NaviSchedAgent(_navi_sched.NaviSchedAgent):
         )
         agent_config.service = makeServiceConfig(navi_sched, name, options)
         agent_config.pd_separated = bool(pd_separated)
+        if pp_cache_collector is not None:
+            if not pd_separated or not pp_cache_collector.valid():
+                raise ValueError(
+                    "PP cache collection requires a complete PP topology and V6D policy"
+                )
+            agent_config.pp_cache_collector = pp_cache_collector
         agent_config.peer_cache_enabled = bool(peer_cache_enabled)
         agent_config.execution_geometry_enabled = bool(execution_geometry_enabled)
         agent_config.projected_execution_geometry_enabled = bool(
