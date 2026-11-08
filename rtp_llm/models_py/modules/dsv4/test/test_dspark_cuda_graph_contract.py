@@ -90,7 +90,8 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
     def test_forward_uses_fixed_role_entrypoints(self) -> None:
         model = _dspark_harness(gamma=3)
         model.v4 = SimpleNamespace(
-            embed=SimpleNamespace(weight=torch.empty((1, 8), dtype=torch.bfloat16))
+            embed=SimpleNamespace(weight=torch.empty((1, 8), dtype=torch.bfloat16)),
+            _embed_target=lambda ids: torch.zeros((*ids.shape, 8)),
         )
         model.kv_cache = None
         model._dspark_width = 3

@@ -14,6 +14,7 @@ py_library(
         "flashinfer_all_reduce.py",
         "flashinfer_ipc_all_reduce.py",
         "all_reduce.py",
+        "ordered_reduce_scatter.py",
         "rocm_rccl.py",
         "symm_mem.py",
     ],

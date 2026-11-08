@@ -39,6 +39,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
@@ -56,6 +57,14 @@ def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tenso
     assert (
         _CUBLAS_GEMM_BF16_BF16_FP32 is not None
     ), "cublas_gemm_bf16_bf16_fp32 op is not built"
+    from rtp_llm.models_py.modules.dsv4.fp8.backend_selection import is_sm120_device
+
+    if is_sm120_device(x.device):
+        from rtp_llm.models_py.modules.dsv4.fp8.sm120_projection import (
+            compressor_linear,
+        )
+
+        return compressor_linear(x, weight, _CUBLAS_GEMM_BF16_BF16_FP32)
     leading_shape = x.shape[:-1]
     x_2d = x.reshape(-1, x.shape[-1])
     out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
@@ -492,7 +501,6 @@ class CompressorFP8(PoolBackedModule):
         self._pool_entry_bytes = (
             KV_ENTRY_BYTES if head_dim == KV_HEAD_DIM else INDEXER_ENTRY_BYTES
         )
-
         # ape stays FP32. wkv/wgate are stored as BF16, while the fused
         # projection below uses BF16 operands with FP32 accumulation/output.
         # Register ape as a non-trainable Parameter so .to(device) follows the
@@ -952,6 +960,22 @@ class CompressorFP8(PoolBackedModule):
     #     (e.g. CSA: nested indexer + main) is required for FIFO ordering
     #     of NCCL collectives within the ProcessGroup.
     # ----------------------------------------------------------------------
+    def _project_prefill(self, x: torch.Tensor) -> torch.Tensor:
+        from rtp_llm.models_py.modules.dsv4.fp8.backend_selection import is_sm120_device
+
+        if is_sm120_device(x.device):
+            from rtp_llm.models_py.modules.dsv4.fp8.sm120_projection import (
+                compressor_prefill,
+            )
+
+            return compressor_prefill(
+                x,
+                self._wkv_wgate_fused,
+                _linear_bf16_bf16_fp32,
+                getattr(getattr(self, "_cp_ctx", None), "chunk_lengths_per_req", None),
+            )
+        return _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+
     def start_prefill(
         self,
         x: torch.Tensor,
@@ -1001,7 +1025,7 @@ class CompressorFP8(PoolBackedModule):
 
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+            fused_out = self._project_prefill(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 
@@ -1164,7 +1188,7 @@ class CompressorFP8(PoolBackedModule):
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
+            fused_out = self._project_prefill(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 

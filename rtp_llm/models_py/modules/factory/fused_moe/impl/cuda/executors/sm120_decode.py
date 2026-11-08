@@ -1,0 +1,483 @@
+"""Explicit SM120 DP/EP decode MoE executor (``moe_strategy=sm120_a2a_decode``).
+
+Transport, all on the WORLD EP group (no stage-local groups):
+
+* eager only: MXFP8 two-way all-to-all dispatch/combine with local
+  contiguous grouped experts; oversize batches use coordinated, bounded
+  dispatch rounds. CUDA graph capture, graph warmup, and symbolic row
+  shapes are rejected before any communication.
+* replicated TP tokens (``attn_tp_size == ep_size == world``) are
+  rejected at the condition boundary: they duplicate logical rows on
+  every rank and cannot enter the DP=EP collective protocol.
+
+Local experts use gate-first DeepGEMM FP8 x FP4 grouped GEMMs in the
+contiguous layout.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, Optional
+
+import torch
+
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    m_grouped_fp8_fp4_gemm_nt_contiguous,
+)
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.kernels.cuda.quant_layouts import (
+    FP4_BLOCK,
+    FP8_BLOCK,
+    prepare_fp4_weight_scale_for_deepgemm,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
+    cuda_graph_warmup_forward_enabled,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.ep_combine import (
+    fp32_peer_sum,
+)
+from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+    ep_gather,
+    ep_scatter,
+    recompute_topk_ids_sum_expert_count,
+)
+from rtp_llm.models_py.triton_kernels.moe.silu_mul_fp8_quant import (
+    silu_mul_fp8_quant_packed,
+)
+from rtp_llm.models_py.utils.arch import is_sm120
+from rtp_llm.models_py.utils.math import align, ceil_div
+
+from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
+from .sm120_fused_moe import local_expert_config, validate_world_ep_topology
+
+_logger = logging.getLogger(__name__)
+_GROUPED_ALIGNMENT = 128
+_A2A_PAYLOAD_TOKEN_BOUND = 65536
+_A2A_OVERSIZE_WARN_CT = [0]
+_A2A_OVERSIZE_WARN_MAX = 3
+_DECODE_CHUNK_TOKENS = 4096
+
+
+def _a2a_payload_bound_exceeded(recv_counts) -> bool:
+    try:
+        return sum(recv_counts) > _A2A_PAYLOAD_TOKEN_BOUND or any(
+            (c < 0 or c > _A2A_PAYLOAD_TOKEN_BOUND for c in recv_counts)
+        )
+    except Exception:
+        return True
+
+
+def _validate_a2a_token_counts(
+    recv_counts, *, world: int, rank: int, local_tokens: int, max_tokens: int
+) -> None:
+    # A collective mismatch can interpret packed FP8 payload bytes as int64
+    # counts. Never pass those values to the dispatch path.
+    if (
+        max_tokens <= 0
+        or not 0 <= rank < world
+        or len(recv_counts) != world
+        or any(
+            type(count) is not int or not 0 <= count <= max_tokens
+            for count in recv_counts
+        )
+        or recv_counts[rank] != local_tokens
+    ):
+        raise RuntimeError(
+            "SM120 MoE received invalid token counts: "
+            f"counts={recv_counts!r}, world={world}, rank={rank}, "
+            f"local_tokens={local_tokens}, max_metadata_tokens={max_tokens}; "
+            "all EP ranks must use the same eager collective protocol"
+        )
+
+
+def _warn_a2a_oversize(recv_counts) -> None:
+    if _A2A_OVERSIZE_WARN_CT[0] >= _A2A_OVERSIZE_WARN_MAX:
+        return
+    _A2A_OVERSIZE_WARN_CT[0] += 1
+    try:
+        total = sum(recv_counts)
+    except Exception:
+        total = -1
+    _logger.warning(
+        "SM120 MoE all-to-all dispatch uses coordinated bounded rounds: "
+        "recv_counts=%r (sum=%d) exceeds the %d-token payload bound. "
+        "(warning %d/%d)",
+        recv_counts,
+        total,
+        _A2A_PAYLOAD_TOKEN_BOUND,
+        _A2A_OVERSIZE_WARN_CT[0],
+        _A2A_OVERSIZE_WARN_MAX,
+    )
+
+
+def _has_sm120_grouped_fp8_fp4_kernel() -> bool:
+    """The contiguous grouped FP8 x FP4 GEMM must exist in deep_gemm."""
+    try:
+        import deep_gemm
+    except Exception:
+        return False
+    return hasattr(deep_gemm, "m_grouped_fp8_fp4_gemm_nt_contiguous")
+
+
+def _stream_is_capturing() -> bool:
+    return torch.cuda.is_current_stream_capturing()
+
+
+def _uses_replicated_tp_tokens(config, world: int) -> bool:
+    attn_tp_size = int(getattr(config, "attn_tp_size", 1))
+    return attn_tp_size > 1 and attn_tp_size == config.ep_size == world
+
+
+class Sm120DecodeExperts(torch.nn.Module):
+    """Gate-first DeepGEMM FP8 x FP4 experts in a local expert-id space."""
+
+    def __init__(self, cfg, layer_weights: Dict) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self._setup_weights(layer_weights)
+
+    def _setup_weights(self, layer_weights: Dict) -> None:
+        from rtp_llm.utils.model_weight import W
+
+        cfg = self.cfg
+        E, D, inter = cfg.n_routed_experts, cfg.dim, cfg.moe_inter_dim
+        w13 = layer_weights.pop(W.moe_w1)
+        s13_raw = layer_weights.pop(W.moe_s1)
+        if not is_sm120(w13.device):
+            raise RuntimeError("SM120 decode weights require an exact SM120 device")
+        self._w13, s13_raw = normalize_moe_w13_gate_up(
+            w13, s13_raw, inter, cfg.moe_w1_layout
+        )
+        self._w2 = layer_weights.pop(W.moe_w2)
+        s2_raw = layer_weights.pop(W.moe_s2)
+        self._s13 = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
+        self._s2 = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
+        if self._s13.dtype != torch.int32 or self._s2.dtype != torch.int32:
+            raise RuntimeError("SM120 decode requires packed DeepGEMM weight scales")
+        del s13_raw, s2_raw
+        torch.cuda.empty_cache()
+
+    def forward_contiguous(
+        self, x, weights, indices, input_scale: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        cfg = self.cfg
+        N, D = x.shape
+        E, inter = cfg.n_routed_experts, cfg.moe_inter_dim
+        device = x.device
+        routed_ids = torch.where(weights != 0, indices, torch.full_like(indices, -1))
+        if input_scale is not None:
+            # MXFP8 dispatch payload: dequantize block-32 to BF16 before the
+            # block-128 DeepGEMM requant.
+            s = (
+                input_scale.reshape(N, D // FP4_BLOCK)
+                .view(torch.float8_e8m0fnu)
+                .to(torch.bfloat16)
+            )
+            x = (
+                (
+                    x.to(torch.bfloat16).view(N, D // FP4_BLOCK, FP4_BLOCK)
+                    * s.unsqueeze(2)
+                )
+                .view(N, D)
+                .contiguous()
+            )
+        a_fp8, a_scale = sgl_per_token_group_quant_fp8(
+            x.contiguous(),
+            group_size=FP8_BLOCK,
+            eps=0.0001,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+            enable_v2=True,
+        )
+        adjusted_topk_ids, num_recv = recompute_topk_ids_sum_expert_count(
+            routed_ids, current_expert_start_id=0, num_local_experts=E
+        )
+        num_recv_cpu = num_recv.cpu().tolist()
+        aligned_counts_list = [align(c, _GROUPED_ALIGNMENT) for c in num_recv_cpu]
+        all_tokens = sum(aligned_counts_list)
+        if all_tokens == 0:
+            return torch.zeros((N, D), dtype=torch.float32, device=device)
+        aligned_counts = torch.tensor(
+            aligned_counts_list, dtype=torch.int32, pin_memory=True, device="cpu"
+        ).to(device, non_blocking=True)
+        scatter_out = torch.empty(
+            (all_tokens, D), dtype=torch.float8_e4m3fn, device=device
+        )
+        scatter_out_scale = torch.zeros(
+            [ceil_div(D // FP8_BLOCK, 4), all_tokens], device=device, dtype=torch.int
+        ).transpose(0, 1)
+        m_indices = torch.empty(all_tokens, dtype=torch.int32, device=device)
+        output_index = torch.empty_like(adjusted_topk_ids)
+        expert_start_loc = torch.empty_like(aligned_counts)
+        ep_scatter(
+            a_fp8,
+            a_scale,
+            adjusted_topk_ids,
+            aligned_counts,
+            expert_start_loc,
+            scatter_out,
+            scatter_out_scale,
+            m_indices,
+            output_index,
+            scale_ue8m0=True,
+        )
+        m_indices.clamp_(min=0, max=E - 1)
+        del a_fp8, a_scale
+        gate_up = torch.empty(
+            all_tokens, 2 * inter, device=device, dtype=torch.bfloat16
+        )
+        m_grouped_fp8_fp4_gemm_nt_contiguous(
+            (scatter_out, scatter_out_scale),
+            (self._w13, self._s13),
+            gate_up,
+            m_indices,
+            recipe_a=(1, FP8_BLOCK),
+            recipe_b=(1, FP4_BLOCK),
+            disable_ue8m0_cast=False,
+        )
+        del scatter_out, scatter_out_scale
+        h_fp8, h_scale = silu_mul_fp8_quant_packed(
+            gate_up, clamp_limit=cfg.swiglu_limit, group_size=FP8_BLOCK
+        )
+        del gate_up
+        down_out = torch.empty(all_tokens, D, device=device, dtype=torch.bfloat16)
+        m_grouped_fp8_fp4_gemm_nt_contiguous(
+            (h_fp8, h_scale),
+            (self._w2, self._s2),
+            down_out,
+            m_indices,
+            recipe_a=(1, FP8_BLOCK),
+            recipe_b=(1, FP4_BLOCK),
+            disable_ue8m0_cast=False,
+        )
+        del h_fp8, h_scale
+        gather_out = torch.empty((N, D), dtype=torch.float32, device=device)
+        ep_gather(down_out, adjusted_topk_ids, weights, output_index, gather_out)
+        return gather_out.float()
+
+    def forward(self, x, weights, indices, input_scale=None):
+        return self.forward_contiguous(x, weights, indices, input_scale)
+
+
+class Sm120DecodeExecutor(Fp8Fp4ExecutorBase):
+    """Explicit SM120 DP/EP decode transport over the WORLD EP group."""
+
+    preserve_output_dtype = True
+
+    # Every rank must enter the collectives, including ranks without tokens.
+    execute_empty_inputs = True
+    # One dispatch per layer on every rank: outer token chunking would let
+    # DP ranks with different token counts issue different collective counts.
+    # Oversized eager batches coordinate their rounds inside the executor.
+    single_round_dispatch = True
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config) -> None:
+        super().check_conditions(checker, config)
+        checker.check(config.ep_size > 1)
+        checker.check(config.world_size == config.ep_size)
+        checker.check(config.world_rank == config.ep_rank)
+        checker.check(not getattr(config, "moe_cp_enabled", False))
+        # Replicated attention-TP duplicates logical tokens on every rank;
+        # the DP=EP collective protocol requires disjoint rows.
+        checker.check(not _uses_replicated_tp_tokens(config, config.world_size))
+        # The packed SiLU+quant path packs 4 x FP8_BLOCK UE8M0 groups per
+        # int32 scale, so inter stays a multiple of 512.
+        checker.check(config.moe_inter_dim % 512 == 0)
+        checker.check(torch.cuda.is_available() and is_sm120())
+        checker.check(_has_sm120_grouped_fp8_fp4_kernel())
+
+    def setup_weights(self, layer_weights: Dict) -> None:
+        self._chunk_tokens = _DECODE_CHUNK_TOKENS
+        self._experts = Sm120DecodeExperts(local_expert_config(self.cfg), layer_weights)
+
+    def _validate_group(self):
+        dist = torch.distributed
+        if not dist.is_initialized():
+            raise RuntimeError("SM120 decode requires an initialized EP group")
+        validate_world_ep_topology(self.cfg, dist, dist.group.WORLD)
+
+    def forward(self, x, weights, indices):
+        self._validate_group()
+        if not is_sm120(x.device):
+            raise RuntimeError("SM120 decode requires an exact SM120 device")
+        dist = torch.distributed
+        if _uses_replicated_tp_tokens(self.cfg, dist.get_world_size()):
+            raise RuntimeError(
+                "sm120_a2a_decode requires eager execution: replicated attention-TP "
+                "tokens (attn_tp_size == ep_size == world) duplicate logical "
+                "rows on every rank and cannot enter the DP=EP collective "
+                "protocol; configure a non-replicated decode topology"
+            )
+        if (
+            _stream_is_capturing()
+            or cuda_graph_warmup_forward_enabled()
+            or isinstance(x.size(0), torch.SymInt)
+        ):
+            raise RuntimeError(
+                "sm120_a2a_decode requires eager execution: CUDA graph capture, "
+                "graph warmup, and symbolic row shapes are unsupported for the "
+                "SM120 DSv4 DECODE collective protocol; set "
+                "enable_cuda_graph=false"
+            )
+        if (
+            weights.dim() != 2
+            or indices.shape != weights.shape
+            or weights.size(0) != x.size(0)
+        ):
+            raise ValueError(
+                "sm120_a2a_decode requires 2-D routing weights and indices with "
+                f"one row per token; got x={tuple(x.shape)}, "
+                f"weights={tuple(weights.shape)}, indices={tuple(indices.shape)}"
+            )
+        try:
+            return self._forward_all_to_all(x, weights, indices)
+        except Exception:
+            _logger.exception("SM120 MoE all-to-all failed")
+            raise
+
+    def _forward_all_to_all(
+        self, x, weights, indices, recv_counts=None
+    ) -> torch.Tensor:
+        from flashinfer import mxfp8_quantize
+
+        dist = torch.distributed
+        group = dist.group.WORLD
+        world = dist.get_world_size(group)
+        cfg = self.cfg
+        experts_per_rank = cfg.n_routed_experts // world
+        send_counts = [int(x.size(0))] * world
+        if recv_counts is None:
+            local_count = torch.tensor(
+                [send_counts[0]], dtype=torch.int64, device=x.device
+            )
+            gathered = torch.empty(world, 1, dtype=torch.int64, device=x.device)
+            dist.all_gather_into_tensor(gathered, local_count, group=group)
+            recv_counts = [int(v) for v in gathered.view(-1).cpu().tolist()]
+        _validate_a2a_token_counts(
+            recv_counts,
+            world=world,
+            rank=dist.get_rank(group),
+            local_tokens=int(x.size(0)),
+            # Framework token counts are int32. max_tokens_per_rank can be the
+            # chunk size and is not a bound on single-round dispatch rows.
+            max_tokens=torch.iinfo(torch.int32).max,
+        )
+        if not any(recv_counts):
+            return torch.empty_like(x, dtype=torch.float32)
+        if _a2a_payload_bound_exceeded(recv_counts):
+            _warn_a2a_oversize(recv_counts)
+            if world > _A2A_PAYLOAD_TOKEN_BOUND:
+                raise RuntimeError("SM120 EP world size exceeds the dispatch capacity")
+            chunk_tokens = min(self._chunk_tokens, _A2A_PAYLOAD_TOKEN_BOUND // world)
+            output = torch.empty_like(x, dtype=torch.float32)
+            # Every rank derives the same rounds, including ranks with no rows.
+            for begin in range(0, max(recv_counts), chunk_tokens):
+                end = begin + chunk_tokens
+                chunk_counts = [
+                    max(0, min(count - begin, chunk_tokens)) for count in recv_counts
+                ]
+                output[begin:end] = self._forward_all_to_all(
+                    x[begin:end], weights[begin:end], indices[begin:end], chunk_counts
+                )
+            return output
+        scale_cols = int(x.size(1)) // 32
+        if x.size(0):
+            x_fp8, x_scale = mxfp8_quantize(x.contiguous(), is_sf_swizzled_layout=False)
+            if x_scale.dtype != torch.uint8:
+                x_scale = x_scale.view(torch.uint8)
+            x_scale = x_scale.reshape(x.size(0), scale_cols)
+        else:
+            # Empty ranks must still exchange and compute peer tokens, but a
+            # zero-row quantizer launch is invalid on the current provider.
+            x_fp8 = torch.empty_like(x, dtype=torch.float8_e4m3fn)
+            x_scale = torch.empty((0, scale_cols), dtype=torch.uint8, device=x.device)
+        topk = weights.size(1)
+        x_end = int(x.size(1))
+        scale_end = x_end + scale_cols
+        weight_end = scale_end + topk * 4
+        payload_cols = int(weight_end + topk * 4)
+        indices_i32 = indices.to(torch.int32)
+        destination = torch.div(
+            indices, experts_per_rank, rounding_mode="floor"
+        ).clamp_(0, world - 1)
+        recv_payload = torch.empty(
+            (sum(recv_counts), payload_cols), dtype=torch.uint8, device=x.device
+        )
+        send_payload_by_peer = torch.empty(
+            (world, int(x.size(0)), payload_cols), dtype=torch.uint8, device=x.device
+        )
+        send_payload_by_peer[:, :, :x_end].copy_(x_fp8.view(torch.uint8))
+        send_payload_by_peer[:, :, x_end:scale_end].copy_(x_scale)
+        del x_fp8, x_scale
+        send_weights = send_payload_by_peer[:, :, scale_end:weight_end].view(
+            torch.float32
+        )
+        send_indices = send_payload_by_peer[:, :, weight_end:].view(torch.int32)
+        for dst in range(world):
+            owned = (destination == dst) & (indices >= 0)
+            torch.where(
+                owned, weights, torch.zeros_like(weights), out=send_weights[dst]
+            )
+            torch.where(
+                owned,
+                indices_i32,
+                torch.full_like(indices_i32, -1),
+                out=send_indices[dst],
+            )
+        send_payload = send_payload_by_peer.view(-1, payload_cols)
+        dist.all_to_all_single(
+            recv_payload,
+            send_payload,
+            output_split_sizes=recv_counts,
+            input_split_sizes=send_counts,
+            group=group,
+        )
+        del send_payload, send_payload_by_peer
+        combine_payload = self._compute_received(
+            recv_payload, sum(recv_counts), x, x_end, scale_end, weight_end
+        )
+        del recv_payload
+        returned_payload = torch.empty(
+            (world * int(x.size(0)), int(combine_payload.size(1))),
+            dtype=combine_payload.dtype,
+            device=x.device,
+        )
+        dist.all_to_all_single(
+            returned_payload,
+            combine_payload,
+            output_split_sizes=send_counts,
+            input_split_sizes=recv_counts,
+            group=group,
+        )
+        del combine_payload
+        if not x.size(0):
+            return torch.empty_like(x, dtype=torch.float32)
+        output = torch.empty_like(x, dtype=torch.float32)
+        return fp32_peer_sum(returned_payload, world, output)
+
+    def _compute_received(self, recv_buf, n_rows, x, x_end, scale_end, weight_end):
+        cfg = self.cfg
+        recv_x = recv_buf[:, :x_end].contiguous().view(torch.float8_e4m3fn)
+        recv_scale = recv_buf[:, x_end:scale_end].contiguous()
+        recv_w = recv_buf[:, scale_end:weight_end].contiguous().view(torch.float32)
+        recv_i = recv_buf[:, weight_end:].contiguous().view(torch.int32).to(torch.int64)
+        local_i = recv_i - cfg.local_expert_start
+        valid = (local_i >= 0) & (local_i < cfg.n_local_experts)
+        local_w = recv_w * valid.to(recv_w.dtype)
+        local_i = torch.where(valid, local_i, 0)
+        chunk_tokens = self._chunk_tokens
+        out = torch.empty(
+            (n_rows, int(x.size(1))), dtype=torch.float32, device=x.device
+        )
+        for begin in range(0, n_rows, chunk_tokens):
+            end = min(begin + chunk_tokens, n_rows)
+            out[begin:end] = self._experts(
+                recv_x[begin:end],
+                local_w[begin:end],
+                local_i[begin:end],
+                input_scale=recv_scale[begin:end],
+            )
+        del recv_x, recv_scale, recv_w, recv_i, local_w, local_i, valid
+        return out.to(dtype=torch.float32).contiguous()

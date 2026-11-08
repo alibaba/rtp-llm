@@ -88,6 +88,7 @@ from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.utils.arch import is_sm120
 from rtp_llm.ops import SpeculativeType
 
 __all__ = [
@@ -287,6 +288,12 @@ class DeepEPWrapper:
         Returns:
             True if DeepEP is supported, False otherwise
         """
+        # The CUDA 13 DeepEP wheel has no SM120 device code: importing succeeds
+        # but buffer initialization fails later. SM120 uses its collective EP
+        # executors instead. Scope is exact SM120 only; other architectures keep
+        # the previous import-based availability check.
+        if is_sm120():
+            return False
         try:
             import deep_ep
 

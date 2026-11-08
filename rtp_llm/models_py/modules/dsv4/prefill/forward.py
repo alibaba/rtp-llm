@@ -382,19 +382,30 @@ def forward_layers(
         )
         ws = PrefillWorkspace(
             input_ids.device,
-            q_rows=v4._prefill_ws_q_rows,
+            q_rows=int(v4._prefill_ws_q_rows),
             q_dim=v4._prefill_ws_q_dim,
             reserve_cp=reserve_cp,
-            cp_rows=v4._prefill_ws_full_rows,
+            cp_rows=int(v4._prefill_ws_full_rows),
             main_w=v4._prefill_ws_main_w,
             idx_w=v4._prefill_ws_idx_w,
         )
-
     # Build + propagate CP context once per prefill step. Under CP the
     # caller hands us a per-rank chunk slice (T_local = chunk_length),
     # and each attn / compressor / indexer reads ``cp_ctx`` off the
     # module to compute its own per-token positions. Without CP we pass
     # None to clear any stale context from a prior forward (warmup).
+    if (
+        getattr(getattr(v4, "args", None), "moe_strategy", None) == "sm120_a2a_decode"
+        and int(input_ids.size(0)) > 8192
+        and not torch.cuda.is_current_stream_capturing()
+    ):
+        # Big prefills start from a clean arena: the previous request's freed
+        # transients sit in the allocator cache as fragmented blocks and made
+        # even 128 MiB contiguous allocations fail at layer-0 attention while
+        # 600+ MiB sat reserved-but-unallocated. One unmap pass, ~ms cost.
+        # Kept to the sm120_a2a_decode profile it was introduced for, and
+        # skipped under CUDA graph capture where empty_cache is illegal.
+        torch.cuda.empty_cache()
     cp_info = getattr(v4, "_cp_info", None)
     cp_size = getattr(v4, "_cp_size", 1)
     cp_rank = getattr(v4, "_cp_rank", 0)
@@ -454,7 +465,9 @@ def forward_layers(
             )
 
     if prepare_hidden_fn is None:
-        h = v4.embed(input_ids)  # [T_total, dim]
+        # ``_embed_target`` gathers TP-sharded embeddings on SM120 and is a
+        # plain ``embed`` elsewhere.
+        h = v4._embed_target(input_ids)  # [T_total, dim]
         if _rt_on:
             _rt.record("prefill_embed_out", h)
         h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]

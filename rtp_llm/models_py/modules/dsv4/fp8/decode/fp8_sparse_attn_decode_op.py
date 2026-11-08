@@ -13,9 +13,9 @@ softmax merging across both pools (mirrors vLLM
 pools -> BF16 cat -> TileLang sparse_attn" path which was
 bandwidth-bound on the dequant kernels.
 
-FlashMLA wheel is required (CUDA >= 12.9). Provider loading is deferred
-until the execution device is bound; importing the model does not load
-optional CUDA wheels.
+FlashMLA is used for non-SM120 devices; SM120 uses the FlashInfer adapter.
+Provider loading is deferred until the execution device is bound; importing
+the model does not load optional CUDA wheels.
 """
 
 from __future__ import annotations
@@ -25,6 +25,10 @@ import logging
 from typing import Any, Callable, Optional
 
 import torch
+
+from rtp_llm.models_py.modules.dsv4.fp8.attention_backend import (
+    get_sparse_attention_backend,
+)
 
 _FLASH_MLA_AVAILABLE = False
 _flash_mla_load_attempted = False
@@ -119,9 +123,13 @@ class SparseAttnV4DecodeFp8Op:
     def _prepare_backend(
         self, device: torch.device
     ) -> tuple[Callable[..., torch.Tensor], bool]:
+        backend = get_sparse_attention_backend(device)
+        forward = backend.prepare_decode(device, self.n_heads, self.softmax_scale)
+        if forward is not None:
+            return forward, False
         if not _load_flash_mla():
             raise RuntimeError(
-                "FlashMLA is required for FP8 sparse decode; "
+                "FlashMLA is required for non-SM120 FP8 sparse decode; "
                 "install the cuda12_9/cuda13 RTP-LLM dependency set"
             )
         return self._forward_flash_mla, True
