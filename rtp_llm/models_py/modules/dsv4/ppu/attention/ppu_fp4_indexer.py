@@ -3,7 +3,6 @@
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import CompressorFP8, _linear_bf16_bf16_fp32
 from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.indexer import IndexerFP8
@@ -242,28 +241,6 @@ class PpuFP4Indexer(IndexerFP8):
                             clean_logits=False,
                             logits_dtype=torch.bfloat16,
                         )
-                    label = getattr(self.compressor, "_profile_label", "")
-                    if (
-                        _rt.LEVEL >= 2
-                        and label.startswith("L")
-                        and label[1:3].isdigit()
-                        and _rt.should_record_layer(int(label[1:3]))
-                    ):
-                        for suffix, tensor in (
-                            ("q", q[start:end]),
-                            ("q_scale", qs[start:end]),
-                            ("w", weights[start:end]),
-                            ("k", request_k),
-                            ("k_scale", request_k_scale),
-                            ("ks", local_ks),
-                            ("ke", local_ke),
-                            ("logits", logits),
-                        ):
-                            _rt.record_if_level(
-                                2,
-                                f"{label.replace('.', '_')}_score_{start}_{suffix}",
-                                tensor,
-                            )
                     with record_function_range("dsv4.ppu.fp4.indexer.topk"):
                         topk_bf16(logits, local_ks, local_ke, out[start:end])
                     del logits

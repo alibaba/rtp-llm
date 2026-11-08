@@ -164,10 +164,7 @@ class HCNormGraphTest(unittest.TestCase):
 
         # Calling the old separate norm means the actual Decode entry point
         # bypassed the platform's fused boundary.
-        with patch(
-            "rtp_llm.models_py.modules.dsv4._record_tensor.should_record_layer",
-            return_value=False,
-        ), patch.object(
+        with patch.object(
             block.attn_norm, "forward", side_effect=AssertionError("separate norm")
         ), patch.object(
             block.ffn_norm, "forward", side_effect=AssertionError("separate norm")

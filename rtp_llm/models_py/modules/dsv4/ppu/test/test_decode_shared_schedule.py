@@ -65,9 +65,6 @@ class SharedScheduleTest(unittest.TestCase):
 
     def test_full_forward_and_chunk_use_selected_order(self):
         with patch(
-            "rtp_llm.models_py.modules.dsv4._record_tensor.should_record_layer",
-            return_value=False,
-        ), patch(
             "rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_ep_moe.combine_routed_and_shared",
             side_effect=_combine,
         ):

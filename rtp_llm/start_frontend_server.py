@@ -22,12 +22,21 @@ from rtp_llm.utils.concurrency_controller import (
 setup_logging()
 
 
-def _install_hot_hook_runtime(role: str) -> None:
-    try:
-        from rtp_llm.utils.hot_hook_runtime import install_if_enabled
+def _install_hot_hook_runtime(role: str, py_env_configs) -> None:
+    """Install the hot hook runtime from the parsed config.
 
-        if install_if_enabled():
-            logging.info("RTP hot hook runtime installed for %s", role)
+    The single switch is the hot-hook config path (--hot_hook_config /
+    RTP_HOT_HOOK_CONFIG): a non-empty path pointing at a loadable JSON enables
+    the runtime; no path means no install.
+    """
+    try:
+        from rtp_llm.utils.hot_hook_runtime import install_from_config
+
+        config_path = py_env_configs.hot_hook_config.config_path
+        if config_path and install_from_config(config_path):
+            logging.info(
+                "RTP hot hook runtime installed for %s (config=%s)", role, config_path
+            )
     except Exception as e:
         logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
 
@@ -46,7 +55,9 @@ def start_frontend_server(
         py_prefill_cp_config=py_env_configs.prefill_cp_config,
     )
     local_rank = pc.local_rank
-    _install_hot_hook_runtime(f"frontend_rank_{local_rank}_server_{server_id}")
+    _install_hot_hook_runtime(
+        f"frontend_rank_{local_rank}_server_{server_id}", py_env_configs
+    )
     logging.info(
         f"[PROCESS_START]Start frontend server process rank_{local_rank}_server_{server_id}"
     )

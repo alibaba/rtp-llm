@@ -144,17 +144,8 @@ class PpuTPMoE(nn.Module):
         )
 
     def _forward_local_chunk(self, x, input_ids):
-        from rtp_llm.models_py.modules.dsv4 import _record_tensor as recorder
-
-        debug = recorder.should_record_layer(self.layer_id)
-        prefix = f"L{self.layer_id:02d}_moe"
-        if debug:
-            recorder.record_if_level(2, prefix + "_x_in", x)
         with record_function_range("dsv4.moe.gate"):
             weights, indices = self.gate(x, input_ids, include_route_scale=False)
-        if debug:
-            recorder.record_if_level(2, prefix + "_topk_weights", weights)
-            recorder.record_if_level(2, prefix + "_topk_indices", indices)
         if (
             self._shared_phases
             and x.is_cuda
@@ -164,12 +155,8 @@ class PpuTPMoE(nn.Module):
             local = self._forward_phased(x, weights, indices)
         else:
             local = self._forward_serial(x, weights, indices)
-        if debug:
-            recorder.record_if_level(2, prefix + "_tp_local_bf16", local)
         with record_function_range("dsv4.moe.tp_all_reduce_bf16"):
             result = self._reduce(local) if self._reduce is not None else local
-        if debug:
-            recorder.record_if_level(2, prefix + "_tp_reduced_bf16", result)
         return result
 
     def _forward_serial(self, x, weights, indices):

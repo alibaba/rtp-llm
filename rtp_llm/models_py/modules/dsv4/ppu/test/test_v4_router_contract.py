@@ -87,7 +87,6 @@ def _gate_from_logits(
     gate.fuse_hash_gate = False
     gate.bias = bias.to(device=device, dtype=torch.float32).contiguous()
     gate.weight = torch.eye(n_experts, device=device, dtype=torch.float32)
-    gate._dbg_prefix = None
     return gate
 
 

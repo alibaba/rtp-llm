@@ -23,7 +23,6 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv41 import _profiler
 from rtp_llm.models_py.modules.dsv41.attn_type import (
     CSA_KV,
@@ -298,21 +297,11 @@ def forward_layers(
     q_len = attn_metadata.q_len_per_req
     input_ids = input_ids.reshape(-1)
 
-    _rt_on = _rt.ENABLED
-    if _rt_on:
-        _rt.begin(seqlen=int(input_ids.numel()))
-        if _rt._get_buf() is None:
-            _rt_on = False
-
     if prepare_hidden_fn is None:
         h = v4.embed(input_ids).view(B, q_len, -1)  # [B, q_len, dim]
-        if _rt_on:
-            _rt.record("decode_embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, v4.hc_mult, 1)  # [B, q_len, hc, dim]
     else:
         h = prepare_hidden_fn(input_ids=input_ids, meta=attn_metadata)
-    if _rt_on:
-        _rt.record("decode_embed_hc_expanded", h)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     layer_forward_range = _profiler.make_layer_forward_range()
     for layer_idx, layer in enumerate(v4.layers):
@@ -325,13 +314,11 @@ def forward_layers(
                 next_layer=(
                     v4.layers[layer_idx + 1] if layer_idx + 1 < len(v4.layers) else None
                 ),
-                preserve_output=layer_idx in capture_ids or _rt_on,
+                preserve_output=layer_idx in capture_ids,
                 kv_cache=kv_cache,
             )
             if layer_idx in capture_ids:
                 v4.capture_aux_hidden(layer_idx, h)
-            if _rt_on:
-                _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
     if v4._mtp_hidden_buffer is not None:
         if capture_ids:
             # DSpARK mode: the buffer already holds this forward's aux rows
@@ -345,28 +332,9 @@ def forward_layers(
                 _pre_hc_flat, is_cuda_graph=attn_metadata.is_cuda_graph
             )
     h = v4._hc_head_reduce(h)
-    if _rt_on:
-        _rt.record("decode_hc_reduced", h)
     # Framework RMSNorm wants 2D — collapse [B, q_len, dim] then view back.
     bsz, q_len, dim_ = h.shape
     h = v4.norm(h.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
-    if _rt_on:
-        _rt.record("decode_final_norm", h)
-        step = getattr(v4, "_dbg_step", 0)
-        _rt.dump(
-            step=step,
-            extra={
-                "path": "decode",
-                "input_ids_shape": tuple(input_ids.shape),
-                "input_ids": input_ids.detach().cpu(),
-                "start_pos": attn_metadata.start_pos[: attn_metadata.batch_size]
-                .detach()
-                .cpu(),
-                "batch_size": int(attn_metadata.batch_size),
-                "q_len": int(attn_metadata.q_len_per_req),
-            },
-        )
-        v4._dbg_step = step + 1
     return h
 
 
@@ -450,13 +418,6 @@ def forward_decode(
 
     B = meta.batch_size
     q_len = meta.q_len_per_req
-    _rt_on = _rt.ENABLED
-    if _rt_on:
-        _rt.begin(seqlen=int(input_ids.numel()))
-        if _rt._get_buf() is None:
-            _rt_on = False
-        else:
-            _rt.record("decode_input_ids", input_ids)
 
     h = forward_layers(
         v4,
@@ -466,29 +427,4 @@ def forward_decode(
         prepare_hidden_fn=prepare_hidden_fn,
     )  # [B, q_len, dim]
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
-    if _rt_on:
-        _rt.record("decode_hidden", hidden)
-        lm_logits = torch.mm(
-            hidden.to(v4.head_weight.dtype), v4.head_weight.t()
-        ).float()
-        _rt.record("decode_lm_logits", lm_logits)
-        top_k = min(16, lm_logits.size(-1))
-        lm_top_values, lm_top_indices = torch.topk(lm_logits, k=top_k, dim=-1)
-        _rt.record("decode_lm_top_values", lm_top_values)
-        _rt.record("decode_lm_top_indices", lm_top_indices)
-        extra = {
-            "is_decode": True,
-            "input_ids_shape": tuple(input_ids.shape),
-            "input_ids": input_ids.detach().cpu(),
-            "batch_size": int(B),
-            "q_len": int(q_len),
-        }
-        seq_lens = getattr(attn, "sequence_lengths", None)
-        if seq_lens is not None:
-            extra["sequence_lengths"] = seq_lens.detach().cpu()
-        start_pos = getattr(meta, "start_pos", None)
-        if start_pos is not None:
-            extra["start_pos"] = start_pos.detach().cpu()
-        _rt.dump(step=v4._dbg_step, extra=extra)
-        v4._dbg_step += 1
     return PyModelOutputs(hidden)

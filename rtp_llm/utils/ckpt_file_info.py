@@ -21,16 +21,42 @@ ROCM_COPY_OUT = torch.version.hip is not None
 # case, ~865GB checkpoint, 2026-10). Shed clean file pages once a shard has
 # supplied this many bytes of reads. POSIX_FADV_DONTNEED is advisory and only
 # evicts clean pages, so a co-located rank that still needs a page simply
-# re-faults it from backing store; correctness is unaffected. The env vars
-# are an emergency killswitch / tuning knob, not required configuration.
-_DROP_PAGE_CACHE_THRESHOLD = (
-    int(os.environ.get("LOADER_DROP_PAGE_CACHE_THRESHOLD_MB", "2048")) * 1024 * 1024
-)
-_DROP_PAGE_CACHE = (
-    os.environ.get("LOADER_DROP_PAGE_CACHE", "1") == "1"
-    and getattr(os, "posix_fadvise", None) is not None
+# re-faults it from backing store; correctness is unaffected. The switches
+# are configured through LoadConfig (--loader_drop_page_cache /
+# --loader_drop_page_cache_threshold_mb, env_name wire: LOADER_DROP_PAGE_CACHE*)
+# and published here by configure_loader_page_cache() at setup_args time;
+# the env read below is the direct-import fallback for paths that never parse
+# server args.
+_FADVISE_AVAILABLE = (
+    getattr(os, "posix_fadvise", None) is not None
     and getattr(os, "POSIX_FADV_DONTNEED", None) is not None
 )
+
+
+def _default_drop_page_cache() -> bool:
+    return os.environ.get("LOADER_DROP_PAGE_CACHE", "1") == "1" and _FADVISE_AVAILABLE
+
+
+def _default_drop_page_cache_threshold() -> int:
+    try:
+        value = int(os.environ.get("LOADER_DROP_PAGE_CACHE_THRESHOLD_MB", "2048"))
+        return max(0, value) * 1024 * 1024
+    except ValueError:
+        return 2048 * 1024 * 1024
+
+
+_DROP_PAGE_CACHE: bool = _default_drop_page_cache()
+_DROP_PAGE_CACHE_THRESHOLD: int = _default_drop_page_cache_threshold()
+
+
+def configure_loader_page_cache(enabled: bool, threshold_mb: int) -> None:
+    """Publish parsed loader switches (setup_args-time; env write-back keeps
+    child processes consistent, mirroring rtp_llm.utils.warmup.configure_warmup)."""
+    global _DROP_PAGE_CACHE, _DROP_PAGE_CACHE_THRESHOLD
+    _DROP_PAGE_CACHE = bool(enabled) and _FADVISE_AVAILABLE
+    _DROP_PAGE_CACHE_THRESHOLD = max(0, int(threshold_mb)) * 1024 * 1024
+    os.environ["LOADER_DROP_PAGE_CACHE"] = "1" if bool(enabled) else "0"
+    os.environ["LOADER_DROP_PAGE_CACHE_THRESHOLD_MB"] = str(max(0, int(threshold_mb)))
 
 
 class CkptType(enum.Enum):

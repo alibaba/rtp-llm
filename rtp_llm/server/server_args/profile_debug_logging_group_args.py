@@ -1,12 +1,23 @@
 from rtp_llm.server.server_args.util import str2bool, str2ratio
 
 
-def init_profile_debug_logging_group_args(parser, profiling_debug_config):
+def init_profile_debug_logging_group_args(
+    parser, profiling_debug_config, hot_hook_config
+):
     ##############################################################################################################
     # Profiling、Debugging、Logging
     ##############################################################################################################
     profile_debug_logging_group = parser.add_argument_group(
         "Profiling、Debugging、Logging"
+    )
+    profile_debug_logging_group.add_argument(
+        "--hot_hook_config",
+        env_name="RTP_HOT_HOOK_CONFIG",
+        bind_to=(hot_hook_config, "config_path"),
+        type=str,
+        default=None,
+        help="RTP hot hook（调试注入运行时）的唯一开关：配置 JSON 路径非空即启用。"
+        "JSON 同时承载 hook 定义与装载子参数（hook_file/dump_dir/allow_local_mutation）",
     )
     profile_debug_logging_group.add_argument(
         "--ft_alog_conf_path",

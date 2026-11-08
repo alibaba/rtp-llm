@@ -404,15 +404,6 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
         if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
             self.skipTest("SM100 CUDA required")
         torch.manual_seed(41041)
-        environment = patch.dict(
-            os.environ,
-            {
-                "DSV4_TRAP_INVALID_KV_ACCESS": "1",
-                "DSV4_VALIDATE_INVALID_KV_ACCESS": "0",
-            },
-        )
-        environment.start()
-        self.addCleanup(environment.stop)
 
     @torch.inference_mode()
     def test_ratio_batch_span_matrix_all_cache_bytes(self):
@@ -432,45 +423,43 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                         _assert_result(self, old, new, initial)
 
     @torch.inference_mode()
-    def test_padded_main_and_table_row_strides_both_trap_modes(self):
+    def test_padded_main_and_table_row_strides_with_trap(self):
         for ratio in (1, 2):
-            for trap in ("0", "1"):
-                with self.subTest(ratio=ratio, trap=trap):
-                    old = _case("cuda", ratio, 2, 6)
-                    new = _clone_case(old)
-                    backings = []
-                    for case in (old, new):
-                        region = case.owner._global_region()
-                        pool = case.owner._test_pools[region]
-                        width = pool.shape[1] * 288
+            with self.subTest(ratio=ratio):
+                old = _case("cuda", ratio, 2, 6)
+                new = _clone_case(old)
+                backings = []
+                for case in (old, new):
+                    region = case.owner._global_region()
+                    pool = case.owner._test_pools[region]
+                    width = pool.shape[1] * 288
+                    backing = torch.full(
+                        (pool.shape[0], width + 256),
+                        0xA5,
+                        dtype=torch.uint8,
+                        device="cuda",
+                    )
+                    padded = backing.as_strided(pool.shape, (width + 256, 288, 1))
+                    padded.copy_(pool)
+                    case.owner._test_pools[region] = padded
+                    backings.append((backing[:, width:], 0xA5))
+                    for region, table in case.owner._block_tables_by_type.items():
                         backing = torch.full(
-                            (pool.shape[0], width + 256),
-                            0xA5,
-                            dtype=torch.uint8,
+                            (table.shape[0], table.shape[1] + 3),
+                            -999,
+                            dtype=table.dtype,
                             device="cuda",
                         )
-                        padded = backing.as_strided(pool.shape, (width + 256, 288, 1))
-                        padded.copy_(pool)
-                        case.owner._test_pools[region] = padded
-                        backings.append((backing[:, width:], 0xA5))
-                        for region, table in case.owner._block_tables_by_type.items():
-                            backing = torch.full(
-                                (table.shape[0], table.shape[1] + 3),
-                                -999,
-                                dtype=table.dtype,
-                                device="cuda",
-                            )
-                            padded = backing[:, : table.shape[1]]
-                            padded.copy_(table)
-                            case.owner._block_tables_by_type[region] = padded
-                            backings.append((backing[:, table.shape[1] :], -999))
-                    initial = _snapshot(old)
-                    with patch.dict(os.environ, {"DSV4_TRAP_INVALID_KV_ACCESS": trap}):
-                        _reference(old)
-                        _candidate(new)
-                    _assert_result(self, old, new, initial)
-                    for padding, sentinel in backings:
-                        self.assertTrue(bool((padding == sentinel).all()))
+                        padded = backing[:, : table.shape[1]]
+                        padded.copy_(table)
+                        case.owner._block_tables_by_type[region] = padded
+                        backings.append((backing[:, table.shape[1] :], -999))
+                initial = _snapshot(old)
+                _reference(old)
+                _candidate(new)
+                _assert_result(self, old, new, initial)
+                for padding, sentinel in backings:
+                    self.assertTrue(bool((padding == sentinel).all()))
 
     @torch.inference_mode()
     def test_unallocated_pages_out_of_table_and_norm_dtype(self):
@@ -598,7 +587,6 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
         base = _case("cuda", 2, 1, 6)
         for label in (
             "missing_cache",
-            "validation_debug",
             "long_span",
             "sharded",
             "wrong_dtype",
@@ -625,17 +613,7 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                     case.x = case.x[:, :1].expand(65, 1, 5120).contiguous()
                 before = _snapshot(case)
                 helper = _fused()
-                with patch.dict(
-                    os.environ,
-                    {
-                        "DSV4_TRAP_INVALID_KV_ACCESS": (
-                            "0" if label == "validation_debug" else "1"
-                        ),
-                        "DSV4_VALIDATE_INVALID_KV_ACCESS": (
-                            "1" if label == "validation_debug" else "0"
-                        ),
-                    },
-                ), patch.object(
+                with patch.object(
                     helper, "_compress_norm_main_store_kernel"
                 ) as stage_a, patch.object(
                     helper, "_index_norm_store_state_kernel"
