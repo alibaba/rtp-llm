@@ -76,6 +76,15 @@ py_test(
     tags = ["L20_CU13"],
 )
 
+# SM120 per-block FP8 scale/layout coverage; sibling of
+# test_inline_fp8_quant. CPU-only: mocks the device/scale-policy paths.
+py_test(
+    name = "test_inline_fp8_quant_sm120",
+    srcs = ["test_inline_fp8_quant_sm120.py"],
+    deps = py_test_deps + ["//rtp_llm/models_py/standalone:auto_model"],
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)
+
 py_test(
     name = "test_inline_fp8_quant",
     srcs = ["test_inline_fp8_quant.py"],
