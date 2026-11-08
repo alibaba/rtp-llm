@@ -18,15 +18,27 @@ export Q38_HF_RTP_REPORT_ONLY=1
 export Q38_LOGPROB_REPORT_ONLY=1
 export Q38_RUN_ID="${Q38_RUN_ID:?Supply the unique run identifier}"
 export Q38_CPU_FIRST_ADAM_ADMISSION_REQUIRED=1 Q38_CPU_CACHE_RECLAIM_ENABLED=1
+# Preserve BF16 Adam state through the verified first-step reuse path and
+# require the world-synchronized CPU admission before later training batches.
+export Q38_FIRST_ADAM_REUSE_CPU_SPILL=1 Q38_NEXT_BATCH_CPU_ADMISSION_REQUIRED=1
+export Q38_VERL_TRAIN_BATCH_SOURCE_SHA256=dd5e7dba6b8f69b5955685c20823674199e24ba8395f9309f770f575c8bf2d66
 # Drain completed CUDA streams and release unused allocator segments between real training micros.
 export Q38_MICRO_BOUNDARY_RELEASE_CACHE=1
 # On a genuine CUDA OOM only, preserve allocator block-state statistics before unwinding.
 export Q38_OOM_ALLOCATOR_AUDIT=1
 # Training master shards start expandable; native IPC keeps its original False transaction boundary.
 export Q38_INITIAL_MASTER_EXPANDABLE_SEGMENTS=1
+# This short-sequence candidate requires new rollout data; forbid historical policy0 replay.
+if [[ "${Q38_INITIAL_POLICY_REPLAY:-0}" != 0 ]]; then
+  echo 'Short-sequence candidate requires fresh rollout; replay is forbidden' >&2
+  exit 2
+fi
+unset Q38_INITIAL_POLICY_REPLAY_MANIFEST Q38_INITIAL_POLICY_REPLAY_MANIFEST_SHA256
+# Reclaim's current-run source whitelist requires full byte verification independently of episode replay.
+export Q38_REPLAY_VERIFY_FULL_SHARD_BYTES=1
 export Q38_VERIFIED_CPU_LIMIT_BYTES_PER_NODE=858993459200
 export Q38_CPU_MOMENT_BYTES_PER_NODE=549755813888 Q38_CPU_RESERVE_BYTES_PER_NODE=64424509440
-export Q38_GPU_GRADIENT_CACHE_BYTES=73014444032 Q38_GPU_REFIT_MASTER_CACHE_BYTES=25769803776
+export Q38_GPU_GRADIENT_CACHE_BYTES=77309411328 Q38_GPU_REFIT_MASTER_CACHE_BYTES=25769803776
 export Q38_TRAINING_AUDIT_DIR="$RUN/training" Q38_POLICY_AUDIT_DIR="$RUN/policy-loss"
 export RTP_PROJECT_ROOT="$PROJECT" QWEN36_RL_ROOT="$PROJECT"
 export RTP_SOURCE="${RTP_SOURCE:-$DEPLOY/rtp-runtime}"
@@ -36,7 +48,7 @@ export PTUNING_PATH= EXTRA_DATA_PATH= LOCAL_EXTRA_DATA_PATH= SP_CHECKPOINT_PATH=
 export LORA_INFO='{}' JSON_MODEL_OVERRIDE_ARGS='{}'
 unset QUANTIZATION SP_QUANTIZATION SP_ACT_TYPE TREE_DECODE_CONFIG
 export RTP_ARM_BF16_ROPE_BACKEND=torch_bf16_v1
-export Q38_TRAIN_MAX_PROMPT_TOKENS=2048 Q38_TRAIN_MAX_TOTAL_TOKENS=4096
+export Q38_TRAIN_MAX_PROMPT_TOKENS=1536 Q38_TRAIN_MAX_TOTAL_TOKENS=2048
 export RTP_SERVER_LAUNCHER="$PROJECT/adapter/serve_rtp_world72.sh"
 export RTP_RL_BOOTSTRAP_POLICY_MANIFEST="$PROJECT/training/expected-canonical-policy-manifest.json"
 export RTP_RL_NATIVE_LIBRARY_SHA256="${RTP_RL_NATIVE_LIBRARY_SHA256:?Pin the accepted freshly built native artifact}"
@@ -55,7 +67,7 @@ export RLLM_RTP_KEEP_KV_CACHE=1 RLLM_RTP_STARTUP_TIMEOUT=5400 RLLM_RTP_CONTROL_T
 export RLLM_RTP_TOKEN_TIMEOUT=1800 RLLM_RTP_MAX_ACTIVE_REQUESTS=8
 export RLLM_PYTHON_TOOL_TRAIN_JSONL="$PROJECT/data/deepscaler-world72-18.jsonl"
 export RLLM_PYTHON_TOOL_ENABLE_THINKING=1 RLLM_PYTHON_TOOL_REASONING_EFFORT=low
-export RLLM_PYTHON_TOOL_MAX_TURNS=2 RLLM_PYTHON_TOOL_CALL_TOKENS=1024 RLLM_PYTHON_TOOL_TOTAL_TOKENS=2048
+export RLLM_PYTHON_TOOL_MAX_TURNS=2 RLLM_PYTHON_TOOL_CALL_TOKENS=512 RLLM_PYTHON_TOOL_TOTAL_TOKENS=1024
 export RLLM_PYTHON_TOOL_HTTP_TIMEOUT=2100 RLLM_PYTHON_TOOL_HTTP_MAX_RETRIES=0
 export RLLM_PYTHON_TOOL_TRACE_DIR="$RUN/tool-episodes" RLLM_EPISODE_LOG_DIR="$RUN/episodes"
 export RLLM_QWEN36_TRACE_AUDIT_DIR="$RUN/trace-linkage" RLLM_REQUIRE_REAL_UPDATE=1
@@ -78,7 +90,7 @@ args=("$PYTHON" -m run_qwen38_bf16_state_rtp_training
   rllm/backend=verl rllm.algorithm.adv_estimator=grpo ++rllm.disable_thinking=false
   rllm.algorithm.norm_adv_by_std_in_grpo=true rllm.algorithm.kl_beta=0.0
   rllm.algorithm.lr_schedule=constant rllm.algorithm.warmup_steps_ratio=0.0 rllm.algorithm.router_replay=disabled
-  rllm.data.train_batch_size=18 rllm.data.max_prompt_length=2048 rllm.data.max_response_length=2048
+  rllm.data.train_batch_size=18 rllm.data.max_prompt_length=1536 rllm.data.max_response_length=512
   rllm.rollout.n=4 rllm.rollout.train.temperature=1.0 rllm.rollout.train.top_p=1.0
   +rllm.rollout.train.top_k=0 +rllm.rollout.val.top_k=0 '~rllm.rollout.train.max_tokens'
   rllm.workflow.n_parallel_tasks=18 rllm.workflow.retry_limit=1 rllm.workflow.raise_on_error=true
