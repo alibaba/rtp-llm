@@ -94,6 +94,31 @@ TEST(FIFOSchedulerCoalesceTest, HoldsSoloRoundForConcurrentArrival) {
     EXPECT_LT(hold_ms, 1000);
 }
 
+TEST(FIFOSchedulerCoalesceTest, HoldsUntilThirdStreamAtTarget3) {
+    // Experiment 00016 default (window 300ms, target 3): a solo round keeps
+    // waiting past the second arrival until the target is reached, then
+    // dispatches immediately instead of burning the rest of the window.
+    CoalesceFixture fixture(/*window_ms=*/1000, /*target_streams=*/3);
+    auto            stream1 = fixture.makeStream({1, 2});
+    fixture.scheduler->new_streams_.push_back(stream1);
+
+    auto        stream2 = fixture.makeStream({3, 4});
+    auto        stream3 = fixture.makeStream({5, 6});
+    std::thread late_arrival_2(
+        [&fixture, stream2]() { fixture.lateArrivalJoinsRound(stream2, /*delay_ms=*/60); });
+    std::thread late_arrival_3(
+        [&fixture, stream3]() { fixture.lateArrivalJoinsRound(stream3, /*delay_ms=*/150); });
+
+    const long hold_ms = fixture.holdMs();
+    late_arrival_2.join();
+    late_arrival_3.join();
+
+    EXPECT_EQ(fixture.scheduler->new_streams_.size(), 3u)
+        << "the held round must keep waiting for the third stream below target";
+    EXPECT_GE(hold_ms, 140) << "the round must have been held until the third arrival";
+    EXPECT_LT(hold_ms, 400) << "the round dispatches right at the target, not the window";
+}
+
 TEST(FIFOSchedulerCoalesceTest, WindowExpiresSoloRound) {
     CoalesceFixture fixture(/*window_ms=*/200, /*target_streams=*/2);
     auto            stream1 = fixture.makeStream({1, 2});

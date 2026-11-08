@@ -515,8 +515,13 @@ struct FIFOSchedulerConfig {
     // per-round fixed cost (3-stream rounds cost about the same as 1-stream
     // rounds), so packing one extra stream nearly doubles the serialized service
     // rate. 0 disables the hold.
-    int64_t context_coalesce_window_ms       = 200;
-    int64_t context_coalesce_target_streams = 2;
+    // Experiment 00016: target raised 2 -> 3 and window 200 -> 300 after the
+    // batch-2 ceiling measurement (loaded prefill saturated at ~5.1 req/s =
+    // round rate ~2.8/s x batch ~1.83; try-0015/try-0016 evidence) - with ~5
+    // arrivals/s a 300ms window collects a third stream often enough to lift
+    // the serialized service rate toward ~2.8 x ~2.5 streams.
+    int64_t context_coalesce_window_ms       = 300;
+    int64_t context_coalesce_target_streams = 3;
     std::string to_string() const;
 };
 

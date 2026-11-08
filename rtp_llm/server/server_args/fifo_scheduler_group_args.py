@@ -76,7 +76,7 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         env_name="CONTEXT_COALESCE_WINDOW_MS",
         bind_to=[(fifo_scheduler_config, "context_coalesce_window_ms")],
         type=int,
-        default=200,
+        default=300,
         help=(
             "引擎空闲且本轮仅凑到不足 context_coalesce_target_streams 个 context stream 时，"
             "最多等待该毫秒数以便并发到达的请求共享同一个 forward 轮（多流轮与单流轮的墙钟基本相同）。"
@@ -88,6 +88,6 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         env_name="CONTEXT_COALESCE_TARGET_STREAMS",
         bind_to=[(fifo_scheduler_config, "context_coalesce_target_streams")],
         type=int,
-        default=2,
+        default=3,
         help="凑批目标：一轮 context forward 期望携带的 stream 数；配合 context_coalesce_window_ms 使用。",
     )
