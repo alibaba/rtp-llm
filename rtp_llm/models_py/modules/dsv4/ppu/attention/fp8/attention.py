@@ -1776,6 +1776,11 @@ class AttentionFP8(_BaseAttentionFP8):
         prefill_workspace: Optional[PrefillWorkspace],
         profile_name: str,
         out: Optional[torch.Tensor] = None,
+        # ``_attn_fp8_swa_via_concat`` (inherited) always passes these; its
+        # packed-prefix path is SM120-only, so they are None here and ignored.
+        sm120_prefix_cache=None,
+        sm120_prefix_slots=None,
+        sm120_prefix_lens=None,
     ) -> torch.Tensor:
         """Run sparse prefill attention in Q chunks and project immediately.
 

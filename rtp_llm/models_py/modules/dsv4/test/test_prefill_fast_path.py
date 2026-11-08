@@ -136,6 +136,9 @@ class _FakeV4:
     def embed(self, input_ids):
         return torch.stack((input_ids.float(), input_ids.float() + 0.5), dim=-1)
 
+    def _embed_target(self, input_ids):
+        return self.embed(input_ids)
+
     def _hc_head_reduce(self, h):
         self.calls.append(("head_reduce", h.clone()))
         return h.squeeze(-2)
@@ -907,9 +910,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             v4.layers = [_FakeLayer(0, v4.calls)]
             with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
                 prefill_forward._rt, "ENABLED", False
-            ), patch.object(
-                v4, "norm", wraps=v4.norm
-            ) as norm:
+            ), patch.object(v4, "norm", wraps=v4.norm) as norm:
                 out = prefill_forward.forward_layers(
                     v4,
                     kv_cache=None,

@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
+#include "rtp_llm/cpp/normal_engine/Dsv4DpPrefillPolicy.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
@@ -201,6 +202,36 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
             "remove the generation-prefill configuration when using speculative execution on PDFUSION (type=%s)",
             SpeculativeExecutionConfig::to_string(sp_config.type).c_str());
     }
+    const auto resolved_moe_strategy =
+        resolveModelMoeStrategy(model_config_.model_type, params.moe_config.moe_strategy, nullptr);
+    // Keep the graph-independent profile rejection before the eager check so
+    // non-speculative PDFUSION retains its actionable phase-policy error.
+    RTP_LLM_CHECK_WITH_INFO(
+        !sm120DecodeNonMtpFusedProfileUnsupported(model_config_.model_type,
+                                                  resolved_moe_strategy.c_str(),
+                                                  pd_sep_config.role_type,
+                                                  parallelism_config.pp_size,
+                                                  parallelism_config.tp_size,
+                                                  parallelism_config.dp_size,
+                                                  parallelism_config.ep_size,
+                                                  parallelism_config.world_size,
+                                                  sp_config.type != SP_TYPE_NONE,
+                                                  parallelism_config.prefill_cp_config.is_enabled()),
+        "sm120_a2a_decode non-speculative PDFUSION with PP1/TP1 and DP=EP=world>1 is "
+        "unsupported; use active MTP or separate PREFILL/DECODE roles");
+    // sm120_a2a_decode execution is eager-only: its DP=EP collective
+    // protocol derives per-round payload extents from exchanged row counts,
+    // which captured CUDA graphs cannot reproduce. Reject a resolved
+    // sm120_a2a_decode profile that still enables CUDA graphs before warmup.
+    RTP_LLM_CHECK_WITH_INFO(
+        !sm120DecodeRequiresEagerExecution(resolved_moe_strategy.c_str(), params.hw_kernel_config.enable_cuda_graph),
+        "sm120_a2a_decode requires eager execution: CUDA graphs are unsupported for the SM120 DSv4 DECODE and "
+        "PDFUSION(DP>1) collective protocol; set enable_cuda_graph=false");
+    RTP_LLM_CHECK_WITH_INFO(!sm120FusedMoeDpDecodeMisaligned(
+                                resolved_moe_strategy.c_str(), pd_sep_config.role_type, parallelism_config.dp_size),
+                            "sm120_fused_moe with DP>1 on decode-capable roles issues mismatched WORLD "
+                            "collectives across prefill/decode phases; use sm120_a2a_decode or "
+                            "TP-only / PREFILL-only");
     if (!model_config_.output_vocab_ids.empty()) {
         RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,
                                 "output vocabulary pruning does not support speculative, MTP, or EAGLE engines");

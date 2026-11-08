@@ -55,6 +55,15 @@ def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
     return norm(x)
 
 
+def attn_oom_defrag_retry(moe_strategy: str) -> bool:
+    """Whether attention may defragment and retry once after an OOM.
+
+    The retry was introduced for the ``sm120_a2a_decode`` profile and stays
+    limited to it; every other profile re-raises the OOM unchanged.
+    """
+    return moe_strategy == "sm120_a2a_decode"
+
+
 class Block(nn.Module):
     def __init__(
         self,
@@ -99,12 +108,17 @@ class Block(nn.Module):
         ep_rank: int = 0,
         world_size: Optional[int] = None,
         world_rank: Optional[int] = None,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        moe_cp_enabled: bool = False,
+        moe_cp_size: int = 1,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
         moe_strategy: str = "auto",
         fp8_kv_cache: bool = False,
         commit_only: bool = False,
         n_physical_experts: Optional[int] = None,
+        sm120_workspace=None,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -138,6 +152,9 @@ class Block(nn.Module):
             tp_size=tp_size,
             tp_rank=tp_rank,
         )
+        # The model layer maps the strategy onto a capability flag so attention
+        # never reads a strategy name.
+        self.attn.oom_defrag_retry = attn_oom_defrag_retry(moe_strategy)
         self._cp_sync_after_attn_done = False
         if commit_only:
             self.ffn = None
@@ -179,6 +196,12 @@ class Block(nn.Module):
             moe_w1_layout="gate_up",
             observer_factory=self._moe_observer,
             record_function_scope=_profiler.moe_record_function_scope,
+            moe_cp_enabled=moe_cp_enabled,
+            moe_cp_size=moe_cp_size,
+            moe_tp_size=moe_tp_size,
+            moe_tp_rank=moe_tp_rank,
+            attn_tp_size=tp_size,
+            sm120_workspace=sm120_workspace,
         )
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight
@@ -406,7 +429,7 @@ class Block(nn.Module):
     ) -> torch.Tensor:
         """Decode-only block forward — mirrors prefill ``forward`` but
         delegates attention to ``Attention.forward_decode``. Prefill
-        ``forward`` is byte-identical for PD-disagg cleanliness.
+        ``forward`` is left untouched for PD-disagg cleanliness.
 
         ``attn_fn`` overrides the attention call (normed input -> attention
         output) while keeping this block's hyper-connection choreography as

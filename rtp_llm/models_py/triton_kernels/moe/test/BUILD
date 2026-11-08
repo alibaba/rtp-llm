@@ -131,3 +131,19 @@ cuda13_sm100_py_test(
     srcs = ["test_mega_moe_input_packer_perf.py"],
     deps = ["//rtp_llm/models_py/triton_kernels:moe"],
 )
+
+# SM120 sentinel cases split out of test_ep_kernels.py.
+py_test(
+    name = "test_ep_kernels_sm120",
+    srcs = ["test_ep_kernels_sm120.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:moe",
+    ] + [
+        ":numpy",
+        ":torch",
+        ":triton",
+    ],
+    visibility = ["//visibility:public"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)

@@ -164,6 +164,9 @@ class _FakeV4:
         base = input_ids.to(torch.float32).unsqueeze(-1)
         return base.repeat(1, 4)
 
+    def _embed_target(self, input_ids):
+        return self.embed(input_ids)
+
     def _hc_head_reduce(self, h):
         return h.mean(dim=1)
 

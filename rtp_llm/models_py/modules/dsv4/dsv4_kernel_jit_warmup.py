@@ -8,6 +8,7 @@ cold compiles are otherwise likely to happen after the health gate opens.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 import torch
 
+from rtp_llm.models_py.utils.arch import is_sm120, mhc_pre_gemm_backend
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
 _DENSE_GEMM_FALLBACK_M_GRID = [
@@ -1668,15 +1670,14 @@ def _generate_dense_gemm_warmup_m_grid(
     return tuple(sorted(reps_by_signature.values()))
 
 
-def _mhc_prenorm_deepgemm_backend_enabled() -> bool:
-    # DeepGEMM is the only mHC prenorm GEMM backend; constant seam kept for
-    # warmup tests that patch this selector.
-    return True
+def _mhc_prenorm_deepgemm_backend_enabled(
+    device: Optional[torch.device] = None,
+) -> bool:
+    return mhc_pre_gemm_backend(device) == "deepgemm"
 
 
-def _mhc_prenorm_deepgemm_backend_name() -> str:
-    # DeepGEMM is the only mHC prenorm GEMM backend.
-    return "deepgemm"
+def _mhc_prenorm_deepgemm_backend_name(device: Optional[torch.device] = None) -> str:
+    return mhc_pre_gemm_backend(device)
 
 
 def _compute_mhc_prenorm_num_split(
@@ -1834,6 +1835,8 @@ def warmup_batched_fp8_einsum_jit(
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
+    if is_sm120(device):
+        return
     _assert_not_capturing()
 
     num_sms = _get_deep_gemm_num_sms(device)
@@ -1923,17 +1926,27 @@ def warmup_mhc_prenorm_gemm_jit(
         return
     _assert_not_capturing()
 
-    backend = _mhc_prenorm_deepgemm_backend_name()
+    device_scope = (
+        torch.cuda.device(device)
+        if torch.cuda.is_available()
+        else contextlib.nullcontext()
+    )
+    with device_scope:
+        backend = _mhc_prenorm_deepgemm_backend_name()
+        deepgemm_enabled = _mhc_prenorm_deepgemm_backend_enabled()
     num_sms = _get_deep_gemm_num_sms(device)
     shape_keys = tuple(sorted(shapes.keys()))
-    specs_by_shape = {
-        key: _generate_mhc_prenorm_warmup_specs(
-            max_m=int(max_m),
-            k_value=int(key[1]),
-            num_sms=num_sms,
-        )
-        for key in shape_keys
-    }
+    if deepgemm_enabled:
+        specs_by_shape = {
+            key: _generate_mhc_prenorm_warmup_specs(
+                max_m=int(max_m),
+                k_value=int(key[1]),
+                num_sms=num_sms,
+            )
+            for key in shape_keys
+        }
+    else:
+        specs_by_shape = {key: ((1, 1),) for key in shape_keys if int(max_m) > 0}
     specs_by_shape = {key: specs for key, specs in specs_by_shape.items() if specs}
     if not specs_by_shape:
         return
@@ -1969,32 +1982,46 @@ def warmup_mhc_prenorm_gemm_jit(
         for key in shape_keys:
             info = shapes[key]
             for num_splits, m_value in specs_by_shape.get(key, ()):
-                _run_deepgemm_warmup_launch_with_retry(
-                    "DSV4 mHC DeepGEMM",
-                    f"shape={key} num_splits={num_splits} m={m_value}",
-                    partial(
-                        _launch_dummy_mhc_prenorm_gemm,
-                        key=key,
-                        info=info,
-                        m_value=m_value,
-                        num_splits=num_splits,
+                if deepgemm_enabled:
+                    _run_deepgemm_warmup_launch_with_retry(
+                        "DSV4 mHC DeepGEMM",
+                        f"shape={key} num_splits={num_splits} m={m_value}",
+                        partial(
+                            _launch_dummy_mhc_prenorm_gemm,
+                            key=key,
+                            info=info,
+                            m_value=m_value,
+                            num_splits=num_splits,
+                            device=device,
+                        ),
                         device=device,
-                    ),
-                    device=device,
-                )
-                _run_tilelang_warmup_launch_with_retry(
-                    "DSV4 mHC TileLangFuse",
-                    f"shape={key} num_splits={num_splits} m={m_value}",
-                    partial(
-                        _launch_dummy_mhc_pre_big_fuse,
-                        key=key,
-                        info=info,
-                        m_value=m_value,
-                        num_splits=num_splits,
+                    )
+                    _run_tilelang_warmup_launch_with_retry(
+                        "DSV4 mHC TileLangFuse",
+                        f"shape={key} num_splits={num_splits} m={m_value}",
+                        partial(
+                            _launch_dummy_mhc_pre_big_fuse,
+                            key=key,
+                            info=info,
+                            m_value=m_value,
+                            num_splits=num_splits,
+                            device=device,
+                        ),
                         device=device,
-                    ),
-                    device=device,
-                )
+                    )
+                else:
+                    _run_tilelang_warmup_launch_with_retry(
+                        "DSV4 mHC TileLangPre",
+                        f"shape={key} m={m_value}",
+                        partial(
+                            _launch_dummy_mhc_pre_wrapper,
+                            key=key,
+                            info=info,
+                            m_value=m_value,
+                            device=device,
+                        ),
+                        device=device,
+                    )
             _sync_cuda(device)
             _release_cuda_cache(device)
 
@@ -2069,6 +2096,8 @@ def warmup_fp8_mqa_logits_jit(
         return
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
+        return
+    if is_sm120(device):
         return
     if not _fp8_mqa_logits_available():
         return
@@ -2560,6 +2589,64 @@ def _launch_dummy_mhc_pre_big_fuse(
         comb_mix,
         layer_input,
     )
+
+
+def _launch_dummy_mhc_pre_wrapper(
+    *,
+    key: tuple[int, int],
+    info: dict,
+    m_value: int,
+    device: torch.device,
+) -> None:
+    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_pre
+
+    n_value, k_value = key
+    mhc_mult = int(info.get("hc_mult", 4) or 4)
+    hidden_size = int(info.get("dim", 0) or 0)
+    if hidden_size <= 0:
+        hidden_size = int(k_value) // max(mhc_mult, 1)
+    norm_eps = float(info.get("norm_eps", 1.0e-6))
+    hc_eps = float(info.get("hc_eps", 1.0e-6))
+    sinkhorn_iters = int(info.get("hc_sinkhorn_iters", 20) or 20)
+
+    fn = info.get("fn")
+    if not isinstance(fn, torch.Tensor) or tuple(fn.shape) != (n_value, k_value):
+        fn = torch.zeros((n_value, k_value), dtype=torch.float32, device=device)
+    else:
+        fn = fn.to(device=device, dtype=torch.float32)
+    scale = info.get("scale")
+    if not isinstance(scale, torch.Tensor) or tuple(scale.shape) != (3,):
+        scale = torch.ones((3,), dtype=torch.float32, device=device)
+    else:
+        scale = scale.to(device=device, dtype=torch.float32)
+    base = info.get("base")
+    if not isinstance(base, torch.Tensor) or tuple(base.shape) != (n_value,):
+        base = torch.zeros((n_value,), dtype=torch.float32, device=device)
+    else:
+        base = base.to(device=device, dtype=torch.float32)
+
+    residual = torch.zeros(
+        (1, max(int(m_value), 1), mhc_mult, hidden_size),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    out = tk_mhc_pre(
+        residual,
+        fn,
+        scale,
+        base,
+        norm_eps=norm_eps,
+        pre_eps=hc_eps,
+        sinkhorn_eps=hc_eps,
+        sinkhorn_iters=sinkhorn_iters,
+        hc_mult=mhc_mult,
+    )
+    if out is None:
+        raise RuntimeError(
+            "TileLang mHC pre warmup failed availability gate for "
+            f"shape={tuple(residual.shape)}, key={key}"
+        )
+    del residual, out, fn, scale, base
 
 
 def _launch_dummy_mhc_head_fused(

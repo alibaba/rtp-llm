@@ -39,9 +39,14 @@ def _build_block(
         raise ValueError("PPU block requires an instance-owned provider")
     else:
         provider = platform_provider
+    block_kwargs = _block_kwargs(layer_id, args, layer_weights, commit_only=commit_only)
+    # Physical MoE-topology kwargs only exist for the generic SM120 Block; the
+    # PPU Block ctor is unchanged upstream and must not receive them.
+    for name in ("moe_tp_size", "moe_tp_rank", "moe_cp_enabled", "moe_cp_size"):
+        block_kwargs.pop(name, None)
     return provider.build_block(
         Block,
-        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only),
+        **block_kwargs,
         platform_provider=provider,
     )
 

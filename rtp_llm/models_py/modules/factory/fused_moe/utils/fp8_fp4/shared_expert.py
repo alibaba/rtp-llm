@@ -14,6 +14,9 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.kernels.cuda.sm120_fp8_blockwise import (
+    sm120_blockwise_fp8_available,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
     strict_fused_moe_enabled,
 )
@@ -21,6 +24,10 @@ from rtp_llm.models_py.utils.profiler import record_function_range
 
 from .expert import require_silu_mul_split
 from .quantized_linear import Mxfp8Linear, create_fp8_linear
+
+
+def _uses_sm120_cutlass_linear(tensor: torch.Tensor) -> bool:
+    return tensor.is_cuda and sm120_blockwise_fp8_available(tensor.device)
 
 
 @dataclass(frozen=True)
@@ -478,13 +485,20 @@ def _run_shared_expert(
     x: torch.Tensor,
     fast_path: FusedSharedExpertFastPath | None,
 ) -> torch.Tensor:
-    if fast_path is not None and fast_path.can_run(shared_experts, x):
+    # On SM120 the CUTLASS linear in Expert.forward is the intended route;
+    # the DeepGEMM workspace path is skipped rather than merely depreferred.
+    if (
+        fast_path is not None
+        and not _uses_sm120_cutlass_linear(x)
+        and fast_path.can_run(shared_experts, x)
+    ):
         try:
             return fast_path._run_prepared(shared_experts, x)
         except Exception:
             if strict_fused_moe_enabled():
                 raise
-    if strict_fused_moe_enabled():
+    # The SM120 CUTLASS linear is the intended default, not a fallback.
+    if strict_fused_moe_enabled() and not _uses_sm120_cutlass_linear(x):
         raise RuntimeError(
             "MOE_STRICT_FUSED=1 forbids the generic Expert.forward "
             "shared-expert fallback"

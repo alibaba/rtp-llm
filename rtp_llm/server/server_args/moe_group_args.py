@@ -25,6 +25,8 @@ MOE_STRATEGY_CHOICES = (
     "mega_moe_se",
     "grouped_fp4",
     "local_loop",
+    "sm120_fused_moe",
+    "sm120_a2a_decode",
     "rocm_ep_normal",
     "rocm_ep_low_latency",
     "rocm_fp8_per_channel_no_dp",
@@ -198,7 +200,13 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         default="auto",
         help=(
             "指定 MoE strategy，默认为 auto。具体策略的适用性由当前模型配置、"
-            "并行拓扑和运行时后端共同校验。"
+            "并行拓扑和运行时后端共同校验。SM120 专用取值：sm120_fused_moe"
+            "（all-gather 后做有序 reduce-scatter）；sm120_a2a_decode（DP=EP "
+            "all-to-all 传输，仅支持 eager 执行，需设置 enable_cuda_graph=false）。"
+            "在 SM120 上运行 DeepSeek-V4 时，启动阶段按角色解析 auto：PREFILL "
+            "解析为 sm120_fused_moe；DECODE 以及 DP>1 的 PDFUSION（需启用 MTP "
+            "等投机解码）解析为 sm120_a2a_decode，PDFUSION 的 prefill 步骤同样"
+            "走该传输。这些角色显式指定其他取值会在启动时被拒绝。"
         ),
     )
     moe_group.add_argument(
