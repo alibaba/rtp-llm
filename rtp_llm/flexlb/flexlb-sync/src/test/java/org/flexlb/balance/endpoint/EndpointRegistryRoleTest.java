@@ -42,14 +42,10 @@ class EndpointRegistryRoleTest {
         Mockito.when(configService.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointTestSupport.TestRequestRuntime requestRuntime =
                 EndpointTestSupport.requestRuntime();
-        registry = new EndpointRegistry(
-                configService,
-                requestRuntime.events(),
-                Mockito.mock(BatchSchedulerReporter.class),
-                EndpointTestSupport.routeStrategy(requestRuntime),
-                new NonBatchTtftEstimator(),
-                new PlacementAvailability(),
-                new QueueCapacity(), new PrefillQueueRegistry());
+        registry = new EndpointRegistry(configService, requestRuntime.events(),
+                Mockito.mock(BatchSchedulerReporter.class), EndpointTestSupport.routeStrategy(requestRuntime),
+                new NonBatchTtftEstimator(), new PlacementAvailability(), new QueueCapacity(),
+                new PrefillQueueRegistry(), Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
     }
 
     @AfterEach
@@ -67,10 +63,10 @@ class EndpointRegistryRoleTest {
         var queues = Mockito.spy(new PrefillQueueRegistry());
         var runtime = EndpointTestSupport.requestRuntime();
         var availability = Mockito.mock(PlacementAvailability.class);
-        var events = new EndpointEventHandler(runtime.requests(), queues);
+        var events = new EndpointEventHandler(runtime.requests(), queues, service);
         var localRegistry = new EndpointRegistry(service, events, Mockito.mock(BatchSchedulerReporter.class),
                 EndpointTestSupport.routeStrategy(runtime), new NonBatchTtftEstimator(), availability,
-                new QueueCapacity(), queues);
+                new QueueCapacity(), queues, Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
         String address = "127.0.0.1:8001";
         Mockito.doAnswer(call -> {
             PrefillEndpoint endpoint = call.getArgument(0);

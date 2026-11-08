@@ -31,14 +31,10 @@ class EndpointRetirementLinearizationTest {
         when(configService.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointTestSupport.TestRequestRuntime requestRuntime =
                 EndpointTestSupport.requestRuntime();
-        EndpointRegistry registry = new EndpointRegistry(
-                configService,
-                requestRuntime.events(),
-                mock(BatchSchedulerReporter.class),
-                EndpointTestSupport.routeStrategy(requestRuntime),
-                new NonBatchTtftEstimator(),
-                new PlacementAvailability(),
-                new QueueCapacity(), new PrefillQueueRegistry());
+        EndpointRegistry registry = new EndpointRegistry(configService, requestRuntime.events(),
+                mock(BatchSchedulerReporter.class), EndpointTestSupport.routeStrategy(requestRuntime),
+                new NonBatchTtftEstimator(), new PlacementAvailability(), new QueueCapacity(),
+                new PrefillQueueRegistry(), mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
         String prefillAddress = "127.0.0.1:8100";
         String decodeAddress = "127.0.0.1:8200";
         WorkerStatus prefillStatus = status(RoleType.PREFILL, 8100);

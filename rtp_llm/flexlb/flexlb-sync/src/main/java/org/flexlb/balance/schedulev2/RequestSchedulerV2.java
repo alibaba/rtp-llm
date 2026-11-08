@@ -125,7 +125,7 @@ public class RequestSchedulerV2 {
         prefillQueues.start(queue -> {
             queue.onCapacityChanged(decodeLoopSignal::wake);
             return new PrefillQueueLoop(queue, prefillQueues, cleanup, mainQueue, endpointRegistry, configService,
-                    reporter, this::sendToDecodeQueue, queueReporter);
+                    this::sendToDecodeQueue, queueReporter);
         });
         mainQueueLoop.start();
         decodeQueueLoop.start();

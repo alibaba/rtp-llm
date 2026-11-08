@@ -49,12 +49,17 @@ public final class V2TestSupport {
      * 一台 PREFILL 机器，WorkerStatus 是 mock，可以用 {@link #report} 设置引擎上报。
      */
     public static PrefillEndpoint prefillEndpoint(String ipPort) {
+        return prefillEndpoint(ipPort, mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
+    }
+
+    public static PrefillEndpoint prefillEndpoint(String ipPort,
+                                                  org.flexlb.service.monitor.RequestSchedulerReporter reporter) {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         WorkerStatus status = mock(WorkerStatus.class);
         when(endpoint.ipPort()).thenReturn(ipPort);
         when(endpoint.getStatus()).thenReturn(status);
         when(status.getRole()).thenReturn(RoleType.PREFILL);
-        when(endpoint.prefillQueue()).thenReturn(new PrefillQueue(endpoint, false));
+        when(endpoint.prefillQueue()).thenReturn(new PrefillQueue(endpoint, false, reporter));
         return endpoint;
     }
 
@@ -78,7 +83,7 @@ public final class V2TestSupport {
         var observation = mock(WorkerStatus.StatusObservation.class);
         when(observation.engine()).thenReturn(engine);
         when(observation.finishedTasks()).thenReturn(Map.of());
-        endpoint.prefillQueue().handlePrefillStatus(observation);
+        endpoint.prefillQueue().handlePrefillStatus(observation, 1000L);
     }
 
     /**
@@ -95,6 +100,13 @@ public final class V2TestSupport {
     public static void reportTasks(org.flexlb.balance.schedulev2.prefill.PrefillQueue queue,
                                    Map<String, TaskPhase> active,
                                    Map<String, TaskPhase> finished) {
+        reportTasks(queue, active, finished, 1000L);
+    }
+
+    public static void reportTasks(PrefillQueue queue,
+                                   Map<String, TaskPhase> active,
+                                   Map<String, TaskPhase> finished,
+                                   long statusTimeoutMs) {
         var activeTasks = active.entrySet()
                 .stream()
                 .collect(Collectors.toMap(Map.Entry::getKey, entry -> task(entry.getKey(), entry.getValue())));
@@ -108,7 +120,7 @@ public final class V2TestSupport {
         when(observation.engine()).thenReturn(engine);
         when(observation.statusVersion()).thenReturn(1L);
         when(observation.finishedTasks()).thenReturn(finishedTasks);
-        queue.handlePrefillStatus(observation);
+        queue.handlePrefillStatus(observation, statusTimeoutMs);
     }
 
     /**

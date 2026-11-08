@@ -264,11 +264,12 @@ class RequestResourceAccountingTest {
             var reporter = mock(BatchSchedulerReporter.class);
             var requestReporter = mock(RequestSchedulerReporter.class);
             requests = new RequestRegistry(service, reporter, requestReporter);
-            var eventHandler = new EndpointEventHandler(requests, org.mockito.Mockito.mock(PrefillQueueRegistry.class));
+            var eventHandler =
+                    new EndpointEventHandler(requests, org.mockito.Mockito.mock(PrefillQueueRegistry.class), service);
             var queueCapacity = new QueueCapacity();
             var endpoints = new EndpointRegistry(service, eventHandler, reporter, EndpointTestSupport.parkedDelivery(),
-                    new NonBatchTtftEstimator(), new PlacementAvailability(), queueCapacity,
-                    new PrefillQueueRegistry());
+                    new NonBatchTtftEstimator(), new PlacementAvailability(), queueCapacity, new PrefillQueueRegistry(),
+                    requestReporter);
             runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter, service, queueCapacity,
                     new ModelMetaConfig(new ServiceRoute()));
             var worker = WorkerStatus.createDiscovered(RoleType.PREFILL, "g", "127.0.0.1", 8080, 8081, "test");

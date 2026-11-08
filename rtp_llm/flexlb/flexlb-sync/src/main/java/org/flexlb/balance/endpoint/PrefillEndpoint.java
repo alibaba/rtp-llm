@@ -37,6 +37,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PrefillQueueEnqueueResult;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -108,7 +109,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     PlacementAvailability placementAvailability,
                     EndpointRegistry endpointRegistry,
                     QueueCapacity queueCapacity,
-                    PrefillQueueRegistry prefillQueueRegistry) {
+                    PrefillQueueRegistry prefillQueueRegistry,
+                    RequestSchedulerReporter requestReporter) {
         super(status);
         this.configSupplier = configSupplier;
         this.reporter = reporter;
@@ -124,7 +126,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 status.getLogicalIpPort(), this, configSupplier.get(),
                 deliveryStrategy, ttftEstimator, endpointEvents, queueCapacity);
         this.prefillState = workerBatcher.ownedState();
-        this.prefillQueue = new PrefillQueue(this, startupConfig.isPriorityOrdering());
+        this.prefillQueue = new PrefillQueue(this, startupConfig.isPriorityOrdering(), requestReporter);
     }
 
     /**
@@ -204,6 +206,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     @Override
     protected void closeEndpoint() {
+        prefillQueue.removeDispatchedOnRetirement();
         prefillQueueRegistry.retire(this);
         // A self-await invariant escapes here before ledger mutation/event
         // publication. Ordinary stop cleanup failures are returned only after

@@ -72,6 +72,7 @@ class PrefillEndpointTest {
     private FlexlbConfig config;
     private BatchSchedulerReporter endpointReporter;
     private EndpointTestSupport.TestRequestRuntime requestRuntime;
+    private final RequestSchedulerReporter v2Reporter = mock(RequestSchedulerReporter.class);
 
     @BeforeEach
     void setUp() {
@@ -133,20 +134,125 @@ class PrefillEndpointTest {
         var status = endpoint.getStatus();
         response.setStatusVersion(status.appliedStatusCursor().statusVersion());
         endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response)).run();
-        queue.removeRequestStatusExpired(System.currentTimeMillis(), 1000L, mock(RequestSchedulerReporter.class));
         assertEquals(1, queue.dispatchedCount());
         assertEquals(1L, queue.inflightCount());
+    }
+
+    @Test
+    void unchangedVersionStatusCleansExpiredPublishedRequestUsingCurrentConfig() {
+        var queue = createV2Queue();
+        var request = V2TestSupport.request(config, "903", 50, 10);
+        V2TestSupport.dispatch(queue, new DispatchedRequest(request, 10L, 5L));
+        assertNull(queue.tryAcquirePublishSlot(request, 1));
+        assertTrue(request.publish(org.flexlb.balance.schedulev2.request.Stage.DECODE_WAITING, List.of()));
+        org.springframework.test.util.ReflectionTestUtils.setField(request, "publishedAtMs",
+                System.currentTimeMillis() - 10_000L);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.PREFILL);
+        response.setAlive(true);
+        response.setRunningTaskInfo(Map.of());
+        response.setFinishedTaskInfo(Map.of());
+        var status = endpoint.getStatus();
+        response.setStatusVersion(status.appliedStatusCursor().statusVersion());
+
+        config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(60_000L);
+        endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response)).run();
+        assertEquals(1, queue.dispatchedCount());
+        org.mockito.Mockito.verifyNoInteractions(v2Reporter);
+
+        config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(1_000L);
+        endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response)).run();
+        endpoint.observeStatusHeartbeat(status, status.freezeStatusResponse(response)).run();
+        assertEquals(0, queue.dispatchedCount());
+        assertEquals(0L, queue.inflightCount());
+        assertEquals(0L, queue.estimatedWorkMs(0L));
+        verify(v2Reporter).reportStatusUpdateTimeout(RoleType.PREFILL, endpoint.ipPort());
+        org.mockito.Mockito.verifyNoMoreInteractions(v2Reporter);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = TaskPhase.class, names = {"PENDING", "RUNNING"})
+    void activeStatusRefreshesRequestBeforeCallbackChecksTimeout(TaskPhase phase) {
+        config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(1000L);
+        var queue = createV2Queue();
+        var request = V2TestSupport.request(config, "904", 50, 10);
+        V2TestSupport.dispatch(queue, new DispatchedRequest(request, 10L, 5L));
+        assertNull(queue.tryAcquirePublishSlot(request, 1));
+        assertTrue(request.publish(org.flexlb.balance.schedulev2.request.Stage.DECODE_WAITING, List.of()));
+        org.springframework.test.util.ReflectionTestUtils.setField(request, "publishedAtMs",
+                System.currentTimeMillis() - 10_000L);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRunningTaskInfo(Map.of("904", taskInfo(904L, 0L, phase, 0, 10)));
+        response.setFinishedTaskInfo(Map.of());
+
+        EndpointTestSupport.applyStatus(endpoint, response).run();
+
+        assertEquals(1, queue.dispatchedCount());
+        assertEquals(1L, queue.inflightCount());
+        org.mockito.Mockito.verifyNoInteractions(v2Reporter);
+    }
+
+    @Test
+    void finishedStatusStillReportsEarlierRequestStatusTimeout() {
+        config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(1000L);
+        var queue = createV2Queue();
+        var request = V2TestSupport.request(config, "905", 50, 10);
+        V2TestSupport.dispatch(queue, new DispatchedRequest(request, 10L, 5L));
+        assertNull(queue.tryAcquirePublishSlot(request, 1));
+        assertTrue(request.publish(org.flexlb.balance.schedulev2.request.Stage.DECODE_WAITING, List.of()));
+        org.springframework.test.util.ReflectionTestUtils.setField(request, "publishedAtMs",
+                System.currentTimeMillis() - 10_000L);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRunningTaskInfo(Map.of());
+        response.setFinishedTaskInfo(Map.of("905", taskInfo(905L, 0L, null, 0, 10)));
+
+        EndpointTestSupport.applyStatus(endpoint, response).run();
+
+        assertEquals(0, queue.dispatchedCount());
+        assertEquals(0L, queue.inflightCount());
+        verify(v2Reporter).reportStatusUpdateTimeout(RoleType.PREFILL, endpoint.ipPort());
+    }
+
+    @Test
+    void retirementRemovesExistingV2DispatchRecords() {
+        var queue = createV2Queue();
+        var request = V2TestSupport.request(config, "906", 50, 10);
+        request.setQueueSeq(1L);
+        V2TestSupport.dispatch(queue, new DispatchedRequest(request, 10L, 5L));
+        assertNull(queue.tryAcquirePublishSlot(request, 1));
+        assertTrue(request.publish(org.flexlb.balance.schedulev2.request.Stage.DECODE_WAITING, List.of()));
+        var waiting = V2TestSupport.request(config, "907", 50, 10);
+        waiting.setQueueSeq(2L);
+        V2TestSupport.choose(waiting, endpoint, 0L, 7L);
+        waiting.moveTo(org.flexlb.balance.schedulev2.request.Stage.MAIN_WAITING,
+                org.flexlb.balance.schedulev2.request.Stage.PREFILL_WAITING);
+        queue.addWaiting(waiting);
+
+        endpoint.close();
+        endpoint.close();
+
+        assertEquals(0, queue.dispatchedCount());
+        assertEquals(0L, queue.inflightCount());
+        assertEquals(1, queue.waitingCount());
+        assertEquals(7L, queue.estimatedWorkMs(0L));
+        assertFalse(queue.removeDispatched(request));
+        queue.removeWaiting(waiting);
+        assertEquals(0L, queue.estimatedWorkMs(0L));
+        org.mockito.Mockito.verifyNoInteractions(v2Reporter);
     }
 
     private PrefillQueue createV2Queue() {
         endpoint.close();
         var queues = mock(PrefillQueueRegistry.class);
-        var events = new org.flexlb.balance.scheduler.EndpointEventHandler(requestRuntime.requests(), queues);
+        var configService = mock(org.flexlb.config.ConfigService.class);
+        org.mockito.Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
+        var events =
+                new org.flexlb.balance.scheduler.EndpointEventHandler(requestRuntime.requests(), queues, configService);
         endpoint = EndpointTestSupport.standalonePrefillEndpoint(
                 EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090), config,
-                EndpointTestSupport.routeStrategy(requestRuntime), events, endpointReporter);
+                EndpointTestSupport.routeStrategy(requestRuntime), events, endpointReporter, v2Reporter);
         endpoint.startGeneration();
-        var queue = new PrefillQueue(endpoint, false);
+        var queue = endpoint.prefillQueue();
         org.mockito.Mockito.when(queues.find(endpoint)).thenReturn(queue);
         return queue;
     }

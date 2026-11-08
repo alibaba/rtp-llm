@@ -107,8 +107,8 @@ class CacheHitFeedbackFlowTest {
                         mock(org.flexlb.balance.scheduler.RequestRegistry.class),
                         mock(org.flexlb.balance.delivery.DeliveryMetrics.class)),
                 new org.flexlb.balance.estimate.NonBatchTtftEstimator(),
-                new org.flexlb.balance.scheduler.PlacementAvailability(),
-                new QueueCapacity(), new PrefillQueueRegistry());
+                new org.flexlb.balance.scheduler.PlacementAvailability(), new QueueCapacity(),
+                new PrefillQueueRegistry(), mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
         directory = new WorkerDirectory(registry);
         worker = RunnerTestSupport.discovered(RoleType.PREFILL, "group", "10.0.0.1", 8080, 8081, "test");
         directory.currentOrDiscover(RoleType.PREFILL, worker.getLogicalIpPort(), () -> worker);

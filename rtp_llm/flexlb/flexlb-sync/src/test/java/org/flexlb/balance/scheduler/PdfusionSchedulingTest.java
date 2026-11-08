@@ -89,10 +89,13 @@ class PdfusionSchedulingTest {
                         }), new AtomicLong()::incrementAndGet,
                         lifecycle, new DeliveryMetrics(reporter))
                 : new NonBatchDeliveryStrategy(lifecycle, new DeliveryMetrics(reporter));
-        EndpointRegistry endpoints = new EndpointRegistry(service,
-                new EndpointEventHandler(lifecycle, org.mockito.Mockito.mock(PrefillQueueRegistry.class)), reporter,
-                delivery, batch ? new BatchTtftEstimator() : new NonBatchTtftEstimator(), availability, queueCapacity,
-                new PrefillQueueRegistry());
+        EndpointRegistry endpoints =
+                new EndpointRegistry(service,
+                        new EndpointEventHandler(lifecycle, org.mockito.Mockito.mock(PrefillQueueRegistry.class),
+                                service),
+                        reporter, delivery, batch ? new BatchTtftEstimator() : new NonBatchTtftEstimator(),
+                        availability, queueCapacity, new PrefillQueueRegistry(),
+                        mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
         WorkerStatus worker = WorkerStatus.createDiscovered(RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test");
         WorkerStatusResponse status = new WorkerStatusResponse();
         status.setRole(RoleType.PDFUSION);

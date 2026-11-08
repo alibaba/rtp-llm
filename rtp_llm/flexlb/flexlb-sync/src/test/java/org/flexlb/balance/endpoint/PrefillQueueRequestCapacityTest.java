@@ -617,9 +617,11 @@ class PrefillQueueRequestCapacityTest {
     }
 
     private static Fixture fixture(Supplier<FlexlbConfig> configSupplier,
-                                   PlacementAvailability availability, String ip,
+                                   PlacementAvailability availability,
+                                   String ip,
                                    EndpointTestSupport.TestRequestRuntime runtime,
-                                   EndpointRegistry registry, QueueCapacity queueCapacity) {
+                                   EndpointRegistry registry,
+                                   QueueCapacity queueCapacity) {
         WorkerStatus status = WorkerStatus.createDiscovered(RoleType.PREFILL, "test", ip, 8080, 9090, "test");
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
@@ -628,9 +630,10 @@ class PrefillQueueRequestCapacityTest {
         DeliveryStrategy parked = EndpointTestSupport.routeStrategy(runtime);
         DeliveryStrategy delivery = mock(DeliveryStrategy.class, delegatesTo(parked));
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
-        PrefillEndpoint endpoint = new PrefillEndpoint(status, configSupplier, delivery, new NonBatchTtftEstimator(), runtime.events(),
-                reporter, availability, registry, queueCapacity,
-                new org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry());
+        PrefillEndpoint endpoint = new PrefillEndpoint(status, configSupplier, delivery, new NonBatchTtftEstimator(),
+                runtime.events(), reporter, availability, registry, queueCapacity,
+                new org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry(),
+                mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
         endpoint.startGeneration();
         return new Fixture(endpoint, delivery, parked, runtime, queueCapacity, reporter);
     }

@@ -21,6 +21,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -30,9 +31,9 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 class PrefillQueueTest {
 
     private final FlexlbConfig config = SchedulingTestConfig.newConfig();
-    private final PrefillEndpoint endpoint = V2TestSupport.prefillEndpoint("p1:8000");
-    private final PrefillQueue queue = endpoint.prefillQueue();
     private final RequestSchedulerReporter reporter = mock(RequestSchedulerReporter.class);
+    private final PrefillEndpoint endpoint = V2TestSupport.prefillEndpoint("p1:8000", reporter);
+    private final PrefillQueue queue = endpoint.prefillQueue();
     private final java.util.concurrent.atomic.AtomicLong nextQueueSeq = new java.util.concurrent.atomic.AtomicLong();
 
     @Test
@@ -42,14 +43,15 @@ class PrefillQueueTest {
         V2TestSupport.dispatch(queue, new DispatchedRequest(normal, 10L, 5L));
         V2TestSupport.dispatch(queue, new DispatchedRequest(expired, 10L, 5L));
         publish(expired);
+        org.springframework.test.util.ReflectionTestUtils.setField(expired, "publishedAtMs",
+                System.currentTimeMillis() - 10_000L);
         assertEquals(null, queue.tryAcquirePublishSlot(normal, 2));
         assertEquals(null, queue.tryAcquirePublishSlot(expired, 2));
         try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
             synchronized (queue) {
                 assertTrue(executor.submit(() -> queue.removeDispatched(normal))
                         .get(2, java.util.concurrent.TimeUnit.SECONDS));
-                executor.submit(
-                        () -> queue.removeRequestStatusExpired(System.currentTimeMillis() + 10_000L, 1000L, reporter))
+                executor.submit(() -> V2TestSupport.reportTasks(queue, Map.of(), Map.of(), 1000L))
                         .get(2, java.util.concurrent.TimeUnit.SECONDS);
                 assertEquals(0, queue.dispatchedCount());
             }
@@ -93,10 +95,13 @@ class PrefillQueueTest {
         publish(request);
         assertEquals(null, queue.tryAcquirePublishSlot(request, 1));
         org.mockito.Mockito.doAnswer(call -> {
+            org.mockito.Mockito.doCallRealMethod()
+                    .when(record)
+                    .statusExpired(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong());
             V2TestSupport.reportTasks(queue, Map.of(request.requestId(), TaskPhase.RUNNING), Map.of());
             return true;
         }).when(record).statusExpired(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong());
-        queue.removeRequestStatusExpired(System.currentTimeMillis(), 1000L, reporter);
+        V2TestSupport.reportTasks(queue, Map.of(), Map.of(), 1000L);
         assertEquals(0, queue.dispatchedCount());
         assertEquals(1L, queue.inflightCount());
         assertFalse(queue.removeDispatched(request));
@@ -112,7 +117,6 @@ class PrefillQueueTest {
         tasks.release(old);
         assertEquals(null, tasks.tryAcquire(replacement, 1));
         tasks.release(old);
-        tasks.releaseExpired(old, System.currentTimeMillis(), 1000L);
         assertEquals(1L, tasks.inflightCount());
         tasks.release(replacement);
         assertEquals(0L, tasks.inflightCount());
@@ -128,7 +132,7 @@ class PrefillQueueTest {
 
         assertEquals(0, queue.dispatchedCount());
         assertEquals(0L, queue.inflightCount());
-        queue.removeRequestStatusExpired(request.publishedAtMs() + 1_000L, 1_000L, reporter);
+        V2TestSupport.reportTasks(queue, Map.of(), Map.of(), 1000L);
         assertEquals(0, queue.dispatchedCount());
         verifyNoInteractions(reporter);
         V2TestSupport.reportTasks(queue, Map.of(), Map.of(request.requestId(), TaskPhase.RUNNING));
@@ -138,19 +142,24 @@ class PrefillQueueTest {
     @Test
     void waitingRequestExpiresWhenItsStatusStopsUpdating() {
         Request request = request("waiting");
-        V2TestSupport.dispatch(queue, new DispatchedRequest(request, 10L, 5L));
+        DispatchedRequest dispatchedRequest = new DispatchedRequest(request, 10L, 5L);
+        V2TestSupport.dispatch(queue, dispatchedRequest);
         publish(request);
         assertEquals(null, queue.tryAcquirePublishSlot(request, 1));
         V2TestSupport.reportTasks(queue, Map.of("waiting", TaskPhase.PENDING), Map.of());
-        queue.removeRequestStatusExpired(System.currentTimeMillis(), 1000L, reporter);
+        V2TestSupport.reportTasks(queue, Map.of("waiting", TaskPhase.PENDING), Map.of(), 1000L);
         assertEquals(1, queue.dispatchedCount());
         verifyNoInteractions(reporter);
         assertEquals(1L, queue.inflightCount());
-        queue.removeRequestStatusExpired(System.currentTimeMillis() + 10_000L, 1000L, reporter);
+        long expiredAtMs = System.currentTimeMillis() - 10_000L;
+        org.springframework.test.util.ReflectionTestUtils.setField(request, "publishedAtMs", expiredAtMs);
+        org.springframework.test.util.ReflectionTestUtils.setField(dispatchedRequest, "lastStatusUpdatedAtMs",
+                expiredAtMs);
+        V2TestSupport.reportTasks(queue, Map.of(), Map.of(), 1000L);
         assertEquals(0, queue.dispatchedCount());
         assertEquals(0L, queue.inflightCount());
         verify(reporter).reportStatusUpdateTimeout(RoleType.PREFILL, endpoint.ipPort());
-        queue.removeRequestStatusExpired(System.currentTimeMillis() + 20_000L, 1000L, reporter);
+        V2TestSupport.reportTasks(queue, Map.of(), Map.of(), 1000L);
         verifyNoMoreInteractions(reporter);
     }
 
@@ -207,7 +216,7 @@ class PrefillQueueTest {
         V2TestSupport.reportTasks(queue, Map.of(), Map.of("1", TaskPhase.RUNNING));
         assertEquals(1, queue.dispatchedCount());
         assertEquals(0L, queue.inflightCount());
-        queue.removeRequestStatusExpired(System.currentTimeMillis() + 10_000L, 1000L, reporter);
+        V2TestSupport.reportTasks(queue, Map.of(), Map.of(), 1000L);
         verifyNoInteractions(reporter);
         assertTrue(queue.removeDispatched(notReported));
     }
@@ -227,15 +236,14 @@ class PrefillQueueTest {
         long publishedAtMs = notReported.publishedAtMs();
         record.updateStatus(WorkView.Phase.ENGINE_RUNNING, publishedAtMs + 50L);
 
-        queue.removeRequestStatusExpired(publishedAtMs + 79L, 80L, reporter);
-        assertEquals(3, queue.dispatchedCount());
-
-        queue.removeRequestStatusExpired(publishedAtMs + 80L, 80L, reporter);
+        assertFalse(record.statusExpired(publishedAtMs + 129L, 80L));
+        assertTrue(record.statusExpired(publishedAtMs + 130L, 80L));
+        org.springframework.test.util.ReflectionTestUtils.setField(notReported, "publishedAtMs",
+                System.currentTimeMillis() - 10_000L);
+        V2TestSupport.reportTasks(queue, Map.of("2", TaskPhase.RUNNING), Map.of(), 1000L);
         assertEquals(2, queue.dispatchedCount());
         assertFalse(queue.removeDispatched(notReported));
-        queue.removeRequestStatusExpired(publishedAtMs + 129L, 80L, reporter);
-        assertEquals(2, queue.dispatchedCount());
-        queue.removeRequestStatusExpired(publishedAtMs + 130L, 80L, reporter);
+        V2TestSupport.reportTasks(queue, Map.of(), Map.of(), 1000L);
         assertEquals(1, queue.dispatchedCount());
         assertFalse(queue.removeDispatched(reported));
         assertTrue(queue.removeDispatched(unpublished));
@@ -357,7 +365,7 @@ class PrefillQueueTest {
 
     @Test
     void predictedWorkIncludesLowerPriorityWaitingWorkWithoutChangingQueueOrder() {
-        PrefillQueue priorityQueue = new PrefillQueue(endpoint, true);
+        PrefillQueue priorityQueue = new PrefillQueue(endpoint, true, reporter);
         Request low = V2TestSupport.request(config, "low", 10, 16L);
         low.setQueueSeq(1L);
         V2TestSupport.choose(low, endpoint, 0L, 100L);
@@ -482,9 +490,30 @@ class PrefillQueueTest {
         V2TestSupport.dispatch(queue, new DispatchedRequest(expired, 16L, 10L));
         publish(expired);
         assertEquals(10L, queue.estimatedWorkMs(0L));
-        queue.removeRequestStatusExpired(expired.publishedAtMs() + 1000L, 1000L, reporter);
-        queue.removeRequestStatusExpired(expired.publishedAtMs() + 2000L, 1000L, reporter);
+        org.springframework.test.util.ReflectionTestUtils.setField(expired, "publishedAtMs",
+                System.currentTimeMillis() - 10_000L);
+        V2TestSupport.reportTasks(queue, Map.of(), Map.of(), 1000L);
+        V2TestSupport.reportTasks(queue, Map.of(), Map.of(), 1000L);
         assertEquals(0L, queue.estimatedWorkMs(0L));
+    }
+
+    @Test
+    void statusTimeoutIsReportedEvenWhenRemovalReturnsFalse() {
+        Request expired = request("timeout-report");
+        V2TestSupport.dispatch(queue, new DispatchedRequest(expired, 16L, 10L));
+        publish(expired);
+        org.springframework.test.util.ReflectionTestUtils.setField(expired, "publishedAtMs",
+                System.currentTimeMillis() - 10_000L);
+        PrefillQueue statusQueue = org.mockito.Mockito.spy(queue);
+        org.mockito.Mockito.doAnswer(call -> {
+            queue.removeDispatched(expired);
+            return false;
+        }).when(statusQueue).removeDispatched(expired);
+
+        V2TestSupport.reportTasks(statusQueue, Map.of(), Map.of(), 1000L);
+
+        verify(reporter).reportStatusUpdateTimeout(RoleType.PREFILL, endpoint.ipPort());
+        assertEquals(0, queue.dispatchedCount());
     }
 
     @Test
@@ -516,6 +545,53 @@ class PrefillQueueTest {
         request.moveTo(Stage.MAIN_WAITING, Stage.PREFILL_WAITING);
         queue.addWaiting(request);
         return request;
+    }
+
+    @Test
+    void releaseKeepsPublishedMapsReadOnlyAndDoesNotChangeEarlierSnapshots() {
+        PrefillActiveTasks activeTasks = new PrefillActiveTasks();
+        DispatchedRequest first = new DispatchedRequest(request("first-snapshot"), 10L, 5L);
+        DispatchedRequest second = new DispatchedRequest(request("second-snapshot"), 10L, 5L);
+        assertEquals(null, activeTasks.tryAcquire(first, 2));
+        assertEquals(null, activeTasks.tryAcquire(second, 2));
+        var snapshots =
+                (java.util.concurrent.atomic.AtomicReference<?>) org.springframework.test.util.ReflectionTestUtils
+                        .getField(activeTasks, "capacitySnapshot");
+        PrefillCapacitySnapshot beforeRelease = (PrefillCapacitySnapshot) snapshots.get();
+
+        activeTasks.release(first);
+        PrefillCapacitySnapshot afterRelease = (PrefillCapacitySnapshot) snapshots.get();
+        assertEquals(2, beforeRelease.localPublishReservations().size());
+        assertEquals(Map.of(second.request().requestId(), second), afterRelease.localPublishReservations());
+        assertThrows(UnsupportedOperationException.class, () -> afterRelease.localPublishReservations().clear());
+
+        activeTasks.release(second);
+        assertEquals(1, afterRelease.localPublishReservations().size());
+        assertEquals(0L, activeTasks.inflightCount());
+    }
+
+    @Test
+    void finishedCleanupUsesCurrentEngineCapacityBeforeNotifyingScheduler() {
+        Request finished = request("finished-capacity");
+        V2TestSupport.dispatch(queue, new DispatchedRequest(finished, 16L, 10L));
+        assertEquals(null, queue.tryAcquirePublishSlot(finished, 1));
+        publish(finished);
+        Request incoming = request("incoming-capacity");
+        V2TestSupport.dispatch(queue, new DispatchedRequest(incoming, 16L, 10L));
+        var acquiredSlots = new java.util.concurrent.atomic.AtomicInteger();
+        queue.onCapacityChanged(() -> {
+            if (queue.tryAcquirePublishSlot(incoming, 1) == null) {
+                acquiredSlots.incrementAndGet();
+            }
+        });
+
+        V2TestSupport.reportTasks(queue, Map.of("external-capacity", TaskPhase.RUNNING),
+                Map.of(finished.requestId(), TaskPhase.RUNNING));
+
+        assertEquals(0, acquiredSlots.get());
+        assertEquals(1L, queue.inflightCount());
+        assertEquals(1, queue.dispatchedCount());
+        assertFalse(queue.hasDispatchSlot(1));
     }
 
     private Request request(String requestId) {

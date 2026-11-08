@@ -4,7 +4,9 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.prefill.WorkerStatusFact;
+import org.flexlb.balance.schedulev2.RequestStatusTimeout;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
+import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
@@ -21,10 +23,14 @@ public final class EndpointEventHandler {
 
     private final RequestRegistry scheduler;
     private final PrefillQueueRegistry prefillQueueRegistry;
+    private final ConfigService configService;
 
-    public EndpointEventHandler(RequestRegistry scheduler, PrefillQueueRegistry prefillQueueRegistry) {
+    public EndpointEventHandler(RequestRegistry scheduler,
+                                PrefillQueueRegistry prefillQueueRegistry,
+                                ConfigService configService) {
         this.scheduler = scheduler;
         this.prefillQueueRegistry = prefillQueueRegistry;
+        this.configService = configService;
     }
 
     public void onPrefillStatus(PrefillEndpoint prefillEndpoint,
@@ -138,7 +144,8 @@ public final class EndpointEventHandler {
                                      WorkerStatus.StatusObservation statusObservation,
                                      List<WorkerStatusFact> facts) {
         Optional.ofNullable(prefillQueueRegistry.find(source))
-                .ifPresent(queue -> queue.handlePrefillStatus(statusObservation));
+                .ifPresent(queue -> queue.handlePrefillStatus(statusObservation,
+                        RequestStatusTimeout.timeoutMs(configService)));
         for (WorkerStatusFact fact : facts) {
             try {
                 scheduler.processPrefillStatus(source, statusObservation.role(), fact);

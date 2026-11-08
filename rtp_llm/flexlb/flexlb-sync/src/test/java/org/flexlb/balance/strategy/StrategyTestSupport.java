@@ -50,14 +50,10 @@ final class StrategyTestSupport {
     static EndpointRegistry endpointRegistry(ConfigService configService) {
         TestRequestRuntime runtime = new TestRequestRuntime();
         DeliveryStrategy delivery = parkedDelivery(runtime.requests());
-        return new EndpointRegistry(
-                configService,
-                runtime.events(),
-                Mockito.mock(BatchSchedulerReporter.class),
-                delivery,
-                new NonBatchTtftEstimator(),
-                new PlacementAvailability(),
-                new QueueCapacity(), new PrefillQueueRegistry());
+        return new EndpointRegistry(configService, runtime.events(), Mockito.mock(BatchSchedulerReporter.class),
+                delivery, new NonBatchTtftEstimator(), new PlacementAvailability(), new QueueCapacity(),
+                new PrefillQueueRegistry(),
+                org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
     }
 
     static WorkerStatus workerStatus(

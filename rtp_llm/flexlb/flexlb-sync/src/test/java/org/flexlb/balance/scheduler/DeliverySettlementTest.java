@@ -109,7 +109,8 @@ class DeliverySettlementTest {
     void realDecodeReservationSurvivesRejectionUntilItsOwnFinished(boolean observed) throws Exception {
         var decode = spy(
                 new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
-                        new EndpointEventHandler(registry, org.mockito.Mockito.mock(PrefillQueueRegistry.class))));
+                        new EndpointEventHandler(registry, org.mockito.Mockito.mock(PrefillQueueRegistry.class),
+                                mock(org.flexlb.config.ConfigService.class))));
         DecodeEndpoint.ReservationHandle reservation;
         try (var hold = decode.tryHold()) {
             reservation = decode.reserveUnqueued(hold, "2", 1L, 1L, 50);
@@ -166,9 +167,10 @@ class DeliverySettlementTest {
             Member member = members.get(i);
             member.claim().complete(DeliveryResult.delivered());
             assertTrue(member.item().future().get(5, TimeUnit.SECONDS).isSuccess());
-            new EndpointEventHandler(registry, org.mockito.Mockito.mock(PrefillQueueRegistry.class)).onPrefillStatus(
-                    prefill, org.flexlb.balance.endpoint.EndpointTestSupport.statusObservation(RoleType.PREFILL),
-                    ledger.finish(20L, member.item()));
+            new EndpointEventHandler(registry, org.mockito.Mockito.mock(PrefillQueueRegistry.class),
+                    mock(org.flexlb.config.ConfigService.class)).onPrefillStatus(prefill,
+                            org.flexlb.balance.endpoint.EndpointTestSupport.statusObservation(RoleType.PREFILL),
+                            ledger.finish(20L, member.item()));
             assertOccupancy(i == 15 ? 0 : 1, 15 - i);
         }
         assertTrue(ledger.prefill.batchAvailability(2).isAvailable());
@@ -489,9 +491,10 @@ class DeliverySettlementTest {
             claim = member.slot().tryInstallPreemption(110L, 111L, "priority victim");
         }
         assertTrue(claim.applyPhase(PreemptionCancelPhase.CANCEL_IN_FLIGHT));
-        new EndpointEventHandler(registry, org.mockito.Mockito.mock(PrefillQueueRegistry.class)).onPrefillStatus(
-                prefill, org.flexlb.balance.endpoint.EndpointTestSupport.statusObservation(RoleType.PDFUSION),
-                ledger.finish(110L, member.item()));
+        new EndpointEventHandler(registry, org.mockito.Mockito.mock(PrefillQueueRegistry.class),
+                mock(org.flexlb.config.ConfigService.class)).onPrefillStatus(prefill,
+                        org.flexlb.balance.endpoint.EndpointTestSupport.statusObservation(RoleType.PDFUSION),
+                        ledger.finish(110L, member.item()));
         assertFalse(member.item().future().isDone());
         assertTrue(claim.applyPhase(PreemptionCancelPhase.CANCEL_UNKNOWN));
 

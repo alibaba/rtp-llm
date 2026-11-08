@@ -374,8 +374,8 @@ class EncoderSchedulingIntegrationTest {
         when(engine.runningTaskList()).thenReturn(tasks);
         when(engine.runningQueryLen()).thenReturn(running);
         when(engine.waitingQueryLen()).thenReturn(waiting);
-        EncoderEndpoint endpoint = new EncoderEndpoint(status,
-                new EndpointEventHandler(requests, org.mockito.Mockito.mock(PrefillQueueRegistry.class)));
+        EncoderEndpoint endpoint = new EncoderEndpoint(status, new EndpointEventHandler(requests,
+                org.mockito.Mockito.mock(PrefillQueueRegistry.class), mock(org.flexlb.config.ConfigService.class)));
         when(directory.holdEndpoint(eq(RoleType.ENCODER), eq(ip))).thenAnswer(invocation -> endpoint.tryHold());
         return endpoint;
     }

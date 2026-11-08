@@ -33,14 +33,10 @@ public final class RunnerTestSupport {
 
     public static EndpointRegistry endpointRegistry(ConfigService configService) {
         DeliveryStrategy delivery = Mockito.mock(DeliveryStrategy.class);
-        return new EndpointRegistry(
-                configService,
-                NOOP_EVENT_SINK,
-                Mockito.mock(BatchSchedulerReporter.class),
-                delivery,
-                new NonBatchTtftEstimator(),
-                new PlacementAvailability(),
-                new QueueCapacity(), new PrefillQueueRegistry());
+        return new EndpointRegistry(configService, NOOP_EVENT_SINK, Mockito.mock(BatchSchedulerReporter.class),
+                delivery, new NonBatchTtftEstimator(), new PlacementAvailability(), new QueueCapacity(),
+                new PrefillQueueRegistry(),
+                org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
     }
 
     public static WorkerStatus discovered(

@@ -4,6 +4,7 @@ import org.flexlb.balance.schedulev2.QueueBlockReason;
 import org.flexlb.balance.schedulev2.request.Request;
 import org.flexlb.dao.master.WorkerStatus;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -18,7 +19,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class PrefillActiveTasks {
 
     private final AtomicReference<PrefillCapacitySnapshot> capacitySnapshot =
-            new AtomicReference<>(new PrefillCapacitySnapshot(null, Map.of(), Set.of(), 0L));
+            new AtomicReference<>(new PrefillCapacitySnapshot(null, Map.of(), Set.of()));
 
     public void updateWorkerCapacity(WorkerStatus.EngineObservation workerStatus) {
         Set<String> workerActiveRequestIds = new HashSet<>();
@@ -26,9 +27,8 @@ public final class PrefillActiveTasks {
             workerActiveRequestIds.add(task.requestId());
         }
         Set<String> immutableWorkerActiveRequestIds = Set.copyOf(workerActiveRequestIds);
-        long nowMs = System.currentTimeMillis();
         capacitySnapshot.updateAndGet(old -> new PrefillCapacitySnapshot(workerStatus, old.localPublishReservations(),
-                immutableWorkerActiveRequestIds, nowMs));
+                immutableWorkerActiveRequestIds));
     }
 
     public long inflightCount() {
@@ -52,9 +52,8 @@ public final class PrefillActiveTasks {
             }
             Map<String, DispatchedRequest> localPublishReservations = new HashMap<>(old.localPublishReservations());
             localPublishReservations.put(id, record);
-            if (capacitySnapshot.compareAndSet(old,
-                    new PrefillCapacitySnapshot(old.workerStatus(), Map.copyOf(localPublishReservations),
-                            old.workerActiveRequestIds(), old.workerStatusUpdatedAtMs()))) {
+            if (capacitySnapshot.compareAndSet(old, new PrefillCapacitySnapshot(old.workerStatus(),
+                    Map.copyOf(localPublishReservations), old.workerActiveRequestIds()))) {
                 return null;
             }
         }
@@ -67,33 +66,18 @@ public final class PrefillActiveTasks {
         }
     }
 
-    public void release(DispatchedRequest record) {
-        release(record, false, 0L, 0L);
-    }
-
-    public void releaseExpired(DispatchedRequest record, long nowMs, long statusTimeoutMs) {
-        release(record, true, nowMs, statusTimeoutMs);
-    }
-
-    private void release(DispatchedRequest record, boolean expired, long nowMs, long statusTimeoutMs) {
-        String requestId = record.request().requestId();
+    public void release(DispatchedRequest dispatchedRequest) {
+        String requestId = dispatchedRequest.request().requestId();
         while (true) {
             PrefillCapacitySnapshot old = capacitySnapshot.get();
-            if (old.localPublishReservations().get(requestId) != record) {
+            if (old.localPublishReservations().get(requestId) != dispatchedRequest) {
                 return;
             }
             Map<String, DispatchedRequest> localPublishReservations = new HashMap<>(old.localPublishReservations());
             localPublishReservations.remove(requestId);
-            Set<String> workerActiveRequestIds = old.workerActiveRequestIds();
-            // 本地记录可以过期；并发收到的新引擎快照仍保留实际活跃占用。
-            if (expired && nowMs - old.workerStatusUpdatedAtMs() >= statusTimeoutMs) {
-                workerActiveRequestIds = new HashSet<>(workerActiveRequestIds);
-                workerActiveRequestIds.remove(requestId);
-                workerActiveRequestIds = Set.copyOf(workerActiveRequestIds);
-            }
-            if (capacitySnapshot.compareAndSet(old,
-                    new PrefillCapacitySnapshot(old.workerStatus(), Map.copyOf(localPublishReservations),
-                            workerActiveRequestIds, old.workerStatusUpdatedAtMs()))) {
+            PrefillCapacitySnapshot updated = new PrefillCapacitySnapshot(old.workerStatus(),
+                    Collections.unmodifiableMap(localPublishReservations), old.workerActiveRequestIds());
+            if (capacitySnapshot.compareAndSet(old, updated)) {
                 return;
             }
         }

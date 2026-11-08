@@ -102,7 +102,8 @@ class QueuedBatchDeliveryTest {
         doAnswer(call -> { prefill.releaseCommittedItem(call.getArgument(0)); return null; })
                 .when(prefill).settleFailedRequest(any());
         decode = new DecodeEndpoint(WorkerStatus.createDiscovered(RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
-                new EndpointEventHandler(registry, org.mockito.Mockito.mock(PrefillQueueRegistry.class)));
+                new EndpointEventHandler(registry, org.mockito.Mockito.mock(PrefillQueueRegistry.class),
+                        mock(org.flexlb.config.ConfigService.class)));
         CountDownLatch entered = new CountDownLatch(1);
         dispatcher.tryPrepareSubmission().value().submit(sender -> {
             entered.countDown();

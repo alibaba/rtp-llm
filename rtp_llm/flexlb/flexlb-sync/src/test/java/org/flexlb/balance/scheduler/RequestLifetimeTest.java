@@ -348,8 +348,8 @@ class RequestLifetimeTest {
                 assertFalse(future.isDone());
             }
 
-            EndpointEventHandler eventHandler =
-                    new EndpointEventHandler(registry, org.mockito.Mockito.mock(PrefillQueueRegistry.class));
+            EndpointEventHandler eventHandler = new EndpointEventHandler(registry,
+                    org.mockito.Mockito.mock(PrefillQueueRegistry.class), mock(org.flexlb.config.ConfigService.class));
             if (evidenceSource == RoleType.PREFILL) {
                 eventHandler.onPrefillStatus(prefill,
                         org.flexlb.balance.endpoint.EndpointTestSupport.statusObservation(RoleType.PREFILL),

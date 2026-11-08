@@ -54,17 +54,40 @@ public final class EndpointTestSupport {
                 endpointEvents, reporter, new PlacementAvailability());
     }
 
-    static PrefillEndpoint standalonePrefillEndpoint(
-            WorkerStatus status, Supplier<FlexlbConfig> configSupplier, DeliveryStrategy deliveryStrategy,
-            EndpointEventHandler endpointEvents, BatchSchedulerReporter reporter,
-            PlacementAvailability availability) {
+    static PrefillEndpoint standalonePrefillEndpoint(WorkerStatus status,
+                                                     Supplier<FlexlbConfig> configSupplier,
+                                                     DeliveryStrategy deliveryStrategy,
+                                                     EndpointEventHandler endpointEvents,
+                                                     BatchSchedulerReporter reporter,
+                                                     PlacementAvailability availability) {
+        return standalonePrefillEndpoint(status, configSupplier, deliveryStrategy, endpointEvents, reporter,
+                availability, org.mockito.Mockito.mock(org.flexlb.service.monitor.RequestSchedulerReporter.class));
+    }
+
+    static PrefillEndpoint standalonePrefillEndpoint(WorkerStatus status,
+                                                     FlexlbConfig config,
+                                                     DeliveryStrategy deliveryStrategy,
+                                                     EndpointEventHandler endpointEvents,
+                                                     BatchSchedulerReporter reporter,
+                                                     org.flexlb.service.monitor.RequestSchedulerReporter requestReporter) {
+        return standalonePrefillEndpoint(status, () -> config, deliveryStrategy, endpointEvents, reporter,
+                new PlacementAvailability(), requestReporter);
+    }
+
+    static PrefillEndpoint standalonePrefillEndpoint(WorkerStatus status,
+                                                     Supplier<FlexlbConfig> configSupplier,
+                                                     DeliveryStrategy deliveryStrategy,
+                                                     EndpointEventHandler endpointEvents,
+                                                     BatchSchedulerReporter reporter,
+                                                     PlacementAvailability availability,
+                                                     org.flexlb.service.monitor.RequestSchedulerReporter requestReporter) {
         EndpointRegistry registry = org.mockito.Mockito.mock(EndpointRegistry.class);
         org.mockito.Mockito.when(registry.getEndpointCount(status.getRole())).thenReturn(1);
         PrefillTtftEstimator ttftEstimator = deliveryStrategy instanceof BatchDeliveryStrategy
                 ? new BatchTtftEstimator() : new NonBatchTtftEstimator();
-        return new PrefillEndpoint(status, configSupplier, deliveryStrategy, ttftEstimator,
-                endpointEvents, reporter, availability, registry,
-                new QueueCapacity(), new org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry());
+        return new PrefillEndpoint(status, configSupplier, deliveryStrategy, ttftEstimator, endpointEvents, reporter,
+                availability, registry, new QueueCapacity(),
+                new org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry(), requestReporter);
     }
 
     static EndpointEventHandler noopEventSink() {

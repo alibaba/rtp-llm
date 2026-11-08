@@ -112,7 +112,7 @@ class PrefillQueueLoopTest {
     }
 
     @Test
-    void publishedRequestNotReportedByEngineIsRemovedAfterConfirmTimeout() {
+    void queueLoopDoesNotScanPublishedRequestStatus() {
         config.getRequestLifecycle().getRequest().setStatusUpdateTimeoutMs(0L);
         Request request = addWaiting("1");
         loop.runOnce();
@@ -125,8 +125,8 @@ class PrefillQueueLoopTest {
         request.publish(Stage.DECODE_WAITING, List.of());
         loop.runOnce();
 
-        assertEquals(0, queues.find(endpoint).dispatchedCount());
-        verify(reporter).reportStatusUpdateTimeout(endpoint.getStatus().getRole(), endpoint.ipPort());
+        assertEquals(1, queues.find(endpoint).dispatchedCount());
+        org.mockito.Mockito.verifyNoInteractions(reporter);
     }
 
     @Test
@@ -239,6 +239,38 @@ class PrefillQueueLoopTest {
     /**
      * 模拟主队列已经选好 Prefill：请求在排队总数里、占着一个主队列名额，处于 PREFILL_WAITING。
      */
+    @Test
+    void retirementDuringEnqueueReturnsRequestToMainWithoutLosingIt() {
+        PrefillQueue queue = endpoint.prefillQueue();
+        loop = new PrefillQueueLoop(queue, queues, cleanup, mainQueue, endpointRegistry, configService,
+                sentToDecode::add, queueReporter);
+        var retiring = new java.util.concurrent.atomic.AtomicBoolean();
+        when(endpoint.isRetired()).thenAnswer(call -> retiring.getAndSet(true));
+
+        Request request = addWaiting("retirement-during-enqueue");
+        long sequence = request.queueSeq();
+        long deadline = request.ctx().getRequestExpiresAtMs();
+        assertEquals(Stage.PREFILL_WAITING, request.stage());
+        assertEquals(1, queue.waitingCount());
+        assertFalse(request.future().isDone());
+
+        loop.runOnce();
+
+        assertEquals(Stage.MAIN_WAITING, request.stage());
+        assertEquals(0, queue.waitingCount());
+        assertEquals(0L, queue.estimatedWorkMs(0L));
+        assertEquals(1, mainQueue.size());
+        assertEquals(0, queueCapacity.engineSubQueueWaiting(RoleType.PREFILL));
+        assertEquals(1L, queueCapacity.globalQueueAndEngineSubQueueCount());
+        assertEquals(sequence, request.queueSeq());
+        assertEquals(deadline, request.ctx().getRequestExpiresAtMs());
+        assertTrue(sentToDecode.isEmpty());
+        assertFalse(request.future().isDone());
+
+        request.cancel(CancelReason.CLIENT_CANCELLED);
+        assertEquals(0L, queueCapacity.globalQueueAndEngineSubQueueCount());
+    }
+
     private Request addWaiting(String requestId) {
         return addWaiting(requestId, 16L);
     }
@@ -264,7 +296,7 @@ class PrefillQueueLoopTest {
         queues.addWaiting(request);
         if (loop == null) {
             loop = new PrefillQueueLoop(queues.find(endpoint), queues, cleanup, mainQueue, endpointRegistry,
-                    configService, reporter, sentToDecode::add, queueReporter);
+                    configService, sentToDecode::add, queueReporter);
         }
         return request;
     }
@@ -370,7 +402,7 @@ class PrefillQueueLoopTest {
             return endpoint;
         }).when(endpointRegistry).get(RoleType.PREFILL, "p1:8000");
         queues.start(queue -> new PrefillQueueLoop(queue, queues, cleanup, mainQueue, endpointRegistry, configService,
-                reporter, request -> {
+                request -> {
                     if (request.selectedPrefill().endpoint() == other) {
                         secondSent.complete(request);
                     }

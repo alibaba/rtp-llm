@@ -235,7 +235,7 @@ class DecodeQueueLoopTest {
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(20L);
         config.getDispatcher().setMaxInflightPerPrefillWorker(4);
         var prefill = V2TestSupport.prefillEndpoint("p1:8000");
-        PrefillQueue queue = new PrefillQueue(prefill, true);
+        PrefillQueue queue = new PrefillQueue(prefill, true, reporter);
         when(prefill.prefillQueue()).thenReturn(queue);
         var requests = new java.util.ArrayList<Request>();
         for (int i = 1; i <= 6; i++) {

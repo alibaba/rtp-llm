@@ -64,21 +64,18 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 prepareBatchSubmission, "prepareBatchSubmission");
         this.lifecycle = new RequestRegistry(
                 configService, batchReporter, requestReporter);
-        this.endpointEvents = new EndpointEventHandler(lifecycle, org.mockito.Mockito.mock(PrefillQueueRegistry.class));
+        this.endpointEvents = new EndpointEventHandler(lifecycle, org.mockito.Mockito.mock(PrefillQueueRegistry.class),
+                configService);
         AtomicLong batchIds = new AtomicLong();
         DeliveryMetrics deliveryMetrics = new DeliveryMetrics(batchReporter);
         DeliveryStrategy delivery = configService.loadBalanceConfig().getDispatcher().requiresGenerateInput()
                 ? new BatchDeliveryStrategy(prepareBatchSubmission, batchIds::incrementAndGet, lifecycle, deliveryMetrics)
                 : new NonBatchDeliveryStrategy(lifecycle, deliveryMetrics);
-        this.registry = new EndpointRegistry(
-                configService,
-                endpointEvents,
-                batchReporter,
-                delivery,
+        this.registry = new EndpointRegistry(configService, endpointEvents, batchReporter, delivery,
                 configService.loadBalanceConfig().getDispatcher().requiresGenerateInput()
-                        ? new BatchTtftEstimator() : new NonBatchTtftEstimator(),
-                placementAvailability,
-                queueCapacity, new PrefillQueueRegistry());
+                        ? new BatchTtftEstimator()
+                        : new NonBatchTtftEstimator(),
+                placementAvailability, queueCapacity, new PrefillQueueRegistry(), requestReporter);
         this.evictionManager = new EvictionManager(
                 requestReporter,
                 cancelChannel,

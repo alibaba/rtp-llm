@@ -10,6 +10,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -127,6 +128,7 @@ public class EndpointRegistry {
     private final ConfigService configService;
     private final EndpointEventHandler endpointEvents;
     private final BatchSchedulerReporter reporter;
+    private final RequestSchedulerReporter requestReporter;
     private final DeliveryStrategy deliveryStrategy;
     private final PrefillTtftEstimator ttftEstimator;
     private final PlacementAvailability placementAvailability;
@@ -165,7 +167,8 @@ public class EndpointRegistry {
                             PrefillTtftEstimator ttftEstimator,
                             PlacementAvailability placementAvailability,
                             QueueCapacity queueCapacity,
-                            PrefillQueueRegistry prefillQueueRegistry) {
+                            PrefillQueueRegistry prefillQueueRegistry,
+                            RequestSchedulerReporter requestReporter) {
         this.configService = configService;
         this.endpointEvents = endpointEvents;
         this.reporter = reporter;
@@ -174,6 +177,7 @@ public class EndpointRegistry {
         this.placementAvailability = placementAvailability;
         this.queueCapacity = queueCapacity;
         this.prefillQueueRegistry = prefillQueueRegistry;
+        this.requestReporter = requestReporter;
     }
 
     public WorkerEndpoint get(RoleType roleType, String ipPort) {
@@ -733,24 +737,17 @@ public class EndpointRegistry {
         }
     }
 
-    private WorkerEndpoint createEndpoint(WorkerStatus status,
-                                          RoleType role) {
+    private WorkerEndpoint createEndpoint(WorkerStatus status, RoleType role) {
         if (role == RoleType.FRONTEND) {
             throw new IllegalArgumentException("Unsupported role: " + role);
         }
         prepareEndpointMetrics(role, status);
         return switch (role) {
-            case PREFILL, PDFUSION -> new PrefillEndpoint(
-                    status,
-                    configService::loadBalanceConfig,
-                    deliveryStrategy,
-                    ttftEstimator,
-                    endpointEvents,
-                    reporter,
-                    placementAvailability,
-                    this,
-                    queueCapacity,
-                    prefillQueueRegistry);
+            case PREFILL,
+                    PDFUSION ->
+                new PrefillEndpoint(status, configService::loadBalanceConfig, deliveryStrategy, ttftEstimator,
+                        endpointEvents, reporter, placementAvailability, this, queueCapacity, prefillQueueRegistry,
+                        requestReporter);
             case DECODE -> new DecodeEndpoint(
                     status, endpointEvents, placementAvailability);
             case ENCODER -> new EncoderEndpoint(status, endpointEvents);

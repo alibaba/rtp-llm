@@ -11,8 +11,7 @@ import java.util.Set;
  */
 record PrefillCapacitySnapshot(WorkerStatus.EngineObservation workerStatus,
                                Map<String, DispatchedRequest> localPublishReservations,
-                               Set<String> workerActiveRequestIds,
-                               long workerStatusUpdatedAtMs) {
+                               Set<String> workerActiveRequestIds) {
 
     long inflightCount() {
         return countTasks().count();

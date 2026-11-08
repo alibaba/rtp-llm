@@ -61,7 +61,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                                        RequestSchedulerReporter requestReporter) {
         this.lifecycle = new RequestRegistry(
                 configService, batchReporter, requestReporter);
-        this.endpointEvents = new EndpointEventHandler(lifecycle, org.mockito.Mockito.mock(PrefillQueueRegistry.class));
+        this.endpointEvents = new EndpointEventHandler(lifecycle, org.mockito.Mockito.mock(PrefillQueueRegistry.class),
+                configService);
         DispatcherConfig dispatcher = Objects.requireNonNull(
                 configService.loadBalanceConfig().getDispatcher(),
                 "dispatcher");
@@ -82,15 +83,11 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                             new DeliveryMetrics(batchReporter));
             case NON_BATCH_V2 -> throw new IllegalArgumentException("该测试环境仅用于 BATCH 和 NON_BATCH");
         };
-        this.registry = new EndpointRegistry(
-                configService,
-                endpointEvents,
-                batchReporter,
-                deliveryStrategy,
+        this.registry = new EndpointRegistry(configService, endpointEvents, batchReporter, deliveryStrategy,
                 dispatcher.getType() == DispatcherConfig.Type.BATCH
-                        ? new BatchTtftEstimator() : new NonBatchTtftEstimator(),
-                placementAvailability,
-                queueCapacity, new PrefillQueueRegistry());
+                        ? new BatchTtftEstimator()
+                        : new NonBatchTtftEstimator(),
+                placementAvailability, queueCapacity, new PrefillQueueRegistry(), requestReporter);
         this.router = new BindingRouter(new org.flexlb.sync.status.WorkerDirectory(registry), configService, lifecycle);
         var cancelChannel = org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
         var preemption = new org.flexlb.balance.eviction.DecodePreemptionCoordinator(cancelChannel, lifecycle, requestReporter);
