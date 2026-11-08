@@ -469,10 +469,15 @@ def _fused_q_kv_rmsnorm_kernel(
     kv_in_stride,
     kv_out_stride,
     eps,
+    q_fp8_ptr,
+    q_scales_ptr,
+    q_amax_ptr,
+    scale_rows,
     Q_SIZE: tl.constexpr,
     KV_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     launch_pdl: tl.constexpr,
+    QUANTIZE_Q: tl.constexpr,
 ):
     # num_tokens goes on grid-x (max 2**31 - 1); task goes on grid-y.
     # CUDA's grid-y/z are capped at 65535, so putting num_tokens there crashes
@@ -510,8 +515,24 @@ def _fused_q_kv_rmsnorm_kernel(
     x = tl.load(row_in + block, mask=mask, other=0.0).to(tl.float32)
     variance = tl.sum(x * x, axis=0) / SIZE
     rrms = tl.rsqrt(variance + eps)
-    y = x * rrms * w
-    tl.store(row_out + block, y.to(row_out.dtype.element_ty), mask=mask)
+    y = (x * rrms * w).to(row_out.dtype.element_ty)
+    tl.store(row_out + block, y, mask=mask)
+    if QUANTIZE_Q and pid_task == 0:
+        rounded = tl.where(mask, y.to(tl.float32), 0.0)
+        tl.store(q_amax_ptr + token_idx, tl.max(tl.abs(rounded), axis=0))
+        groups = tl.reshape(rounded, (BLOCK_SIZE // 128, 128))
+        amax = tl.maximum(tl.max(tl.abs(groups), axis=1), 1e-4)
+        bits = (amax * (1.0 / 448.0)).to(tl.int32, bitcast=True)
+        exponent = ((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).to(tl.int32)
+        scale = (exponent << 23).to(tl.float32, bitcast=True)
+        quantized = tl.reshape(tl.clamp(groups / scale[:, None], -448.0, 448.0), (BLOCK_SIZE,))
+        tl.store(q_fp8_ptr + token_idx * Q_SIZE + block, quantized, mask=mask)
+        packed = tl.sum(
+            tl.reshape(exponent, (BLOCK_SIZE // 512, 4))
+            << (tl.arange(0, 4)[None, :] * 8), axis=1,
+        )
+        packs = tl.arange(0, BLOCK_SIZE // 512)
+        tl.store(q_scales_ptr + packs * scale_rows + token_idx, packed, packs < Q_SIZE // 512)
 
 
 @lru_cache(None)
@@ -519,7 +540,7 @@ def _supports_pdl(device_index):
     return torch.cuda.get_device_capability(device_index)[0] >= 9
 
 
-def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps, *, packed_output=False):
+def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps, *, packed_output=False, quantize_q=False):
     if q.ndim != 2 or kv.ndim != 2 or q.shape[0] != kv.shape[0]:
         raise ValueError("MLA Q/KV norms require rank-2 Q/KV with equal token counts")
     for x, weight in ((q, q_weight), (kv, kv_weight)):
@@ -537,15 +558,28 @@ def fused_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps, *, packed_output=False):
     else:
         q_out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
         kv_out = torch.empty(kv.shape, device=kv.device, dtype=kv.dtype)
+    scale_rows = triton.cdiv(q.shape[0], 4) * 4
+    if quantize_q:
+        if q.shape[1] % 512 or packed_output:
+            raise ValueError("Q encoding requires 512-aligned Q and separate Q/KV outputs")
+        q_fp8 = q.new_empty(q.shape, dtype=torch.float8_e4m3fn)
+        q_scales = q.new_empty((q.shape[1] // 512, scale_rows), dtype=torch.int32)
+        q_amax = q.new_empty(q.shape[0], dtype=torch.float32)
+    else:
+        q_fp8 = q_scales = q_amax = q_out
     if q.shape[0]:
         block = triton.next_power_of_2(max(q.shape[1], kv.shape[1]))
         _fused_q_kv_rmsnorm_kernel[(q.shape[0], 2)](
             q, q_out, q_weight, q.stride(0), q_out.stride(0),
             kv, kv_out, kv_weight, kv.stride(0), kv_out.stride(0), eps,
+            q_fp8, q_scales, q_amax, scale_rows,
             Q_SIZE=q.shape[1], KV_SIZE=kv.shape[1], BLOCK_SIZE=block,
             launch_pdl=_supports_pdl(q.device.index),
+            QUANTIZE_Q=quantize_q,
             num_warps=8 if block >= 2048 else 4,
         )
+    if quantize_q:
+        return q_out, kv_out, (q_fp8, q_scales.T[:q.shape[0]]), q_amax
     return packed if packed_output else (q_out, kv_out)
 
 

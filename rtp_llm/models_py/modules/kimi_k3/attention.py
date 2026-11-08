@@ -1,6 +1,7 @@
 """K3 projections over RTP's MLA and paged KDA implementations."""
 
 from functools import lru_cache
+import os
 
 import torch
 from torch import nn
@@ -91,6 +92,11 @@ class KimiK3KDA(KdaAttention):
         # K3 keeps BF16 convolution storage and FP32 recurrent checkpoints.
         prefill.gate_lower_bound = runtime.kda_gate_lower_bound
         decode.gate_lower_bound = runtime.kda_gate_lower_bound
+        nvfp4_ag_mode = "off"
+        if getattr(input_projection, "dynamic_input_scale", False):
+            nvfp4_ag_mode = os.environ.get("KDA_NVFP4_AG_MODE", "serial")
+            if nvfp4_ag_mode not in ("serial", "direct", "overlap", "auto"):
+                raise ValueError("KDA_NVFP4_AG_MODE must be serial, direct, overlap, or auto")
         super().__init__(
             input_projection=input_projection,
             forget_projection=forget_projection,
@@ -107,6 +113,7 @@ class KimiK3KDA(KdaAttention):
             ),
             strided_fp8_prefill_forget=strided_fp8_forget,
             ag_local_fp8_overlap=isinstance(input_projection, CudaFp8GEMMLinear),
+            nvfp4_ag_mode=nvfp4_ag_mode,
         )
 
 
@@ -121,6 +128,7 @@ class KimiK3MLA(nn.Module):
     def __init__(self, config, parallelism, weights, layer_idx, hardware=None):
         super().__init__()
         self._fp8_collective = None
+        self._fp8_input_collective = None
         self._bf16_collective = None
         self._mtp_bf16_collectives = None
         cfg = config.attn_config
@@ -218,15 +226,13 @@ class KimiK3MLA(nn.Module):
         return output.reshape(-1, self.heads * self.v_dim)
 
     def forward(self, hidden, fmha, cache, attention_inputs=None, metadata=None):
-        use_fused_ag = (
-            self._fp8_collective is not None
-            and self._fp8_collective.eligible_ag(hidden, attention_inputs, metadata)
-        )
+        fp8_ag = self._fp8_input_collective
+        use_fused_ag = fp8_ag is not None and fp8_ag.eligible_ag(hidden, attention_inputs, metadata)
         if isinstance(hidden, Fp8Activation) and not use_fused_ag:
             raise RuntimeError("prequantized FP8 input requires the FP8 AG/GEMM path")
         if use_fused_ag:
             with profile_scope("RTP::attention.fp8_ag_gemm"):
-                fused_input = self._fp8_collective.all_gather_gemm(hidden, self.input)
+                fused_input = fp8_ag.all_gather_gemm(hidden, self.input)
             full_hidden = None
         elif self._bf16_collective is not None and self._bf16_collective.eligible(
             hidden.shape[0], attention_inputs, metadata,

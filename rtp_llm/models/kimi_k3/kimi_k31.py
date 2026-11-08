@@ -130,7 +130,7 @@ class KimiK31(KimiK3):
     @classmethod
     def _post_build_model_config(cls, config):
         config.validate_nvfp4()
-        logging.info("K3.1 NVFP4 W4A4 target GEMMs: %s", config.k31_nvfp4_modules or "disabled")
+        logging.info("K3.1 target NVFP4 switch selection: %s", config.k31_nvfp4_modules or "disabled")
         types = config.hybrid_attention_config.hybrid_attention_types
         for module in config.k31_nvfp4_modules:
             present = (

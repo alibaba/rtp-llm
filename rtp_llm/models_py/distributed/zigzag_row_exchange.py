@@ -414,6 +414,14 @@ class DirectedRowExchange:
             project_heads=project_heads,
         )
 
+    def consume_nvfp4(self, activation, plan, consumer, *, before_consume, project_heads=None):
+        """Deliver Zigzag intervals with their original source's scalar scale."""
+        return self._run(
+            activation, plan, "to_zigzag", self.chunk_capacity, consumer=consumer,
+            consuming=True, before_consume=before_consume, nvfp4=True,
+            project_heads=project_heads,
+        )
+
     def _fp8_views(self, storage, rows):
         # These sections fit inside the BF16 allocation used by the inverse route.
         raw = storage.view(torch.uint8).flatten()
@@ -547,7 +555,7 @@ class DirectedRowExchange:
 
     def _run(self, values, plan, direction, chunk_rows, *, out=None, consumer=None,
              consuming=False, before_consume=None, producer=None, fp8=False,
-             project_heads=None, producer_rows=None):
+             nvfp4=False, project_heads=None, producer_rows=None):
         with self._lock:
             if not self.enabled:
                 raise RuntimeError("directed exchange is disabled after a setup or asynchronous failure")
@@ -561,10 +569,10 @@ class DirectedRowExchange:
                         raise ValueError("chunk_rows exceeds fixed receive capacity")
                     validate_plan(plan, direction, self.size, self.rank, self.max_rows)
                     self._require_prepared(plan, chunk_rows)
-                    if fp8:
+                    if fp8 or nvfp4:
                         if (self.hidden_size != 7168 or values.device != self.device
                                 or values.shape != (plan.local_rows, self.hidden_size)):
-                            raise ValueError("FP8 directed exchange requires local K3.1 hidden rows")
+                            raise ValueError("Quantized directed exchange requires local K3.1 hidden rows")
                     elif producer is None:
                         self._validate_tensor(values, plan.local_rows, "values")
                     else:
@@ -590,9 +598,10 @@ class DirectedRowExchange:
                         if out is None:
                             out = torch.empty_like(values)
                         self._validate_tensor(out, plan.local_rows, "out")
-                    if fp8:
-                        return self._submit_fp8(
+                    if fp8 or nvfp4:
+                        return self._submit_quantized(
                             values, plan, caller, consumer, before_consume, project_heads,
+                            nvfp4=nvfp4,
                         )
                     if producer_rows is not None:
                         self._submit_produced_chunks(values, plan, producer_rows, producer, caller, out)
@@ -604,15 +613,42 @@ class DirectedRowExchange:
                 raise
             return out
 
-    def _submit_fp8(self, activation, plan, caller, consumer, before_consume, project_heads):
+    def _submit_quantized(
+        self, activation, plan, caller, consumer, before_consume, project_heads, *, nvfp4,
+    ):
         rows = plan.local_rows
         comm = self._stream
         source, source_scales, source_heads = self._fp8_views(self._source, self.max_rows)
         peers = [self._fp8_views(peer, self.max_rows) for peer in self._peers]
         # Allocate on the caller before recording entry so comm also waits
         # for any earlier uses of memory recycled by the caller's allocator.
-        target = torch.empty_like(activation.values)
-        scales = activation.scale_wire.new_empty((source_scales.shape[0], (rows + 3) // 4 * 4))
+        if nvfp4:
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_comm_fusion import (
+                PackedNvfp4Activation, nvfp4_packet_capacity,
+            )
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import Fp4Activation
+            from rtp_llm.models_py.triton_kernels.common.nvfp4 import pull_nvfp4_rows
+
+            packet_bytes = nvfp4_packet_capacity(rows, self.hidden_size)
+            if packet_bytes > source_heads.data_ptr() - self._source.data_ptr():
+                raise ValueError("NVFP4 packet exceeds its publication region")
+            wire = activation.wire
+            if (wire.shape != (packet_bytes,) or wire.dtype != torch.uint8
+                    or not wire.is_contiguous()):
+                raise ValueError("Invalid NVFP4 source packet")
+            local_wire = self._source.view(torch.uint8).flatten()[:packet_bytes]
+            remote_packets = [
+                PackedNvfp4Activation(peer.view(torch.uint8).flatten()[:packet_bytes], activation.shape)
+                for peer in self._peers
+            ]
+            target_packet = PackedNvfp4Activation.empty(rows, self.hidden_size, self.device)
+            values, block_scales, _ = target_packet.unpack(target_packet.wire)
+            target = Fp4Activation(
+                values, block_scales, values.new_empty((rows,), dtype=torch.float32),
+            )
+        else:
+            target = torch.empty_like(activation.values)
+            scales = activation.scale_wire.new_empty((source_scales.shape[0], (rows + 3) // 4 * 4))
         self._entry.record(caller)
         if project_heads is not None:
             if not hasattr(self, "_heads_ready"):
@@ -629,30 +665,31 @@ class DirectedRowExchange:
         with torch.cuda.stream(comm), profile_scope(f"{_HIDDEN_ROUTE_SCOPE}.publish"):
             comm.wait_event(self._done)
             comm.wait_event(self._entry)
-            activation.values.record_stream(comm)
-            activation.scale_wire.record_stream(comm)
-            source[:rows].copy_(activation.values)
-            source_scales[:, :rows].copy_(activation.scale_wire[:, :rows])
+            if nvfp4:
+                wire.record_stream(comm)
+                local_wire.copy_(wire)
+            else:
+                activation.values.record_stream(comm)
+                activation.scale_wire.record_stream(comm)
+                source[:rows].copy_(activation.values)
+                source_scales[:, :rows].copy_(activation.scale_wire[:, :rows])
             self._handle.barrier(channel=0, timeout_ms=_TIMEOUT_SECONDS * 1000)
         with torch.cuda.stream(comm), profile_scope(f"{_HIDDEN_ROUTE_SCOPE}.pull"):
-            target.record_stream(comm)
-            scales.record_stream(comm)
-            for segment in plan.to_zigzag:
-                src, dst, count = segment.source_offset, segment.destination_offset, segment.rows
-                remote, remote_scales, _ = peers[segment.peer]
-                target[dst:dst + count].copy_(remote[src:src + count])
-                scales[:, dst:dst + count].copy_(remote_scales[:, src:src + count])
-            scales[:, rows:].fill_(0x7F7F7F7F)
+            if nvfp4:
+                target_packet.wire.record_stream(comm)
+                target.scale.record_stream(comm)
+                for segment in plan.to_zigzag:
+                    pull_nvfp4_rows(remote_packets[segment.peer], target, segment)
+            else:
+                target.record_stream(comm)
+                scales.record_stream(comm)
+                for segment in plan.to_zigzag:
+                    src, dst, count = segment.source_offset, segment.destination_offset, segment.rows
+                    remote, remote_scales, _ = peers[segment.peer]
+                    target[dst:dst + count].copy_(remote[src:src + count])
+                    scales[:, dst:dst + count].copy_(remote_scales[:, src:src + count])
+                scales[:, rows:].fill_(0x7F7F7F7F)
             self._ready[0].record(comm)
-
-        if before_consume is not None:
-            result = before_consume()
-            if result is not None or torch.cuda.current_stream(self.device) != caller:
-                raise RuntimeError("before_consume must return None and keep the caller stream")
-        caller.wait_event(self._ready[0])
-        result = consumer(target, scales[:, :rows].T)
-        if result is not None or torch.cuda.current_stream(self.device) != caller:
-            raise RuntimeError("FP8 route consumer must return None and keep the caller stream")
 
         with torch.cuda.stream(comm):
             if heads is not None:
@@ -666,6 +703,16 @@ class DirectedRowExchange:
             with profile_scope(f"{_HIDDEN_ROUTE_SCOPE}.peer_reads_done"):
                 self._handle.barrier(channel=1, timeout_ms=_TIMEOUT_SECONDS * 1000)
                 self._readers_done.record(comm)
+        if before_consume is not None:
+            result = before_consume()
+            if result is not None or torch.cuda.current_stream(self.device) != caller:
+                raise RuntimeError("before_consume must return None and keep the caller stream")
+        # Only hidden is needed for the query GEMMs. Head weights join after
+        # the consumer has submitted them.
+        caller.wait_event(self._ready[0])
+        result = consumer(target) if nvfp4 else consumer(target, scales[:, :rows].T)
+        if result is not None or torch.cuda.current_stream(self.device) != caller:
+            raise RuntimeError("Quantized route consumer must return None and keep the caller stream")
         caller.wait_event(self._pulls_done)
         self._done.record(caller)
         return heads

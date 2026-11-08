@@ -326,9 +326,9 @@ class K31CiTest(unittest.TestCase):
             item[role].update(test_block_num=blocks, evidence_port=port)
         with patch.dict("os.environ", {}, clear=True):
             pd_config.validate_config(item, local_role="prefill")
-        self.assertFalse(item["kda_nvfp4"])
-        self.assertFalse(item["dsa_nvfp4"])
-        item["dsa_nvfp4"] = True
+        self.assertTrue(item["kda_nvfp4"])
+        self.assertTrue(item["dsa_nvfp4"])
+        item["kda_nvfp4"] = False
         with patch.dict("os.environ", KDA_NVFP4="1", DSA_NVFP4="0"):
             pd_config.validate_config(item, local_role="prefill")
         self.assertFalse(item["kda_nvfp4"])

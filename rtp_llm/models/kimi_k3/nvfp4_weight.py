@@ -10,7 +10,7 @@ from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models.kimi_k3.nvfp4_tensor import OnlineNvfp4Projection, nvfp4_scale_keys
 from rtp_llm.utils.model_weight import W
 
-NVFP4_WEIGHT_MODULES = {
+ATTENTION_PROJECTION_MODULES = {
     K3W.KDA_INPUT: "kda.input",
     W.linear_attn_f_b_w: "kda.forget",
     W.linear_attn_out_w: "kda.output",

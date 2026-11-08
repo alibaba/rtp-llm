@@ -2,9 +2,16 @@
 
 import os
 
-KDA_NVFP4_MODULES = ("kda.input", "kda.forget", "kda.output")
-DSA_NVFP4_MODULES = ("dsa.input", "dsa.query", "dsa.output")
+KDA_NVFP4_MODULES = ("kda.input", "kda.forget")
+DSA_NVFP4_MODULES = ("dsa.input", "dsa.query")
 NVFP4_MODULES = frozenset(KDA_NVFP4_MODULES + DSA_NVFP4_MODULES)
+
+
+def uses_fp8_output(module, selected_modules):
+    return (
+        (module == "kda.output" and "kda.input" in selected_modules)
+        or (module == "dsa.output" and "dsa.input" in selected_modules)
+    )
 
 
 def parse_nvfp4_flag(name, value=None, *, default=False):

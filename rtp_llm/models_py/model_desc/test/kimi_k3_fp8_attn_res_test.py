@@ -65,7 +65,7 @@ class KimiK3Fp8AttnResTest(unittest.TestCase):
 
         class Attention:
             supports_fp8_activation = True
-            _fp8_collective = SimpleNamespace(
+            _fp8_input_collective = SimpleNamespace(
                 enable_ag=True, can_run_ag=lambda rows: rows * 8 <= 65536
             )
 

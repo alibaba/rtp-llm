@@ -184,12 +184,12 @@ class KimiK3DecoderLayer(nn.Module):
 
     def forward(
         self, hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask,
-        *, mlp_delta=None, defer_mlp_residual=False,
+        *, mlp_delta=None, mlp_shared_delta=None, defer_mlp_residual=False,
     ):
         if self.block_size:
             previous = (self.index + self.block_size - 1) // self.block_size
             writes = self.index % self.block_size == 0
-            fp8_ag = self.attention._fp8_collective
+            fp8_ag = self.attention._fp8_input_collective
             produce_fp8 = (
                 fp8_ag is not None
                 and fp8_ag.enable_ag
@@ -202,18 +202,38 @@ class KimiK3DecoderLayer(nn.Module):
                 and not attention_inputs.is_mtp_draft_update
                 and not torch.cuda.is_current_stream_capturing()
             )
+            natural_nvfp4 = getattr(self.attention, "_natural_nvfp4_enabled", False)
             natural_fp8 = (
-                getattr(self.attention, "natural_kv_indexer_input", None) is not None
+                (natural_nvfp4 or getattr(self.attention, "natural_kv_indexer_input", None) is not None)
                 and getattr(metadata, "outer_layout", None) is not None
                 and attention_inputs.is_prefill
                 and not metadata.is_target_verify
                 and not attention_inputs.is_mtp_draft_update
                 and hidden.is_cuda
-                and hidden.shape[0] >= 4096
+                and hidden.shape[0] >= (1 if natural_nvfp4 else 4096)
                 and torch.cuda.get_device_capability(hidden.device)[0] == 10
                 and not torch.cuda.is_current_stream_capturing()
             )
-            with profile_scope(f"RTP::layers.{self.index}.attention_residual"):
+            natural_nvfp4 = natural_nvfp4 and natural_fp8
+            eligible_nvfp4_ag = getattr(self.attention, "eligible_nvfp4_ag", None)
+            decode_nvfp4 = (
+                getattr(self.attention, "_decode_nvfp4_ag", None) is not None
+                and (metadata.is_target_verify or not attention_inputs.is_prefill)
+                and not attention_inputs.is_mtp_draft_update
+                and hidden.shape[0] > 0
+            )
+            produce_fp4 = (
+                (decode_nvfp4 or (
+                    eligible_nvfp4_ag is not None
+                    and eligible_nvfp4_ag(hidden, attention_inputs, metadata)
+                ))
+                and hidden.shape[1] == 7168
+                and torch.cuda.get_device_capability(hidden.device)[0] == 10
+            )
+            residual_scope = (
+                "attention_residual_nvfp4" if produce_fp4 or natural_nvfp4 else "attention_residual"
+            )
+            with profile_scope(f"RTP::layers.{self.index}.{residual_scope}"):
                 residual = (
                     self.attention_residual.forward_fp8
                     if produce_fp8
@@ -223,22 +243,33 @@ class KimiK3DecoderLayer(nn.Module):
                     hidden,
                     anchors,
                     delta=mlp_delta,
+                    shared_delta=mlp_shared_delta,
                     num_blocks=previous,
                     block_write_idx=previous if writes else -1,
                     output_norm_weight=self.attention_norm.weight,
                     output_norm_eps=self.attention_norm.variance_epsilon,
                     metadata=metadata,
                     **({"also_quantize": True} if natural_fp8 else {}),
+                    **({"quantize_nvfp4": True, "split_nvfp4_quant": not decode_nvfp4}
+                       if produce_fp4 or natural_nvfp4 else {}),
+                    **({"rowwise_nvfp4": True} if produce_fp4 else {}),
+                    **({"decode_head_gate_columns": self.attention._decode_head_gate_columns}
+                       if decode_nvfp4 and getattr(self.attention, "_decode_head_gate_columns", 0) else {}),
                 )
-                if natural_fp8:
+                if natural_nvfp4:
+                    attn_input, encoded, packed = attn_input
+                elif natural_fp8:
                     attn_input, encoded = attn_input
             with profile_scope(f"RTP::layers.{self.index}.attention"):
                 attended = self.attention(
                     attn_input, fmha, cache, attention_inputs, metadata,
                     **({"natural_fp8": encoded} if natural_fp8 else {}),
+                    **({"natural_nvfp4": packed} if natural_nvfp4 else {}),
                 )
             if natural_fp8:
                 del encoded
+            if natural_nvfp4:
+                del packed
             delta = None
             if writes:
                 hidden = attended
@@ -296,7 +327,8 @@ class KimiK3DecoderLayer(nn.Module):
         with profile_scope(f"RTP::layers.{self.index}.mlp"):
             if defer_mlp_residual:
                 if self.mlp.fuses_layer_residual:
-                    return self.apply_mlp(hidden, mlp_input, valid_mask), None
+                    routed, shared = self.mlp(mlp_input, valid_mask, defer_output_add=True)
+                    return hidden, routed, shared
                 mlp_output = self.mlp(mlp_input, valid_mask)
                 if (
                     hidden.dtype == mlp_output.dtype == torch.bfloat16
@@ -304,8 +336,8 @@ class KimiK3DecoderLayer(nn.Module):
                     and hidden.is_contiguous()
                     and mlp_output.is_contiguous()
                 ):
-                    return hidden, mlp_output
-                return hidden + mlp_output, None
+                    return hidden, mlp_output, None
+                return hidden + mlp_output, None, None
             return self.apply_mlp(hidden, mlp_input, valid_mask)
 
 
@@ -424,12 +456,67 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         self._initialize_natural_outer(init_resource)
         self._initialize_fp8_collective()
         self._initialize_bf16_collective(init_resource)
+        self._initialize_nvfp4_direct_ag(init_resource)
+        self._initialize_decode_nvfp4_ag(init_resource)
         from rtp_llm.models_py.modules.kimi_k3.kernel_jit_warmup import (
             warmup_kimi_k3_kernel_jit,
         )
 
         warmup_kimi_k3_kernel_jit(self, init_resource)
         return ready
+
+    def _initialize_nvfp4_direct_ag(self, init_resource):
+        if self.tp_size == 1 or init_resource.is_decode_role:
+            return
+        attentions = [
+            layer.attention for layer in self.layers
+            if getattr(layer.attention, "_nvfp4_ag_mode", None) == "direct"
+        ]
+        if not attentions:
+            return
+        from rtp_llm.models_py.distributed.collective_torch import create_custom_all_gather
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_comm_fusion import (
+            nvfp4_packet_capacity,
+        )
+
+        width = self.config.hidden_size
+        max_m = self._projection_staging_tokens
+        direct = create_custom_all_gather(
+            _get_group(Group.TP), attentions[0].input.weight.device,
+            max_m=max_m, k=width, fp8=False, staging_only=False,
+            packed_bytes=nvfp4_packet_capacity(max_m // self.tp_size, width, rowwise=True),
+        )
+        for attention in attentions:
+            attention._nvfp4_direct_ag = direct
+
+    def _initialize_decode_nvfp4_ag(self, init_resource):
+        if not init_resource.is_decode_role or self.tp_size == 1:
+            return
+        attentions = [
+            layer.attention for layer in self.layers
+            if layer.block_size and getattr(layer.attention.input, "dynamic_input_scale", False)
+        ]
+        if not attentions:
+            return
+        from rtp_llm.models_py.distributed.collective_torch import create_custom_all_gather
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_comm_fusion import (
+            DecodeNvfp4AllGather, decode_packet_capacity,
+        )
+
+        group = _get_group(Group.TP)
+        width = self.config.hidden_size
+        max_m = self._projection_staging_tokens
+        gate_columns = max(getattr(attention, "_decode_head_gate_columns", 0) for attention in attentions)
+        direct = create_custom_all_gather(
+            group, attentions[0].input.weight.device,
+            max_m=max_m, k=width, fp8=False, staging_only=False,
+            packed_bytes=decode_packet_capacity(
+                max_m // self.tp_size, width, gate_columns, rowwise=True,
+            ),
+        )
+        collective = DecodeNvfp4AllGather(group, direct)
+        for attention in attentions:
+            attention._decode_nvfp4_ag = collective
 
     def _initialize_bf16_collective(self, init_resource):
         if self.tp_size == 1 or (
@@ -478,33 +565,34 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         if type(self) is not KimiK3Model or self.tp_size == 1:
             return
         quant = getattr(self.config, "attention_projection_quant_config", None)
-        if quant is None or quant.get_method() != "FP8_PER_BLOCK":
-            return
-        if any(name.startswith(("kda.", "dsa."))
-               for name in getattr(self.config, "k31_nvfp4_modules", ())):
-            # The per-GEMM fallback retains ordinary BF16 TP collectives. Do
-            # not feed a prequantized FP8 activation to a selected W4A4 GEMM.
-            return
+        grouped_fp8 = quant is not None and quant.get_method() == "FP8_PER_BLOCK"
         decode_staging = self.parallelism_config.role_type == RoleType.DECODE
-        # Projection precision selects its matching modeling path. Runtime
-        # eligibility still handles phase, capacity, Graph and query layout.
-        enable_ag = enable_rs = True
+        fp8_ag_layers, fp8_rs_layers = [], []
+        for layer in self.layers:
+            attention = layer.attention
+            fp8_output = getattr(attention.output, "scale_ue8m0", False)
+            fp8_input = getattr(attention.input, "scale_ue8m0", False)
+            if grouped_fp8 and (
+                not fp8_output or (
+                    not fp8_input and not getattr(attention.input, "dynamic_input_scale", False)
+                )
+            ):
+                raise ValueError("FP8 collective fusion requires grouped E4M3 projections")
+            if fp8_output:
+                fp8_rs_layers.append(layer)
+                if fp8_input:
+                    fp8_ag_layers.append(layer)
+        if not fp8_rs_layers:
+            return
+        enable_ag = bool(fp8_ag_layers)
         if enable_ag and self.config.k3_runtime_config.attn_res_block_size:
             if self.config.hidden_size != 7168 or any(
                 (layer.index + layer.block_size - 1) // layer.block_size > 8
-                for layer in self.layers
+                for layer in fp8_ag_layers
             ):
                 raise ValueError(
                     "FP8 AttnRes fusion requires hidden_size=7168 and at most "
                     "8 residual blocks; validate the checkpoint before serving"
-                )
-        for layer in self.layers:
-            attention = layer.attention
-            if (enable_ag and not getattr(attention.input, "scale_ue8m0", False)) or (
-                enable_rs and not getattr(attention.output, "scale_ue8m0", False)
-            ):
-                raise ValueError(
-                    "FP8 collective fusion requires grouped E4M3 projections"
                 )
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_comm_fusion import (
             Fp8CollectiveProjection,
@@ -518,23 +606,30 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
             max_m=max_m,
             hidden_size=self.config.hidden_size,
             enable_ag=enable_ag,
-            enable_rs=enable_rs,
+            enable_rs=True,
             decode_staging=decode_staging,
         )
-        for layer in self.layers:
-            layer.attention._fp8_collective = self._fp8_collective
+        collective = self._fp8_collective
+        for layer in fp8_rs_layers:
+            layer.attention._fp8_collective = collective
+        for layer in fp8_ag_layers:
+            layer.attention._fp8_input_collective = collective
             if layer.block_size:
                 layer.attention_residual.configure_verify_fp8(
                     decode_staging
                     and getattr(layer.attention, "supports_fp8_activation", False)
                 )
-            if decode_staging and enable_rs and isinstance(layer.mlp, KimiK3DenseMLP):
-                layer.mlp.output_transition = self._fp8_collective.reduce_scatter_bf16
+        if decode_staging and grouped_fp8:
+            for layer in self.layers:
+                if isinstance(layer.mlp, KimiK3DenseMLP):
+                    layer.mlp.output_transition = collective.reduce_scatter_bf16
         logging.info(
-            "FP8 TP projection fusion enabled: ag=%s rs=%s max_m=%d",
-            enable_ag,
-            enable_rs,
+            "K3 TP projection collectives: fp8_layers=%d decode_push_rs=%s "
+            "max_m=%d fp8_ag_layers=%d",
+            len(fp8_rs_layers),
+            decode_staging,
             max_m,
+            len(fp8_ag_layers),
         )
         return
 
@@ -724,6 +819,7 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
             and torch.cuda.get_device_capability(hidden.device)[0] == 10
         )
         mlp_delta = None
+        mlp_shared_delta = None
         for index, layer in enumerate(self.layers):
             if getattr(layer.attention, "indexer", None) is not None:
                 tags = ("full", "indexer_kv")
@@ -751,9 +847,10 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
                     else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, index)
                 )
             if defer_mlp_residual:
-                hidden, mlp_delta = layer(
+                hidden, mlp_delta, mlp_shared_delta = layer(
                     hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask,
-                    mlp_delta=mlp_delta, defer_mlp_residual=True,
+                    mlp_delta=mlp_delta, mlp_shared_delta=mlp_shared_delta,
+                    defer_mlp_residual=True,
                 )
             else:
                 hidden = layer(
@@ -761,7 +858,7 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
                 )
         if self.num_blocks:
             hidden = (
-                self.final_residual(hidden, anchors, delta=mlp_delta)
+                self.final_residual(hidden, anchors, delta=mlp_delta, shared_delta=mlp_shared_delta)
                 if mlp_delta is not None
                 else self.final_residual(hidden, anchors)
             )

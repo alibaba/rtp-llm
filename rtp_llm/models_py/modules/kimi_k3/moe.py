@@ -492,7 +492,7 @@ class KimiK3LatentMoE(nn.Module):
         del shared_input
         return routed, shared
 
-    def forward(self, hidden, valid_mask=None, residual=None):
+    def forward(self, hidden, valid_mask=None, residual=None, *, defer_output_add=False):
         with profile_scope("RTP::moe.router"):
             routing, ids = self.router(hidden)
         routing, ids = self.mask_routes(routing, ids, valid_mask)
@@ -509,13 +509,15 @@ class KimiK3LatentMoE(nn.Module):
             and self.up.weight.is_cuda
             and self.up.weight.dtype == torch.bfloat16
         )
-        if residual is not None:
+        if residual is not None or defer_output_add:
             if not self.fuses_layer_residual or not bf16_up:
                 raise ValueError("MoE residual fusion requires the BF16 Decode shared expert")
-            from rtp_llm.models_py.triton_kernels.moe.output_add import add_moe_output
-
             with profile_scope("RTP::moe.routed_up_proj_add_shared"):
                 routed_up = self.up(routed)
+                if defer_output_add:
+                    return routed_up, shared
+                from rtp_llm.models_py.triton_kernels.moe.output_add import add_moe_output
+
                 return add_moe_output(routed_up, shared, residual)
         with profile_scope("RTP::moe.routed_up_proj_add_shared"):
             if bf16_up:

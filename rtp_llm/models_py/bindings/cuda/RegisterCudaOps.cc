@@ -105,7 +105,11 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("eps"),
                   py::arg("output_norm_eps"),
                   py::arg("fp8_output") = py::none(),
-                  py::arg("fp8_scales") = py::none());
+                  py::arg("fp8_scales") = py::none(),
+                  py::arg("amax_partials") = py::none(),
+                  py::arg("nvfp4_packet") = py::none(),
+                  py::arg("nvfp4_rowwise") = false,
+                  py::arg("shared_delta") = py::none());
 #endif
 
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
@@ -124,9 +128,17 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
     rtp_ops_m.def(
         "per_token_quant_fp8", &per_token_quant_fp8, py::arg("input"), py::arg("output_q"), py::arg("output_s"));
 
-    // NVFP4 mm/quant live in rtp_kernel.nvfp4. Keep the grouped experts
-    // quantizers here; they are not part of that port.
 #if defined(ENABLE_FP4)
+#if defined(USING_CUDA13) && USING_CUDA13
+    rtp_ops_m.def("nvfp4_quantize_strided_from_amax",
+                  &nvfp4_quantize_strided_from_amax,
+                  py::arg("input"),
+                  py::arg("amax_partials"),
+                  py::arg("output"),
+                  py::arg("output_scale"),
+                  py::arg("global_scale"),
+                  py::arg("compute_amax") = false);
+#endif
     rtp_ops_m.def("scaled_fp4_experts_quant",
                   &scaled_fp4_experts_quant_sm100a,
                   py::arg("output"),

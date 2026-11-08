@@ -50,8 +50,9 @@ class Nvfp4SwitchTest(unittest.TestCase):
         for kda in (False, True):
             for dsa in (False, True):
                 modules = selected_nvfp4_modules(kda, dsa)
-                self.assertEqual(sum(m.startswith("kda.") for m in modules), 3 * kda)
-                self.assertEqual(sum(m.startswith("dsa.") for m in modules), 3 * dsa)
+                self.assertEqual(sum(m.startswith("kda.") for m in modules), 2 * kda)
+                self.assertEqual(sum(m.startswith("dsa.") for m in modules), 2 * dsa)
+                self.assertFalse(any(m.endswith(".output") for m in modules))
                 self.assertEqual(selected_nvfp4_modules(kda, dsa, is_draft=True), ())
                 self.assertFalse(any(m.startswith("moe.") for m in modules))
 

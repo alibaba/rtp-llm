@@ -9,7 +9,7 @@ from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
 from rtp_llm.models_py.model_desc.kimi_k3_mtp import KimiK3MtpModel
 from rtp_llm.models_py.modules import Embedding
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import PrefillCPConfig, RoleType
 
 
 class KimiK3MtpLocalProjectionTest(unittest.TestCase):
@@ -21,15 +21,24 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
         model.config = SimpleNamespace(
             hidden_size=7168,
             k3_runtime_config=SimpleNamespace(attn_res_block_size=0),
+            attention_projection_quant_config=(
+                SimpleNamespace(get_method=lambda: "FP8_PER_BLOCK")
+                if dtype == torch.float8_e4m3fn
+                else None
+            ),
         )
         model._max_moe_tokens = 262144
+        model._projection_staging_tokens = 262144
         model._fp8_collective = None
         attention = nn.Module()
         for name in ("input", "output"):
             setattr(
                 attention,
                 name,
-                SimpleNamespace(weight=torch.empty(1, dtype=dtype), scale_ue8m0=True),
+                SimpleNamespace(
+                    weight=torch.empty(1, dtype=dtype),
+                    scale_ue8m0=dtype == torch.float8_e4m3fn,
+                ),
             )
         layer = nn.Module()
         layer.attention = attention
@@ -62,6 +71,8 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
                     model.layers[0].attention.input.weight.device,
                     max_m=262144,
                     hidden_size=7168,
+                    enable_ag=True,
+                    enable_rs=True,
                     decode_staging=role == RoleType.DECODE,
                 )
                 self.assertIs(model._fp8_collective, collective.return_value)
@@ -86,6 +97,7 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
     def test_fp8_target_rejects_mixed_projection_precision(self):
         model = self._target_model(torch.float8_e4m3fn, RoleType.PREFILL)
         model.layers[0].attention.output.weight = torch.empty(1, dtype=torch.bfloat16)
+        model.layers[0].attention.output.scale_ue8m0 = False
         with self.assertRaisesRegex(ValueError, "grouped E4M3 projections"):
             model._initialize_fp8_collective()
 
@@ -115,6 +127,7 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
                             pp_size=1,
                             get_attn_tp_size=lambda: tp,
                             enable_sp=True,
+                            prefill_cp_config=PrefillCPConfig(),
                         )
                         weights = SimpleNamespace(
                             weights=[{}],
@@ -147,7 +160,9 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
         model.parallelism_config = SimpleNamespace(role_type=RoleType.PREFILL)
         model.config = SimpleNamespace(hidden_size=8)
         model._max_moe_tokens = 64
+        model._projection_staging_tokens = 64
         model._fp8_collective = None
+        model._outer_natural_enabled = False
         attention = nn.Module()
         attention.input = CudaF16Linear(
             torch.ones(8, 8, dtype=torch.bfloat16, device=device)
@@ -210,6 +225,7 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
             max_m=64,
             hidden_size=8,
             output_projections=[attention.output],
+            decode_staging=False,
         )
         self.assertIs(attention._bf16_collective, bf16_collective.return_value)
         self.assertIsNone(model._fp8_collective)

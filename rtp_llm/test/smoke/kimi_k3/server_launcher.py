@@ -38,7 +38,7 @@ def launch_config(args):
     model_type = getattr(args, "model_type", "kimi_k3")
     nvfp4 = {
         key.upper(): str(int(model_type == "kimi_k31" and parse_nvfp4_flag(
-            key.upper(), getattr(args, key, None)
+            key.upper(), getattr(args, key, None), default=True
         ))) for key in ("kda_nvfp4", "dsa_nvfp4")
     }
     fp8_gemm = getattr(args, "fp8_gemm", None)

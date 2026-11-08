@@ -249,10 +249,12 @@ cc_library(
         "@//:using_cuda13_x86": [
             "//rtp_llm/models_py/bindings/cuda/kernels:attn_res",
             "//rtp_llm/models_py/bindings/cuda/kernels:mega_topk",
+            "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
         ],
         "@//:using_cuda13_arm": [
             "//rtp_llm/models_py/bindings/cuda/kernels:attn_res",
             "//rtp_llm/models_py/bindings/cuda/kernels:mega_topk",
+            "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
         ],
         "//conditions:default": [],
     }),

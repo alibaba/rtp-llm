@@ -99,6 +99,10 @@ class NaturalPairedProjection(torch.nn.Module):
                     disable_ue8m0_cast=self._disable_ue8m0_cast)
         return out.split((self.q_width, self.gate_width), dim=-1)
 
+    def forward_nvfp4(self, activation):
+        out = self.nvfp4.forward_quantized(activation)
+        return out.split((self.q_width, self.gate_width), dim=-1)
+
     def forward(self, hidden):
         if self.nvfp4 is not None:
             out = self.nvfp4(hidden)

@@ -3,6 +3,8 @@
 import json
 from collections import Counter
 
+from rtp_llm.models.kimi_k3.nvfp4_config import selected_nvfp4_modules, uses_fp8_output
+
 MARKER = "[K31_PROJECTION_EVENT] "
 LINEAR_POLICIES = {
     "NVFP4": ("CudaFp4GEMMLinear", "torch.uint8", "dynamic"),
@@ -21,6 +23,7 @@ def matches_precision(row, expected):
 
 def audit_projection_precision(directory, config, *, layers=93, ranks=8):
     initialized, executed, draft = {}, set(), set()
+    modules = selected_nvfp4_modules(config["kda_nvfp4"], config["dsa_nvfp4"])
     for path in (directory / "logs").rglob("*.log"):
         for line in path.read_text(errors="replace").splitlines():
             if MARKER not in line:
@@ -40,12 +43,13 @@ def audit_projection_precision(directory, config, *, layers=93, ranks=8):
                 raise ValueError("unknown projection model identity")
             if any(row[key] is not config[key] for key in ("kda_nvfp4", "dsa_nvfp4")):
                 raise ValueError(f"projection switches differ: {key}")
-            selected = config[row["module"].split(".")[0] + "_nvfp4"]
-            expected = (
-                "NVFP4"
-                if selected
-                else ("FP8" if config.get("fp8_gemm", True) else "BF16")
-            )
+            module = row["module"]
+            if uses_fp8_output(module, modules):
+                expected = "FP8"
+            elif module in modules:
+                expected = "NVFP4"
+            else:
+                expected = "FP8" if config.get("fp8_gemm", True) else "BF16"
             if not matches_precision(row, expected):
                 raise ValueError(
                     f"projection precision differs: {key}, expected {expected}, "
@@ -57,8 +61,9 @@ def audit_projection_precision(directory, config, *, layers=93, ranks=8):
                     raise ValueError(f"conflicting projection receipts: {key}")
                 initialized[key] = row
             elif row["event"] == "executed":
+                expected_input = "torch.uint8" if row.get("prequantized_input") else "torch.bfloat16"
                 if (
-                    row["input_dtype"] != "torch.bfloat16"
+                    row["input_dtype"] != expected_input
                     or row["output_dtype"] != "torch.bfloat16"
                 ):
                     raise ValueError(f"NVFP4 input/output dtype differs: {key}")
@@ -78,7 +83,7 @@ def audit_projection_precision(directory, config, *, layers=93, ranks=8):
                 )
     if draft != set(range(ranks)):
         raise ValueError("missing native draft precision receipts")
-    selected = {key for key in initialized if config[key[2].split(".")[0] + "_nvfp4"]}
+    selected = {key for key, row in initialized.items() if row["weight_precision"] == "NVFP4"}
     required = {
         (*key, fragment)
         for key in selected

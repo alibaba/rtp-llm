@@ -144,7 +144,11 @@ cc_library(
     ] + torch_deps(),
     copts = sm100_cuda_copts + [
         "-DCUTLASS_ARCH_MMA_SM100_SUPPORTED",
-    ],
+    ] + select({
+        "@//:using_cuda13_x86": ["--cuda-gpu-arch=sm_103a", "--cuda-include-ptx=sm_103a"],
+        "@//:using_cuda13_arm": ["--cuda-gpu-arch=sm_103a", "--cuda-include-ptx=sm_103a"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 
@@ -444,8 +448,9 @@ cc_library(
 cc_library(
     name = "attn_res",
     srcs = ["attn_res.cu"],
-    hdrs = ["attn_res.h"],
+    hdrs = ["attn_res.h", "nvfp4_quant.cuh"],
     deps = torch_deps() + [
+        "@cutlass4.0//:cutlass",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],

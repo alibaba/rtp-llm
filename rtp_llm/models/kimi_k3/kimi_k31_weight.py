@@ -1,6 +1,8 @@
 """K3.1 adds replicated Indexer weights to the existing K3 MLA manifest."""
 
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3Weight, KimiK3MtpWeight
+from rtp_llm.models.kimi_k3.nvfp4_config import uses_fp8_output
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.model_weight import transpose
 import torch
@@ -52,16 +54,26 @@ class KimiK31Weight(KimiK3Weight):
         if not modules:
             return source
         from rtp_llm.models.kimi_k3.nvfp4_weight import (
-            KimiK31Nvfp4Weight, NVFP4_WEIGHT_MODULES,
+            ATTENTION_PROJECTION_MODULES, KimiK31Nvfp4Weight,
         )
 
-        module = NVFP4_WEIGHT_MODULES.get(source.name)
+        module = ATTENTION_PROJECTION_MODULES.get(source.name)
         if module not in modules:
             return source
         return KimiK31Nvfp4Weight(source, module=module)
 
     def _attention_projection_weights(self, attention):
         return [self._nvfp4_projection(source) for source in attention]
+
+    def _attention_fp8_quant_config(self, source):
+        quant = super()._attention_fp8_quant_config(source)
+        modules = getattr(self.model_config, "k31_nvfp4_modules", ())
+        if quant is None and modules:
+            from rtp_llm.models.kimi_k3.nvfp4_weight import ATTENTION_PROJECTION_MODULES
+
+            if uses_fp8_output(ATTENTION_PROJECTION_MODULES.get(source.name), modules):
+                return Fp8BlockWiseQuantConfig()
+        return quant
 
     # Verified against the weight index at 546f79b5ee100f74d7ef432f0c078d92dc92bab6.
     _INDEXER_SUFFIXES = (

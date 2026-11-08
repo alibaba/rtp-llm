@@ -16,6 +16,7 @@ def _rmsnorm_fp8_quant_kernel(
     out_norm_ptr,
     out_q_ptr,
     out_scale_ptr,
+    amax_partials_ptr,
     M,
     x_stride_m,
     out_norm_stride_m,
@@ -30,10 +31,11 @@ def _rmsnorm_fp8_quant_kernel(
     GROUP_SIZE: tl.constexpr,
     SCALE_PACKS: tl.constexpr,
     STORE_NORM: tl.constexpr,
+    STORE_AMAX: tl.constexpr,
 ):
     offs_n = tl.arange(0, BLOCK_N)
     n_mask = offs_n < N
-    if not STORE_NORM:
+    if not STORE_NORM or STORE_AMAX:
         # Match the K3.1 Prefill norm's four-row tile and round to BF16 in
         # registers before computing scales. Both Q projections consume FP8.
         rows = (tl.program_id(0) * 4 + tl.arange(0, 4)).to(tl.int64)
@@ -43,6 +45,10 @@ def _rmsnorm_fp8_quant_kernel(
         w = tl.load(w_ptr + offs_n, mask=n_mask, other=0.0).to(tl.float32)
         inv = tl.rsqrt(tl.sum(x * x, axis=1) / N + EPS)
         y = (x * inv[:, None] * w[None, :]).to(tl.bfloat16).to(tl.float32)
+        if STORE_AMAX:
+            tl.store(out_norm_ptr + rows[:, None] * out_norm_stride_m + offs_n[None, :], y, mask=mask)
+            amax = tl.max(tl.max(tl.where(mask, tl.abs(y), 0.0), axis=1), axis=0)
+            tl.store(amax_partials_ptr + tl.program_id(0), amax)
         groups = tl.reshape(y, (4, BLOCK_N // GROUP_SIZE, GROUP_SIZE))
         amax = tl.maximum(tl.max(tl.abs(groups), axis=2), CLAMP_EPS)
         # UE8M0 is the FP32 exponent rounded up to the next power of two.
@@ -125,6 +131,7 @@ def rmsnorm_fp8_quant_ue8m0(
     clamp_eps: float = 1.0e-4,
     out_norm: Optional[torch.Tensor] = None,
     store_norm: bool = True,
+    amax_partials: Optional[torch.Tensor] = None,
 ) -> tuple[Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
     """Normalize a BF16 matrix and quantize it; optionally omit the BF16 output."""
     if x.dim() != 2:
@@ -135,7 +142,13 @@ def rmsnorm_fp8_quant_ue8m0(
         raise ValueError(f"weight must be bf16, got {weight.dtype}")
     if not x.is_cuda or not weight.is_cuda:
         raise RuntimeError("rmsnorm_fp8_quant_ue8m0 requires CUDA tensors")
-    if store_norm:
+    store_amax = amax_partials is not None
+    if store_amax and (not store_norm or group_size != 128 or amax_partials.device != x.device
+                       or amax_partials.dtype != torch.float32
+                       or amax_partials.shape != (triton.cdiv(x.shape[0], 4),)
+                       or not amax_partials.is_contiguous()):
+        raise ValueError("RMSNorm FP4 partials require one FP32 maximum per four-row tile")
+    if store_norm and not store_amax:
         if not x.is_contiguous():
             raise ValueError("x must be contiguous")
     elif x.stride(1) != 1 or (x.shape[0] > 1 and x.stride(0) < x.shape[1]):
@@ -150,7 +163,7 @@ def rmsnorm_fp8_quant_ue8m0(
         if out_norm is not None or group_size != 128:
             raise ValueError("quant-only RMSNorm requires group 128 and no BF16 output")
     elif out_norm is None:
-        out_norm = torch.empty_like(x)
+        out_norm = x.new_empty(x.shape)
     else:
         if out_norm.shape != x.shape:
             raise ValueError(
@@ -170,13 +183,15 @@ def rmsnorm_fp8_quant_ue8m0(
 
     finfo = torch.finfo(torch.float8_e4m3fn)
     scale_packs = (n // group_size + 3) // 4
-    block_n = triton.next_power_of_2(n) if store_norm else max(512, triton.next_power_of_2(n))
-    _rmsnorm_fp8_quant_kernel[(m if store_norm else triton.cdiv(m, 4),)](
+    grouped = not store_norm or store_amax
+    block_n = max(512, triton.next_power_of_2(n)) if grouped else triton.next_power_of_2(n)
+    _rmsnorm_fp8_quant_kernel[(triton.cdiv(m, 4) if grouped else m,)](
         x,
         weight,
         x if out_norm is None else out_norm,
         out_q,
         out_scale,
+        amax_partials,
         m,
         x.stride(0),
         0 if out_norm is None else out_norm.stride(0),
@@ -191,7 +206,8 @@ def rmsnorm_fp8_quant_ue8m0(
         GROUP_SIZE=group_size,
         SCALE_PACKS=scale_packs,
         STORE_NORM=store_norm,
-        num_warps=8 if not store_norm or block_n >= 4096 else 4,
+        STORE_AMAX=store_amax,
+        num_warps=8 if grouped or block_n >= 4096 else 4,
         num_stages=2,
     )
     return out_norm, out_q, out_scale

@@ -856,6 +856,9 @@ class KimiK3Weight(ModelDeployWeightInfo):
     def _attention_projection_weights(self, attention):
         return attention
 
+    def _attention_fp8_quant_config(self, source):
+        return self.model_config.attention_projection_quant_config
+
     def _get_weight_info(self) -> ModelWeightInfo:
         layer_weights: List[List[WeightModule]] = []
         moe_layers = set(self.model_config.moe_layer_index)
@@ -867,6 +870,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 "Kimi K3 hybrid attention schedule is shorter than num_layers: "
                 f"{len(layer_types)} < {self._num_layers}"
             )
+        fp8_weight = None
         for layer_id, layer_type in enumerate(layer_types[: self._num_layers]):
             weights = self._common_layer_weights()
             attention = (
@@ -875,31 +879,31 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 else self._mla_weights()
             )
             attention = self._attention_projection_weights(attention)
-            if self.model_config.attention_projection_quant_config is not None:
-                fp8_weight = self._attention_fp8_weight_cls()
-                projection_tp = (
-                    (self.tp_size, self.tp_rank)
-                    if layer_type == HybridAttentionType.LINEAR
-                    else self._mla_projection_parallelism()
-                )
-                converted = []
-                for source in attention:
-                    if (source.name not in fp8_weight.w8a8_weight_list
-                            or isinstance(source, QuantWeight)):
-                        converted.append(source)
-                        continue
-                    derive_mla = isinstance(source, _KimiK3MlaKVWeight)
-                    if derive_mla:
-                        source = source.sub_weights[W.mla_kv_b_w]
-                    converted.append(fp8_weight(
-                        source, self.model_config.attention_projection_quant_config,
-                        derive_mla=derive_mla, layer_id=layer_id,
-                        replicate_q_weights=self._replicate_mla_query_heads(),
-                        projection_tp_size=projection_tp[0],
-                        projection_tp_rank=projection_tp[1],
-                    ))
-                attention = converted
-            weights.extend(attention)
+            projection_tp = (
+                (self.tp_size, self.tp_rank)
+                if layer_type == HybridAttentionType.LINEAR
+                else self._mla_projection_parallelism()
+            )
+            for source in attention:
+                quant = self._attention_fp8_quant_config(source)
+                if quant is None or isinstance(source, QuantWeight):
+                    weights.append(source)
+                    continue
+                if fp8_weight is None:
+                    fp8_weight = self._attention_fp8_weight_cls()
+                if source.name not in fp8_weight.w8a8_weight_list:
+                    weights.append(source)
+                    continue
+                derive_mla = isinstance(source, _KimiK3MlaKVWeight)
+                if derive_mla:
+                    source = source.sub_weights[W.mla_kv_b_w]
+                weights.append(fp8_weight(
+                    source, quant,
+                    derive_mla=derive_mla, layer_id=layer_id,
+                    replicate_q_weights=self._replicate_mla_query_heads(),
+                    projection_tp_size=projection_tp[0],
+                    projection_tp_rank=projection_tp[1],
+                ))
             weights.extend(
                 self._moe_weights() if layer_id in moe_layers else self._dense_weights()
             )

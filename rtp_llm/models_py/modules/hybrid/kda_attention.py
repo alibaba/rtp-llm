@@ -5,8 +5,7 @@ The packed input is [Q,K,V,output_gate,forget_latent,beta]. Equal Q/K/V head
 geometry is required by this packed layout; other gate layouts can compose the
 shared KdaPrefill/KdaDecode primitives directly.
 
-Projection and communication behavior is preserved from the current model
-implementation; no new projection backends or tuning options are added.
+Projection and communication backends are selected by the model.
 """
 
 import torch
@@ -22,6 +21,8 @@ from rtp_llm.models_py.distributed.collective_torch import (
 from rtp_llm.models_py.utils.module_profiler import profile_scope
 
 _AG_LOCAL_FP8_OVERLAP_MIN_ROWS = 4096
+# TP8 crossover uses the local row count before AllGather.
+_AG_LOCAL_NVFP4_OVERLAP_MIN_ROWS_TP8 = 8192
 
 
 class KdaAttention(nn.Module):
@@ -41,6 +42,7 @@ class KdaAttention(nn.Module):
         strided_fp8_forget=False,
         strided_fp8_prefill_forget=False,
         ag_local_fp8_overlap=False,
+        nvfp4_ag_mode="off",
     ):
         super().__init__()
         if (
@@ -61,17 +63,22 @@ class KdaAttention(nn.Module):
         self.norm, self.prefill, self.decode = norm, prefill, decode
         self._fp8_output_norm = fp8_output_norm
         self._ag_local_fp8_overlap = ag_local_fp8_overlap
-        self._project_forget = (
-            self._project_forget_strided_fp8
-            if strided_fp8_forget
-            else self._project_forget_contiguous
-        )
+        self._nvfp4_ag_mode = nvfp4_ag_mode
+        self._nvfp4_direct_ag = None
+        self._decode_nvfp4_ag = None
+        if strided_fp8_forget:
+            self._project_forget = self._project_forget_strided_fp8
+        elif fa_width == 128 and getattr(forget_projection, "dynamic_input_scale", False):
+            self._project_forget = self._project_forget_strided_fp4
+        else:
+            self._project_forget = self._project_forget_contiguous
         self._project_prefill_forget = (
             self._project_forget_strided_fp8
             if strided_fp8_prefill_forget
             else self._project_forget
         )
         self._fp8_collective = None
+        self._fp8_input_collective = None
         self._bf16_collective = None
 
     def _project_forget_contiguous(self, latent):
@@ -85,11 +92,34 @@ class KdaAttention(nn.Module):
         values, scales = quantize_strided_group128_fp8(latent)
         return self.f_b.forward_quantized(values, scales)
 
-    def forward(self, hidden, fmha, cache, attention_inputs, metadata):
-        use_fused_ag = (
-            self._fp8_collective is not None
-            and self._fp8_collective.eligible_ag(hidden, attention_inputs, metadata)
+    def _project_forget_strided_fp4(self, latent):
+        if not latent.shape[0] or latent.stride(1) != 1:
+            return self.f_b(latent)
+        from rtp_llm.models_py.triton_kernels.common.nvfp4 import quantize_strided_nvfp4
+
+        with profile_scope("RTP::attention.kda.forget_fp4_strided_quant"):
+            activation = quantize_strided_nvfp4(latent)
+        return self.f_b.forward_quantized(activation)
+
+    def eligible_nvfp4_ag(self, hidden, attention_inputs, metadata):
+        return (
+            self._nvfp4_ag_mode != "off"
+            and self.tp_size > 1 and hidden.shape[0] > 0
+            and hidden.is_cuda and hidden.dtype == torch.bfloat16
+            and attention_inputs.is_prefill and not metadata.is_target_verify
+            and not getattr(attention_inputs, "is_mtp_draft_update", False)
+            and not torch.cuda.is_current_stream_capturing()
         )
+
+    def forward(self, hidden, fmha, cache, attention_inputs, metadata):
+        decode_nvfp4 = (
+            getattr(self, "_decode_nvfp4_ag", None) is not None
+            and (metadata.is_target_verify or not attention_inputs.is_prefill)
+            and not attention_inputs.is_mtp_draft_update
+            and hidden.shape[0] > 0
+        )
+        fp8_ag = self._fp8_input_collective
+        use_fused_ag = fp8_ag is not None and fp8_ag.eligible_ag(hidden, attention_inputs, metadata)
         use_overlap = (
             self._ag_local_fp8_overlap
             and self.tp_size > 1
@@ -102,9 +132,35 @@ class KdaAttention(nn.Module):
         )
         if isinstance(hidden, Fp8Activation) and not use_fused_ag:
             raise RuntimeError("prequantized FP8 input requires the FP8 AG/GEMM path")
-        if use_fused_ag:
+        use_nvfp4_ag = False
+        if self._nvfp4_ag_mode != "off":
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_comm_fusion import (
+                PackedNvfp4Activation,
+                all_gather_nvfp4_gemm,
+            )
+
+            use_nvfp4_ag = isinstance(hidden, PackedNvfp4Activation) or self.eligible_nvfp4_ag(
+                hidden, attention_inputs, metadata,
+            )
+        if decode_nvfp4:
+            with profile_scope("RTP::attention.kda.decode_nvfp4_ag_gemm"):
+                activation, _, _ = self._decode_nvfp4_ag(hidden)
+                fused = self.input.forward_quantized(activation)
+        elif use_fused_ag:
             with profile_scope("RTP::attention.fp8_ag_gemm"):
-                fused = self._fp8_collective.all_gather_gemm(hidden, self.input)
+                fused = fp8_ag.all_gather_gemm(hidden, self.input)
+        elif use_nvfp4_ag:
+            overlap = self._nvfp4_ag_mode == "overlap" or (
+                self._nvfp4_ag_mode == "auto"
+                and self.tp_size == 8
+                and hidden.shape[0] >= _AG_LOCAL_NVFP4_OVERLAP_MIN_ROWS_TP8
+            )
+            with profile_scope("RTP::attention.kda.fp4_ag_gemm"):
+                fused = all_gather_nvfp4_gemm(
+                    hidden, self.input, _get_group(Group.TP),
+                    overlap=overlap,
+                    direct=self._nvfp4_direct_ag if self._nvfp4_ag_mode == "direct" else None,
+                )
         elif self._bf16_collective is not None and self._bf16_collective.eligible(
             hidden.shape[0], attention_inputs, metadata,
         ):

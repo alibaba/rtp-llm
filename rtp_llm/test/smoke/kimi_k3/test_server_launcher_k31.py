@@ -86,13 +86,13 @@ class K31LaunchContract(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "allocator pages"):
                 launch.launch_config(args)
 
-    def test_nvfp4_switches_default_off_and_explicit_values_override_environment(self):
+    def test_nvfp4_switches_default_on_and_explicit_values_override_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self.fixture(Path(tmp), 93)
             with patch.dict(launch.os.environ, {}, clear=True), patch.object(launch.socket, "socket") as route:
                 route.return_value.getsockname.return_value = ("127.0.0.1", 0)
                 env, _ = launch.launch_config(args)
-                self.assertEqual((env["KDA_NVFP4"], env["DSA_NVFP4"]), ("0", "0"))
+                self.assertEqual((env["KDA_NVFP4"], env["DSA_NVFP4"]), ("1", "1"))
                 self.assertEqual(env["QUANTIZATION"], "FP8_PER_BLOCK")
                 for kda in (False, True):
                     for dsa in (False, True):

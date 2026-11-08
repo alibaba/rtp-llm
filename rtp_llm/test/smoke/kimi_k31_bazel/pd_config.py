@@ -17,7 +17,7 @@ def validate_config(config, *, local_role):
     from rtp_llm.models.kimi_k3.nvfp4_config import parse_nvfp4_flag
 
     for key in ("kda_nvfp4", "dsa_nvfp4"):
-        config[key] = parse_nvfp4_flag(key.upper(), config.get(key))
+        config[key] = parse_nvfp4_flag(key.upper(), config.get(key), default=True)
     for role in ("prefill", "decode"):
         host = config[role]
         port = host.get("evidence_port")

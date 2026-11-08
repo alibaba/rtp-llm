@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace as NS
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +46,7 @@ class ProjectionPolicyTest(unittest.TestCase):
             def __init__(self, group, device, **kwargs):
                 self.group, self.device = group, device
                 self.__dict__.update(kwargs)
+                self.push_rs = object() if self.decode_staging else None
                 owner.created.append(self)
 
             def reduce_scatter_bf16(self, value):
@@ -66,8 +67,8 @@ class ProjectionPolicyTest(unittest.TestCase):
         result = KimiK3Model()
         result._fp8_collective = None
         result.tp_size = 8
-        result.fp8_collective_max_tokens = 65536
-        result._max_moe_tokens = 192 if role == "DECODE" else 65536
+        result._max_moe_tokens = 192 if role == "DECODE" else 262144
+        result._projection_staging_tokens = 192 if role == "DECODE" else 65536
         result.parallelism_config = NS(role_type=role)
         result.config = NS(
             hidden_size=7168,
@@ -77,11 +78,13 @@ class ProjectionPolicyTest(unittest.TestCase):
             ),
         )
         attention = NS(
-            input=NS(scale_ue8m0=True, weight=NS(device="cuda:0")),
-            output=NS(scale_ue8m0=True),
+            input=NS(scale_ue8m0=quantized, weight=NS(device="cuda:0")),
+            output=NS(scale_ue8m0=quantized),
             supports_fp8_activation=fp8_input,
+            _fp8_collective=None,
+            _fp8_input_collective=None,
         )
-        residual = NS(configure_verify_fp8=lambda enabled: setattr(residual, "verify", enabled))
+        residual = NS(verify=False, configure_verify_fp8=lambda enabled: setattr(residual, "verify", enabled))
         result.layers = [NS(index=0, block_size=1, attention=attention,
                             attention_residual=residual, mlp=KimiK3DenseMLP())]
         return result
@@ -141,13 +144,48 @@ class ProjectionPolicyTest(unittest.TestCase):
         self.initialize_model(model)
         self.assertEqual(len(self.created), 1)
 
-    def test_selected_nvfp4_attention_uses_per_gemm_collectives(self):
-        for module in ("kda.input", "kda.forget", "dsa.query", "dsa.output"):
-            model = self.model()
-            model.config.k31_nvfp4_modules = (module,)
-            self.initialize_model(model)
-            self.assertIsNone(model._fp8_collective)
-        self.assertEqual(self.created, [])
+    def test_decode_shares_push_rs_and_preserves_fp8_per_layer(self):
+        for kda_fp4, dsa_fp4 in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(kda_fp4=kda_fp4, dsa_fp4=dsa_fp4):
+                self.created.clear()
+                model = self.model(role="DECODE")
+                model.layers += self.model(role="DECODE", fp8_input=False).layers
+                for layer, use_fp4 in zip(model.layers, (kda_fp4, dsa_fp4)):
+                    if use_fp4:
+                        layer.attention.input.scale_ue8m0 = False
+                        layer.attention.input.dynamic_input_scale = True
+
+                self.initialize_model(model)
+                collective, = self.created
+                self.assertEqual(collective.enable_ag, not (kda_fp4 and dsa_fp4))
+                self.assertTrue(collective.enable_rs)
+                for layer, use_fp4 in zip(model.layers, (kda_fp4, dsa_fp4)):
+                    self.assertIs(layer.attention._fp8_collective, collective)
+                    self.assertIs(layer.attention._fp8_input_collective, None if use_fp4 else collective)
+                    self.assertEqual(layer.mlp.output_transition, collective.reduce_scatter_bf16)
+                self.assertEqual(model.layers[0].attention_residual.verify, not kda_fp4)
+                self.assertFalse(model.layers[1].attention_residual.verify)
+
+    def test_prefill_fp4_input_keeps_fp8_rs_without_fp8_ag(self):
+        for grouped_fp8, include_fp8_layer in ((False, False), (True, False), (True, True)):
+            with self.subTest(grouped_fp8=grouped_fp8, include_fp8_layer=include_fp8_layer):
+                self.created.clear()
+                model = self.model(quantized=grouped_fp8)
+                mixed = model.layers[0].attention
+                mixed.input.scale_ue8m0 = False
+                mixed.input.dynamic_input_scale = True
+                mixed.output.scale_ue8m0 = True
+                if include_fp8_layer:
+                    model.layers += self.model().layers
+                self.initialize_model(model)
+                collective, = self.created
+                self.assertEqual(collective.enable_ag, include_fp8_layer)
+                self.assertTrue(collective.enable_rs)
+                self.assertIs(mixed._fp8_collective, collective)
+                self.assertIsNone(mixed._fp8_input_collective)
+                self.assertFalse(model.layers[0].attention_residual.verify)
+                if include_fp8_layer:
+                    self.assertIs(model.layers[1].attention._fp8_input_collective, collective)
 
     def test_indexer_hidden_contract_disables_verify_fp8_only_producer(self):
         model = self.model(role="DECODE", fp8_input=False)
@@ -180,7 +218,7 @@ class AttnResConsumerTest(unittest.TestCase):
                 return hidden
 
         class Attention:
-            _fp8_collective = NS(enable_ag=True, can_run_ag=lambda rows: True)
+            _fp8_input_collective = NS(enable_ag=True, can_run_ag=lambda rows: True)
 
             def __call__(self, hidden, *args):
                 return hidden
@@ -424,6 +462,31 @@ class CacheDispatchTest(unittest.TestCase):
 
 
 class DsaFusionTest(unittest.TestCase):
+    def test_multistream_verify_hands_gate_quantized_fp8_to_output_collective(self):
+        values, scales = NS(shape=(256, 1536)), object()
+        output = object()
+        inputs = NS(valid_token_mask=None)
+        metadata = NS(is_target_verify=True)
+        gemm_rs = Mock(return_value=output)
+        eligible = Mock(return_value=True)
+        activation = ModuleType("rtp_llm.models_py.triton_kernels.common.activation")
+        activation.sigmoid_mul_per_token_group_quant_fp8 = Mock(return_value=(values, scales))
+        forward = method("KimiK31DSA", "forward", {
+            "profile_scope": lambda _: nullcontext(),
+        }, DSA)
+        core, gate = object(), object()
+        layer = NS(
+            prefill_query_cp=False, tp_size=8, prologue="multi_stream",
+            _decode_prologue=Mock(return_value=(core, gate)),
+            _fp8_output_gate=True, output=object(),
+            _fp8_collective=NS(eligible_rs=eligible, gemm_reduce_scatter=gemm_rs),
+        )
+        with patch.dict(sys.modules, {activation.__name__: activation}):
+            self.assertIs(forward(layer, None, {"full": NS()}, None, inputs, metadata), output)
+        activation.sigmoid_mul_per_token_group_quant_fp8.assert_called_once_with(core, gate)
+        eligible.assert_called_once_with(256, inputs, metadata, True)
+        gemm_rs.assert_called_once_with(values, scales, layer.output)
+
     def test_gate_quant_reuse_preserves_local_query_and_tp_output_layouts(self):
         class Tensor:
             def __init__(self, rows, width, dtype="bf16", masked=False):
@@ -485,6 +548,7 @@ class DsaFusionTest(unittest.TestCase):
                     return Tensor(qkv.shape[0], heads * 128)
 
                 layer = NS(prefill_query_cp=local_query, tp_size=8, prologue="dev",
+                           _decode_nvfp4_ag=None,
                            _bf16_collective=object(),
                            _mtp_bf16_collectives=None, q_rank=1536, kv_rank=512,
                            suffix_dim=64, heads=heads, v_dim=128, _input_padding=64,

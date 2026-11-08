@@ -60,8 +60,7 @@ def fold_head_gate_scales(head_gate, packed_scale, scale, heads):
 class KimiK31DSA(KimiK3MLA):
     """Local-Q Prefill and replicated-Q Decode over owner-local cache."""
 
-    # Indexer K/head-gate projections also consume the BF16 hidden rows.
-    # AttnRes must not replace those rows with an FP8-only activation.
+    # Indexer head weights need the local BF16 hidden alongside quantized inputs.
     supports_fp8_activation = False
 
     def __init__(self, config, parallelism, weights, layer_idx, hardware=None):
@@ -128,6 +127,7 @@ class KimiK31DSA(KimiK3MLA):
             else None
         )
         self.natural_kv_indexer_input = None
+        self._natural_nvfp4_enabled = False
         self._share_fp8_q_latent = False
         if self.prefill_query_cp and not config.is_mtp:
             from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
@@ -163,15 +163,21 @@ class KimiK31DSA(KimiK3MLA):
                 self.natural_q_input, self.natural_gate_input,
             )
             wk = self.indexer.wk
-            if (isinstance(self.natural_kv_input, Fp8NaturalProjection)
-                    and self.input.scale_ue8m0 and wk.scale_ue8m0
-                    and self.indexer.index_n_heads == 32
-                    and self.indexer.index_head_dim == 128
-                    and self.indexer._fp32_head_weight is not None
-                    and config.hidden_size == 7168):
+            can_quantize_indexer = (
+                wk.scale_ue8m0
+                and self.indexer.index_n_heads == 32
+                and self.indexer.index_head_dim == 128
+                and self.indexer._fp32_head_weight is not None
+                and config.hidden_size == 7168
+            )
+            if (can_quantize_indexer and isinstance(self.natural_kv_input, Fp8NaturalProjection)
+                    and self.input.scale_ue8m0):
                 index_k = Fp8NaturalProjection(wk, 0, wk.N, wk.N)
                 self.natural_kv_indexer_input = NaturalPairedProjection(self.natural_kv_input, index_k)
                 self._share_fp8_q_latent = share_fp8_q_latent
+            self._natural_nvfp4_enabled = (
+                can_quantize_indexer and self.natural_q_gate_input.nvfp4 is not None
+            )
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.dsa_dcp_options import (
             dcp_prologue_mode,
         )
@@ -181,7 +187,15 @@ class KimiK31DSA(KimiK3MLA):
             if policy.indexer_use_fp8 and parallelism.role_type == RoleType.DECODE and self.tp_size > 1
             else "dev"
         )
-        if self.prologue != "dev":
+        self._decode_nvfp4_ag = None
+        packed_decode = (
+            not config.is_mtp and policy.indexer_use_fp8
+            and parallelism.role_type == RoleType.DECODE and self.tp_size > 1
+            and getattr(self.input, "dynamic_input_scale", False)
+            and config.k3_runtime_config.attn_res_block_size
+        )
+        self._decode_head_gate_columns = 3 * self.indexer.index_n_heads if packed_decode else 0
+        if self.prologue != "dev" or packed_decode:
             self._init_prologue(config, weights)
 
     def _init_prologue(self, config, weights):
@@ -213,36 +227,62 @@ class KimiK31DSA(KimiK3MLA):
     # DAG nodes over one state namespace per call.
 
     def _gather(self, s):
-        s.full = all_gather(s.hidden, Group.TP)
+        s.fp4 = None
+        if self._decode_nvfp4_ag is not None and not isinstance(s.hidden, torch.Tensor):
+            _, _, head_gate = s.hidden.views()
+            head_gate.copy_(torch.mm(s.hidden.local_hidden, self._head_gate, out_dtype=torch.float32))
+            s.fp4, s.fp8, s.head_gate = self._decode_nvfp4_ag(s.hidden)
+        else:
+            s.full = all_gather(s.hidden, Group.TP)
 
     def _input_projection(self, s):
-        s.qkv, _, s.gate = self.input(s.full).split(
+        projected = self.input(s.full) if s.fp4 is None else self.input.forward_quantized(s.fp4)
+        s.qkv, _, s.gate = projected.split(
             [self.q_rank + self.kv_rank + self.suffix_dim, self._input_padding, self.heads * self.v_dim], dim=-1,
         )
 
     def _index_keys(self, s):
         indexer = self.indexer
-        key = indexer.k_norm(indexer.wk(s.full))
+        raw = indexer.wk(s.full) if s.fp4 is None else indexer.wk.forward_quantized(*s.fp8)
+        key = indexer.k_norm(raw)
         indexer.indexer_op.write_key(key, s.indexer_cache, s.indexer.fmha_params)
 
     def _head_gate_projection(self, s):
-        s.head_gate = torch.mm(s.full, self._head_gate, out_dtype=torch.float32)
+        if s.fp4 is None:
+            s.head_gate = torch.mm(s.full, self._head_gate, out_dtype=torch.float32)
 
     def _norm(self, s):
         q, kv = s.qkv.split([self.q_rank, self.kv_rank + self.suffix_dim], dim=-1)
         latent, s.suffix = kv.split([self.kv_rank, self.suffix_dim], dim=-1)
-        s.q, s.latent = fused_q_kv_rmsnorm(
-            q, latent, self.q_norm.weight, self.kv_norm.weight, self.q_norm.variance_epsilon,
+        s.q_fp8 = None
+        quantize_q = (
+            s.fp4 is not None and self.q_rank % 512 == 0
+            and getattr(self.q_b, "dynamic_input_scale", False) and self.indexer.wq_b.scale_ue8m0
         )
+        normalized = fused_q_kv_rmsnorm(
+            q, latent, self.q_norm.weight, self.kv_norm.weight, self.q_norm.variance_epsilon,
+            quantize_q=quantize_q,
+        )
+        if quantize_q:
+            s.q, s.latent, s.q_fp8, s.q_amax = normalized
+        else:
+            s.q, s.latent = normalized
 
     def _sfa_query(self, s):
-        query = self.q_b(s.q).view(-1, self.query_heads, self.q_dim)
+        if s.q_fp8 is None:
+            query = self.q_b(s.q)
+        else:
+            from rtp_llm.models_py.triton_kernels.common.nvfp4 import quantize_nvfp4_from_partials
+
+            query = self.q_b.forward_quantized(quantize_nvfp4_from_partials(s.q, s.q_amax))
+        query = query.view(-1, self.query_heads, self.q_dim)
         s.sfa_query = s.sfa.decode_query(query, self.layer_idx)
         s.sfa.write_decode_cache(s.latent, s.suffix, s.sfa_cache)
 
     def _index_queries(self, s):
         indexer = self.indexer
-        query = indexer.wq_b(s.q).view(-1, indexer.index_n_heads, indexer.index_head_dim)
+        query = indexer.wq_b(s.q) if s.q_fp8 is None else indexer.wq_b.forward_quantized(*s.q_fp8)
+        query = query.view(-1, indexer.index_n_heads, indexer.index_head_dim)
         s.index_query, scale = indexer.indexer_op.encode_query(query, unpack_scale=False)
         s.index_weights = fold_head_gate_scales(
             s.head_gate, scale, self._head_gate_scale, indexer.index_n_heads
@@ -320,7 +360,7 @@ class KimiK31DSA(KimiK3MLA):
             raise RuntimeError("K3.1 sparse attention returned no output")
         return output.reshape(-1, self.heads * self.v_dim)
 
-    def _forward_natural(self, hidden, fmha, cache, metadata, natural_fp8=None):
+    def _forward_natural(self, hidden, fmha, cache, metadata, natural_fp8=None, natural_nvfp4=None):
         from rtp_llm.models_py.modules.kimi_k3.natural_dsa import Fp8NaturalProjection
 
         sfa, sfa_cache, index_fmha, index_cache = resolve_mla_routes(
@@ -342,7 +382,17 @@ class KimiK31DSA(KimiK3MLA):
         def prepare_kv():
             nonlocal latent, suffix
             key = raw_key = None
-            if natural_fp8 is None:
+            if natural_nvfp4 is not None:
+                with profile_scope("RTP::attention.dsa.sfa.kv_proj"):
+                    packed = self.natural_kv_input.forward_quantized(
+                        natural_nvfp4.unpack(natural_nvfp4.wire),
+                    )
+                if index_cache is not None:
+                    with profile_scope("RTP::attention.dsa.indexer.k_proj"):
+                        raw_key = self.indexer.wk.forward_quantized(
+                            natural_fp8.values, natural_fp8.scale_wire[:, :rows].T,
+                        )
+            elif natural_fp8 is None:
                 with profile_scope("RTP::attention.dsa.sfa.kv_proj"):
                     packed = self.natural_kv_input(hidden)
             else:
@@ -396,14 +446,16 @@ class KimiK31DSA(KimiK3MLA):
         prepare_index_query = index_cache is not None and index_fmha.is_sparse()
         query = gate = index_query = head_weights = None
 
-        def project_queries(zigzag_hidden, activation_scales=None):
+        def project_queries(zigzag_hidden, activation_scales=None, *, nvfp4_input=None):
             nonlocal query, gate, index_query, head_weights, latent, suffix
             quantized = None
             with profile_scope(
                 "RTP::attention.dsa.q_latent_and_output_gate_proj"
                 if q_gate is not None else "RTP::attention.dsa.q_latent_proj"
             ):
-                if activation_scales is not None:
+                if nvfp4_input is not None:
+                    q_input, gate = q_gate.forward_nvfp4(nvfp4_input)
+                elif activation_scales is not None:
                     q_input, gate = q_gate.forward_quantized(zigzag_hidden, activation_scales)
                 elif q_gate is not None:
                     q_input, gate = q_gate(zigzag_hidden)
@@ -412,8 +464,25 @@ class KimiK31DSA(KimiK3MLA):
                     q_input = self.natural_q_input.forward_quantized(*quantized)
                 else:
                     q_input = self.natural_q_input(zigzag_hidden)
-            shared_q = None
-            if joint_q_kv_norm:
+            shared_q = fp4_q = None
+            if (nvfp4_input is not None and getattr(self.q_b, "dynamic_input_scale", False)
+                    and rows >= self.indexer.wq_b.FLASHINFER_M_THRESHOLD
+                    and self.indexer.wq_b.scale_ue8m0):
+                from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
+                    rmsnorm_fp8_quant_ue8m0,
+                )
+                from rtp_llm.models_py.triton_kernels.common.nvfp4 import quantize_nvfp4_from_partials
+
+                with profile_scope("RTP::attention.dsa.q_rmsnorm_fp8_nvfp4_amax"):
+                    amax = q_input.new_empty(((q_input.shape[0] + 3) // 4,), dtype=torch.float32)
+                    q, values, scales = rmsnorm_fp8_quant_ue8m0(
+                        q_input, self.q_norm.weight, eps=self.q_norm.variance_epsilon,
+                        amax_partials=amax,
+                    )
+                    shared_q = values, scales
+                with profile_scope("RTP::attention.dsa.q_nvfp4_quant"):
+                    fp4_q = quantize_nvfp4_from_partials(q, amax)
+            elif joint_q_kv_norm:
                 with profile_scope("RTP::attention.dsa.q_latent_and_sfa_kv_rmsnorm"):
                     q, latent = grouped_q_kv_rmsnorm(
                         q_input, latent, self.q_norm.weight, self.kv_norm.weight,
@@ -438,7 +507,9 @@ class KimiK31DSA(KimiK3MLA):
                     )
             del q_input
             with profile_scope("RTP::attention.dsa.sfa.q_proj"):
-                if shared_q is not None:
+                if fp4_q is not None:
+                    query = self.q_b.forward_quantized(fp4_q).view(-1, self.heads, self.q_dim)
+                elif shared_q is not None:
                     query = self.q_b.forward_quantized(*shared_q).view(-1, self.heads, self.q_dim)
                 else:
                     query = self.q_b(q).reshape(-1, self.heads, self.q_dim)
@@ -450,8 +521,8 @@ class KimiK31DSA(KimiK3MLA):
                         )
                     else:
                         index_q = self.indexer.project_query(q, original_rows=rows)
-            del shared_q
-            if prepare_index_query and activation_scales is not None:
+            del shared_q, fp4_q
+            if prepare_index_query and (activation_scales is not None or nvfp4_input is not None):
                 index_query = torch.empty(index_q.shape, dtype=torch.float8_e4m3fn, device=hidden.device)
                 head_weights = torch.empty((*index_q.shape[:2], 1), dtype=torch.float32, device=hidden.device)
                 with profile_scope("RTP::attention.dsa.indexer.q_quant"):
@@ -481,8 +552,20 @@ class KimiK31DSA(KimiK3MLA):
                 with profile_scope("RTP::attention.dsa.indexer.head_weights_fp32_proj"):
                     project_prefill_head_weights(hidden, self.indexer._fp32_head_weight, out)
 
-            raw_weights = owner.row_exchange.consume_fp8(
-                natural_fp8, owner.routing_plan, project_queries,
+            if natural_nvfp4 is not None:
+                consume = owner.row_exchange.consume_nvfp4
+                activation = natural_nvfp4
+
+                def project_nvfp4_queries(packed):
+                    project_queries(None, nvfp4_input=packed)
+
+                project = project_nvfp4_queries
+            else:
+                consume = owner.row_exchange.consume_fp8
+                activation = natural_fp8
+                project = project_queries
+            raw_weights = consume(
+                activation, owner.routing_plan, project,
                 before_consume=prepare_kv,
                 project_heads=project_heads if prepare_index_query else None,
             )
@@ -560,9 +643,12 @@ class KimiK31DSA(KimiK3MLA):
                       if self._fp8_output_gate else self.output(output))
         return exchange.exchange(output, owner.routing_plan, "to_natural")
 
-    def forward(self, hidden, fmha, cache, attention_inputs=None, metadata=None, *, natural_fp8=None):
+    def forward(
+        self, hidden, fmha, cache, attention_inputs=None, metadata=None, *,
+        natural_fp8=None, natural_nvfp4=None,
+    ):
         if getattr(metadata, "outer_layout", None) is not None:
-            output = self._forward_natural(hidden, fmha, cache, metadata, natural_fp8)
+            output = self._forward_natural(hidden, fmha, cache, metadata, natural_fp8, natural_nvfp4)
             next(iter(fmha.values())).workspace_owner.release_eager_buffers()
             return output
         local_query = (
@@ -570,7 +656,9 @@ class KimiK31DSA(KimiK3MLA):
             and getattr(metadata, "query_layout", None) is not None
         )
         use_bf16_collective = False
-        if self.prologue != "dev":
+        if self.prologue != "dev" or (
+            self._decode_nvfp4_ag is not None and not isinstance(hidden, torch.Tensor)
+        ):
             output, gate = self._decode_prologue(hidden, fmha, cache)
         else:
             collective = self._bf16_collective

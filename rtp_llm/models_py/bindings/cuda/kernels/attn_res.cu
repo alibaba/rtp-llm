@@ -19,6 +19,9 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/attn_res.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
+#include <cooperative_groups.h>
+#include "rtp_llm/models_py/bindings/cuda/kernels/nvfp4_quant.cuh"
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 
@@ -273,16 +276,119 @@ __device__ __forceinline__ void store_fp8_group(
   *reinterpret_cast<Packed*>(output + (long long)row * H + col) = packed;
 }
 
+// All CTAs have produced their BF16 rows and maxima. The same grid finishes
+// the scale and writes the CUTLASS 128x4 layout directly into the wire buffer.
+template <int H>
+__device__ __forceinline__ void attn_res_nvfp4_packet(
+    const bf16_t* output, int rows, const float* amax_partials, uint8_t* wire) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && __CUDA_ARCH__ < 1100
+  cooperative_groups::this_grid().sync();
+  __shared__ float inverse;
+  constexpr int vectors_per_row = H / CVT_FP4_ELTS_PER_THREAD;
+  const int padded_rows = (rows + 127) / 128 * 128;
+  auto* codes = reinterpret_cast<uint32_t*>(wire);
+  auto* scales = wire + static_cast<int64_t>(rows) * (H / 2);
+  auto* tail = reinterpret_cast<float*>(scales + static_cast<int64_t>(padded_rows) * (H / 16));
+  if (threadIdx.x < 32) {
+    uint32_t maximum = 0;
+    for (unsigned i = threadIdx.x; i < gridDim.x; i += 32) {
+      maximum = max(maximum, __float_as_uint(amax_partials[i]));
+    }
+    maximum = __reduce_max_sync(0xffffffff, maximum);
+    if (threadIdx.x == 0) {
+      const float scale = __fmul_rn(fmaxf(__uint_as_float(maximum), 1e-8f), 1.0f / 2688.0f);
+      inverse = __frcp_rn(scale);
+      if (blockIdx.x == 0) {
+        tail[0] = scale;
+        tail[1] = tail[2] = tail[3] = 0.f;
+      }
+    }
+  }
+  __syncthreads();
+  struct alignas(16) AlignedInput {
+    PackedVec<bf16_t> values;
+  };
+  auto* vectors = reinterpret_cast<const AlignedInput*>(output);
+  for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+       i < static_cast<int64_t>(padded_rows) * vectors_per_row; i += gridDim.x * blockDim.x) {
+    const int row = i / vectors_per_row;
+    const int col = i % vectors_per_row;
+    PackedVec<bf16_t> values{};
+    if (row < rows) {
+      values = vectors[i].values;
+    }
+    auto* sf = cvt_quant_to_fp4_get_sf_out_offset<uint8_t, 2>(row, col, H, scales);
+    const auto packed = cvt_warp_fp16_to_fp4<bf16_t, false, true>(values, inverse, sf);
+    if (row < rows) {
+      codes[i] = packed;
+    }
+  }
+#endif
+}
+
+// The consumer warps own one complete normalized row. Keep its rounded BF16
+// values in registers until the CTA has computed the row's dequant scale.
+template <int H, int SLICES>
+__device__ __forceinline__ void store_nvfp4_row(
+    const uint4 (&values)[SLICES], uint32_t packed_amax, uint32_t* warp_amax,
+    int row, int group, int comp_wid, int ct_in_group, int lane,
+    uint32_t* codes, uint8_t* scales, float* row_scales) {
+  static_assert(H == 7168);
+  const uint32_t local = max(packed_amax & 0xffffu, packed_amax >> 16);
+  const uint32_t partial = __reduce_max_sync(0xffffffff, local);
+  if (lane == 0) {
+    warp_amax[comp_wid] = partial;
+  }
+  named_barrier_sync(CONSUMER_THREADS, 0);
+  const uint32_t maximum = __reduce_max_sync(
+      0xffffffff, lane < CONSUMER_WARPS ? warp_amax[lane] : 0u);
+  const float scale = __fmul_rn(
+      fmaxf(__uint_as_float(maximum << 16), 1.e-8f), 1.f / 2688.f);
+  const float inverse = __frcp_rn(scale);
+  if (comp_wid == 0 && lane == 0) {
+    row_scales[row] = scale;
+  }
+  uint32_t* row_codes = codes + static_cast<int64_t>(row) * (H / 8);
+  #pragma unroll
+  for (int si = 0; si < SLICES - 1; ++si) {
+    const int col = (si * CONSUMER_GROUPS + group) * K_TILE + ct_in_group * 8;
+    auto vec = *reinterpret_cast<const PackedVec<bf16_t>*>(&values[si]);
+    auto* sf = cvt_quant_to_fp4_get_sf_out_offset<uint8_t, 2>(row, col / 8, H, scales);
+    row_codes[col / 8] = cvt_warp_fp16_to_fp4<bf16_t, false, true>(vec, inverse, sf);
+  }
+
+  // The last tile has four values per lane. Two lanes form the same 8-value
+  // vector, and the next pair supplies the other half of the 16-value group.
+  const uint4 tail = values[SLICES - 1];
+  const uint32_t other_x = __shfl_xor_sync(0xffffffff, tail.x, 1);
+  const uint32_t other_y = __shfl_xor_sync(0xffffffff, tail.y, 1);
+  const bool even = (lane & 1) == 0;
+  const uint4 joined = even ? make_uint4(tail.x, tail.y, other_x, other_y)
+                            : make_uint4(other_x, other_y, tail.x, tail.y);
+  auto vec = *reinterpret_cast<const PackedVec<bf16_t>*>(&joined);
+  const int col = 6 * K_TILE + group * (K_TILE / 2) + ct_in_group * 4;
+  auto* sf = (lane & 3) == 0
+      ? cvt_quant_to_fp4_get_sf_out_offset<uint8_t, 1>(row, col / 16, H, scales)
+      : nullptr;
+  const uint32_t packed = cvt_warp_fp16_to_fp4<bf16_t, false, true, 2>(vec, inverse, sf);
+  if (even) {
+    row_codes[col / 8] = packed;
+  }
+}
+
 template <int H, int N, int NC = N_CHUNK_DEFAULT, int B = 1,
           bool RELEASE_TMEM = false, bool STATIC_COMMON_PATH = false,
-          bool HAS_OUTPUT_NORM = false, bool STORE_FP8 = false>
+          bool HAS_OUTPUT_NORM = false, bool STORE_FP8 = false,
+          bool STORE_NVFP4_AMAX = false, bool STORE_NVFP4_ROWS = false>
 __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
     bf16_t* __restrict__ block_res, bf16_t* __restrict__ layer_res,
     const bf16_t* __restrict__ delta, const bf16_t* __restrict__ res_w,
     const bf16_t* __restrict__ rms_w, bf16_t* __restrict__ output, int T,
     int block_stride_m, int block_stride_r, float rms_eps,
     const bf16_t* __restrict__ output_norm_weight, float output_norm_eps,
-    int block_write_idx, uint8_t* fp8_output, uint8_t* fp8_scales) {
+    int block_write_idx, uint8_t* fp8_output, uint8_t* fp8_scales,
+    float* amax_partials, uint8_t* nvfp4_packet,
+    const bf16_t* __restrict__ shared_delta) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && __CUDA_ARCH__ < 1100
   constexpr float LOG2_E = 1.4426950408889634f;
   constexpr int N_CHUNK = NC;
@@ -300,11 +406,22 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
   static_assert(H >= 4096 && H <= 8192);
   static_assert(H % K_TILE == 0);
   static_assert(!STATIC_COMMON_PATH || HAS_OUTPUT_NORM);
+  static_assert(!(STORE_FP8 || STORE_NVFP4_AMAX || STORE_NVFP4_ROWS) || HAS_OUTPUT_NORM);
+  __shared__ uint32_t warp_amax[CONSUMER_WARPS];
+  uint32_t packed_amax = 0;
 
   const int tid = threadIdx.x;
   const int wid = tid >> 5;
   const int lane = tid & 31;
   const int TB = T * B;
+  const int padded_rows = (TB + 127) / 128 * 128;
+  uint8_t* row_block_scales = nullptr;
+  float* row_scales = nullptr;
+  if constexpr (STORE_NVFP4_ROWS) {
+    row_block_scales = nvfp4_packet + static_cast<int64_t>(TB) * (H / 2);
+    row_scales = reinterpret_cast<float*>(
+        row_block_scales + static_cast<int64_t>(padded_rows) * (H / 16));
+  }
   const int num_ctas = gridDim.x;
   const bool has_delta = STATIC_COMMON_PATH || delta != nullptr;
   const int write_idx = STATIC_COMMON_PATH ? -1 : block_write_idx;
@@ -463,6 +580,7 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
 
     long long gci = 0;
     for (int tb = blockIdx.x; tb < TB; tb += num_ctas) {
+      const bf16_t* shared_row = shared_delta ? shared_delta + static_cast<int64_t>(tb) * H : nullptr;
       float m_running = -FLT_MAX;
       float s_running = 0.f;
   #pragma unroll
@@ -505,6 +623,10 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
                       for (int j = 0; j < 2; j++) {
                         auto delta2 = *reinterpret_cast<const __nv_bfloat162*>(
                             delta_ptr + 2 * j);
+                        if (shared_row) {
+                          delta2 = __hadd2(delta2, *reinterpret_cast<const __nv_bfloat162*>(
+                              shared_row + h_base + 2 * j));
+                        }
                         v2[j] = __hadd2(v2[j], delta2);
                       }
                       *reinterpret_cast<int2*>(layer_res + (long long)tb * H +
@@ -547,6 +669,10 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
                   for (int j = 0; j < VEC / 2; j++) {
                     auto delta2 = *reinterpret_cast<const __nv_bfloat162*>(
                         delta_ptr + 2 * j);
+                    if (shared_row) {
+                      delta2 = __hadd2(delta2, *reinterpret_cast<const __nv_bfloat162*>(
+                          shared_row + h_base + 2 * j));
+                    }
                     v2[j] = __hadd2(v2[j], delta2);
                   }
                   *reinterpret_cast<int4*>(layer_res + (long long)tb * H +
@@ -805,7 +931,8 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
       }
 
       float inv_s = 1.f / s_running;
-      bf16_t* out_ptr = output + (long long)tb * H;
+      constexpr bool STORE_BF16 = !STORE_NVFP4_ROWS || STORE_FP8;
+      bf16_t* out_ptr = STORE_BF16 ? output + (long long)tb * H : nullptr;
       float2 output_sq_pair = {};
       // When output RMSNorm is fused, the softmax denominator cancels:
       // (acc / s) * rsqrt(mean((acc / s)^2) + eps)
@@ -883,6 +1010,8 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
               rsqrtf(total_sq / H + output_norm_eps * s_running * s_running);
         }
         float output_rsigma = __shfl_sync(0xffffffff, total_sq, 0);
+        uint4 row_values[SLICES_PER_GROUP];
+        uint32_t row_amax = 0;
   #pragma unroll
         for (int si = 0; si < SLICES_PER_GROUP; si++) {
           if constexpr (H == 7168) {
@@ -896,7 +1025,19 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
                 values[j] = __float2bfloat16(acc32[si * VEC + j] *
                                              output_rsigma * weight);
               }
-              *reinterpret_cast<uint2*>(out_ptr + h_base) = packed;
+              if constexpr (STORE_NVFP4_ROWS) {
+                row_values[si] = make_uint4(packed.x, packed.y, 0, 0);
+                row_amax = __vmaxu2(row_amax, packed.x & 0x7fff7fff);
+                row_amax = __vmaxu2(row_amax, packed.y & 0x7fff7fff);
+              }
+              if constexpr (STORE_BF16) {
+                *reinterpret_cast<uint2*>(out_ptr + h_base) = packed;
+              }
+              if constexpr (STORE_NVFP4_AMAX) {
+                // Absolute BF16 values are ordered by their unsigned bits.
+                packed_amax = __vmaxu2(packed_amax, packed.x & 0x7fff7fff);
+                packed_amax = __vmaxu2(packed_amax, packed.y & 0x7fff7fff);
+              }
               if constexpr (STORE_FP8) {
                 store_fp8_group<H, 4, uint32_t>(values, fp8_output, fp8_scales, tb, TB, h_base);
               }
@@ -914,18 +1055,73 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
             values[j] =
                 __float2bfloat16(acc32[si * VEC + j] * output_rsigma * weight);
           }
-          *reinterpret_cast<uint4*>(out_ptr + h_base) = packed;
+          if constexpr (STORE_NVFP4_ROWS) {
+            row_values[si] = packed;
+            row_amax = __vmaxu2(row_amax, packed.x & 0x7fff7fff);
+            row_amax = __vmaxu2(row_amax, packed.y & 0x7fff7fff);
+            row_amax = __vmaxu2(row_amax, packed.z & 0x7fff7fff);
+            row_amax = __vmaxu2(row_amax, packed.w & 0x7fff7fff);
+          }
+          if constexpr (STORE_BF16) {
+            *reinterpret_cast<uint4*>(out_ptr + h_base) = packed;
+          }
+          if constexpr (STORE_NVFP4_AMAX) {
+            packed_amax = __vmaxu2(packed_amax, packed.x & 0x7fff7fff);
+            packed_amax = __vmaxu2(packed_amax, packed.y & 0x7fff7fff);
+            packed_amax = __vmaxu2(packed_amax, packed.z & 0x7fff7fff);
+            packed_amax = __vmaxu2(packed_amax, packed.w & 0x7fff7fff);
+          }
           if constexpr (STORE_FP8) {
             store_fp8_group<H, VEC, uint64_t>(values, fp8_output, fp8_scales, tb, TB, h_base);
           }
+        }
+        if constexpr (STORE_NVFP4_ROWS) {
+          store_nvfp4_row<H>(row_values, row_amax, warp_amax, tb, group,
+                             comp_wid, ct_in_group, lane,
+                             reinterpret_cast<uint32_t*>(nvfp4_packet),
+                             row_block_scales, row_scales);
         }
       }
     }
   }
 
+  if constexpr (STORE_NVFP4_AMAX) {
+    if (wid != 0) {
+      uint32_t maximum = __reduce_max_sync(
+          0xffffffff, max(packed_amax & 0xffffu, packed_amax >> 16));
+      if (lane == 0) {
+        warp_amax[comp_wid] = maximum;
+      }
+    }
+  }
+  if constexpr (STORE_NVFP4_ROWS) {
+    const int id = blockIdx.x * blockDim.x + tid;
+    for (int i = id; i < (padded_rows - TB) * (H / 16); i += gridDim.x * blockDim.x) {
+      *cvt_quant_to_fp4_get_sf_out_offset<uint8_t, 1>(
+          TB + i / (H / 16), i % (H / 16), H, row_block_scales) = 0;
+    }
+    if (id < ((4 - TB % 4) % 4)) {
+      row_scales[TB + id] = 0.f;
+    }
+  }
   __syncthreads();
+  if constexpr (STORE_NVFP4_AMAX) {
+    if (tid == 0) {
+      uint32_t maximum = 0;
+      #pragma unroll
+      for (int warp = 0; warp < CONSUMER_WARPS; ++warp) {
+        maximum = max(maximum, warp_amax[warp]);
+      }
+      amax_partials[blockIdx.x] = __uint_as_float(maximum << 16);
+    }
+  }
   if (wid == 1) {
     tmem_free(plan.tmem_base, TMEM_COLS_ALLOC);
+  }
+  if constexpr (STORE_NVFP4_AMAX) {
+    if (nvfp4_packet != nullptr) {
+      attn_res_nvfp4_packet<H>(output, TB, amax_partials, nvfp4_packet);
+    }
   }
 #else
   if (threadIdx.x == 0) {
@@ -935,7 +1131,8 @@ __global__ void __launch_bounds__(BLK, 1) attn_res_fwd_online_v2_kernel(
 }
 
 template <int H, int N, int NC = N_CHUNK_DEFAULT, bool RELEASE_TMEM = false,
-          bool STATIC_COMMON_PATH = false, bool HAS_OUTPUT_NORM = false, bool STORE_FP8 = false>
+          bool STATIC_COMMON_PATH = false, bool HAS_OUTPUT_NORM = false, bool STORE_FP8 = false,
+          bool STORE_NVFP4_AMAX = false, bool STORE_NVFP4_ROWS = false>
 static void launch_fwd(bf16_t* block_residual, bf16_t* layer_residual,
                        const bf16_t* delta, const bf16_t* res_weight,
                        const bf16_t* rms_weight, bf16_t* output, int T,
@@ -943,7 +1140,10 @@ static void launch_fwd(bf16_t* block_residual, bf16_t* layer_residual,
                        const bf16_t* output_norm_weight = nullptr,
                        float output_norm_eps = 0.f, int block_stride_m = 0,
                        int block_stride_r = 0, int block_write_idx = -1,
-                       uint8_t* fp8_output = nullptr, uint8_t* fp8_scales = nullptr) {
+                       uint8_t* fp8_output = nullptr, uint8_t* fp8_scales = nullptr,
+                       float* amax_partials = nullptr,
+                       uint8_t* nvfp4_packet = nullptr,
+                       const bf16_t* shared_delta = nullptr) {
   constexpr size_t smem_size =
       ((size_t)(CHUNK_DEPTH * (NC + 1) + (HAS_OUTPUT_NORM ? 1 : 0)) * H *
            sizeof(bf16_t) +
@@ -951,7 +1151,8 @@ static void launch_fwd(bf16_t* block_residual, bf16_t* layer_residual,
       ~size_t(15);
   auto kernel =
       &attn_res_fwd_online_v2_kernel<H, N, NC, 1, RELEASE_TMEM,
-                                     STATIC_COMMON_PATH, HAS_OUTPUT_NORM, STORE_FP8>;
+                                     STATIC_COMMON_PATH, HAS_OUTPUT_NORM, STORE_FP8,
+                                     STORE_NVFP4_AMAX, STORE_NVFP4_ROWS>;
   static bool attrs_set = false;
   if (!attrs_set) {
     if (smem_size > 48 * 1024) {
@@ -966,15 +1167,21 @@ static void launch_fwd(bf16_t* block_residual, bf16_t* layer_residual,
   config.blockDim = BLK;
   config.dynamicSmemBytes = smem_size;
   config.stream = stream;
-  cudaLaunchAttribute attrs[1];
-  attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attrs[0].val.programmaticStreamSerializationAllowed = 1;
-  config.attrs = attrs;
+  cudaLaunchAttribute attr{};
+  if (nvfp4_packet != nullptr && !STORE_NVFP4_ROWS) {
+    attr.id = cudaLaunchAttributeCooperative;
+    attr.val.cooperative = 1;
+  } else {
+    attr.id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attr.val.programmaticStreamSerializationAllowed = 1;
+  }
+  config.attrs = &attr;
   config.numAttrs = 1;
-  cudaLaunchKernelEx(&config, kernel, block_residual, layer_residual, delta,
+  C10_CUDA_CHECK(cudaLaunchKernelEx(&config, kernel, block_residual, layer_residual, delta,
                      res_weight, rms_weight, output, T, block_stride_m,
                      block_stride_r, rms_eps, output_norm_weight,
-                     output_norm_eps, block_write_idx, fp8_output, fp8_scales);
+                     output_norm_eps, block_write_idx, fp8_output, fp8_scales, amax_partials,
+                     nvfp4_packet, shared_delta));
 }
 
 }  // namespace fwd_prod_v2
@@ -989,7 +1196,10 @@ void attn_res(at::Tensor& prefix,
                       at::Tensor& output, int64_t num_blocks,
                       int64_t block_write_idx, double eps,
                       double output_norm_eps, std::optional<at::Tensor> fp8_output,
-                      std::optional<at::Tensor> fp8_scales) {
+                      std::optional<at::Tensor> fp8_scales,
+                      std::optional<at::Tensor> amax_partials,
+                      std::optional<at::Tensor> nvfp4_packet, bool nvfp4_rowwise,
+                      std::optional<at::Tensor> shared_delta) {
   TORCH_CHECK(prefix.is_cuda() && prefix.dim() == 2 && prefix.scalar_type() == at::kBFloat16,
               "AttnRes prefix must be a CUDA BF16 matrix");
   auto check_tensor = [&](const at::Tensor& tensor, const char* name) {
@@ -1012,6 +1222,12 @@ void attn_res(at::Tensor& prefix,
     check_tensor(*delta, "delta");
     TORCH_CHECK(delta->sizes() == prefix.sizes(), "AttnRes delta shape mismatch");
   }
+  if (shared_delta.has_value()) {
+    check_tensor(*shared_delta, "shared delta");
+    TORCH_CHECK(delta.has_value() && shared_delta->sizes() == prefix.sizes() &&
+                shared_delta->is_contiguous(),
+                "AttnRes shared delta requires matching dense MoE deltas");
+  }
   if (output_norm_weight.has_value()) {
     check_tensor(*output_norm_weight, "output_norm_weight");
     TORCH_CHECK(output_norm_weight->is_contiguous() && output_norm_weight->numel() == prefix.size(1),
@@ -1033,6 +1249,14 @@ void attn_res(at::Tensor& prefix,
   int const device = prefix.get_device();
   c10::cuda::CUDAGuard const device_guard(prefix.device());
   cudaDeviceProp const* properties = at::cuda::getDeviceProperties(device);
+  if (amax_partials.has_value()) {
+    TORCH_CHECK(output_norm_weight.has_value() &&
+                amax_partials->device() == prefix.device() &&
+                amax_partials->scalar_type() == at::kFloat &&
+                amax_partials->is_contiguous() && amax_partials->dim() == 1 &&
+                amax_partials->numel() == properties->multiProcessorCount,
+                "AttnRes NVFP4 amax requires output norm and one FP32 value per SM");
+  }
   TORCH_CHECK(properties->major == 10,
                   "AttnRes requires the SM100 family");
   int64_t const hidden_size = prefix.size(1);
@@ -1054,26 +1278,44 @@ void attn_res(at::Tensor& prefix,
                   "block row, got ",
                   block_write_idx);
 
+  if (nvfp4_rowwise) {
+    TORCH_CHECK(nvfp4_packet && output_norm_weight && !amax_partials,
+                "Rowwise AttnRes NVFP4 requires output norm and a packet");
+  }
+  if (nvfp4_packet.has_value()) {
+    const int64_t padded = (static_cast<int64_t>(num_tokens) + 127) / 128 * 128;
+    const int64_t scale_bytes = nvfp4_rowwise ? ((static_cast<int64_t>(num_tokens) + 3) / 4 * 16) : 16;
+    const int64_t packet_bytes = num_tokens * (hidden_size / 2) + padded * (hidden_size / 16) + scale_bytes;
+    TORCH_CHECK((nvfp4_rowwise || (amax_partials && properties->cooperativeLaunch)) &&
+                nvfp4_packet->device() == prefix.device() && nvfp4_packet->scalar_type() == at::kByte &&
+                nvfp4_packet->is_contiguous() && nvfp4_packet->numel() == packet_bytes &&
+                reinterpret_cast<uintptr_t>(nvfp4_packet->data_ptr()) % 16 == 0,
+                "AttnRes NVFP4 requires an aligned CUTLASS packet and supported launch");
+  }
+
   if (num_tokens == 0) {
     return;
   }
 
   using namespace sm100::fwd_prod_v2;
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(device);
-  auto dispatch_blocks = [&](auto static_common_path, auto has_output_norm, auto store_fp8) {
+  auto dispatch_blocks = [&](auto static_common_path, auto has_output_norm, auto store_fp8,
+                             auto store_nvfp4_amax, auto store_nvfp4_rows) {
     constexpr bool STATIC_COMMON_PATH = decltype(static_common_path)::value;
     constexpr bool HAS_OUTPUT_NORM = decltype(has_output_norm)::value;
     auto dispatch = [&](auto source_count) {
       constexpr int NUM_SOURCES = decltype(source_count)::value;
       launch_fwd<7168, NUM_SOURCES, 3, false, STATIC_COMMON_PATH,
-                 HAS_OUTPUT_NORM, decltype(store_fp8)::value>(
+                 HAS_OUTPUT_NORM, decltype(store_fp8)::value, decltype(store_nvfp4_amax)::value,
+                 decltype(store_nvfp4_rows)::value>(
           static_cast<bf16_t*>(blocks.data_ptr()),
           static_cast<bf16_t*>(prefix.data_ptr()),
           delta.has_value() ? static_cast<bf16_t const*>(delta->data_ptr())
                             : nullptr,
           static_cast<bf16_t const*>(qk_weight.data_ptr()),
           static_cast<bf16_t const*>(norm_weight.data_ptr()),
-          static_cast<bf16_t*>(output.data_ptr()), num_tokens,
+          nvfp4_rowwise && !fp8_output ? nullptr : static_cast<bf16_t*>(output.data_ptr()),
+          num_tokens,
           static_cast<float>(eps), properties->multiProcessorCount, stream,
           output_norm_weight.has_value()
               ? static_cast<bf16_t const*>(output_norm_weight->data_ptr())
@@ -1083,7 +1325,10 @@ void attn_res(at::Tensor& prefix,
           static_cast<int>(blocks.stride(1)),
           static_cast<int>(block_write_idx),
           fp8_output ? static_cast<uint8_t*>(fp8_output->data_ptr()) : nullptr,
-          fp8_scales ? static_cast<uint8_t*>(fp8_scales->data_ptr()) : nullptr);
+          fp8_scales ? static_cast<uint8_t*>(fp8_scales->data_ptr()) : nullptr,
+          amax_partials ? amax_partials->data_ptr<float>() : nullptr,
+          nvfp4_packet ? nvfp4_packet->data_ptr<uint8_t>() : nullptr,
+          shared_delta ? static_cast<const bf16_t*>(shared_delta->data_ptr()) : nullptr);
     };
     switch (num_blocks) {
       case 0:
@@ -1115,19 +1360,41 @@ void attn_res(at::Tensor& prefix,
         break;
     }
   };
-  if (fp8_output.has_value()) {
+  auto dispatch_quantized = [&](auto store_fp8, auto store_nvfp4_amax) {
     if (delta.has_value() && block_write_idx < 0) {
-      dispatch_blocks(std::true_type{}, std::true_type{}, std::true_type{});
+      dispatch_blocks(std::true_type{}, std::true_type{}, store_fp8, store_nvfp4_amax, std::false_type{});
     } else {
-      dispatch_blocks(std::false_type{}, std::true_type{}, std::true_type{});
+      dispatch_blocks(std::false_type{}, std::true_type{}, store_fp8, store_nvfp4_amax, std::false_type{});
     }
+  };
+  if (nvfp4_rowwise) {
+    auto dispatch_rowwise = [&](auto store_fp8) {
+      if (delta.has_value() && block_write_idx < 0) {
+        dispatch_blocks(std::true_type{}, std::true_type{}, store_fp8, std::false_type{}, std::true_type{});
+      } else {
+        dispatch_blocks(std::false_type{}, std::true_type{}, store_fp8, std::false_type{}, std::true_type{});
+      }
+    };
+    if (fp8_output.has_value()) {
+      dispatch_rowwise(std::true_type{});
+    } else {
+      dispatch_rowwise(std::false_type{});
+    }
+  } else if (amax_partials.has_value()) {
+    if (fp8_output.has_value()) {
+      dispatch_quantized(std::true_type{}, std::true_type{});
+    } else {
+      dispatch_quantized(std::false_type{}, std::true_type{});
+    }
+  } else if (fp8_output.has_value()) {
+    dispatch_quantized(std::true_type{}, std::false_type{});
   } else if (delta.has_value() && output_norm_weight.has_value() &&
       block_write_idx < 0) {
-    dispatch_blocks(std::true_type{}, std::true_type{}, std::false_type{});
+    dispatch_blocks(std::true_type{}, std::true_type{}, std::false_type{}, std::false_type{}, std::false_type{});
   } else if (output_norm_weight.has_value()) {
-    dispatch_blocks(std::false_type{}, std::true_type{}, std::false_type{});
+    dispatch_blocks(std::false_type{}, std::true_type{}, std::false_type{}, std::false_type{}, std::false_type{});
   } else {
-    dispatch_blocks(std::false_type{}, std::false_type{}, std::false_type{});
+    dispatch_blocks(std::false_type{}, std::false_type{}, std::false_type{}, std::false_type{}, std::false_type{});
   }
   cudaError_t const error = cudaGetLastError();
   TORCH_CHECK(

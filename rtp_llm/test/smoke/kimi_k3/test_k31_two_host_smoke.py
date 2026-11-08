@@ -233,10 +233,10 @@ class K31TwoHostSmokeTest(unittest.TestCase):
     def test_nvfp4_config_resolution_survives_remote_environment(self):
         with patch.dict(os.environ, {}, clear=True):
             regular, = smoke.stage_configs(base_config())
-        with patch.dict(os.environ, KDA_NVFP4="1", DSA_NVFP4="1"):
+        with patch.dict(os.environ, KDA_NVFP4="0", DSA_NVFP4="0"):
             received = smoke.launcher.validate(regular)
-            self.assertFalse(received["kda_nvfp4"])
-            self.assertFalse(received["dsa_nvfp4"])
+            self.assertTrue(received["kda_nvfp4"])
+            self.assertTrue(received["dsa_nvfp4"])
         with patch.dict(os.environ, KDA_NVFP4="0", DSA_NVFP4="1"):
             regular, = smoke.stage_configs(base_config())
         with patch.dict(os.environ, KDA_NVFP4="1", DSA_NVFP4="0"):
@@ -256,13 +256,18 @@ class K31TwoHostSmokeTest(unittest.TestCase):
             (root / "logs").mkdir()
             rows = []
             config = dict(kda_nvfp4=True, dsa_nvfp4=False)
-            for label in ("input", "forget", "output"):
+            for label in ("input", "forget"):
                 row = dict(model="target", rank=0, layer=0, module="kda." + label,
                            linear="CudaFp4GEMMLinear", weight_dtype="torch.uint8",
                            weight_precision="NVFP4", activation_precision="NVFP4",
                            activation_scheme="dynamic", **config)
                 rows += [dict(row, event="initialized"), dict(row, event="executed",
                          input_dtype="torch.bfloat16", output_dtype="torch.bfloat16")]
+            rows.append(dict(
+                rows[0], module="kda.output", linear="CudaFp8GEMMLinear",
+                weight_dtype="torch.float8_e4m3fn", weight_precision="FP8",
+                activation_precision="FP8", activation_scheme="native",
+            ))
             rows.append(dict(model="draft", rank=0, layer=0, module="dsa.input",
                              linear="CudaF16Linear", activation_scheme="native",
                              weight_dtype="torch.bfloat16", weight_precision="BF16",
@@ -271,7 +276,15 @@ class K31TwoHostSmokeTest(unittest.TestCase):
             def write(receipts):
                 log.write_text("\n".join(MARKER + json.dumps(row) for row in receipts))
             write(rows)
-            self.assertTrue(audit_projection_precision(root, config, layers=1, ranks=1)["passed"])
+            for base_fp8 in (False, True):
+                receipt = audit_projection_precision(
+                    root, {**config, "fp8_gemm": base_fp8}, layers=1, ranks=1,
+                )
+                self.assertEqual(receipt["initialized_by_precision"], {"NVFP4": 2, "FP8": 1})
+                self.assertEqual(receipt["nvfp4_executed"], 2)
+            write(rows[:4] + [dict(rows[0], module="kda.output"), rows[-1]])
+            with self.assertRaisesRegex(ValueError, "expected FP8"):
+                audit_projection_precision(root, config, layers=1, ranks=1)
             rows[0]["execution_fragments"] = ["q_gate", "kv"]
             rows[1]["fragment"] = "q_gate"
             write(rows)
