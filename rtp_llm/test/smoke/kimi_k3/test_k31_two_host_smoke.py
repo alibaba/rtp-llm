@@ -37,6 +37,24 @@ def base_config():
 
 
 class K31TwoHostSmokeTest(unittest.TestCase):
+    def test_crc_audit_checks_all_rank_slots_and_the_selected_transfer_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "logs").mkdir()
+            path = root / "logs/engine.log"
+            rows = [
+                f"[RANK {rank}] BlockTree CRC32C enabled: device={rank} "
+                "batch=4 slots=2 device_total=428.62 MiB\n"
+                for rank in range(8)
+            ]
+            path.write_text("".join(rows))
+            self.assertEqual(len(smoke.audit_crc_workspace(root, 1, 4)), 8)
+            with self.assertRaisesRegex(ValueError, "CRC transfer batch"):
+                smoke.audit_crc_workspace(root, 1, 8)
+            path.write_text("".join(rows[:-1]))
+            with self.assertRaisesRegex(ValueError, "eight enabled CRC receipts"):
+                smoke.audit_crc_workspace(root, 1, 4)
+
     def test_service_ports_cannot_race_with_outgoing_ephemeral_connections(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -283,11 +301,12 @@ assert rtp_llm.__file__ == runfiles_package
         self.assertNotIn("linear_pool_blocks", long_case["decode"])
         self.assertEqual(long_case["decode"]["request_capacity"], 1)
         self.assertEqual(long_case["decode"]["decode_capture_batches"], "1")
+        self.assertEqual(regular["prefill_kv_workspace_budget_gib"], 8)
+        self.assertEqual(long_case["prefill_kv_workspace_budget_gib"], 8)
         for stage in (regular, long_case):
             self.assertIs(stage["target_only"], False)
             self.assertIs(stage["fp8_gemm"], True)
             self.assertIs(stage["fp8_kv_cache"], False)
-            self.assertEqual(stage["prefill_kv_workspace_budget_gib"], 8)
             for role in ("prefill", "decode"):
                 self.assertEqual(stage[role]["checkpoint"], base[role]["checkpoint"])
                 self.assertEqual(
@@ -302,6 +321,24 @@ assert rtp_llm.__file__ == runfiles_package
         base = {**base_config(), "prefill_kv_workspace_budget_gib": 10}
         for stage in smoke.stage_configs(base):
             self.assertEqual(stage["prefill_kv_workspace_budget_gib"], 10)
+
+    def test_shared_stage_entry_keeps_last_five_geometry_for_ci_callers(self):
+        base = {**base_config(), "last_n_checkpoints": 5}
+        shared = smoke.launcher.validate(smoke.stage_config(base, "regular"))
+        traditional, = smoke.stage_configs(base, ("regular",))
+        traditional.pop("request_argv")
+        self.assertEqual(shared, traditional)
+        self.assertEqual(shared["prefill_kv_workspace_budget_gib"], 8)
+        with self.assertRaisesRegex(ValueError, "304 regular slots"):
+            smoke.stage_config(base, "long")
+
+    def test_shared_stage_entry_preserves_long_budget_and_explicit_override(self):
+        base = base_config()
+        self.assertEqual(
+            smoke.stage_config(base, "long")["prefill_kv_workspace_budget_gib"], 8
+        )
+        base["prefill_kv_workspace_budget_gib"] = 4.5
+        self.assertEqual(smoke.stage_config(base, "long")["prefill_kv_workspace_budget_gib"], 4.5)
 
     def test_default_phases_require_native_mtp(self):
         with self.assertRaisesRegex(ValueError, "native MTP"):

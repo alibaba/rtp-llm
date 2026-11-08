@@ -73,7 +73,8 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def stage_configs(base, stages=STAGES):
+def stage_config(base, stage):
+    """Common model topology for the traditional and Bazel stage runners."""
     require(
         base.get("target_only", False) is False, "default smoke requires native MTP"
     )
@@ -92,65 +93,73 @@ def stage_configs(base, stages=STAGES):
     require(last_n is None or type(last_n) is int and last_n == 5,
             "full Last-N smoke uses Last-5; smaller N is covered by focused tests")
     if last_n is not None:
-        require(tuple(stages) == ("regular",),
+        require(stage == "regular",
                 "Last-5 uses the existing 304 regular slots; select --stages regular")
         require(base.get("decode_dp", 1) == 1, "Last-5 smoke requires Decode TP8/EP8")
-    configs = []
-    geometry = {"regular": (2, 96), "long": (1, 140)}
-    for stage in stages:
-        decode_dp, block_count = geometry[stage]
-        if stage == "regular":
-            decode_dp = 1 if last_n is not None else base.get("decode_dp", decode_dp)
-        if last_n is not None:
-            long_pool_blocks = LONG_INPUT_TOKENS // (8 * page_tokens) + 8
-            block_count = max(256 if calibration else long_pool_blocks, base["prefill"].get("test_block_num", 0))
-        config = copy.deepcopy(base)
-        config.setdefault("cache_store_rdma_mode", True)
-        config.setdefault("fp8_gemm", True)
-        config.setdefault("fp8_kv_cache", True)
-        config.setdefault("prefill_kv_workspace_budget_gib", launcher.DEFAULT_KV_WORKSPACE_GIB)
-        config.update(
-            run_id=f"{base['run_id']}-{stage}",
-            k31_smoke_stage=stage,
-            decode_dp=decode_dp,
-            target_only=False,
+    require(stage in STAGES, "unsupported K3.1 smoke stage")
+    decode_dp, block_count = {
+        "regular": (2, 96),
+        "long": (1, 140),
+    }[stage]
+    if stage == "regular":
+        decode_dp = 1 if last_n is not None else base.get("decode_dp", decode_dp)
+    if last_n is not None:
+        long_pool_blocks = LONG_INPUT_TOKENS // (8 * page_tokens) + 8
+        block_count = max(256 if calibration else long_pool_blocks, base["prefill"].get("test_block_num", 0))
+    config = copy.deepcopy(base)
+    config.setdefault("cache_store_rdma_mode", True)
+    config.setdefault("fp8_gemm", True)
+    config.setdefault("fp8_kv_cache", True)
+    config.setdefault(
+        "prefill_kv_workspace_budget_gib", launcher.DEFAULT_KV_WORKSPACE_GIB
+    )
+    config.update(
+        run_id=f"{base['run_id']}-{stage}",
+        k31_smoke_stage=stage,
+        decode_dp=decode_dp,
+        target_only=False,
+    )
+    config["prefill"]["test_block_num"] = block_count
+    if last_n is not None:
+        config["decode"]["test_block_num"] = max(64 if calibration else long_pool_blocks, base["decode"].get("test_block_num", 0))
+        # FULL covers 1M; LINEAR needs independent pressure for HOST/SSD hits.
+        config["prefill"].setdefault("linear_pool_blocks", 256 if calibration else 96)
+        config["decode"].setdefault("linear_pool_blocks", 64 if calibration else 512)
+        config["prefill"].setdefault("memory_cache_size_mb", 8192)
+        config["prefill"].setdefault("disk_cache_size_mb", 65536)
+        for role in launcher.ROLES:
+            require(config[role].get("max_seq_len", 2_097_152) >=
+                    LONG_INPUT_TOKENS + MAX_OUTPUT_TOKENS + MTP_RESERVE_TOKENS,
+                    f"{role}: Last-5 smoke must admit the existing 1M cold seed")
+    if stage == "long":
+        config["prefill"].setdefault(
+            "linear_pool_blocks", long_prefill_linear_minimum() + 1
         )
-        config["prefill"]["test_block_num"] = block_count
-        if last_n is not None:
-            config["decode"]["test_block_num"] = max(64 if calibration else long_pool_blocks,
-                                                      base["decode"].get("test_block_num", 0))
-            # FULL covers 1M; LINEAR needs separate pressure for a real
-            # LINEAR HOST/SSD hit, independently of MLA page eviction.
-            config["prefill"].setdefault("linear_pool_blocks", 256 if calibration else 96)
-            config['decode'].setdefault('linear_pool_blocks', 64 if calibration else 512)
-            config["prefill"].setdefault("memory_cache_size_mb", 8192)
-            config["prefill"].setdefault("disk_cache_size_mb", 65536)
-            for role in launcher.ROLES:
-                require(config[role].get("max_seq_len", 2_097_152) >=
-                        LONG_INPUT_TOKENS + MAX_OUTPUT_TOKENS + MTP_RESERVE_TOKENS,
-                        f"{role}: Last-5 smoke must admit the existing 1M cold seed")
-        if stage == "long":
-            config["prefill"].setdefault(
-                "linear_pool_blocks", long_prefill_linear_minimum() + 1
+        config["prefill"].setdefault("request_capacity", 1)
+        # Keep the traditional long-stage CRC and MoE staging budgets.
+        config["prefill"].setdefault("block_tree_transfer_worker_count", 1)
+        config["prefill"].setdefault("prefill_token_capacity", 8192)
+        config["decode"].update(
+            test_block_num=block_count,
+            request_capacity=1,
+            decode_capture_batches="1",
+        )
+        for role in launcher.ROLES:
+            limit = config[role].setdefault("max_seq_len", LONG_INPUT_TOKENS + 4096)
+            require(
+                limit >= LONG_INPUT_TOKENS + MAX_OUTPUT_TOKENS + MTP_RESERVE_TOKENS,
+                f"{role} max_seq_len must admit the exact 1M continuation and generation reserve",
             )
-            config["prefill"].setdefault("request_capacity", 1)
-            # One load worker and one background worker keep CRC enabled
-            # with two scratch slots beside the dense 1M LINEAR pool.
-            config["prefill"].setdefault("block_tree_transfer_worker_count", 1)
-            # Bound the MoE symmetric staging pool alongside the dense FP32
-            # LINEAR inventory; one CP stripe still holds eight physical pages.
-            config["prefill"].setdefault("prefill_token_capacity", 8192)
-            config["decode"].update(
-                test_block_num=block_count,
-                request_capacity=1,
-                decode_capture_batches="1",
-            )
-            for role in launcher.ROLES:
-                limit = config[role].setdefault("max_seq_len", LONG_INPUT_TOKENS + 4096)
-                require(
-                    limit >= LONG_INPUT_TOKENS + MAX_OUTPUT_TOKENS + MTP_RESERVE_TOKENS,
-                    f"{role} max_seq_len must admit the exact 1M continuation and generation reserve",
-                )
+    return config
+
+
+def stage_configs(base, stages=STAGES):
+    if base.get("last_n_checkpoints") is not None:
+        require(tuple(stages) == ("regular",),
+                "Last-5 uses the existing 304 regular slots; select --stages regular")
+    configs = []
+    for stage in stages:
+        config = stage_config(base, stage)
         control = launcher.run_dir(config, "prefill") / "control.json"
         config["request_argv"] = [
             "python3",
@@ -375,6 +384,28 @@ def wait_for_cleanup(config, timeout=120):
     return True, receipts
 
 
+def audit_crc_workspace(directory, workers, expected_batch=None):
+    engine_log = (directory / "logs/engine.log").read_text(errors="replace")
+    crc = re.findall(
+        r"\[RANK (\d+)\][^\n]*BlockTree CRC32C enabled: "
+        r"device=\d+ batch=(\d+) slots=(\d+) device_total=([\d.]+) MiB",
+        engine_log,
+    )
+    require(
+        len(crc) == 8 and {int(rank) for rank, *_ in crc} == set(range(8))
+        and all(int(slots) == workers * 2 for _, _, slots, _ in crc),
+        f"{directory.name}: expected eight enabled CRC receipts with {workers * 2} slots",
+    )
+    require(
+        expected_batch is None or all(int(batch) == expected_batch for _, batch, _, _ in crc),
+        f"{directory.name}: CRC transfer batch differs from the configured limit",
+    )
+    return {
+        rank: dict(batch=int(batch), slots=int(slots), device_total_mib=float(mib))
+        for rank, batch, slots, mib in crc
+    }
+
+
 def audit_startup(config, output):
     proof = {}
     readiness = read_json(output / "launch" / "readiness.json")
@@ -432,21 +463,9 @@ def audit_startup(config, output):
         )
         workers = config[role].get("block_tree_transfer_worker_count")
         if workers is not None:
-            engine_log = (directory / "logs/engine.log").read_text(errors="replace")
-            crc = re.findall(
-                r"\[RANK (\d+)\][^\n]*BlockTree CRC32C enabled: "
-                r"device=\d+ batch=(\d+) slots=(\d+) device_total=([\d.]+) MiB",
-                engine_log,
+            proof[role]["crc_workspace"] = audit_crc_workspace(
+                directory, workers, config[role].get("memory_cache_max_descriptors_per_transfer_batch")
             )
-            require(
-                len(crc) == 8 and {int(rank) for rank, *_ in crc} == set(range(8))
-                and all(int(slots) == workers * 2 for _, _, slots, _ in crc),
-                f"{role}: expected eight enabled CRC receipts with {workers * 2} slots",
-            )
-            proof[role]["crc_workspace"] = {
-                rank: dict(batch=int(batch), slots=int(slots), device_total_mib=float(mib))
-                for rank, batch, slots, mib in crc
-            }
     require(
         proof["prefill"]["checkpoints"] == proof["decode"]["checkpoints"],
         "PD checkpoints differ",
@@ -456,12 +475,26 @@ def audit_startup(config, output):
 
 def audit_long_native_route(proof, prefill_logs, decode_logs):
     if __package__:
-        from .audit_k31_full_smoke import group_evidence, read_events, request_events
+        from .audit_k31_full_smoke import read_events
     else:
-        from audit_k31_full_smoke import group_evidence, read_events, request_events
+        from audit_k31_full_smoke import read_events
 
     prefill = read_events(prefill_logs, prefill_logs / "engine.log")
     decode = read_events(decode_logs, decode_logs / "engine.log")
+    return audit_long_events(proof, prefill, decode)
+
+
+def audit_long_events(proof, prefill, decode, *, decode_tp=8, decode_owner=0):
+    """Same native route proof for files or authenticated CI event snapshots."""
+    if __package__:
+        from .audit_k31_full_smoke import group_evidence, request_events
+    else:
+        from audit_k31_full_smoke import group_evidence, request_events
+
+    require(
+        decode_tp in (4, 8) and 0 <= decode_owner < 8 // decode_tp,
+        "invalid long smoke Decode owner geometry",
+    )
     groups = {}
     for event in prefill[0]:
         if event.get("event") != "mtp_target_prefill_forward" or event.get("fake"):
@@ -484,18 +517,33 @@ def audit_long_native_route(proof, prefill_logs, decode_logs):
         require(cursor == case["input_len"], f"{name}: native and HTTP input lengths differ")
 
         per_rank, bytes_by_source = {}, dict.fromkeys(ranks, 0)
+        selected_ranks = range(decode_owner * decode_tp, (decode_owner + 1) * decode_tp)
         for rank in range(8):
+            if rank not in selected_ranks:
+                require(
+                    not request_events(decode[rank], "pd_cache_loaded", request_id),
+                    f"{name}: unexpected cache load on Decode owner rank {rank}",
+                )
+                continue
             loaded = request_events(decode[rank], "pd_cache_loaded", request_id)
             transfers = request_events(decode[rank], "pd_transfer_submitted", request_id)
-            require(len(loaded) == 1 and loaded[0]["loaded_blocks"] > 0
-                    and loaded[0]["dp_rank"] == 0 and loaded[0]["attn_tp_rank"] == rank,
-                    f"{name}: rank {rank} did not load the remote cache")
+            require(
+                len(loaded) == 1
+                and loaded[0]["loaded_blocks"] > 0
+                and loaded[0]["dp_rank"] == decode_owner
+                and loaded[0]["attn_tp_rank"] == rank % decode_tp,
+                f"{name}: rank {rank} did not load the remote cache",
+            )
             require({event["source_tp_rank"] for event in transfers} == ranks,
                     f"{name}: rank {rank} has an incomplete source plan")
             for event in transfers:
-                require(event["source_tp"] == event["destination_tp"] == 8
-                        and event["dp_rank"] == 0 and event["attn_tp_rank"] == rank,
-                        f"{name}: rank {rank} has incorrect PD routing dimensions")
+                require(
+                    event["source_tp"] == 8
+                    and event["destination_tp"] == decode_tp
+                    and event["dp_rank"] == decode_owner
+                    and event["attn_tp_rank"] == rank % decode_tp,
+                    f"{name}: rank {rank} has incorrect PD routing dimensions",
+                )
                 bytes_by_source[event["source_tp_rank"]] += event["transfer_bytes"]
             per_rank[str(rank)] = {"loaded_blocks": loaded[0]["loaded_blocks"]}
         require(all(value > 0 for value in bytes_by_source.values()), f"{name}: missing source KV payload")

@@ -130,6 +130,29 @@ class SharedPrefillKVBudgetTest(unittest.TestCase):
         self.assertTrue(ragged.chunked)
         self.assertEqual([s.owner for s in ragged.slices], list(range(8)))
 
+    def test_one_million_history_fits_one_gib_without_omitting_tokens(self):
+        query, prefix = 8192, 1040384
+        workspace = Bf16MlaWorkspaceBudget(2**30, 8, 512, 64, query)
+        plan = plan_prefix_chunks(
+            (query,), (prefix,), page_tokens=1024, bytes_per_token=7680,
+            workspace_budget=workspace,
+        )
+        self.assertTrue(plan.chunked)
+        self.assertTrue(plan.requires_fp32_accumulator)
+        cursor = 0
+        for part in plan.slices:
+            self.assertEqual((part.owner, part.start), (0, cursor))
+            self.assertLessEqual(part.length, plan.capacity_tokens)
+            cursor += part.length
+        self.assertEqual(cursor + query, 1048576)
+        rows = plan.capacity_tokens
+        owner_pages = (rows + 8191) // 8192
+        live_bytes = (
+            max(query, rows) * 7680 + rows * 512 * 2
+            + (rows + 9 * owner_pages * 1024) * 1152
+        )
+        self.assertLessEqual(live_bytes, workspace.budget_bytes)
+
     def test_mtp_cold_query_must_fit_packed_kv_without_history(self):
         with self.assertRaisesRegex(ValueError, "current-query BF16 MLA KV"):
             plan_prefix_chunks(

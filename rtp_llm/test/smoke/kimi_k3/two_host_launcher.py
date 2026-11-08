@@ -73,8 +73,8 @@ def validate(config):
             raise ValueError(f"{key} must be boolean")
     if (
         config.get("k31_smoke_stage") in ("regular", "long")
-        and not config.get("cache_store_rdma_mode", True)
-    ):
+        or config.get("smoke_profile") == "k31"
+    ) and not config.get("cache_store_rdma_mode", True):
         raise ValueError("K3.1 smoke requires RDMA")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", config["run_id"]):
         raise ValueError("run_id must contain only letters, digits, _ and -")
@@ -380,6 +380,7 @@ def serve(config, role):
         kv_cache_mem_mb=host.get("kv_cache_mem_mb"), memory_cache_size_mb=host.get("memory_cache_size_mb",32768),
         test_block_num=host.get("test_block_num"),
         linear_pool_blocks=host.get("linear_pool_blocks"),
+        reuse_cache_tail_blocks=host.get("reuse_cache_tail_blocks"),
         block_tree_transfer_worker_count=host.get("block_tree_transfer_worker_count"),
         last_n_checkpoints=config.get("last_n_checkpoints"),
         last_n_page_tokens=config.get("last_n_page_tokens"),
@@ -389,6 +390,8 @@ def serve(config, role):
                           if role == "prefill" and config.get("last_n_checkpoints") is not None else None),
         disk_cache_size_mb=host.get("disk_cache_size_mb", 65536),
         prefill_token_capacity=host.get("prefill_token_capacity"),
+        allocator_large_segment_size_mb=host.get("allocator_large_segment_size_mb"),
+        memory_cache_max_descriptors_per_transfer_batch=host.get("memory_cache_max_descriptors_per_transfer_batch"),
         max_seq_len=host.get("max_seq_len"), request_capacity=host.get("request_capacity"),
         decode_capture_batches=host.get("decode_capture_batches"), cache_store_rdma_mode=rdma)
     explicit, command = launch_config(args)
@@ -599,19 +602,27 @@ def status(config, role):
                 row["gib"] == expected[KV_WORKSPACE_ENV] for row in receipts.values()
             )
         )
-    if result["healthy"] and config.get("k31_smoke_stage"):
+    if result["healthy"] and (
+        config.get("k31_smoke_stage") or config.get("smoke_profile") == "k31"
+    ):
         if __package__:
             from .k31_smoke_capacity import cache_geometry, fastsafetensors_proof
         else:
             from k31_smoke_capacity import cache_geometry, fastsafetensors_proof
         try:
             geometry = cache_geometry(
-                directory / "logs" / "engine.log", role,
+                directory / "logs" / "engine.log",
+                role,
                 8 if role == "prefill" else 8 // decode_dp_size(config),
-                long_case=config["k31_smoke_stage"] == "long",
+                long_case=(
+                    config.get("k31_smoke_stage") == "long"
+                    or (config.get("k31_smoke_stage") is None
+                        and config.get("smoke_profile") == "k31")
+                ),
                 last_n_checkpoints=config.get("last_n_checkpoints"),
                 last_n_page_tokens=config.get("last_n_page_tokens"),
-                calibration=config.get('last_n_calibration', False),
+                prefill_tail_blocks=config[role].get("reuse_cache_tail_blocks"),
+                calibration=config.get("last_n_calibration", False),
             )
             result["fastsafetensors_rank_log_lines"] = fastsafetensors_proof(directory / "logs")
         except (OSError, ValueError, TypeError) as exc:

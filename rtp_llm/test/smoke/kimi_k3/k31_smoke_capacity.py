@@ -52,7 +52,12 @@ def fastsafetensors_proof(logs):
 
 
 def cache_geometry(engine_log, role, local_tp, *, long_case, last_n_checkpoints=None,
-                   last_n_page_tokens=None, calibration=False):
+                   last_n_page_tokens=None, calibration=False, prefill_tail_blocks=None):
+    if prefill_tail_blocks is not None and (
+        role != "prefill" or type(prefill_tail_blocks) is not int
+        or not 1 <= prefill_tail_blocks <= 5 or last_n_checkpoints is not None
+    ):
+        raise ValueError("Prefill retention must be N=1..5 outside the dedicated Last-N profile")
     if type(calibration) is not bool or calibration and last_n_checkpoints != 5:
         raise ValueError('calibration requires the explicit Last-5 CP geometry')
     if last_n_checkpoints is not None and (
@@ -139,6 +144,8 @@ def cache_geometry(engine_log, role, local_tp, *, long_case, last_n_checkpoints=
                 physical_linear_pages = True
             if not valid_step:
                 raise ValueError(f"{role} rank {rank}: expected eight-page KDA checkpoints")
+        if prefill_tail_blocks is not None and field(body, "reuse_cache_tail_blocks") != str(prefill_tail_blocks):
+            raise ValueError(f"{role} rank {rank}: Prefill checkpoint retention differs")
         usable = {tag: count - 1 for tag, count in zip(tags, blocks)}
         if last_n_checkpoints is not None:
             # The 304-slot profile includes an actual cold 1M request and a
@@ -158,12 +165,14 @@ def cache_geometry(engine_log, role, local_tp, *, long_case, last_n_checkpoints=
             # allocator retains one checkpoint per stripe. Also reserve tail
             # states and the destination allocated before dropping old tails.
             # Decode's replay pool only needs a live tail and its replacement.
-            linear_minimum = (
-                (long_prefill_linear_minimum(int(field(body, "seq_size_per_block")))
-                 if physical_linear_pages
-                 else max_sequence // 8192 + 2 + 1 + (MTP_RESERVE_TOKENS - 1))
-                if role == "prefill" else 3
-            )
+            linear_minimum = 3
+            if role == "prefill":
+                if prefill_tail_blocks is not None:
+                    linear_minimum = prefill_tail_blocks + 2
+                elif physical_linear_pages:
+                    linear_minimum = long_prefill_linear_minimum(int(field(body, "seq_size_per_block")))
+                else:
+                    linear_minimum = max_sequence // 8192 + 2 + 1 + (MTP_RESERVE_TOKENS - 1)
             if (min(usable["full"], usable["indexer_kv"]) < paged_minimum
                     or usable["linear"] < linear_minimum):
                 raise ValueError(f"{role} rank {rank}: 1M cache capacity is insufficient: {usable}")
@@ -175,6 +184,7 @@ def cache_geometry(engine_log, role, local_tp, *, long_case, last_n_checkpoints=
         runtime_verified=True, runtime_layers=93, page_size=page_tokens, kernel_page_size=kernel_tokens,
         source_shards=8, local_shards=local_tp, checkpoint_span=checkpoint_tokens, cache_key_stride=checkpoint_tokens,
         usable_pages=capacity, draft_layer_shared_full_group=True, role=role,
+        **({"reuse_cache_tail_blocks": prefill_tail_blocks} if prefill_tail_blocks is not None else {}),
         **({"reuse_cache_tail_blocks": last_n_checkpoints if role == "prefill" and not calibration else 2147483647,
             "last_n_calibration": calibration}
            if last_n_checkpoints is not None else {}),

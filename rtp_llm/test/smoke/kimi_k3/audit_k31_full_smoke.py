@@ -56,9 +56,9 @@ def request_events(rows, event, request_id):
             and row.get("request_id") == request_id]
 
 
-def read_events(directory, engine):
-    events = {rank: [] for rank in range(8)}
-    for rank in range(8):
+def read_events(directory, engine, ranks=range(8)):
+    events = {rank: [] for rank in ranks}
+    for rank in ranks:
         path = Path(directory) / f"main_{rank}.log"
         for line in path.read_text(errors="replace").splitlines():
             if MARKER in line:

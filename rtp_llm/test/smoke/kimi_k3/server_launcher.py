@@ -73,6 +73,15 @@ def launch_config(args):
     tp_size, dp_size, ep_size = smoke_topology(args)
     world_size = tp_size * dp_size
     prefill_capacity = getattr(args, "prefill_token_capacity", None)
+    allocator_page_mb = getattr(args, "allocator_large_segment_size_mb", None)
+    if allocator_page_mb is not None and (
+        model_type != "kimi_k31"
+        or args.role != "PREFILL"
+        or type(allocator_page_mb) is not int
+        or allocator_page_mb <= 10
+        or allocator_page_mb % 2
+    ):
+        raise ValueError("K3.1 Prefill allocator pages must be even MiB greater than 10")
     if prefill_capacity is not None and (
         model_type != "kimi_k31" or args.role != "PREFILL"
         or not 1024 <= prefill_capacity <= 65536 or prefill_capacity % 1024
@@ -250,6 +259,10 @@ def launch_config(args):
             # at the 64-request capture bucket; the fixed feat smoke uses 0.
             environment["NCCL_GRAPH_REGISTER"] = "0"
             environment["NCCL_MAX_CTAS"] = "8"
+    if allocator_page_mb is not None:
+        profile = f"expandable_segments:True,large_segment_size_mb:{allocator_page_mb}"
+        for alias in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF"):
+            environment[alias] = profile
     if model_type == "kimi_k31":
         environment["RTP_MTP_ACCEPTANCE_STATS"] = "1"
         if args.role == "DECODE":
@@ -323,6 +336,12 @@ def launch_config(args):
         # Match the deployed service and retain the normal staged drain defaults.
         "shutdown_timeout": 120,
     }
+    retention = getattr(args, "reuse_cache_tail_blocks", None)
+    if retention is not None:
+        if (model_type != "kimi_k31" or args.role != "PREFILL"
+                or type(retention) is not int or not 1 <= retention <= 5):
+            raise ValueError("Explicit checkpoint retention requires K3.1 Prefill and N=1..5")
+        options["reuse_cache_tail_blocks"] = retention
     last_n = getattr(args, "last_n_checkpoints", None)
     last_n_page_tokens = getattr(args, "last_n_page_tokens", None)
     if last_n_page_tokens is not None and (last_n is None or last_n_page_tokens not in (64, 128)):
@@ -388,6 +407,12 @@ def launch_config(args):
         if type(transfer_workers) is not int or not 1 <= transfer_workers <= 64:
             raise ValueError("BlockTree transfer workers must be an integer in [1, 64]")
         options["block_tree_transfer_worker_count"] = transfer_workers
+    transfer_batch = getattr(args, "memory_cache_max_descriptors_per_transfer_batch", None)
+    if transfer_batch is not None:
+        if (model_type != "kimi_k31" or args.role != "PREFILL"
+                or type(transfer_batch) is not int or not 1 <= transfer_batch <= 64):
+            raise ValueError("K3.1 Prefill transfer batch must be an integer in [1, 64]")
+        options["memory_cache_max_descriptors_per_transfer_batch"] = transfer_batch
     if prefill_capacity is not None:
         # Explicit fixture admission/workspace capacity, not an in-model Q loop.
         # The caller must prove each complete physical query fits this capacity.
@@ -637,7 +662,7 @@ def require_gpu_capacity(
         )
 
 
-def main():
+def main(argv=None, *, configure=None, extend_parser=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", required=True, choices=["PREFILL", "DECODE"])
     parser.add_argument("--tp-size", type=int, help="Defaults to 8 / DP")
@@ -755,15 +780,23 @@ def main():
                         help="Explicit bounded cache-pool size for reproducible tier-pressure smoke")
     parser.add_argument("--linear-pool-blocks", type=int,
                         help="Independent physical LINEAR pool size, including reserved block zero")
+    parser.add_argument("--reuse-cache-tail-blocks", type=int,
+                        help="K3.1 Prefill retention policy; does not select a Last-N request profile")
     parser.add_argument("--prefill-token-capacity", type=int,
                         help="K3.1 fixture-only page-aligned token/workspace capacity;default65536 unchanged")
-    args = parser.parse_args()
+    parser.add_argument("--allocator-large-segment-size-mb", type=int,
+                        help="Optional K3.1 Prefill allocator page size; other profiles keep Torch defaults")
+    parser.add_argument("--memory-cache-max-descriptors-per-transfer-batch", type=int,
+                        help="Optional K3.1 Prefill cache transfer batch; request geometry is unchanged")
+    if extend_parser is not None:
+        extend_parser(parser)
+    args = parser.parse_args(argv)
     if not args.target_only and not args.draft_checkpoint:
         parser.error("MTP requires --draft-checkpoint; synthetic fallback is disabled")
     if args.expected_draft_shards is not None and args.expected_draft_shards < 1:
         parser.error("--expected-draft-shards requires a positive count")
     args.tp_size, args.dp_size, args.ep_size = smoke_topology(args)
-    environment, command = launch_config(args)
+    environment, command = (configure or launch_config)(args)
     if args.print_config:
         print(json.dumps({"environment": environment, "command": command}, indent=2))
         return

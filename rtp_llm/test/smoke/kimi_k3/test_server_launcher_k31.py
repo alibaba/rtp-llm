@@ -13,6 +13,79 @@ launch=importlib.util.module_from_spec(spec);spec.loader.exec_module(launch)
 
 
 class K31LaunchContract(unittest.TestCase):
+    def test_prefill_retention_changes_only_the_tail_policy_and_decode_stays_dp2_tp4(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp), 93)
+            with patch.object(launch.socket, "socket") as route:
+                route.return_value.getsockname.return_value = ("127.0.0.1", 0)
+                original_env, original = launch.launch_config(args)
+                args.reuse_cache_tail_blocks = 5
+                env, command = launch.launch_config(args)
+                key = command.index("--reuse_cache_tail_blocks") + 1
+                self.assertEqual(command[key], "5")
+                command[key] = original[key]
+                self.assertEqual(command, original)
+                self.assertEqual(env, original_env)
+                args.role, args.tp_size, args.dp_size = "DECODE", 4, 2
+                args.reuse_cache_tail_blocks = None
+                _, decode = launch.launch_config(args)
+                self.assertEqual(decode[decode.index("--tp_size") + 1], "4")
+                self.assertEqual(decode[decode.index("--dp_size") + 1], "2")
+                self.assertEqual(decode[decode.index("--reuse_cache_tail_blocks") + 1], "2147483647")
+                args.reuse_cache_tail_blocks = 5
+                with self.assertRaisesRegex(ValueError, "K3.1 Prefill"):
+                    launch.launch_config(args)
+
+    def test_transfer_batch_override_keeps_the_original_request_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp), 93)
+            with patch.object(launch.socket, "socket") as route:
+                route.return_value.getsockname.return_value = ("127.0.0.1", 0)
+                original_env, original = launch.launch_config(args)
+                args.memory_cache_max_descriptors_per_transfer_batch = 4
+                env, command = launch.launch_config(args)
+            key = "--memory_cache_max_descriptors_per_transfer_batch"
+            position = command.index(key)
+            self.assertEqual(command[position + 1], "4")
+            self.assertEqual(command[:position] + command[position + 2:], original)
+            self.assertEqual(env, original_env)
+            for value, role in ((0, "PREFILL"), (True, "PREFILL"), (4, "DECODE")):
+                args.memory_cache_max_descriptors_per_transfer_batch, args.role = value, role
+                with self.assertRaisesRegex(ValueError, "transfer batch"):
+                    launch.launch_config(args)
+
+    def test_prefill_allocator_override_changes_only_the_allocator_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp), 93)
+            with patch.object(launch.socket, "socket") as route:
+                route.return_value.getsockname.return_value = ("127.0.0.1", 0)
+                original_env, original_command = launch.launch_config(args)
+                args.allocator_large_segment_size_mb = 12
+                env, command = launch.launch_config(args)
+            self.assertEqual(command, original_command)
+            aliases = {"PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF"}
+            for key in original_env:
+                if key in aliases:
+                    self.assertEqual(original_env[key], "expandable_segments:True")
+                    self.assertEqual(
+                        env[key], "expandable_segments:True,large_segment_size_mb:12"
+                    )
+                else:
+                    self.assertEqual(env[key], original_env[key])
+
+    def test_prefill_allocator_override_rejects_invalid_pages_and_decode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp), 93)
+            for size in (0, 10, 11, True, 12.0):
+                args.allocator_large_segment_size_mb = size
+                with self.subTest(size=size), self.assertRaisesRegex(
+                    ValueError, "allocator pages"
+                ):
+                    launch.launch_config(args)
+            args.allocator_large_segment_size_mb, args.role = 12, "DECODE"
+            with self.assertRaisesRegex(ValueError, "allocator pages"):
+                launch.launch_config(args)
+
     def test_nvfp4_switches_default_on_and_explicit_values_override_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self.fixture(Path(tmp), 93)
@@ -244,6 +317,7 @@ class K31LaunchContract(unittest.TestCase):
             args = self.fixture(Path(tmp), 93)
             args.linear_pool_blocks, args.test_block_num = 1032, 140
             args.block_tree_transfer_worker_count = 1
+            args.prefill_token_capacity, args.max_seq_len = 65536, 1052672
             with patch.object(launch.socket, "socket") as route:
                 route.return_value.getsockname.return_value = ("127.0.0.1", 0)
                 env, argv = launch.launch_config(args)
@@ -251,6 +325,10 @@ class K31LaunchContract(unittest.TestCase):
             self.assertEqual(options["--linear_pool_blocks"], "1032")
             self.assertEqual(options["--test_block_num"], "140")
             self.assertEqual(options["--block_tree_transfer_worker_count"], "1")
+            self.assertEqual(env["PREFILL_CHUNK_SIZE"], "65536")
+            self.assertEqual(options["--max_batch_tokens_without_cache"], "65536")
+            self.assertEqual(options["--max_batch_tokens_size"], "65536")
+            self.assertEqual(options["--max_seq_len"], "1052672")
             self.assertEqual(env["SP_QUANTIZATION"], "")
             for value in (1, -1, True, 2**31):
                 args.linear_pool_blocks = value
