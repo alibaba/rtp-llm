@@ -288,8 +288,10 @@ _STAGE3_SEND_DIAGNOSTIC = (
     "num_tokens=%d source_pages=%d source_controller=%s"
 )
 _V6D_COMPONENT_SOURCE_DIGESTS = (
-    '3272b5e999be3e3126a4792eee9e8841b975bf70f74e85fe0da98e590554435f',
-    '64bc9a02ef972d0427ab03493443d2a3646fc664fdf28307ea171a397b00c89c',
+    "3272b5e999be3e3126a4792eee9e8841b975bf70f74e85fe0da98e590554435f",
+    "64bc9a02ef972d0427ab03493443d2a3646fc664fdf28307ea171a397b00c89c",
+    "6bf76747eb12cc6f32565d0efab8400fa6baa19e286d46c6faaf15c7e0c90ba2",
+    "73f79db216c99cf591b2214786b7fb29d325bee0ddc84bfc61ac1392fbff7d8e",
 )
 
 
@@ -1000,7 +1002,10 @@ def prepare_native_scheduler_component_probe(scheduler):
         ("connector_mamba_protection", vendor, "_protect_mamba_store_blocks"),
         ("connector_info_log", module.logger, "info"),
     )
-    if hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest() == _V6D_COMPONENT_SOURCE_DIGESTS[1]:
+    if (
+        hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
+        in _V6D_COMPONENT_SOURCE_DIGESTS[1:]
+    ):
         extra += (
             ("connector_store_planning", vendor, "_plan_stores"),
             ("connector_allocation_submit", vendor, "_submit_store_allocation"),
