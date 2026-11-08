@@ -4,6 +4,12 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//:__subpackages__"])
 
 cc_library(
+    name = "dsv4_moe_strategy",
+    hdrs = ["Dsv4MoeStrategy.h"],
+    copts = copts(),
+)
+
+cc_library(
     name = "model_utils",
     hdrs = glob([
         "*.h",

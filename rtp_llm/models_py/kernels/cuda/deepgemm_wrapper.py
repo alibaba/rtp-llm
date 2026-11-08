@@ -689,13 +689,13 @@ def _require_sm100_packed_scale_for_fp8_fp4(
 ) -> None:
     if not torch.cuda.is_available():
         return
-    arch_major, _ = torch.cuda.get_device_capability(a[0].device)
-    if arch_major not in (10, 12):
+    arch_major, _ = torch.cuda.get_device_capability()
+    if arch_major != 10 or not is_deep_gemm_e8m0_used():
         return
     if a[1].dtype != torch.int32 or b[1].dtype != torch.int32:
         raise RuntimeError(
-            "SM100/SM120 FP8xFP4 DeepGEMM calls require prepacked int32 "
-            f"scales; got a_scale={a[1].dtype}, b_scale={b[1].dtype}"
+            "SM100 FP8xFP4 DeepGEMM calls require prepacked int32 scales; "
+            f"got a_scale={a[1].dtype}, b_scale={b[1].dtype}"
         )
 
 

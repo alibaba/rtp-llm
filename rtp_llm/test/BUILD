@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm120_py_test")
+
 py_test(
     name = "kv_cache_specs_test",
     srcs = [
@@ -286,6 +288,39 @@ py_test(
     ],
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
+)
+
+dsv4_sm120_py_test(
+    name = "start_server_warmup_test_sm120",
+    src = "start_server_warmup_test.py",
+    deps = ["//rtp_llm:sdk", "//rtp_llm:testlib", "//rtp_llm:utils"],
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)
+
+
+# SM120 warmup/startup-policy cases split out of
+# start_server_warmup_test.py; the original is left unchanged.
+dsv4_sm120_py_test(
+    name = "start_server_warmup_sm120_cases_test",
+    src = "start_server_warmup_sm120_test.py",
+    deps = ["//rtp_llm:sdk", "//rtp_llm:testlib", "//rtp_llm:utils"],
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)
+
+dsv4_sm120_py_test(
+    name = "auto_configure_deepep_sm120_test",
+    src = "auto_configure_deepep_sm120_test.py",
+    deps = ["//rtp_llm:sdk", "//rtp_llm:testlib", "//rtp_llm:utils"],
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)
+
+# Exact-SM120 DSv4 worker startup contract regressions (PREFILL/DECODE/
+# PDFUSION accepted profiles + actual-vs-required rejections).
+dsv4_sm120_py_test(
+    name = "sm120_dsv4_worker_profile_test",
+    src = "sm120_dsv4_worker_profile_test.py",
+    deps = ["//rtp_llm:sdk", "//rtp_llm:testlib", "//rtp_llm:utils"],
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
 )
 
 py_test(

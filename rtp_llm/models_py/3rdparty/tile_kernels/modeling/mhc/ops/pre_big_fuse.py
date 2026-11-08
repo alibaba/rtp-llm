@@ -2,6 +2,9 @@ import functools
 
 import torch
 
+from rtp_llm.models_py.utils.arch import mhc_pre_gemm_backend
+
+from ....mhc.norm_fn_kernel import _mhc_pre_norm_fn_fwd_mul, round_to_tf32
 from ....mhc.pre_big_fuse_kernel import _mhc_pre_big_fuse
 
 
@@ -17,6 +20,25 @@ def _compute_num_split(block_k: int, k: int, grid_size: int) -> int:
     num_block_k = _ceil_div(k, block_k)
     split_k = min(split_k, num_block_k // 4)
     return max(split_k, 1)
+
+
+def _run_tilelang_single_gemm(
+    residual_flat: torch.Tensor,
+    fn: torch.Tensor,
+    gemm_out_mul: torch.Tensor,
+    gemm_out_sqrsum: torch.Tensor,
+    mhc_mult3: int,
+    mhc_hidden_size: int,
+) -> int:
+    fn = round_to_tf32(fn)
+    fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(mhc_mult3, 1, mhc_hidden_size)
+    fwd_mul_kernel(
+        residual_flat.view(-1, mhc_hidden_size),
+        fn,
+        gemm_out_mul[:1].view(-1, 1, mhc_mult3),
+        gemm_out_sqrsum[:1].view(-1, 1),
+    )
+    return 1
 
 
 def _run_deepgemm_splitk_gemm(
@@ -71,9 +93,16 @@ def mhc_pre_big_fuse(
     num_tokens = residual_flat.shape[0]
     fn_flat = fn
 
+    # JIT warmup and runtime dispatch share this single resolver so
+    # architecture defaults cannot drift.
+    backend = mhc_pre_gemm_backend(residual.device)
     block_k = 64
     block_m = 64
-    n_splits = _compute_num_split(block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m))
+    n_splits = (
+        _compute_num_split(block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m))
+        if backend == "deepgemm"
+        else 1
+    )
 
     post_mix = torch.empty(
         num_tokens, mhc_mult, dtype=torch.float32, device=residual.device
@@ -91,13 +120,27 @@ def mhc_pre_big_fuse(
     gemm_out_sqrsum = torch.empty(
         n_splits, num_tokens, dtype=torch.float32, device=residual.device
     )
-    _run_deepgemm_splitk_gemm(
-        residual_flat.view(num_tokens, mhc_hidden_size),
-        fn_flat,
-        gemm_out_mul,
-        gemm_out_sqrsum,
-        n_splits,
-    )
+    if backend == "deepgemm":
+        _run_deepgemm_splitk_gemm(
+            residual_flat.view(num_tokens, mhc_hidden_size),
+            fn_flat,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            n_splits,
+        )
+    elif backend == "tilelang_single":
+        n_splits = _run_tilelang_single_gemm(
+            residual_flat,
+            fn_flat,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            mhc_mult3,
+            mhc_hidden_size,
+        )
+        gemm_out_mul = gemm_out_mul[:1]
+        gemm_out_sqrsum = gemm_out_sqrsum[:1]
+    else:
+        raise ValueError(f"unsupported mhc prenorm GEMM backend: {backend!r}")
 
     _mhc_pre_big_fuse(
         hidden_size,

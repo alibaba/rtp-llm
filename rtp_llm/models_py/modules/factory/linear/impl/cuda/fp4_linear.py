@@ -8,13 +8,21 @@ from typing import Optional
 import torch
 
 from rtp_llm.models_py.modules.factory.linear import LinearBase
+from rtp_llm.models_py.utils.arch import is_blackwell, is_sm120
 
 logger = logging.getLogger(__name__)
 
 from flashinfer import fp4_quantize, mm_fp4
-
-from rtp_llm.models_py.kernels.cuda.fp4_kernel import cutlass_scaled_fp4_mm_wrapper
+from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
+    cutlass_scaled_fp4_mm_wrapper,
+    is_legacy_cutlass_fp4_available,
+)
 from rtp_llm.ops import HWKernelConfig
+
+
+def fp4_backend_available(device=None) -> bool:
+    """Whether this process exposes usable Blackwell FlashInfer FP4 APIs."""
+    return is_blackwell(device) and callable(fp4_quantize) and callable(mm_fp4)
 
 
 class CudaFp4GEMMLinear(LinearBase):
@@ -65,14 +73,20 @@ class CudaFp4GEMMLinear(LinearBase):
         self.input_scale = input_scales
         self.bias = bias
         # CUDA12 pins FlashInfer 0.6.0, which has no quantization backend
-        # argument or CuTe GEMM. Resolve this once, outside graph capture.
+        # argument or CuTe GEMM. SM120 uses the established CUDA/CUTLASS path.
         self._quantize_kwargs = (
             {"backend": "cute-dsl"}
-            if "backend" in inspect.signature(fp4_quantize).parameters
+            if not is_sm120(weight.device)
+            and "backend" in inspect.signature(fp4_quantize).parameters
             else {}
         )
         default_backend = "cute-dsl" if self._quantize_kwargs else "cutlass"
         self.backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", default_backend)
+        if self.backend == "sgl_cutlass" and not is_legacy_cutlass_fp4_available():
+            raise RuntimeError(
+                "RTP_LLM_FP4_GEMM_BACKEND=sgl_cutlass requires the "
+                "rtp_kernel.nvfp4 CUDA provider."
+            )
         self.alpha = self.weight_scale_2 * self.input_scale
         self.input_scale_inv = 1 / self.input_scale
 

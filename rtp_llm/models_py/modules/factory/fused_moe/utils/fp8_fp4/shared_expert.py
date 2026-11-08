@@ -62,6 +62,8 @@ class W13SharedExpert(nn.Module):
         inter_dim: int,
         expert_weights: dict[str, torch.Tensor],
         swiglu_limit: float = 0.0,
+        *,
+        prefer_sm120_blockwise: bool = False,
     ) -> None:
         super().__init__()
         w13_w = expert_weights["w13_w"]
@@ -73,8 +75,22 @@ class W13SharedExpert(nn.Module):
                 "shared w13 weight shape mismatch: "
                 f"got {tuple(w13_w.shape)}, expected {(2 * inter_dim, dim)}"
             )
-        self.w13 = create_fp8_linear(w13_w, w13_s)
-        self.w2 = create_fp8_linear(expert_weights["w2_w"], expert_weights["w2_s"])
+        self.w13 = create_fp8_linear(
+            w13_w, w13_s, prefer_sm120_blockwise=prefer_sm120_blockwise
+        )
+        self.w2 = create_fp8_linear(
+            expert_weights["w2_w"],
+            expert_weights["w2_s"],
+            prefer_sm120_blockwise=prefer_sm120_blockwise,
+        )
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_vllm_blockwise_sm120_linear import (
+            CudaFp8VllmBlockwiseLinear,
+        )
+
+        self.uses_sm120_cutlass_linear = all(
+            isinstance(linear, CudaFp8VllmBlockwiseLinear)
+            for linear in (self.w13, self.w2)
+        )
         self.swiglu_limit = swiglu_limit
 
     def _apply_layer(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -478,13 +494,21 @@ def _run_shared_expert(
     x: torch.Tensor,
     fast_path: FusedSharedExpertFastPath | None,
 ) -> torch.Tensor:
-    if fast_path is not None and fast_path.can_run(shared_experts, x):
+    uses_sm120_cutlass = getattr(shared_experts, "uses_sm120_cutlass_linear", False)
+    # On SM120 the CUTLASS linear in Expert.forward is the intended route;
+    # the DeepGEMM workspace path is skipped rather than merely depreferred.
+    if (
+        fast_path is not None
+        and not uses_sm120_cutlass
+        and fast_path.can_run(shared_experts, x)
+    ):
         try:
             return fast_path._run_prepared(shared_experts, x)
         except Exception:
             if strict_fused_moe_enabled():
                 raise
-    if strict_fused_moe_enabled():
+    # The SM120 CUTLASS linear is the intended default, not a fallback.
+    if strict_fused_moe_enabled() and not uses_sm120_cutlass:
         raise RuntimeError(
             "MOE_STRICT_FUSED=1 forbids the generic Expert.forward "
             "shared-expert fallback"

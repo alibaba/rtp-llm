@@ -136,6 +136,9 @@ class _FakeV4:
     def embed(self, input_ids):
         return torch.stack((input_ids.float(), input_ids.float() + 0.5), dim=-1)
 
+    def _embed_target(self, input_ids):
+        return self.embed(input_ids)
+
     def _hc_head_reduce(self, h):
         self.calls.append(("head_reduce", h.clone()))
         return h.squeeze(-2)
