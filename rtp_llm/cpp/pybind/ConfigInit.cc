@@ -1514,6 +1514,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
         .def_readwrite("max_inited_kv_cache_streams", &FIFOSchedulerConfig::max_inited_kv_cache_streams)
         .def_readwrite("max_batch_tokens_without_cache", &FIFOSchedulerConfig::max_batch_tokens_without_cache)
+        .def_readwrite("context_coalesce_window_ms", &FIFOSchedulerConfig::context_coalesce_window_ms)
+        .def_readwrite("context_coalesce_target_streams", &FIFOSchedulerConfig::context_coalesce_target_streams)
         .def("to_string", &FIFOSchedulerConfig::to_string)
         .def(py::pickle(
             [](const FIFOSchedulerConfig& self) {
@@ -1523,10 +1525,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.decode_prefill_ratio,
                                       self.cp_force_single_prefill,
                                       self.max_inited_kv_cache_streams,
-                                      self.max_batch_tokens_without_cache);
+                                      self.max_batch_tokens_without_cache,
+                                      self.context_coalesce_window_ms,
+                                      self.context_coalesce_target_streams);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 9)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
@@ -1542,6 +1546,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 7) {
                         c.max_batch_tokens_without_cache = t[6].cast<int64_t>();
+                    }
+                    if (t.size() >= 9) {
+                        c.context_coalesce_window_ms       = t[7].cast<int64_t>();
+                        c.context_coalesce_target_streams = t[8].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());

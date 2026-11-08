@@ -508,6 +508,15 @@ struct FIFOSchedulerConfig {
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
+    // Context-round coalescing (experiment 00014): when the engine is otherwise
+    // idle and a round would carry fewer than context_coalesce_target_streams
+    // context streams, hold the round for at most context_coalesce_window_ms so
+    // concurrent arrivals can share it. Profiled rounds are dominated by a
+    // per-round fixed cost (3-stream rounds cost about the same as 1-stream
+    // rounds), so packing one extra stream nearly doubles the serialized service
+    // rate. 0 disables the hold.
+    int64_t context_coalesce_window_ms       = 200;
+    int64_t context_coalesce_target_streams = 2;
     std::string to_string() const;
 };
 

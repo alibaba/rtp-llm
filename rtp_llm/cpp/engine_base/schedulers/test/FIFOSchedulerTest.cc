@@ -1,4 +1,5 @@
 #include <chrono>
+#include <thread>
 #include <future>
 #include <iostream>
 #include <limits>
@@ -5696,6 +5697,168 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
     ASSERT_EQ(result.value().size(), 4);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 4);
+}
+
+// ---------------------------------------------------------------------------
+// Context-round coalescing (experiment 00014)
+// ---------------------------------------------------------------------------
+
+
+TEST_F(FIFOSchedulerTest, testContextCoalesceHoldsSoloRoundForConcurrentArrival) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 16;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+
+    runtime_config.fifo_scheduler_config.context_coalesce_window_ms       = 500;
+    runtime_config.fifo_scheduler_config.context_coalesce_target_streams = 2;
+    FIFOScheduler scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto stream1 = makeStream({1, 2}, model_config, runtime_config, resource_context, 1);
+    ASSERT_TRUE(scheduler.enqueue(stream1).ok());
+
+    auto stream2  = makeStream({3, 4}, model_config, runtime_config, resource_context, 1);
+    auto enqueue2 = [&scheduler, stream2]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        ASSERT_TRUE(scheduler.enqueue(stream2).ok());
+    };
+    std::thread late_arrival(enqueue2);
+
+    const auto t0    = std::chrono::steady_clock::now();
+    auto       round = scheduler.schedule();
+    const auto hold  = std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - t0)
+                       .count();
+    late_arrival.join();
+
+    ASSERT_TRUE(round.ok());
+    ASSERT_EQ(round->size(), 2) << "the held round must carry the concurrent arrival";
+    EXPECT_GE(hold, 50) << "the solo round must have been held for the arrival";
+    EXPECT_LT(hold, 1000);
+    EXPECT_FALSE(stream1->hasError());
+    EXPECT_FALSE(stream2->hasError());
+}
+
+TEST_F(FIFOSchedulerTest, testContextCoalesceWindowExpiresSoloRound) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 16;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+
+    runtime_config.fifo_scheduler_config.context_coalesce_window_ms       = 200;
+    runtime_config.fifo_scheduler_config.context_coalesce_target_streams = 2;
+    FIFOScheduler scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto stream1 = makeStream({1, 2}, model_config, runtime_config, resource_context, 1);
+    ASSERT_TRUE(scheduler.enqueue(stream1).ok());
+
+    const auto t0    = std::chrono::steady_clock::now();
+    auto       round = scheduler.schedule();
+    const auto hold  = std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - t0)
+                       .count();
+
+    ASSERT_TRUE(round.ok());
+    ASSERT_EQ(round->size(), 1) << "no arrival: the window expires and the solo round dispatches";
+    EXPECT_GE(hold, 150) << "the round must have been held for (roughly) the full window";
+    EXPECT_LT(hold, 2000);
+    EXPECT_FALSE(stream1->hasError());
+}
+
+TEST_F(FIFOSchedulerTest, testContextCoalesceDisabledDispatchesImmediately) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 16;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+
+    runtime_config.fifo_scheduler_config.context_coalesce_window_ms = 0;  // disabled
+    FIFOScheduler scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto stream1 = makeStream({1, 2}, model_config, runtime_config, resource_context, 1);
+    ASSERT_TRUE(scheduler.enqueue(stream1).ok());
+
+    const auto t0    = std::chrono::steady_clock::now();
+    auto       round = scheduler.schedule();
+    const auto hold  = std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - t0)
+                       .count();
+
+    ASSERT_TRUE(round.ok());
+    ASSERT_EQ(round->size(), 1);
+    EXPECT_LT(hold, 100) << "window=0 must keep the legacy immediate dispatch";
+    EXPECT_FALSE(stream1->hasError());
+}
+
+TEST_F(FIFOSchedulerTest, testContextCoalesceSkipsHoldWhenTargetAlreadyQueued) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 16;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+
+    runtime_config.fifo_scheduler_config.context_coalesce_window_ms       = 500;
+    runtime_config.fifo_scheduler_config.context_coalesce_target_streams = 2;
+    FIFOScheduler scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto stream1 = makeStream({1, 2}, model_config, runtime_config, resource_context, 1);
+    auto stream2 = makeStream({3, 4}, model_config, runtime_config, resource_context, 1);
+    ASSERT_TRUE(scheduler.enqueue(stream1).ok());
+    ASSERT_TRUE(scheduler.enqueue(stream2).ok());
+
+    const auto t0    = std::chrono::steady_clock::now();
+    auto       round = scheduler.schedule();
+    const auto hold  = std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - t0)
+                       .count();
+
+    ASSERT_TRUE(round.ok());
+    ASSERT_EQ(round->size(), 2) << "both queued streams join one round via the normal admission path";
+    EXPECT_LT(hold, 100) << "no hold is needed when the queue already reaches the target";
+    EXPECT_FALSE(stream1->hasError());
+    EXPECT_FALSE(stream2->hasError());
 }
 
 }  // namespace rtp_llm

@@ -451,7 +451,9 @@ std::string FIFOSchedulerConfig::to_string() const {
         << "decode_prefill_ratio: " << decode_prefill_ratio << "\n"
         << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
         << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams << "\n"
-        << "max_batch_tokens_without_cache: " << max_batch_tokens_without_cache;
+        << "max_batch_tokens_without_cache: " << max_batch_tokens_without_cache << "\n"
+        << "context_coalesce_window_ms: " << context_coalesce_window_ms << "\n"
+        << "context_coalesce_target_streams: " << context_coalesce_target_streams;
     return oss.str();
 }
 

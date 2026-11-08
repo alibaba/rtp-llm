@@ -34,10 +34,15 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
         static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
     prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
-                         1) {
+                         1),
+    context_coalesce_window_ms_(
+        std::max<int64_t>(runtime_config.fifo_scheduler_config.context_coalesce_window_ms, 0)),
+    context_coalesce_target_streams_(
+        std::max<int64_t>(runtime_config.fifo_scheduler_config.context_coalesce_target_streams, 1)) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
                      "max_batch_tokens_without_cache is [%zu], cp_force_single_prefill is [%d], "
                      "prefill_cp_size is [%zu], max_inited_kv_cache_streams is [%zu], "
+                     "context_coalesce_window_ms is [%lld], context_coalesce_target_streams is [%lld], "
                      "scheduler_poll_interval_ms is [%lld]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
@@ -45,6 +50,8 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                      cp_force_single_prefill_,
                      prefill_cp_size_,
                      max_inited_kv_cache_streams_,
+                     static_cast<long long>(context_coalesce_window_ms_),
+                     static_cast<long long>(context_coalesce_target_streams_),
                      static_cast<long long>(poll_interval_.count()));
 }
 
@@ -753,6 +760,12 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
             }
         }
     }
+    // Context-round coalescing (experiment 00014): with the engine otherwise idle
+    // and a small all-context round, hold briefly so concurrent arrivals can share
+    // the fixed round cost. Multi-stream rounds profiled at the same wall time as
+    // single-stream rounds (GPU ~40% busy per round).
+    maybeCoalesceContextRound(lock);
+
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
 
@@ -762,6 +775,42 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     return running_streams_;
 }
 
+void FIFOScheduler::maybeCoalesceContextRound(std::unique_lock<std::mutex>& lock) {
+    // Hold an otherwise-idle, all-context, below-target round for at most
+    // context_coalesce_window_ms so concurrent arrivals can join it. Any other
+    // runnable work (waiters, pending cache loads, groups, fake fill) or a stop
+    // bypasses the hold entirely: it only ever delays an otherwise-solo round.
+    if (context_coalesce_window_ms_ <= 0 || context_coalesce_target_streams_ <= 1) {
+        return;
+    }
+    const size_t target = static_cast<size_t>(context_coalesce_target_streams_);
+    if (!running_streams_.empty() || new_streams_.empty() || new_streams_.size() >= target
+        || !waiting_streams_.empty() || !loading_cache_streams_.empty()
+        || !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty() || need_fill_fake_stream_) {
+        return;
+    }
+    for (const auto& stream : new_streams_) {
+        if (!stream || !stream->isContextStream()) {
+            return;
+        }
+    }
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::milliseconds(context_coalesce_window_ms_);
+    while (!stop_ && new_streams_.size() < target) {
+        schedule_trigger_ = false;
+        if (!cond_.wait_until(lock, deadline, [this] { return waitPredicate(); })) {
+            break;  // coalescing window expired
+        }
+        if (stop_ || !running_streams_.empty() || need_fill_fake_stream_ || !waiting_group_queue_.empty()
+            || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()) {
+            break;
+        }
+        if (!waiting_streams_.empty()) {
+            admitWaitingStreams(waiting_streams_, new_streams_);
+        }
+    }
+    schedule_trigger_ = false;
+}
 void FIFOScheduler::updateCacheExposedWait() {
     // Measure scheduler-observed stalls between batches, after both lanes had
     // a chance to provide runnable work. A group parked here may already be ready.

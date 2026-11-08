@@ -107,6 +107,10 @@ private:
     void moveGroupToNewStreams(StreamGroup& group);
     void moveGroupToAllocatingGroup(StreamGroup& group);
     void dispatchPreparedGroup(StreamGroup& group);
+    // Context-round coalescing (experiment 00014): hold an otherwise-idle round
+    // briefly so concurrent arrivals can join it. Called from schedule() with
+    // lock_ held; cond_ waits release it while parked.
+    void maybeCoalesceContextRound(std::unique_lock<std::mutex>& lock);
 
     void    updateCacheExposedWait();
     void    cancelExtraStreams() override;
@@ -127,6 +131,10 @@ private:
     // cache loads/waiters. CP padding is included. 0 disables it.
     const size_t max_batch_tokens_without_cache_ = 0;
     const size_t prefill_cp_size_                = 1;
+    // Context-round coalescing (experiment 00014): bounded hold for otherwise-idle
+    // single-stream rounds so concurrent arrivals can share the fixed round cost.
+    const int64_t context_coalesce_window_ms_       = 0;
+    const int64_t context_coalesce_target_streams_ = 1;
 
     // Consumed (exchanged to 0) from the const fillExtraMetrics() reporting hook.
     mutable std::atomic<int64_t> pending_group_fallback_count_ = 0;
