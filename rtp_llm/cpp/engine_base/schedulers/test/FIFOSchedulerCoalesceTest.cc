@@ -21,7 +21,8 @@ namespace {
 // maybeCoalesceContextRound() is invoked with the scheduler lock held, exactly as
 // schedule() does. The cache manager is left uninitialized on purpose.
 struct CoalesceFixture {
-    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(CacheConfig{});
+    // No KVCacheManager: the scheduler constructor only stores the pointer and the
+    // hold mechanics never touch the cache (admission is not exercised here).
     ResourceContext                 resource_context;
     ModelConfig                     model_config;
     RuntimeConfig                   runtime_config;
@@ -31,14 +32,14 @@ struct CoalesceFixture {
     std::unique_ptr<FIFOScheduler>  scheduler;
 
     CoalesceFixture(int64_t window_ms, int64_t target_streams) {
-        resource_context.cache_manager                         = cache_manager;
         model_config.max_seq_len                                = 8192;
         runtime_config.max_generate_batch_size                  = 16;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
         runtime_config.fifo_scheduler_config.context_coalesce_window_ms       = window_ms;
         runtime_config.fifo_scheduler_config.context_coalesce_target_streams = target_streams;
         scheduler = std::make_unique<FIFOScheduler>(
-            runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+            runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config,
+            /*cache_manager=*/nullptr);
     }
 
     std::shared_ptr<GenerateStream> makeStream(const std::vector<int>& ids) {
