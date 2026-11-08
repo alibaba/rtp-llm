@@ -268,7 +268,7 @@ def install_pp_daemon_hook(
                 native_core = naviSchedModule()
             invalid = invalid_object_id
             if invalid is None:
-                from vineyard import ObjectID
+                from v6d.lite.common.type import ObjectID
 
                 invalid = ObjectID.invalid_object_id().id
             start_pp_daemon_collector(

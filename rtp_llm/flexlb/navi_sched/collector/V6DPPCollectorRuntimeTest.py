@@ -3,6 +3,7 @@ import json
 import socket
 import sys
 import unittest
+from types import ModuleType
 from types import SimpleNamespace as Obj
 from unittest import mock
 
@@ -216,6 +217,40 @@ class V6DPPCollectorRuntimeTest(unittest.TestCase):
             self.assertFalse(daemon._navi_sched_pp_collector_error)
             self.assertIs(daemon.peer.seal_result, daemon.peer.stop())
             self.assertTrue(observer._stopped)
+        finally:
+            observer = getattr(daemon, "_navi_sched_pp_collector", None)
+            if observer is not None:
+                observer.stop()
+
+    def test_default_object_id_uses_native_v6d_lite_without_vineyard_package(self):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        native_type = ModuleType("v6d.lite.common.type")
+        native_type.ObjectID = Obj(
+            invalid_object_id=mock.Mock(return_value=Obj(id=(1 << 64) - 1))
+        )
+        modules = {
+            name: ModuleType(name) for name in ("v6d", "v6d.lite", "v6d.lite.common")
+        }
+        modules.update({"v6d.lite.common.type": native_type, "vineyard": None})
+        daemon_type = self.daemon_type()
+        runtime.install_pp_daemon_hook(
+            daemon_type, environ=environment(str(port)), core=core
+        )
+        daemon = daemon_type()
+        try:
+            with mock.patch.dict(sys.modules, modules):
+                result = asyncio.run(daemon.push_kv_cache_spec(spec()))
+            self.assertIs(daemon.result, result)
+            self.assertFalse(daemon._navi_sched_pp_collector_error)
+            self.assertEqual(
+                port, daemon._navi_sched_pp_collector._collector.get_grpc_port()
+            )
+            self.assertEqual(
+                (1 << 64) - 1, daemon._navi_sched_pp_collector._invalid_object_id
+            )
+            native_type.ObjectID.invalid_object_id.assert_called_once_with()
         finally:
             observer = getattr(daemon, "_navi_sched_pp_collector", None)
             if observer is not None:
