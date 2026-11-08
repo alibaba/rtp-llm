@@ -5,8 +5,8 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
-def _validate_mapping(restore, mask, expected, padding, flags, N: tl.constexpr,
+@triton.jit(do_not_specialize=["N"])
+def _validate_mapping(restore, mask, expected, padding, flags, N,
                       RS: tl.constexpr, MS: tl.constexpr, BLOCK: tl.constexpr):
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     live = offsets < N

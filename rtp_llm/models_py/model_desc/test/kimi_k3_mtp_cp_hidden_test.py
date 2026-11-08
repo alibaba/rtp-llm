@@ -24,6 +24,7 @@ class KimiK3MtpCpHiddenTest(unittest.TestCase):
         model.register_buffer('_mtp_prefill_last_hidden_buffer', None, persistent=False)
         model._mtp_prefill_last_hidden_valid_rows = 0
         model._max_generate_batch_size = 4
+        model._max_moe_tokens = 64
         model._mtp_target_hidden_states = None
         model._query_layout = None
         return model
@@ -60,8 +61,9 @@ class KimiK3MtpCpHiddenTest(unittest.TestCase):
         pointer = model._mtp_prefill_hidden_buffer.data_ptr()
         self.initialize(model)
         self.assertEqual(pointer, model._mtp_prefill_hidden_buffer.data_ptr())
+        model._max_moe_tokens = 72
         with self.assertRaisesRegex(ValueError, 'Cannot replace'):
-            self.initialize(model, requests=3)
+            self.initialize(model)
         self.assertEqual(pointer, model._mtp_prefill_hidden_buffer.data_ptr())
 
     def test_rank_local_pre_norm_padding_and_stride_are_preserved(self):

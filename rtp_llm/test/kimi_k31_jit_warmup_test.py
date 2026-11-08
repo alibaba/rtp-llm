@@ -441,11 +441,36 @@ class KimiK31JitWarmupTest(unittest.TestCase):
         model = SimpleNamespace(
             kv_cache=object(), layers=[SimpleNamespace(attention=attention)]
         )
-        for dtype, width in ((torch.bfloat16, 14400), (torch.float8_e4m3fn, 14464)):
+        for dtype, width in (
+            (torch.bfloat16, 14400),
+            (torch.float8_e4m3fn, 14464),
+            (torch.uint8, 14400),
+        ):
             with self.subTest(dtype=dtype):
                 attention.input = SimpleNamespace(
-                    weight=torch.empty((width, 7168), device="meta", dtype=dtype)
+                    weight=torch.empty(
+                        (width, 3584 if dtype == torch.uint8 else 7168),
+                        device="meta",
+                        dtype=dtype,
+                    ),
+                    hidden_size=7168,
                 )
+                kv_stride = 576 + width - 14400
+
+                def q_gate(hidden):
+                    self.assertEqual(hidden.shape, (128, 7168))
+                    return torch.ones(
+                        (128, 13824), device=self.device, dtype=torch.bfloat16
+                    ).split((1536, 12288), -1)
+
+                def kv_projection(hidden):
+                    self.assertEqual(hidden.shape, (128, 7168))
+                    return torch.ones(
+                        (128, kv_stride), device=self.device, dtype=torch.bfloat16
+                    )[:, :576]
+
+                attention.natural_q_gate_input = q_gate
+                attention.natural_kv_input = kv_projection
                 self.warmup.warmup_kimi_k31_dsa_jit(
                     model, SimpleNamespace(is_decode_role=False)
                 )
@@ -477,10 +502,150 @@ class KimiK31JitWarmupTest(unittest.TestCase):
                                 self.assertTrue(
                                     torch.equal(output, torch.ones_like(output))
                                 )
+                    natural_q = torch.ones(
+                        (542, 13824), device=self.device, dtype=torch.bfloat16
+                    )[:, :1536]
+                    natural_kv = torch.ones(
+                        (542, kv_stride), device=self.device, dtype=torch.bfloat16
+                    )
+                    from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
+                        independent_q_kv_rmsnorm,
+                    )
+
+                    for rows in (1, 34, 127, 128, 129, 542):
+                        q, kv = natural_q[:rows], natural_kv[:rows, :512]
+                        suffix = natural_kv[:rows, 512:576]
+                        outputs = grouped_q_kv_rmsnorm(
+                            q,
+                            kv,
+                            attention.q_norm.weight,
+                            attention.kv_norm.weight,
+                            1e-6,
+                            kv_suffix=suffix,
+                        )
+                        for value, weight, tail in (
+                            (q, attention.q_norm.weight, None),
+                            (kv, attention.kv_norm.weight, suffix),
+                        ):
+                            independent = independent_q_kv_rmsnorm(
+                                value,
+                                weight,
+                                1e-6,
+                                q_width=1536,
+                                kv_width=512,
+                                full_rows=542,
+                                suffix=tail,
+                            )
+                            self.assertTrue(
+                                torch.equal(independent, torch.ones_like(independent))
+                            )
+                        for output in outputs:
+                            self.assertTrue(
+                                torch.equal(output, torch.ones_like(output))
+                            )
                     torch.cuda.synchronize()
                 self.assertEqual(
                     misses, [], "Prefill warmup missed grouped Norm layouts"
                 )
+
+    def test_prefill_restore_validation_reuses_kernel_across_lengths(self):
+        import triton
+        from rtp_llm.models_py.triton_kernels.common.validate_zigzag import (
+            _validate_mapping,
+            validate_zigzag,
+        )
+
+        def run(rows, *, invalid=False):
+            expected = torch.arange(rows, device=self.device, dtype=torch.int64)
+            restore = expected.clone()
+            mask = torch.ones(rows, device=self.device, dtype=torch.bool)
+            flags = torch.empty(
+                (triton.cdiv(rows, 4096),), device=self.device, dtype=torch.bool
+            )
+            if invalid:
+                restore[rows // 2] = -1
+                _validate_mapping[(flags.numel(),)](
+                    restore, mask, expected, mask, flags, rows, 1, 1, 4096
+                )
+                self.assertFalse(flags.all().item())
+            else:
+                validate_zigzag(restore, mask, expected, mask, flags)
+                self.assertTrue(flags.all().item())
+
+        run(16)
+        misses = []
+        with triton.knobs.compilation.scope():
+
+            def observe(*, cache_hit, src, **_):
+                if not cache_hit:
+                    misses.append(src.fn.__name__)
+
+            triton.knobs.compilation.listener = observe
+            for rows in (1, 17, 2800, 4095, 4097, 11024, 11792):
+                run(rows)
+                run(rows, invalid=True)
+            torch.cuda.synchronize()
+        self.assertEqual(
+            misses, [], "Prefill mapping length introduced Triton JIT keys"
+        )
+
+    def test_prefill_independent_norm_reuses_kernel_and_preserves_values(self):
+        import triton
+        from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
+            independent_q_kv_rmsnorm,
+        )
+
+        def run(rows, full_rows, *, kv):
+            width = 512 if kv else 1536
+            stride = 640 if kv else 13824
+            source = torch.randn(
+                (rows, stride), device=self.device, dtype=torch.bfloat16
+            )
+            x = source[:, :width]
+            suffix = source[:, width : width + 64] if kv else None
+            weight = torch.rand(width, device=self.device, dtype=torch.bfloat16) + 0.5
+            actual = independent_q_kv_rmsnorm(
+                x,
+                weight,
+                1e-5,
+                q_width=1536,
+                kv_width=512,
+                full_rows=full_rows,
+                suffix=suffix,
+            )
+            expected = (
+                x.float()
+                * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-5)
+                * weight.float()
+            ).bfloat16()
+            ulp = (
+                actual.view(torch.int16).int() - expected.view(torch.int16).int()
+            ).abs()
+            self.assertLessEqual(int(ulp.max()), 1)
+            if kv:
+                packed = actual.as_strided((rows, 576), (576, 1))
+                torch.testing.assert_close(packed[:, 512:], suffix, rtol=0, atol=0)
+
+        for kv in (False, True):
+            run(1, 1, kv=kv)
+            run(128, 128, kv=kv)
+        misses = []
+        with triton.knobs.compilation.scope():
+
+            def observe(*, cache_hit, src, **_):
+                if not cache_hit:
+                    misses.append(src.fn.__name__)
+
+            triton.knobs.compilation.listener = observe
+            for rows in (2, 17, 127, 128, 129, 542, 2800):
+                for kv in (False, True):
+                    run(rows, max(rows, 542), kv=kv)
+                    if rows < 128:
+                        run(rows, 127, kv=kv)
+            torch.cuda.synchronize()
+        self.assertEqual(
+            misses, [], "Prefill independent Norm length introduced Triton JIT keys"
+        )
 
     def test_prefill_slot_map_reuses_kernel_across_request_geometry(self):
         import triton

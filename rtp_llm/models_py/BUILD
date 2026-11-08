@@ -88,6 +88,12 @@ filegroup(
 
 
 filegroup(
+    name = "prefill_runtime_capacity_test_sources",
+    srcs = ["modules/kimi_k3/dsa_model_adapter.py"],
+    visibility = ["//rtp_llm/models_py/modules/kimi_k3/test:__pkg__"],
+)
+
+filegroup(
     name = "flash_mla_prefill_api_test_sources",
     srcs = ["modules/kimi_k3/mla.py"],
     visibility = ["//rtp_llm/models_py/modules/kimi_k3/test:__pkg__"],

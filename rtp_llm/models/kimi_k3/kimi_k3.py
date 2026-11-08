@@ -522,7 +522,7 @@ class KimiK3(BaseModel):
                 )
 
         # SP pads complete requests. Cover decode, verify and MTP update, including
-        # capture buckets larger than the serving batch limit. K3 has no query CP.
+        # capture buckets larger than the serving batch limit.
         batch = self.max_generate_batch_size
         if hw.enable_cuda_graph:
             batch = max([batch, *hw.decode_capture_batch_sizes])
@@ -540,6 +540,35 @@ class KimiK3(BaseModel):
         prompt = max(
             map(len, self.kv_cache_config.multi_task_prompt_tokens.values()), default=0
         )
+        cp = self.parallelism_config.prefill_cp_config
+        moe_staging_tokens = None
+        projection_staging_tokens = None
+        if (
+            role == RoleType.PREFILL
+            and getattr(config.k3_runtime_config, "dsa", None) is not None
+            and cp.is_enabled()
+            and cp.preserve_tp_layout
+        ):
+            # Zigzag pads each request to 2*TP independently, including
+            # unchunked startup work. Share the physical bound with all buffers.
+            requests = (
+                runtime.fifo_scheduler_config.max_context_batch_size
+                if runtime is not None
+                else self.max_generate_batch_size
+            )
+            prefill = max(prefill, prompt) + int(requests) * (2 * tp - 1)
+            # Projection collectives have an eager fallback for inputs above
+            # their staging capacity. Do not size them for return-sequence fanout.
+            projection_staging_tokens = (max(prefill, decode, 1) + tp - 1) // tp * tp
+            # Reserve normal chunk staging, not the potentially much larger
+            # transport bound for return-sequence fanout. Query-CP ranks have
+            # equal physical row counts and can tile oversized MoE calls.
+            if self.parallelism_config.dp_size == 1:
+                moe_staging_tokens = (prefill + tp - 1) // tp * tp
+            if runtime is not None and scheduler.prefill_chunk_size > 0:
+                # FIFO caps logical tokens, not expanded return-sequence count.
+                # Every nonempty sequence can consume a whole 2*TP stripe.
+                prefill = max(prefill, scheduler.prefill_chunk_size * 2 * tp)
         max_moe_tokens = (max(prefill, decode, prompt, 1) + tp - 1) // tp * tp
 
         # Release inactive blocks left by checkpoint loading before the expert
@@ -553,6 +582,8 @@ class KimiK3(BaseModel):
             self.weight,
             max_generate_batch_size=self.max_generate_batch_size,
             max_moe_tokens=max_moe_tokens,
+            moe_staging_tokens=moe_staging_tokens,
+            projection_staging_tokens=projection_staging_tokens,
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.hw_kernel_config,
             device_resource_config=self.device_resource_config,

@@ -26,7 +26,19 @@ py_test(
     name = "kimi_k31_dsa_fused_buffers_test",
     srcs = ["kimi_k31_dsa_fused_buffers_test.py"],
     deps = ["//rtp_llm:testlib"],
-    exec_properties = {"gpu": "B300"},
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "kimi_k31_kv_chunk_cuda_test",
+    srcs = ["kimi_k31_kv_chunk_cuda_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    timeout = "long",
 )
 
 py_test(

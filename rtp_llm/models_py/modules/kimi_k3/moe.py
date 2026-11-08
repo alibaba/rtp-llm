@@ -448,6 +448,43 @@ class KimiK3LatentMoE(nn.Module):
             self.experts = FusedMoeFactory().create_fused_moe(cfg, packed)
             self.expert_step = self._separate_expert_step
             self.mask_routes = self._mask_routes
+        cp = parallelism.prefill_cp_config
+        if (
+            parallelism.role_type == RoleType.PREFILL
+            and parallelism.dp_size == 1
+            and getattr(runtime, "dsa", None) is not None
+            and cp.is_enabled()
+            and cp.preserve_tp_layout
+        ):
+            self._prefill_chunk_tokens = cfg.max_tokens_per_rank
+            self._prefill_expert_step = self.expert_step
+            self.expert_step = self._chunked_prefill_expert_step
+
+    def _chunked_prefill_expert_step(
+        self, hidden, routed_input, routing, ids, valid_mask
+    ):
+        capacity = self._prefill_chunk_tokens
+        if hidden.size(0) <= capacity:
+            return self._prefill_expert_step(
+                hidden, routed_input, routing, ids, valid_mask
+            )
+        # Query-CP pads every sequence evenly across TP=EP. All peers therefore
+        # enter the same number of tiles without an extra size collective.
+        routed_output = torch.empty_like(routed_input)
+        shared_output = torch.empty_like(hidden)
+        for start in range(0, hidden.size(0), capacity):
+            stop = start + capacity
+            routed, shared = self._prefill_expert_step(
+                hidden[start:stop],
+                routed_input[start:stop],
+                routing[start:stop],
+                ids[start:stop],
+                None if valid_mask is None else valid_mask[start:stop],
+            )
+            # The backend reuses staging outputs on the next tile.
+            routed_output[start:stop].copy_(routed)
+            shared_output[start:stop].copy_(shared)
+        return routed_output, shared_output
 
     @staticmethod
     def _keep_routes(routing, ids, valid_mask):

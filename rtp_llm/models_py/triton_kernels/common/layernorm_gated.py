@@ -651,9 +651,9 @@ def grouped_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps, *, kv_suffix=None):
     return q_out, kv_out
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _independent_q_kv_rmsnorm_kernel(
-    X, W, OUT, SUFFIX, N: tl.constexpr, WIDTH: tl.constexpr,
+    X, W, OUT, SUFFIX, N, WIDTH: tl.constexpr,
     XS: tl.constexpr, OS: tl.constexpr, SS: tl.constexpr,
     SUFFIX_DIM: tl.constexpr, EPS: tl.constexpr, ROWS: tl.constexpr,
     BLOCK: tl.constexpr, PDL: tl.constexpr,

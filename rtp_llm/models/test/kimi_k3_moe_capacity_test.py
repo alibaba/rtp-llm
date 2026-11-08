@@ -1,8 +1,12 @@
 import unittest
+from itertools import product
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
+import torch
+
 from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3, KimiK3Mtp
+from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.ops import RoleType
 
 
@@ -16,6 +20,7 @@ class KimiK3MoeCapacityTest(unittest.TestCase):
             gen_num_per_cycle=width - 1,
             mm_model_config=NS(is_multimodal=False),
             moe_prefill_max_tokens_per_rank=999999,
+            k3_runtime_config=NS(dsa=None),
         )
         model.runtime_config = NS(
             fifo_scheduler_config=NS(
@@ -31,6 +36,8 @@ class KimiK3MoeCapacityTest(unittest.TestCase):
         model.parallelism_config = NS(
             role_type=role,
             tp_size=tp,
+            dp_size=1,
+            prefill_cp_config=NS(is_enabled=lambda: False, preserve_tp_layout=False),
             ffn_disaggregate_config=NS(enable_ffn_disaggregate=False),
         )
         model.hw_kernel_config = NS(
@@ -83,6 +90,117 @@ class KimiK3MoeCapacityTest(unittest.TestCase):
                                     padded += 1
                                 physical_rows.append(padded * q)
                         self.assertEqual(self.capacity(model), max(physical_rows))
+
+    def test_query_cp_includes_per_request_zigzag_padding(self):
+        model = self.model(chunk=129)
+        model.model_config.k3_runtime_config.dsa = object()
+        model.parallelism_config.prefill_cp_config = NS(
+            is_enabled=lambda: True, preserve_tp_layout=True
+        )
+        # FIFO can admit more return sequences than the warmup request count.
+        self.assertEqual(self.capacity(model), 2064)
+        model.kv_cache_config.multi_task_prompt_tokens = {1: [0] * 4097}
+        self.assertEqual(self.capacity(model), 4144)
+        model.runtime_config.warm_up = True
+        model.runtime_config.warm_up_with_loss = True
+        self.assertEqual(self.capacity(model), 12336)
+
+    def test_query_cp_capacity_covers_ragged_requests(self):
+        for tp in (2, 8, 16):
+            model = self.model(tp=tp, chunk=31, batch=1)
+            model.model_config.k3_runtime_config.dsa = object()
+            model.parallelism_config.prefill_cp_config = NS(
+                is_enabled=lambda: True, preserve_tp_layout=True
+            )
+            capacity = self.capacity(model)
+            for lengths in product(range(1, 16), repeat=3):
+                if sum(lengths) > 31:
+                    continue
+                physical = 0
+                for length in lengths:
+                    while length % (2 * tp):
+                        length += 1
+                    physical += length
+                self.assertLessEqual(physical, capacity, (tp, lengths))
+
+    def test_query_cp_covers_many_one_token_return_sequences(self):
+        model = self.model(tp=8, chunk=129, batch=1)
+        model.model_config.k3_runtime_config.dsa = object()
+        model.parallelism_config.prefill_cp_config = NS(
+            is_enabled=lambda: True, preserve_tp_layout=True
+        )
+        # A single stream can expand all 129 logical tokens into separate
+        # one-token return sequences, each requiring a 16-token CP stripe.
+        lengths = [1] * 129
+        physical = sum(16 for _ in lengths)
+        self.assertGreater(len(lengths), model.max_generate_batch_size)
+        self.assertGreater(
+            len(lengths), model.runtime_config.fifo_scheduler_config.max_context_batch_size
+        )
+        self.assertGreaterEqual(self.capacity(model), physical)
+
+    def test_large_cp_transport_does_not_inflate_projection_or_moe_staging(self):
+        model = self.model(tp=8, chunk=65536)
+        model.runtime_config.fifo_scheduler_config.max_context_batch_size = 1
+        model.model_config.k3_runtime_config.dsa = object()
+        model.parallelism_config.prefill_cp_config = NS(
+            is_enabled=lambda: True, preserve_tp_layout=True
+        )
+        with (
+            patch("rtp_llm.models_py.model_desc.kimi_k3.KimiK3Model") as ctor,
+            patch("torch.cuda.empty_cache"),
+        ):
+            model._create_python_model()
+        self.assertEqual(ctor.call_args.kwargs["max_moe_tokens"], 1048576)
+        self.assertEqual(ctor.call_args.kwargs["moe_staging_tokens"], 65552)
+        self.assertEqual(ctor.call_args.kwargs["projection_staging_tokens"], 65552)
+        model.parallelism_config.dp_size = 2
+        with (
+            patch("rtp_llm.models_py.model_desc.kimi_k3.KimiK3Model") as ctor,
+            patch("torch.cuda.empty_cache"),
+        ):
+            model._create_python_model()
+        self.assertIsNone(ctor.call_args.kwargs["moe_staging_tokens"])
+        self.assertEqual(ctor.call_args.kwargs["projection_staging_tokens"], 65552)
+
+    def test_cp_moe_tiles_copy_reused_backend_outputs_and_preserve_fast_path(self):
+        layer = object.__new__(KimiK3LatentMoE)
+        torch.nn.Module.__init__(layer)
+        layer._prefill_chunk_tokens = 4
+        routed_buffer = torch.empty(4, 2, dtype=torch.bfloat16)
+        shared_buffer = torch.empty(4, 3, dtype=torch.bfloat16)
+        calls = []
+
+        def step(hidden, routed, weights, ids, valid):
+            count = hidden.size(0)
+            calls.append((count, None if valid is None else valid.clone()))
+            routed_buffer[:count].copy_(routed + weights[:, :1] + ids[:, :1])
+            shared_buffer[:count].copy_(hidden * 2)
+            return routed_buffer[:count], shared_buffer[:count]
+
+        layer._prefill_expert_step = step
+        hidden = torch.arange(33, dtype=torch.bfloat16).reshape(11, 3)
+        routed = hidden[:, :2].clone()
+        weights = torch.arange(11, dtype=torch.bfloat16).reshape(11, 1)
+        ids = torch.arange(11, dtype=torch.int32).reshape(11, 1)
+        mask = torch.arange(11) % 3 != 0
+        for valid in (None, mask):
+            calls.clear()
+            result, shared = layer._chunked_prefill_expert_step(
+                hidden, routed, weights, ids, valid
+            )
+            self.assertEqual([count for count, _ in calls], [4, 4, 3])
+            torch.testing.assert_close(result, routed + weights + ids, rtol=0, atol=0)
+            torch.testing.assert_close(shared, hidden * 2, rtol=0, atol=0)
+            if valid is not None:
+                torch.testing.assert_close(torch.cat([v for _, v in calls]), mask)
+        calls.clear()
+        result, shared = layer._chunked_prefill_expert_step(
+            hidden[:3], routed[:3], weights[:3], ids[:3], None
+        )
+        self.assertEqual([count for count, _ in calls], [3])
+        self.assertEqual(result.data_ptr(), routed_buffer.data_ptr())
+        self.assertEqual(shared.data_ptr(), shared_buffer.data_ptr())
 
     def test_disabled_graph_buckets_do_not_inflate_decode(self):
         model = self.model(role=RoleType.DECODE, batch=9, width=5)

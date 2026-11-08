@@ -254,6 +254,8 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         moe_config=None,
         *,
         max_moe_tokens: int,
+        moe_staging_tokens: int | None = None,
+        projection_staging_tokens: int | None = None,
     ):
         super().__init__(
             model_config,
@@ -292,12 +294,23 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         self.requires_token_position_ids = self.prefill_query_cp
         self.requires_fixed_capacity_mtp_draft_prefill = self.prefill_query_cp
         self._max_generate_batch_size = int(max_generate_batch_size)
-        # The K3 owner passes global physical rows; SP sends only its local shard
-        # into MoE. Projection warmup and collectives retain the global capacity.
+        # The owner passes the global physical input bound. Projection staging
+        # only needs to cover the regular prefill shape.
         self._max_moe_tokens = int(max_moe_tokens)
         if self._max_moe_tokens <= 0 or self._max_moe_tokens % self.tp_size:
             raise ValueError("K3 token capacity must be positive and divisible by TP")
+        self._projection_staging_tokens = self._max_moe_tokens
+        if self.prefill_query_cp and projection_staging_tokens is not None:
+            if projection_staging_tokens <= 0 or projection_staging_tokens % self.tp_size:
+                raise ValueError("K3 projection staging must be positive and divisible by TP")
+            self._projection_staging_tokens = min(
+                self._max_moe_tokens, projection_staging_tokens
+            )
         moe_capacity = (self._max_moe_tokens + self.tp_size - 1) // self.tp_size
+        if self.prefill_query_cp and moe_staging_tokens is not None:
+            if moe_staging_tokens <= 0 or moe_staging_tokens % self.tp_size:
+                raise ValueError("K3 MoE staging must be positive and divisible by TP")
+            moe_capacity = min(moe_capacity, moe_staging_tokens // self.tp_size)
         logging.info(
             "K3 SP MoE capacity: global_capacity=%d local_capacity=%d tp=%d",
             self._max_moe_tokens,
@@ -382,7 +395,7 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         collective = Bf16CollectiveProjection(
             _get_group(Group.TP),
             device,
-            max_m=self._max_moe_tokens,
+            max_m=self._projection_staging_tokens,
             hidden_size=self.config.hidden_size,
             output_projections=[attention.output for attention in attentions],
             decode_staging=init_resource.is_decode_role,
@@ -430,7 +443,7 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         )
 
         device = self.layers[0].attention.input.weight.device
-        max_m = self._max_moe_tokens
+        max_m = self._projection_staging_tokens
         self._fp8_collective = Fp8CollectiveProjection(
             _get_group(Group.TP),
             device,

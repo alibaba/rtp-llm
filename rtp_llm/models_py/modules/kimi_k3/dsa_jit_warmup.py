@@ -16,7 +16,9 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_page_rr_cache
 from rtp_llm.models_py.modules.kimi_k3.mla_jit_warmup import _warmup_decode_metadata
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
     grouped_q_kv_rmsnorm,
+    independent_q_kv_rmsnorm,
 )
+from rtp_llm.models_py.triton_kernels.common.validate_zigzag import validate_zigzag
 
 
 def _warmup_grouped_norm(attention, prepared):
@@ -28,18 +30,64 @@ def _warmup_grouped_norm(attention, prepared):
     dimensions = (attention.q_rank, attention.kv_rank, attention.suffix_dim)
     width = attention.input.weight.shape[0]
     eps = attention.q_norm.variance_epsilon
-    key = (q_weight.device, q_weight.dtype, dimensions, width, eps)
+    natural = getattr(attention, "natural_q_gate_input", None)
+    key = (
+        q_weight.device,
+        q_weight.dtype,
+        dimensions,
+        width,
+        attention.input.weight.dtype,
+        eps,
+        natural is not None,
+    )
     if key in prepared:
         return
     # Preserve the real fused projection's row stride and split offsets.
     source = torch.zeros((128, width), device=q_weight.device, dtype=q_weight.dtype)
-    # Short requests use the existing one-row producer instead of grouped norm.
-    for rows in (1, 128):
-        q, kv, suffix = source[:rows, : sum(dimensions)].split(dimensions, dim=-1)
-        for packed in (False, True):
-            grouped_q_kv_rmsnorm(
-                q, kv, q_weight, kv_weight, eps, kv_suffix=suffix if packed else None
-            )
+    layouts = [source[:, : sum(dimensions)].split(dimensions, dim=-1)]
+    if natural is not None:
+        restore = torch.arange(16, device=q_weight.device, dtype=torch.int64)
+        padding = torch.ones_like(restore, dtype=torch.bool)
+        flags = torch.empty((1,), device=q_weight.device, dtype=torch.bool)
+        validate_zigzag(restore, padding, restore, padding, flags)
+        # Natural Q+gate and KV are separate producers, including FP8 output
+        # padding. Use their actual views instead of the fused input's stride.
+        hidden_size = getattr(
+            attention.input, "hidden_size", attention.input.weight.shape[1]
+        )
+        hidden = torch.zeros(
+            (128, hidden_size), device=q_weight.device, dtype=q_weight.dtype
+        )
+        q, _ = natural(hidden)
+        kv, suffix = attention.natural_kv_input(hidden).split(dimensions[1:], dim=-1)
+        layouts.append((q, kv, suffix))
+    for index, (q, kv, suffix) in enumerate(layouts):
+        # Preserve the short-input and grouped reduction policies.
+        for rows in (1, 128):
+            for packed in (False, True):
+                grouped_q_kv_rmsnorm(
+                    q[:rows],
+                    kv[:rows],
+                    q_weight,
+                    kv_weight,
+                    eps,
+                    kv_suffix=suffix[:rows] if packed else None,
+                )
+            if index:
+                # Multi-chunk natural routing normalizes Q and KV independently.
+                for value, weight, tail in (
+                    (q, q_weight, None),
+                    (kv, kv_weight, suffix),
+                ):
+                    independent_q_kv_rmsnorm(
+                        value[:rows],
+                        weight,
+                        eps,
+                        q_width=attention.q_rank,
+                        kv_width=attention.kv_rank,
+                        full_rows=rows,
+                        suffix=None if tail is None else tail[:rows],
+                    )
     torch.cuda.synchronize(q_weight.device)
     prepared.add(key)
 

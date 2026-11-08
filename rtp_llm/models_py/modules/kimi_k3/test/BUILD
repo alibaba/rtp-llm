@@ -32,9 +32,33 @@ py_test(
 )
 
 py_test(
+    name = "prefill_runtime_capacity_test",
+    srcs = ["test_prefill_runtime_capacity.py"],
+    main = "test_prefill_runtime_capacity.py",
+    data = ["//rtp_llm/models_py:prefill_runtime_capacity_test_sources"],
+    deps = ["//rtp_llm:torch"],
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
+    name = "prefill_runtime_cuda_test",
+    srcs = ["prefill_runtime_cuda_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:models"],
+    env = {"GPU_COUNT": "8"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "8"},
+    timeout = "long",
+)
+
+py_test(
     name = "flash_mla_prefill_api_test",
     srcs = ["flash_mla_prefill_api_test.py"],
     data = ["//rtp_llm/models_py:flash_mla_prefill_api_test_sources"],
+)
+
+test_suite(
+    name = "prefill_runtime_tests",
+    tests = [":prefill_runtime_capacity_test", ":prefill_runtime_cuda_test"],
 )
 
 py_test(
