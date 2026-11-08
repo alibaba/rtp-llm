@@ -16,6 +16,8 @@ export Q38_ENABLE_BF16_STATE_RUNTIME=1 Q38_BF16_ROUNDING_SEED=20261106
 # User requests HF/RTP differences as a numerical report, not an acceptance limit.
 export Q38_HF_RTP_REPORT_ONLY=1
 export Q38_LOGPROB_REPORT_ONLY=1
+# Match the production rollout path: numerical scores are attempted but non-gating.
+export Q38_OPTIONAL_NUMERICAL_PROBES="${Q38_OPTIONAL_NUMERICAL_PROBES:-2}"
 export Q38_RUN_ID="${Q38_RUN_ID:?Supply the unique run identifier}"
 export Q38_CPU_FIRST_ADAM_ADMISSION_REQUIRED=1 Q38_CPU_CACHE_RECLAIM_ENABLED=1
 # Preserve BF16 Adam state through the verified first-step reuse path and

@@ -29,7 +29,7 @@ from qwen38_world_contract import (
     CONTROL_TOPOLOGY, World72Topology, canonical_uuid, require, fixed_layer_source_map,
     validate_native_manifest, validate_native_library_proof, validate_world_manifests,
 )
-from qwen38_refit_contract import validate_policy_probe_sources
+from qwen38_refit_contract import validate_policy_probe_sources, validate_policy_refit_source
 
 
 def _probe_attempt_payload(values, hf, prompt, target, request_ids, context):
@@ -61,6 +61,83 @@ def _probe_attempt_payload(values, hf, prompt, target, request_ids, context):
         observed_max_dp_error=(max(abs(a-b) for row in values for a, b in zip(values[0], row)) if finite else None),
         observed_max_HF_error=(max(abs(a-b) for row in values for a, b in zip(hf['raw_log_probs'], row)) if finite else None),
         **context)
+
+
+def _optional_hf_reference(path,step,prompt,target):
+    """Only diagnostic file/score content may become unavailable."""
+    try:
+        raw=path.read_bytes();row=json.loads(raw);values=row.get('raw_log_probs')
+        if (row.get('schema')!='q38-real-HF-policy-probe-v1' or row.get('rank')!=0
+                or row.get('world_size')!=72 or row.get('global_step')!=step
+                or row.get('master_dtype')!='bfloat16' or row.get('compute_dtype')!='bfloat16'
+                or row.get('score_dtype')!='float32' or row.get('prompt_ids')!=prompt
+                or row.get('response_ids')!=target or not isinstance(values,list)
+                or len(values)!=len(target) or not all(type(x) in (int,float) and math.isfinite(x) for x in values)
+                or row.get('raw_fp32_bits_hex')!=struct.pack(f'<{len(values)}f',*values).hex()):
+            return None
+        return row,hashlib.sha256(raw).hexdigest()
+    except (OSError,ValueError,TypeError,AttributeError,KeyError,OverflowError,struct.error):return None
+
+
+async def _optional_world_scores(server,step,version,sync,sync_path,statuses):
+    """Collect optional scores; only explicit response-data errors are soft.
+
+    Real transport, cancellation, version, CUDA or control failures propagate.
+    The mandatory refit and all72 native statuses must have passed beforehand.
+    """
+    from rtp_llm.RL.token_rpc_client import OptionalScoreDataError
+    rows=[];hf=None;prompt=target=None;attempted=False;issues=[]
+    try:
+        prompt=server.tokenizer.encode('The value of 37 * 43 is',add_special_tokens=False)
+        target=server.tokenizer.encode(' 1591.',add_special_tokens=False)
+        if (not isinstance(prompt,list) or not isinstance(target,list) or not prompt or not target
+                or any(type(x) is not int for x in prompt+target)):raise ValueError('invalid diagnostic token IDs')
+    except (OSError,ValueError,TypeError,AttributeError) as exc:
+        issues.append('diagnostic_tokenizer:'+type(exc).__name__)
+    else:
+        hf_path=Path(os.environ['Q38_TRAINING_AUDIT_DIR'])/f'hf-probe-step{step}-rank0.json'
+        hf=_optional_hf_reference(hf_path,step,prompt,target)
+        if hf is None:issues.append('HF_score_unavailable')
+        request_ids=[uuid.uuid4().int&((1<<63)-1) for _ in server.clients]
+        attempted=True
+        values=await asyncio.gather(*[client.score_tokens(request_id,prompt,target,expected_version=version)
+            for client,request_id in zip(server.clients,request_ids)],return_exceptions=True)
+        for value in values:
+            if isinstance(value,BaseException) and not isinstance(value,OptionalScoreDataError):raise value
+        for dp,value in enumerate(values):
+            if isinstance(value,OptionalScoreDataError):
+                issues.append(f'native_DP{dp}:OptionalScoreDataError');continue
+            try:
+                if (not isinstance(value,list) or len(value)!=len(target)
+                        or not all(type(x) in (int,float) and math.isfinite(x) for x in value)):
+                    raise ValueError('invalid diagnostic scores')
+                bits=struct.pack(f'<{len(value)}f',*value).hex()
+            except (ValueError,TypeError,OverflowError,struct.error):
+                issues.append(f'native_DP{dp}:invalid_score_content');continue
+            row=dict(dp_rank=dp,generation_world_rank=dp*8,raw_log_probs=value,raw_fp32_bits_hex=bits)
+            if hf is not None:
+                differences=[abs(a-b) for a,b in zip(hf[0]['raw_log_probs'],value)]
+                row.update(absolute_HF_errors=differences,mean_HF_absolute_error=sum(differences)/len(differences))
+            rows.append(row)
+    record=dict(replica_rank=0,logical_model_replicas=1,world_size=72,tp_size=8,dp_size=9,ep_size=72,
+        native_boot=server.boot,native_incarnation=server.incarnation,global_step=step,model_version=version,
+        full_source_sha256=sync['full_source_sha256'],source_transaction_sha256=hashlib.sha256(sync_path.read_bytes()).hexdigest(),
+        statuses=_status_rows(statuses),prompt_ids=prompt,response_ids=target,probes=rows,
+        numerical_probe_non_gating=True,numerical_probe_attempted=attempted,numerical_probe_skipped=not attempted,
+        score_values_not_claimed=not bool(rows),diagnostic_issues=issues,finished_unix=time.time())
+    if hf is not None:
+        record.update(hf_raw_log_probs=hf[0]['raw_log_probs'],hf_raw_fp32_bits_hex=hf[0]['raw_fp32_bits_hex'],
+                      actual_HF_reference_sha256=hf[1])
+    if len(rows)==9:
+        record['max_dp_error']=max(abs(a-b) for row in rows for a,b in zip(rows[0]['raw_log_probs'],row['raw_log_probs']))
+        if hf is not None:
+            errors=[x for row in rows for x in row['absolute_HF_errors']]
+            record.update(max_HF_error=max(errors),mean_HF_absolute_error=sum(errors)/len(errors))
+    try:
+        name=f'rtp_probe_rank0_step{step}.json' if len(rows)==9 else f'rtp_probe_partial_step{step}_{time.time_ns()}.json'
+        _write_json(server.main_audit_root/name,record)
+    except (OSError,TypeError,ValueError,OverflowError):pass
+    return record
 
 
 def _check_native_port_available(host, port):
@@ -551,9 +628,12 @@ class World72RTPServer(RTPServer):
                 and self._committed_step == expected_step and self._committed_version,
                 'the final gate requires the actually committed policy after exactly two optimizer updates')
         record = await self.wake_and_probe(expected_step, self._committed_version)
-        record = dict(record, final_native_GPU_reprobe=True, final_expected_optimizer_updates=2,
+        skipped=record.get('numerical_probe_skipped') is True
+        record = dict(record, final_native_GPU_reprobe=not skipped, final_native_status_verified=True,
+                      final_expected_optimizer_updates=2,
                       controller_identity=self.controller_identity)
-        _write_json(self.main_audit_root / 'rtp_final_policy2_actual_reprobe.json', record)
+        name='rtp_final_policy2_actual_status.json' if skipped else 'rtp_final_policy2_actual_reprobe.json'
+        _write_json(self.main_audit_root / name, record)
         return record
 
     async def _wake_and_probe_locked(self, expected_step, expected_version):
@@ -563,22 +643,64 @@ class World72RTPServer(RTPServer):
         await self._close_admission('post_refit_probe')
         sync_path = self.main_audit_root / f'rtp_sync_rank0_step{expected_step}.json'
         sync = json.loads(sync_path.read_text())
-        hf_path = Path(os.environ['Q38_TRAINING_AUDIT_DIR']) / f'hf-probe-step{expected_step}-rank0.json'
-        hf = validate_policy_probe_sources(sync, json.loads(hf_path.read_text()), step=expected_step,
-            version=expected_version, boot=self.boot, incarnation=self.incarnation)
+        mode=os.environ.get('Q38_OPTIONAL_NUMERICAL_PROBES','1')
+        require(mode in ('0','1','2'), 'optional numerical probe mode must be explicit 0, 1 or 2')
+        validate_policy_refit_source(sync,step=expected_step,version=expected_version,
+            boot=self.boot,incarnation=self.incarnation)
+        if mode=='1':
+            hf_path = Path(os.environ['Q38_TRAINING_AUDIT_DIR']) / f'hf-probe-step{expected_step}-rank0.json'
+            hf = validate_policy_probe_sources(sync, json.loads(hf_path.read_text()), step=expected_step,
+                version=expected_version, boot=self.boot, incarnation=self.incarnation)
+        else:
+            tensors=sync.get('tensors')
+            require(isinstance(tensors,list) and len(tensors)==1590
+                and all(isinstance(row,dict) and isinstance(row.get('name'),str)
+                    and isinstance(row.get('sha256'),str) and len(row['sha256'])==64
+                    and all(c in '0123456789abcdef' for c in row['sha256']) for row in tensors)
+                and {row['name'] for row in tensors}==self.required_sources,
+                'complete exact 1590-source transaction is required without a numerical probe')
         control = await _control(self.topology)
         try:
             statuses = await control.status()
-            require(all(row.model_version == expected_version and row.global_step == expected_step and not row.update_id
+            require(len(statuses)==72 and {row.world_rank for row in statuses}==set(range(72))
+                    and all(row.model_version == expected_version and row.global_step == expected_step and not row.update_id
                         and row.received_weights == 1590 and row.applied_weights > 0 for row in statuses),
                     'all 72 ranks must ACK the complete main-policy version before resume')
             if statuses[0].phase == 'paused':
                 if not statuses[0].kv_cache_ready:
                     await control.restore_cache()
                 statuses = await control.resume()
-            require(all(row.phase == 'running' for row in statuses), 'the world did not resume for the probes')
+            require(len(statuses)==72 and {row.world_rank for row in statuses}==set(range(72))
+                and all(row.phase=='running' and row.model_version==expected_version
+                    and row.global_step==expected_step and row.received_weights==1590 and row.applied_weights>0
+                    and not row.update_id for row in statuses), 'the world did not resume the committed policy')
         finally:
             await control.close()
+        require(len(self.clients)==9,'nine actual DP clients are required for generation')
+        if mode=='0':
+            # Do not issue optional numerical RPCs. Communication and source
+            # validation above remain mandatory and any exception is fatal.
+            for client in self.clients:
+                client.expected_step,client.expected_version=expected_step,expected_version
+                client.open_admission()
+            record=dict(replica_rank=0,logical_model_replicas=1,world_size=72,tp_size=8,dp_size=9,ep_size=72,
+                native_boot=self.boot,native_incarnation=self.incarnation,global_step=expected_step,
+                model_version=expected_version,full_source_sha256=sync['full_source_sha256'],
+                source_transaction_sha256=hashlib.sha256(sync_path.read_bytes()).hexdigest(),
+                statuses=_status_rows(statuses),numerical_probe_skipped=True,
+                score_values_not_claimed=True,finished_unix=time.time())
+            _write_json(self.main_audit_root/f'rtp_status_rank0_step{expected_step}.json',record)
+            self._committed_version,self._committed_step=expected_version,int(expected_step)
+            async with self._admission:self._generation_ready=True
+            return record
+        if mode=='2':
+            for client in self.clients:
+                client.expected_step,client.expected_version=expected_step,expected_version
+                client.open_admission()
+            record=await _optional_world_scores(self,expected_step,expected_version,sync,sync_path,statuses)
+            self._committed_version,self._committed_step=expected_version,int(expected_step)
+            async with self._admission:self._generation_ready=True
+            return record
         prompt = self.tokenizer.encode('The value of 37 * 43 is', add_special_tokens=False)
         target = self.tokenizer.encode(' 1591.', add_special_tokens=False)
         require(hf['prompt_ids'] == prompt and hf['response_ids'] == target,
@@ -805,7 +927,8 @@ def launch_world72_server(model_path, topology, node_ids):
             'one distinct live Ray node per native owner is required')
     from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
     runtime = dict(env_vars={'RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES': '1',
-                            'Q38_LOGPROB_REPORT_ONLY': '1' if os.environ.get('Q38_LOGPROB_REPORT_ONLY') == '1' else '0'})
+                            'Q38_LOGPROB_REPORT_ONLY': '1' if os.environ.get('Q38_LOGPROB_REPORT_ONLY') == '1' else '0',
+                            'Q38_OPTIONAL_NUMERICAL_PROBES': os.environ.get('Q38_OPTIONAL_NUMERICAL_PROBES','1')})
     owner_class = ray.remote(num_cpus=1, num_gpus=0)(WorldNodeOwner)
     owners = [owner_class.options(name=f'q38_native_world_owner_{index}', max_concurrency=16,
                   scheduling_strategy=NodeAffinitySchedulingStrategy(node_id, soft=False), runtime_env=runtime)

@@ -70,8 +70,8 @@ def exact_native_ack(ranks):
     return ranks
 
 
-def validate_policy_probe_sources(sync, hf, *, step, version, boot, incarnation):
-    """Bind pre-refit actual HF scores to the precise full native transaction."""
+def validate_policy_refit_source(sync, *, step, version, boot, incarnation):
+    """Validate the mandatory current-world refit without requiring scores."""
     if (sync.get('global_step') != step or sync.get('model_version') != version
             or sync.get('native_boot') != boot or sync.get('native_incarnation') != incarnation
             or sync.get('logical_model_replicas') != 1 or sync.get('received_weights') != MAIN_SOURCES):
@@ -80,6 +80,12 @@ def validate_policy_probe_sources(sync, hf, *, step, version, boot, incarnation)
     digest = sync.get('full_source_sha256', '')
     if not isinstance(digest, str) or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
         raise ValueError('Post-refit probe requires the actual full canonical source digest')
+    return sync
+
+
+def validate_policy_probe_sources(sync, hf, *, step, version, boot, incarnation):
+    """Bind pre-refit actual HF scores to the precise full native transaction."""
+    validate_policy_refit_source(sync,step=step,version=version,boot=boot,incarnation=incarnation)
     if (hf.get('schema') != 'q38-real-HF-policy-probe-v1' or hf.get('world_size') != WORLD
             or hf.get('rank') != 0 or hf.get('global_step') != step
             or hf.get('master_dtype') != 'bfloat16' or hf.get('compute_dtype') != 'bfloat16'

@@ -18,7 +18,21 @@ _BACKEND_PATCHED=False
 
 
 def validate_final_policy_proof(proof, *, expected_step=2):
-    if not isinstance(proof,dict) or proof.get('final_native_GPU_reprobe') is not True:
+    if not isinstance(proof,dict):raise RuntimeError('A final native policy proof is required')
+    skipped=proof.get('numerical_probe_skipped') is True
+    optional=os.environ.get('Q38_OPTIONAL_NUMERICAL_PROBES','1')=='2'
+    if optional:
+        if (proof.get('numerical_probe_non_gating') is not True
+                or proof.get('final_native_status_verified') is not True
+                or proof.get('final_native_GPU_reprobe') is not (not skipped)):
+            raise RuntimeError('Optional scores require a real final native status proof')
+    elif skipped:
+        if (os.environ.get('Q38_OPTIONAL_NUMERICAL_PROBES','1')!='0'
+                or proof.get('final_native_status_verified') is not True
+                or proof.get('final_native_GPU_reprobe') is not False
+                or proof.get('score_values_not_claimed') is not True):
+            raise RuntimeError('Skipped numerical diagnostics require a real final native status proof')
+    elif proof.get('final_native_GPU_reprobe') is not True:
         raise RuntimeError('A fresh final native GPU re-probe RPC is required')
     if (proof.get('global_step')!=expected_step or proof.get('logical_model_replicas')!=1
             or (proof.get('world_size'),proof.get('tp_size'),proof.get('dp_size'),proof.get('ep_size'))!=(72,8,9,72)
@@ -33,6 +47,7 @@ def validate_final_policy_proof(proof, *, expected_step=2):
     digest=proof.get('full_source_sha256','')
     if len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):
         raise RuntimeError('Final probe lacks the actual complete canonical source digest')
+    if skipped or optional:return proof
     target=proof.get('response_ids',[]);hf=proof.get('hf_raw_log_probs',[]);probes=proof.get('probes',[])
     if (not proof.get('prompt_ids') or not target or len(hf)!=len(target)
             or not all(isinstance(v,(int,float)) and math.isfinite(v) for v in hf)

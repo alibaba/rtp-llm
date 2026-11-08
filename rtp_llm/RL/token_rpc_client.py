@@ -22,6 +22,14 @@ class TokenProtocolError(RuntimeError):
     """A reply cannot safely be used as a training sample."""
 
 
+class OptionalScoreDataError(TokenProtocolError):
+    """A completed diagnostic score response has missing or invalid scores.
+
+    This remains a TokenProtocolError for normal RL callers. Only the optional
+    HF/native diagnostic may treat this precise response-data error as absent.
+    """
+
+
 def _tensor_values(value, dtype: int):
     if value.data_type != dtype:
         raise TokenProtocolError(
@@ -328,12 +336,15 @@ class TokenRpcClient:
             output.start_pos,
             output.end_pos,
         ) != (start, end):
-            raise TokenProtocolError(
+            raise OptionalScoreDataError(
                 "Prompt scores do not cover the requested next-token positions"
             )
-        values = _tensor_values(output.target_logprobs, pb.TensorPB.FP32)
+        try:
+            values = _tensor_values(output.target_logprobs, pb.TensorPB.FP32)
+        except TokenProtocolError as exc:
+            raise OptionalScoreDataError("Invalid diagnostic score tensor") from exc
         if len(values) != len(response_ids) or any(
             not math.isfinite(v) or v > 1e-5 for v in values
         ):
-            raise TokenProtocolError("Missing or invalid target logprobs")
+            raise OptionalScoreDataError("Missing or invalid target logprobs")
         return values
