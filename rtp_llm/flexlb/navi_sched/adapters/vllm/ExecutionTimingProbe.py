@@ -1012,6 +1012,9 @@ def prepare_native_scheduler_component_probe(scheduler):
 
 def engine_stage_event(observer, stage, started_ns, finished_ns, details):
     """Audit existing stage boundaries; tracked contexts are not stage ownership."""
+    # Detailed per-context JSON is diagnostic work, never a serving default.
+    if not getattr(observer, "_engine_stage_audit_enabled", False):
+        return 0
     stage_code = {
         "schedule": 1,
         "update_from_output": 2,

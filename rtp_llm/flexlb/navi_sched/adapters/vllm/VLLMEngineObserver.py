@@ -149,6 +149,7 @@ class _AgentConfig:
     residual_update_error_ratio: float
     residual_idle_decay_start_ms: int
     residual_idle_decay_end_ms: int
+    engine_stage_audit_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "_AgentConfig":
@@ -244,6 +245,9 @@ class _AgentConfig:
             ),
             residual_idle_decay_end_ms=int(
                 os.environ.get("VLLM_NAVI_SCHED_RESIDUAL_IDLE_DECAY_END_MS", "300000")
+            ),
+            engine_stage_audit_enabled=_read_bool_env(
+                "VLLM_NAVI_SCHED_ENGINE_STAGE_AUDIT_ENABLED", False
             ),
         )
         if not config.biz_name:
@@ -1577,6 +1581,7 @@ class VLLMEngineObserver:
 
         scheduler_config = vllm_config.scheduler_config
         config = _AgentConfig.from_env()
+        self._engine_stage_audit_enabled = config.engine_stage_audit_enabled
         self._execution_geometry_enabled = (
             self._native_ingress and config.execution_geometry_enabled
         )
