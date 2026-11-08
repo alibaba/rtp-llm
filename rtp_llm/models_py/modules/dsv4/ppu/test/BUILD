@@ -113,8 +113,8 @@ py_test(
     name = "block_kwargs_test",
     srcs = ["test_block_kwargs.py"],
     main = "test_block_kwargs.py",
-    data = ["//rtp_llm/models_py:modules/dsv4/ppu/transformer.py"],
-    deps = ["//rtp_llm/models_py:models", "//rtp_llm:torch"],
+    data = ["//rtp_llm/models_py:ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"] + select({"@//:using_ppu": [":ppu_test_runtime"], "//conditions:default": []}),
 )
 
 
