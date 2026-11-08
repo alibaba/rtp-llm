@@ -99,6 +99,8 @@ class Block(nn.Module):
         ep_size: int = 1,
         ep_rank: int = 0,
         parallelism_config: Optional[Any] = None,
+        moe_config: Optional[Any] = None,
+        enable_cuda_graph: bool = False,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
         moe_strategy: str = "auto",
@@ -194,8 +196,12 @@ class Block(nn.Module):
             ep_rank=ep_rank,
             # The fused-MoE runtime config reads the true tp_size from the
             # ParallelismConfig; TP-sharded weights need the Group.TP
-            # reduction that a tp_size=1 fallback would skip.
+            # reduction that a tp_size=1 fallback would skip.  moe_config
+            # and the engine graph flag keep the DeepEP/strategy and
+            # graph-safety gates identical to the dsv4 chain.
             parallelism_config=parallelism_config,
+            moe_config=moe_config,
+            enable_cuda_graph=enable_cuda_graph,
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
             strategy=moe_strategy,

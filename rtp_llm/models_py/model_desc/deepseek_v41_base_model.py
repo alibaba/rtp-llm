@@ -340,6 +340,13 @@ class DeepSeekV4Model(GptModelBase):
             # it the layer falls back to tp_size=1 and TP-sharded weights
             # silently skip their Group.TP reduction.
             args.parallelism_config = parallelism_config
+        # Mirror the dsv4 wiring: the MoEConfig and engine graph flag drive
+        # the same runtime-config gates (DeepEP selection, graph-safety
+        # skips) instead of per-layer invented fallbacks.
+        args.moe_config = moe_config
+        args.enable_cuda_graph = bool(
+            getattr(py_hw_kernel_config, "enable_cuda_graph", False)
+        )
         if args.world_size > 1:
             logging.info(
                 "[DeepSeekV4Model] parallelism: world=%d tp=%d/%d ep=%d/%d dp=%d/%d (scaffold only — V4 sharding not yet implemented; see docs/dsv4/parallel_design.md)",

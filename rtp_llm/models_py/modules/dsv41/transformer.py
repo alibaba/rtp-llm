@@ -95,6 +95,11 @@ class V4Args:
     # The real ParallelismConfig: the fused-MoE runtime config must see the
     # true tp_size or TP-sharded weights skip their Group.TP reduction.
     parallelism_config: Optional[Any] = None
+    # The MoEConfig and engine graph flag feed the same runtime config, so
+    # the DeepEP/strategy choices and the graph-safety gates match the dsv4
+    # chain instead of running on invented fallbacks.
+    moe_config: Optional[Any] = None
+    enable_cuda_graph: bool = False
     is_decode_role: bool = False
     # Dedicated DSpARK prefill workers execute only the commit side: target
     # features are projected into the draft SWA pools and no query/FFN/mHC
@@ -165,6 +170,8 @@ def _block_kwargs(
         ep_size=args.ep_size,
         ep_rank=args.ep_rank,
         parallelism_config=args.parallelism_config,
+        moe_config=args.moe_config,
+        enable_cuda_graph=args.enable_cuda_graph,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
         moe_strategy=args.moe_strategy,
