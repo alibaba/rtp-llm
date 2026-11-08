@@ -60,6 +60,20 @@ cc_test(
 )
 
 cc_test(
+    name = "fifo_scheduler_coalesce_test",
+    srcs = [
+        "FIFOSchedulerCoalesceTest.cc",
+    ],
+    data = [],
+    copts = copts() + ["-fno-access-control"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache",
+    ],
+    size = "small",
+)
+
+cc_test(
     name = "fifo_scheduler_async_cache_test",
     srcs = [
         "FIFOSchedulerAsyncCacheTest.cc",
