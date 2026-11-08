@@ -1,6 +1,8 @@
 """CPU contracts for the reduced ViT resource configuration."""
 
+import argparse
 import io
+import json
 import os
 import subprocess
 import sys
@@ -13,7 +15,11 @@ from rtp_llm.config.oss_download import (
 )
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.server.server_args.server_args import EnvArgumentParser
-from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
+from rtp_llm.server.server_args.vit_group_args import (
+    apply_embedding_cache_config,
+    init_vit_group_args,
+    parse_embedding_cache_config,
+)
 
 
 class VitResourceConfigTest(unittest.TestCase):
@@ -29,8 +35,71 @@ class VitResourceConfigTest(unittest.TestCase):
         parser.set_root_config(config)
         init_vit_group_args(parser, config)
         with patch.dict(os.environ, env or {}, clear=True):
-            parser.parse_args(list(args))
+            parsed = parser.parse_args(list(args))
+            apply_embedding_cache_config(config, parsed.mm_embedding_cache_config)
         return config, parser
+
+    def test_embedding_json_expands_existing_fields_with_zero_local_cache(self):
+        document = json.dumps(
+            {
+                "local": {
+                    "cpu_max_bytes": 0,
+                    "gpu_max_bytes": 0,
+                    "async_publish": False,
+                },
+                "remote": {
+                    "enable": True,
+                    "namespace": "model@revision/processor@revision",
+                    "gdr_enable": False,
+                    "audit": True,
+                    "read_timeout_ms": 1000,
+                },
+            }
+        )
+        config, _ = self.parse(
+            ["--mm_cache_cpu_max_bytes", "8192"],
+            {"MM_EMBEDDING_CACHE_CONFIG": document},
+        )
+        self.assertEqual(config.mm_cache_cpu_max_bytes, 0)
+        self.assertEqual(config.mm_cache_gpu_max_bytes, 0)
+        self.assertFalse(config.mm_cache_async_publish)
+        self.assertTrue(config.mm_remote_cache_enable)
+        self.assertTrue(config.mm_remote_cache_audit)
+        self.assertFalse(config.mm_remote_cache_gdr_enable)
+        self.assertEqual(config.mm_remote_cache_read_timeout_ms, 1000)
+        self.assertEqual(config.mm_remote_cache_max_pending, 8)
+
+    def test_embedding_json_cli_overrides_json_env(self):
+        config, _ = self.parse(
+            ["--mm_embedding_cache_config", '{"local":{"cpu_max_bytes":0}}'],
+            {"MM_EMBEDDING_CACHE_CONFIG": '{"local":{"cpu_max_bytes":123}}'},
+        )
+        self.assertEqual(config.mm_cache_cpu_max_bytes, 0)
+
+    def test_embedding_json_rejects_bad_types_typos_and_duplicate_keys(self):
+        for value in (
+            "[]",
+            "null",
+            "{",
+            '{"other":{}}',
+            '{"remote":{"enbale":true}}',
+            '{"local":{"cpu_max_bytes":false}}',
+            '{"remote":{"enable":1}}',
+            '{"remote":{"max_pending":0}}',
+            '{"local":{"cpu_max_bytes":-1}}',
+            '{"remote":{"namespace":" "}}',
+            '{"remote":{},"remote":{}}',
+        ):
+            with self.subTest(value=value), self.assertRaises(
+                argparse.ArgumentTypeError
+            ):
+                parse_embedding_cache_config(value)
+        with self.assertRaises(SystemExit):
+            self.parse(
+                env={"MM_EMBEDDING_CACHE_CONFIG": '{"local":{"cpu_max_bytes":false}}'}
+            )
+        with self.assertRaises(ValueError):
+            self.parse(env={"MM_EMBEDDING_CACHE_CONFIG": '{"remote":{"enable":true}}'})
 
     def test_removed_fields_and_arguments_are_absent(self):
         config, parser = self.parse()
@@ -186,11 +255,11 @@ class VitResourceConfigTest(unittest.TestCase):
                 )
 
     def test_worker_does_not_override_runtime_threads(self):
-        from rtp_llm.multimodal import mm_process_engine as engine
+        from rtp_llm.multimodal import mm_preprocess as engine
 
         config = VitConfig()
-        with patch.object(engine.signal, "signal"), patch.object(
-            engine.torch, "set_num_threads"
+        with patch.object(engine.signal, "signal"), patch(
+            "torch.set_num_threads"
         ) as threads, patch.object(
             engine.url_data_cache_, "resize_cache"
         ), patch.object(

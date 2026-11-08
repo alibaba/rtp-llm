@@ -71,6 +71,37 @@ class MetricReporterTest(unittest.TestCase):
         self.assertEqual(sum(point.value for point in points), 2.0)
         self.assertEqual({point.tags["worker_pid"] for point in points}, {"1", "2"})
 
+    def test_emb_lifecycle_and_delivery_metrics_reach_registered_backend(self):
+        reporter, _ = self.make_reporter()
+        counters = (
+            AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_QPS_METRIC,
+            AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_ERROR_QPS_METRIC,
+            AccMetrics.VIT_REMOTE_EMB_METADATA_QPS_METRIC,
+            AccMetrics.VIT_REMOTE_EMB_RESULT_ACCEPTED_QPS_METRIC,
+        )
+        gauges = (
+            GaugeMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_RT_METRIC,
+            GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,
+        )
+        with mock.patch(
+            "rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.acc_metric.time"
+        ) as clock:
+            clock.time.return_value = 100.0
+            reporter.init()
+            for metric in counters:
+                reporter.report(metric, 1, {"status": "success"})
+            for metric in gauges:
+                reporter.report(metric, 25, {"operation": "read"})
+            clock.time.return_value = 101.0
+            for metric in counters:
+                points = reporter._matic_map[metric.value].fetch_reported_data()
+                self.assertEqual(len(points), 1)
+                self.assertEqual(points[0].value, 1.0)
+            for metric in gauges:
+                points = reporter._matic_map[metric.value].fetch_reported_data()
+                self.assertEqual(len(points), 1)
+                self.assertEqual(points[0].value, 25)
+
     def test_empty_selection_does_not_register_all_metrics(self):
         reporter, backend = self.make_reporter()
         reporter.init(acc_metrics=(), gauge_metrics=())
