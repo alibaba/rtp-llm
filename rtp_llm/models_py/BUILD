@@ -109,6 +109,23 @@ _DSV4_PPU_KERNELS = [
     "kernels/ppu/jit/**/*.py", "kernels/ppu/runtime.py",
 ]
 
+# Source-level policy tests deliberately do not import GPU modules.
+filegroup(
+    name = "prefill_policy_source_data",
+    srcs = [
+        "modules/dsv4/dsv4_kernel_jit_warmup.py",
+        "modules/dsv4/fp8/attention.py",
+        "modules/dsv4/utils.py",
+        "modules/dsv4/fp8/attention_backend.py",
+        "modules/dsv4/fp8/backend_selection.py",
+        "modules/dsv4/fp8/sm120_attention_backend.py",
+        "modules/dsv4/fp8/sm120_projection.py",
+        "utils/arch.py",
+        "//rtp_llm:device_type_source",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "prefill_optimization_source_data",
     srcs = glob([

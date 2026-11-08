@@ -191,6 +191,10 @@ def _mega_moe_unavailable_reason() -> str | None:
     cap = torch.cuda.get_device_capability()
     if cap[0] < 10:
         return f"CUDA device capability sm{cap[0]}{cap[1]} is below SM100"
+    # The DeepGEMM Mega kernels target datacenter Blackwell; exact SM120 has
+    # no compatible cubin and uses the SM120 executors instead.
+    if tuple(cap) == (12, 0):
+        return "MegaMoE is unavailable on exact SM120"
     return None
 
 

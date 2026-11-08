@@ -64,14 +64,16 @@ def _drop_impl_cuda_strategies():
     ]
 
 
-def _register_production_strategy_set(capability=(12, 0), fp4_module="ready"):
+def _register_production_strategy_set(capability=(12, 0), fp4_module="missing"):
     """Rebuild the production CUDA registry exactly once.
 
     Drops the classes the init appends, then runs the real impl-package
     registration under the requested device capability, so each strategy
     lands exactly once on both CPU-initialized and SM120-initialized
-    processes. ``fp4_module`` supplies the main FP4 provider class, without
-    any later SM120 availability helper, or makes the provider import fail.
+    processes. ``fp4_module`` selects the state of the optional FlashInfer
+    FP4 provider module: ``"missing"`` makes its import fail, ``"ready"``
+    supplies a usable provider, ``"unavailable"`` supplies the module with
+    ``fp4_backend_available()`` reporting False.
     """
     _drop_impl_cuda_strategies()
     fake_fp4 = None
@@ -83,6 +85,7 @@ def _register_production_strategy_set(capability=(12, 0), fp4_module="ready"):
 
         _FakeFp4GEMMLinear.__module__ = FP4_MODULE_NAME
         fake_fp4.CudaFp4GEMMLinear = _FakeFp4GEMMLinear
+        fake_fp4.fp4_backend_available = lambda device=None: fp4_module == "ready"
     with ExitStack() as stack:
         stack.enter_context(patch(f"{ARCH}.is_cuda", return_value=True))
         stack.enter_context(patch(f"{ARCH}.get_sm", return_value=capability))
@@ -152,7 +155,8 @@ class Sm120BlockwiseFactoryRegistrationTest(unittest.TestCase):
 
     def test_package_init_registers_blockwise_on_sm120(self):
         # Re-register under the same conditions the __init__ guards on:
-        # is_cuda + is_sm120, with the existing FP4 provider available.
+        # is_cuda + is_sm120. The Blackwell FP4 import stays optional and its
+        # absence must not disturb the mandatory blockwise registration.
         _register_production_strategy_set()
         self.assertIn(STRATEGY, LinearFactory._strategies)
         self.assertEqual(LinearFactory._strategies.count(STRATEGY), 1)
@@ -186,8 +190,9 @@ class Sm120BlockwiseFactoryRegistrationTest(unittest.TestCase):
         self.assertFalse(STRATEGY.can_handle(quant_config, weight, weight_scales))
 
     def test_fp4_registration_preserves_main_major_ge_10(self):
-        # FP4 keeps main's unconditional provider import for major >= 10.
-        # The fake module deliberately has no C3-only availability helper.
+        # The outer FP4 gate keeps the existing ``major >= 10`` predicate:
+        # only the exact (12, 0) device takes the best-effort FP4 arm; every
+        # other Blackwell-class device keeps the unconditional import.
         for capability in [
             (9, 0),
             (10, 0),
@@ -203,24 +208,36 @@ class Sm120BlockwiseFactoryRegistrationTest(unittest.TestCase):
                     getattr(cls, "__module__", "") == FP4_MODULE_NAME
                     for cls in LinearFactory._strategies
                 )
-                self.assertEqual(fp4_registered, capability[0] >= 10)
+                if capability[0] >= 10 and capability != (12, 0):
+                    # Default path: unconditional import/register of the provider.
+                    self.assertTrue(fp4_registered)
+                elif capability == (12, 0):
+                    # SM120 arm: fp4_backend_available() reported True.
+                    self.assertTrue(fp4_registered)
+                else:
+                    # Below major 10 the FP4 import is never attempted.
+                    self.assertFalse(fp4_registered)
                 self.assertIn(gemm_module.CudaFp8GEMMLinear, LinearFactory._strategies)
-                if capability == (12, 0):
-                    self.assertIn(STRATEGY, LinearFactory._strategies)
             with self.subTest(capability=capability, fp4_module="missing"):
-                if capability[0] >= 10:
+                if capability[0] >= 10 and capability != (12, 0):
+                    # Off exact SM120 there is no best-effort arm: the missing
+                    # provider propagates the import failure.
                     with self.assertRaises(ImportError):
                         _register_production_strategy_set(
                             capability, fp4_module="missing"
                         )
                 else:
                     _register_production_strategy_set(capability, fp4_module="missing")
-                    self.assertFalse(
-                        any(
-                            getattr(cls, "__module__", "") == FP4_MODULE_NAME
-                            for cls in LinearFactory._strategies
-                        )
+                    fp4_registered = any(
+                        getattr(cls, "__module__", "") == FP4_MODULE_NAME
+                        for cls in LinearFactory._strategies
                     )
+                    self.assertFalse(fp4_registered)
+            # Mandatory FP8 registrations survive the exact-SM120
+            # missing-provider case.
+            if capability == (12, 0):
+                self.assertIn(gemm_module.CudaFp8GEMMLinear, LinearFactory._strategies)
+                self.assertIn(STRATEGY, LinearFactory._strategies)
 
     def test_create_linear_no_candidate_preserves_main_errors(self):
         # No registered strategy matches: the existing no-candidate errors

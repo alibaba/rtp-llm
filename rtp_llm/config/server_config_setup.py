@@ -48,12 +48,39 @@ def finalize_rank_local_deepep_internode(
     )
 
 
+def _auto_deepep_supported_on_visible_devices(local_world_size: int = 0) -> bool:
+    """Whether automatic DeepEP selection is valid for participating devices.
+
+    Consumer Blackwell SM120 uses the generic SM120 collective strategy;
+    DeepEP does not ship compatible kernels there. Models on other SM12x
+    architectures retain main's startup behavior and validate their concrete
+    backends later.
+    Devices outside the local world do not participate and must not affect
+    selection.
+    """
+    if not torch.cuda.is_available():
+        # Preserve CPU-only config parsing and unit-test behavior.  Runtime
+        # hardware validation occurs later when CUDA is initialized.
+        return True
+    device_count = torch.cuda.device_count()
+    participating_device_count = min(
+        device_count,
+        local_world_size if local_world_size > 0 else device_count,
+    )
+    capabilities = [
+        torch.cuda.get_device_capability(device_index)
+        for device_index in range(participating_device_count)
+    ]
+    return all(capability != (12, 0) for capability in capabilities)
+
+
 def auto_configure_deepep(
     moe_config,
     deep_ep_config,
     parallelism_config: ParallelismConfig,
     role_type: RoleType,
     ll_num_max_token: int = 0,
+    model_type: str = "",
 ):
     """
     Automatically configure DeepEP settings based on deployment scenario.
@@ -155,11 +182,34 @@ def auto_configure_deepep(
         and deep_ep_config.use_mori_ep is None
     ):
         # All are None, use auto configuration
-        _apply_auto_deepep_config(
-            moe_config=moe_config,
-            parallelism_config=parallelism_config,
-            role_type=role_type,
-        )
+        is_model_worker = role_type in {
+            RoleType.PREFILL,
+            RoleType.DECODE,
+            RoleType.PDFUSION,
+        }
+        if (
+            is_model_worker
+            and model_type == "deepseek_v4"
+            and parallelism_config.pp_size == 1
+            and parallelism_config.ep_size > 1
+            and not _auto_deepep_supported_on_visible_devices(
+                parallelism_config.local_world_size
+            )
+        ):
+            moe_config.use_deepep_moe = False
+            moe_config.use_deepep_low_latency = False
+            moe_config.use_deepep_internode = False
+            logging.info(
+                "Automatic DeepEP selection is disabled on the participating "
+                "GPU architecture; a concrete MoE backend will validate any "
+                "required fallback after the model configuration is loaded"
+            )
+        else:
+            _apply_auto_deepep_config(
+                moe_config=moe_config,
+                parallelism_config=parallelism_config,
+                role_type=role_type,
+            )
     else:
         # User has set at least one value, copy them to moe_config
         if deep_ep_config.use_deepep_moe is not None:
@@ -282,6 +332,135 @@ def _apply_auto_deepep_config(
         f"  USE_DEEPEP_LOW_LATENCY: {use_deepep_low_latency}\n"
         f"  USE_DEEPEP_INTERNODE: {use_deepep_internode}"
     )
+
+
+def _validate_sm120_dsv4_worker_profile(py_env_configs) -> None:
+    """Fail fast on unsupported exact-SM120 DSv4 worker topologies.
+
+    Applies when any participating visible device reports the exact
+    ``sm120`` architecture and the role is a DSv4 model role. Other
+    architectures and roles keep main behavior. Accepted profiles:
+
+      PREFILL : PP1, physical TP4 (CP4), DP1, EP4, world4, prefill CP enabled
+      DECODE  : PP1, TP1, DP4, EP4, world4, no local CP; eager execution
+                only (CUDA graphs are rejected)
+      PDFUSION: PP1, TP1, DP == EP == world, no local CP; over DP > 1 the
+                sm120_a2a_decode backend runs eagerly only (CUDA graphs are
+                rejected), and non-speculative sm120_a2a_decode PDFUSION over
+                DP > 1 is unsupported (use active MTP or separate roles)
+
+    Keep this in sync with the C++ twin in
+    ``rtp_llm/cpp/normal_engine/Dsv4DpPrefillPolicy.h`` (engine-side
+    admission, needed because a wrong topology can hang inside NCCL before
+    Python error handling runs) and with the auto-selection table in
+    ``rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/strategy/fp8_fp4.py``.
+    """
+    role = py_env_configs.role_config.role_type
+    if role not in {RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION}:
+        return
+    p = py_env_configs.parallelism_config
+    if _auto_deepep_supported_on_visible_devices(p.local_world_size):
+        # No participating device is exact SM120; not the target lane.
+        return
+
+    cp_cfg = getattr(p, "prefill_cp_config", None)
+    cp_on = bool(cp_cfg and cp_cfg.is_enabled())
+    spec_on = py_env_configs.sp_config.type != SpeculativeType.NONE
+    graph_on = bool(
+        getattr(
+            getattr(py_env_configs, "py_hw_kernel_config", None),
+            "enable_cuda_graph",
+            False,
+        )
+    )
+    actual = (
+        f"role={role}, pp={p.pp_size}, tp={p.tp_size}, dp={p.dp_size}, "
+        f"ep={p.ep_size}, world={p.world_size}, prefill_cp={cp_on}, "
+        f"speculative={spec_on}"
+    )
+
+    required = None
+    ok = False
+    if p.pp_size != 1:
+        required = "pp_size=1 (non-PP)"
+    elif role == RoleType.PREFILL:
+        ok = (
+            p.tp_size == 4
+            and p.dp_size == 1
+            and p.ep_size == 4
+            and p.world_size == 4
+            and cp_on
+        )
+        required = "TP4/CP4/DP1/EP4/world4 PREFILL"
+    elif role == RoleType.DECODE:
+        ok = (
+            p.tp_size == 1
+            and p.dp_size == 4
+            and p.ep_size == 4
+            and p.world_size == 4
+            and not cp_on
+        )
+        required = "TP1/DP4/EP4/world4 DECODE (CP off)"
+    else:  # PDFUSION
+        base = p.tp_size == 1 and p.dp_size == p.ep_size == p.world_size and not cp_on
+        ok = base
+        required = "TP1 DP=EP=world PDFUSION (PP1, no local CP)"
+    if not ok:
+        raise ValueError(
+            f"Unsupported exact-SM120 DSv4 worker profile: {actual}. "
+            f"Required: {required}."
+        )
+
+    # Resolve the required MoE strategy at startup instead of letting an
+    # unsupported `auto` surface during execution.
+    moe = py_env_configs.moe_config
+    canonical = {
+        RoleType.PREFILL: "sm120_fused_moe",
+        RoleType.DECODE: "sm120_a2a_decode",
+        RoleType.PDFUSION: "sm120_a2a_decode" if p.dp_size > 1 else None,
+    }[role]
+    current = getattr(moe, "moe_strategy", "auto") or "auto"
+    if canonical is not None:
+        if current == "auto":
+            moe.moe_strategy = canonical
+            logging.info(
+                "Resolved exact-SM120 DSv4 %s moe_strategy to %s", role, canonical
+            )
+        elif current != canonical:
+            raise ValueError(
+                f"Unsupported exact-SM120 DSv4 {role} moe_strategy={current}. "
+                f"Required: {canonical}."
+            )
+
+    # The exact retired profile: resolved sm120_a2a_decode PDFUSION over DP>1
+    # without speculation has no phase protocol that keeps EP peers inside
+    # the same collective order. Reject before warmup or graph capture.
+    if (
+        role == RoleType.PDFUSION
+        and p.pp_size == 1
+        and p.tp_size == 1
+        and p.dp_size > 1
+        and p.dp_size == p.ep_size == p.world_size
+        and not spec_on
+        and not cp_on
+        and moe.moe_strategy == "sm120_a2a_decode"
+    ):
+        raise ValueError(
+            "Unsupported exact-SM120 DSv4 non-speculative sm120_a2a_decode "
+            f"PDFUSION profile: {actual}. Use active MTP or separate "
+            "PREFILL/DECODE roles."
+        )
+
+    # sm120_a2a_decode decode execution is eager-only: its DP=EP collective
+    # protocol derives per-round payload extents from exchanged row counts,
+    # which captured CUDA graphs cannot reproduce. Reject a resolved
+    # sm120_a2a_decode profile that still enables CUDA graphs, before warmup.
+    if moe.moe_strategy == "sm120_a2a_decode" and graph_on:
+        raise ValueError(
+            "sm120_a2a_decode requires eager execution: CUDA graphs are "
+            "unsupported for the exact-SM120 DSv4 DECODE and "
+            "PDFUSION(DP>1) collective protocol; set enable_cuda_graph=false"
+        )
 
 
 def set_parallelism_config(
@@ -681,8 +860,22 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         parallelism_config=py_env_configs.parallelism_config,
         role_type=py_env_configs.role_config.role_type,
         ll_num_max_token=ll_num_max_token,
+        model_type=py_env_configs.model_args.model_type,
     )
 
     # Set local ip if not already set (e.g. for world_info / distributed_server)
     if not py_env_configs.server_config.ip:
         py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
+
+    # Frontend wheels omit model implementations. Model-specific settings must
+    # also leave unrelated models unaffected when launch environments are shared.
+    if (
+        py_env_configs.role_config.role_type == RoleType.FRONTEND
+        or py_env_configs.model_args.model_type != "deepseek_v4"
+    ):
+        return
+
+    # Exact-SM120 DSv4 workers only accept the validated deployment profiles.
+    # Fail before backend construction/capture rather than letting an
+    # unsupported auto configuration die inside the runtime.
+    _validate_sm120_dsv4_worker_profile(py_env_configs)

@@ -11,6 +11,9 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4._chunk_policy import (
+    should_chunk_moe_input,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.layer import (
     Fp8Fp4MoeLayer,
 )
@@ -23,6 +26,20 @@ _CHUNKED_MOE_LOGGED = False
 _SYNCHRONIZED_CHUNK_TOKENS: ContextVar[Optional[int]] = ContextVar(
     "moe_synchronized_chunk_tokens", default=None
 )
+_SYNCHRONIZED_CHUNK_STRATEGIES = frozenset({"mega_moe", "mega_moe_se"})
+
+
+def _requires_synchronized_chunks(layer: nn.Module) -> bool:
+    """Whether every EP rank must run the same number of eager MoE chunks.
+
+    Mega kernels and executors that exchange variable-size payloads over a
+    collective (``requires_synchronized_chunk_schedule``) need it.
+    """
+    if getattr(layer, "strategy_name", None) in _SYNCHRONIZED_CHUNK_STRATEGIES:
+        return True
+    moe = getattr(layer, "_moe", None)
+    executor = getattr(getattr(moe, "fused_moe", None), "fused_experts", None)
+    return getattr(executor, "requires_synchronized_chunk_schedule", False) is True
 
 
 def cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
@@ -121,8 +138,7 @@ def synchronized_moe_chunk_plan(
         return
 
     needs_sync = any(
-        getattr(getattr(layer, "ffn", layer), "strategy_name", None)
-        in {"mega_moe", "mega_moe_se"}
+        _requires_synchronized_chunks(getattr(layer, "ffn", layer))
         and not getattr(getattr(layer, "ffn", layer), "_is_decode_role", False)
         and getattr(getattr(layer, "ffn", layer), "chunking_enabled", False)
         for layer in layers
@@ -172,6 +188,12 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         has_shared_expert_gate: bool = False,
         observer_factory: Optional[ObserverFactory] = None,
         record_function_scope: Callable[[], ContextManager] = nullcontext,
+        moe_cp_enabled: bool = False,
+        moe_cp_size: int = 1,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        attn_tp_size: int = 1,
+        sm120_workspace=None,
     ) -> None:
         super().__init__()
         if layer_weights is None:
@@ -208,6 +230,12 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             has_shared_expert_gate=has_shared_expert_gate,
             physical_expert_num=n_physical_experts,
             is_decode_role=is_decode_role,
+            moe_cp_enabled=moe_cp_enabled,
+            moe_cp_size=moe_cp_size,
+            moe_tp_size=moe_tp_size,
+            moe_tp_rank=moe_tp_rank,
+            attn_tp_size=attn_tp_size,
+            sm120_workspace=sm120_workspace,
         )
         self.strategy_name = self._moe.strategy_name
 
@@ -224,22 +252,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         return self._moe.shared_experts
 
     def _should_chunk(self, tokens: int, *, is_decode_forward: bool = False) -> bool:
-        max_tokens = self.max_tokens_per_rank
-        if max_tokens <= 0:
-            raise ValueError(f"max_tokens_per_rank must be positive, got {max_tokens}")
-        capturing = (
-            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
-        )
-        is_decode = self._is_decode_role or is_decode_forward
-        if is_decode or capturing:
-            if tokens > max_tokens:
-                mode = "decode" if is_decode else "CUDA graph capture"
-                raise ValueError(
-                    f"{mode} MoE input tokens={tokens} exceeds "
-                    f"max_tokens_per_rank={max_tokens}"
-                )
-            return False
-        return self.chunking_enabled and tokens > max_tokens
+        return should_chunk_moe_input(self, tokens, is_decode_forward=is_decode_forward)
 
     def _synchronized_chunk_tokens(
         self,
@@ -249,7 +262,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         is_decode_forward: bool = False,
     ) -> int:
         if (
-            self.strategy_name not in {"mega_moe", "mega_moe_se"}
+            not _requires_synchronized_chunks(self)
             or self._is_decode_role
             or is_decode_forward
             or not self.chunking_enabled

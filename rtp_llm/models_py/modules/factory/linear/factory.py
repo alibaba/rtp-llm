@@ -9,8 +9,8 @@ from typing import Dict, List, Optional, Type
 import torch
 from torch import nn
 
-from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
 from rtp_llm.ops import HWKernelConfig
+from rtp_llm.utils.cutlass import setup_cutlass_import_path
 
 from .linear_base import LinearBase
 

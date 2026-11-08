@@ -31,6 +31,7 @@ class DeviceBase:
             deep_ep_config=self.py_env_configs.deep_ep_config,
             parallelism_config=self.py_env_configs.parallelism_config,
             role_type=self.py_env_configs.role_config.role_type,
+            model_type=self.py_env_configs.model_args.model_type,
         )
 
     def get_device_type(self) -> DeviceType:

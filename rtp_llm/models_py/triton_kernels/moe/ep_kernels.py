@@ -118,13 +118,19 @@ def _fwd_kernel_ep_scatter_2(
         )
         for topk_idx_int32 in tl.range(0, topk_num, 1, num_stages=4):
             topk_index = topk_idx_int32.to(tl.int64)
-            expert_id = tl.load(recv_topk + token_id * recv_topk_stride0 + topk_index)
+            expert_id = tl.load(
+                recv_topk
+                + token_id * recv_topk_stride0
+                + topk_index * recv_topk_stride1
+            )
             if expert_id >= 0 and expert_id < num_experts:
                 dest_token_index_int32 = tl.atomic_add(expert_start_loc + expert_id, 1)
                 dest_token_index = dest_token_index_int32.to(tl.int64)
                 dest_is_valid = dest_token_index < output_capacity
                 tl.store(
-                    output_index + token_id * output_index_stride0 + topk_index,
+                    output_index
+                    + token_id * output_index_stride0
+                    + topk_index * output_index_stride1,
                     dest_token_index_int32,
                     mask=dest_is_valid,
                 )
@@ -169,11 +175,7 @@ def ep_scatter(
     hidden_size = recv_x.shape[1]
     # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
     grid = num_experts
-    scale_hidden_size = hidden_size // BLOCK_D
-    if scale_ue8m0:
-        # ue8m0 scales are packed here (4 scales per int32),
-        # hence the effective size of this dimension is divided by 4.
-        scale_hidden_size = ceil_div(scale_hidden_size, 4)
+    scale_hidden_size = recv_x_scale.shape[1]
 
     assert m_indices.shape[0] % align_m == 0
     assert recv_x_scale.dtype == output_tensor_scale.dtype
@@ -303,12 +305,18 @@ def _fwd_kernel_ep_scatter_2_v2(
         )
         for topk_idx_int32 in tl.range(0, topk_num, 1, num_stages=4):
             topk_index = topk_idx_int32.to(tl.int64)
-            expert_id = tl.load(recv_topk + token_id * recv_topk_stride0 + topk_index)
+            expert_id = tl.load(
+                recv_topk
+                + token_id * recv_topk_stride0
+                + topk_index * recv_topk_stride1
+            )
             if expert_id >= 0 and expert_id < num_experts:
                 dest_token_index_int32 = tl.atomic_add(expert_start_loc + expert_id, 1)
                 dest_token_index = dest_token_index_int32.to(tl.int64)
                 tl.store(
-                    output_index + token_id * output_index_stride0 + topk_index,
+                    output_index
+                    + token_id * output_index_stride0
+                    + topk_index * output_index_stride1,
                     dest_token_index_int32,
                 )
                 output_tensor_ptr = (
@@ -399,6 +407,7 @@ def ep_scatter_v2(
 def _fwd_kernel_ep_gather(
     total_token_num,
     total_input_tokens,
+    hidden_size,
     input_tensor,
     input_tensor_stride0,
     input_tensor_stride1,
@@ -416,6 +425,7 @@ def _fwd_kernel_ep_gather(
     output_tensor_stride1,
     topk_num: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    RANK_BITS: tl.constexpr = 0,
 ):
     cur_block = tl.program_id(0).to(tl.int64)
     start_cur_token_int32 = tl.program_id(1)
@@ -423,36 +433,51 @@ def _fwd_kernel_ep_gather(
     for cur_token_int32 in range(start_cur_token_int32, total_token_num, grid_num):
         cur_token = cur_token_int32.to(tl.int64)
         off_d = tl.arange(0, BLOCK_D)
+        col = cur_block * BLOCK_D + off_d
+        col_mask = col < hidden_size
         accumulator = tl.zeros([BLOCK_D], dtype=tl.float32)
         for topk_index_int32 in range(0, topk_num):
             topk_index = topk_index_int32.to(tl.int64)
             expert_id = tl.load(
-                recv_topk_ids + cur_token * recv_topk_ids_stride0 + topk_index
+                recv_topk_ids
+                + cur_token * recv_topk_ids_stride0
+                + topk_index * recv_topk_ids_stride1
             )
             if expert_id >= 0:
                 source_token_index_int32 = tl.load(
-                    input_index + cur_token * input_index_stride0 + topk_index
+                    input_index
+                    + cur_token * input_index_stride0
+                    + topk_index * input_index_stride1
                 )
                 source_token_index = source_token_index_int32.to(tl.int64)
                 if source_token_index >= 0 and source_token_index < total_input_tokens:
                     acc_weight = tl.load(
                         recv_topk_weight
                         + cur_token * recv_topk_weight_stride0
-                        + topk_index
+                        + topk_index * recv_topk_weight_stride1
                     )
                     tmp = tl.load(
                         input_tensor
                         + source_token_index * input_tensor_stride0
-                        + cur_block * BLOCK_D
-                        + off_d
+                        + col * input_tensor_stride1,
+                        mask=col_mask,
+                        other=0.0,
                     )
                     accumulator += tmp.to(tl.float32) * acc_weight
+        output_token = cur_token
+        if RANK_BITS:
+            shard_rows = total_token_num // (1 << RANK_BITS)
+            shard = cur_token // shard_rows
+            destination = tl.full((), 0, tl.int64)
+            for bit in tl.static_range(RANK_BITS):
+                destination |= ((shard >> bit) & 1) << (RANK_BITS - 1 - bit)
+            output_token = destination * shard_rows + cur_token % shard_rows
         tl.store(
             output_tensor
-            + cur_token * output_tensor_stride0
-            + cur_block * BLOCK_D
-            + off_d,
+            + output_token * output_tensor_stride0
+            + col * output_tensor_stride1,
             accumulator.to(output_tensor.dtype.element_ty),
+            mask=col_mask,
         )
 
 
@@ -463,16 +488,31 @@ def ep_gather(
     recv_topk_weight: torch.Tensor,
     input_index: torch.Tensor,
     output_tensor: torch.Tensor,
+    *,
+    output_rank_count: int = 1,
 ):
+    """Combine local experts; optionally bit-reverse equal destination shards.
+
+    ``output_rank_count > 1`` is the producer layout required by
+    ``ordered_reduce_scatter``. Ordinary callers retain token order.
+    """
     BLOCK_D = 512  # block size of quantization
     num_warps = 2
     num_tokens = output_tensor.shape[0]
+    if (
+        output_rank_count < 1
+        or output_rank_count & (output_rank_count - 1)
+        or num_tokens % output_rank_count
+    ):
+        raise ValueError("ep_gather output requires equal power-of-two rank shards")
     hidden_size = input_tensor.shape[1]
-    assert hidden_size % BLOCK_D == 0
+    if num_tokens == 0:
+        return
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
     _fwd_kernel_ep_gather[grid](
         num_tokens,
         input_tensor.shape[0],
+        hidden_size,
         input_tensor,
         input_tensor.stride(0),
         input_tensor.stride(1),
@@ -491,6 +531,7 @@ def ep_gather(
         topk_num=recv_topk_ids.shape[1],
         num_warps=num_warps,
         BLOCK_D=BLOCK_D,
+        RANK_BITS=output_rank_count.bit_length() - 1,
     )
     return
 

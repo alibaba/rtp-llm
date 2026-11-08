@@ -1,4 +1,4 @@
-load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test", "dsv4_sm100_py_test", "dsv4_sm120_py_test")
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 
 package(default_visibility = ["//visibility:public"])
@@ -70,6 +70,14 @@ _CONTRACT_TESTS = [
     "test_compressor_cp_merged_gather",
 ]
 
+# Additive SM120-only registrations: new tests, NOT members of the main
+# dsv4_fp8_cuda13_unit aggregate. Base targets still build via the loop.
+_ADDITIVE_TESTS = [
+    "test_sm120_prefill_indices",
+    "test_sm120_sparse_mla",
+    "test_pack_slots_to_paged",
+]
+
 [
     dsv4_py_test(
         name = name,
@@ -83,7 +91,22 @@ _CONTRACT_TESTS = [
         tags = ["multi_device"] if name == "test_topk_v3" else [],
         deps = _DSV4_FP8_TEST_DEPS,
     )
-    for name in _GPU_TESTS + _CONTRACT_TESTS
+    for name in _GPU_TESTS + _CONTRACT_TESTS + _ADDITIVE_TESTS
+]
+
+[
+    dsv4_sm120_py_test(
+        name = name + "_sm120",
+        src = name + ".py",
+        tags = ["SM120_CU13"],
+        deps = _DSV4_FP8_TEST_DEPS,
+    )
+    for name in [
+        "test_indexer_forward_with_pending_nested",
+        "test_sm120_prefill_indices",
+        "test_sm120_sparse_mla",
+        "test_pack_slots_to_paged",
+    ]
 ]
 
 dsv4_py_test(
@@ -109,6 +132,50 @@ dsv4_py_test(
         "test_varlen_prefill_oracle",
     ]
 ]
+
+dsv4_sm120_py_test(
+    name = "test_sm120_cp_compressor_projection",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+# Fork-only sparse MLA decode.
+dsv4_sm120_py_test(
+    name = "test_sm120_sparse_mla_hardware",
+    deps = _DSV4_FP8_TEST_DEPS,
+    sm120_build_only = True,
+)
+
+# The topk_v3 fatbin only carries an sm_120 cubin in the exact SM120 build.
+dsv4_sm120_py_test(
+    name = "test_sm120_indexer_hardware",
+    deps = _DSV4_FP8_TEST_DEPS,
+    sm120_build_only = True,
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_prefill_indices_hardware",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+
+dsv4_sm120_py_test(
+    name = "test_sm120_prefill_indices_producer_matrix",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+# Keep the broad target above, and run the same architecture-agnostic
+# kernel contract on real SM120 hardware as part of the positive-tag gate.
+dsv4_sm120_py_test(
+    name = "test_dsv4_persistent_topk_sm120",
+    src = "test_dsv4_persistent_topk.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+dsv4_sm120_py_test(
+    name = "test_indexer_topk_v3_routing_sm120",
+    src = "test_indexer_topk_v3_routing.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+)
 
 # Compares locally constructed F.linear/cat expressions, not CompressorFP8.
 dsv4_py_test(
@@ -205,6 +272,44 @@ dsv4_sm100_py_test(
         deps = _DSV4_FP8_TEST_DEPS,
     )
     for name in ["test_mega_csa_adapter", "test_mega_hca_adapter"]
+]
+
+[
+    py_test(
+        name = name,
+        srcs = [name + ".py"],
+        data = [
+            "//rtp_llm:models",
+            "//rtp_llm/models_py:prefill_optimization_source_data",
+            "//rtp_llm/models_py/modules/dsv4/test:cpu_test_support",
+            "//rtp_llm:device_type_source",
+        ],
+        deps = ["//rtp_llm:torch"],
+        env = {"CUDA_VISIBLE_DEVICES": ""},
+    )
+    for name in ["test_attention_packed_prefix_cpu", "test_serialized_indexer_tail_cpu", "test_backend_contracts"]
+]
+
+
+# SM120 cases split out of the pre-existing main test files; the originals
+# are left unchanged.
+[
+    dsv4_sm120_py_test(
+        name = name,
+        deps = _DSV4_FP8_TEST_DEPS,
+    )
+    for name in [
+        "test_swa_dequant_large_stride_sm120",
+        "test_swa_prefill_suffix_pool",
+        "test_swa_slot_mapping_sm120",
+        "test_attention_cp_prefill_paths_sm120",
+        "test_fp8_sparse_attn_decode_op_sm120_cases",
+        "test_sparse_decode_backend_sm120",
+        "test_indexer_topk_v3_routing_sm120_cases",
+        "test_swa_fp8_kv_roundtrip_sm120_cases",
+        "test_prefill_mixed_layer_cache_store_sm120",
+        "test_indexer_fp8_score_sm120",
+    ]
 ]
 
 [
