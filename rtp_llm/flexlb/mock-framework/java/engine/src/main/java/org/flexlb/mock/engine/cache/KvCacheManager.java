@@ -152,7 +152,7 @@ public final class KvCacheManager implements AutoCloseable {
             values.path("kv_cache_event_instance_group").asText("default"),
             host,
             values.path("model_name").asText("mock-full-kv"), "FP16", false,
-            config.blockSize(), config.tpSize(), config.dpSize(), "rtp_llm_hbm_" + config.blockSize() + "_full");
+            config.blockSize(), config.cpSize(), "rtp_llm_hbm_" + config.blockSize() + "_full");
         int snapshotMillis = RtpConfig.nativeInt(values, "kv_cache_event_snapshot_interval_ms", 600000, Integer.MIN_VALUE, Integer.MAX_VALUE);
         String override = values.path("kv_cache_event_manager_endpoint").asText();
         boolean vip = RtpConfig.nativeBool(values, "kvcm_enable_vipserver", false);

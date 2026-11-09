@@ -205,7 +205,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             items.add(new ForwardBatch.Request(stream.input.identity(), stream.input.tokens(), stream.reused,
                 prefill() ? 1 : stream.input.maxNewTokens(), member.step().request().generated(), tokens, stream.input.priority(), List.of()));
         }
-        var batch = new ForwardBatch(config.id() + "/" + ++batchSequence, List.of(new ForwardBatch.Partition(0, items)));
+        var batch = new ForwardBatch(config.id() + "/" + ++batchSequence, items);
         executing = new Work(new Batch(List.copyOf(members), scheduleStarted, System.nanoTime(), prepareStarted), batch);
         metrics.computeStarted();
         metrics.batchPrepared(System.nanoTime() - prepareStarted);

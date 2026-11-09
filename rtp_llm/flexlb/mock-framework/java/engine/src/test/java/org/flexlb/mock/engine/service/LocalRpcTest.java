@@ -91,7 +91,11 @@ class LocalRpcTest {
                 var base=org.flexlb.mock.protocol.MediaInput.cacheKeys(org.flexlb.mock.protocol.MediaInput.text(input),2);
                 assertEquals(Set.of(base.get(3),base.get(7)),cache.getCacheKeysMap().keySet());
                 assertEquals(8,cache.getBlockSize());assertEquals(64,cache.getTotalKvCache());
-                assertEquals(64,rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getTotalKvCache());
+                var worker = rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance());
+                assertEquals(64, worker.getTotalKvCache());
+                assertEquals(4, worker.getTpSize());
+                assertEquals(1, worker.getDpSize());
+                assertEquals(0, worker.getDpRank());
                 var second=rpc.generateStreamCall(input.toBuilder().setRequestId(2).build());
                 assertEquals(16,second.next().getFlattenOutput().getAuxInfo(0).getTotalReuseLen());
                 assertFalse(second.hasNext());

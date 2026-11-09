@@ -1,6 +1,4 @@
 max_seq_len: 1048576
-tp_size: 1
-dp_size: 1
 seq_size_per_block: 128
 reuse_cache: true
 enable_device_cache: true

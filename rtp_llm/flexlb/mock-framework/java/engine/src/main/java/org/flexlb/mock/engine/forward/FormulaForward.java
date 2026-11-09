@@ -12,7 +12,7 @@ public final class FormulaForward {
     private static final Set<String> BATCH_VARIABLES;
     static {
         Map<String, Integer> indices = new LinkedHashMap<>();
-        indices.put("batchSize", indices.size()); indices.put("dpRank", indices.size());
+        indices.put("batchSize", indices.size());
         Set<String> batch = new HashSet<>(indices.keySet());
         for (String name : REQUEST_VARIABLES.keySet()) {
             indices.put(name, indices.size());
@@ -50,17 +50,13 @@ public final class FormulaForward {
     public static Set<String> variableNames() { return INDICES.keySet(); }
 
     public Duration estimate(ForwardBatch batch) {
-        if (batch.dps().size() != 1)
-            throw new IllegalArgumentException("FormulaForward currently supports one DP; multiple DPs need an explicit model");
-        var dp = batch.dps().getFirst();
-        if (dp.requests().isEmpty()) throw new IllegalArgumentException("Forward requires a nonempty batch");
+        if (batch.requests().isEmpty()) throw new IllegalArgumentException("Forward requires a nonempty batch");
         double[] outer = new double[indices.size()];
         Arrays.fill(outer, Double.NaN); // Per-request names outside sum() are deliberately not batch totals.
-        outer[indices.get("batchSize")] = dp.requests().size();
-        outer[indices.get("dpRank")] = dp.rank();
+        outer[indices.get("batchSize")] = batch.requests().size();
         constants.forEach((name, value) -> outer[indices.get(name)] = value);
-        List<double[]> items = new ArrayList<>(dp.requests().size());
-        for (var request : dp.requests()) {
+        List<double[]> items = new ArrayList<>(batch.requests().size());
+        for (var request : batch.requests()) {
             double[] row = new double[indices.size()];
             Arrays.fill(row, Double.NaN);
             for (var entry : REQUEST_VARIABLES.entrySet()) row[INDICES.get(entry.getKey())] = entry.getValue().applyAsDouble(request);

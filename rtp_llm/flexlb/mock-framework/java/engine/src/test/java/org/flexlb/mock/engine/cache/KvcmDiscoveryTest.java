@@ -114,7 +114,7 @@ class KvcmDiscoveryTest {
             var resolver = new KvcmDiscovery(null, "kvcm-domain", "shared_128", vip);
             try (var lease = cache.acquire(1, List.of()).lease()) { lease.publish(List.of(99L), 1); }
             try (var reporter = new KvcmReporter(new KvcmReporter.Configuration(resolver, true, 600000),
-                    new KvcmReporter.Identity("shared_128", "group", "127.0.0.1:18080", "full", "FP16", false, 1, 1, 1, "hbm"), cache)) {
+                    new KvcmReporter.Identity("shared_128", "group", "127.0.0.1:18080", "full", "FP16", false, 1, 1, "hbm"), cache)) {
                 try { await(() -> first.snapshots.get() > 0); }
                 catch (AssertionError error) { throw new AssertionError("Initial reporter: " + reporter.status()
                     + ", lookups=" + first.lookups + ", registrations=" + first.registrations, error); }
