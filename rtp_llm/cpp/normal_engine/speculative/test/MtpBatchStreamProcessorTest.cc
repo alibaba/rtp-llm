@@ -1043,6 +1043,11 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchPrefillStagesCompactLogprobsToCp
     EXPECT_FALSE(stream->getTopLogprobTokenIds().is_cuda());
     EXPECT_FALSE(stream->getTopLogProbs().is_cuda());
     EXPECT_NEAR(stream->getTokenLogProbs().index({0, 0}).item<float>(), expected.index({0, 2}).item<float>(), 1e-3);
+    target_output.sampler_output.token_ids.fill_(0);
+    const auto target_token = stream->getSPOutputBuffer()->target_token_gpu;
+    ASSERT_TRUE(target_token.defined());
+    ASSERT_TRUE(target_token.is_cuda());
+    EXPECT_EQ(target_token.item<int32_t>(), 2);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testSpecUpdateLogprobsFollowStopTruncation) {
@@ -1833,6 +1838,13 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
 
     checkOutput(stream1, {2, 1}, {1, 2}, {0.2, 0.1, 0.3, 0.5}, {0.3, 0.4});
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {1.7, 1.8});
+    target_output.sampler_output.token_ids.fill_(0);
+    for (const auto& stream : {stream1, stream2}) {
+        const auto output = stream->getSPOutputBuffer();
+        ASSERT_TRUE(output->target_token_gpu.defined());
+        ASSERT_TRUE(output->target_token_gpu.is_cuda());
+        EXPECT_TRUE(torch::equal(output->target_token_gpu.cpu(), output->tokens.select(1, 0)));
+    }
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchUsesDraftLastHiddenOverride) {

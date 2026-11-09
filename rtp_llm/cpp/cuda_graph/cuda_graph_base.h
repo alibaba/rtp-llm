@@ -15,6 +15,7 @@ struct CudaGraphState {
     int current_real_graph_bs{1};       // for decode
     int current_real_graph_seq_len{1};  // for prefill
     int seq_len_sum{0};
+    int decode_graph_key{0};
 };
 
 struct GraphParams {
@@ -22,6 +23,7 @@ struct GraphParams {
     bool                 enable_cuda_graph_debug_mode = false;
     bool                 is_prefill_cuda_graph_mode   = false;
     bool                 is_target_verify             = false;
+    bool                 adaptive_verification        = false;
     bool                 is_draft_extend              = false;
     int                  max_seq_len                  = 0;
     int                  tokens_per_block             = 0;  // physical kv block size

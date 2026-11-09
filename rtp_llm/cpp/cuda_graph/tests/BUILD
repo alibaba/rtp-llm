@@ -125,3 +125,13 @@ py_test(
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
 )
+
+py_test(
+    name = "cuda_graph_adaptive_test",
+    srcs = ["cuda_graph_adaptive_test.py"],
+    data = [":test_cuda_graph_runner", "//:th_transformer"],
+    deps = ["//rtp_llm/test/model_test/test_util:test_util"],
+    env = {"TEST_USING_DEVICE": "CUDA", "NOT_USE_DEFAULT_STREAM": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)

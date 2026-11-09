@@ -208,6 +208,34 @@ generated text. RTP reserves generator offsets rather than using vLLM absolute
 token positions. Optional vLLM block verification, FLy and watermarking are not
 exposed as RTP request options by this integration.
 
+The adaptive-verification controller has a separate startup opt-in,
+`RTP_LLM_ADAPTIVE_VERIFICATION`. Unset or `0` returns no controller, without
+importing the estimator or allocating its GPU buffers. Only `1` creates the
+controller; other values raise an error. It does not read or modify either
+sampling-backend switch above. Changing this value requires a new controller
+at startup; it is not a live toggle for a batch with pending verification.
+
+The MTP executor connects predictions, packed Target inputs, smaller target graph
+capacities and actual acceptance feedback. This route requires the logits
+rejection backend (`RTP_LLM_USE_VLLM_REJECTION_SAMPLING=1`) and paged KV attention;
+unsupported configurations fail explicitly. Disabling adaptive verification does
+not disable the new rejection backend.
+
+With five draft steps, `RTP_LLM_ADAPTIVE_VERIFY_CAP=3` admits exactly the first
+three draft tokens and executes four Target positions per request, including
+the bonus position. Unset or `-1` enables dynamic budgeting: the first rounds for
+each batch size measure uniform verification lengths, then interpolate the
+observed CUDA-event costs. Missing seed predictions keep full verification when
+selecting a dynamic budget. Forced-acceptance requests do not train the estimator.
+
+Dynamic budgeting reads current confidence rows on the CPU before Target forward.
+Request/step indices are cached on the GPU; feedback validation and estimator
+updates stay on the GPU. Timing events are polled in later rounds without waiting
+for unfinished work. Fixed-cap mode skips prediction, training and cost timing.
+The integration disables cross-round forward overlap and MTP Indexer sharing
+while enabled. It is an opt-in, not a guarantee of improved throughput.
+Controller and graph tests do not replace full-model validation.
+
 HY4 uses the same deferred verification route as GLM5 when V2 rejection is
 enabled. Its point-mass draft tokens do not require dense draft probabilities.
 On this route, filtering follows the request's TopK/TopP parameters; the legacy

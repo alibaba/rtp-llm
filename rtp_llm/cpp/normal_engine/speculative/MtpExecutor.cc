@@ -962,6 +962,34 @@ bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
 }
 
+std::vector<int64_t> MtpExecutor::adaptiveRequestIds(const StreamGroups& groups) {
+    for (auto it = adaptive_request_ids_.begin(); it != adaptive_request_ids_.end();) {
+        it = it->first.expired() ? adaptive_request_ids_.erase(it) : std::next(it);
+    }
+    std::vector<int64_t> ids;
+    for (const auto& stream : groups.allStreams()) {
+        auto [it, inserted] = adaptive_request_ids_.try_emplace(stream, adaptive_next_request_id_);
+        if (inserted) {
+            ++adaptive_next_request_id_;
+        }
+        ids.push_back(it->second);
+    }
+    return ids;
+}
+
+void MtpExecutor::adaptivePredict(const StreamGroups& groups, int step, const torch::Tensor& logits) {
+    if (!adaptive_session_ || warm_up_ || groups.allStreams().empty()) {
+        return;
+    }
+    for (const auto& stream : groups.allStreams()) {
+        if (stream->isFakeStream()) {
+            return;
+        }
+    }
+    py::gil_scoped_acquire gil;
+    adaptive_session_->attr("predict")(adaptiveRequestIds(groups), step, logits);
+}
+
 void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
                                                        ModelBase&      source,
                                                        bool            request_actual_rows) {
@@ -1430,6 +1458,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     propose_step_     = propose_params->gen_num_per_circle;
     vocab_size_       = params.model_config_.vocab_size;
     draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
+    const char* adaptive_env = std::getenv("RTP_LLM_ADAPTIVE_VERIFICATION");
+    RTP_LLM_CHECK_WITH_INFO(!adaptive_env || std::string(adaptive_env) == "0" || std::string(adaptive_env) == "1",
+                            "RTP_LLM_ADAPTIVE_VERIFICATION must be 0 or 1");
+    adaptive_verification_ = adaptive_env && std::string(adaptive_env) == "1";
 
     const auto& draft_engine_params    = propose_params->getEngineInitParams();
     const auto& draft_model_config     = draft_engine_params.model_config_;
@@ -1439,10 +1471,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     const bool context_parallel_enabled = params.parallelism_config.prefill_cp_config.is_enabled()
                                           || draft_engine_params.parallelism_config.prefill_cp_config.is_enabled();
     mtp_indexer_share_enabled_ =
-        kMtpIndexerShareFlag.on && python_draft_share_capable && params.hw_kernel_config.enable_cuda_graph
-        && !params.device_resource_config.enable_layer_micro_batch && !context_parallel_enabled
-        && draft_model_config.index_share_for_mtp_iteration && draft_model_config.num_layers == 1
-        && draft_model_config.attn_config.indexer_topk > 0 && propose_step_ >= 3;
+        !adaptive_verification_ && kMtpIndexerShareFlag.on && python_draft_share_capable
+        && params.hw_kernel_config.enable_cuda_graph && !params.device_resource_config.enable_layer_micro_batch
+        && !context_parallel_enabled && draft_model_config.index_share_for_mtp_iteration
+        && draft_model_config.num_layers == 1 && draft_model_config.attn_config.indexer_topk > 0 && propose_step_ >= 3;
     mtp_indexer_topk_ = draft_model_config.attn_config.indexer_topk;
     // Forward overlap consumes per-request MTP GPU state, independently of
     // indexer sharing (including GLM-5.1 models without an indexer). Preserve
@@ -1471,6 +1503,18 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
+    if (adaptive_verification_ && !warm_up_ && isTpRank0()) {
+        py::gil_scoped_acquire gil;
+        auto                   session = py::module_::import("rtp_llm.models_py.sampling.adaptive_session")
+                           .attr("create_session")(params.concurrency_config.concurrency_limit, propose_step_, "cuda");
+        adaptive_session_ = std::shared_ptr<py::object>(new py::object(std::move(session)), [](py::object* value) {
+            py::gil_scoped_acquire gil;
+            delete value;
+        });
+    }
+    RTP_LLM_LOG_INFO(
+        "[adaptive-verify] enabled=%d; fixed verification when disabled; indexer sharing disabled when enabled",
+        adaptive_verification_);
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, tp_rank_);
 
     if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
@@ -1498,6 +1542,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
 
     sampler_.reset(new Sampler(SamplerInitParams{params.model_config_.model_type, params.model_config_.vocab_size}));
+    RTP_LLM_CHECK_WITH_INFO(
+        !adaptive_verification_ || supportsDeferredRejectionSampling(),
+        "adaptive verification requires RTP_LLM_USE_VLLM_REJECTION_SAMPLING=1 and an available logits sampler");
 
     // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
     std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;
@@ -1562,6 +1609,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
 
     is_linear_attention_model_ = target_cache_config.linear_group_num > 0;
+    RTP_LLM_CHECK_WITH_INFO(!adaptive_verification_ || !is_linear_attention_model_,
+                            "adaptive verification requires paged KV attention, not linear attention");
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
                                                               params.pd_sep_config,
                                                               params.profiling_debug_logging_config,
@@ -2230,7 +2279,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     std::shared_ptr<MtpForwardClaims> forward_claims;
     std::optional<StreamGroups>       forward_groups;
     bool                              overlapped_forward = false;
-    if (useForwardOverlap() && !streams.empty()) {
+    if (!adaptive_verification_ && useForwardOverlap() && !streams.empty()) {
         // RPC may publish GPU state before its initial host payload is consumed.
         // Consume that payload once before forward; never inspect host mirrors
         // while bookkeeping owns them, or retain empty steady rows in this list.
@@ -2269,6 +2318,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
     if (!overlapped_forward) {
+        if (adaptive_verification_ && useStreamAsync()) {
+            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+        }
         waitPreviousBookkeepingAndKvSwaps(streams);
         // Host-derived metadata is only gathered after CPU bookkeeping settles.
         forward_groups.emplace(streams);
@@ -2331,6 +2383,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         return absl::OkStatus();
     }
 
+    if (adaptive_session_ && !model_input.is_fake_stream) {
+        py::gil_scoped_acquire gil;
+        adaptive_session_->attr("begin")(adaptiveRequestIds(stream_groups));
+    }
     launchTargetVerifyPrepareAsync(model_input, batch_size);
 
     if (propose_step_ > 1) {
@@ -2355,6 +2411,41 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
 
+    torch::Tensor  adaptive_caps;
+    torch::Tensor  adaptive_rows;
+    const bool     packed_verify = adaptive_verification_ && !warm_up_ && !model_input.is_fake_stream;
+    GptModelInputs dense_verify_input;
+    if (packed_verify) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.adaptive_pack");
+        if (isTpRank0()) {
+            py::gil_scoped_acquire gil;
+            auto                   plan = adaptive_session_->attr("plan")().cast<py::tuple>();
+            adaptive_caps               = plan[0].cast<torch::Tensor>();
+            adaptive_rows               = plan[1].cast<torch::Tensor>();
+        } else {
+            adaptive_caps = torch::empty({static_cast<int64_t>(batch_size)}, model_input.combo_tokens.options());
+        }
+        if (parallelism_config_.tp_size > 1) {
+            execBroadcast({{adaptive_caps}, 0});
+            if (!isTpRank0()) {
+                auto rows =
+                    torch::arange(batch_size * (propose_step_ + 1), adaptive_caps.options().dtype(torch::kInt64));
+                auto keep     = rows.remainder(propose_step_ + 1) <= adaptive_caps.repeat_interleave(propose_step_ + 1);
+                adaptive_rows = rows.masked_select(keep);
+            }
+        }
+        dense_verify_input            = model_input;
+        model_input.combo_tokens      = model_input.combo_tokens.index_select(0, adaptive_rows);
+        model_input.input_lengths     = adaptive_caps + 1;
+        model_input.lm_output_indexes = torch::arange(adaptive_rows.numel(), adaptive_caps.options());
+        if (model_input.combo_position_ids.defined() && model_input.combo_position_ids.numel() > 0) {
+            model_input.combo_position_ids = model_input.combo_position_ids.index_select(0, adaptive_rows);
+        }
+        if (model_input.combo_tokens_type_ids.defined() && model_input.combo_tokens_type_ids.numel() > 0) {
+            model_input.combo_tokens_type_ids = model_input.combo_tokens_type_ids.index_select(0, adaptive_rows);
+        }
+    }
+
     {
         if (shouldSkipFakeStreamForStop(model_input, "target verify forward")) {
             releaseAllModelBuffers();
@@ -2363,6 +2454,31 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output          = runTargetVerifyForward(model_input, stream_groups);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+
+    if (packed_verify) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.adaptive_unpack");
+        if (isTpRank0()) {
+            py::gil_scoped_acquire gil;
+            adaptive_session_->attr("target_done")();
+        }
+        if (!isCpContextRequest(parallelism_config_, model_input)) {
+            maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_);
+        }
+        const auto restore = [&](torch::Tensor& value) {
+            if (value.defined() && value.numel() > 0 && value.size(0) == adaptive_rows.numel()) {
+                auto shape = value.sizes().vec();
+                shape[0]   = batch_size * (propose_step_ + 1);
+                auto dense = torch::zeros(shape, value.options());
+                dense.index_copy_(0, adaptive_rows, value);
+                value = std::move(dense);
+            }
+        };
+        restore(model_output.logits);
+        restore(model_output.hidden_states);
+        restore(model_output.all_hidden_states);
+        restore(model_output.all_logits);
+        model_input = std::move(dense_verify_input);
     }
 
     if (overlapped_forward) {
@@ -2519,7 +2635,18 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                                     && draft_sampler_output.draft_point_mass,
                                                                 draft_sampler_output.token_ids));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
+            if (packed_verify) {
+                if (sampler_input.spec_mask_ready_event) {
+                    sampler_input.spec_mask_ready_event->block(cuda_graph::graphGetCurrentStream());
+                }
+                sampler_input.spec_cap_gpu = sampler_input.spec_cap_gpu.defined() ?
+                                                 torch::minimum(sampler_input.spec_cap_gpu, adaptive_caps) :
+                                                 adaptive_caps;
+            }
             sampler_output           = std::move(sampler_->forward(sampler_input));
+            RTP_LLM_CHECK_WITH_INFO(
+                !packed_verify || sampler_output.deferred_token_sampling,
+                "adaptive verification requires the logits rejection sampler; disable adaptive verification to use legacy sampling");
             if (!sampler_output.deferred_token_sampling) {
                 sampler_output.all_probs = reshapeMtpTargetAllProbs(sampler_output.all_probs,
                                                                 static_cast<int64_t>(batch_size),
@@ -2546,6 +2673,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
             applySpecLogitsAcceptLenCap(
                 sampler_input, sampler_output, speculative_sampler_output, batch_size, propose_step_);
+            if (packed_verify) {
+                std::vector<bool> forced;
+                for (const auto& stream : stream_groups.allStreams()) {
+                    forced.push_back(stream->forceSpAccept());
+                }
+                py::gil_scoped_acquire gil;
+                adaptive_session_->attr("observe")(speculative_sampler_output.accept_len - 1, forced);
+            }
         }
 
         batch_stream_processor_->updateDecodePostDraftModelInput(
@@ -2572,7 +2707,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         rejection_event->record(cuda_graph::graphGetCurrentStream());
     }
 
-    maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
+    if (!packed_verify) {
+        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
+    }
     broadcastPostRejectionInputs(model_input, stream_groups, post_rejection_selected_tokens);
     // Draft-prefill inputs are finalized only after rejection sampling updates
     // combo_tokens/last_hidden_states/lm_output_indexes and the TP broadcast
@@ -2642,6 +2779,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     try {
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_sample)");
+            adaptivePredict(stream_groups, 0, draft_prefill_model_output.logits);
             auto fast_topk_sampler_output          = fast_topk_sampler_->forward(draft_prefill_model_output.logits);
             draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
             draft_prefill_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
@@ -2713,7 +2851,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 }
 
 void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size) {
-    if (!useAsyncPrepare()) {
+    if (!useAsyncPrepare() || adaptive_verification_) {
         return;
     }
     if (isCpContextRequest(parallelism_config_, model_input)) {
@@ -3776,6 +3914,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
         // sample
         speculative::MtpDraftSampleContext sample_context;
+        adaptivePredict(stream_groups, i + 1, draft_decode_model_output.logits);
         if (i != propose_step_ - 2)
             sample_context.sequence_lengths = model_input.sequence_lengths;
         if (model_input.is_fake_stream) {

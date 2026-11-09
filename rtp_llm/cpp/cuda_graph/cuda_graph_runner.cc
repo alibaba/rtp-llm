@@ -295,8 +295,9 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
 void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputData");
     c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
-    const size_t     graph_idx =
-        is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
+    const size_t     graph_idx        = is_prefill_cuda_graph_mode_ ?
+                                            state.current_real_graph_seq_len :
+                                            (state.decode_graph_key > 0 ? state.decode_graph_key : state.current_real_graph_bs);
     auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     int   token_num        = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
 
@@ -363,8 +364,9 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     }
     prepared_attention_inputs_.store(true, std::memory_order_release);
 
-    const size_t graph_idx =
-        is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
+    const size_t graph_idx               = is_prefill_cuda_graph_mode_ ?
+                                               state.current_real_graph_seq_len :
+                                               (state.decode_graph_key > 0 ? state.decode_graph_key : state.current_real_graph_bs);
     auto&     py_model_inputs_        = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto      attn_pyobj              = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
     const int captured_batch_capacity = py_model_inputs_.attention_inputs.input_lengths.defined() ?
@@ -654,8 +656,9 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.updateKVCacheKernelBlockId");
     c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
-    const size_t     graph_idx =
-        is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
+    const size_t     graph_idx        = is_prefill_cuda_graph_mode_ ?
+                                            state.current_real_graph_seq_len :
+                                            (state.decode_graph_key > 0 ? state.decode_graph_key : state.current_real_graph_bs);
     auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto  attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
 
@@ -750,7 +753,7 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
     } else {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
-            replayDecode(state.current_real_graph_bs);
+            replayDecode(state.decode_graph_key > 0 ? state.decode_graph_key : state.current_real_graph_bs);
             if (debugSyncCudaGraphReplayEnabled()) {
                 RTP_LLM_LOG_INFO("[CudaGraphRunner] debug sync after decode replay key=%d seq_len_sum=%d",
                                  state.current_real_graph_bs,
@@ -759,8 +762,8 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             }
         }
         outputs.hidden_states =
-            graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
-                0, 0, state.seq_len_sum);
+            graph_instances_[state.decode_graph_key > 0 ? state.decode_graph_key : state.current_real_graph_bs]
+                .mem_hold_.decoder_layer_hidden_states_.slice(0, 0, state.seq_len_sum);
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
@@ -803,6 +806,7 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
                             state.current_batch_size,
                             capture_range_.back());
     state.current_real_graph_bs = *it;
+    state.decode_graph_key      = state.current_real_graph_bs;
     RTP_LLM_LOG_DEBUG(
         "batch size used in replay: %d (graph key %d)", state.current_batch_size, state.current_real_graph_bs);
 
@@ -820,6 +824,14 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
                                 state.current_batch_size,
                                 state.current_real_graph_bs,
                                 num_tokens_per_bs_);
+        if (adaptive_verification_) {
+            const int tokens_per_request =
+                (state.seq_len_sum + state.current_real_graph_bs - 1) / state.current_real_graph_bs;
+            state.decode_graph_key = decodeGraphKey(state.current_real_graph_bs, tokens_per_request);
+            RTP_LLM_CHECK_WITH_INFO(graph_instances_.count(state.decode_graph_key) != 0,
+                                    "adaptive target graph was not captured: key=%d",
+                                    state.decode_graph_key);
+        }
     } else if (inputs.attention_inputs.is_prefill) {
         state.seq_len_sum = inferTotalTokensNoSync(inputs);
         RTP_LLM_CHECK_WITH_INFO(

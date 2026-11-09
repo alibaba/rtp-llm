@@ -1379,6 +1379,12 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
     RTP_LLM_CHECK(total_batch_size_out == (size_t)new_all_token_ids.size(0));
     const size_t token_stride = new_all_token_ids.size(1);
 
+    // The next verification starts with the emitted target token. Own its
+    // storage because subsequent sampler calls can reuse token_ids buffers.
+    auto target_tokens_gpu = new_all_token_ids.select(1, token_stride - 1)
+                                 .to(torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32))
+                                 .clone();
+
     // TODO(async): stream bookkeeping below still iterates token_ids/success
     // on CPU. Keep the .cpu() explicit until spec-update assembly is
     // device-native.
@@ -1445,7 +1451,7 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
                                      std::move(last_hidden_states),
                                      std::move(propose_all_probs),
                                      torch::Tensor(),
-                                     torch::Tensor(),
+                                     target_tokens_gpu.narrow(0, batch_idx_out, next_batch_size),
                                      std::move(compact_target_logprobs.token_logprobs),
                                      std::move(compact_target_logprobs.top_logprob_token_ids),
                                      std::move(compact_target_logprobs.top_logprobs),

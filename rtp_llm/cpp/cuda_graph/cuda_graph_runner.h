@@ -24,6 +24,7 @@ public:
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
+        adaptive_verification_(graph_params.adaptive_verification),
         is_draft_extend_(graph_params.is_draft_extend),
         device_index_(cuda_graph::graphCurrentDeviceIndex()),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
@@ -90,6 +91,7 @@ public:
     void           replayDecode(int bs);
     void           replayPrefill(int seq_len);
     int            getCurrentRealGraphBs(const CudaGraphState& state) const;
+    int            decodeGraphKey(int batch_size, int tokens_per_request) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           initCapture() override;
 
@@ -127,6 +129,7 @@ private:
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
+    bool                    adaptive_verification_{false};
     bool                    is_draft_extend_{false};
     int                     device_index_{0};
     cuda_graph::GraphStream capture_stream_;

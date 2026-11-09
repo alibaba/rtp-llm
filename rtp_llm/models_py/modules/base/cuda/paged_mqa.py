@@ -28,6 +28,8 @@ def paged_mqa_context_lens(attention_inputs: Any, fmha_params: Any) -> torch.Ten
         return fmha_params.kvlen_d.reshape(-1, 1)
 
     lengths = fmha_params.expanded_seq_lens
+    if adaptive_target_layout(attention_inputs):
+        return lengths.reshape(-1, 1)
     if (
         lengths.numel() > 0
         and os.environ.get("RTP_LLM_INDEXER_NATIVE_MTP", "1") != "0"
@@ -39,3 +41,9 @@ def paged_mqa_context_lens(attention_inputs: Any, fmha_params: Any) -> torch.Ten
             raise ValueError("MTP query lengths must contain equal rows per request")
         return lengths.view(batch_size, -1)
     return lengths.reshape(-1, 1)
+
+
+def adaptive_target_layout(attention_inputs: Any) -> bool:
+    return bool(getattr(attention_inputs, "is_target_verify", False)) and (
+        os.environ.get("RTP_LLM_ADAPTIVE_VERIFICATION", "0") == "1"
+    )

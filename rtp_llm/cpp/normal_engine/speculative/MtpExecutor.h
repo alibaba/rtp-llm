@@ -104,6 +104,8 @@ protected:
     };
 
     bool isTpRank0() const;
+    void                 adaptivePredict(const StreamGroups& groups, int step, const torch::Tensor& logits);
+    std::vector<int64_t> adaptiveRequestIds(const StreamGroups& groups);
 
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
 
@@ -247,6 +249,11 @@ private:
     size_t                                           hidden_size_;
     size_t                                           propose_step_;
     size_t                                           draft_vocab_size_;
+    bool                                             adaptive_verification_ = false;
+    std::shared_ptr<py::object>                      adaptive_session_;
+    std::map<std::weak_ptr<GenerateStream>, int64_t, std::owner_less<std::weak_ptr<GenerateStream>>>
+                                                     adaptive_request_ids_;
+    int64_t                                          adaptive_next_request_id_  = 0;
     bool                                             mtp_indexer_share_enabled_ = false;
     bool                                             forward_overlap_supported_ = false;
     int64_t                                          mtp_indexer_topk_          = 0;

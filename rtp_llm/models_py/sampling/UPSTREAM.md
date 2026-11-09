@@ -53,3 +53,17 @@ or bonus row per request, without eager per-position target samples. Unused tail
 are explicitly set to -1 before RTP cleanup. RNG offsets are reserved per request;
 upstream's absolute-position and cross-engine bitwise replay contract does not
 apply unless the complete metadata is supplied identically.
+
+## Adaptive verification
+
+`acceptance_estimator.py` copies `OnlineAcceptanceEstimator` and its kernels from
+`vllm/v1/worker/gpu/spec_decode/acceptance_estimator.py` at the same pinned commit,
+with local imports. `adaptive_verification.py` retains the upstream survival
+counting and budget-assignment kernels; its host budget selector implements the
+expected-output/time objective with explicitly supplied measured costs.
+
+`adaptive_controller.py` and `adaptive_session.py` are RTP integration code:
+request slots, valid prediction prefixes, admitted-row packing, feedback,
+fixed verification caps, and online CUDA-event cost measurements. They are not
+an exact port of vLLM scheduling or profiling. The DSpark confidence-head source
+is not connected in this branch.

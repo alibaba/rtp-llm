@@ -1,12 +1,17 @@
 load("//bazel:arch_select.bzl", "requirement")
 
-requirement(["torch", "triton"])
+requirement(["numpy", "torch", "triton"])
 
 py_library(
     name = "sampling",
     srcs = [
         "__init__.py",
         "adapter.py",
+        "acceptance_estimator.py",
+        "adaptive_controller.py",
+        "adaptive_runtime.py",
+        "adaptive_session.py",
+        "adaptive_verification.py",
         "draft_logits.py",
         "runtime.py",
         "rejection_metadata.py",
@@ -17,8 +22,37 @@ py_library(
         "vllm_prf_base.py",
         "vllm_fly.py",
     ],
-    deps = [":torch", ":triton"],
+    deps = [":numpy", ":torch", ":triton"],
     visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "test_adaptive_controller",
+    srcs = ["test_adaptive_controller.py"],
+    deps = [":sampling"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_adaptive_runtime",
+    srcs = ["test_adaptive_runtime.py", "adaptive_runtime.py"],
+)
+
+py_test(
+    name = "test_adaptive_verification",
+    srcs = ["test_adaptive_verification.py"],
+    deps = [":sampling"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_acceptance_estimator",
+    srcs = ["test_acceptance_estimator.py"],
+    deps = [":sampling"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
 
 py_test(
