@@ -336,6 +336,19 @@ def _args_from_model_config(
             if model_config.moe_prefill_max_tokens_per_rank is not None
             else (int(model_config.max_seq_len) or 4096)
         ),
+        # Largest rank-local token count one prefill forward can carry: a
+        # scheduler-admitted batch (the budget above) or a FIFO singleton of
+        # max_seq_len.  Under CUDA graphs the MoE chunk count is derived
+        # from it deterministically (empty chunks keep the per-invocation
+        # peer collectives paired without any collective).
+        graph_chunk_token_bound=max(
+            int(
+                model_config.moe_prefill_max_tokens_per_rank
+                if model_config.moe_prefill_max_tokens_per_rank is not None
+                else (int(model_config.max_seq_len) or 4096)
+            ),
+            int(model_config.max_seq_len) or 4096,
+        ),
         fp8_kv_cache=fp8_kv_cache,
     )
 

@@ -102,6 +102,10 @@ class V4Args:
     # explicitly set; kept separate so non-MoE engines can leave the
     # buffer small.
     max_tokens_per_rank: int = 8192
+    # Largest rank-local token count one prefill forward can carry (the
+    # scheduler-admitted batch budget or a max_seq_len singleton).  Under
+    # CUDA graphs the MoE chunk count is derived from it deterministically.
+    graph_chunk_token_bound: int = 0
     # parallelism (S7 scaffold — currently unused; populated from
     # ParallelismConfig in deepseek_v4_model.py and threaded down so
     # downstream patches can shard without re-wiring the constructor.)
@@ -143,12 +147,12 @@ def _block_kwargs(
     ``compress_ratios`` is sized ``n_layers + n_mtp_layers`` (44 for
     V4-Flash default) so ``compress_ratios[layer_id]`` works directly.
 
-    ``include_moe_runtime=False`` drops the four fused-MoE runtime kwargs
+    ``include_moe_runtime=False`` drops the five fused-MoE runtime kwargs
     (``model_type`` / ``parallelism_config`` / ``moe_config`` /
-    ``enable_cuda_graph``) consumed only by the CUDA ``Block``'s
-    ``ChunkedFp8Fp4MoeLayer``. The PPU ``Block`` builds its own packaged
-    MegaMoE and its explicit signature rejects them, so the PPU builder must
-    pass this flag.
+    ``enable_cuda_graph`` / ``graph_chunk_token_bound``) consumed only by
+    the CUDA ``Block``'s ``ChunkedFp8Fp4MoeLayer``. The PPU ``Block`` builds
+    its own packaged MegaMoE and its explicit signature rejects them, so the
+    PPU builder must pass this flag.
     """
     kwargs = dict(
         layer_id=layer_id,
@@ -205,6 +209,7 @@ def _block_kwargs(
             parallelism_config=args.parallelism_config,
             moe_config=args.moe_config,
             enable_cuda_graph=args.enable_cuda_graph,
+            graph_chunk_token_bound=args.graph_chunk_token_bound,
         )
     return kwargs
 

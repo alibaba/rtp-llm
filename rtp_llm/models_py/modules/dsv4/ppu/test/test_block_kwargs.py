@@ -24,6 +24,7 @@ _FUSED_MOE_RUNTIME_KEYS = (
     "parallelism_config",
     "moe_config",
     "enable_cuda_graph",
+    "graph_chunk_token_bound",
 )
 
 

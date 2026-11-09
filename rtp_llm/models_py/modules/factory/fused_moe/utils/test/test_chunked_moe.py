@@ -370,18 +370,38 @@ class ChunkedMoeTest(unittest.TestCase):
         self.assertEqual(layer._moe.token_chunks, [3, 0, 0])
         self.assertTrue(torch.equal(output, torch.full((3, 4), 3.0)))
 
-    def test_graph_enabled_collective_prefill_rejects_oversized_tokens(self):
-        # Under graphs the chunk plan is skipped, so an oversized eager
-        # prefill would chunk by its local token count and desynchronize
-        # the per-layer peer collectives; the violation must fail fast.
+    def test_graph_enabled_collective_prefill_runs_fixed_chunk_count(self):
+        # Under graphs the plan sync is skipped, so a collective-strategy
+        # prefill runs the construction-time fixed chunk count on every
+        # rank: the same invocation count regardless of the local token
+        # count, with empty chunks keeping the peer collectives paired.
         layer = _fake_layer(capacity=4)
         layer.strategy_name = "fp8_per_block_pure_dp"
         layer.enable_cuda_graph = True
-        with self.assertRaisesRegex(
-            ValueError, "CUDA-graph-enabled MoE input tokens=9"
-        ):
-            layer(torch.ones(9, 4), torch.arange(9))
-        self.assertEqual(layer._moe.token_chunks, [])
+        layer._graph_fixed_chunks = 3
+
+        output = layer(torch.ones(9, 4), torch.arange(9))
+        self.assertEqual(layer._moe.token_chunks, [4, 4, 1])
+        self.assertTrue(torch.equal(output, torch.full((9, 4), 3.0)))
+
+        # A small prefill still runs the full count, padded with empty
+        # chunks — the deterministic-alignment contract.
+        layer._moe.token_chunks.clear()
+        output = layer(torch.ones(3, 4), torch.arange(3))
+        self.assertEqual(layer._moe.token_chunks, [3, 0, 0])
+        self.assertTrue(torch.equal(output, torch.full((3, 4), 3.0)))
+
+    def test_graph_enabled_collective_fixed_count_never_drops_tokens(self):
+        # A token count beyond the fixed count's coverage (a scheduler
+        # contract violation) extends the count instead of dropping rows.
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "fp8_per_block_pure_dp"
+        layer.enable_cuda_graph = True
+        layer._graph_fixed_chunks = 1
+
+        output = layer(torch.ones(9, 4), torch.arange(9))
+        self.assertEqual(layer._moe.token_chunks, [4, 4, 1])
+        self.assertTrue(torch.equal(output, torch.full((9, 4), 3.0)))
 
     def test_graph_enabled_non_collective_prefill_still_chunks(self):
         # No per-invocation peer collectives, so local chunking stays safe.
@@ -400,6 +420,55 @@ class ChunkedMoeTest(unittest.TestCase):
         output = layer(torch.ones(9, 4), torch.arange(9))
         self.assertEqual(layer._moe.token_chunks, [4, 4, 1])
         self.assertTrue(torch.equal(output, torch.full((9, 4), 3.0)))
+
+    def test_layer_derives_fixed_chunk_count_from_token_bound(self):
+        import rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer as chunked_module
+
+        def _layer(**kwargs):
+            with mock.patch.object(chunked_module, "Fp8Fp4MoeLayer") as moe_ctor:
+                moe_ctor.return_value.strategy_name = "fp8_per_block_pure_dp"
+                return ChunkedFp8Fp4MoeLayer(
+                    layer_id=0,
+                    dim=4,
+                    moe_inter_dim=8,
+                    n_routed_experts=4,
+                    n_activated_experts=2,
+                    n_shared_experts=0,
+                    score_func="sigmoid",
+                    route_scale=1.0,
+                    swiglu_limit=1.0,
+                    n_hash_layers=3,
+                    vocab_size=16,
+                    layer_weights={"opaque": torch.zeros(1)},
+                    **kwargs,
+                )
+
+        # ceil(bound / capacity), at least one chunk.
+        layer = _layer(
+            enable_cuda_graph=True,
+            max_tokens_per_rank=4,
+            graph_chunk_token_bound=12,
+        )
+        self.assertEqual(layer._graph_fixed_chunks, 3)
+        layer = _layer(
+            enable_cuda_graph=True,
+            max_tokens_per_rank=4,
+            graph_chunk_token_bound=1,
+        )
+        self.assertEqual(layer._graph_fixed_chunks, 1)
+
+        # Graphs disabled or no bound configured: no fixed count.
+        layer = _layer(
+            enable_cuda_graph=False,
+            max_tokens_per_rank=4,
+            graph_chunk_token_bound=12,
+        )
+        self.assertIsNone(layer._graph_fixed_chunks)
+        layer = _layer(
+            enable_cuda_graph=True,
+            max_tokens_per_rank=4,
+        )
+        self.assertIsNone(layer._graph_fixed_chunks)
 
     def test_layer_forwards_parallelism_config_to_the_moe_layer(self):
         # TP-sharded weights need the runtime config to see the real

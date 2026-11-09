@@ -271,6 +271,10 @@ def _args_from_model_config(
         max_batch_size=max_generate_batch_size,
         max_seq_len=int(model_config.max_seq_len) or 4096,
         max_tokens_per_rank=int(model_config.max_seq_len) or 4096,
+        # Largest rank-local token count one prefill forward can carry; the
+        # scheduler budget here is max_seq_len itself.  Under CUDA graphs
+        # the MoE chunk count is derived from it deterministically.
+        graph_chunk_token_bound=int(model_config.max_seq_len) or 4096,
         fp8_kv_cache=fp8_kv_cache,
     )
 

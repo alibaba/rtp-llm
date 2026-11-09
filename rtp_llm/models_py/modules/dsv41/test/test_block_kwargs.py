@@ -21,10 +21,17 @@ class Dsv41BlockKwargsTest(unittest.TestCase):
     def test_block_kwargs_threads_moe_config_and_graph_flag(self):
         moe_config = object()
         kwargs = _block_kwargs(
-            0, V4Args(moe_config=moe_config, enable_cuda_graph=True), None
+            0,
+            V4Args(
+                moe_config=moe_config,
+                enable_cuda_graph=True,
+                graph_chunk_token_bound=4096,
+            ),
+            None,
         )
         self.assertIs(kwargs.get("moe_config"), moe_config)
         self.assertTrue(kwargs.get("enable_cuda_graph"))
+        self.assertEqual(kwargs.get("graph_chunk_token_bound"), 4096)
 
     def test_block_kwargs_defaults(self):
         kwargs = _block_kwargs(0, V4Args(), None)

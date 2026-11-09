@@ -103,6 +103,9 @@ class V4Args:
     # chain instead of running on invented fallbacks.
     moe_config: Optional[Any] = None
     enable_cuda_graph: bool = False
+    # Largest rank-local token count one prefill forward can carry; under
+    # CUDA graphs the MoE chunk count is derived from it deterministically.
+    graph_chunk_token_bound: int = 0
     is_decode_role: bool = False
     # Dedicated DSpARK prefill workers execute only the commit side: target
     # features are projected into the draft SWA pools and no query/FFN/mHC
@@ -175,6 +178,7 @@ def _block_kwargs(
         parallelism_config=args.parallelism_config,
         moe_config=args.moe_config,
         enable_cuda_graph=args.enable_cuda_graph,
+        graph_chunk_token_bound=args.graph_chunk_token_bound,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
         moe_strategy=args.moe_strategy,

@@ -247,6 +247,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         has_shared_expert_gate: bool = False,
         observer_factory: Optional[ObserverFactory] = None,
         record_function_scope: Callable[[], ContextManager] = nullcontext,
+        graph_chunk_token_bound: int = 0,
     ) -> None:
         super().__init__()
         if layer_weights is None:
@@ -259,6 +260,22 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         # Surfaced for synchronized_moe_chunk_plan: a decode forward must
         # skip the plan collective when peers may replay CUDA graphs.
         self.enable_cuda_graph = bool(enable_cuda_graph)
+        # Deterministic chunk count under CUDA graphs: the plan sync is
+        # skipped when graphs are enabled, so collective strategies align
+        # their per-invocation peer collectives by having every rank run the
+        # same fixed number of chunks (empty chunks included) on every
+        # prefill forward, derived from the per-rank capacity and the
+        # schedulable prefill token bound.
+        graph_chunk_token_bound = int(graph_chunk_token_bound or 0)
+        self._graph_fixed_chunks = (
+            max(
+                (graph_chunk_token_bound + self.max_tokens_per_rank - 1)
+                // self.max_tokens_per_rank,
+                1,
+            )
+            if (self.enable_cuda_graph and graph_chunk_token_bound > 0)
+            else None
+        )
         self._observer_factory = observer_factory
         self._record_function_scope = record_function_scope
         self._moe = Fp8Fp4MoeLayer(
@@ -339,25 +356,39 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             return False
         if (
             self.chunking_enabled
-            and tokens > max_tokens
             and getattr(self, "enable_cuda_graph", False)
             and self.strategy_name in _COLLECTIVE_CHUNK_STRATEGIES
+            and getattr(self, "_graph_fixed_chunks", None) is not None
         ):
-            # Under CUDA graphs the chunk plan and the per-layer sync are
-            # skipped for every forward (graph-replaying ranks never join
-            # them), so an oversized eager prefill would chunk by its local
-            # token count and desynchronize the per-layer peer collectives
-            # across ranks.  Surface the contract violation instead of
-            # hanging, matching the decode/capture branches.
-            raise ValueError(
-                f"CUDA-graph-enabled MoE input tokens={tokens} exceeds "
-                f"max_tokens_per_rank={max_tokens} on collective strategy "
-                f"{self.strategy_name!r}: cross-rank chunk alignment is "
-                "skipped under graphs, so the oversized prefill cannot be "
-                "chunked locally. Raise the per-rank MoE capacity, disable "
-                "CUDA graphs, or pick a non-collective strategy."
-            )
+            # Deterministic alignment without collectives: under graphs the
+            # plan sync is skipped, so a collective-strategy prefill runs
+            # the same fixed chunk count on every rank — empty chunks keep
+            # the per-invocation peer collectives paired — instead of
+            # chunking by the local token count.
+            return True
         return self.chunking_enabled and tokens > max_tokens
+
+    def _effective_graph_fixed_chunks(self, tokens: int) -> Optional[int]:
+        """Fixed chunk count for a graph-enabled collective prefill.
+
+        The count is the construction-time constant that covers the
+        schedulable prefill bound.  A token count beyond it (a scheduler
+        contract violation) extends the count so tokens are never dropped,
+        at the cost of alignment in that already-violating step.
+        """
+
+        if (
+            _SYNCHRONIZED_CHUNK_COUNT.get() is None
+            and self.chunking_enabled
+            and getattr(self, "enable_cuda_graph", False)
+            and self.strategy_name in _COLLECTIVE_CHUNK_STRATEGIES
+            and getattr(self, "_graph_fixed_chunks", None) is not None
+        ):
+            local_chunks = (int(tokens) + self.max_tokens_per_rank - 1) // (
+                self.max_tokens_per_rank
+            )
+            return max(self._graph_fixed_chunks, local_chunks)
+        return None
 
     def _synchronized_chunk_tokens(
         self,
@@ -468,14 +499,21 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
                 self.max_tokens_per_rank,
             )
         planned_chunks = _SYNCHRONIZED_CHUNK_COUNT.get()
-        if planned_chunks is None:
+        fixed_chunks = self._effective_graph_fixed_chunks(synchronized_tokens)
+        if planned_chunks is not None:
+            chunk_count = planned_chunks
+        elif fixed_chunks is not None:
+            chunk_count = fixed_chunks
+        else:
+            chunk_count = None
+        if chunk_count is None:
             chunk_starts = range(
                 0, synchronized_tokens, self.max_tokens_per_rank
             )
         else:
             chunk_starts = (
                 chunk_index * self.max_tokens_per_rank
-                for chunk_index in range(planned_chunks)
+                for chunk_index in range(chunk_count)
             )
         for start in chunk_starts:
             local_start = min(start, flat_x.size(0))
