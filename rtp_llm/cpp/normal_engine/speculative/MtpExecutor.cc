@@ -828,8 +828,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                       is_dspark_ ? DSparkModelRole::PROPOSE : DSparkModelRole::NONE,
                                                       draft_graph_allowed));
             }
-            /** MTP separates prefill/decode graph shapes; DSpARK separates fixed PROPOSE/COMMIT entry points. */
-            if (enable_cuda_graph || is_dspark_) {
+            // GLM53's draft prefill sizes its compressed index from live host
+            // lengths. Use the existing eager path for that forward.
+            const bool capture_draft_prefill = enable_cuda_graph && params.model_config_.model_type != "glm5_3_flash";
+            if (capture_draft_prefill || is_dspark_) {
                 RTP_LLM_LOG_INFO("[speculative decoding] creating draft prefill model");
                 // Ordinary MTP captures a prefill graph. DSpARK keeps the same
                 // runtime slot but constructs a gamma+1 decode-graph commit wrapper.

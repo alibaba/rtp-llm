@@ -8,6 +8,7 @@ Hybrid architecture:
 
 import logging
 import os
+from importlib.util import find_spec
 from typing import Any, Dict, Optional
 
 import torch
@@ -243,7 +244,10 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
 
     @staticmethod
     def _backend() -> str:
-        backend = os.environ.get("GLM5_KDA_PREFILL_BACKEND", "cula").lower()
+        backend = os.environ.get("GLM5_KDA_PREFILL_BACKEND")
+        if backend is None:
+            return "cula" if find_spec("cula") is not None else "triton"
+        backend = backend.lower()
         if backend not in ("cula", "triton"):
             raise ValueError(
                 "GLM5_KDA_PREFILL_BACKEND must be 'cula' or 'triton', "
