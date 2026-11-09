@@ -58,7 +58,9 @@ public:
     static uint32_t synchronizeBlockNum(uint32_t                 local_block_num,
                                         const ParallelismConfig& parallelism_config,
                                         const CacheConfig&       config);
-    static uint32_t selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service);
+    // is_ffn_service defaults to the attention cohort: main retired the
+    // FFN-disaggregation role that used the third argument.
+    static uint32_t selectConfirmedBlockNum(const int* candidates, size_t count, bool is_ffn_service = false);
     using SizingSignature = std::array<int32_t, 5>;
     // baseline=0 describes sizing rules; a positive baseline also includes
     // resulting capacities. Both signatures have a fixed collective shape.

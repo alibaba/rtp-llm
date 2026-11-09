@@ -573,8 +573,9 @@ uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candid
         execSyncCommunication(false);
         cudaSyncAndCheck();
 
-        return selectConfirmedBlockNum(
-            block_num_ptr, world_size, parallelism_config.ffn_disaggregate_config.is_ffn_service());
+        // Main retired the FFN-disaggregation role; the FFN sizing cohort is
+        // gone, so the confirmation always runs in the attention role.
+        return selectConfirmedBlockNum(block_num_ptr, world_size, /*is_ffn_service=*/false);
     }
     return candidate_block_num;
 }
@@ -670,8 +671,9 @@ uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candid
     const size_t     local_rank = parallelism_config.tp_size * parallelism_config.dp_rank + parallelism_config.tp_rank;
     constexpr size_t width      = std::tuple_size<SizingSignature>::value;
     const auto       agree      = [&](uint32_t baseline) {
-        const auto signature =
-            sizingSignature(config, baseline, parallelism_config.ffn_disaggregate_config.is_ffn_service());
+        // Main retired the FFN-disaggregation role; the sizing agreement
+        // always runs in the attention cohort.
+        const auto signature = sizingSignature(config, baseline, /*is_ffn_service=*/false);
         // Shape never depends on local pool count or the JSON configuration.
         // Even inconsistent topologies therefore reach the same collective.
         auto  tensor = torch::empty({static_cast<int64_t>(world_size * width)}, torch::kInt32).pin_memory();
