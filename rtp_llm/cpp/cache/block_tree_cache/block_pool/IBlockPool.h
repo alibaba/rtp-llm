@@ -47,6 +47,18 @@ struct BlockPoolConfigBase {
 // DeviceBlockPool adds request-like outer ownership through the protected Tree edge hooks.
 class IBlockPool {
 public:
+    struct TreeReferenceStats {
+        size_t                                     total_blocks;
+        size_t                                     free_blocks;
+        size_t                                     cache_only_blocks;
+        size_t                                     active_blocks;
+        std::array<size_t, kBlockTreeRefTypeCount> ref_blocks;
+
+        size_t blocksWithRef(BlockTreeRefType type) const {
+            return ref_blocks[static_cast<size_t>(type)];
+        }
+    };
+
     virtual ~IBlockPool() = default;
 
     void setCapacityChangeCallback(std::function<void()> callback);
@@ -131,6 +143,7 @@ protected:
     // Helpers for derived-pool transactions; the caller holds mutex_.
     std::optional<BlockIdList> mallocNoLock(size_t n);
     size_t                     availableFreeBlocksNoLock() const;
+    TreeReferenceStats         treeReferenceStatsNoLock() const;
     void                       reserveReleasedBlocksNoLock(size_t additional) {
         released_blocks_.reserve(released_blocks_.size() + additional);
     }

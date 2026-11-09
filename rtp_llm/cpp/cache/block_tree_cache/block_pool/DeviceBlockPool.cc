@@ -232,6 +232,14 @@ size_t DeviceBlockPool::referencedBlocksNum(DeviceBlockRefType ref_type) const {
     return referenced_block_counts_[static_cast<size_t>(ref_type)];
 }
 
+DeviceBlockPool::ReferenceStats DeviceBlockPool::referenceStats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return {treeReferenceStatsNoLock(),
+            referenced_block_counts_[static_cast<size_t>(DeviceBlockRefType::REQUEST)],
+            referenced_block_counts_[static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR)],
+            referenced_block_counts_[static_cast<size_t>(DeviceBlockRefType::PD_CONNECTOR)]};
+}
+
 void DeviceBlockPool::onFirstTreeRefNoLock(BlockIdxType block) {
     ++refcounts_[block];
 }

@@ -77,6 +77,15 @@ public:
     using IBlockPool::referencedBlocksNum;
     size_t referencedBlocksNum(DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST) const;
 
+    struct ReferenceStats {
+        TreeReferenceStats tree;
+        size_t             request_ref_blocks;
+        size_t             remote_connector_ref_blocks;
+        size_t             pd_connector_ref_blocks;
+    };
+    // Snapshot existing per-pool counters together under the pool mutex.
+    ReferenceStats referenceStats() const;
+
     // Stable CUDA device index of the backing buffer. Returns -1 for non-CUDA builds.
     int deviceIndex() const;
 
