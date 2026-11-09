@@ -22,7 +22,7 @@ uv run --locked mock-case compile <case目录>/case.yaml \
 
 ### ID 命名要求
 
-新增或修改 Case 时，ID 统一使用小写 `snake_case`，并在同一个 Case 中全局唯一。Case ID 描述场景并与目录名一致，例如 `version_regression`；Phase ID 描述阶段，例如 `startup`、`performance`。
+新增或修改 Case 时，ID 统一使用小写 `snake_case`，并在同一个 Case 中全局唯一。Case ID 描述场景并与目录名一致，例如 `performance_regression`；Phase ID 描述阶段，例如 `startup`、`performance`。
 
 Step ID 必须采用“动作 + 对象”，必要时追加统计量或时序条件。启动和停止使用 `start_client`、`stop_client`；读取并保存结果使用 `get_master_a`；带断言的检查使用 `check_master_leader`、`check_prefill_tps`、`check_client_ttft_p95`、`check_client_success_rate_after_drain`。不要只写 `traffic`、`leader`、`drain` 或指标名。ID 用于引用和事件定位，具体参数、阈值与说明放在 args、expect 和 describe 中。重命名时同步更新 Step 引用及 View 的 annotation_steps。
 
