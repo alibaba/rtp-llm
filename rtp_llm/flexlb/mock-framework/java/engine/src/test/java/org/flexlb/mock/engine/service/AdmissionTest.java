@@ -39,7 +39,7 @@ class AdmissionTest {
                      assertNull(created.get(), "One scheduler per instance");
                      var scheduler = new RejectingScheduler(domain); created.set(scheduler); return scheduler;
                  }, history, cache, compute, role, "test");
-                 var service = new RtpRpcService(new RtpRpcService.Config("test", role, 2, 1, 1, 4096, 0, compute, -200, 0L),
+                 var service = new RtpRpcService(new RtpRpcService.Config("test", role, 2, 4096, 0, compute, -200, 0L, 1),
                      cache, lock, history, engine, true)) {
                 var server = io.grpc.netty.NettyServerBuilder.forPort(0).addService(service).build().start();
                 var channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();

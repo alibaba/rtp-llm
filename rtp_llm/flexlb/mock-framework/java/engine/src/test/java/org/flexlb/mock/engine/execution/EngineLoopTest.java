@@ -182,7 +182,7 @@ class EngineLoopTest {
 
     private static EngineScheduler.Work work(String id) {
         var item = new ForwardBatch.Request(id, 4, 0, 8, 0, 4, 0, List.of());
-        return new EngineScheduler.Work(new Object(), new ForwardBatch(id, List.of(new ForwardBatch.Partition(0, List.of(item)))));
+        return new EngineScheduler.Work(new Object(), new ForwardBatch(id, List.of(item)));
     }
 
     private EngineLoop engine(Object lock, Policy policy, String expression) {

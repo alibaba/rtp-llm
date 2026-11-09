@@ -65,6 +65,30 @@ class LocalRpcTest {
             .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).findFirst().orElseThrow();
     }
 
+    @Test void shardedPrefillUsesBaseHashesButVirtualAllocationAndReuseBoundaries() throws Exception {
+        try(var node=LLMMockEngine.start(config("1",Map.of("prefill_cp_size",4)))) {
+            var channel=ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
+            try {
+                var rpc=RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3,TimeUnit.SECONDS);
+                var input=PrefillAdmissionTest.input(1,0,true).toBuilder().clearTokenIds()
+                    .addAllTokenIds(java.util.stream.IntStream.rangeClosed(1,17).boxed().toList()).build();
+                var first=rpc.generateStreamCall(input);while(first.hasNext()) first.next();
+                var cache=rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
+                var base=org.flexlb.mock.protocol.MediaInput.cacheKeys(org.flexlb.mock.protocol.MediaInput.text(input),2);
+                assertEquals(Set.of(base.get(3),base.get(7)),cache.getCacheKeysMap().keySet());
+                assertEquals(8,cache.getBlockSize());assertEquals(64,cache.getTotalKvCache());
+                var worker = rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance());
+                assertEquals(64, worker.getTotalKvCache());
+                assertEquals(4, worker.getTpSize());
+                assertEquals(1, worker.getDpSize());
+                assertEquals(0, worker.getDpRank());
+                var second=rpc.generateStreamCall(input.toBuilder().setRequestId(2).build());
+                assertEquals(16,second.next().getFlattenOutput().getAuxInfo(0).getTotalReuseLen());
+                assertFalse(second.hasNext());
+            } finally {channel.shutdownNow().awaitTermination(3,TimeUnit.SECONDS);}
+        }
+    }
+
     @Test void cacheStatusPreservesVersionedKeysAndLiveCapacityOnTheWire() throws Exception {
         try (var node = LLMMockEngine.start(config("1"))) {
             try (var seed = node.cacheManager().acquire(4, List.of()).lease()) {
@@ -219,10 +243,13 @@ class LocalRpcTest {
         assertEquals(List.of(-8366447769517741626L, 455111481605203084L, 3534810267006820515L), org.flexlb.mock.protocol.MediaInput.cacheKeys(org.flexlb.mock.protocol.MediaInput.text(input), 2));
     }
 
-    private RtpConfig config(String expression) throws Exception {
+    private RtpConfig config(String expression) throws Exception { return config(expression,Map.of()); }
+
+    private RtpConfig config(String expression,Map<String,Object> settings) throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("prefill"));
         ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true);
         ((ObjectNode) root.path("component").path("config").path("mock.compute").path("forward")).put("expression", expression);
+        ((ObjectNode)root.path("component").path("config")).setAll((ObjectNode)json.valueToTree(settings));
         var path = directory.resolve("config.json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
     }
 

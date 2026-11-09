@@ -178,7 +178,7 @@ P 每轮只产首 token，finished 表示整个请求是否结束，不表示 Pr
 
 ForwardBatch 保留请求长度、实际缓存命中、已生成长度、stepTokens、优先级和图片 shape。FormulaForward 只计算 Duration，不保留没有实际替换入口的 ForwardModel 接口；SimulatedCompute 只执行可取消等待；公共 Compute 的产出计算不修改请求或队列。一个 Engine 同时至多一个 Forward，完成结果只提交一次。
 
-公式复用生产 ArithmeticFormula 的 param(name, value)、sum 等函数，单位 ms，保留到 ns；非法变量、负值、非有限值和溢出拒绝。逐请求变量只在 sum 中使用：inputTokens/hitCacheTokens/computeTokens/hasHitCache/outputTokens/generatedTokens/contextTokens/stepTokens/priority/imageCount/imagePixels；batch 使用 batchSize、dpRank、total/max 派生变量。RTP 额外绑定 cpSize、cpEnabled（0/1）、tpSize、dpSize，只有显式引用才参与计算，不自动缩放已有拟合公式。默认 FormulaForward 不猜测多个 DP 的组合方式。
+公式复用生产 ArithmeticFormula 的 param(name, value)、sum 等函数，结果以 ms 为单位，保留到 ns。非法变量、负值、非有限值和溢出都会被拒绝。逐请求变量 inputTokens/hitCacheTokens/computeTokens/hasHitCache/outputTokens/generatedTokens/contextTokens/stepTokens/priority/imageCount/imagePixels 只在 sum 中使用。Batch 使用 batchSize 和 total/max 派生变量。RTP 额外绑定 cpSize 和 cpEnabled（0/1）。公式显式引用时才使用这两个变量。
 
 倍率直接乘入 forward.expression，不提供独立 scale/noise.scale。噪声位于 forward.noise，默认 stddev.ms/stddev.ratio=0；启用时要求 seed 和正 max.deviation.ms，扰动有界、最终耗时不小于 0。seed、Engine 身份、角色和 batch 身份固定一次耗时样本，取消批次不补完成指标。当前 DeepSeek Case 不启用噪声。
 
@@ -198,22 +198,22 @@ Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.express
 
 ### 已实现的 real 参数
 
-| 参数                                                         | 默认值/约束                                                 | 行为                                                                                                                                                                                               |
-| ------------------------------------------------------------ | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| seq_size_per_block / max_seq_len / test_block_num            | 64 / 8192 / 必填；前两者为 0 时用默认值，test_block_num ≥ 2 | KV 分配粒度、单请求序列上限、Device 物理块数（含 null block）。                                                                                                                                    |
-| concurrency_limit                                            | 32，正整数                                                  | P/D 每轮请求数上限；real 的 ConcurrencyConfig 输入经 engine_config.py 写入内部 max_generate_batch_size。                                                                                           |
-| reserve_block_ratio                                          | 5，0–100                                                    | 首次分配预留百分比。                                                                                                                                                                               |
-| reuse_cache / enable_device_cache                            | false / true                                                | 前缀复用和 Device 索引。                                                                                                                                                                           |
-| tp_size / dp_size                                            | 1 / 1，正整数                                               | real 并行配置；tp_size 用于原生状态/接入元数据，二者分别绑定公式 tpSize/dpSize，不模拟 rank 间执行。                                                                                               |
-| cp_rotate_method                                             | DISABLED                                                    | 沿用 real PrefillCPConfig；ALL_GATHER、ALL_GATHER_WITH_OVERLAP、ALLTOALL 开启通用 CP，cpSize=tp_size、cpEnabled=1，否则为 1/0。PREFILL_CP 是独立策略，当前未模拟，prefill_cp_size 等专用参数忽略。 |
-| max_batch_tokens_size                                        | 0，启动时解析为 max_context_batch_size × max_seq_len        | P 的 batch token/矩形准入；合法 singleton 可超过预算。D 不使用该预算选批，仍通过 WorkerStatus 报告。                                                                                               |
-| max_context_batch_size                                       | 1，正整数                                                   | 只在 max_batch_tokens_size 缺省或为 0 时参与预算推导，不直接限制 batch 请求数。                                                                                                                    |
-| max_batch_tokens_without_cache / max_inited_kv_cache_streams | 0 / 0                                                       | 仅 P 生效；0 不启用对应限制。                                                                                                                                                                      |
-| disable_decode_first_malloc_device_reuse                     | false                                                       | real 内部 CacheConfig 属性，文件输入；不杜撰公开 ENV 名。                                                                                                                                          |
-| gpu_max_batch_size / gpu_batch_wait_ms                       | 1 / 10 ms                                                   | 仅 V；batch=1 为逐请求执行且等待为 0；>1 同时限制 Forward 工作块数与媒体数，较大图片组分轮执行。                                                                                                   |
-| vit_concurrency / vit_max_queue_size                         | 64 / 64                                                     | 异步工作线程上限 / 额外等待额度；总准入和 GPU 就绪队列容量为两者之和。                                                                                                                             |
-| mm_cache_gpu_max_bytes / mm_cache_cpu_max_bytes              | 各 2 GiB                                                    | V embedding 缓存逻辑预算，单位 byte。                                                                                                                                                              |
-| mm_hash_key_cache_max_bytes                                  | 256 MiB                                                     | V hash 缓存逻辑预算，单位 byte。                                                                                                                                                                   |
+| 参数                                                         | 默认值/约束                                                 | 行为                                                                                                                                                                    |
+| ------------------------------------------------------------ | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| seq_size_per_block / max_seq_len / test_block_num            | 64 / 8192 / 必填；前两者为 0 时用默认值，test_block_num ≥ 2 | 基础哈希/物理块 token 数、单请求序列上限、每 rank 的 Device 物理块数（含 null block）。P 的逻辑分配粒度为基础块大小乘 prefill_cp_size。                                 |
+| concurrency_limit                                            | 32，正整数                                                  | P/D 每轮请求数上限；real 的 ConcurrencyConfig 输入经 engine_config.py 写入内部 max_generate_batch_size。                                                                |
+| reserve_block_ratio                                          | 5，0–100                                                    | 首次分配预留百分比。                                                                                                                                                    |
+| reuse_cache / enable_device_cache                            | false / true                                                | 前缀复用和 Device 索引。                                                                                                                                                |
+| prefill_cp_size                                              | 1（0 视为默认）                                             | Mock P 每组包含的基础缓存块数。大于 1 时只取每组末尾的键，逻辑块大小为基础块大小乘该值，未命中 token 的准入预算按 2 × CP size 对齐。D 的本地 FULL KV 始终按基础块管理。 |
+| cp_force_single_prefill                                      | true                                                        | 仅在 P 的 CP size 大于 1 时生效。设为 false 可在同轮接纳多个 Prefill。                                                                                                  |
+| max_batch_tokens_size                                        | 0，启动时解析为 max_context_batch_size × max_seq_len        | P 的 batch token/矩形准入；合法 singleton 可超过预算。D 不使用该预算选批，仍通过 WorkerStatus 报告。                                                                    |
+| max_context_batch_size                                       | 1，正整数                                                   | 只在 max_batch_tokens_size 缺省或为 0 时参与预算推导，不直接限制 batch 请求数。                                                                                         |
+| max_batch_tokens_without_cache / max_inited_kv_cache_streams | 0 / 0                                                       | 仅 P 生效；0 不启用对应限制。                                                                                                                                           |
+| disable_decode_first_malloc_device_reuse                     | false                                                       | real 内部 CacheConfig 属性，文件输入；不杜撰公开 ENV 名。                                                                                                               |
+| gpu_max_batch_size / gpu_batch_wait_ms                       | 1 / 10 ms                                                   | 仅 V；batch=1 为逐请求执行且等待为 0；>1 同时限制 Forward 工作块数与媒体数，较大图片组分轮执行。                                                                        |
+| vit_concurrency / vit_max_queue_size                         | 64 / 64                                                     | 异步工作线程上限 / 额外等待额度；总准入和 GPU 就绪队列容量为两者之和。                                                                                                  |
+| mm_cache_gpu_max_bytes / mm_cache_cpu_max_bytes              | 各 2 GiB                                                    | V embedding 缓存逻辑预算，单位 byte。                                                                                                                                   |
+| mm_hash_key_cache_max_bytes                                  | 256 MiB                                                     | V hash 缓存逻辑预算，单位 byte。                                                                                                                                        |
 
 real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine_config.py`、`rtp_llm/config/py_config_modules.py` 和 `rtp_llm/cpp/config/ConfigModules.h` 为依据。Mock 不用真实 GPU 分配这些预算，也不按实例伪造物理资源消耗。
 
@@ -231,7 +231,7 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 
 ### ENV 输入
 
-real 公开参数按其 server_args 声明读取 ENV。P/D 上表的公开项对应大写下划线名，例如 `CONCURRENCY_LIMIT`、`SEQ_SIZE_PER_BLOCK`、`TP_SIZE`、`DP_SIZE`、`CP_ROTATE_METHOD`。V 的 batch 参数分别使用 `VIT_GPU_MAX_BATCH_SIZE`、`VIT_GPU_BATCH_WAIT_MS`，队列参数为 `VIT_CONCURRENCY`、`VIT_MAX_QUEUE_SIZE`；缓存参数为 `MM_CACHE_GPU_MAX_BYTES`、`MM_CACHE_CPU_MAX_BYTES`、`MM_HASH_KEY_CACHE_MAX_BYTES`。不会从这些 ENV 名反推另一套默认值。
+real 公开参数按其 server_args 声明读取 ENV。P/D 上表的公开项对应大写下划线名，例如 `CONCURRENCY_LIMIT`、`SEQ_SIZE_PER_BLOCK`、`PREFILL_CP_SIZE`、`CP_FORCE_SINGLE_PREFILL`。V 的 batch 参数分别使用 `VIT_GPU_MAX_BATCH_SIZE`、`VIT_GPU_BATCH_WAIT_MS`，队列参数为 `VIT_CONCURRENCY`、`VIT_MAX_QUEUE_SIZE`；缓存参数为 `MM_CACHE_GPU_MAX_BYTES`、`MM_CACHE_CPU_MAX_BYTES`、`MM_HASH_KEY_CACHE_MAX_BYTES`。不会从这些 ENV 名反推另一套默认值。
 
 Mock 名称的点号转换为下划线并大写，例如 `mock.compute.decode.tokens.per.step` → `MOCK_COMPUTE_DECODE_TOKENS_PER_STEP`。`MOCK_COMPUTE_*`、`MOCK_CACHE_*`、`MOCK_VIT_*` 是严格校验的业务命名空间；框架启动变量另行处理。只读取已声明的业务字段，其他进程 ENV 不写入配置产物。
 
@@ -245,10 +245,6 @@ java -jar java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar
 ```
 
 ## DSV4.1 Engine / KVCM 契约
-
-Master 的 KVCM 通信、后台 leader 刷新、连接池、查询预算、健康阈值和 Local Standby 采用生产候选 `codex/dsv41-mu-rebase-vit-field28@1f81c1a16c` 的设计，接入 DSV 现有请求生命周期。LOCAL_SYNC 模式保留真实缓存同步索引；KVCM 模式不再拉取 P/D 完整 key 或维护该索引，查询失败使用有界、带 TTL 的 Local Standby 预测，健康恢复后返回 KVCM。预测来自成功路由的 P/PDFusion 请求，按 Engine 代次隔离，不代表已计算或真实驻留的 KV；ViT 缓存链路保持不变。
-
-WorkerStatusPB 与生产候选统一为 `block_size=23`、`block_hash_lookahead_tokens=24`、`kv_cache_group_mode=25`、`cache_match_rollback_blocks=26`、`last_step_metrics=27`、`mm_inflight_inputs=28`；相关角色必须使用同一份协议重新构建，不保留 ViT 字段 23 别名。DSV 仍使用的传输/KVCM 完成查询 RPC 保留。Mock 的 traits 和 `prefix_length_valid` 由实际缓存规则与准入结果提供，经 Engine RPC 接入层转换及 Master 不可变状态提交，不补造未模拟的 step 遥测。当前支持显式 namespace、Full Attention、单 Engine/端点、CP=1；自动 namespace/查询类型解析和完整命中比较反馈尚未迁移。
 
 ViT 的 GetWorkerStatus 总是显式提供 `mm_inflight_inputs`（包括真实零值），计数来自去重后的媒体所有权；缓存命中不增加，重复等待者不重复增加，排队/执行/缓存结果发布完成前不提前减少。RPC 等待者数不是该指标。状态查询不经过阻塞的结果等待执行器。真实图片由 Java 下载，ImageIO 读取 PNG/JPEG/GIF/BMP 尺寸，WebP 读取格式头；仅提取尺寸，不做完整像素解码校验。文件字节的 SHA-256 摘要与模型几何参数共同生成模拟特征身份，不执行神经网络或物化 embedding 张量，不依赖 Python、Pillow 或解码子进程。未知格式明确拒绝，不回退到请求中的尺寸提示；需要的新格式按实际输入补齐。
 
@@ -474,3 +470,13 @@ LLM Mock Engine 的装配类统一命名为 `execution/LLMMockEngine`，缓存�
 Scheduler/EngineLoop 的外部终止入口为 `abort` / `abortRequest`，必须提供失败原因；成功仅由内部计算和 P/D 状态转换决定。终止不等待输出交付，KV 使用权仍在持有时延迟释放资源。
 
 ViT Cache Claim 和 Forward Work 只提供只读 CompletionStage；调用方转换得到的 CompletableFuture 是独立副本，完成或取消副本不会修改共享结果。Claim.close() 幂等，每个消费者只归还自己的引用，最后一个消费者离开才触发放弃处理。
+
+### Prefill CP
+
+采集数据用最终共享前缀跨度描述前缀关系，展开后的回放数据保存 token 和请求信息。见[标准压缩输入与分片](architecture.md#标准压缩输入与分片)。本地回放用 Client 和 Mock P 的启动配置指定相同的 `seq_size_per_block`、`cache_key_hash_seed` 和 `prefill_cp_size`。例如基础块 128、CP4 时，Client 发 K4、K8，并将请求的 `cache_key_block_size` 设为 512。CP size 缺省时按 1，Client 缺省基础块大小时不生成路由键。
+
+Whale 使用真实 Frontend 时，需要让 Mock P 遵守真实 Frontend 的缓存路由合同：相同 `cache_key_hash_seed` 和基础 `seq_size_per_block`，并对齐 CP 分片配置。基础块为 128 时，Mock P 设置 `prefill_cp_size=4`，按 128-token 块滚动哈希并保留 K4、K8。媒体身份也在基础块边界参与哈希。P 的 KV 分配、复用、完整块提交、CacheStatus.block_size 和 token 容量统一使用 512 的逻辑边界；`test_block_num` 仍是每 rank 物理块数（含 null block）。有效配置额外显示只读的 `cache_key_block_size`。
+
+P→D 仍传完整语义 token 和媒体 cache spans，ALLOCATE/LOAD/GENERATE 接口不新增 CP 字段，不传预先抽样的 P cache keys。D 从同一语义输入按自己的本地布局生成 key；即使设置 `prefill_cp_size=4`，它的 FULL KV 仍按基础块管理，与 real `KVCacheManager` 的 DECODE 分支一致。P 分片、D 不分片时，二者的 key 数和容量粒度不同是预期行为，不应强行设置成相同。
+
+Mock 模拟的是 FULL KV 的 key/容量/复用边界及既有性能公式，不启动 CP rank，不模拟 collective、真实 KV payload 拆分或张量搬运。KVCM 注册上报的 `block_size` 仍为基础块大小 128。main Master 用请求的 `cache_key_block_size` 拼查询 instance，因此此例 P 的 `kv_cache_event_instance_id` 应为 `<namespace>_512`。D 使用自己的基础块布局，启用上报时可单独配置其 instance。未配置分片时保持原有行为；不会根据 TH 的某一套配置自动给所有部署开启 CP4。

@@ -1,6 +1,6 @@
 # main 上的 DSV4.1 Mock 迁移审查
 
-基线为 main `6a1eca9a62894c688669935693515cfe36966935`。
+初始迁移基线为 main `6a1eca9a62894c688669935693515cfe36966935`，后续 rebase 到 `97ebd38f8b6f223ffeb0d98d99705e9478cc8237`。
 Mock 来源为 `codex/mock-engine-on-vit-kvcm-align@fb64aacfde`。
 DSV 行为参考 `feature/dsv41-dev-main-202161013@9ca78c35f6`。
 
@@ -78,7 +78,7 @@ feat/diag-v41-base 包含 main KVCM，但只是在较近 main 上增加诊断注
 
 - main 的监控 provider 缺省为 noop。Mock Master 显式选择原生 micrometer provider，并用 `flexlb_` 前缀导出全部业务指标；不改动生产默认配置。
 - main 的 ViT 目录索引为 `ip:port@engineIndex`，此前物理地址校验会误报 VIT_ROUTE_STALE。目录和校验改用逻辑身份，保留代次检查。
-- KVCM 查询缓存可以让两次生成只产生一次原生查询。测试检查实际正向匹配，不要求固定 RPC 次数；测试统计中的命中数量按匹配 host 计数。
+- 原迁移实验观测到两次生成对应一次原生查询，未确定首次生成未产生查询的原因。测试检查实际正向匹配，不要求固定 RPC 次数；测试统计中的命中数量按匹配 host 计数。
 - Basic Case 初次运行的 4s 窗口含冷启动后的补发：请求 2→3 间隔 1.562s，随后请求 3→4 间隔 2ms，短窗口观测为 2.674 QPS。将采样前等待从 6s 延至 8s，保持 QPS=2、门禁 [1.5, 2.5] 和全部请求成功条件。
 
 最终 Basic 产物：`/Users/wangziyi/.codex/outputs/mock-main-dsv41-20261106.ckOtt1/result-final`。

@@ -302,7 +302,7 @@ public final class KvcmReporter implements AutoCloseable {
         var root = JSON.createObjectNode().put("instance_group", identity.group()).put("instance_id", identity.instance())
             .put("block_size", identity.blockSize()).put("default_query_type", "QT_PREFIX_MATCH");
         root.putObject("model_deployment").put("model_name", identity.model()).put("dtype", identity.dtype())
-            .put("use_mla", identity.mla()).put("tp_size", identity.tp()).put("dp_size", identity.dp()).put("pp_size", 1);
+            .put("use_mla", identity.mla()).put("tp_size", identity.cpSize()).put("dp_size", 1).put("pp_size", 1);
         root.putArray("location_spec_infos").addObject().put("name", identity.spec());
         root.putArray("location_spec_groups").addObject().put("name", "default").putArray("spec_names").add(identity.spec());
         return root;
@@ -359,11 +359,11 @@ public final class KvcmReporter implements AutoCloseable {
      * Caller describes the capability it actually implements; no model/layout inference in the reporter.
      */
     public record Identity(String instance, String group, String address, String model, String dtype,
-                           boolean mla, int blockSize, int tp, int dp, String spec) {
+                           boolean mla, int blockSize, int cpSize, String spec) {
         public Identity {
             for (String value : List.of(instance, group, address, model, dtype, spec))
                 if (value.isBlank()) throw new IllegalArgumentException("Empty KVCM identity");
-            if (blockSize < 1 || tp < 1 || dp < 1) throw new IllegalArgumentException("Invalid KVCM layout");
+            if (blockSize < 1 || cpSize < 1) throw new IllegalArgumentException("Invalid KVCM layout");
         }
     }
 }

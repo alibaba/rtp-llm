@@ -63,7 +63,7 @@ final class DecodeRpcServer implements AutoCloseable {
                 var input = frame.getInput();
                 prepared = RpcMessages.toSchedulerInput(new org.flexlb.mock.protocol.MediaInput.Prepared(input, frame.getMultimodalCacheSpansList()),
                     frame.getClientId() + "/" + input.getRequestId(), call.started,
-                    RpcMessages.deadline(input, call.started, call.rpcDeadline), false, config.blockSize(), config.cacheKeySeed());
+                    RpcMessages.deadline(input, call.started, call.rpcDeadline), false, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
             }
             synchronized (executionLock) {
                 if (call.terminal) return;

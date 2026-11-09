@@ -132,7 +132,7 @@ class RtpSchedulerTest {
             var a = scheduler.enqueue(input(1, false), first); var b = scheduler.enqueue(input(2, false), second);
             scheduler.prepareKvAndCheckTimeouts(); drain(scheduler); generate(scheduler, a); generate(scheduler, b);
             var batch = scheduler.schedule();
-            assertEquals(2, batch.batch().dps().getFirst().requests().size());
+            assertEquals(2, batch.batch().requests().size());
             assertEquals(new QueueSnapshot(0, 2, 0, 0), scheduler.queues());
             long available = cache.snapshot(0, false).availableBlocks();
             scheduler.abort(a, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel one"));
@@ -148,7 +148,7 @@ class RtpSchedulerTest {
             assertTrue(scheduler.metrics().scrape().lines().anyMatch(line -> line.startsWith("rtp_llm_model_forward_seconds_count{")
                 && line.contains("role=\"decode\"") && line.endsWith(" 1.0")));
             var next = scheduler.schedule();
-            assertEquals(List.of("2"), next.batch().dps().getFirst().requests().stream().map(r -> r.id()).toList());
+            assertEquals(List.of("2"), next.batch().requests().stream().map(r -> r.id()).toList());
             complete(scheduler, next, config); drain(scheduler);
             assertNull(second.terminal.get(1, TimeUnit.SECONDS)); assertEquals(12, cache.snapshot(0, false).availableBlocks());
             String terminalMetrics = scheduler.metrics().scrape();
@@ -202,7 +202,7 @@ class RtpSchedulerTest {
             var first = new Listener(); scheduler.enqueue(input(1, false), first); scheduler.enqueue(input(2, false), new Listener());
             assertNull(scheduler.schedule()); assertFalse(first.terminal.isDone());
             held.close();
-            var batch = scheduler.schedule(); assertEquals(2, batch.batch().dps().getFirst().requests().size());
+            var batch = scheduler.schedule(); assertEquals(2, batch.batch().requests().size());
             complete(scheduler, batch, config); drain(scheduler);
             assertNull(first.terminal.get(1, TimeUnit.SECONDS)); assertEquals(12, cache.snapshot(0, false).availableBlocks());
         }
@@ -252,7 +252,7 @@ class RtpSchedulerTest {
             scheduler.enqueue(input(1, false), new Listener());
             var waiting = scheduler.enqueue(input(2, false), new Listener());
             var work = scheduler.schedule();
-            assertEquals(1, work.batch().dps().getFirst().requests().size());
+            assertEquals(1, work.batch().requests().size());
             assertEquals(EngineScheduler.ReportedPhase.RECEIVED, scheduler.tasks().stream().filter(task -> task.requestId() == waiting.input().requestId()).findFirst().orElseThrow().phase()); assertEquals(9, cache.snapshot(0, false).availableBlocks());
             complete(scheduler, work, config); drain(scheduler);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
@@ -260,7 +260,7 @@ class RtpSchedulerTest {
             var oversized = new EngineScheduler.Input("large", 3, 0, 6, 1, 0, System.nanoTime(), Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(6, 0), List.of()), false, false, 0, false);
             scheduler.enqueue(oversized, new Listener());
             var singleton = scheduler.schedule(); assertNotNull(singleton);
-            assertEquals(1, singleton.batch().dps().getFirst().requests().size());
+            assertEquals(1, singleton.batch().requests().size());
             complete(scheduler, singleton, config); drain(scheduler);
             assertTrue(scheduler.requests().isEmpty());
         }
@@ -276,7 +276,7 @@ class RtpSchedulerTest {
                     try {
                         var result = method.invoke(scheduler, args);
                         if (method.getName().equals("schedule") && result instanceof EngineScheduler.Work work) {
-                            batches.add(work.batch().dps().stream().flatMap(dp -> dp.requests().stream()).map(item -> item.id()).toList());
+                            batches.add(work.batch().requests().stream().map(item -> item.id()).toList());
                             first.countDown();
                         }
                         return result;
@@ -417,7 +417,7 @@ class RtpSchedulerTest {
                         assertEquals(1, cache.snapshot(-1, false).freeBlocks());
                     } else {
                         assertNotNull(work); assertEquals(0, cache.snapshot(-1, false).availableBlocks());
-                        assertEquals(1, work.batch().dps().getFirst().requests().getFirst().stepTokens());
+                        assertEquals(1, work.batch().requests().getFirst().stepTokens());
                         complete(scheduler, work, config); drain(scheduler);
                         assertEquals(7, request.snapshot().generated());
                         assertEquals(0, cache.snapshot(-1, false).availableBlocks());
@@ -445,13 +445,13 @@ class RtpSchedulerTest {
 
             // The first Decode round still fits; the next round crosses the block boundary.
             var initial = scheduler.schedule();
-            assertEquals(2, initial.batch().dps().getFirst().requests().size());
+            assertEquals(2, initial.batch().requests().size());
             complete(scheduler, initial, config); drain(scheduler);
             assertEquals(2, a.snapshot().generated());
 
             // A grows into the last free block; B cannot grow and must release only B's lease.
             var work = scheduler.schedule(); drain(scheduler);
-            assertNotNull(work); assertEquals(1, work.batch().dps().getFirst().requests().size());
+            assertNotNull(work); assertEquals(1, work.batch().requests().size());
             assertEquals(RequestFailure.Reason.CAPACITY, second.terminal.get(1, TimeUnit.SECONDS).reason());
             assertEquals(3, cache.snapshot(0, false).availableBlocks());
             assertFalse(first.terminal.isDone());
@@ -547,7 +547,7 @@ class RtpSchedulerTest {
                 Long.MAX_VALUE, new CacheSequence(2, Collections.nCopies(1, 0), List.of()), false, false, 0, false), small);
             var work = scheduler.schedule(); drain(scheduler);
             assertFalse(oversized.terminal.isDone(), "Rejected requests were never admitted");
-            assertNotNull(work); assertEquals(1, work.batch().dps().getFirst().requests().size());
+            assertNotNull(work); assertEquals(1, work.batch().requests().size());
             complete(scheduler, work, config); drain(scheduler);
             assertNull(small.terminal.get(1, TimeUnit.SECONDS));
             assertTrue(scheduler.requests().isEmpty());
@@ -694,8 +694,7 @@ class RtpSchedulerTest {
         for (String mode : List.of("fifo", "group")) for (boolean single : List.of(true, false)) {
             var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("prefill"));
             ((ObjectNode) root.path("component").path("config"))
-                .put("seq_size_per_block", 2).put("max_batch_tokens_size", 100)
-                .put("cp_rotate_method", "ALL_GATHER").put("tp_size", 2)
+                .put("seq_size_per_block", 1).put("prefill_cp_size", 2).put("max_batch_tokens_size", 100)
                 .put("cp_force_single_prefill", single).put("mock.scheduler.mode", mode);
             var config = RtpConfig.load(root);
             try (var cache = new KvCacheManager(2, 20, 0);
@@ -710,8 +709,8 @@ class RtpSchedulerTest {
     @Test void uncachedAdmissionQuotaIncludesCpPadding() throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("prefill"));
         ((ObjectNode) root.path("component").path("config"))
-            .put("seq_size_per_block", 2).put("max_batch_tokens_size", 100).put("max_batch_tokens_without_cache", 6)
-            .put("cp_rotate_method", "ALL_GATHER").put("tp_size", 2).put("cp_force_single_prefill", false);
+            .put("seq_size_per_block", 1).put("prefill_cp_size", 2).put("max_batch_tokens_size", 100)
+            .put("max_batch_tokens_without_cache", 6).put("cp_force_single_prefill", false);
         var config = RtpConfig.load(root);
         try (var cache = new KvCacheManager(2, 20, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
@@ -937,7 +936,7 @@ class RtpSchedulerTest {
     }
 
     private static List<Long> ids(EngineScheduler.Work work) {
-        return work.batch().dps().getFirst().requests().stream().map(item -> Long.valueOf(item.id())).toList();
+        return work.batch().requests().stream().map(item -> Long.valueOf(item.id())).toList();
     }
 
     private RtpConfig admissionLimits(RtpConfig config, int inited, int uncached) throws Exception {

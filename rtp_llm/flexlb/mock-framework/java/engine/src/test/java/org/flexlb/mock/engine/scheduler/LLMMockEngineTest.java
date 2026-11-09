@@ -42,7 +42,7 @@ public class LLMMockEngineTest {
                 assertEquals(0, status.getAvailableConcurrency()); assertTrue(status.getAlive());
                 assertEquals(128, status.getTotalKvCache()); assertEquals(128, status.getAvailableKvCache());
                 assertEquals(4096, status.getMaxSeqLen());
-                assertEquals(3, status.getDpSize()); assertEquals(0, status.getDpRank());
+                assertEquals(1, status.getDpSize()); assertEquals(0, status.getDpRank()); assertEquals(1, status.getTpSize());
                 assertEquals(4096, status.getMaxBatchTokensSize());
                 assertTrue(rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getStatusVersion() > status.getStatusVersion());
                 var lease = node.cacheManager().acquire(32, List.of()).lease();

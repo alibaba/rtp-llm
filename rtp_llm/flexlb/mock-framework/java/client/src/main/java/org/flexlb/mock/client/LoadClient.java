@@ -12,7 +12,9 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
 import org.flexlb.mock.client.ClientProtocol.*;
 
-/** Owns playback pacing, admission, concurrency and request lifetimes. */
+/**
+ * Owns playback pacing, admission, concurrency and request lifetimes.
+ */
 final class LoadClient implements AutoCloseable {
     private final Shard plan;
     private final NativeClient client;
@@ -24,21 +26,28 @@ final class LoadClient implements AutoCloseable {
     private final Map<String, Long> outcomes = new TreeMap<>();
     private final List<String> errors = new ArrayList<>();
     private final CompletableFuture<State> completion = new CompletableFuture<>();
+
     private final int imageToken;
     private final int blockSize;
+
     private Thread player, dispatcher;
+
     private boolean begun, producerDone;
     private volatile boolean stopped;
+
     private final AtomicLong produced = new AtomicLong();
+
     private long issued, finished, drainDeadline = Long.MAX_VALUE;
 
     LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id) throws Exception {
         this(plan, metrics, topology, evidence, id, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN);
     }
+
     LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id, int imageToken) throws Exception {
-        this(plan, metrics, topology, evidence, id, imageToken, 0, 0L);
+        this(plan, metrics, topology, evidence, id, imageToken, 0, 0L, 1);
     }
-    LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id, int imageToken, int blockSize, long seed) throws Exception {
+
+    LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id, int imageToken, int blockSize, long seed, int prefillCpSize) throws Exception {
         this.imageToken = imageToken; this.blockSize = blockSize;
         this.plan = plan; this.metrics = metrics;
         queue = new ArrayBlockingQueue<>(plan.queue_capacity());
@@ -46,10 +55,20 @@ final class LoadClient implements AutoCloseable {
         discovery = new MasterDiscovery(topology, plan.masters());
         try { journal = new RequestJournal(evidence, id, plan); }
         catch (Exception error) { discovery.close(); throw error; }
-        client = new NativeClient(discovery::routes, journal::record, imageToken, seed);
+        client = new NativeClient(discovery::routes, journal::record, imageToken, seed, prefillCpSize);
         // A lost begin command must not leave a prepared worker alive forever.
         dispatcher = Thread.ofVirtual().name("client-dispatch").start(this::dispatch);
     }
+
+    @Override public void close() {
+        halt();
+        List<NativeClient.Call> calls;
+        synchronized (this) { calls = List.copyOf(active.values()); }
+        calls.forEach(NativeClient.Call::cancel);
+        try { completion.get(8, TimeUnit.SECONDS); }
+        catch (Exception error) { dispatcher.interrupt(); }
+    }
+
     synchronized void begin(long epochMillis) {
         if (begun || stopped || completion.isDone()) throw new IllegalStateException("Client already begun or stopped");
         long delay = epochMillis - System.currentTimeMillis();
@@ -65,6 +84,7 @@ final class LoadClient implements AutoCloseable {
         });
         LockSupport.unpark(dispatcher);
     }
+
     /** Use the shared source time origin for every shard. */
     static void play(Shard plan, long startNanos, Consumer<Item> submit) throws IOException, InterruptedException {
         try (var reader = new ReplayInput.Reader(Path.of(plan.requests_file()))) {
@@ -83,7 +103,24 @@ final class LoadClient implements AutoCloseable {
         }
     }
 
+    synchronized void fail(String error) {
+        if (errors.isEmpty()) errors.add(error);
+        halt();
+    }
+
+    synchronized void halt() {
+        if (completion.isDone() || stopped) return;
+        stopped = true; queue.clear();
+        if (player != null) player.interrupt();
+        finishInput();
+    }
+
+    synchronized State state() { return completion.isDone() ? completion.join() : snapshot(false); }
+
+    State await(long timeoutMillis) throws Exception { return completion.get(timeoutMillis, TimeUnit.MILLISECONDS); }
+
     private synchronized boolean isStopped() { return stopped; }
+
     private void offer(Item item) {
         if (stopped) return;
         if (!queue.offer(item)) {
@@ -95,6 +132,7 @@ final class LoadClient implements AutoCloseable {
         if (stopped) queue.clear();
         LockSupport.unpark(dispatcher);
     }
+
     private void finishInput() {
         if (!producerDone) {
             producerDone = true;
@@ -102,16 +140,7 @@ final class LoadClient implements AutoCloseable {
         }
         LockSupport.unpark(dispatcher);
     }
-    synchronized void halt() {
-        if (completion.isDone() || stopped) return;
-        stopped = true; queue.clear();
-        if (player != null) player.interrupt();
-        finishInput();
-    }
-    synchronized void fail(String error) {
-        if (errors.isEmpty()) errors.add(error);
-        halt();
-    }
+
     private void dispatch() {
         long prepareDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         try {
@@ -168,18 +197,9 @@ final class LoadClient implements AutoCloseable {
             synchronized (this) { completion.complete(snapshot(true)); LockSupport.unpark(dispatcher); }
         }
     }
+
     private State snapshot(boolean done) {
         return new State(done, stopped, produced.get(), issued, finished, plan.count() - issued,
             queue.size(), active.size(), Map.copyOf(outcomes), List.copyOf(errors));
-    }
-    synchronized State state() { return completion.isDone() ? completion.join() : snapshot(false); }
-    State await(long timeoutMillis) throws Exception { return completion.get(timeoutMillis, TimeUnit.MILLISECONDS); }
-    @Override public void close() {
-        halt();
-        List<NativeClient.Call> calls;
-        synchronized (this) { calls = List.copyOf(active.values()); }
-        calls.forEach(NativeClient.Call::cancel);
-        try { completion.get(8, TimeUnit.SECONDS); }
-        catch (Exception error) { dispatcher.interrupt(); }
     }
 }

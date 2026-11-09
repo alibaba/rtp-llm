@@ -84,7 +84,7 @@ final class VitScheduler implements AutoCloseable {
                     requests.add(new ForwardBatch.Request(Long.toString(++sequence),rows,0,rows,0,0,50,
                         List.of(new ForwardBatch.Image(image.key(),image.width(),image.height(),3))));
                 }
-                var work=new ForwardBatch(Long.toString(++sequence),List.of(new ForwardBatch.Partition(0,requests)));
+                var work=new ForwardBatch(Long.toString(++sequence),requests);
                 var sample=config.compute().plan(Role.vit,config.id(),work);
                 var result=compute.submit(sample).completion().toCompletableFuture().get();
                 boolean completedForward=result.state()==SimulatedCompute.State.COMPLETED;

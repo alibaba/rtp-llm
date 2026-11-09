@@ -6,7 +6,7 @@ import java.util.*;
  * Immutable semantic input, cache-only media identity and model-owned cache key namespace.
  */
 public final class CacheSequence {
-    private final int blockSize;
+    private final int blockSize, hashBlockSize, keyStride;
 
     private final List<Integer> tokens;
     private final List<Span> spans;
@@ -18,7 +18,11 @@ public final class CacheSequence {
     public CacheSequence(int blockSize, List<Integer> tokens, List<Span> spans) { this(blockSize, tokens, spans, 0); }
 
     public CacheSequence(int blockSize, List<Integer> tokens, List<Span> spans, long seed) {
-        if (blockSize < 1) throw new IllegalArgumentException("Invalid cache block size");
+        this(blockSize,tokens,spans,seed,1);
+    }
+
+    public CacheSequence(int blockSize, List<Integer> tokens, List<Span> spans, long seed, int keyStride) {
+        if (blockSize < 1 || keyStride < 1) throw new IllegalArgumentException("Invalid cache block size");
         tokens = List.copyOf(tokens); spans = List.copyOf(spans);
         long previous = 0;
         for (var span : spans) {
@@ -27,7 +31,8 @@ public final class CacheSequence {
                 throw new IllegalArgumentException("Invalid multimodal cache span");
             previous = end;
         }
-        this.blockSize = blockSize; this.tokens = tokens; this.spans = spans; this.seed = seed;
+        this.hashBlockSize=blockSize; this.keyStride=keyStride;
+        this.blockSize = Math.multiplyExact(blockSize,keyStride); this.tokens = tokens; this.spans = spans; this.seed = seed;
         promptKeys = appendKeys(List.of(), 0, 0);
     }
 
@@ -49,36 +54,41 @@ public final class CacheSequence {
     }
 
     @Override public boolean equals(Object other) {
-        return other instanceof CacheSequence sequence && blockSize == sequence.blockSize && seed == sequence.seed
+        return other instanceof CacheSequence sequence && hashBlockSize == sequence.hashBlockSize && keyStride == sequence.keyStride && seed == sequence.seed
             && tokens.equals(sequence.tokens) && spans.equals(sequence.spans);
     }
 
-    @Override public int hashCode() { return Objects.hash(blockSize, tokens, spans, seed); }
+    @Override public int hashCode() { return Objects.hash(hashBlockSize, keyStride, tokens, spans, seed); }
 
     @Override public String toString() {
-        return "CacheSequence[blockSize=" + blockSize + ", tokens=" + tokens + ", spans=" + spans + ", seed=" + seed + "]";
+        return "CacheSequence[blockSize=" + blockSize + ", hashBlockSize=" + hashBlockSize + ", keyStride=" + keyStride + ", tokens=" + tokens + ", spans=" + spans + ", seed=" + seed + "]";
     }
 
     private List<Long> appendKeys(List<Long> prefix, int computedOutputTokens, int outputToken) {
         int length = Math.addExact(tokens.size(), computedOutputTokens);
+        int completeTokens = length - length % blockSize;
+        int prefixTokens = prefix.size() * blockSize;
+        if (completeTokens == prefixTokens) return prefix;
+
         var keys = new ArrayList<>(prefix);
         long hash = prefix.isEmpty() ? seed : prefix.getLast();
         int spanIndex = 0;
-        for (int start = prefix.size() * blockSize; (long) start + blockSize <= length; start += blockSize) {
-            for (int i = start; i < start + blockSize; i++)
+        // Hash at physical block boundaries and retain only complete logical block keys.
+        for (int start = prefixTokens; start < completeTokens; start += hashBlockSize) {
+            for (int i = start; i < start + hashBlockSize; i++)
                 hash = roll(hash, i < tokens.size() ? tokens.get(i) : outputToken);
             while (spanIndex < spans.size() && spans.get(spanIndex).offset() + spans.get(spanIndex).rowHashes().size() <= start)
                 spanIndex++;
-            for (int j = spanIndex; j < spans.size() && spans.get(j).offset() < start + blockSize; j++) {
+            for (int j = spanIndex; j < spans.size() && spans.get(j).offset() < start + hashBlockSize; j++) {
                 var span = spans.get(j);
                 int begin = Math.max(start, span.offset());
-                int end = Math.min(start + blockSize, span.offset() + span.rowHashes().size());
+                int end = Math.min(start + hashBlockSize, span.offset() + span.rowHashes().size());
                 if (begin >= end) continue;
                 for (int value : new int[]{-42, begin - start, span.rowHashes().size(), begin - span.offset(), end - begin})
                     hash = roll(hash, value);
                 for (int i = begin; i < end; i++) hash = roll(hash, span.rowHashes().get(i - span.offset()));
             }
-            keys.add(hash);
+            if ((start + hashBlockSize) % blockSize == 0) keys.add(hash);
         }
         return List.copyOf(keys);
     }

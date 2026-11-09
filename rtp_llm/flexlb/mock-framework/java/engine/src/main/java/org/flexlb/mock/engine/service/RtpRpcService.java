@@ -139,8 +139,8 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             long collected = System.nanoTime();
             var result = WorkerStatusPB.newBuilder().setRole("RoleType." + role)
                 .setRoleType(RoleTypePB.valueOf("ROLE_TYPE_" + role)).setAlive(true).setKvCacheGroupMode(KvCacheGroupModePB.KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY)
-                .setBlockSize(config.blockSize()).setBlockHashLookaheadTokens(0).setCacheMatchRollbackBlocks(0)
-                .setDpSize(config.dpSize()).setDpRank(0).setTpSize(config.tpSize()).setPrecision("FP16")
+                .setDpSize(1).setDpRank(0).setTpSize(config.cacheKeyStride()).setPrecision("FP16")
+                .setBlockSize(config.cacheBlockSize()).setBlockHashLookaheadTokens(0).setCacheMatchRollbackBlocks(0)
                 .setStatusVersion(version).setMaxSeqLen(config.maxSeqLen()).setMaxBatchTokensSize(config.maxBatchTokens())
                 .setTotalKvCache(tokens(snapshot.totalBlocks())).setAvailableKvCache(tokens(snapshot.availableBlocks()))
                 .addAllRunningTaskInfo(tasks.tasks().stream().map(RpcMessages::task).toList())
@@ -156,7 +156,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             // Real measures cache collection only, before protobuf construction.
             long collected = System.nanoTime();
             var result = CacheStatusPB.newBuilder().setTotalKvCache(tokens(snapshot.totalBlocks()))
-                .setAvailableKvCache(tokens(snapshot.availableBlocks())).setBlockSize(config.blockSize()).setVersion(snapshot.version());
+                .setAvailableKvCache(tokens(snapshot.availableBlocks())).setBlockSize(config.cacheBlockSize()).setVersion(snapshot.version());
             for (long key : snapshot.keys()) result.putCacheKeys(key, true);
             return new StatusResult<>(result.build(), collected);
         });
@@ -174,10 +174,6 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             if (completed.compareAndSet(false, true))
                 rpcMetrics.observe("rtp_llm_rpc_onflight_request", onflightRequests.getAndDecrement());
         };
-    }
-
-    private void recordCancellation() {
-        rpcMetrics.increment("rtp_llm_rpc_cancel_qps");
     }
 
     private void recordCancellation() {
@@ -203,7 +199,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         } else { observer.onNext(value); observer.onCompleted(); }
     }
 
-    private long tokens(int blocks) { return (long) blocks * config.blockSize(); }
+    private long tokens(int blocks) { return (long) blocks * config.cacheBlockSize(); }
 
     private <T> void reply(StreamObserver<T> observer, Supplier<T> read) {
         if (closed) { observer.onError(Status.UNAVAILABLE.withDescription("RTP node is closed").asRuntimeException()); return; }
@@ -217,18 +213,20 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     /**
      * Supplies the Engine settings used when exposing native RPC status and request admission.
      */
-    public record Config(String id, Role role, int blockSize, int tpSize, int dpSize, int maxSeqLen,
-                         int maxBatchTokens, ComputeModel compute, int imageToken, long cacheKeySeed) {
+    public record Config(String id, Role role, int blockSize, int maxSeqLen,
+                         int maxBatchTokens, ComputeModel compute, int imageToken, long cacheKeySeed, int cacheKeyStride) {
         public Config {
             if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
-                    || blockSize < 1 || tpSize < 1 || dpSize < 1 || maxSeqLen < 1 || maxBatchTokens < 0)
+                    || blockSize < 1 || cacheKeyStride < 1 || maxSeqLen < 1 || maxBatchTokens < 0)
                 throw new IllegalArgumentException("Invalid RTP endpoint configuration");
             Objects.requireNonNull(compute);
         }
 
+        public int cacheBlockSize() { return Math.multiplyExact(blockSize,cacheKeyStride); }
+
         public static Config from(RtpConfig config) {
-            return new Config(config.id(), config.role(), config.blockSize(), config.tpSize(), config.dpSize(),
-                config.maxSeqLen(), config.maxBatchTokens(), config.compute(), config.imageToken(), config.cacheKeySeed());
+            return new Config(config.id(), config.role(), config.blockSize(), config.maxSeqLen(),
+                config.maxBatchTokens(), config.compute(), config.imageToken(), config.cacheKeySeed(), config.cpSize());
         }
     }
 

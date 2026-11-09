@@ -30,17 +30,25 @@ class NativeVisionTest {
     @TempDir Path directory;
 
     @Test void nativeSingleAndMasterBatchRequestsTraverseVPD() throws Exception {
+        var prefillConfig = config("prefill");
+        ((com.fasterxml.jackson.databind.node.ObjectNode) prefillConfig.path("component").path("config"))
+            .put("seq_size_per_block", 1).put("prefill_cp_size", 4);
         try (var v = VitNode.start(VitConfig.load(config("vit")), 0, 0);
-             var p = LLMMockEngine.start(RtpConfig.load(config("prefill")));
+             var p = LLMMockEngine.start(RtpConfig.load(prefillConfig));
              var d = LLMMockEngine.start(RtpConfig.load(config("decode")))) {
             var routes = List.of(server("vit", v.endpoints()), server("prefill", p.endpoints()), server("decode", d.endpoints()));
             var stages=new AtomicInteger();var epoch=new AtomicInteger(1);var rejectedPin=new AtomicBoolean();var pChannel=ManagedChannelBuilder.forTarget(p.rpcAddress()).usePlaintext().build();
+            var routeKeys = new ConcurrentHashMap<Long, List<Long>>();
             var master=NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1",0)).addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
                 @Override public void schedule(FlexlbScheduleRequestPB request,StreamObserver<FlexlbScheduleResponsePB> response) {
                     try {
                         if(request.getVitRouteOnly()) { stages.incrementAndGet();response.onNext(FlexlbScheduleResponsePB.newBuilder().setSuccess(true).setCode(200).addServerStatus(routes.get(0).toBuilder().setWorkerGeneration(epoch.get())).build()); }
                         else {
                             assertTrue(request.hasSelectedVit());assertEquals(epoch.get(),request.getSelectedVit().getWorkerGeneration());stages.incrementAndGet();
+                            assertEquals(4, request.getCacheKeyBlockSize());
+                            assertFalse(request.getBlockCacheKeysList().isEmpty());
+                            var previous = routeKeys.putIfAbsent(request.getRequestId(), request.getBlockCacheKeysList());
+                            if (previous != null) assertEquals(previous, request.getBlockCacheKeysList());
                             if(request.getRequestId()==1 && rejectedPin.compareAndSet(false,true)) {
                                 epoch.incrementAndGet();response.onNext(FlexlbScheduleResponsePB.newBuilder().setSuccess(false).setCode(8408).build());response.onCompleted();return;
                             }
@@ -59,15 +67,19 @@ class NativeVisionTest {
                     } catch(Exception error) { response.onError(Status.INTERNAL.withCause(error).asRuntimeException()); }
                 }
             }).build().start();
-            try(var client=new NativeClient(() -> List.of("127.0.0.1:"+master.getPort()), event -> {}, 1000)) {
+            try(var client=new NativeClient(() -> List.of("127.0.0.1:"+master.getPort()), event -> {}, 1000, 0L, 4)) {
                 for(long id:List.of(1L,2L,3L)) {
                     var input=GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(id == 3 ? List.of(10,1000) : List.of(10,1000,20))
                         .addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("same-image")
                             .setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(56).setHeight(28)))
-                        .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(3).setIgnoreEos(true).setReturnIncremental(true).setCanUsePdSeparation(true)).build();
-                    var request=FlexlbScheduleRequestPB.newBuilder().setRequestId(id).setSeqLen(input.getTokenIdsCount()).setMaxNewTokens(3).setGenerateInput(input.toByteString()).build();
+                        .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(3).setIgnoreEos(true).setReturnIncremental(true).setCanUsePdSeparation(true).setReuseCache(true)).build();
+                    var request=FlexlbScheduleRequestPB.newBuilder().setRequestId(id).setSeqLen(input.getTokenIdsCount()).setMaxNewTokens(3).setCacheKeyBlockSize(1).setGenerateInput(input.toByteString()).build();
                     var result=client.send(request,Duration.ofSeconds(8)).completion().toCompletableFuture().get(10,TimeUnit.SECONDS);
                     assertEquals(NativeClient.Outcome.success,result.outcome(),result.toString());assertEquals(3,result.outputTokens());
+                    var cache = RpcServiceGrpc.newBlockingStub(pChannel).getCacheStatus(CacheVersionPB.newBuilder()
+                        .setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
+                    assertEquals(4, cache.getBlockSize());
+                    assertTrue(cache.getCacheKeysMap().keySet().containsAll(routeKeys.get(id)));
                 }
                 assertEquals(8,stages.get());
             } finally { master.shutdownNow().awaitTermination(2,TimeUnit.SECONDS);pChannel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }

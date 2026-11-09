@@ -157,7 +157,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             items.add(new ForwardBatch.Request(stream.input.identity(), stream.input.tokens(), stream.reused,
                 prefill() ? 1 : stream.input.maxNewTokens(), member.step().request().generated(), tokens, stream.input.priority(), List.of()));
         }
-        var batch = new ForwardBatch(config.id() + "/" + ++batchSequence, List.of(new ForwardBatch.Partition(0, items)));
+        var batch = new ForwardBatch(config.id() + "/" + ++batchSequence, items);
         executing = new Work(new Batch(List.copyOf(members), scheduleStarted, System.nanoTime(), prepareStarted), batch);
         metrics.computeStarted();
         metrics.batchPrepared(System.nanoTime() - prepareStarted);
@@ -403,8 +403,8 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         boolean reuse = canReuseLocalKv(stream);
         var keys = stream.input.keys();
         if (prefill())
-            metrics.recordPrefillCacheKeys(keys, stream.input.tokens(), config.blockSize());
-        int matched = Math.min(keys.size(), (stream.input.tokens() - 1) / config.blockSize());
+            metrics.recordPrefillCacheKeys(keys, stream.input.tokens(), config.cacheBlockSize());
+        int matched = Math.min(keys.size(), (stream.input.tokens() - 1) / config.cacheBlockSize());
         stream.cacheMatchRequested = reuse && matched > 0;
         return completePreparation(stream,
             cache.prepare(stream.input.tokens(), reuse ? keys.subList(0, matched) : List.of()));
@@ -439,7 +439,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         metrics.cacheLookup(stream.input.tokens(), stream.reused);
         if (stream.cacheMatchRequested) metrics.cacheMatched(ready.matchNanos());
         if (config.reuseCache() && stream.input.reuse())
-            metrics.prepared((long) (stream.input.tokens() / config.blockSize()) * config.blockSize(),
+            metrics.prepared((long) (stream.input.tokens() / config.cacheBlockSize()) * config.cacheBlockSize(),
                 stream.reused - stream.remoteReused, System.nanoTime() - stream.preparationStarted);
         if (!prefill()) {
             stream.phase = WAITING_LOAD;
@@ -544,9 +544,9 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         synchronized (lock) {
             var counts = queues();
             var kv = cache.snapshot(0, false);
-            long block = config.blockSize();
+            long block = config.cacheBlockSize();
             return new RtpMetrics.State(counts.waiting(), counts.running(), counts.loading(), counts.ready(), kv.totalBlocks() * block,
-                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, config.blockSize());
+                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, config.cacheBlockSize());
         }
     }
 

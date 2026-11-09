@@ -92,7 +92,7 @@ ENV 路径始终使用入口传入的环境，包括模型下载和 DSV4.1 names
 - `seq_size_per_block` 缺省或为 0 时使用普通设备路径的 64。Mock 不根据宿主硬件推断 ROCm/XPU；需要这些布局时显式设置原生参数。
 - `max_seq_len` 缺省或为 0 时使用 8192；Mock 不从 checkpoint 推导长度，模拟长上下文时显式配置。
 - CP 开启时，`cp_force_single_prefill` 默认 true；设为 false 才允许同轮接纳多个 Prefill。uncached token 配额按 real 的 `2 × CP size` 对齐计数。
-- `dp_size` 一致用于计算参数、KVCM 元信息及 WorkerStatus；当前实例表示 rank 0，不创建或模拟其他 DP rank 的独立执行。
+- WorkerStatus 和 KVCM 注册保留单 DP 的协议元信息。DP size 固定为 1，WorkerStatus 的 rank 固定为 0，TP size 在 P 上取 CP size，在 D 上取 1。
 - ViT 将 `vit_concurrency` 归一为至少 1，`vit_max_queue_size` 归一为至少 0；不额外限制一小时超时上限。
 
 容量只保留两个入口：`test_block_num` 必填，表示包含 null block 的真实 device 块数（至少 2）；可选 `mock.cache.total.blocks` 表示统一缓存保留容量，不含 null block，默认 `test_block_num - 1` 且不能更小。ENV 分别为 `TEST_BLOCK_NUM`、`MOCK_CACHE_TOTAL_BLOCKS`。`reserve_block_ratio` 只按 device 容量计算。
@@ -100,3 +100,18 @@ ENV 路径始终使用入口传入的环境，包括模型下载和 DSV4.1 names
 例如 `TEST_BLOCK_NUM=1025 MOCK_CACHE_TOTAL_BLOCKS=4096` 表示 device 最多容纳 1024 个不同的活动 KV block，统一索引最多保留 4096 个 block。缓存命中同样需要 device 额度，初次容量不足等待重试，Decode 增长不足失败；不模拟 Host/device 搬运耗时。
 
 `device_blocks`、`reserve_blocks` 仅为派生输出。旧 `mock.cache.memory.blocks`、`capacity.*` 和 `device_eviction_policy` 不再接受，LRU 固定；不要为扩大统一池配置 `enable_memory_cache`。`memory_cache_size_mb` 及真实 GPU 显存预算不用于推算 block 数。Mock Case 应只保留实际消费的参数。
+
+### 真实 Frontend 的 CP 缓存布局
+
+Whale 的真实 Frontend 按原生配置开启分片。对于基础块为 128 的 CP4 布局，Mock P 的缓存配置如下。
+
+```text
+SEQ_SIZE_PER_BLOCK=128
+PREFILL_CP_SIZE=4
+```
+
+Mock P 上报 K4、K8 等 canonical keys，CacheStatus 的逻辑块为 512。哈希和 KVCM 注册的基础块大小为 128。Frontend 与 Mock P 使用相同的 seed、基础块和抽样步长。
+
+迁移旧 Mock 部署时，直接填写所需的 `PREFILL_CP_SIZE`。旧的 `TP_SIZE`、`DP_SIZE`、`CP_ROTATE_METHOD` 和 `PREFILL_CP_KV_CACHE_SHARDED` 已退出 Mock 配置。原来只配置了 CP size 的部署，现在会同时应用对应的 Prefill 准入规则。
+
+D 的本地 FULL KV 按基础块管理。P→D 传完整语义输入和媒体身份，不增加 CP 协议字段。本地 Client/Case 可保持不分片，无需把 CP 写进数据集。具体范围见 [Prefill CP](component-reference.md#prefill-cp)。

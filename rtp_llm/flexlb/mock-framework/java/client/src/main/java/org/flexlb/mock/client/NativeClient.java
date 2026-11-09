@@ -13,44 +13,52 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.flexlb.mock.protocol.*;
 
-/** One native Schedule -> Fetch/Generate exchange. Frontend-style primary/backup scheduling; no Engine fallback. */
+/**
+ * One native Schedule -> Fetch/Generate exchange. Frontend-style primary/backup scheduling; no Engine fallback.
+ */
 public final class NativeClient implements AutoCloseable {
-    public enum Outcome { success, error, cancelled, timeout }
-    public record Result(long requestId, Instant sentAt, Long ttftNanos, long elapsedNanos,
-                         int outputTokens, Outcome outcome, String grpcCode, long errorCode, String message, Long tpotNanos) {}
     private final java.util.function.Supplier<List<String>> masters;
     private final java.util.function.Consumer<ObjectNode> events;
     private final VitClient vision;
+
     private final long cacheKeySeed;
+    private final int prefillCpSize;
+
     private final Map<String, ManagedChannel> channels = new HashMap<>();
     private final Map<Long, Call> active = new HashMap<>();
     private final ScheduledThreadPoolExecutor timers = new ScheduledThreadPoolExecutor(1,
         Thread.ofPlatform().daemon().name("mock-client-deadline").factory());
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
+
     private boolean closed, closing;
 
     public NativeClient(String master) {
         this(() -> List.of(master));
         if (master == null || master.isBlank()) throw new IllegalArgumentException("Master gRPC address required");
     }
+
     public NativeClient(java.util.function.Supplier<List<String>> masters) {
         this(masters, event -> {});
     }
+
     NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events) {
         this(masters, events, MediaInput.IMAGE_TOKEN);
     }
+
     NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events, int imageToken) {
         this(masters, events, imageToken, 0L);
     }
+
     NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events, int imageToken, long seed) {
+        this(masters, events, imageToken, seed, 1);
+    }
+
+    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events, int imageToken, long seed, int prefillCpSize) {
         cacheKeySeed = seed;
+        this.prefillCpSize = prefillCpSize;
         vision = new VitClient(imageToken);
         this.masters = Objects.requireNonNull(masters); this.events = Objects.requireNonNull(events);
         timers.setRemoveOnCancelPolicy(true);
-    }
-    private synchronized ManagedChannel channel(String target) {
-        if (closed) throw new IllegalStateException("Client closed");
-        return channels.computeIfAbsent(target, t -> ManagedChannelBuilder.forTarget(t).usePlaintext().build());
     }
 
     public Call send(FlexlbScheduleRequestPB request, Duration timeout) {
@@ -66,14 +74,19 @@ public final class NativeClient implements AutoCloseable {
                 || input.getGenerateConfig().getNumBeams() > 1 || input.getGenerateConfig().getNumReturnSequences() > 1)
             throw new IllegalArgumentException("Client currently requires matching single-sequence request metadata");
         if (input.getGenerateConfig().getTimeoutMs() > 0) budget = Math.min(budget, TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs()));
-        if (input.getMultimodalInputsCount() == 0 && request.getCacheKeyBlockSize() > 0)
-            request = request.toBuilder().clearBlockCacheKeys().addAllBlockCacheKeys(
-                MediaInput.sequence(MediaInput.text(input), Math.toIntExact(request.getCacheKeyBlockSize()), cacheKeySeed).keys()).build();
+        long baseBlockSize = request.getCacheKeyBlockSize();
+        if (baseBlockSize > 0) {
+            var routed = request.toBuilder().setCacheKeyBlockSize(Math.multiplyExact(Math.toIntExact(baseBlockSize), prefillCpSize));
+            if (input.getMultimodalInputsCount() == 0) {
+                routed.clearBlockCacheKeys().addAllBlockCacheKeys(routingKeys(MediaInput.text(input), baseBlockSize));
+            }
+            request = routed.build();
+        }
         Call call;
         synchronized (this) {
             if (closed || closing) throw new IllegalStateException("Client closed");
             if (active.containsKey(request.getRequestId())) throw new IllegalArgumentException("Active request_id already exists");
-            call = new Call(request, input, budget);
+            call = new Call(request, input, budget, baseBlockSize);
             events.accept(call.event("ISSUED").put("epoch_ms", Long.toString(call.sentAt.toEpochMilli())));
             active.put(request.getRequestId(), call);
         }
@@ -87,32 +100,89 @@ public final class NativeClient implements AutoCloseable {
         return call;
     }
 
+    @Override public void close() {
+        List<Call> calls;
+        synchronized (this) { if (closed || closing) return; closing = true; calls = List.copyOf(active.values()); }
+        for (var call : calls) call.cancel();
+        timers.shutdownNow(); vision.close(); workers.shutdown();
+        try { workers.awaitTermination(2, TimeUnit.SECONDS); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+        workers.shutdownNow();
+        List<ManagedChannel> owned;
+        synchronized (this) { closed = true; owned = List.copyOf(channels.values()); }
+        owned.forEach(ManagedChannel::shutdownNow);
+        for (var channel : owned) try { channel.awaitTermination(3, TimeUnit.SECONDS); }
+        catch (InterruptedException error) { Thread.currentThread().interrupt(); break; }
+    }
+
+    private synchronized ManagedChannel channel(String target) {
+        if (closed) throw new IllegalStateException("Client closed");
+        return channels.computeIfAbsent(target, t -> ManagedChannelBuilder.forTarget(t).usePlaintext().build());
+    }
+
+    private List<Long> routingKeys(MediaInput.Prepared input, long baseBlockSize) {
+        if (baseBlockSize <= 0) return List.of();
+        return MediaInput.sequence(input, Math.toIntExact(baseBlockSize), cacheKeySeed, prefillCpSize).keys();
+    }
+
+    private static String message(Status status) {
+        String text = status.getDescription() == null ? "" : status.getDescription();
+        return text.length() <= 4096 ? text : text.substring(0, 4096) + " [truncated]";
+    }
+
+    private static String address(FlexlbServerStatusPB server) {
+        if (server.getServerIp().isBlank() || server.getGrpcPort() <= 0 || server.getGrpcPort() > 65535)
+            throw Status.DATA_LOSS.withDescription("Invalid native route address").asRuntimeException();
+        return (server.getServerIp().contains(":") ? "[" + server.getServerIp() + "]" : server.getServerIp()) + ":" + server.getGrpcPort();
+    }
+
+    public enum Outcome { success, error, cancelled, timeout }
+
+    public record Result(long requestId, Instant sentAt, Long ttftNanos, long elapsedNanos,
+                         int outputTokens, Outcome outcome, String grpcCode, long errorCode, String message, Long tpotNanos) {}
+
+    /**
+     * Tracks one generation from Master routing and optional ViT preparation through streaming completion.
+     */
     public final class Call {
         private FlexlbScheduleRequestPB request;
         private GenerateInputPB input;
+
         private final List<String> routes;
+
         private String scheduledMaster;
+
         private boolean visionPrepared, visionRerouted;
+
         private final Context.CancellableContext context;
         private final CompletableFuture<Result> result = new CompletableFuture<>();
         private final CompletableFuture<Long> firstToken = new CompletableFuture<>();
         private final Instant sentAt = Instant.now();
+
         private final long started = System.nanoTime();
+
         private Long ttft;
+
         private long lastTokenNanos;
         private long batchId;
         private int outputTokens, scheduleAttempt;
         private boolean pendingSchedule;
         private boolean terminal, finalFrame, scheduleStarted, routeRejected;
-        private Call(FlexlbScheduleRequestPB request, GenerateInputPB input, long budget) {
+
+        private final long baseBlockSize;
+
+        private Call(FlexlbScheduleRequestPB request, GenerateInputPB input, long budget, long baseBlockSize) {
             this.request = request; this.input = input;
+            this.baseBlockSize = baseBlockSize;
             routes = List.copyOf(masters.get());
             if (routes.size() > 2 || new HashSet<>(routes).size() != routes.size() || routes.stream().anyMatch(String::isBlank))
                 throw new IllegalArgumentException("Expected distinct primary and optional backup Master");
             context = Context.ROOT.withDeadlineAfter(budget, TimeUnit.NANOSECONDS, timers);
         }
+
         public CompletionStage<Result> completion() { return result.minimalCompletionStage(); }
+
         public CompletionStage<Long> firstToken() { return firstToken.minimalCompletionStage(); }
+
         public void cancel() { finish(Status.CANCELLED.withDescription("Client cancelled request"), 0, Outcome.cancelled); }
 
         private ObjectNode event(String kind) {
@@ -121,7 +191,9 @@ public final class NativeClient implements AutoCloseable {
                 .put("epoch_ms", Long.toString(System.currentTimeMillis()))
                 .put("elapsed_nanos", Long.toString(System.nanoTime() - started));
         }
+
         private void emit(String kind) { events.accept(event(kind)); }
+
         private void scheduleResult(Status status, long code, Boolean responseSuccess) {
             if (!pendingSchedule) return;
             pendingSchedule = false;
@@ -130,6 +202,7 @@ public final class NativeClient implements AutoCloseable {
             if (responseSuccess != null) result.put("response_success", responseSuccess);
             events.accept(result);
         }
+
         private void schedule(int attempt) {
             if (routes.isEmpty()) { finish(Status.UNAVAILABLE.withDescription("No healthy Master"), 0, Outcome.error); return; }
             try {
@@ -180,6 +253,36 @@ public final class NativeClient implements AutoCloseable {
                 });
             } catch (RuntimeException error) { fail(error); }
         }
+
+        private synchronized void finish(Status status, long code, Outcome outcome) {
+            if (terminal) return;
+            terminal = true;
+            scheduleResult(status, code, null);
+            if (!firstToken.isDone()) firstToken.completeExceptionally(status.asRuntimeException());
+            context.cancel(null);
+            synchronized (NativeClient.this) { active.remove(request.getRequestId(), this); }
+            if (outcome != Outcome.success && scheduleStarted && !routeRejected) {
+                // Cancel against this request's last attempted Master, not a newer discovery snapshot.
+                try { workers.submit(() -> {
+                    try {
+                        FlexlbServiceGrpc.newBlockingStub(channel(scheduledMaster)).withDeadlineAfter(1, TimeUnit.SECONDS).cancel(
+                            FlexlbCancelRequestPB.newBuilder().setRequestId(request.getRequestId()).setBatchId(batchId)
+                                .setReason(outcome == Outcome.timeout ? CancelReasonPB.CANCEL_REASON_DEADLINE_EXCEEDED : CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED).build());
+                    } catch (RuntimeException failure) {
+                        System.getLogger(NativeClient.class.getName()).log(System.Logger.Level.WARNING,
+                            "Best-effort Master Cancel failed for request " + request.getRequestId() + ": " + Status.fromThrowable(failure).getCode());
+                    }
+                }); } catch (RejectedExecutionException closing) { /* Client shutdown owns the remaining channels. */ }
+            }
+            var ended = event("TERMINAL").put("outcome", outcome.name()).put("grpc_code", status.getCode().name())
+                .put("error_code", Long.toString(code)).put("message", message(status)).put("output_tokens", outputTokens);
+            if (ttft != null) ended.put("ttft_nanos", Long.toString(ttft));
+            events.accept(ended);
+            Long tpot = ttft != null && outputTokens > 1 ? (lastTokenNanos - ttft) / (outputTokens - 1) : null;
+            result.complete(new Result(request.getRequestId(), sentAt, ttft, ended.path("elapsed_nanos").asLong(), outputTokens,
+                outcome, status.getCode().name(), code, status.getDescription() == null ? "" : status.getDescription(), tpot));
+        }
+
         private void prepareVision(FlexlbScheduleResponsePB route) {
             try {
                 var targets = route.getServerStatusList().stream().filter(s -> s.getRole().equals("VIT")).toList();
@@ -198,14 +301,27 @@ public final class NativeClient implements AutoCloseable {
                             if (terminal) return;
                             visionPrepared = true;
                             request = request.toBuilder().setGenerateInput(media.toByteString()).setSeqLen(prepared.input().getTokenIdsCount())
-                                .setSelectedVit(selected).clearBlockCacheKeys().addAllBlockCacheKeys(
-                                    request.getCacheKeyBlockSize() > 0 ? MediaInput.sequence(prepared, Math.toIntExact(request.getCacheKeyBlockSize()), cacheKeySeed).keys() : java.util.List.of()).build();
+                                .setSelectedVit(selected).clearBlockCacheKeys()
+                                .addAllBlockCacheKeys(routingKeys(prepared, baseBlockSize)).build();
                             schedule(0);
                         }
                     } catch (RuntimeException error) { fail(error); }
                 }));
             } catch (RuntimeException error) { fail(error); }
         }
+
+        private void fail(Throwable error) {
+            long code = 0;
+            var trailers = Status.trailersFromThrowable(error);
+            if (trailers != null) {
+                var raw = trailers.get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER));
+                if (raw != null) try { code = ErrorDetailsPB.parseFrom(raw).getErrorCode(); }
+                catch (com.google.protobuf.InvalidProtocolBufferException malformed) { /* Preserve the transport status. */ }
+            }
+            var status = Status.fromThrowable(error);
+            finish(status, code, status.getCode() == Status.Code.DEADLINE_EXCEEDED ? Outcome.timeout : Outcome.error);
+        }
+
         private void consume(FlexlbScheduleResponsePB route) {
             try {
                 if (route.hasLifecycle() && route.getLifecycle().getRequestId() != request.getRequestId())
@@ -274,66 +390,5 @@ public final class NativeClient implements AutoCloseable {
                 }
             } catch (RuntimeException error) { fail(error); }
         }
-        private void fail(Throwable error) {
-            long code = 0;
-            var trailers = Status.trailersFromThrowable(error);
-            if (trailers != null) {
-                var raw = trailers.get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER));
-                if (raw != null) try { code = ErrorDetailsPB.parseFrom(raw).getErrorCode(); }
-                catch (com.google.protobuf.InvalidProtocolBufferException malformed) { /* Preserve the transport status. */ }
-            }
-            var status = Status.fromThrowable(error);
-            finish(status, code, status.getCode() == Status.Code.DEADLINE_EXCEEDED ? Outcome.timeout : Outcome.error);
-        }
-        private synchronized void finish(Status status, long code, Outcome outcome) {
-            if (terminal) return;
-            terminal = true;
-            scheduleResult(status, code, null);
-            if (!firstToken.isDone()) firstToken.completeExceptionally(status.asRuntimeException());
-            context.cancel(null);
-            synchronized (NativeClient.this) { active.remove(request.getRequestId(), this); }
-            if (outcome != Outcome.success && scheduleStarted && !routeRejected) {
-                // Cancel against this request's last attempted Master, not a newer discovery snapshot.
-                try { workers.submit(() -> {
-                    try {
-                        FlexlbServiceGrpc.newBlockingStub(channel(scheduledMaster)).withDeadlineAfter(1, TimeUnit.SECONDS).cancel(
-                            FlexlbCancelRequestPB.newBuilder().setRequestId(request.getRequestId()).setBatchId(batchId)
-                                .setReason(outcome == Outcome.timeout ? CancelReasonPB.CANCEL_REASON_DEADLINE_EXCEEDED : CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED).build());
-                    } catch (RuntimeException failure) {
-                        System.getLogger(NativeClient.class.getName()).log(System.Logger.Level.WARNING,
-                            "Best-effort Master Cancel failed for request " + request.getRequestId() + ": " + Status.fromThrowable(failure).getCode());
-                    }
-                }); } catch (RejectedExecutionException closing) { /* Client shutdown owns the remaining channels. */ }
-            }
-            var ended = event("TERMINAL").put("outcome", outcome.name()).put("grpc_code", status.getCode().name())
-                .put("error_code", Long.toString(code)).put("message", message(status)).put("output_tokens", outputTokens);
-            if (ttft != null) ended.put("ttft_nanos", Long.toString(ttft));
-            events.accept(ended);
-            Long tpot = ttft != null && outputTokens > 1 ? (lastTokenNanos - ttft) / (outputTokens - 1) : null;
-            result.complete(new Result(request.getRequestId(), sentAt, ttft, ended.path("elapsed_nanos").asLong(), outputTokens,
-                outcome, status.getCode().name(), code, status.getDescription() == null ? "" : status.getDescription(), tpot));
-        }
-    }
-    private static String message(Status status) {
-        String text = status.getDescription() == null ? "" : status.getDescription();
-        return text.length() <= 4096 ? text : text.substring(0, 4096) + " [truncated]";
-    }
-    private static String address(FlexlbServerStatusPB server) {
-        if (server.getServerIp().isBlank() || server.getGrpcPort() <= 0 || server.getGrpcPort() > 65535)
-            throw Status.DATA_LOSS.withDescription("Invalid native route address").asRuntimeException();
-        return (server.getServerIp().contains(":") ? "[" + server.getServerIp() + "]" : server.getServerIp()) + ":" + server.getGrpcPort();
-    }
-    @Override public void close() {
-        List<Call> calls;
-        synchronized (this) { if (closed || closing) return; closing = true; calls = List.copyOf(active.values()); }
-        for (var call : calls) call.cancel();
-        timers.shutdownNow(); vision.close(); workers.shutdown();
-        try { workers.awaitTermination(2, TimeUnit.SECONDS); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
-        workers.shutdownNow();
-        List<ManagedChannel> owned;
-        synchronized (this) { closed = true; owned = List.copyOf(channels.values()); }
-        owned.forEach(ManagedChannel::shutdownNow);
-        for (var channel : owned) try { channel.awaitTermination(3, TimeUnit.SECONDS); }
-        catch (InterruptedException error) { Thread.currentThread().interrupt(); break; }
     }
 }

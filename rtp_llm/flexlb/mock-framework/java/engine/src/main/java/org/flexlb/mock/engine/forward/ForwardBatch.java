@@ -2,19 +2,19 @@ package org.flexlb.mock.engine.forward;
 
 import java.util.*;
 
-/** Engine supplies the chosen batch and already-resolved cache hits. No cache or scheduling happens here. */
-public record ForwardBatch(String id, List<Partition> dps) {
+/**
+ * Engine supplies the chosen batch and already-resolved cache hits. No cache or scheduling happens here.
+ */
+public record ForwardBatch(String id, List<Request> requests) {
     public ForwardBatch {
-        nonblank(id); dps = List.copyOf(dps);
-        if (dps.isEmpty() || dps.stream().map(Partition::rank).distinct().count() != dps.size())
-            throw new IllegalArgumentException("Batch needs distinct DP ranks");
+        nonblank(id);
+        requests = List.copyOf(requests);
     }
-    public record Partition(int rank, List<Request> requests) {
-        public Partition {
-            if (rank < 0) throw new IllegalArgumentException("DP rank must be nonnegative");
-            requests = List.copyOf(requests);
-        }
+
+    private static void nonblank(String value) {
+        if (value == null || value.isBlank()) throw new IllegalArgumentException("Identity must be nonempty");
     }
+
     public record Request(String id, long inputTokens, long hitCacheTokens, long outputTokens,
                           long generatedTokens, long stepTokens, int priority, List<Image> images) {
         public Request {
@@ -28,15 +28,15 @@ public record ForwardBatch(String id, List<Partition> dps) {
         public long computeTokens() { return inputTokens - hitCacheTokens; }
         public long contextTokens() { return Math.addExact(inputTokens, generatedTokens); }
     }
-    /** Original image shape only; no patching, resizing or feature-token calculation. */
+
+    /**
+     * Original image shape only; no patching, resizing or feature-token calculation.
+     */
     public record Image(String id, int width, int height, int channels) {
         public Image {
             nonblank(id);
             if (width <= 0 || height <= 0 || channels <= 0) throw new IllegalArgumentException("Invalid image shape");
         }
         public long pixels() { return (long) width * height; }
-    }
-    private static void nonblank(String value) {
-        if (value == null || value.isBlank()) throw new IllegalArgumentException("Identity must be nonempty");
     }
 }

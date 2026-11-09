@@ -11,28 +11,40 @@ import java.util.concurrent.*;
 import org.flexlb.mock.protocol.ControlServer;
 import org.flexlb.mock.client.ClientProtocol.*;
 
-/** Each JVM executes locally; only client-0 coordinates the one current plan. */
+/**
+ * Each JVM executes locally; only client-0 coordinates the one current plan.
+ */
 public final class ClientNode implements ClientProtocol, AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
+
     private final String id;
+
     private final int imageToken;
     private final int blockSize;
+    private final int prefillCpSize;
     private final long cacheKeySeed;
+
     private final Path topology, directory;
     private final ClientMetrics metrics = new ClientMetrics();
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
     private final ControlServer api;
+
     private LoadClient worker;
+
     private long workerSequence, sequence, nextRequestId = 1;
+
     private Group group;
+
     private boolean collected = true;
     private volatile boolean closed;
 
     public ClientNode(String id, Path topology, Path directory) throws IOException {
-        this(id, topology, directory, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN, 0, 0L);
+        this(id, topology, directory, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN, 0, 0L, 1);
     }
-    private ClientNode(String id, Path topology, Path directory, int imageToken, int blockSize, long seed) throws IOException {
+
+    private ClientNode(String id, Path topology, Path directory, int imageToken, int blockSize, long seed, int prefillCpSize) throws IOException {
         this.imageToken = imageToken; this.blockSize = blockSize; this.cacheKeySeed = seed;
+        this.prefillCpSize = prefillCpSize;
         this.id = id; this.topology = topology; this.directory = directory;
         api = new ControlServer(new InetSocketAddress("127.0.0.1", 0)).route("client/start", Start.class, Ack.class, this::start)
             .route("client/stop", Empty.class, Summary.class, this::stop)
@@ -42,26 +54,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
             .route("worker/state", Sequence.class, State.class, this::state)
             .metrics(metrics::scrape).start();
     }
-    public String url() { return api.url(); }
-    private static void save(Path path, Object value) throws IOException {
-        Files.createDirectories(path.getParent());
-        Path temp = Files.createTempFile(path.getParent(), ".client-", ".json");
-        try {
-            JSON.writerWithDefaultPrettyPrinter().writeValue(temp.toFile(), value);
-            Files.move(temp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } finally { Files.deleteIfExists(temp); }
-    }
-    private JsonNode call(String url, String operation, Object args) throws Exception {
-        var body = Map.of("interface", operation, "args", args, "context", Map.of(
-            "run", "foreground", "query_time", Instant.now().toString(), "timeout_ms", 2000, "observation", Map.of()));
-        var request = HttpRequest.newBuilder(URI.create(url + "/invoke")).timeout(Duration.ofSeconds(3))
-            .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofByteArray(JSON.writeValueAsBytes(body))).build();
-        var response = http.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) throw new IOException(operation + " at " + url + ": HTTP " + response.statusCode());
-        var result = JSON.readTree(response.body());
-        if (!result.isObject() || result.size() != 1 || !result.has("result")) throw new IOException("Invalid Client response");
-        return result.get("result");
-    }
+
     @Override public synchronized Ack prepare(Shard args) throws Exception {
         if (closed || args.sequence() <= workerSequence || worker != null && !worker.state().done())
             throw new IllegalStateException("Previous Client playback has not ended or stale prepare");
@@ -69,16 +62,15 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         Files.createDirectories(playback.getParent()); Files.createDirectory(playback);
         save(playback.resolve("plan.json"), args);
         if (worker != null) worker.close();
-        worker = new LoadClient(args, metrics, topology, playback.resolve("requests.jsonl"), id, imageToken, blockSize, cacheKeySeed);
+        worker = new LoadClient(args, metrics, topology, playback.resolve("requests.jsonl"), id, imageToken, blockSize, cacheKeySeed, prefillCpSize);
         workerSequence = args.sequence();
         return new Ack(true);
     }
-    private synchronized LoadClient worker(long expected) {
-        if (worker == null || expected != workerSequence) throw new IllegalStateException("Stale/unknown worker command");
-        return worker;
-    }
+
     @Override public Ack begin(Begin args) { worker(args.sequence()).begin(args.start_epoch_ms()); return new Ack(true); }
+
     @Override public Ack halt(Sequence args) { worker(args.sequence()).halt(); return new Ack(true); }
+
     @Override public State state(Sequence args) {
         var result = worker(args.sequence()).state();
         if (result.done()) try { save(directory.resolve("playback/" + args.sequence() + "/result.json"), result); }
@@ -132,6 +124,9 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
             throw error;
         }
     }
+
+    public String url() { return api.url(); }
+
     @Override public Summary stop(Empty args) throws Exception {
         Group current;
         synchronized (this) {
@@ -144,18 +139,103 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         synchronized (this) { collected = true; }
         return result;
     }
+
+    @Override public void close() {
+        LoadClient owned;
+        synchronized (this) { if (closed) return; closed = true; owned = worker; if (group != null) group.stop = true; }
+        if (owned != null) owned.close();
+        api.close(); http.shutdownNow();
+    }
+
+    public static void main(String[] args) throws Exception {
+        if (args.length != 0) throw new IllegalArgumentException("Use runner environment");
+        var config = JSON.readTree(Path.of(required("MOCK_CONFIG_FILE")).toFile());
+        var settings = config.path("component").path("config");
+        settings.fieldNames().forEachRemaining(name -> {
+            if (!java.util.Set.of("image_token_id", "cache_key_hash_seed", "seq_size_per_block", "prefill_cp_size").contains(name)) throw new IllegalArgumentException("Unknown Client setting: " + name);
+        });
+        var configuredImageToken = settings.get("image_token_id");
+        if (configuredImageToken != null && (!configuredImageToken.isIntegralNumber()
+                || !configuredImageToken.canConvertToInt() || configuredImageToken.intValue() < 0))
+            throw new IllegalArgumentException("Client image_token_id must be nonnegative int32");
+        int imageToken = settings.path("image_token_id").asInt(org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN);
+        int blockSize = settings.path("seq_size_per_block").asInt(0);
+        if (settings.has("seq_size_per_block") && (!settings.path("seq_size_per_block").isIntegralNumber() || !settings.path("seq_size_per_block").canConvertToInt() || blockSize < 1))
+            throw new IllegalArgumentException("Client seq_size_per_block must be positive int32");
+        var configuredCp = settings.get("prefill_cp_size");
+        if (configuredCp != null && (!configuredCp.isIntegralNumber() || !configuredCp.canConvertToInt() || configuredCp.intValue() < 0))
+            throw new IllegalArgumentException("Client prefill_cp_size must be nonnegative int32");
+        int prefillCpSize = Math.max(1, settings.path("prefill_cp_size").asInt(1));
+        if (prefillCpSize > 1 && blockSize == 0)
+            throw new IllegalArgumentException("Client prefill_cp_size requires seq_size_per_block");
+        int routeBlockSize = Math.multiplyExact(blockSize, prefillCpSize);
+        long seed = org.flexlb.mock.protocol.ConfigInput.signedLong(settings, "cache_key_hash_seed", 0);
+        var directory = Path.of(required("MOCK_OUTPUT_DIR"));
+        try (var node = new ClientNode(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory, imageToken, blockSize, seed, prefillCpSize)) {
+            var hook = new Thread(node::close, "client-shutdown"); Runtime.getRuntime().addShutdownHook(hook);
+            var effective = JSON.createObjectNode().put("id", node.id).put("seq_size_per_block", blockSize).put("cache_key_hash_seed", seed)
+                .put("prefill_cp_size", prefillCpSize).put("cache_key_block_size", routeBlockSize);
+            if (configuredImageToken != null) effective.put("image_token_id", imageToken);
+            save(directory.resolve("effective-config.json"), effective);
+            save(directory.resolve("endpoints.json"), Map.of("id", node.id, "role", "client", "control", node.url(),
+                "rpc", URI.create(node.url()).getAuthority(), "metrics", node.url() + "/metrics"));
+            node.api.publishReady(Path.of(required("MOCK_READY_FILE")));
+            try { new CountDownLatch(1).await(); }
+            finally { try { Runtime.getRuntime().removeShutdownHook(hook); } catch (IllegalStateException ignored) { } }
+        }
+    }
+
+    private static void save(Path path, Object value) throws IOException {
+        Files.createDirectories(path.getParent());
+        Path temp = Files.createTempFile(path.getParent(), ".client-", ".json");
+        try {
+            JSON.writerWithDefaultPrettyPrinter().writeValue(temp.toFile(), value);
+            Files.move(temp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } finally { Files.deleteIfExists(temp); }
+    }
+
+    private JsonNode call(String url, String operation, Object args) throws Exception {
+        var body = Map.of("interface", operation, "args", args, "context", Map.of(
+            "run", "foreground", "query_time", Instant.now().toString(), "timeout_ms", 2000, "observation", Map.of()));
+        var request = HttpRequest.newBuilder(URI.create(url + "/invoke")).timeout(Duration.ofSeconds(3))
+            .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofByteArray(JSON.writeValueAsBytes(body))).build();
+        var response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) throw new IOException(operation + " at " + url + ": HTTP " + response.statusCode());
+        var result = JSON.readTree(response.body());
+        if (!result.isObject() || result.size() != 1 || !result.has("result")) throw new IOException("Invalid Client response");
+        return result.get("result");
+    }
+
+    private synchronized LoadClient worker(long expected) {
+        if (worker == null || expected != workerSequence) throw new IllegalStateException("Stale/unknown worker command");
+        return worker;
+    }
+
+    private static String required(String name) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) throw new IllegalArgumentException("Missing " + name);
+        return value;
+    }
+
+    /**
+     * Coordinates one playback plan across the Client workers and collects their results.
+     */
     private final class Group {
         final long number, firstId;
+
         final List<String> peers;
         final Start config;
         final CompletableFuture<Summary> finished = new CompletableFuture<>();
         final List<String> errors = new ArrayList<>();
+
         volatile boolean stop;
+
         Thread thread;
+
         Group(long number, List<String> peers, Start config, long firstId) {
             this.number = number; this.peers = peers; this.config = config; this.firstId = firstId;
         }
-        void error(String error) { if (errors.isEmpty()) errors.add(error); }
+
         void supervise() {
             var states = new LinkedHashMap<String, State>();
             var unavailable = new HashSet<String>();
@@ -201,45 +281,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
             }
             finished.complete(result);
         }
-    }
-    @Override public void close() {
-        LoadClient owned;
-        synchronized (this) { if (closed) return; closed = true; owned = worker; if (group != null) group.stop = true; }
-        if (owned != null) owned.close();
-        api.close(); http.shutdownNow();
-    }
-    public static void main(String[] args) throws Exception {
-        if (args.length != 0) throw new IllegalArgumentException("Use runner environment");
-        var config = JSON.readTree(Path.of(required("MOCK_CONFIG_FILE")).toFile());
-        var settings = config.path("component").path("config");
-        settings.fieldNames().forEachRemaining(name -> {
-            if (!java.util.Set.of("image_token_id", "cache_key_hash_seed", "seq_size_per_block").contains(name)) throw new IllegalArgumentException("Unknown Client setting: " + name);
-        });
-        var configuredImageToken = settings.get("image_token_id");
-        if (configuredImageToken != null && (!configuredImageToken.isIntegralNumber()
-                || !configuredImageToken.canConvertToInt() || configuredImageToken.intValue() < 0))
-            throw new IllegalArgumentException("Client image_token_id must be nonnegative int32");
-        int imageToken = settings.path("image_token_id").asInt(org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN);
-        int blockSize = settings.path("seq_size_per_block").asInt(0);
-        if (settings.has("seq_size_per_block") && (!settings.path("seq_size_per_block").isIntegralNumber() || !settings.path("seq_size_per_block").canConvertToInt() || blockSize < 1))
-            throw new IllegalArgumentException("Client seq_size_per_block must be positive int32");
-        long seed = org.flexlb.mock.protocol.ConfigInput.signedLong(settings, "cache_key_hash_seed", 0);
-        var directory = Path.of(required("MOCK_OUTPUT_DIR"));
-        try (var node = new ClientNode(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory, imageToken, blockSize, seed)) {
-            var hook = new Thread(node::close, "client-shutdown"); Runtime.getRuntime().addShutdownHook(hook);
-            var effective = JSON.createObjectNode().put("id", node.id).put("seq_size_per_block", blockSize).put("cache_key_hash_seed", seed);
-            if (configuredImageToken != null) effective.put("image_token_id", imageToken);
-            save(directory.resolve("effective-config.json"), effective);
-            save(directory.resolve("endpoints.json"), Map.of("id", node.id, "role", "client", "control", node.url(),
-                "rpc", URI.create(node.url()).getAuthority(), "metrics", node.url() + "/metrics"));
-            node.api.publishReady(Path.of(required("MOCK_READY_FILE")));
-            try { new CountDownLatch(1).await(); }
-            finally { try { Runtime.getRuntime().removeShutdownHook(hook); } catch (IllegalStateException ignored) { } }
-        }
-    }
-    private static String required(String name) {
-        String value = System.getenv(name);
-        if (value == null || value.isBlank()) throw new IllegalArgumentException("Missing " + name);
-        return value;
+
+        void error(String error) { if (errors.isEmpty()) errors.add(error); }
     }
 }

@@ -25,6 +25,27 @@ import static org.junit.jupiter.api.Assertions.*;
 class PdGenerationTest {
     @TempDir Path directory;
 
+    @Test void shardedPrefillTransfersSemanticInputToUnshardedDecode() throws Exception {
+        try(var p=node("prefill",16,1,Map.of("settings",Map.of("prefill_cp_size",4)));
+            var d=node("decode",32,1,Map.of("settings",Map.of("prefill_cp_size",4)))) {
+            var request=input(d,71,17,5,3000,true);
+            var rpc=RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(4,TimeUnit.SECONDS);
+            var results=rpc.generateStreamCall(request);
+            GenerateOutputsPB last=null;
+            while(results.hasNext()) last=results.next();
+            assertNotNull(last);assertTrue(last.getFlattenOutput().getFinished(0));
+            assertEquals(5,last.getFlattenOutput().getAuxInfo(0).getOutputLen());
+            var query=CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build();
+            var ps=rpc.getCacheStatus(query);
+            var ds=RpcServiceGrpc.newBlockingStub(d.channel).withDeadlineAfter(2,TimeUnit.SECONDS).getCacheStatus(query);
+            var base=org.flexlb.mock.protocol.MediaInput.cacheKeys(org.flexlb.mock.protocol.MediaInput.text(request),2);
+            assertEquals(Set.of(base.get(3),base.get(7)),ps.getCacheKeysMap().keySet());
+            assertTrue(ds.getCacheKeysMap().keySet().containsAll(base));
+            assertEquals(8,ps.getBlockSize());assertEquals(128,ps.getTotalKvCache());
+            assertEquals(2,ds.getBlockSize());assertEquals(64,ds.getTotalKvCache());
+        }
+    }
+
     @Test void localPdBatchAndGroupPrepareEachImageExactlyOnceBeforeScheduling() throws Exception {
         var calls = new ConcurrentHashMap<Long, Integer>();
         var vision = io.grpc.netty.NettyServerBuilder.forPort(0)

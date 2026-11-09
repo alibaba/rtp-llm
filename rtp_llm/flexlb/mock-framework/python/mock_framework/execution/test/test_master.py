@@ -190,12 +190,14 @@ def test_real_master_routes_to_isolated_rtp_processes(
             "protocol": "grpc",
         }
         master_config["MODEL_SERVICE_CONFIG"] = json.dumps(route)
+    prefill_config = dict(engine_config)
     if kvcm:
-        engine_config.update(
+        prefill_config.update(
+            prefill_cp_size=4,
             reuse_cache=True,
             kv_cache_event_publisher_type="kvcm",
             kvcm_server_address=f"127.0.0.1:{meta['rpc_port']}",
-            kv_cache_event_instance_id="mock_16",
+            kv_cache_event_instance_id="mock_64",
             kv_cache_event_instance_group="test",
         )
     document = {
@@ -203,7 +205,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
         "describe": "真实Master与新P/D及Client接线验证",
         "environment": {
             "master": {"deployment": {"replicas": replicas}, "config": master_config},
-            "prefill": {"engine": "rtp", "config": engine_config},
+            "prefill": {"engine": "rtp", "config": prefill_config},
             "decode": {"engine": "rtp", "config": engine_config},
         },
         "phases": [
@@ -353,7 +355,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
                     endpoints["rpc"],
                     str(batched).lower(),
                     str(actual),
-                    *([meta["http"]] if kvcm else []),
+                    *([meta["http"], "4"] if kvcm else []),
                 ],
                 capture_output=True,
                 text=True,

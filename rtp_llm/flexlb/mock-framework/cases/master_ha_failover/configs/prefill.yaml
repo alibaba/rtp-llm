@@ -1,8 +1,6 @@
 max_seq_len: 1048576
-cp_rotate_method: ALL_GATHER
-tp_size: 4
-dp_size: 1
-seq_size_per_block: 512
+prefill_cp_size: 4
+seq_size_per_block: 128
 reuse_cache: false
 enable_device_cache: true
 reserve_block_ratio: 1
@@ -15,7 +13,8 @@ test_block_num: 21554
 # 原 DSv4 legacy_unverified 校准公式；DeepSeek preset 的 1.23 倍率直接乘入公式，不启用噪声。
 mock.compute:
   forward:
-    expression: 1.23 * (max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 * batchSize + 0.158123254797307
+    expression:
+      1.23 * (max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 * batchSize + 0.158123254797307
       * sum(hitCacheTokens / 1024.) + 0.575522710053703 * sum(computeTokens / 1024.) + 0.0517623430739831 * sum(computeTokens
       / 1024. * computeTokens / 1024.) + 0.0395308136993267 * sum(hitCacheTokens / 1024. * computeTokens / 1024.) + 0.0104363634681015
       * sum(hitCacheTokens / 1024. * hitCacheTokens / 1024.) + 0.575522710053703 * max(sum(computeTokens / 1024.) - 16,

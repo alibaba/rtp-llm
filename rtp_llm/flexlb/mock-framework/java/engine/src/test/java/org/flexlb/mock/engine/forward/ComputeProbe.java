@@ -8,7 +8,9 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import org.flexlb.mock.protocol.Role;
 
-/** Cross-language component test only; not an Engine or production launcher. */
+/**
+ * Cross-language component test only; not an Engine or production launcher.
+ */
 public final class ComputeProbe {
     public static void main(String[] args) throws Exception {
         var root = new ObjectMapper().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
@@ -22,7 +24,7 @@ public final class ComputeProbe {
         }
         var models = ComputeModel.fromSettings(settings, Map.of());
         var request = new ForwardBatch.Request("request", 10, 2, 32, 0, 8, 0, List.of());
-        var batch = new ForwardBatch("batch", List.of(new ForwardBatch.Partition(0, List.of(request))));
+        var batch = new ForwardBatch("batch", List.of(request));
         var sample = models.plan(Role.prefill, "prefill-0", batch);
         try (var timer = new SimulatedCompute()) {
             var outcome = timer.submit(sample).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
