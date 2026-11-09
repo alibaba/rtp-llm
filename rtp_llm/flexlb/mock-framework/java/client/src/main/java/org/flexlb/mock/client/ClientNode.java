@@ -106,8 +106,25 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         }
         try {
             save(directory.resolve("coordinator/" + created.number + "/plan.json"), Map.of("clients", created.peers, "config", args));
-            var parts = ReplayInput.split(args, directory.resolve("coordinator/" + created.number + "/shards"), created.peers.size(), () -> created.stop || closed);
-            long total = parts.stream().mapToLong(ReplayInput.Part::count).reduce(0, Math::addExact);
+            var parts = new ArrayList<ReplayInput.Part>();
+            long total;
+            if (IndexedTraffic.isIndexed(args.requests_file())) {
+                try (var input = new IndexedTraffic(Path.of(args.requests_file()))) {
+                    total = input.count;
+                    int clients = created.peers.size();
+                    if (total < clients) throw new IOException("Need at least one request per Client");
+                    if (args.replay_speed() != null && input.lastArrival / (1000.0 * args.replay_speed()) > 86400)
+                        throw new IOException("Playback exceeds 24 hours");
+                    for (int i = 0; i < clients; i++) {
+                        long count = total / clients + (i < total % clients ? 1 : 0);
+                        parts.add(new ReplayInput.Part(args.requests_file(), count, input.identity));
+                    }
+                }
+            } else {
+                parts.addAll(ReplayInput.split(args, directory.resolve("coordinator/" + created.number + "/shards"),
+                    created.peers.size(), () -> created.stop || closed));
+                total = parts.stream().mapToLong(ReplayInput.Part::count).reduce(0, Math::addExact);
+            }
             synchronized (this) { nextRequestId = Math.addExact(created.firstId, total); }
             save(directory.resolve("coordinator/" + created.number + "/input.json"), Map.of("count", total, "shards", parts));
             for (int i = 0; i < created.peers.size(); i++) {

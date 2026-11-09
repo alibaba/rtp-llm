@@ -4,6 +4,8 @@ from mock_framework.execution.test.helpers.zookeeper import command as zookeeper
 import asyncio
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,7 +19,8 @@ from mock_framework.execution.test.helpers.input import pb, write_inputs
 from test_master import configuration
 
 
-def test_vision_playback_through_real_master(tmp_path):
+@pytest.mark.parametrize('indexed', [False, True])
+def test_vision_playback_through_real_master(tmp_path, indexed):
     root = FRAMEWORK
     java = str(Path(os.environ['JAVA_HOME']) / 'bin/java')
     master_classpath = os.pathsep.join([str(root / 'java/master/target/classes'),
@@ -46,9 +49,23 @@ def test_vision_playback_through_real_master(tmp_path):
         component = data['environment'][role]
         (tmp_path / 'configs' / f'{role}.yaml').write_text(yaml.safe_dump(component['config']))
         data['environment'][role] = {**component, 'config': f'configs/{role}.yaml'}
-    requests = [pb.Request(token_ids=[10, 0, 20], max_new_tokens=3,
-        images=[pb.Image(url='mock://image-' + str(i % 2), width=56, height=28, offset=1)]) for i in range(8)]
-    write_inputs(tmp_path / 'requests.binpb.zst', requests)
+    if indexed:
+        data['environment']['client']['deployment'] = {'replicas': 2}
+        args = data['phases'][0]['steps'][0]['args']
+        args.pop('qps')
+        args.update(requests_file='requests.mckidx', replay_speed=2)
+        source = tmp_path / 'anonymous.jsonl'
+        rows = [['media', 1, 56, 28], ['media', 2, 56, 28]]
+        rows += [['tokens', [10, 20 if i < 4 else 21], i * 250, 3, 50, [[i % 2 + 1, 1, 924]]]
+                 for i in range(8)]
+        rows.append(['end', 8])
+        source.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        subprocess.run([sys.executable, str(root / 'scripts/build-indexed-traffic.py'), str(source),
+                        str(tmp_path / args['requests_file'])], check=True)
+    else:
+        requests = [pb.Request(token_ids=[10, 0, 20], max_new_tokens=3,
+            images=[pb.Image(url='mock://image-' + str(i % 2), width=56, height=28, offset=1)]) for i in range(8)]
+        write_inputs(tmp_path / 'requests.binpb.zst', requests)
     path = tmp_path / 'case.yaml'
     path.write_text(yaml.safe_dump(data))
     registry = StepRegistry.standard()
@@ -66,8 +83,22 @@ def test_vision_playback_through_real_master(tmp_path):
     assert result['status'] == 'PASS', result
     summary = json.loads((output / 'components/client-0/coordinator/1/result.json').read_text())
     assert not summary['errors'], summary
-    client, = summary['clients'].values()
-    assert client['issued'] == client['finished'] == client['outcomes']['success'] == 8, client
+    clients = list(summary['clients'].values())
+    assert len(clients) == (2 if indexed else 1)
+    for client in clients:
+        assert client['issued'] == client['finished'] == client['outcomes']['success'] == (4 if indexed else 8), client
+    if indexed:
+        assert not (output / 'components/client-0/coordinator/1/shards').exists()
+        for index in range(2):
+            component = output / f'components/client-{index}'
+            plan = json.loads((component / 'playback/1/plan.json').read_text())
+            assert plan['requests_file'] == str(tmp_path / 'requests.mckidx')
+            rows = [json.loads(line) for line in (component / 'playback/1/requests.jsonl').read_text().splitlines()]
+            issued = [int(row['request_id']) for row in rows if row.get('kind') == 'ISSUED']
+            assert issued == list(range(index + 1, 9, 2))
+            assert sum(row.get('kind') == 'SCHEDULE_START' for row in rows) == 8
+            assert any('ViT replay length differs' in path.read_text(errors='replace')
+                       for path in component.glob('*.log'))
     events = [json.loads(line) for line in (output / 'events.jsonl').read_text().splitlines()]
     engines = [event for event in events if event.get('event') == 'process_started'
                and event.get('node') in {'prefill-0', 'decode-0', 'vit-0'}]

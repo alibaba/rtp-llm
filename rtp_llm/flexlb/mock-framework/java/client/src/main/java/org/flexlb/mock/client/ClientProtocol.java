@@ -32,7 +32,8 @@ public interface ClientProtocol {
                 throw new IllegalArgumentException("Invalid finite playback plan (maximum 24 hours)");
         }
     }
-    record Item(long request_id, long index, org.flexlb.mock.client.input.ClientInput.Request input) {
+    record Item(long request_id, long index, org.flexlb.mock.client.input.ClientInput.Request input,
+                List<Integer> expectedImageTokens) {
         public Item { if (request_id <= 0 || index < 0) throw new IllegalArgumentException("Invalid request identity"); }
     }
     @JsonInclude(JsonInclude.Include.NON_NULL)

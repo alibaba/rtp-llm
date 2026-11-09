@@ -57,7 +57,7 @@ final class LoadClient implements AutoCloseable {
         begun = true;
         long start = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(delay);
         player = Thread.ofVirtual().name("client-player").start(() -> {
-            try { play(plan, start, this::offer); }
+            try { play(plan, start, imageToken, this::offer); }
             catch (InterruptedException interrupted) { if (!isStopped()) fail("Player interrupted unexpectedly"); }
             catch (java.io.InterruptedIOException interrupted) { if (!isStopped()) fail(interrupted.toString()); }
             catch (java.io.IOException | RuntimeException error) { fail(error.toString()); }
@@ -67,20 +67,45 @@ final class LoadClient implements AutoCloseable {
     }
     /** Use the shared source time origin for every shard. */
     static void play(Shard plan, long startNanos, Consumer<Item> submit) throws IOException, InterruptedException {
-        try (var reader = new ReplayInput.Reader(Path.of(plan.requests_file()))) {
+        play(plan, startNanos, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN, submit);
+    }
+
+    static void play(Shard plan, long startNanos, int imageToken, Consumer<Item> submit) throws IOException, InterruptedException {
+        Path path = Path.of(plan.requests_file());
+        if (IndexedTraffic.isIndexed(plan.requests_file())) {
+            try (var indexed = new IndexedTraffic(path)) {
+                long expected = indexed.count / plan.stride() + (plan.first_index() < indexed.count % plan.stride() ? 1 : 0);
+                if (!indexed.identity.equals(plan.sha256()) || expected != plan.count())
+                    throw new IOException("Indexed traffic changed after planning");
+                for (long position = 0; position < plan.count(); position++) {
+                    ReplayInput.checkInterrupted();
+                    long index = plan.first_index() + position * plan.stride();
+                    var entry = indexed.entry(index, imageToken);
+                    submit(plan, startNanos, submit, new Item(plan.first_request_id() + index,
+                        index, entry.input(), entry.expectedImageTokens()));
+                }
+            }
+            return;
+        }
+        try (var reader = new ReplayInput.Reader(path)) {
             for (long position = 0; position < plan.count(); position++) {
                 var input = reader.next();
                 if (input == null) throw new IOException("Truncated request shard: " + plan.requests_file());
-                long index = Math.addExact(plan.first_index(), Math.multiplyExact(position, plan.stride()));
-                long due = startNanos + ReplayInput.delayNanos(index, input, plan.qps(), plan.replay_speed());
-                long left;
-                while ((left = due - System.nanoTime()) > 0) TimeUnit.NANOSECONDS.sleep(left);
-                if (Thread.interrupted()) throw new InterruptedException();
-                submit.accept(new Item(Math.addExact(plan.first_request_id(), index), index, input));
+                long index = plan.first_index() + position * plan.stride();
+                submit(plan, startNanos, submit, new Item(plan.first_request_id() + index, index, input, List.of()));
             }
             if (reader.next() != null) throw new IOException("Extra records in request shard: " + plan.requests_file());
             reader.verify(plan.sha256());
         }
+    }
+
+    private static void submit(Shard plan, long startNanos, Consumer<Item> submit, Item item)
+            throws IOException, InterruptedException {
+        long due = startNanos + ReplayInput.delayNanos(item.index(), item.input(), plan.qps(), plan.replay_speed());
+        long left;
+        while ((left = due - System.nanoTime()) > 0) TimeUnit.NANOSECONDS.sleep(left);
+        if (Thread.interrupted()) throw new InterruptedException();
+        submit.accept(item);
     }
 
     private synchronized boolean isStopped() { return stopped; }
@@ -138,7 +163,7 @@ final class LoadClient implements AutoCloseable {
                         var request = FlexlbScheduleRequestPB.newBuilder().setRequestId(item.request_id())
                             .setCacheKeyBlockSize(blockSize).setSeqLen(item.input().getTokenIdsList().size()).setMaxNewTokens(item.input().getMaxNewTokens())
                             .setPriority(item.input().hasPriority() ? item.input().getPriority() : 50).setGenerateInput(input.build().toByteString()).build();
-                        var call = client.send(request, Duration.ofMillis(plan.request_timeout_ms()));
+                        var call = client.send(request, Duration.ofMillis(plan.request_timeout_ms()), item.expectedImageTokens());
                         active.put(item.request_id(), call); issued++; metrics.issued();
                         call.completion().whenComplete((result, error) -> {
                             synchronized (LoadClient.this) {

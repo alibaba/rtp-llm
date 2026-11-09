@@ -15,7 +15,7 @@ uv run --locked mock-case compile <case目录>/case.yaml \
 每个 Case 保存自己的声明和角色配置。配置与数据必须按以下要求组织：
 
 - `config` 使用 Case 自己目录内的配置，文件统一放在 `configs/`，通过 `config: configs/master.yaml` 等相对路径引用；空配置可以直接写 `config: {}`。禁止跨 Case 引用配置，也不把角色配置放进共享 data；需要借用其他 Case 的配置时先复制到本 Case，再独立维护。
-- 回放 `data` 使用共享的 `data/traffic/`，不在各 Case 内复制流量文件。例如 `requests_file: data/traffic/deepseek.binpb.zst` 默认从框架目录解析，也可以用 `--shared-root` 指定共享根。输入支持 JSONL 和 Protobuf + Zstd，编译阶段检查 Case 声明，播放时检查文件内容。
+- 回放 `data` 使用共享的 `data/traffic/`，不在各 Case 内复制流量文件。例如 `requests_file: data/traffic/deepseek.binpb.zst` 默认从框架目录解析，也可以用 `--shared-root` 指定共享根。新数据集使用共享索引文件 `.mckidx`，各 Client 直接按序号读取。JSONL 和 Protobuf + Zstd 仍按原路径读取。编译阶段检查 Case 声明，播放时检查文件内容。
 - 使用默认大盘时省略 `view`，框架自动使用 `views/default.json`；只有使用自定义大盘时才显式声明 `view`。
 
 顶层为 `id`、可选 `name`、`describe`、`environment`、`phases` 和可选 `view`。Phase 顺序执行。每个 Step 直接写 `interface` 与 `args`，可选 `expect`、`within`、`wait_after` 和 `background`。phase 必须有正的 `timeout`。ID 全局唯一，引用必须来自前置步骤或允许的全局发现字段。
