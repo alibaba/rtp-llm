@@ -19,6 +19,7 @@ class KVCacheConfigPickleTest(TestCase):
         config.disk_cache_paths = "/tmp/cache"
         config.disk_cache_sync_timeout_ms = 200
         config.disk_cache_evict_timeout_ms = 45000
+        config.disk_cache_linear_byte_ratio = 0.4
         config.kvcm_task_timeout_ms = 23000
         for name, value in BASE_EVENT_FIELD_VALUES.items():
             setattr(config, name, value)
@@ -26,14 +27,15 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 86)
-                self.assertEqual(state[:2], ("KVCacheConfig", 14))
+                self.assertEqual(len(state), 87)
+                self.assertEqual(state[:2], ("KVCacheConfig", 15))
                 self.assertEqual(
                     state[64:69], tuple(BASE_EVENT_FIELD_VALUES.values())
                 )
                 self.assertIs(state[69], enable_crc)
                 self.assertEqual(state[80], 23000)
                 self.assertEqual(state[85], 45000)
+                self.assertEqual(state[86], 0.4)
                 # Normalizing old fields must not mutate the supplied tuple.
                 original_state = tuple(list(state))
                 direct = KVCacheConfig.__new__(KVCacheConfig)
@@ -47,6 +49,7 @@ class KVCacheConfigPickleTest(TestCase):
                 self.assertEqual(restored.disk_cache_paths, "/tmp/cache")
                 self.assertEqual(restored.disk_cache_sync_timeout_ms, 200)
                 self.assertEqual(restored.disk_cache_evict_timeout_ms, 45000)
+                self.assertEqual(restored.disk_cache_linear_byte_ratio, 0.4)
                 self.assertEqual(restored.kvcm_task_timeout_ms, 23000)
                 for name, value in BASE_EVENT_FIELD_VALUES.items():
                     self.assertEqual(getattr(restored, name), value, name)
@@ -162,6 +165,47 @@ class KVCacheConfigPickleTest(TestCase):
         disabled = KVCacheConfig.__new__(KVCacheConfig)
         disabled.__setstate__((state[0], 13, *state[2:84], 0))
         self.assertEqual(disabled.linear_pool_avg_prompt_tokens, -1)
+
+    def test_disk_linear_byte_ratio_survives_worker_spawn_and_legacy_states(self):
+        config = KVCacheConfig()
+        self.assertTrue(hasattr(config, "disk_cache_linear_byte_ratio"))
+        self.assertEqual(config.disk_cache_linear_byte_ratio, -1.0)
+        config.disk_cache_linear_byte_ratio = 0.4
+        for _ in range(2):
+            config = pickle.loads(pickle.dumps(config))
+            self.assertEqual(config.disk_cache_linear_byte_ratio, 0.4)
+        state = config.__getstate__()
+        legacy = KVCacheConfig.__new__(KVCacheConfig)
+        legacy.__setstate__((state[0], 13, *state[2:85]))
+        self.assertEqual(legacy.disk_cache_linear_byte_ratio, -1.0)
+        self.assertEqual(
+            legacy.linear_pool_avg_prompt_tokens, config.linear_pool_avg_prompt_tokens
+        )
+
+    def test_disk_linear_byte_ratio_rejects_invalid_pickled_values(self):
+        state = KVCacheConfig().__getstate__()
+        for value in (0.0, 1.0, -0.5, float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaises(RuntimeError):
+                config = KVCacheConfig.__new__(KVCacheConfig)
+                config.__setstate__((*state[:-1], value))
+
+    def test_version_fourteen_disk_branches_remain_compatible(self):
+        source = KVCacheConfig()
+        source.disk_cache_evict_timeout_ms = 45000
+        source.disk_cache_linear_byte_ratio = 0.4
+        state = source.__getstate__()
+        for tail, expected_timeout, expected_ratio in (
+            (45000, 45000, -1.0),
+            (-1, -1, -1.0),
+            (0.4, -1, 0.4),
+            (-1.0, -1, -1.0),
+        ):
+            with self.subTest(tail=tail, tail_type=type(tail)):
+                previous = (state[0], 14, *state[2:85], tail)
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__(previous)
+                self.assertEqual(restored.disk_cache_evict_timeout_ms, expected_timeout)
+                self.assertEqual(restored.disk_cache_linear_byte_ratio, expected_ratio)
 
     def test_pool_settings_round_trip_and_version10_defaults(self):
         config = KVCacheConfig()
