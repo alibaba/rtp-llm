@@ -292,14 +292,17 @@ class DeepSeekV41Model(DeepSeekV4Model):
                     and self.v4.embed.weight.is_cuda
                     and not torch.cuda.is_current_stream_capturing()
                 ):
-                    if engram_cpu_lookup_enabled(is_decode_role=self._is_decode_role):
+                    external = attachment is not None and attachment.external
+                    if not external and engram_cpu_lookup_enabled(
+                        is_decode_role=self._is_decode_role
+                    ):
                         prefetch = EngramCPULookupPrefetch(
                             self,
                             getattr(inputs, "engram_token_windows_host", None),
                             int(self._v4_args.v41_config.get("image_token_id", 129264)),
                         )
                     elif engram_lookup_prefetch_enabled(
-                        is_decode_role=self._is_decode_role
+                        is_decode_role=self._is_decode_role, external=external
                     ):
                         prefetch = EngramLookupPrefetch(
                             (layer_id, self.v4.layers[layer_id])

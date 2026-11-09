@@ -997,6 +997,16 @@ class HostEngramEmbedding:
         return not self._uses_external_storage
 
     @property
+    def supports_async_prefetch(self):
+        """A side stream can prefetch the mapped table.
+
+        Local tables keep the prefetch-tuned host kernel. External Fabric views
+        are GPU addresses, so the plain host-row kernel runs on the same side
+        stream once the mapping exists.
+        """
+        return not self._uses_external_storage or self._uva is not None
+
+    @property
     def supports_decode_prefetch(self):
         """Scheduled native decode supports either live table owner."""
         return (
@@ -1019,8 +1029,8 @@ class HostEngramEmbedding:
     def __call__(
         self, indices: torch.Tensor, device, *, prefetch=False
     ) -> torch.Tensor:
-        if prefetch and not self.supports_generic_prefetch:
-            raise RuntimeError("external Engram asynchronous prefetch is not supported")
+        if prefetch and not self.supports_async_prefetch:
+            raise RuntimeError("Engram asynchronous prefetch is not supported")
         if self._uses_external_storage:
             from rtp_llm.models_py.modules.dsv41 import _engram_triton
 
@@ -1225,11 +1235,13 @@ def gated_engram_residual(
     return result if out is None else out.copy_(result)
 
 
-def engram_lookup_prefetch_enabled(*, is_decode_role=False):
+def engram_lookup_prefetch_enabled(*, is_decode_role=False, external=False):
+    # Fabric mappings can only be read on CUDA, so the CPU lookup preference
+    # does not take precedence over prefetch for external tables.
+    default = "1" if external else "0"
     return (
-        not engram_cpu_lookup_enabled(is_decode_role=is_decode_role)
-        and os.getenv("DSV41_ASYNC_ENGRAM_LOOKUP", "0") == "1"
-    )
+        external or not engram_cpu_lookup_enabled(is_decode_role=is_decode_role)
+    ) and os.getenv("DSV41_ASYNC_ENGRAM_LOOKUP", default) == "1"
 
 
 def engram_cpu_lookup_enabled(*, is_decode_role=False):
@@ -1953,8 +1965,10 @@ class Engram(nn.Module):
     def prepare_lookup_prefetch(self):
         """Called after lookup JIT warmup, never from a request or capture."""
         if (
-            not getattr(self.embed_tokens, "supports_generic_prefetch", True)
-            or not engram_lookup_prefetch_enabled()
+            not getattr(self.embed_tokens, "supports_async_prefetch", True)
+            or not engram_lookup_prefetch_enabled(
+                external=self.embed_tokens._uses_external_storage is True
+            )
             or not self.q_weight.is_cuda
             or self.embed_tokens._uva is None
             or self._lookup_stream is not None
@@ -1975,7 +1989,7 @@ class Engram(nn.Module):
 
     def prefetch_lookup(self, hash_ids):
         if (
-            not getattr(self.embed_tokens, "supports_generic_prefetch", True)
+            not getattr(self.embed_tokens, "supports_async_prefetch", True)
             or self._lookup_stream is None
             or self._lookup_work is not None
             or not hash_ids.is_cuda
@@ -1991,17 +2005,16 @@ class Engram(nn.Module):
         stream = self._lookup_stream
         stream.wait_stream(torch.cuda.current_stream(hash_ids.device))
         hash_ids.record_stream(stream)
-        try:
-            with torch.cuda.stream(stream):
+        with self.embed_tokens.lookup_guard(), torch.cuda.stream(stream):
+            try:
                 rows = _lookup_for_projection(
                     self, hash_ids, hash_ids.device, prefetch=True
                 )
                 self._lookup_done.record(stream)
-        except BaseException:
-            # Preserve owners until queued reads have finished, then propagate
-            # the launch/runtime error instead of silently running a fallback.
-            stream.synchronize()
-            raise
+            except BaseException:
+                # Keep the backing admitted until any queued reads finish.
+                stream.synchronize()
+                raise
         work = _EngramLookupWork(self.embed_tokens, hash_ids, rows, self._lookup_done)
         self._lookup_work = work
         return work

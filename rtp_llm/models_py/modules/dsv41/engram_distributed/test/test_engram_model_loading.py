@@ -289,6 +289,8 @@ class ExternalCheckpointTests(unittest.TestCase):
         self.assertTrue(local.supports_generic_prefetch)
         self.assertFalse(external.supports_cpu_lookup)
         self.assertFalse(external.supports_generic_prefetch)
+        # Views are required before either prefetch path can run.
+        self.assertFalse(external.supports_async_prefetch)
         self.assertFalse(external.supports_decode_prefetch)
 
     def test_local_default_cpu_lookup_still_prepares_once(self):

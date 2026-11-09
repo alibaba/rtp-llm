@@ -7,10 +7,10 @@ import sys
 import unittest
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import torch
 
@@ -61,6 +61,7 @@ class EngramPrefetchTest(unittest.TestCase):
         self.current, self.side, self.event = Mock(), Mock(), Mock()
         self.rows = Tensor()
         self.embedding = Mock(return_value=self.rows)
+        self.embedding.lookup_guard.return_value = nullcontext()
         self.embedding._uva = (object(), object())
         self.embedding._pinned = SimpleNamespace(_lookup_events=[])
         self.module = SimpleNamespace(
@@ -207,6 +208,52 @@ class EngramPrefetchTest(unittest.TestCase):
         self.event.record.assert_called_once_with(self.side)
         self.current.wait_event.assert_called_once_with(self.event)
         self.assertEqual(self.embedding._pinned._lookup_events, [self.event])
+
+    def test_external_owner_prepares_prefetch_and_registers_with_storage(self):
+        # External Fabric views prefetch on the same side stream; the completion
+        # event belongs to the storage, not to a pinned host table.
+        self.module._lookup_stream = None
+        storage = MagicMock()
+        self.embedding._external_storage = storage
+        self.embedding._uses_external_storage = True
+        self.embedding._pinned = None
+        self.embedding.supports_async_prefetch = True
+        self.embedding.lookup_guard = engram.HostEngramEmbedding.lookup_guard.__get__(
+            self.embedding
+        )
+        self.embedding.register_lookup_event = (
+            engram.HostEngramEmbedding.register_lookup_event.__get__(self.embedding)
+        )
+        with (
+            patch.dict(os.environ, {"DSV41_CPU_ENGRAM_LOOKUP": "1"}, clear=True),
+            patch.object(torch.cuda, "Stream", return_value=self.side),
+            patch.object(torch.cuda, "Event", return_value=self.event),
+        ):
+            engram.Engram.prepare_lookup_prefetch(self.module)
+        self.assertIs(self.module._lookup_stream, self.side)
+        storage.register_lookup_event.assert_called_once_with(self.event)
+
+        active = False
+
+        @contextmanager
+        def admitted_lookup():
+            nonlocal active
+            active = True
+            try:
+                yield
+            finally:
+                active = False
+
+        def record_completion(stream):
+            self.assertTrue(active)
+            self.assertIs(stream, self.side)
+
+        storage.use.side_effect = admitted_lookup
+        self.event.record.side_effect = record_completion
+        work = self.module.prefetch_lookup(Tensor())
+        self.assertIsNotNone(work)
+        self.assertFalse(active)
+        self.module.clear_lookup_prefetch()
 
     def test_unregister_waits_before_releasing_mapped_host_storage(self):
         order = []
@@ -549,6 +596,32 @@ class EngramPrefetchTest(unittest.TestCase):
         self.embedding.assert_not_called()
         self.event.synchronize.assert_not_called()
         self.assertIsNone(self.module._lookup_work)
+
+    def test_external_prefill_prefetches_even_with_cpu_lookup_enabled(self):
+        for override in (None, "0"):
+            with self.subTest(override=override):
+                model, inputs = self._model()
+                model._engram_attachment.external = True
+                env = {"DSV41_CPU_ENGRAM_LOOKUP": "1"}
+                if override is not None:
+                    env["DSV41_ASYNC_ENGRAM_LOOKUP"] = override
+
+                def run_layer(inputs):
+                    prefetch = model.v4._engram_lookup_prefetch
+                    if override == "0":
+                        self.assertIsNone(prefetch)
+                    else:
+                        prefetch.before_layer(0)
+                    return "output"
+
+                model.parent_forward.side_effect = run_layer
+                self.embedding.reset_mock()
+                with patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(model(inputs), "output")
+                if override == "0":
+                    self.embedding.assert_not_called()
+                else:
+                    self.embedding.assert_called_once()
 
     def test_model_tagged_attention_inputs_start_prefetch(self):
         model, inputs = self._model()
