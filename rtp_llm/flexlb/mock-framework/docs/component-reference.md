@@ -477,7 +477,7 @@ ViT Cache Claim 和 Forward Work 只提供只读 CompletionStage；调用方转�
 
 ### CP：只模拟缓存布局，不模拟 rank 通信
 
-数据集只提供语义 token、媒体信息和期望输出，不知道 CP。本地回放用 Client 和 Mock P 的启动配置指定相同的 `seq_size_per_block`、`cache_key_hash_seed` 和 `prefill_cp_size`。例如基础块 128、CP4 时，Client 发 K4、K8，并将请求的 `cache_key_block_size` 设为 512。CP size 缺省时按 1，Client 缺省基础块大小时不生成路由键。`cp_rotate_method` 和 `tp_size` 仍用于已有的计算模型和 Prefill 准入。
+采集数据用最终共享前缀跨度描述前缀关系，展开后的回放数据保存 token 和请求信息。见[标准压缩输入与分片](architecture.md#标准压缩输入与分片)。本地回放用 Client 和 Mock P 的启动配置指定相同的 `seq_size_per_block`、`cache_key_hash_seed` 和 `prefill_cp_size`。例如基础块 128、CP4 时，Client 发 K4、K8，并将请求的 `cache_key_block_size` 设为 512。CP size 缺省时按 1，Client 缺省基础块大小时不生成路由键。`cp_rotate_method` 和 `tp_size` 仍用于已有的计算模型和 Prefill 准入。
 
 Whale 使用真实 Frontend 时，需要让 Mock P 遵守真实 Frontend 的缓存路由合同：相同 `cache_key_hash_seed` 和基础 `seq_size_per_block`，并对齐 CP 分片配置。基础块为 128 时，Mock P 设置 `prefill_cp_size=4`，按 128-token 块滚动哈希并保留 K4、K8。媒体身份也在基础块边界参与哈希。P 的 KV 分配、复用、完整块提交、CacheStatus.block_size 和 token 容量统一使用 512 的逻辑边界；`test_block_num` 仍是每 rank 物理块数（含 null block）。有效配置额外显示只读的 `cache_key_block_size`。
 

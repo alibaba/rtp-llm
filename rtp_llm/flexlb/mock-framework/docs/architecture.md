@@ -250,6 +250,10 @@ Python 在 stop 或最终清理时收集异常，不增加实时发压监控。�
 
 文件以 `MCKINP01` 标识输入格式 v1，之后每批为 4 字节大端压缩长度加一个 Zstd 压缩的 Protobuf InputChunk。帧必须为 single-segment、声明解压长度并带校验和，压缩及解压单批上限均为 4 MiB；每请求 Protobuf 上限 1 MiB，每批至多 1024 个请求。写入器按约 1 MiB 或 1024 请求封批，不累积整个文件。InputChunk.sequence 从 1 连续递增，末批只含 total_requests；缺末批、计数不符、截断或尾随数据均报错。InputChunk 仅用于文件分块，不决定请求发送或 Engine 计算的 batch。压缩输入和分片使用同一份格式与读写器。
 
+前缀采集文件的 `block_size` 统一表示**每个已记录的共享前缀块覆盖多少 token**。采集端在写出前缀键前确定这个跨度。如果记录的是 CP4 抽样后的键，基础块 128 对应的跨度就是 512，和基础块 512、CP1 的采集结果使用相同的 `block_size=512`。前缀格式只需要这个最终值。
+
+转换器直接按 `block_size` 将每个前缀块标签展开为 token 序列，最后按原始输入长度截断。共享关系的精度由采集时的跨度决定。当前 DeepSeek 源数据已记录 `block_size=512`，展开后的回放文件存储 `token_ids`。Client 和 Engine 回放时再按各自的启动配置生成缓存键。
+
 client0 在 start 的步骤预算内流式校验整个输入，按全局序号 `k % Client 数` 写本轮压缩分片；校验、封口、关闭和发布全部完成后才 prepare/begin。分片位于 `components/client-0/coordinator/<轮次>/shards/`，直接写压缩 `.part`，成功后原子发布为 `.binpb.zst`。input.json 只记录条数和摘要等元数据，不保存可读请求副本。准备失败不启动播放；源文件在准备期间发生可检测的大小、修改时间或文件身份变化会报错。
 
 每份 worker 计划只包含分片路径、条数、全局序号起点/步长、请求 ID 起点、SHA-256 和发流参数。LoadClient 的播放线程使用 ReplayInput.Reader 按批次解压，交给原有小队列；不把完整输入放进堆，也不把请求/响应经 client0 转发。请求 ID 在多轮 start 之间单调分配，主动停止留下的未发请求不会重新分配给后续轮次。播放读失败、条数或完整读取后的 SHA-256 不符使整组失败；主动 stop 不扫描未消费的后缀，剩余请求计入 unsent。
