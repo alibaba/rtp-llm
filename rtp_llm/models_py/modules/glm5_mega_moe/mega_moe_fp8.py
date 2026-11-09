@@ -159,6 +159,10 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
             del w2_scale
             torch.cuda.empty_cache()
         else:
+            if s13.dtype == torch.int32:
+                # Concatenating the two packed halves creates row-major storage.
+                # DeepGEMM requires MN-major scales within each expert.
+                s13 = s13.transpose(-1, -2).contiguous().transpose(-1, -2)
             s13_int = prepare_fp8_weight_scale_for_deepgemm(s13, 2 * inter, D, E)
             s2_int = prepare_fp8_weight_scale_for_deepgemm(w2_scale, D, inter, E)
             del s13, w2_scale
