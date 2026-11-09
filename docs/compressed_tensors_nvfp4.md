@@ -65,8 +65,8 @@ This isolates adapter/layout errors from activation quantization error.
 Local validation (2026-11-09): 10 new CPU tests pass; 5 existing ModelOpt parser
 regression cases pass with filesystem reads mocked to avoid Windows temporary-directory
 ACL failures. The native GPU test skips on this RTX 3050 (SM86).
-Loader integration tests are authored but not executed locally: the Windows environment
-lacks the built Linux extensions and its Torch version predates required dtype APIs.
+Full built-Linux loader integration remains unexecuted locally. Isolated Python-loader
+unit checks with explicit native/database substitutes are recorded below.
 Full-model load, TP execution, generation quality and performance remain unverified.
 See `rtp_llm/config/test/fixtures/nvfp4/README.md` for checkpoint evidence.
 
@@ -146,3 +146,43 @@ This is not native NVFP4 kernel, production loader, TP/EP, whole-model,
 quantization-quality or performance validation. Peak Torch allocated memory
 in the report excludes the CUDA context and other processes. The existing
 host environment was not modified; files were placed in an isolated run directory.
+
+## Python loader pipeline checks
+
+An isolated Torch 2.8.0 CPU dependency directory (no changes to the existing
+CUDA/FracDTI environments) ran 25 unit tests: 15 compressed-tensors NVFP4
+loader tests and 10 existing FP4 exclusion regression tests, all passing.
+The report is [ct_nvfp4_loader_unit_result.json](validation/ct_nvfp4_loader_unit_result.json).
+
+The tests execute the actual Python `WeightModule.create()` and `load()`
+methods, checkpoint-name formatting, fusion, padding and TP slicing code.
+A recording TensorSource supplies real q_proj fixture bytes; structural
+QKV/gate-up cases reuse or slice those bytes and are explicitly synthetic
+assemblies, not additional real projection checkpoints. A recording device
+checks that the layout hook receives the correct tensors after splitting;
+it does not implement or validate native swizzling.
+
+The new down-projection negative control first failed because independently
+padding malformed packed/scales inputs could hide their original mismatch.
+A per-load source proxy now checks paired raw per-shard shapes before padding,
+without changing tensor contents or mutating shared atomic weights. Final
+post-padding shape checks remain in place. Original tests also now construct
+wrappers through the real factory, which supplies required framework metadata.
+
+Optional reproduction without built native extensions:
+
+```sh
+python scripts/validate_ct_nvfp4_loader_units.py --isolated-boundaries --output /path/to/loader_result.json
+```
+
+The explicit isolation flag substitutes `rtp_llm.ops` and the disk database
+boundary, and bypasses eager `model_loader` package initialization. Real Python
+loader, tensor-source and tensor-operation code is used. This does not test
+complete package initialization/registry, a real disk database, compiled Linux
+integration, distributed communication or native layout/GEMM. In a built
+Linux environment use the normal Bazel target instead of the isolation runner.
+
+PR #1664 status checked on 2026-11-09: CLA success, no submitted reviews/comments;
+the CI Request Trigger run reported `action_required` with no jobs. The repository
+workflow documents a fresh LGTM gate before internal CI is triggered. No CI pass
+or GPU result is inferred from those statuses.

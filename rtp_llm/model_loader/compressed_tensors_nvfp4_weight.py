@@ -11,6 +11,48 @@ from rtp_llm.model_loader.per_group_fp4_quant_weight import (
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, is_v4_weight, pad
 
 
+def _validate_packed_scale_shapes(packed_shape, scale_shape):
+    if (
+        len(packed_shape) != 2
+        or len(scale_shape) != 2
+        or packed_shape[0] != scale_shape[0]
+        or packed_shape[1] != scale_shape[1] * 8
+    ):
+        raise ValueError("NVFP4 expects packed [N,K/2] and local scales [N,K/16]")
+
+
+class _ShapeCheckedSource:
+    """Check paired checkpoint shapes before padding can conceal a mismatch.
+
+    Forward the original tensors unchanged; retain only per-shard shapes.
+    This wrapper is local to a single load and does not mutate shared atomics.
+    """
+
+    def __init__(self, source):
+        self._source = source
+        self._shapes = {}
+
+    def __getattr__(self, name):
+        return getattr(self._source, name)
+
+    def load_tensor(self, name, data_type):
+        tensors = self._source.load_tensor(name, data_type)
+        for kind, suffix in (("packed", ".weight_packed"), ("scales", ".weight_scale")):
+            if not name.endswith(suffix):
+                continue
+            pair = self._shapes.setdefault(name.removesuffix(suffix), {})
+            pair[kind] = [tuple(t.shape) for t in tensors]
+            if "packed" in pair and "scales" in pair:
+                if len(pair["packed"]) != len(pair["scales"]):
+                    raise ValueError(
+                        "NVFP4 packed weights and local scales have different shard counts"
+                    )
+                for packed_shape, scale_shape in zip(pair["packed"], pair["scales"]):
+                    _validate_packed_scale_shapes(packed_shape, scale_shape)
+            break
+        return tensors
+
+
 class CompressedTensorsNvfp4Weight(PerGroupFp4Weight):
     @classmethod
     def support(cls, quant_config, src_weight_info):
@@ -54,14 +96,10 @@ class CompressedTensorsNvfp4Weight(PerGroupFp4Weight):
             )
 
     def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):
-        tensors = super()._load_raw_tensor(tensor_source, layer_id, device, load_config)
+        tensors = super()._load_raw_tensor(
+            _ShapeCheckedSource(tensor_source), layer_id, device, load_config
+        )
         packed = tensors[self.kernel.name]
         scales = tensors[self.scale.name]
-        if (
-            packed.ndim != 2
-            or scales.ndim != 2
-            or packed.shape[0] != scales.shape[0]
-            or packed.shape[1] != scales.shape[1] * 8
-        ):
-            raise ValueError("NVFP4 expects packed [N,K/2] and local scales [N,K/16]")
+        _validate_packed_scale_shapes(packed.shape, scales.shape)
         return tensors

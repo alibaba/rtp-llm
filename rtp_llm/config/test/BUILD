@@ -119,3 +119,5 @@ py_test(
     exec_properties = {"gpu": "SM100_ARM_CU13"},
     tags = ["SM100_ARM_CU13"],
 )
+
+exports_files(["fixtures/nvfp4/q_proj_tile.json"])
