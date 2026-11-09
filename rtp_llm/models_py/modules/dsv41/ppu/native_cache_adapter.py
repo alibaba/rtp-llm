@@ -5,7 +5,9 @@ legacy logical-cache construction, import and export are never called.
 """
 
 import hashlib
+import logging
 import math
+import os
 from types import SimpleNamespace
 
 import torch
@@ -19,6 +21,9 @@ from rtp_llm.models_py.modules.dsv41.ppu.native_cache import (
     _WIDTH,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _latest_csa_indices(blocks, offsets, positions):
@@ -190,10 +195,66 @@ class SharedNativeCache(NativeCacheBridge):
     def prepare_source(self, source):
         """Uniform collectives before any rank-local selector/consumer branch."""
         if self.sharded:
+            mode = os.environ.get("RTP_V41_PPU_CP8_BATCHED_KV_READ", "1")
+            if (
+                mode in ("1", "verify")
+                and self._is_prefill
+                and self.cp["size"] == 8
+                and torch.device(self.device).type == "cuda"
+            ):
+                if not all(
+                    (source, rid) in self._source_reads for rid in range(len(self.lengths))
+                ):
+                    self._prepare_source_batched(source, verify=mode == "verify")
+                return
             for rid, length in enumerate(self.lengths):
                 self._source_reads[source, rid] = self.read_source(
                     source, rid, global_entries=length // self.geometry.ratio(source),
                 )
+
+    def _prepare_source_batched(self, source, *, verify):
+        from rtp_llm.models_py.modules.dsv41.ppu.prefill_readback import gather_pool
+
+        ratio = self.geometry.ratio(source)
+        counts = tuple(length // ratio for length in self.lengths)
+        tag = "global_kv_2" if ratio == 2 else "global_kv_1"
+        packed = []
+        for kind in (tag, "indexer_kv"):
+            key = source, kind
+            packed.append(
+                gather_pool(
+                    self.pools[key],
+                    self.placements[key],
+                    counts,
+                    width=_WIDTH[kind],
+                    planar=kind == "indexer_kv",
+                )
+            )
+        rows = tuple(zip(*packed))
+        if verify:
+            self._verify_source_readback(source, counts, rows)
+        self._source_reads.update(((source, rid), row) for rid, row in enumerate(rows))
+
+    def _verify_source_readback(self, source, counts, rows):
+        from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+        mismatches = []
+        for rid, (count, actual) in enumerate(zip(counts, rows)):
+            expected = self.read_source(source, rid, global_entries=count)
+            for kind, new, old in zip(("global", "indexer"), actual, expected):
+                if not torch.equal(new, old):
+                    mismatches.append((rid, kind))
+        failed = torch.tensor(
+            [int(bool(mismatches))], dtype=torch.int32, device=self.device
+        )
+        if bool(all_gather(failed, Group.TP).any()):
+            raise RuntimeError(f"CP8 KV readback mismatch at source {source}: {mismatches}")
+        _LOGGER.info(
+            "CP8 KV readback bytes match: rank=%s source=%s counts=%s",
+            self.cp["rank"],
+            source,
+            counts,
+        )
 
     def read_csa(self, layer, request, positions):
         return self._copy_rows((layer, "csa_state"), request, positions)
