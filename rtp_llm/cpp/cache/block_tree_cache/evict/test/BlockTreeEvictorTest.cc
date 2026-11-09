@@ -157,6 +157,8 @@ std::shared_ptr<HostBlockPool> makePinnedHostPool(size_t usable_blocks) {
     config->pool_type            = BlockPoolType::HOST;
     config->pool_name            = "block_tree_evictor_test_host";
     config->physical_block_count = usable_blocks + 1;
+    // These small lifetime fixtures intentionally freeze more than the production threshold.
+    config->frozen_block_abort_ratio = 0.0;
     config->payload_bytes        = 64;
     config->stride_bytes         = 4096;
     config->alignment            = 4096;
@@ -202,6 +204,7 @@ std::shared_ptr<BlockTreeDiskBlockPool> makeTestDiskPool(size_t usable_blocks, c
     config->pool_type            = BlockPoolType::DISK;
     config->pool_name            = name;
     config->work_dir             = "/tmp";
+    config->frozen_block_abort_ratio = 0.0;
     config->payload_bytes        = 64;
     config->stride_bytes         = 64;
     config->disk_size_bytes      = (usable_blocks + 1) * config->stride_bytes;

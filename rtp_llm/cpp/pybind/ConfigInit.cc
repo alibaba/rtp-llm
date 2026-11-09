@@ -1,4 +1,5 @@
 #define PYBIND11_DETAILED_ERROR_MESSAGES
+#include <cmath>
 #include <limits>
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
@@ -499,6 +500,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("block_tree_transfer_worker_count", &KVCacheConfig::block_tree_transfer_worker_count)
         .def_readwrite("block_tree_business_queue_max_size", &KVCacheConfig::block_tree_business_queue_max_size)
         .def_readwrite("block_tree_transfer_queue_max_size", &KVCacheConfig::block_tree_transfer_queue_max_size)
+        .def_readwrite("block_tree_device_frozen_abort_ratio", &KVCacheConfig::block_tree_device_frozen_abort_ratio)
         .def_readwrite("block_tree_device_evict_low_watermark_ratio",
                        &KVCacheConfig::block_tree_device_evict_low_watermark_ratio)
         .def_readwrite("block_tree_device_evict_high_watermark_ratio",
@@ -598,7 +600,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      15,
+                                      16,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -681,13 +683,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.block_tree_full_disk_evict_low_watermark_ratio,
                                       self.block_tree_full_disk_evict_high_watermark_ratio,
                                       self.kvcm_task_timeout_ms,
-                                      self.disk_cache_evict_timeout_ms);
+                                      self.disk_cache_evict_timeout_ms,
+                                      self.block_tree_device_frozen_abort_ratio);
             },
             [](py::tuple t) {
                 if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
                     || t[0].cast<std::string>() != "KVCacheConfig"
                     || !((t.size() == 83 && t[1].cast<int>() == 13) || (t.size() == 84 && t[1].cast<int>() == 14)
-                         || (t.size() == 85 && t[1].cast<int>() == 15))) {
+                         || (t.size() == 85 && t[1].cast<int>() == 15) || (t.size() == 86 && t[1].cast<int>() == 16))) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
@@ -778,6 +781,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 if (t.size() >= 85) {
                     c.disk_cache_evict_timeout_ms = t[84].cast<int64_t>();
+                }
+                if (t.size() == 86) {
+                    c.block_tree_device_frozen_abort_ratio = t[85].cast<double>();
+                }
+                if (!std::isfinite(c.block_tree_device_frozen_abort_ratio)
+                    || c.block_tree_device_frozen_abort_ratio < 0.0 || c.block_tree_device_frozen_abort_ratio > 1.0) {
+                    throw std::runtime_error("invalid KVCacheConfig device frozen abort ratio");
                 }
                 if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
                     || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())

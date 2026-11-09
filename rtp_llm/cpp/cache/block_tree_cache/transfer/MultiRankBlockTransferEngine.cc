@@ -11,9 +11,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
-#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -52,7 +50,7 @@ public:
 
     void waitDone() override {
         try {
-            broadcast_result_->waitDone();
+            broadcast_result_->waitDone(/*timeout_ms=*/0, /*fatal_on_error=*/false);
         } catch (const std::exception& error) {
             evaluate(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, error.what()));
         } catch (...) {
@@ -128,10 +126,6 @@ private:
                 return false;
             }
             if (!broadcast_result_->success()) {
-                if (StaticConfig::user_ft_core_dump_on_exception) {
-                    RTP_LLM_FAIL("multi-rank transfer aborted, at least one worker RPC status is not OK: %s",
-                                 broadcast_result_->failureSummary().c_str());
-                }
                 result = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN,
                                     "multi-rank transfer RPC failed: " + broadcast_result_->failureSummary()),
                           CacheCopyError::RPC_FAILED};
@@ -353,7 +347,8 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
             return stub->AsyncExecuteFunction(context.get(), rpc_request, completion_queue);
         },
         task.requestId(),
-        MemoryOperationRequestPB_CopyDirection_Name(request.copy_direction()));
+        MemoryOperationRequestPB_CopyDirection_Name(request.copy_direction()),
+        /*fatal_on_error=*/false);
     if (broadcast_result == nullptr) {
         RTP_LLM_LOG_WARNING("failed to start broadcast");
         return std::make_shared<CompletedTransferAsyncContext>(
