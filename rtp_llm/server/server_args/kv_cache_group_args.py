@@ -4,6 +4,21 @@ import math
 from rtp_llm.server.server_args.util import str2bool
 
 
+def _frozen_abort_ratio(value):
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "device frozen abort ratio must be a finite number in [0, 1]"
+        ) from error
+    if not math.isfinite(ratio) or not 0 <= ratio <= 1:
+        raise argparse.ArgumentTypeError(
+            "device frozen abort ratio must be a finite number in [0, 1]"
+        )
+    return ratio
+
+
+
 def _reuse_tail_blocks(value):
     try:
         count = int(value)
@@ -399,6 +414,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=32,
         help="各传输方向共用的最大 descriptor 批大小；Disk->Device 还受 staging 容量限制，Device->Disk 保留单项提交。",
+    )
+    kv_cache_group.add_argument(
+        "--block_tree_device_frozen_abort_ratio",
+        env_name="BLOCK_TREE_DEVICE_FROZEN_ABORT_RATIO",
+        bind_to=(kv_cache_config, "block_tree_device_frozen_abort_ratio"),
+        type=_frozen_abort_ratio,
+        default=0.3,
+        help="单个 DEVICE/HOST/DISK pool 的冻结 block 占比严格超过实际阈值时 core。配置范围 [0, 1]，默认 0.3；(0, 1) 内的配置会增加 [0, 0.10) 范围内的进程级固定随机扰动，接近 1 时缩小扰动范围，实际阈值始终小于 1；0 和 1 不加扰动，0 关闭保护。沿用原 device 配置名，启动时配置。",
     )
     kv_cache_group.add_argument(
         "--btc_transfer_engine_async",
