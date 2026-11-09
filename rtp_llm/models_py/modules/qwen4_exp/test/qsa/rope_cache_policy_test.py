@@ -45,7 +45,7 @@ def check_policy(mode):
             raise WriterReached
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.main_qk_cache_triton.prepare_main_qk_cache",
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.main_qk_cache.prepare_main_qk_cache",
             return_value=SimpleNamespace(run=Mock(side_effect=launch)),
         ):
             try:

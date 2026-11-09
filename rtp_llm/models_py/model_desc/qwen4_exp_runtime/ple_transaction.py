@@ -125,7 +125,7 @@ class PLETransactionCoordinator:
 
         gathered = None
         if graph_capture:
-            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import (
                 gather_target_read_state,
             )
 
@@ -431,7 +431,7 @@ class PLETransactionCoordinator:
                     for layer, stage in transaction.stages.items()
                 },
             )
-        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_metadata_triton import (
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_commit_metadata import (
             begin_accepted_pair_resolution,
         )
 
@@ -509,7 +509,7 @@ class PLETransactionCoordinator:
         # allocate immutable undo only now, with no persistent-pool writes.
         prepared_writes = []
         for stage, state_blocks, ctx_blocks in pending:
-            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_prepare_triton import (
+            from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_commit_prepare import (
                 prepare_commit_values,
             )
 
@@ -579,7 +579,7 @@ class PLETransactionCoordinator:
         blocks stay tolerated in both modes: parking routes such writes to
         the final destination.
         """
-        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_prepare_triton import (
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_commit_prepare import (
             prepare_commit_values,
         )
 

@@ -127,7 +127,7 @@ class PLECacheViews:
             # the pool while capture/replay is in progress.
             if not pages.numel() or not int(table.shape[1]) or pool_rows <= 0:
                 raise RuntimeError(f"PLE cache {tag!r} graph table is empty")
-            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import (
                 resolve_read_blocks,
             )
 
@@ -180,7 +180,7 @@ class PLECacheViews:
         if table.shape[1] == 0 or pool_rows <= 0:
             raise RuntimeError(f"PLE cache {tag!r} commit table or pool is empty")
         pages = logical_pages.to(device=table.device, dtype=torch.long)
-        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
+        from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import (
             resolve_commit_blocks,
         )
 
@@ -229,9 +229,7 @@ class PLECacheViews:
             PLE_NGRAM_CTX_TAG,
             PLE_STATE_TAG,
         )
-        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
-            resolve_commit_pair,
-        )
+        from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import resolve_commit_pair
 
         tables = []
         for inputs, tag in (

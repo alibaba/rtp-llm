@@ -4,6 +4,10 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.qsa.rope_triton import (
+    try_apply_partial_rope,
+    try_build_text_rope,
+)
 from rtp_llm.models_py.model_desc.test.qwen4_exp.qsa_fixtures import QSARuntimeFixture
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     Qwen4ExpQSAIndexer,
@@ -11,12 +15,8 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     build_base_rope,
     build_qsa_rope_from_logical_positions,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.rope_triton import (
-    try_apply_partial_rope,
-    try_build_text_rope,
-)
 
-MODULE = "rtp_llm.models_py.modules.qwen4_exp.qsa.rope_triton"
+MODULE = "rtp_llm.models_py.kernels.cuda.qsa.rope_triton"
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
@@ -317,7 +317,7 @@ class IndexerRoPETritonTest(unittest.TestCase):
                 patch(MODULE + ".try_build_text_rope", return_value=None),
                 patch(MODULE + ".try_apply_partial_rope", return_value=None),
                 patch(
-                    "rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer_triton."
+                    "rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer."
                     "try_write_target_window",
                     return_value=None,
                 ),

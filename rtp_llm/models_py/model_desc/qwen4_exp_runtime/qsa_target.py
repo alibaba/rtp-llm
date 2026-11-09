@@ -85,7 +85,7 @@ def select_target_verify_tokens(
     rotated_q = None
     prepared = None
     if raw_query and target_writer:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.target_prepare_triton import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.target_prepare import (
             try_prepare_target_window,
         )
 
@@ -128,7 +128,7 @@ def select_target_verify_tokens(
             inv_freq=frequency,
         )
         if target_writer:
-            from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
+            from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
                 write_target_window_with_undo_,
             )
 
@@ -173,7 +173,7 @@ def select_target_verify_tokens(
         sine = current_sin.view(batch_size, query_len, 1, -1)
         rotated_q = None
         if raw_query:
-            from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_norm_rope import (
+            from rtp_llm.models_py.kernels.cuda.qsa.indexer_norm_rope import (
                 try_indexer_norm_rope,
             )
 
@@ -201,7 +201,7 @@ def select_target_verify_tokens(
             dtype=torch.float32,
             device=q.device,
         )
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
+    from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
         qsa_paged_indexer_score,
     )
 

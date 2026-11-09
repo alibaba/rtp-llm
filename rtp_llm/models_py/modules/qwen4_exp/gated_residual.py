@@ -32,7 +32,7 @@ class Qwen4GatedResidual(GatedResidual):
                 and normed.shape[0] >= 8192
                 and supports_hc_prefill(normed, weight, scale)
             ):
-                from rtp_llm.models_py.triton_kernels.common.gated_residual_down_triton import (
+                from rtp_llm.models_py.triton_kernels.gated_residual.down import (
                     separate_down_inject_epilogue,
                 )
 
@@ -57,7 +57,7 @@ class Qwen4GatedResidual(GatedResidual):
         # producer independently of the projection dtype, then ignore the
         # optional FP8 scale. Other layouts keep the shared implementation.
         if self.down_projection is None and self.hc_mult == 4:
-            from rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_inject_norm_triton import (
+            from rtp_llm.models_py.triton_kernels.gated_residual.prefill_inject_norm import (
                 try_inject_grouped_norm,
             )
 

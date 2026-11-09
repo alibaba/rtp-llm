@@ -260,7 +260,7 @@ class MainQkCacheTest(MainQkCacheFixture, unittest.TestCase):
 
         operation = SimpleNamespace(run=Mock(side_effect=fail))
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.main_qk_cache_triton.prepare_main_qk_cache",
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.main_qk_cache.prepare_main_qk_cache",
             return_value=operation,
         ):
             with self.assertRaisesRegex(
@@ -295,7 +295,7 @@ class MainQkCacheTest(MainQkCacheFixture, unittest.TestCase):
 
         owner.rope_kvcache_impl.forward.side_effect = stop
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.main_qk_cache_triton.prepare_main_qk_cache",
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.main_qk_cache.prepare_main_qk_cache",
             return_value=None,
         ):
             with self.assertRaisesRegex(RuntimeError, "original writer reached"):

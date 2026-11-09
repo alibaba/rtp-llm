@@ -12,17 +12,15 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import sparse_paged_gqa_attn
+from rtp_llm.models_py.kernels.cuda.qsa.test.reference.sparse_fmha import (
+    sparse_prefill_attn_torch_reference,
+)
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     _select_attention_impl_key,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa import sparse_gqa_impl
 from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import SparseGqaFmhaImpl
-from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
-    sparse_paged_gqa_attn,
-)
-from rtp_llm.models_py.modules.qwen4_exp.test.reference.sparse_fmha import (
-    sparse_prefill_attn_torch_reference,
-)
 
 _H_Q, _H_KV, _D = 24, 2, 256
 _DEV = "cuda"
@@ -566,7 +564,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
                 side_effect=lambda *args: events.append("cache_store"),
             ),
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha."
+                "rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha."
                 "sparse_paged_gqa_attn",
                 side_effect=_paged,
             ),
@@ -796,12 +794,11 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         calls.clear()
         with (
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha."
-                "sparse_prefill_attn",
+                "rtp_llm.models_py.kernels.cuda.qsa.sparse_fmha." "sparse_prefill_attn",
                 side_effect=AssertionError("local sparse prefill must not run"),
             ),
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha."
+                "rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha."
                 "sparse_paged_gqa_attn",
                 side_effect=_record_paged,
             ),
@@ -916,7 +913,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
             impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
 
     def test_paged_verdict_ors_repeated_request_error_bits(self):
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.paged_validation import (
+        from rtp_llm.models_py.kernels.cuda.qsa.paged_validation import (
             geometry_flags,
             validate_geometry,
         )
@@ -1170,7 +1167,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         impl.attn_inputs.input_lengths = impl.attn_inputs.input_lengths.to(_DEV)
         impl.attn_inputs.prefix_lengths = impl.attn_inputs.prefix_lengths.to(_DEV)
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.prefill_validation.validate_prefill_inputs",
+            "rtp_llm.models_py.kernels.cuda.qsa.prefill_validation.validate_prefill_inputs",
             side_effect=AssertionError("host plan requires host metadata"),
         ):
             actual = impl._prepare_incremental_prefill_inputs(qkv, cache, selected)
@@ -1210,8 +1207,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
                 side_effect=lambda *args: events.append("cache_store"),
             ),
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha."
-                "sparse_prefill_attn",
+                "rtp_llm.models_py.kernels.cuda.qsa.sparse_fmha." "sparse_prefill_attn",
                 side_effect=AssertionError("local sparse prefill must not run"),
             ),
         ):
@@ -1240,12 +1236,11 @@ class SparseGqaImplForwardTest(unittest.TestCase):
 
         with (
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha."
-                "sparse_prefill_attn",
+                "rtp_llm.models_py.kernels.cuda.qsa.sparse_fmha." "sparse_prefill_attn",
                 side_effect=lambda q, k, v, indices: torch.zeros_like(q),
             ) as local_prefill,
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha."
+                "rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha."
                 "sparse_paged_gqa_attn",
                 side_effect=AssertionError("paged prefill must not run"),
             ),
@@ -1335,7 +1330,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
                 side_effect=lambda *args: events.append("cache_store"),
             ),
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha.sparse_prefill_attn",
+                "rtp_llm.models_py.kernels.cuda.qsa.sparse_fmha.sparse_prefill_attn",
                 side_effect=_record_sparse,
             ),
         ):
@@ -1397,7 +1392,7 @@ class SparseGqaImplForwardTest(unittest.TestCase):
             return q
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha."
+            "rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha."
             "sparse_paged_gqa_attn",
             side_effect=_record_paged,
         ):

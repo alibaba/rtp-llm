@@ -6,7 +6,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
     restore_indexer_cache,
     write_indexer_cache,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
     write_decode_key_,
     write_decode_key_with_undo_,
     write_draft_window_with_undo_,

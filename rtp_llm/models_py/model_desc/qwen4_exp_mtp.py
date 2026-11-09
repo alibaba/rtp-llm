@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from typing import Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import get_attention_inputs_value
@@ -18,7 +20,6 @@ from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 
 def normalize_mtp_prefill_positions(inputs, index_factor: int) -> None:
@@ -139,7 +140,7 @@ class Qwen4ExpMTPInputProjection(nn.Module):
 
         embedding = None
         if inputs_embeds.is_cuda and torch.version.hip is None:
-            from rtp_llm.models_py.modules.qwen4_exp.mtp_norm_triton import (
+            from rtp_llm.models_py.kernels.cuda.qwen4_mtp_norm import (
                 try_mtp_embedding_rms_norm,
             )
 

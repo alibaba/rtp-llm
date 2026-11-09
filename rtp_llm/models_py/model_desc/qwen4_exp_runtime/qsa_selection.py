@@ -53,9 +53,7 @@ def select_qsa_paged_tokens(
                 "block_logits do not cover every completed block in token_lengths"
             )
 
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_topk_triton import (
-        try_select_qsa_tokens,
-    )
+    from rtp_llm.models_py.kernels.cuda.qsa.qsa_topk_triton import try_select_qsa_tokens
 
     result = try_select_qsa_tokens(
         block_logits,

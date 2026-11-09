@@ -259,7 +259,7 @@ def build_base_rope(
 
     scale = _rope_scale(rope_config, "Base RoPE")
     if inv_freq is not None and positions.is_cuda and torch.version.hip is None:
-        from .rope_triton import try_build_text_rope
+        from rtp_llm.models_py.kernels.cuda.qsa.rope_triton import try_build_text_rope
 
         fused = try_build_text_rope(
             positions[:, 0],
@@ -345,7 +345,7 @@ def build_qsa_rope_from_logical_positions(
     if logical_positions.dim() != 1 or int(logical_positions.numel()) != token_count:
         raise ValueError("qwen4 QSA logical position count does not match tokens")
     if logical_positions.is_cuda and torch.version.hip is None:
-        from .rope_triton import try_build_text_rope
+        from rtp_llm.models_py.kernels.cuda.qsa.rope_triton import try_build_text_rope
 
         result = try_build_text_rope(
             logical_positions,
@@ -397,7 +397,9 @@ def apply_partial_rope(
     ``cos``/``sin`` must already be broadcastable to ``x``.
     """
     if x.is_cuda and torch.version.hip is None:
-        from .rope_triton import try_apply_partial_rope
+        from rtp_llm.models_py.kernels.cuda.qsa.rope_triton import (
+            try_apply_partial_rope,
+        )
 
         result = try_apply_partial_rope(x, cos, sin)
         if result is not None:
@@ -625,7 +627,9 @@ class Qwen4ExpQSAIndexer(nn.Module):
                 torch.empty((batch, seq_len, 0), device=device), positions
             )
 
-        from .indexer_prefill_score import try_prefill_score
+        from rtp_llm.models_py.kernels.cuda.qsa.indexer_prefill_score import (
+            try_prefill_score,
+        )
 
         scores = try_prefill_score(q, block_keys)
         if scores is not None:
@@ -671,7 +675,9 @@ class Qwen4ExpQSAIndexer(nn.Module):
         top_k = min(self.block_topk, num_blocks)
         if top_k > 0:
             if ratio == 4 and self.token_budget == 2048:
-                from .qsa_topk_triton import try_select_qsa_tokens
+                from rtp_llm.models_py.kernels.cuda.qsa.qsa_topk_triton import (
+                    try_select_qsa_tokens,
+                )
 
                 visible_lengths = (positions + 1).to(torch.int32).repeat(batch)
                 selected = try_select_qsa_tokens(

@@ -389,8 +389,11 @@ def _try_prepare_host_incremental_prefill(
     All device contents are checked for this invocation. Nothing is cached across
     layers or calls; in-place metadata updates still take effect before KV writes.
     """
+    from rtp_llm.models_py.kernels.cuda.qsa.prefill_validation import (
+        validate_prefill_inputs,
+    )
+
     from .fmha_validation import _validate_main_cache_layout
-    from .prefill_validation import validate_prefill_inputs
 
     cu = self.attn_inputs.cu_seqlens_device
     tokens = int(qkv.shape[0])

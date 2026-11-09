@@ -5,11 +5,11 @@ import torch
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
     restore_indexer_cache,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
     write_target_window_with_undo_,
 )
 
-MODULE = "rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer_triton"
+MODULE = "rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer"
 
 
 class TargetWriterFixture:

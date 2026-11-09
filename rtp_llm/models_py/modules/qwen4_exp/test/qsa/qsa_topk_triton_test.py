@@ -2,14 +2,12 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.qsa.qsa_topk_triton import try_select_qsa_tokens
+from rtp_llm.models_py.kernels.cuda.qsa.test.reference.topk_reference import (
+    select_qsa_paged_tokens as reference_topk,
+)
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
     select_qsa_paged_tokens,
-)
-from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_topk_triton import (
-    try_select_qsa_tokens,
-)
-from rtp_llm.models_py.modules.qwen4_exp.test.reference.topk_reference import (
-    select_qsa_paged_tokens as reference_topk,
 )
 
 
@@ -105,7 +103,7 @@ class QsaTopkTritonTest(unittest.TestCase):
             )
 
     def test_paged_producer_mask_preserves_native_order_and_tail(self):
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
+        from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
             qsa_paged_indexer_score,
         )
 

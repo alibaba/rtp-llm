@@ -1,32 +1,25 @@
-load(":defs.bzl", "qwen4_test")
+load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 
 package(default_visibility = ["//visibility:public"])
-
-exports_files(["test_main.py"])
 
 _REFERENCE_DEPS = [
     ":math_references",
     ":test_support",
 ]
 
-qwen4_test(
+models_py_test(
     name = "state_cache_inputs_test",
     src = "state_cache_inputs_test.py",
     gpu = "L20_CU13",
 )
 
 # Keep the standalone grouped-FP8 kernel test free of the native-engine testlib.
-py_library(
-    name = "sparse_paged_reference",
-    srcs = ["reference/sparse_paged.py"],
-    deps = ["//rtp_llm:torch"],
-)
 
 py_library(
     name = "math_references",
     srcs = glob(["reference/*.py"]),
     visibility = ["//visibility:public"],
-    deps = ["//rtp_llm/models_py:modules"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm/models_py/kernels/cuda/qsa/test/reference:math_references"],
 )
 
 py_library(
@@ -43,12 +36,6 @@ py_library(
 )
 
 py_library(
-    name = "test_runner",
-    srcs = ["support/test_runner.py"],
-    visibility = ["//visibility:public"],
-)
-
-py_library(
     name = "upstream_fixture",
     srcs = ["parity/upstream_fixture.py"],
     data = [
@@ -57,42 +44,35 @@ py_library(
     ],
 )
 
-qwen4_test(
+models_py_test(
     name = "ple_test",
     src = "ple/ple_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
-    name = "ple_gather_triton_test",
-    src = "ple/ple_gather_triton_test.py",
-    gpu = "L20_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
+models_py_test(
     name = "ple_prefetch_test",
     src = "ple/ple_prefetch_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "ple_inline_uva_graph_test",
     src = "ple/ple_inline_uva_graph_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "ple_decode_test",
     src = "ple/ple_decode_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "upstream_parity_test",
     src = "parity/upstream_parity_test.py",
     env = {"QWEN4_EXP_REQUIRE_PARITY": "1"},
@@ -103,7 +83,7 @@ qwen4_test(
     ],
 )
 
-qwen4_test(
+models_py_test(
     name = "gdn_upstream_parity_test",
     src = "parity/gdn_upstream_parity_test.py",
     gpu = "L20_CU13",
@@ -114,50 +94,50 @@ qwen4_test(
     ],
 )
 
-qwen4_test(
+models_py_test(
     name = "indexer_compressor_test",
     src = "qsa/indexer_compressor_test.py",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "indexer_decode_triton_test",
     src = "qsa/indexer_decode_triton_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "indexer_prefill_triton_test",
     src = "qsa/indexer_prefill_triton_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "moe_align_triton_test",
     src = "moe/moe_align_triton_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "moe_topk_triton_test",
     src = "moe/moe_topk_triton_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "marlin_admission_test",
     src = "moe/marlin_admission_test.py",
     data = [
-        "moe/marlin_large_decode_test.py",
+        "//rtp_llm/models_py/kernels/cuda/marlin_nvfp4/test:marlin_large_decode_test.py",
         "moe/marlin_nvfp4_test.py",
     ],
 )
 
-qwen4_test(
+models_py_test(
     name = "marlin_nvfp4_test",
     src = "moe/marlin_nvfp4_test.py",
     args = [
@@ -173,7 +153,7 @@ qwen4_test(
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "marlin_nvfp4_hopper_test",
     src = "moe/marlin_nvfp4_test.py",
     args = [
@@ -184,21 +164,14 @@ qwen4_test(
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "target_writer_fusion_test",
     src = "qsa/target_writer_fusion_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
-    name = "target_metadata_test",
-    src = "qsa/target_metadata_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
+models_py_test(
     name = "indexer_rope_triton_test",
     src = "qsa/indexer_rope_triton_test.py",
     gpu = "RTX_5000_PRO_CU13",
@@ -209,189 +182,104 @@ qwen4_test(
     ],
 )
 
-qwen4_test(
+models_py_test(
     name = "qsa_topk_triton_test",
     src = "qsa/qsa_topk_triton_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "qsa_decode_graph_test",
     src = "qsa/qsa_decode_graph_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
-    name = "indexer_paged_score_test",
-    src = "qsa/indexer_paged_score_test.py",
-    gpu = "L20_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
-    name = "sparse_fmha_test",
-    src = "qsa/sparse_fmha_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
-    name = "qsa_tma_prefill_test",
-    src = "qsa/tma_prefill_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-)
-
-qwen4_test(
+models_py_test(
     name = "sparse_gqa_impl_test",
     src = "qsa/sparse_gqa_impl_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "sparse_paged_fmha_test",
     src = "qsa/sparse_paged_fmha_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "draft_prefill_graph_test",
     src = "qsa/draft_prefill_graph_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
-    name = "draft_metadata_test",
-    src = "qsa/draft_metadata_test.py",
-    gpu = "L20_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
+models_py_test(
     name = "prefill_silu_quant_test",
     src = "qsa/prefill_silu_quant_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
-    name = "sparse_prefill_bitmap_test",
-    src = "qsa/sparse_prefill_bitmap_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
-    name = "indexer_prefill_score_test",
-    src = "qsa/indexer_prefill_score_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
+models_py_test(
     name = "small_moe_gemv_test",
     src = "moe/small_moe_gemv_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "pd_cache_store_test",
     src = "qsa/pd_cache_store_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "gdn_composition_test",
     src = "gdn/gdn_composition_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "fp8_kv_test",
     src = "qsa/fp8_kv_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
-    name = "indexer_tensorcore_test",
-    src = "qsa/indexer_tensorcore_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    testlib = "//rtp_llm/models_py/standalone:auto_model",
-)
-
-qwen4_test(
+models_py_test(
     name = "prefill_preflight_test",
     src = "qsa/prefill_preflight_test.py",
     gpu = "RTX_5000_PRO_CU13",
     testlib = "//rtp_llm/models_py/standalone:auto_model",
 )
 
-qwen4_test(
+models_py_test(
     name = "compute_weight_view_test",
     src = "parity/compute_weight_view_test.py",
     testlib = "//rtp_llm/models_py/standalone:auto_model",
 )
 
-qwen4_test(
-    name = "marlin_large_decode_test",
-    src = "moe/marlin_large_decode_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    testlib = "//rtp_llm/models_py/standalone:auto_model",
-)
-
-qwen4_test(
-    name = "marlin_prefill_test",
-    src = "moe/marlin_prefill_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    testlib = "//rtp_llm/models_py/standalone:auto_model",
-)
-
-qwen4_test(
+models_py_test(
     name = "gated_residual_bf16_test",
     src = "parity/gated_residual_bf16_test.py",
     gpu = "RTX_5000_PRO_CU13",
     testlib = "//rtp_llm/models_py/standalone:auto_model",
 )
 
-qwen4_test(
-    name = "histogram_topk_test",
-    src = "qsa/histogram_topk_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    testlib = "//rtp_llm/models_py/standalone:auto_model",
-)
-
-qwen4_test(
+models_py_test(
     name = "hc_prefill_mix_test",
     src = "parity/hc_prefill_mix_test.py",
     gpu = "RTX_5000_PRO_CU13",
     testlib = "//rtp_llm/models_py/standalone:auto_model",
 )
 
-qwen4_test(
-    name = "chunk_paged_gqa_test",
-    src = "qsa/chunk_paged_gqa_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    testlib = "//rtp_llm/models_py/standalone:auto_model",
-    deps = [":sparse_paged_reference"],
-)
-
-qwen4_test(
-    name = "grouped_fp8_test",
-    src = "qsa/grouped_fp8_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    testlib = "//rtp_llm/models_py/standalone:auto_model",
-    deps = [":sparse_paged_reference"],
-)
-
-qwen4_test(
+models_py_test(
     name = "upstream_parity_qualification",
     src = "parity/real_weight_parity_test.py",
     env = {"QWEN4_EXP_REQUIRE_PARITY": "1"},
@@ -404,7 +292,7 @@ qwen4_test(
     ],
 )
 
-qwen4_test(
+models_py_test(
     name = "gdn_upstream_parity_qualification",
     src = "parity/gdn_upstream_parity_test.py",
     env = {"QWEN4_EXP_REQUIRE_PARITY": "1"},
@@ -417,213 +305,139 @@ qwen4_test(
     ],
 )
 
-qwen4_test(
-    name = "ple_outer_residual_test",
-    src = "ple/ple_outer_residual_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
+models_py_test(
     name = "ple_commit_metadata_test",
     src = "ple/ple_commit_metadata_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "ple_commit_prepare_test",
     src = "ple/ple_commit_prepare_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "ple_commit_test",
     src = "ple/ple_commit_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
-    name = "ple_hash_triton_test",
-    src = "ple/ple_hash_triton_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
+models_py_test(
     name = "gdn_prefill_norm_test",
     src = "gdn/gdn_prefill_norm_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "ple_gate_test",
     src = "ple/ple_gate_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "gdn_prefill_adapter_test",
     src = "gdn/gdn_prefill_adapter_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
-    name = "indexer_norm_rope_test",
-    src = "qsa/indexer_norm_rope_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
-    name = "qsa_packed_count_test",
-    src = "qsa/qsa_packed_count_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
-    name = "ple_read_blocks_test",
-    src = "ple/ple_read_blocks_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
-    name = "main_qk_norm_rope_test",
-    src = "qsa/main_qk_norm_rope_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
+models_py_test(
     name = "qsa_projection_pair_test",
     src = "qsa/qsa_projection_pair_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "mtp_embedding_norm_test",
     src = "qsa/mtp_embedding_norm_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
-    name = "qsa_cub_topk_test",
-    src = "qsa/qsa_cub_topk_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
+models_py_test(
     name = "qsa_target_prepare_test",
     src = "qsa/qsa_target_prepare_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "tp_registered_input_test",
     src = "distributed/tp_registered_input_test.py",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "prefetch_order_test",
     src = "qsa/prefetch_order_test.py",
     gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "decode_snapshot_test",
     src = "qsa/decode_snapshot_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "main_qk_cache_test",
     src = "qsa/main_qk_cache_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "qsa_main_metadata_test",
     src = "qsa/qsa_main_metadata_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "decode_rope_stride_test",
     src = "qsa/decode_rope_stride_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "rope_cache_policy_test",
     src = "qsa/rope_cache_policy_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-
-
-qwen4_test(
+models_py_test(
     name = "gdn_norm_quant_test",
     src = "gdn/gdn_norm_quant_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "shared_expert_overlap_test",
     src = "moe/shared_expert_overlap_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-
-
-qwen4_test(
+models_py_test(
     name = "draft_qsa_fused_test",
     src = "qsa/draft_qsa_fused_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
-    name = "draft_qsa_layout_test",
-    src = "qsa/draft_qsa_layout_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
-    name = "draft_paged_fmha_test",
-    src = "qsa/draft_paged_fmha_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
-    name = "draft_qsa_metadata_test",
-    src = "qsa/draft_qsa_metadata_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-qwen4_test(
+models_py_test(
     name = "cpu_target_status_test",
     src = "distributed/cpu_target_status_test.py",
     # Native CPU bindings share a CUDA-linked library; no CUDA device is needed.
@@ -632,18 +446,18 @@ qwen4_test(
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "eager_validation_test",
     src = "qsa/eager_validation_test.py",
 )
 
-qwen4_test(
+models_py_test(
     name = "indexer_cpu_contract_test",
     src = "qsa/indexer_cpu_contract_test.py",
     deps = _REFERENCE_DEPS,
 )
 
-qwen4_test(
+models_py_test(
     name = "indexer_cuda_contract_test",
     src = "qsa/indexer_cuda_contract_test.py",
     gpu = "L20_CU13",
@@ -663,7 +477,7 @@ test_suite(
         ":hc_prefill_mix_test",
         ":gated_residual_bf16_test",
         ":compute_weight_view_test",
-        ":histogram_topk_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:histogram_topk_test",
         ":upstream_parity_test",
     ],
 )
@@ -676,12 +490,13 @@ test_suite(
         ":ple_commit_test",
         ":ple_decode_test",
         ":ple_gate_test",
-        ":ple_gather_triton_test",
-        ":ple_hash_triton_test",
+        "//rtp_llm/models_py/kernels/cuda/qwen4_ple/test:gate_test",
+        "//rtp_llm/models_py/kernels/cuda/qwen4_ple/test:ple_gather_triton_test",
+        "//rtp_llm/models_py/kernels/cuda/qwen4_ple/test:ple_hash_triton_test",
         ":ple_inline_uva_graph_test",
-        ":ple_outer_residual_test",
+        "//rtp_llm/models_py/kernels/cuda/qwen4_ple/test:ple_outer_residual_test",
         ":ple_prefetch_test",
-        ":ple_read_blocks_test",
+        "//rtp_llm/models_py/kernels/cuda/qwen4_ple/test:ple_read_blocks_test",
         ":ple_test",
     ],
 )
@@ -691,46 +506,47 @@ test_suite(
     tests = [
         ":decode_rope_stride_test",
         ":decode_snapshot_test",
-        ":draft_metadata_test",
-        ":draft_paged_fmha_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:draft_metadata_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:draft_paged_fmha_test",
         ":draft_prefill_graph_test",
         ":draft_qsa_fused_test",
-        ":draft_qsa_layout_test",
-        ":draft_qsa_metadata_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:draft_qsa_layout_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:draft_qsa_metadata_test",
         ":fp8_kv_test",
-        ":chunk_paged_gqa_test",
-        ":indexer_tensorcore_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:chunk_paged_gqa_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:indexer_tensorcore_test",
         ":prefill_preflight_test",
-        ":grouped_fp8_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:grouped_fp8_test",
         ":indexer_compressor_test",
         ":indexer_cpu_contract_test",
         ":indexer_cuda_contract_test",
         ":indexer_decode_triton_test",
-        ":indexer_norm_rope_test",
-        ":indexer_paged_score_test",
-        ":indexer_prefill_score_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:indexer_norm_rope_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:indexer_paged_score_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:indexer_prefill_score_test",
         ":indexer_prefill_triton_test",
         ":indexer_rope_triton_test",
         ":main_qk_cache_test",
-        ":main_qk_norm_rope_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:main_qk_norm_rope_test",
         ":mtp_embedding_norm_test",
+        "//rtp_llm/models_py/kernels/cuda/test:qwen4_mtp_norm_test",
         ":pd_cache_store_test",
         ":prefetch_order_test",
         ":prefill_silu_quant_test",
-        ":qsa_cub_topk_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:qsa_cub_topk_test",
         ":qsa_decode_graph_test",
         ":qsa_main_metadata_test",
-        ":qsa_packed_count_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:qsa_packed_count_test",
         ":qsa_projection_pair_test",
         ":qsa_target_prepare_test",
-        ":qsa_tma_prefill_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:qsa_tma_prefill_test",
         ":qsa_topk_triton_test",
         ":rope_cache_policy_test",
-        ":sparse_fmha_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:sparse_fmha_test",
         ":sparse_gqa_impl_test",
         ":sparse_paged_fmha_test",
-        ":sparse_prefill_bitmap_test",
-        ":target_metadata_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:sparse_prefill_bitmap_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:target_metadata_test",
         ":target_writer_fusion_test",
     ],
 )
@@ -739,12 +555,13 @@ test_suite(
     name = "qwen4_moe",
     tests = [
         ":factory_isolation_test",
-        ":marlin_large_decode_test",
+        "//rtp_llm/models_py/kernels/cuda/marlin_nvfp4/test:marlin_large_decode_test",
         ":marlin_nvfp4_hopper_test",
         ":marlin_nvfp4_test",
-        ":marlin_prefill_test",
+        "//rtp_llm/models_py/kernels/cuda/marlin_nvfp4/test:marlin_prefill_test",
         ":moe_align_triton_test",
         ":moe_topk_triton_test",
+        "//rtp_llm/models_py/triton_kernels/moe/test:qwen4_topk_test",
         ":shared_expert_overlap_test",
         ":small_moe_gemv_test",
     ],
@@ -755,6 +572,8 @@ test_suite(
     tests = [
         ":gdn_composition_test",
         ":gdn_norm_quant_test",
+        "//rtp_llm/models_py/kernels/cuda/gdn_sm120/test:norm_quant_test",
+        "//rtp_llm/models_py/kernels/cuda/gdn_sm120/test:norm_test",
         ":gdn_prefill_adapter_test",
         ":gdn_prefill_norm_test",
     ],
@@ -779,7 +598,7 @@ test_suite(
     ],
 )
 
-qwen4_test(
+models_py_test(
     name = "shared_expert_tp2_integration_test",
     src = "moe/shared_expert_tp2_integration_test.py",
     gpu = "RTX_5000_PRO_CU13",
@@ -787,9 +606,7 @@ qwen4_test(
     deps = _REFERENCE_DEPS,
 )
 
-
-
-qwen4_test(
+models_py_test(
     name = "factory_isolation_test",
     src = "moe/factory_isolation_test.py",
     gpu = "RTX_5000_PRO_CU13",

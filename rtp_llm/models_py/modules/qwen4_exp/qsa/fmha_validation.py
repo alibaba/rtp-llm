@@ -137,7 +137,10 @@ def _try_validate_main_paged_geometry(
     page_size, cache_blocks = _validate_main_cache_layout(
         self, cache, block_table, batch_size, device
     )
-    from .paged_validation import geometry_flags, validate_geometry
+    from rtp_llm.models_py.kernels.cuda.qsa.paged_validation import (
+        geometry_flags,
+        validate_geometry,
+    )
 
     # Preserve int64 metadata until validation; narrowing first can hide overflow.
     bases = sequence_bases.to(device=device, non_blocking=True)

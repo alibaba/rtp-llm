@@ -35,7 +35,7 @@ class PLEProjectionFixture:
         state = initial
         outputs, snapshots = [], []
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.ple.ple_gate_triton.try_ple_gate",
+            "rtp_llm.models_py.kernels.cuda.qwen4_ple.gate.try_ple_gate",
             return_value=None,
         ):
             for start in range(0, hidden.shape[1], 128):

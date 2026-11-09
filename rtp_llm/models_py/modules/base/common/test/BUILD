@@ -4,7 +4,6 @@ py_test_deps = [
 
 test_envs = {}
 
-
 py_test (
     name = "embeding_test",
     srcs = ["embeding_test.py"],
@@ -55,7 +54,6 @@ py_test(
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
 )
-
 
 py_test(
     name = "vocab_byte_gather_test",

@@ -3,14 +3,12 @@ from types import SimpleNamespace
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.qsa.indexer_norm_rope import try_indexer_norm_rope
+from rtp_llm.models_py.kernels.cuda.qsa.rope_triton import try_build_text_rope
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
     restore_indexer_cache,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_norm_rope import (
-    try_indexer_norm_rope,
-)
-from rtp_llm.models_py.modules.qwen4_exp.qsa.rope_triton import try_build_text_rope
-from rtp_llm.models_py.modules.qwen4_exp.qsa.target_prepare_triton import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.target_prepare import (
     try_prepare_target_window,
 )
 from rtp_llm.models_py.modules.qwen4_exp.test.support.target_writer_fusion import (

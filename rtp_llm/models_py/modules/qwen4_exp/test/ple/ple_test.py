@@ -122,9 +122,7 @@ class Qwen4ExpNGramEmbeddingTest(unittest.TestCase):
         "NVIDIA CUDA is required for CPU UVA",
     )
     def test_cpu_uva_gather_matches_host_rows_and_zeroes_remote_shards(self):
-        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
-            gather_local,
-        )
+        from rtp_llm.models_py.kernels.cuda.qwen4_ple.gather import gather_local
 
         for dtype in (torch.float32, torch.bfloat16):
             with self.subTest(dtype=dtype):

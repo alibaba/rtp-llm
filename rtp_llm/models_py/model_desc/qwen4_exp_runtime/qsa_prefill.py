@@ -183,7 +183,7 @@ def write_prefill_indexer_cache(
     # The fused prefill writer requires allocated pages for every request.
     # Fake/warmup batches use the transactional writer's row-level padding mask.
     if defer_cu:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_triton import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill import (
             write_zero_prefix_prefill,
         )
 
@@ -263,15 +263,15 @@ def select_draft_graph_tokens(
     raw_query: bool = False,
 ) -> torch.Tensor:
     """Capture a fixed-capacity draft plan; replay validates host mirrors."""
+    from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
+        qsa_paged_indexer_score,
+    )
     from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_prefill_graph import (
         draft_graph_lanes,
         draft_graph_rows,
     )
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
         write_draft_window_with_undo_,
-    )
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
-        qsa_paged_indexer_score,
     )
 
     inputs = self.main_inputs
@@ -353,7 +353,7 @@ def select_draft_graph_tokens(
         batch_size=batch,
         device=q.device,
     )
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_prepare_triton import (
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_prepare import (
         try_prepare,
         try_prepare_metadata,
     )
@@ -442,9 +442,7 @@ def select_draft_graph_tokens(
         max_ctx_len=int(kv_table.shape[1]) * 32,
         validate_block_table=False,
     )
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import (
-        try_cub_draft_qsa_tokens,
-    )
+    from rtp_llm.models_py.kernels.cuda.qsa.cub_topk import try_cub_draft_qsa_tokens
 
     if int(indexer.token_budget) == 2048:
         packed = try_cub_draft_qsa_tokens(
@@ -463,7 +461,7 @@ def select_draft_graph_tokens(
         validate_lengths=False,
         scores_are_masked=True,
     )
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_layout_triton import (
+    from rtp_llm.models_py.kernels.cuda.qsa.draft_layout_triton import (
         try_restore_selection,
     )
 
@@ -589,7 +587,7 @@ def _incremental_prefill_selection(
         and int(plan.state_tokens_per_block) == 128
     )
     if triton_draft_window:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
             write_draft_window_with_undo_,
         )
 
@@ -642,7 +640,7 @@ def _incremental_prefill_selection(
         dtype=torch.float32,
         device=q.device,
     )
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
+    from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
         qsa_paged_indexer_score,
     )
 

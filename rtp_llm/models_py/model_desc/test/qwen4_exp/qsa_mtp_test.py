@@ -193,7 +193,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             )
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=_score,
         ):
@@ -252,7 +252,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
                 side_effect=original,
             ) as geometry,
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+                "rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score."
                 "qsa_paged_indexer_score",
                 return_value=torch.zeros(q_len, 2, device="cuda"),
             ),
@@ -330,7 +330,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
                 )
                 q = torch.randn(q_len, 2, self.D, dtype=torch.bfloat16, device=device)
                 with patch(
-                    "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+                    "rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score."
                     "qsa_paged_indexer_score",
                     side_effect=_score,
                 ):
@@ -391,7 +391,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             ).view(rows, max_ctx_len)
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=_score,
         ):
@@ -475,7 +475,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
                         )
 
                     with patch(
-                        "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+                        "rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score."
                         "qsa_paged_indexer_score",
                         side_effect=score,
                     ):
@@ -612,7 +612,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             )
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=_score,
         ):
@@ -703,7 +703,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             )
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=_score,
         ):
@@ -751,7 +751,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
         raw = torch.randn(8, self.D, dtype=torch.bfloat16, device=device)
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=lambda q, weight, pool, table, lengths, **kwargs: torch.zeros(
                 q.shape[1], kwargs["max_ctx_len"], dtype=torch.float32, device=device
@@ -784,7 +784,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
         )
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=RuntimeError("injected paged score failure"),
         ):
@@ -832,7 +832,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             return torch.zeros((1, max_ctx_len), dtype=torch.float32)
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=_score,
         ):

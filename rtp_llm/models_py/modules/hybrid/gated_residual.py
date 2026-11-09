@@ -23,7 +23,7 @@ def grouped_rms_norm(
     ``plus_one``, unlike the rest of the repo's RMSNorms.
     """
     if x.is_cuda and torch.version.hip is None:
-        from rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton import (
+        from rtp_llm.models_py.triton_kernels.gated_residual.norm import (
             try_grouped_rms_norm,
         )
 
@@ -46,7 +46,7 @@ def inject_into_residual(
     ``[..., hidden]`` and ``inject_weights`` is ``[..., hc_mult]``.
     """
     if hyper_input.is_cuda and torch.version.hip is None:
-        from rtp_llm.models_py.triton_kernels.common.gated_residual_inject_triton import (
+        from rtp_llm.models_py.triton_kernels.gated_residual.inject import (
             try_fused_inject,
         )
 
@@ -159,7 +159,7 @@ class GatedResidual(nn.Module):
             and hyper_input.is_cuda
             and torch.version.hip is None
         ):
-            from rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton import (
+            from rtp_llm.models_py.triton_kernels.gated_residual.norm import (
                 try_grouped_rms_norm_with_fp8_scale,
             )
 
@@ -184,7 +184,7 @@ class GatedResidual(nn.Module):
             and self.down_projection.use_scaled_mm
             and tuple(self.down_projection.weight.shape) == (320, 10240)
         ):
-            from rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_inject_norm_triton import (
+            from rtp_llm.models_py.triton_kernels.gated_residual.prefill_inject_norm import (
                 try_inject_grouped_norm,
             )
 
@@ -213,7 +213,7 @@ class GatedResidual(nn.Module):
             and normed.device == merged.device
             and 1 <= normed.numel() // self.hc_hidden_size <= 32
         ):
-            from rtp_llm.models_py.triton_kernels.common.gated_residual_down_triton import (
+            from rtp_llm.models_py.triton_kernels.gated_residual.down import (
                 down_inject_epilogue,
             )
 
@@ -231,7 +231,7 @@ class GatedResidual(nn.Module):
                 self.inject_projection is not None
                 and self.inject_projection.compute_weight is not None
             ):
-                from rtp_llm.models_py.triton_kernels.common.gated_residual_splitk_inject import (
+                from rtp_llm.models_py.triton_kernels.gated_residual.splitk_inject import (
                     try_splitk_down_inject,
                 )
 
@@ -244,7 +244,7 @@ class GatedResidual(nn.Module):
                 and down.is_cuda
                 and torch.version.hip is None
             ):
-                from rtp_llm.models_py.triton_kernels.common.gated_residual_down_triton import (
+                from rtp_llm.models_py.triton_kernels.gated_residual.down import (
                     separate_down_inject_epilogue,
                 )
 
@@ -261,7 +261,7 @@ class GatedResidual(nn.Module):
         mixed = None
         up = self.up_projection
         if up is not None and up.bias is None and up.role in ("DECODE", "PDFUSION"):
-            from rtp_llm.models_py.triton_kernels.common.gated_residual_up_mix_triton import (
+            from rtp_llm.models_py.triton_kernels.gated_residual.up_mix import (
                 try_fp8_up_mix,
             )
 
@@ -272,7 +272,7 @@ class GatedResidual(nn.Module):
             and up.bias is None
             and up.role in ("PREFILL", "DECODE", "PDFUSION")
         ):
-            from rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_up_mix_triton import (
+            from rtp_llm.models_py.triton_kernels.gated_residual.prefill_up_mix import (
                 try_fp8_prefill_up_mix,
             )
 
@@ -282,7 +282,7 @@ class GatedResidual(nn.Module):
         if mixed is None:
             mix_logits = dense_projection(mix, self.mix_up, self.up_projection)
             if normed.is_cuda and torch.version.hip is None:
-                from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
+                from rtp_llm.models_py.triton_kernels.gated_residual.mix import (
                     try_fused_mix_reduce,
                 )
 

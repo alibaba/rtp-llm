@@ -4,12 +4,12 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
+from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
     _merge_sparse_paged_splits_kernel,
     _validate_sparse_paged_indices,
     sparse_paged_gqa_attn,
 )
-from rtp_llm.models_py.modules.qwen4_exp.test.reference.sparse_paged import _reference
+from rtp_llm.models_py.kernels.cuda.qsa.test.reference.sparse_paged import _reference
 
 _DEVICE = "cuda"
 
@@ -60,7 +60,7 @@ class SparsePagedIndexValidationTest(unittest.TestCase):
             q, cache, table, plan.kv_lens, plan.selected_indices, page_size=4
         )
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha._validate_sparse_paged_indices",
+            "rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha._validate_sparse_paged_indices",
             side_effect=AssertionError("decode repeated validation"),
         ):
             actual = sparse_paged_gqa_attn(
@@ -534,7 +534,7 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
         return _reference(q, cache, table, lengths, selected)
 
     def test_grouped_padded_hybrid_pool_and_graph(self):
-        import rtp_llm.models_py.modules.qwen4_exp.qsa.grouped_sparse_paged_fmha as candidate
+        import rtp_llm.models_py.kernels.cuda.qsa.grouped_sparse_paged_fmha as candidate
 
         q, cache, table, lengths, selected = self.inputs()
         width = cache[0].numel()
@@ -569,7 +569,7 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
         self.assertTrue(torch.isnan(packed[:, width:]).all())
 
     def test_grouped_live_graph_inputs_and_invalid_pages(self):
-        import rtp_llm.models_py.modules.qwen4_exp.qsa.grouped_sparse_paged_fmha as candidate
+        import rtp_llm.models_py.kernels.cuda.qsa.grouped_sparse_paged_fmha as candidate
 
         for query_len in (1, 2, 3, 4):
             inputs = self.inputs(query_len)
@@ -613,7 +613,7 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
             torch.testing.assert_close(actual, torch.zeros_like(actual))
 
     def test_unsupported_geometry_uses_existing_kernel(self):
-        import rtp_llm.models_py.modules.qwen4_exp.qsa.grouped_sparse_paged_fmha as candidate
+        import rtp_llm.models_py.kernels.cuda.qsa.grouped_sparse_paged_fmha as candidate
 
         heads = list(self.inputs())
         heads[0] = heads[0].repeat(1, 2, 1, 1)

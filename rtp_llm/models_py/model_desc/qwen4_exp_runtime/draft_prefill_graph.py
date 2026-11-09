@@ -26,9 +26,7 @@ def draft_graph_rows(inputs, token_capacity):
     batch = lengths.numel()
     lanes = draft_graph_lanes(inputs, token_capacity)
     if lengths.is_cuda:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_metadata_triton import (
-            draft_rows,
-        )
+        from rtp_llm.models_py.kernels.cuda.qsa.draft_metadata_triton import draft_rows
 
         fused = draft_rows(lengths, prefixes, cu, token_capacity)
         if fused is not None:
@@ -167,7 +165,7 @@ class DraftPrefillGraphReplay(Mapping):
         prefix_device = anchor.prefix_lengths_device
         invalid_replay = None
         if length_device.is_cuda:
-            from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_metadata_triton import (
+            from rtp_llm.models_py.kernels.cuda.qsa.draft_metadata_triton import (
                 replay_invalid,
             )
 

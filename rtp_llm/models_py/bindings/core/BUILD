@@ -191,7 +191,6 @@ cc_library(
     copts = copts(),
 )
 
-
 filegroup(
     name = "exec_ctx_impl_srcs",
     srcs = [

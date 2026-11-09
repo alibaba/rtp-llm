@@ -6,14 +6,14 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_cache_views import PLECacheViews
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_commit_prepare import (
+    prepare_commit_values,
+)
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_state import (
     _PLETargetTransaction,
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_transaction import (
     PLETransactionCoordinator,
-)
-from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_prepare_triton import (
-    prepare_commit_values,
 )
 
 
@@ -158,7 +158,7 @@ class PLECommitPrepareTest(unittest.TestCase):
 
         with (
             patch(
-                "rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_prepare_triton.prepare_commit_values",
+                "rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_commit_prepare.prepare_commit_values",
                 side_effect=prepare,
             ),
             patch.object(
@@ -273,13 +273,14 @@ class PLECommitPrepareTest(unittest.TestCase):
                         nullcontext()
                         if fused
                         else patch(
-                            "rtp_llm.models_py.modules.qwen4_exp.ple."
-                            "ple_commit_metadata_triton.begin_accepted_pair_resolution",
+                            "rtp_llm.models_py.model_desc.qwen4_exp_runtime."
+                            "ple_commit_metadata.begin_accepted_pair_resolution",
                             return_value=None,
                         )
                     )
-                    with resolution, self.assertRaisesRegex(
-                        RuntimeError, "must be int32"
+                    with (
+                        resolution,
+                        self.assertRaisesRegex(RuntimeError, "must be int32"),
                     ):
                         owner.prepare_speculative_target_commit(accepted.int())
                     self.assertIsNone(owner.active_transaction.prepared_writes)

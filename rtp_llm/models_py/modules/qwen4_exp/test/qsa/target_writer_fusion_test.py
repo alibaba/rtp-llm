@@ -6,14 +6,14 @@ import torch
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
     restore_indexer_cache,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
     write_target_window_with_undo_,
 )
 from rtp_llm.models_py.modules.qwen4_exp.test.support.target_writer_fusion import (
     TargetWriterFixture,
 )
 
-MODULE = "rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer_triton"
+MODULE = "rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer"
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
@@ -56,7 +56,7 @@ class TargetWriterFusionTest(TargetWriterFixture, unittest.TestCase):
             self.compare(args)
 
     def test_empty_capacity_declines_without_touching_pools(self):
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer_triton import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer import (
             try_write_target_window,
         )
 

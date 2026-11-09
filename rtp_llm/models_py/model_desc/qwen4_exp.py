@@ -538,7 +538,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             self.self_attn.prefill_gdn = Qwen4Sm120GdnPrefill(
                 native.linear_attn_config, native.parallelism_config, native.weights
             )
-            from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_triton import (
+            from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm import (
                 Qwen4PrefillGatedNorm,
             )
 
@@ -548,9 +548,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                     gdn_norm, role=self._execution_role
                 )
         if hasattr(self.mlp, "select_topk"):
-            from rtp_llm.models_py.modules.qwen4_exp.moe.moe_topk_triton import (
-                Qwen4ExpMoeTopk,
-            )
+            from rtp_llm.models_py.modules.qwen4_exp.moe.topk import Qwen4ExpMoeTopk
 
             self.mlp.select_topk = Qwen4ExpMoeTopk(self.mlp.select_topk)
             self.mlp.prepare_shared_expert_overlap()

@@ -110,7 +110,7 @@ def select_decode_tokens(
     frequency = get_frequency(rope_config) if callable(get_frequency) else None
     prepared = None
     if graph_decode and self.is_mtp_draft:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_decode_positions_triton import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_decode_positions import (
             try_prepare_decode_positions,
         )
 
@@ -247,7 +247,7 @@ def select_decode_tokens(
         )
     fused_writer = True
     if fused_writer:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
             is_supported,
             write_decode_key_with_undo_,
         )
@@ -318,7 +318,7 @@ def select_decode_tokens(
             dtype=torch.float32,
             device=q.device,
         )
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
+    from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
         qsa_paged_indexer_score,
     )
 

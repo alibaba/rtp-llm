@@ -681,7 +681,7 @@ class PLEExecution:
                     else None
                 ),
             )
-            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import (
                 store_decode_rows,
             )
 

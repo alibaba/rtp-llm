@@ -3,9 +3,7 @@ from unittest.mock import Mock
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa.main_qk_cache_triton import (
-    prepare_main_qk_cache,
-)
+from rtp_llm.models_py.modules.qwen4_exp.qsa.main_qk_cache import prepare_main_qk_cache
 from rtp_llm.models_py.modules.qwen4_exp.test.support.main_qk_norm_rope import (
     MainQkNormRopeFixture,
 )

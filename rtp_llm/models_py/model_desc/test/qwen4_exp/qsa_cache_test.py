@@ -246,7 +246,7 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
 
     @skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_fused_required_block_validation_handles_strides_and_fallback(self):
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_validation_triton import (
+        from rtp_llm.models_py.kernels.cuda.qsa.qsa_validation_triton import (
             is_supported,
             required_block_flags,
         )
@@ -598,7 +598,7 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
             return torch.tensor([[0.25, 3.0]], dtype=torch.float32)
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=_score,
         ):
@@ -657,7 +657,7 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
             return torch.zeros((1, 1), dtype=torch.float32)
 
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score."
+            "rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score."
             "qsa_paged_indexer_score",
             side_effect=_score,
         ):

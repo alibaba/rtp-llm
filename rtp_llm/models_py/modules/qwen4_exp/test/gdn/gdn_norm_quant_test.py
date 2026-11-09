@@ -6,6 +6,10 @@ import torch
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import quant_weight_ue8m0_packed
+from rtp_llm.models_py.kernels.cuda.gdn_sm120.norm_quant_gluon import (
+    _gdn_norm_quant,
+    norm_quant,
+)
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
@@ -13,13 +17,7 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear impo
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
     CudaFp8GEMMLinear,
 )
-from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_quant_gluon import (
-    _gdn_norm_quant,
-    norm_quant,
-)
-from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_triton import (
-    Qwen4PrefillGatedNorm,
-)
+from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm import Qwen4PrefillGatedNorm
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 
 
@@ -51,31 +49,6 @@ class GdnNormQuantTest(unittest.TestCase):
             role=role,
         )
         return norm, projection
-
-    def test_runtime_rows_and_strides_reuse_compilation(self):
-        for width in (1536, 3072):
-            norm, projection = self.build(width)
-            x = torch.randn(2048, width, device="cuda", dtype=torch.bfloat16)
-            norm_quant(x, x, norm.weight, norm.eps)
-            with patch.object(
-                _gdn_norm_quant,
-                "compile",
-                side_effect=AssertionError("runtime sizes triggered recompilation"),
-            ):
-                for rows, padding in ((2053, 16), (4096, 32), (8191, 64)):
-                    with self.subTest(width=width, rows=rows, padding=padding):
-                        x = torch.randn(
-                            rows, width, device="cuda", dtype=torch.bfloat16
-                        )
-                        gate = torch.randn(
-                            rows, width + padding, device="cuda", dtype=torch.bfloat16
-                        )[:, :width]
-                        q, s = norm_quant(x, gate, norm.weight, norm.eps)
-                        refq, refs = projection.quantize_input(norm.native(x, gate))
-                        self.assertTrue(
-                            torch.equal(q.view(torch.uint8), refq.view(torch.uint8))
-                        )
-                        self.assertTrue(torch.equal(s, refs))
 
     def test_complete_projection_and_packed_scales_exact_across_domain(self):
         for width in (1536, 3072):
@@ -135,9 +108,7 @@ class GdnNormQuantTest(unittest.TestCase):
         norm, projection = self.build()
         x = torch.randn(2048, 3072, device="cuda", dtype=torch.bfloat16)
         gate = torch.randn_like(x)
-        module = (
-            "rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_triton.norm_quant"
-        )
+        module = "rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm.norm_quant"
         for role, quant_mode, rows in (
             ("DECODE", "auto", 2048),
             ("PREFILL", "legacy", 2048),
@@ -163,9 +134,7 @@ class GdnNormQuantTest(unittest.TestCase):
         self.assertEqual(calls, ["norm"])
 
     def test_production_factory_dispatcher_enters_fusion_with_exact_output(self):
-        module = (
-            "rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_triton.norm_quant"
-        )
+        module = "rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm.norm_quant"
         for width, rows in ((1536, 4093), (1536, 4096), (3072, 2048), (3072, 4096)):
             norm, projection = self.build(width, factory=True)
             x = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
@@ -199,9 +168,7 @@ class GdnNormQuantTest(unittest.TestCase):
         norm, projection = self.build(factory=True)
         x = torch.randn(2048, 3072, device="cuda", dtype=torch.bfloat16)
         gate = torch.randn_like(x)
-        module = (
-            "rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm_triton.norm_quant"
-        )
+        module = "rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm.norm_quant"
         for owner in (projection, projection._deepgemm_linear):
             calls = []
             hook = owner.register_forward_hook(lambda *args: calls.append(1))

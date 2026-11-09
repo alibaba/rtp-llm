@@ -5,7 +5,9 @@ from torch import nn
 
 from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpDecoderLayer
 from rtp_llm.models_py.modules.hybrid.gated_residual import inject_into_residual
-from rtp_llm.models_py.modules.hybrid.test import residual_fixtures as hc_fixture
+from rtp_llm.models_py.triton_kernels.gated_residual.test import (
+    residual_fixtures as hc_fixture,
+)
 
 
 class _Attention(nn.Module):

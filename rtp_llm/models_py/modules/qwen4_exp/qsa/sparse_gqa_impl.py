@@ -2,7 +2,7 @@
 
 The indexer picks which compressed-block tokens each query may read; this impl
 consumes that selection and runs :func:`sparse_prefill_attn
-<rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha.sparse_prefill_attn>` instead
+<rtp_llm.models_py.kernels.cuda.qsa.sparse_fmha.sparse_prefill_attn>` instead
 of the dense attention.
 
 Routing uses checkpoint-derived ``attn_configs.is_sparse`` and the ordinary
@@ -88,7 +88,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     def _paged_kv_scale_args(self, cache):
-        from .sparse_paged_fmha import main_kv_scale_view
+        from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
+            main_kv_scale_view,
+        )
 
         if cache is None:
             return {}
@@ -256,16 +258,20 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
 
     def _forward_draft_graph(self, qkv, kv_cache, selected_indices, output_gate=None):
+        from rtp_llm.models_py.kernels.cuda.qsa.draft_layout_triton import (
+            try_pack_inputs,
+            try_unpack_output,
+        )
+        from rtp_llm.models_py.kernels.cuda.qsa.draft_paged_fmha import (
+            try_draft_paged_attention,
+        )
+        from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
+            sparse_paged_gqa_attn,
+        )
         from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_prefill_graph import (
             draft_graph_lanes,
             draft_graph_rows,
         )
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
-            sparse_paged_gqa_attn,
-        )
-
-        from .draft_layout_triton import try_pack_inputs, try_unpack_output
-        from .draft_paged_fmha import try_draft_paged_attention
 
         if kv_cache is None or kv_cache.kv_cache_base.dtype not in (
             torch.bfloat16,
@@ -484,7 +490,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         writer = self.rope_kvcache_impl
         fused_writer = None
         if qk_norm is not None and self.is_target_verify:
-            from .main_qk_cache_triton import prepare_main_qk_cache
+            from rtp_llm.models_py.modules.qwen4_exp.qsa.main_qk_cache import (
+                prepare_main_qk_cache,
+            )
 
             fused_writer = prepare_main_qk_cache(
                 qkv,
@@ -499,7 +507,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             if fused_writer is None:
                 qkv = qk_norm(qkv)
         elif qk_norm is not None:
-            from .main_qk_norm_rope import try_main_qk_norm_rope
+            from rtp_llm.models_py.kernels.cuda.qsa.main_qk_norm_rope import (
+                try_main_qk_norm_rope,
+            )
 
             position_ids = self.rope_params.position_ids
             # The MRoPE fast path needs one three-axis id per token; anything
@@ -617,10 +627,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_fmha import (
-            sparse_prefill_attn,
-        )
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.tma_prefill import (
+        from rtp_llm.models_py.kernels.cuda.qsa.sparse_fmha import sparse_prefill_attn
+        from rtp_llm.models_py.kernels.cuda.qsa.tma_prefill import (
             try_causal_qsa_prefill,
             try_ragged_causal_qsa_prefill,
         )
@@ -725,7 +733,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         block_table = plan.block_table
         page_size = int(plan.page_size)
 
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
+        from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
             sparse_paged_gqa_attn,
         )
 
@@ -774,7 +782,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 "inconsistent with preflight"
             )
 
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
+        from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
             sparse_paged_gqa_attn,
         )
 
@@ -839,7 +847,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             and self.attn_configs.indexer_topk == 512
             and len(requests) > 1
         ):
-            from .tma_prefill import try_ragged_paged_qsa_prefill
+            from rtp_llm.models_py.kernels.cuda.qsa.tma_prefill import (
+                try_ragged_paged_qsa_prefill,
+            )
 
             output = try_ragged_paged_qsa_prefill(
                 q,
@@ -865,7 +875,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             request_q = request_q.transpose(1, 2)
             request_output = None
             if trusted_selected and self.attn_configs.indexer_topk == 512:
-                from .tma_prefill import try_paged_causal_qsa_prefill
+                from rtp_llm.models_py.kernels.cuda.qsa.tma_prefill import (
+                    try_paged_causal_qsa_prefill,
+                )
 
                 request_output = try_paged_causal_qsa_prefill(
                     request_q,

@@ -4,19 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-
-def _quantize_projection_input(rows, *, role, scale=None, output=None):
-    if scale is None and role in ("DECODE", "PDFUSION"):
-        from rtp_llm.models_py.triton_kernels.common.fp8_small_quant import (
-            try_small_fp8_quant,
-        )
-
-        result = try_small_fp8_quant(rows, output=output)
-        if result is not None:
-            return result
-    from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
-
-    return scaled_fp8_per_tensor_quant(rows, scale=scale, output=output)
+from rtp_llm.models_py.kernels.cuda.fp8_input_quant import _quantize_projection_input
 
 
 class Fp8Linear(nn.Module):
@@ -128,7 +116,7 @@ class Fp8Linear(nn.Module):
             and rows.shape[0] <= 4
             and tuple(self.weight.shape) == (10240, 320)
         ):
-            from rtp_llm.models_py.triton_kernels.common.fp8_gemv import (
+            from rtp_llm.models_py.triton_kernels.gated_residual.fp8_gemv import (
                 try_fp8_hc_gemv,
             )
 

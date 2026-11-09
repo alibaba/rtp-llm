@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import gather_local
+from rtp_llm.models_py.kernels.cuda.qwen4_ple.gather import gather_local
 
 
 @dataclass

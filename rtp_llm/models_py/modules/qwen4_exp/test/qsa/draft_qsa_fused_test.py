@@ -6,11 +6,11 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_prepare_triton import try_prepare
+from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_prepare import try_prepare
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
     restore_indexer_cache,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
     write_draft_window_with_undo_,
 )
 from rtp_llm.ops import RopeStyle
@@ -27,7 +27,7 @@ def undo_equal(a, b):
 
 def baseline(*args, **kwargs):
     with patch(
-        "rtp_llm.models_py.modules.qwen4_exp.qsa.draft_writer_triton.try_write_draft_window",
+        "rtp_llm.models_py.modules.qwen4_exp.qsa.draft_writer.try_write_draft_window",
         return_value=None,
     ):
         return write_draft_window_with_undo_(*args, **kwargs)

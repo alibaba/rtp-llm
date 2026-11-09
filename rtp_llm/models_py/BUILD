@@ -1,4 +1,4 @@
-load("@arch_config//:arch_select.bzl", "requirement")
+load("@arch_config//:arch_select.bzl", "requirement", "triton_deps")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch")
 
 py_library(
@@ -53,10 +53,22 @@ requirement(["flash-mla-legacy"])
 requirement(rtp_kernel)
 requirement(flashattn)
 
-
 filegroup(
     name = "cutlass_moe_config",
     srcs = glob(["kernels/cuda/fp8_kernel/cutlass_groupgemm/*"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "kernel_layout_sources",
+    srcs = glob([
+        "kernels/__init__.py",
+        "kernels/cuda/fp8_input_quant.py",
+        "kernels/cuda/gdn_sm120/*.py",
+        "kernels/cuda/qsa/*.py",
+        "kernels/cuda/qwen4_ple/*.py",
+        "modules/qwen4_exp/**/*.py",
+    ], exclude = ["modules/qwen4_exp/test/**"]),
     visibility = ["//visibility:public"],
 )
 
@@ -240,7 +252,6 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
-
 # Export sitecustomize.py for test targets to fix nvidia-cutlass-dsl import
 exports_files(["modules/factory/sitecustomize.py"])
 
@@ -253,7 +264,6 @@ exports_files(
     ],
     visibility = ["//rtp_llm/models_py/modules/dsv4/ppu/test:__pkg__"],
 )
-
 
 py_library(
     name = "modules_cuda",
@@ -319,14 +329,21 @@ py_library(
     srcs = glob([
         "kernels/*.py",
         "kernels/**/*.py",
-    ], exclude = _DSV4_PPU_KERNELS) + select({
+    ], exclude = _DSV4_PPU_KERNELS + ["kernels/**/test/**"]) + select({
         "@//:using_ppu": glob(_DSV4_PPU_KERNELS),
         "//conditions:default": [],
     }),
     data = [
         "//rtp_llm/libs:marlin_nvfp4",
         "kernels/cuda/marlin_nvfp4/marlin_kernels/LICENSE",
-    ],
+    ] + glob(["kernels/cuda/qsa/*.cu", "kernels/cuda/qsa/*.cuh"]),
+    deps = [
+        ":utils",
+        "//rtp_llm:torch",
+        "//rtp_llm/models_py/triton_kernels:common",
+        "//rtp_llm/models_py/triton_kernels:fla",
+    ] + triton_deps(["triton"]),
+    visibility = ["//rtp_llm/models_py:__subpackages__"],
 )
 
 py_library(

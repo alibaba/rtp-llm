@@ -7,17 +7,7 @@ from typing import Optional, overload
 
 import torch
 
-
-@dataclass(frozen=True)
-class PagedInputs:
-    batch: int
-    query_len: int
-    tokens: int
-    selected_indices: torch.Tensor
-    kv_lens: torch.Tensor
-    block_table: torch.Tensor
-    page_size: int
-    validated_cache_blocks: Optional[int] = None
+from rtp_llm.models_py.kernels.cuda.qsa.contracts import PagedInputs
 
 
 @dataclass(frozen=True)

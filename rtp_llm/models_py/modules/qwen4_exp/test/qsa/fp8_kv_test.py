@@ -5,12 +5,12 @@ from types import SimpleNamespace
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import SparseGqaFmhaImpl
-from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
+from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
     main_kv_scale_view,
     sparse_paged_gqa_attn,
 )
-from rtp_llm.models_py.modules.qwen4_exp.test.reference.sparse_paged import _reference
+from rtp_llm.models_py.kernels.cuda.qsa.test.reference.sparse_paged import _reference
+from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import SparseGqaFmhaImpl
 
 
 class Fp8MainKvTest(unittest.TestCase):

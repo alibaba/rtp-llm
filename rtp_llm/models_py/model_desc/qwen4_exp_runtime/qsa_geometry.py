@@ -555,7 +555,7 @@ def _target_verify_geometry(
         device=device,
     )
 
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.target_metadata_triton import (
+    from rtp_llm.models_py.kernels.cuda.qsa.target_metadata_triton import (
         try_target_metadata,
     )
 

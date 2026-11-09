@@ -15,7 +15,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
     restore_indexer_cache,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_triton import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill import (
     write_zero_prefix_prefill,
 )
 from rtp_llm.models_py.modules.qwen4_exp.test.reference.scalar_cache_reference import (
@@ -131,7 +131,7 @@ class IndexerPrefillTritonTest(unittest.TestCase):
                         )
                     before = kv.clone(), state.clone()
                     with patch(
-                        "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_triton.write_zero_prefix_prefill"
+                        "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill.write_zero_prefix_prefill"
                     ) as fused:
                         _, _, _, result = context.write_prefill_indexer_cache(
                             raw, indexer=indexer, rope_config=rope
@@ -162,7 +162,9 @@ class IndexerPrefillTritonTest(unittest.TestCase):
         context.indexer_state_inputs.kv_cache_block_id = (
             context.indexer_state_inputs.kv_cache_block_id_device.cpu()
         )
-        from rtp_llm.models_py.modules.qwen4_exp.qsa import indexer_prefill_triton
+        from rtp_llm.models_py.modules.qwen4_exp.qsa import (
+            indexer_prefill as indexer_prefill_triton,
+        )
 
         with patch.object(
             indexer_prefill_triton,
@@ -215,7 +217,7 @@ class IndexerPrefillTritonTest(unittest.TestCase):
         before = kv.clone(), state.clone()
         context.main_inputs.cu_seqlens_device[1] = 128
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_triton.write_zero_prefix_prefill",
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill.write_zero_prefix_prefill",
             return_value=None,
         ):
             with self.assertRaisesRegex(RuntimeError, "cu_seqlens do not match"):
@@ -461,7 +463,7 @@ class IndexerPrefillTritonTest(unittest.TestCase):
         args = self.inputs([129, 7])
         before_kv, before_state = args[6].clone(), args[8].clone()
         with patch(
-            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_triton._kv_write"
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill._kv_write"
         ) as kernel:
             kernel.__getitem__.return_value.side_effect = RuntimeError(
                 "injected KV launch failure"

@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton import (
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
     write_decode_key_with_undo_,
 )
 from rtp_llm.models_py.modules.qwen4_exp.test.support.target_writer_fusion import (
@@ -22,7 +22,7 @@ class DecodeSnapshotTest(TargetWriterFixture, unittest.TestCase):
     def write(self, args, fused):
         if not fused:
             with patch(
-                "rtp_llm.models_py.modules.qwen4_exp.qsa.decode_snapshot_triton.try_snapshot_decode",
+                "rtp_llm.models_py.modules.qwen4_exp.qsa.decode_snapshot.try_snapshot_decode",
                 return_value=None,
             ):
                 return write_decode_key_with_undo_(*args, norm_eps=1.0e-6)
@@ -49,7 +49,7 @@ class DecodeSnapshotTest(TargetWriterFixture, unittest.TestCase):
         self.compare(args)
 
     def test_snapshot_int64_arithmetic_and_unsupported_layout_fallback(self):
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.decode_snapshot_triton import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.decode_snapshot import (
             try_snapshot_decode,
         )
 
@@ -61,7 +61,9 @@ class DecodeSnapshotTest(TargetWriterFixture, unittest.TestCase):
                 dtype=torch.int32,
             )
         )
-        path = "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode_triton.write_decode_key_"
+        path = (
+            "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode.write_decode_key_"
+        )
         with patch(path):
             baseline = self.write(args, False)
             candidate = self.write(args, True)

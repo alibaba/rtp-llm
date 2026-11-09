@@ -30,7 +30,7 @@ class DeviceChecks:
         if len(self._flags) == 1:
             verdict = self._flags[0].reshape(())
         elif self._flags[0].is_cuda and torch.version.hip is None:
-            from .validation_triton import pack_checks
+            from rtp_llm.models_py.kernels.cuda.qsa.validation_triton import pack_checks
 
             verdict = pack_checks(self._flags, self._offsets)
         else:

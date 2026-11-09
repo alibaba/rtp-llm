@@ -137,7 +137,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             and torch.version.hip is None
         )
         if self._cpu_uva_enabled:
-            from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.gather import (
                 prepare_cpu_uva_shards,
             )
 
@@ -267,7 +267,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
     def hashed_ids(self, token_history: torch.Tensor, seq_len: int) -> torch.Tensor:
         """Map a ``[B, context_len + seq_len]`` history to ``[B, seq_len, heads]``."""
         if token_history.is_cuda and torch.version.hip is None:
-            from .ple_hash_triton import try_hashed_ngram_ids
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.hash import (
+                try_hashed_ngram_ids,
+            )
 
             result = try_hashed_ngram_ids(
                 token_history,
@@ -305,9 +307,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             if self._graph_gather_required and not self._cpu_uva_enabled:
                 raise RuntimeError("PLE CPU graph lookup requires pinned NVIDIA UVA")
             if self._cpu_uva_enabled:
-                from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
-                    gather_local,
-                )
+                from rtp_llm.models_py.kernels.cuda.qwen4_ple.gather import gather_local
 
                 return gather_local(
                     ngram_ids,
@@ -323,7 +323,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 )
             # CPU-only component reference; never stages deployment rows via H2D.
             return self._gather_torch(ngram_ids)
-        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_gather_triton import (
+        from rtp_llm.models_py.kernels.cuda.qwen4_ple.gather import (
             gather_local,
             is_supported,
         )
@@ -536,7 +536,7 @@ class Qwen4ExpPLELayer(nn.Module):
                 else F.linear(embeddings, self.value_proj)
             )
         if hyper_states.is_cuda and torch.version.hip is None:
-            from .ple_gate_triton import try_ple_gate
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.gate import try_ple_gate
 
             fused = try_ple_gate(
                 key,
@@ -669,8 +669,8 @@ class Qwen4ExpPLELayer(nn.Module):
             )
         ):
             return None
-        from .ple_conv_triton import try_ple_conv
-        from .ple_gate_triton import try_ple_gate
+        from rtp_llm.models_py.kernels.cuda.qwen4_ple.conv import try_ple_conv
+        from rtp_llm.models_py.kernels.cuda.qwen4_ple.gate import try_ple_gate
 
         keys, values = [], []
         for start in range(0, hyper_states.shape[1], page_size):
@@ -763,11 +763,11 @@ class Qwen4ExpPLELayer(nn.Module):
             and self.key_projection.use_scaled_mm
             and self.value_projection.use_scaled_mm
         ):
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.gate import try_ple_gate
             from rtp_llm.models_py.modules.base.common.fp8_linear import (
                 project_fp8_pair,
             )
 
-            from .ple_gate_triton import try_ple_gate
             from .ple_page_projection import project_pages_pair
 
             projected = project_pages_pair(
@@ -807,7 +807,9 @@ class Qwen4ExpPLELayer(nn.Module):
                 )
                 if fused is not None:
                     gated, normed = fused
-                    from .ple_conv_triton import try_ple_conv
+                    from rtp_llm.models_py.kernels.cuda.qwen4_ple.conv import (
+                        try_ple_conv,
+                    )
 
                     output = try_ple_conv(
                         gated,
@@ -1001,7 +1003,7 @@ class Qwen4ExpPLELayer(nn.Module):
             hyper_states, token_history, embeddings=embeddings
         )
         if hyper_states.is_cuda and torch.version.hip is None:
-            from .ple_conv_triton import try_ple_conv
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.conv import try_ple_conv
 
             fused = try_ple_conv(
                 gated_value,

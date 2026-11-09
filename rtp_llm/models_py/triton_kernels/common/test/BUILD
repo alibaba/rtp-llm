@@ -64,11 +64,3 @@ py_test(
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
 )
-
-py_test(
-    name = "fp8_dense_gemv_test",
-    srcs = ["fp8_dense_gemv_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    tags = ["RTX_5000_PRO_CU13"],
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
-)

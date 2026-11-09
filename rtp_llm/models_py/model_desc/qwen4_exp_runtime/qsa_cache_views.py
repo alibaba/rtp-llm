@@ -95,7 +95,7 @@ def _validate_required_blocks(
     checks = DeviceChecks() if checks is None else checks
     flags = None
     if table.is_cuda and torch.version.hip is None:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_validation_triton import (
+        from rtp_llm.models_py.kernels.cuda.qsa.qsa_validation_triton import (
             is_supported,
             required_block_flags,
         )

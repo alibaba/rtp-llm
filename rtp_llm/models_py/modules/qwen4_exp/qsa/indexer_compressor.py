@@ -63,7 +63,7 @@ def _capture_pool_slots(
 def restore_indexer_cache(undo: IndexerCacheUndo) -> None:
     """Restore a captured side-cache write on the caller's current stream."""
     if undo.padded_slots:
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_triton import (
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill import (
             restore_padded_indexer_cache,
         )
 

@@ -285,7 +285,7 @@ class GatedResidualTest(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_merged_down_epilogue_preserves_bf16_rounding_and_graph_replay(self):
-        from rtp_llm.models_py.triton_kernels.common.gated_residual_down_triton import (
+        from rtp_llm.models_py.triton_kernels.gated_residual.down import (
             down_inject_epilogue,
         )
 
@@ -388,9 +388,7 @@ class GatedResidualTest(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_fused_mix_reduce_matches_torch_and_replays(self):
-        from rtp_llm.models_py.triton_kernels.common.gated_residual_mix_triton import (
-            fused_mix_reduce,
-        )
+        from rtp_llm.models_py.triton_kernels.gated_residual.mix import fused_mix_reduce
 
         width = 4 * 2560
         for rows in (1, 8, 17):

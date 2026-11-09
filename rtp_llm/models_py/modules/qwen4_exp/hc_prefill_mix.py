@@ -48,7 +48,7 @@ def hc_up_mix(mix, weight, normed, scale=None):
     output = mix.new_empty((rows, 2560))
     grid = (triton.cdiv(rows, 32), 40)
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
-    from rtp_llm.models_py.triton_kernels.common.gated_residual_medium_up_mix_triton import (
+    from rtp_llm.models_py.triton_kernels.gated_residual.medium_up_mix import (
         _hc_medium_up_mix,
     )
 

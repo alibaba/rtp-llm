@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_metadata_triton import (
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_commit_metadata import (
     begin_accepted_pair_resolution,
 )
 

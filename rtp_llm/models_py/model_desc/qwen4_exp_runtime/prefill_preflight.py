@@ -56,12 +56,12 @@ class MainGeometryReceipt:
 @contextmanager
 def main_geometry_preflight(entries):
     """Check all entries before publishing any receipt, and clear on exceptions."""
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.fmha_validation import (
-        _validate_main_cache_layout,
-    )
-    from rtp_llm.models_py.modules.qwen4_exp.qsa.paged_validation import (
+    from rtp_llm.models_py.kernels.cuda.qsa.paged_validation import (
         geometry_flags,
         raise_geometry_error,
+    )
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.fmha_validation import (
+        _validate_main_cache_layout,
     )
 
     pending = []

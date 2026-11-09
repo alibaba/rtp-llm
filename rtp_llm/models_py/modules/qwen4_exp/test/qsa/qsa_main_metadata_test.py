@@ -4,10 +4,10 @@ from unittest.mock import Mock
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.qsa import fmha_inputs, fmha_validation
-from rtp_llm.models_py.modules.qwen4_exp.qsa.target_metadata_triton import (
+from rtp_llm.models_py.kernels.cuda.qsa.target_metadata_triton import (
     try_target_metadata,
 )
+from rtp_llm.models_py.modules.qwen4_exp.qsa import fmha_inputs, fmha_validation
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
