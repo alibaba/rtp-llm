@@ -17,6 +17,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     private final VitCache cache;
     private final VitScheduler scheduler;
     private final VitPreparation preparation;
+    private final VitGeometryCapture geometryCapture = VitGeometryCapture.fromEnvironment();
     private final String instance=UUID.randomUUID().toString();
     private final ExecutorService replies=Executors.newVirtualThreadPerTaskExecutor();
     private volatile boolean closed;
@@ -112,7 +113,11 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
                 var image=computed.get(key);if(image==null) image=cache.hash(key);
                 var entry=MultimodalHashEntryPB.newBuilder().setKey(key);String tier=cache.tier(key);
                 entry.setEmbeddingHit(!tier.isEmpty()).setEmbeddingTier(tier);
-                if(image!=null) entry.setHashHit(true).setEntryGeneration(instance+":"+key).addSplitSize(image.rows()).setFeatureHashes(VitGeometry.hashes(image.featureIdentity(),image.rows()));
+                if (image != null) {
+                    if (geometryCapture != null) geometryCapture.record(image);
+                    entry.setHashHit(true).setEntryGeneration(instance + ":" + key).addSplitSize(image.rows())
+                            .setFeatureHashes(VitGeometry.hashes(image.featureIdentity(), image.rows()));
+                }
                 result.addEntries(entry);
             }
             return result.build();
