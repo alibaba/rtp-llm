@@ -378,7 +378,7 @@ class DefaultRouterTest {
             verify((DecodeEndpoint) decode.endpoint)
                     .release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED);
             verify((PrefillEndpoint) prefill.endpoint)
-                    .expireCommittedItem(any(ScheduledRequest.class));
+                    .expireCommittedItem(any(RequestExecution.class));
         } finally {
             requests.closeAdmissionAndAwaitMutations();
             requests.closeOutstandingAndTerminalize();
@@ -532,17 +532,19 @@ class DefaultRouterTest {
     }
 
     @Test
-    void projectedDecodeBlockUsesDecodeWaitDomain() {
+    void selectedPrefillWaitDomainSurvivesRouterComposition() {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
         DefaultRouter router = router();
         BalanceContext context = context(111L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
-                .thenReturn(PlacementResult.blocked(RoleType.DECODE));
+                .thenReturn(
+                        PlacementResult.blocked(
+                                PlacementKey.exact(RoleType.PREFILL, "g1", "p:8001")));
 
         PlacementResult<RouteAdmission, PlacementKey> blocked = router.select(context);
         assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
 
-        assertEquals(new PlacementKey(RoleType.DECODE, null), blocked.blocker());
+        assertEquals(PlacementKey.exact(RoleType.PREFILL, "g1", "p:8001"), blocked.blocker());
     }
 
     @Test
@@ -759,7 +761,16 @@ class DefaultRouterTest {
             PlacementResult<SelectedRole, RoleType> result) {
         switch (role) {
             case PREFILL, PDFUSION ->
-                    when(prefillSelector.select(context, role, group)).thenReturn(result);
+                    when(prefillSelector.select(context, role, group))
+                            .thenReturn(
+                                    new PlacementResult<>(
+                                            result.status(),
+                                            result.value(),
+                                            result.failure(),
+                                            result.blocker() == null
+                                                    ? null
+                                                    : new PlacementKey(result.blocker(), group),
+                                            result.diagnostics()));
             case DECODE ->
                     when(decodeSelector.select(context, DecodeBinding.capture(context), group))
                             .thenReturn(result);

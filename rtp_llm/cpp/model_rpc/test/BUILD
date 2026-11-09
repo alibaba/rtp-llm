@@ -43,6 +43,7 @@ py_test (
         "//rtp_llm/cpp/model_rpc:model_rpc_client",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
         "//rtp_llm/test/model_test/test_util",
+        "//rtp_llm/server:server",
     ] + telemetry_test_deps(),
     data = [
         "//:th_transformer",

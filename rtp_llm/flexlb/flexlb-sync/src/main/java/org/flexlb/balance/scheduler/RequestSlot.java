@@ -84,7 +84,10 @@ public final class RequestSlot {
     private boolean currentGeneration = true;
 
     /** Routing identity survives handoff and is used to reject late facts. */
-    private ScheduledRequest item;
+    private RequestExecution item;
+
+    /** Scheduling input stays valid and is handed to DeliveryPublication at ACK. */
+    private ScheduledRequest pendingItem;
 
     /** Storage/cleanup ownership; distinct from the public request lifecycle. */
     private SlotPhase slotPhase = SlotPhase.ACTIVE;
@@ -345,11 +348,21 @@ public final class RequestSlot {
                 detail);
     }
 
-    synchronized boolean ownsActiveItem(ScheduledRequest expected) {
-        return ownsActiveGenerationLocked() && item == expected;
+    /** Every delivery acknowledgement releases scheduling input from this slot. */
+    synchronized ScheduledRequest scheduledItem() {
+        return ownsActiveGenerationLocked() ? pendingItem : null;
     }
 
-    synchronized ScheduledRequest activeItemForReservation(long reservationToken) {
+    /** Exact execution identity remains available while this generation is live. */
+    synchronized RequestExecution activeItem() {
+        return ownsActiveGenerationLocked() ? item : null;
+    }
+
+    synchronized boolean ownsActiveItem(ScheduledRequest expected) {
+        return ownsActiveGenerationLocked() && expected != null && item == expected.execution();
+    }
+
+    synchronized RequestExecution activeItemForReservation(long reservationToken) {
         DecodeEndpoint.ReservationHandle reservation =
                 item == null ? null : item.decodeReservation();
         return ownsActiveGenerationLocked()
@@ -399,13 +412,13 @@ public final class RequestSlot {
         if (item == null
                 || item.decodeEp() != endpoint
                 || !Objects.equals(item.decodeReservation(), reservation)
-                || !ownsPreparedDeliveryLocked(item)
+                || !ownsPreparedDeliveryLocked(pendingItem)
                 || admissionHandle != null
                 || item.requestExpired(System.currentTimeMillis())) {
             return null;
         }
         admissionHandle = new AdmissionHandle(this);
-        withdrawingRoute = item;
+        withdrawingRoute = pendingItem;
         return admissionHandle;
     }
 
@@ -416,10 +429,13 @@ public final class RequestSlot {
             throw new IllegalStateException("withdrawn route is no longer queued: " + requestId);
         }
         synchronized (this) {
-            if (admissionHandle != claim || withdrawingRoute != exact || item != exact) {
+            if (admissionHandle != claim
+                    || withdrawingRoute != exact
+                    || item != exact.execution()) {
                 throw new IllegalStateException("route withdrawal lost its owner: " + requestId);
             }
             item = null;
+            pendingItem = null;
             detail = "queued after Decode reservation withdrawal";
             updatedAtMs = System.currentTimeMillis();
         }
@@ -559,13 +575,16 @@ public final class RequestSlot {
             }
             response =
                     selectDeliveryFailureLocked(
-                            exact,
+                            exact.execution(),
                             DeliveryResult.Status.NOT_SENT,
                             "Delivery preparation failed: " + detailOf(cause));
         }
         Throwable failure =
                 runStep(null, response == null ? null : () -> completionPublisher.submit(response));
-        failure = runStep(failure, () -> cleanUpRequest(exact, DeliveryResult.Status.NOT_SENT));
+        failure =
+                runStep(
+                        failure,
+                        () -> cleanUpRequest(exact.execution(), DeliveryResult.Status.NOT_SENT));
         rethrowCleanup(failure);
     }
 
@@ -610,7 +629,7 @@ public final class RequestSlot {
         executeEngineObservationEffects(observation);
     }
 
-    void recordPrefillRetirement(PrefillEndpoint source, ScheduledRequest exact) {
+    void recordPrefillRetirement(PrefillEndpoint source, RequestExecution exact) {
         String detail =
                 "Prefill endpoint generation retired: "
                         + source.ipPort()
@@ -651,14 +670,9 @@ public final class RequestSlot {
     void recordSchedulingFailure(StrategyErrorType error, String detail) {
         RequestEffect work;
         synchronized (this) {
-            work = processRequestEndLocked(activeItem(), DeferredTerminal.failure(error, detail));
+            work = processRequestEndLocked(item, DeferredTerminal.failure(error, detail));
         }
         execute(work);
-    }
-
-    /** Exact ACTIVE item, or null when this generation no longer owns one. */
-    synchronized ScheduledRequest activeItem() {
-        return ownsActiveGenerationLocked() ? item : null;
     }
 
     TerminalAction claimShutdownAction() {
@@ -928,11 +942,15 @@ public final class RequestSlot {
                             TerminalOutcome.fail("terminal projection did not terminate"));
         }
 
+        if (context != null) {
+            context.setGenerateInputPb(null);
+        }
         if (encoderEndpoint != null) {
             encoderEndpoint.forgetRequest(requestId);
             encoderEndpoint = null;
         }
         item = null;
+        pendingItem = null;
         context = null;
         cleanupProgress = null;
         preemption = null;
@@ -1041,7 +1059,8 @@ public final class RequestSlot {
                 || candidate.future() != future) {
             return false;
         }
-        item = candidate;
+        item = candidate.execution();
+        pendingItem = candidate;
         assertInvariantLocked();
         return true;
     }
@@ -1085,6 +1104,8 @@ public final class RequestSlot {
         }
         if (admissionOpen
                 || item != null
+                || pendingItem != null
+                || context != null
                 || cancellationReason != null
                 || preemption != null
                 || admissionHandle != null
@@ -1105,11 +1126,12 @@ public final class RequestSlot {
     /** Roll back only the exact binding whose queue publication did not commit. */
     private void rollbackItemPublicationLocked(ScheduledRequest exact) {
         requireSlotLock("request item publication rollback");
-        if (item != exact || admissionHandle == null) {
+        if (item != exact.execution() || admissionHandle == null) {
             throw new IllegalStateException(
                     "request item publication ownership changed for " + requestId);
         }
         item = null;
+        pendingItem = null;
         assertInvariantLocked();
     }
 
@@ -1178,7 +1200,8 @@ public final class RequestSlot {
             return RequestEffect.terminal(
                     decideRequestEndLocked(
                             DeferredTerminal.inactivityExpired(
-                                    "REQUEST_INACTIVE: no matching Engine request status before inactivity timeout")),
+                                    "REQUEST_INACTIVE: no matching Engine request status before"
+                                            + " inactivity timeout")),
                     null);
         }
 
@@ -1221,13 +1244,13 @@ public final class RequestSlot {
 
     /** Retain an end event while admission or preemption still owns the request. */
     private RequestEffect processRequestEndLocked(
-            ScheduledRequest expected, DeferredTerminal event) {
+            RequestExecution expected, DeferredTerminal event) {
         requireSlotLock("request end");
         boolean workerProof = event.authoritativeWorker();
         if (expected == null
                 || !ownsResourceTrackingLocked()
                 || item != expected
-                || !workerProof && !ownsActiveItem(expected)) {
+                || !workerProof && !ownsActiveExecution(expected)) {
             return RequestEffect.STALE;
         }
         if (cleanupProgress != null) {
@@ -1271,11 +1294,19 @@ public final class RequestSlot {
         return currentGeneration && slotPhase == SlotPhase.ACTIVE;
     }
 
+    private boolean ownsActiveExecution(RequestExecution expected) {
+        return expected != null && ownsActiveGenerationLocked() && item == expected;
+    }
+
     /** Cleanup completion never reselects the response. */
     private TerminalAction tryCloseAfterCleanupLocked() {
         requireSlotLock("cleanup completion");
         if (cleanupProgress == null) {
             return null;
+        }
+        if (cleanupProgress.prefillSettled && admissionHandle == null) {
+            pendingItem = null;
+            context = null;
         }
         return claimTerminalActionLocked(null, new TerminalOutcome(state, detail), null, false);
     }
@@ -1329,6 +1360,7 @@ public final class RequestSlot {
                     new TerminalAction(
                             this,
                             item,
+                            pendingItem,
                             deliveryClaimKind,
                             cleanupProgress != null,
                             claimedPreemption,
@@ -1431,7 +1463,7 @@ public final class RequestSlot {
                             event,
                             TerminalOutcome.complete("decode completed"),
                             buildSuccessResponse(
-                                    activeItem().routeResponse(),
+                                    item.routeResponse(),
                                     deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE),
                             true);
                 } else {
@@ -1482,7 +1514,7 @@ public final class RequestSlot {
             PreemptionRegistration exact, boolean transportUnknown, PreemptionRegistration signal) {
         DeferredTerminal terminal = exact.pendingTerminal();
         if (terminal != null && (!transportUnknown || terminal.authoritativeWorker())) {
-            ScheduledRequest active = activeItem();
+            RequestExecution active = ownsActiveGenerationLocked() ? item : null;
             DecodeEndpoint decode = active == null ? null : active.decodeEp();
             // Decode emits completion after committing its ledger; Prefill still needs
             // reconciliation.
@@ -1504,7 +1536,7 @@ public final class RequestSlot {
             return RequestEffect.DEFERRED;
         }
 
-        ScheduledRequest active = activeItem();
+        RequestExecution active = ownsActiveGenerationLocked() ? item : null;
         DecodeEndpoint decode = active == null ? null : active.decodeEp();
         boolean activeWon =
                 decode == null
@@ -1566,8 +1598,14 @@ public final class RequestSlot {
                             : "route decision delivered");
             DeliveryPublication publication =
                     new DeliveryPublication(
-                            item, response, permit, requestDeadline, batchEnqueueStartedAtMs);
+                            pendingItem,
+                            response,
+                            permit,
+                            requestDeadline,
+                            batchEnqueueStartedAtMs);
             requestDeadline = null;
+            pendingItem = null;
+            context = null;
             assertInvariantLocked();
             return RequestEffect.delivery(publication, signal);
         } catch (RuntimeException | Error failure) {
@@ -1581,13 +1619,13 @@ public final class RequestSlot {
         if (claim == null || claim.slot != this) {
             throw new IllegalArgumentException("foreign delivery claim");
         }
-        return ownsDeliveryClaimLocked(claim.item, claim.kind, claim.correlationId);
+        return ownsDeliveryClaimLocked(claim.item.execution(), claim.kind, claim.correlationId);
     }
 
     private boolean ownsDeliveryClaimLocked(
-            ScheduledRequest expected, DeliveryClaimKind kind, long expectedBatchId) {
+            RequestExecution expected, DeliveryClaimKind kind, long expectedBatchId) {
         requireSlotLock("delivery claim lookup");
-        return ownsActiveItem(expected)
+        return ownsActiveExecution(expected)
                 && deliveryClaimKind == kind
                 && batchId == expectedBatchId
                 && !state.isTerminal();
@@ -1630,7 +1668,7 @@ public final class RequestSlot {
                 null, pending.transition, pending.response, pending.response != null);
     }
 
-    private boolean ownsPrefillFactLocked(PrefillEndpoint source, ScheduledRequest expected) {
+    private boolean ownsPrefillFactLocked(PrefillEndpoint source, RequestExecution expected) {
         requireSlotLock("Prefill fact ownership lookup");
         return ownsResourceTrackingLocked() && item == expected && expected.prefillEp() == source;
     }
@@ -1683,7 +1721,7 @@ public final class RequestSlot {
                 || cancellationReason == null) {
             return null;
         }
-        ScheduledRequest active = activeItem();
+        RequestExecution active = ownsActiveGenerationLocked() ? item : null;
         if (active != null && !canClaimLocalTerminalLocked()) {
             return null;
         }
@@ -1707,7 +1745,7 @@ public final class RequestSlot {
     }
 
     private void resumeCleanup() {
-        ScheduledRequest exact;
+        RequestExecution exact;
         DeliveryResult.Status source;
         synchronized (this) {
             if (cleanupProgress == null) {
@@ -1724,16 +1762,18 @@ public final class RequestSlot {
      * Completion facts only move forward; an older "still owned" result cannot undo them.
      * Exact identities also let late callbacks settle resources after their slot is gone.
      */
-    private void cleanUpRequest(ScheduledRequest exact, DeliveryResult.Status source) {
+    private void cleanUpRequest(RequestExecution exact, DeliveryResult.Status source) {
         requireOutsideSlotLock("request cleanup");
         CleanupProgress progress;
         boolean prefillDone;
         boolean decodeDone;
         boolean expired;
+        ScheduledRequest queuedInput;
         RequestDeadline obsoleteRequest = null;
         DecisionDeadline obsoleteDecision = null;
         synchronized (this) {
             progress = item == exact ? cleanupProgress : null;
+            queuedInput = item == exact ? pendingItem : null;
             if (progress != null && admissionHandle != null) {
                 return;
             }
@@ -1764,7 +1804,7 @@ public final class RequestSlot {
         }
         try {
             if (!prefillDone) {
-                terminalCleanup.settlePrefill(exact, expired);
+                terminalCleanup.settlePrefill(exact, queuedInput, expired);
             }
             prefillDone = true;
         } catch (Throwable problem) {
@@ -1868,7 +1908,7 @@ public final class RequestSlot {
             if (failed) {
                 failureResponse =
                         selectDeliveryFailureLocked(
-                                claim.item,
+                                claim.item.execution(),
                                 result.status(),
                                 "Delivery failed: " + detailOf(result.cause()));
             } else if (ownsDeliveryClaimLocked(claim)) {
@@ -1892,7 +1932,8 @@ public final class RequestSlot {
                     runStep(
                             null,
                             response == null ? null : () -> completionPublisher.submit(response));
-            failure = runStep(failure, () -> cleanUpRequest(claim.item, result.status()));
+            failure =
+                    runStep(failure, () -> cleanUpRequest(claim.item.execution(), result.status()));
             rethrowCleanup(failure);
         } else {
             execute(acknowledgement);
@@ -1903,9 +1944,9 @@ public final class RequestSlot {
 
     /** Select the failure now; endpoint cleanup and protocol completion may follow later. */
     private SelectedPublication selectDeliveryFailureLocked(
-            ScheduledRequest exact, DeliveryResult.Status source, String detail) {
+            RequestExecution exact, DeliveryResult.Status source, String detail) {
         requireSlotLock("request failure");
-        if (!ownsActiveItem(exact) || cleanupProgress != null) {
+        if (!ownsActiveExecution(exact) || cleanupProgress != null) {
             return null;
         }
         CancelReason cancellation =
@@ -1987,14 +2028,15 @@ public final class RequestSlot {
                 return new EngineObservation(applyPrefillActivityLocked(source, fact.item()), null);
             }
             cleanupProgress.prefillSettled = true;
-            if (fact.kind() == PrefillState.WorkerStatusFact.Kind.PRIORITY_CANCELED
+            TerminalAction terminal = tryCloseAfterCleanupLocked();
+            if (terminal == null
+                    && fact.kind() == PrefillState.WorkerStatusFact.Kind.PRIORITY_CANCELED
                     && preemption != null
                     && !preemption.isFinished()) {
                 return new EngineObservation(
                         applyPriorityCancellationLocked(source, fact.item()), null);
             }
-            return new EngineObservation(
-                    RequestEffect.terminal(tryCloseAfterCleanupLocked(), null), null);
+            return new EngineObservation(RequestEffect.terminal(terminal, null), null);
         }
         RequestEffect transition =
                 switch (fact.kind()) {
@@ -2049,7 +2091,7 @@ public final class RequestSlot {
      * already-selected effect.
      */
     private RequestEffect applyPrefillActivityLocked(
-            PrefillEndpoint source, ScheduledRequest expected) {
+            PrefillEndpoint source, RequestExecution expected) {
         requireSlotLock("Prefill activity reduction");
         PreemptionRegistration exact = preemption;
         if (!ownsPrefillFactLocked(source, expected)) {
@@ -2070,7 +2112,7 @@ public final class RequestSlot {
     }
 
     private RequestEffect applyPriorityCancellationLocked(
-            PrefillEndpoint source, ScheduledRequest expected) {
+            PrefillEndpoint source, RequestExecution expected) {
         requireSlotLock("priority cancellation reduction");
         PreemptionRegistration exact = ownsPrefillFactLocked(source, expected) ? preemption : null;
         DecodeEndpoint decode = expected.decodeEp();
@@ -2234,7 +2276,7 @@ public final class RequestSlot {
             return false;
         }
         if (reason == CancelReason.DEADLINE_EXCEEDED && queueScheduling) {
-            ScheduledRequest item = activeItem();
+            RequestExecution item = this.item;
             Map<String, Object> diagnostics;
             if (deliveryClaimKind != DeliveryClaimKind.NONE) {
                 diagnostics = Map.of("cause", message);
@@ -2252,7 +2294,9 @@ public final class RequestSlot {
                             StrategyErrorType.RESOURCE_EXHAUSTED,
                             AdmissionRejectReason.RESOURCE_EXHAUSTED,
                             String.valueOf(diagnostics.get("cause")));
-            context.setSchedulingDiagnostics(diagnostics);
+            if (context != null) {
+                context.setSchedulingDiagnostics(diagnostics);
+            }
         } else {
             cancellationResponse = buildErrorResponse(cancellationErrorTypeLocked(reason), message);
         }
@@ -2279,7 +2323,7 @@ public final class RequestSlot {
         if (deliveryPredictionConsumed) {
             throw new IllegalStateException("delivery prediction already consumed");
         }
-        double lifetime = item.ctx().getConfig().getRequestLifecycle().getDecision().getLifetime();
+        double lifetime = context.getConfig().getRequestLifecycle().getDecision().getLifetime();
         if (!Double.isFinite(lifetime) || lifetime < 1.0) {
             throw new IllegalArgumentException("invalid decision lifetime");
         }
@@ -2524,7 +2568,8 @@ public final class RequestSlot {
             synchronized (owner) {
                 if (!resolved.get()
                         && owner.admissionHandle == this
-                        && owner.cancellationResponse == null) {
+                        && owner.cancellationResponse == null
+                        && owner.context != null) {
                     owner.context.setSchedulingDiagnostics(diagnostics);
                 }
             }
@@ -2581,7 +2626,7 @@ public final class RequestSlot {
         /** Sticky decision: later Worker activity cannot revoke an already requested expiry. */
         boolean expired;
 
-        CleanupProgress(ScheduledRequest item, DeliveryResult.Status source) {
+        CleanupProgress(RequestExecution item, DeliveryResult.Status source) {
             this.source = source;
             prefillSettled = item.prefillEp() == null;
             decodeSettled = item.decodeEp() == null || item.decodeReservation() == null;
@@ -2615,7 +2660,7 @@ public final class RequestSlot {
      */
     private record PendingPrefillRetirement(
             PrefillEndpoint source,
-            ScheduledRequest item,
+            RequestExecution item,
             TerminalOutcome transition,
             Response response) {}
 
@@ -2685,7 +2730,7 @@ public final class RequestSlot {
         }
     }
 
-    record DecisionExpiry(ScheduledRequest item, boolean needsConfirmation) {}
+    record DecisionExpiry(RequestExecution item, boolean needsConfirmation) {}
 }
 
 /**
@@ -2795,7 +2840,8 @@ record DeferredTerminal(
  */
 record TerminalAction(
         RequestSlot slot,
-        ScheduledRequest item,
+        RequestExecution item,
+        ScheduledRequest queuedItem,
         DeliveryClaimKind deliveryKind,
         boolean endpointsSettled,
         PreemptionRegistration preemption,

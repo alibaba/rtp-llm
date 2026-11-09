@@ -6,13 +6,15 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -22,6 +24,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * Shared fixtures which exercise only the frozen endpoint-facing ports.
  */
 public final class EndpointTestSupport {
+    static final DeliveryMetrics NOOP_TELEMETRY = org.mockito.Mockito.mock(DeliveryMetrics.class);
     private static final CapacityBoundary PARKED_BOUNDARY =
             CapacityBoundary.unavailable(
                     new CapacityBoundary.Availability() {
@@ -39,9 +42,7 @@ public final class EndpointTestSupport {
                     new RouteProjection.AdmissionBlockSemantics(
                             "test delivery parked",
                             RouteProjection.AfterProbeAdmission.BLOCKED,
-                            "test delivery parked",
-                            RoleType.PREFILL));
-    static final DeliveryMetrics NOOP_TELEMETRY = org.mockito.Mockito.mock(DeliveryMetrics.class);
+                            "test delivery parked"));
 
     private EndpointTestSupport() {}
 
@@ -50,12 +51,14 @@ public final class EndpointTestSupport {
     }
 
     static WorkerStatus workerStatus(RoleType role, String ip, int port, int grpcPort) {
-        return WorkerStatus.createDiscovered(role, null, ip, port, grpcPort, null);
+        return WorkerStatusTestFixtures.readyForScheduling(
+                WorkerStatus.createDiscovered(role, null, ip, port, grpcPort, null));
     }
 
     static WorkerStatus workerStatus(
             RoleType role, String group, String ip, int port, int grpcPort, String site) {
-        return WorkerStatus.createDiscovered(role, group, ip, port, grpcPort, site);
+        return WorkerStatusTestFixtures.readyForScheduling(
+                WorkerStatus.createDiscovered(role, group, ip, port, grpcPort, site));
     }
 
     static Runnable applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
@@ -64,9 +67,9 @@ public final class EndpointTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
+                    WorkerStatusTestFixtures.prepare(
+                            status, WorkerStatusTestFixtures.observation(status, response));
             Runnable projection = endpoint.applyPreparedStatus(status, prepared);
-            status.recordSuccessfulPoll(response.isAlive());
             return projection;
         } finally {
             status.lock.unlock();
@@ -78,9 +81,9 @@ public final class EndpointTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
+                    WorkerStatusTestFixtures.prepare(
+                            status, WorkerStatusTestFixtures.observation(status, response));
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive());
         } finally {
             status.lock.unlock();
         }
@@ -106,7 +109,8 @@ public final class EndpointTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
+                    WorkerStatusTestFixtures.prepare(
+                            status, WorkerStatusTestFixtures.observation(status, response));
             return registry.publishPreparedEndpoint(address, status, prepared).endpoint();
         } finally {
             status.lock.unlock();
@@ -164,6 +168,9 @@ public final class EndpointTestSupport {
     static void commitUnqueued(PrefillEndpoint endpoint, long requestId, long predictedMs) {
         ScheduledRequest item = org.mockito.Mockito.mock(ScheduledRequest.class);
         org.mockito.Mockito.when(item.requestId()).thenReturn(Long.toString(requestId));
+        RequestExecution execution = org.mockito.Mockito.mock(RequestExecution.class);
+        org.mockito.Mockito.when(execution.requestId()).thenReturn(Long.toString(requestId));
+        org.mockito.Mockito.when(item.execution()).thenReturn(execution);
         try (var reservation = reserveUnqueued(endpoint, item, predictedMs);
                 var commit = endpoint.tryBeginRouteCommitAdmission();
                 var handoff = commit.commit(List.of(item), List.of(reservation))) {
@@ -209,33 +216,23 @@ public final class EndpointTestSupport {
         }
         List<ScheduledRequest> items = List.copyOf(exactItems);
         List<PrefillState.RouteReservation> reservations = new ArrayList<>(items.size());
-        boolean committed = false;
-        try {
-            for (ScheduledRequest item : items) {
-                PrefillState.ReservationResult<PrefillState.RouteReservation> result =
-                        endpoint.reserveRouteOwnership(item, predictedMs);
-                if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
-                    throw new IllegalStateException(
-                            "route reservation rejected: " + result.status());
+        PrefillEndpoint.RouteCommitAdmission admission = endpoint.tryBeginRouteCommitAdmission();
+        if (admission == null) {
+            throw new IllegalStateException("route endpoint retired");
+        }
+        try (admission) {
+            try {
+                for (ScheduledRequest item : items) {
+                    var result = admission.reserve(item, predictedMs);
+                    if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
+                        throw new IllegalStateException(
+                                "route reservation rejected: " + result.status());
+                    }
+                    reservations.add(result.reservation());
                 }
-                reservations.add(result.reservation());
-            }
-            PrefillEndpoint.RouteCommitAdmission admission =
-                    endpoint.tryBeginRouteCommitAdmission();
-            if (admission == null) {
-                throw new IllegalStateException("route endpoint retired");
-            }
-            PrefillState.CommittedHandoff handoff;
-            try (admission) {
-                handoff = admission.commit(items, reservations);
-            }
-            committed = true;
-            return List.of(handoff);
-        } finally {
-            if (!committed) {
-                for (int index = reservations.size() - 1; index >= 0; index--) {
-                    reservations.get(index).close();
-                }
+                return List.of(admission.commit(items, reservations));
+            } finally {
+                reservations.forEach(PrefillState.RouteReservation::close);
             }
         }
     }
@@ -320,7 +317,7 @@ public final class EndpointTestSupport {
     /**
      * Describes the exact Prefill retirement observed by an endpoint test.
      */
-    record PrefillRetirement(PrefillEndpoint endpoint, List<ScheduledRequest> ownedItems) {
+    record PrefillRetirement(PrefillEndpoint endpoint, List<RequestExecution> ownedItems) {
         PrefillRetirement {
             ownedItems = List.copyOf(ownedItems);
         }

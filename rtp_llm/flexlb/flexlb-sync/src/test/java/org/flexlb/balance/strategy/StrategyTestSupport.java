@@ -15,11 +15,11 @@ import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.mockito.Mockito;
 
 import java.util.List;
@@ -46,8 +46,7 @@ final class StrategyTestSupport {
                     new RouteProjection.AdmissionBlockSemantics(
                             "test delivery parked",
                             RouteProjection.AfterProbeAdmission.BLOCKED,
-                            "test delivery parked",
-                            RoleType.PREFILL));
+                            "test delivery parked"));
     private static final DeliveryMetrics NOOP_METRICS = Mockito.mock(DeliveryMetrics.class);
 
     private StrategyTestSupport() {}
@@ -108,9 +107,9 @@ final class StrategyTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
+                    WorkerStatusTestFixtures.prepare(
+                            status, WorkerStatusTestFixtures.observation(status, response));
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive());
         } finally {
             status.lock.unlock();
         }
@@ -134,11 +133,9 @@ final class StrategyTestSupport {
                         source.committedEngineObservation(), true, 1L, 0L, Map.of());
         status.lock.lock();
         try {
-            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation);
-            WorkerEndpoint endpoint =
-                    registry.publishPreparedEndpoint(address, status, prepared).endpoint();
-            status.recordSuccessfulPoll(observation.alive());
-            return endpoint;
+            WorkerStatus.PreparedStatus prepared =
+                    WorkerStatusTestFixtures.prepare(status, observation);
+            return registry.publishPreparedEndpoint(address, status, prepared).endpoint();
         } finally {
             status.lock.unlock();
         }
@@ -167,21 +164,6 @@ final class StrategyTestSupport {
         try (PrefillState.BatchReservation reservation = result.reservation()) {
             return reservation.commit(items, predictedMs);
         }
-    }
-
-    static void setCacheStatus(WorkerStatus status, long blockSize, long availableKv) {
-        CacheStatus cache = new CacheStatus();
-        cache.setBlockSize(blockSize);
-        cache.setAvailableKvCache(availableKv);
-        WorkerStatusResponse response =
-                response(
-                        status.getRole(),
-                        status.pollHealth().reportedAlive(),
-                        status.getAvailableKvCacheTokens(),
-                        status.getTotalKvCacheTokens(),
-                        Math.max(1L, status.appliedStatusCursor().statusVersion() + 1L));
-        response.setCacheStatus(cache);
-        publish(status, response);
     }
 
     /** Keep selection-owned queues parked without replacing admission internals. */

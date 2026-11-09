@@ -297,6 +297,21 @@ message V41RequestInputsPB {
     repeated sint32 token_types = 2;
     repeated bool image_mask = 3;
     repeated V41ImageInputPB images = 4;
+    // Opaque handle on the selected ViT. With a handle, images contain metadata
+    // only; patches were uploaded directly by the frontend before scheduling.
+    string payload_id = 5;
+}
+
+message V41InputUploadPB {
+    int64 request_id = 1;
+    string payload_id = 2;
+    V41RequestInputsPB inputs = 3;
+    int64 ttl_ms = 4;
+}
+
+message V41InputRefPB {
+    int64 request_id = 1;
+    string payload_id = 2;
 }
 
 message GenerateInputPB {
@@ -553,6 +568,9 @@ message CacheStatusPB {
     int64 version = 4;
     map<int64, bool> cache_keys = 5;
     MultimodalCacheStatusPB multimodal_cache = 6;
+    // Prefer this list when nonempty; otherwise fall back to legacy cache_keys.
+    // Upgrade all Masters before engines; roll back engines before Masters.
+    repeated sfixed64 cache_key_list = 7 [packed = true];
 }
 
 message MultimodalCacheStatusPB {
@@ -1106,6 +1124,8 @@ message MultimodalHashResponsePB {
 }
 
 service MultimodalRpcService {
+    rpc UploadV41Inputs(V41InputUploadPB) returns (EmptyPB);
+    rpc ReleaseV41Inputs(V41InputRefPB) returns (EmptyPB);
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);

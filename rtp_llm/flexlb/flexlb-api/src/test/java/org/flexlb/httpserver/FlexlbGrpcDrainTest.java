@@ -33,6 +33,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -47,6 +48,69 @@ import static org.mockito.Mockito.when;
  */
 class FlexlbGrpcDrainTest {
     @Test
+    void interruptedShutdownStillDrainsQueuedGrpcBufferCleanup() throws Exception {
+        var config = mock(ConfigService.class);
+        when(config.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
+        var grpc =
+                new FlexlbGrpcServer(
+                        mock(FlexlbServiceImpl.class),
+                        config,
+                        new MockEnvironment(),
+                        null,
+                        NoOpFlexMonitor.getInstance(),
+                        new GrpcServerTimingInterceptor(),
+                        null);
+        var executor =
+                new java.util.concurrent.ThreadPoolExecutor(
+                        1,
+                        1,
+                        0L,
+                        TimeUnit.SECONDS,
+                        new LinkedBlockingQueue<>(),
+                        new FlexlbGrpcServer.CountingCallerRunsHandler());
+        var occupied = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        executor.execute(
+                () -> {
+                    occupied.countDown();
+                    try {
+                        release.await();
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+        assertTrue(occupied.await(3, TimeUnit.SECONDS));
+        var buffer = io.netty.buffer.PooledByteBufAllocator.DEFAULT.directBuffer(65536);
+        var serialized = new io.grpc.internal.SerializingExecutor(executor);
+        serialized.execute(buffer::release);
+        ReflectionTestUtils.setField(grpc, "grpcExecutor", executor);
+        var interruptPreserved = new AtomicBoolean();
+        var shutdown =
+                new Thread(
+                        () -> {
+                            Thread.currentThread().interrupt();
+                            grpc.shutdown();
+                            interruptPreserved.set(Thread.currentThread().isInterrupted());
+                        });
+        try {
+            shutdown.start();
+            shutdown.join(3000);
+            assertFalse(shutdown.isAlive());
+            assertTrue(interruptPreserved.get());
+            release.countDown();
+            assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS));
+            assertEquals(0, buffer.refCnt(), "accepted gRPC cleanup must not be discarded");
+        } finally {
+            release.countDown();
+            executor.shutdown();
+            executor.awaitTermination(3, TimeUnit.SECONDS);
+            if (buffer.refCnt() > 0) {
+                buffer.release();
+            }
+        }
+    }
+
+    @Test
     void acceptedRpcCanEnterServiceAndFinishAfterQuietPeriod() throws Exception {
         var accepted = new CountDownLatch(1);
         var resume = new CountDownLatch(1);
@@ -55,9 +119,9 @@ class FlexlbGrpcDrainTest {
         var routingConfig =
                 ConfigService.parse(
                         """
-                {"requestLifecycle":{"request":{"timeoutMs":60000}},
-                 "grpcServer":{"shutdownQuietPeriodMs":100}}
-                """);
+                        {"requestLifecycle":{"request":{"timeoutMs":60000}},
+                         "grpcServer":{"shutdownQuietPeriodMs":100}}
+                        """);
         routingConfig.setDispatcher(DispatcherConfig.nonBatch());
         when(config.loadBalanceConfig()).thenReturn(routingConfig);
         var routes = mock(RouteService.class);
@@ -135,6 +199,9 @@ class FlexlbGrpcDrainTest {
                 Thread.sleep(10);
             }
             assertTrue(server.isShutdown());
+            assertFalse(
+                    grpc.isServing(),
+                    "shutting down transport must withdraw readiness before pending RPC completes");
             assertFalse(pending.isDone());
             assertTrue(drainer.isAlive());
             resume.countDown();
@@ -155,12 +222,14 @@ class FlexlbGrpcDrainTest {
         try (var fixture = new Fixture(300)) {
             Thread.sleep(700); // Idle before TERM does not count toward drain.
             assertFalse(fixture.server.isShutdown());
+            assertTrue(fixture.grpc.isServing());
             long started = System.nanoTime();
             fixture.startDrain();
             fixture.drainer.join(100);
             assertTrue(fixture.drainer.isAlive());
             fixture.drainer.join(3000);
             assertFalse(fixture.drainer.isAlive());
+            assertFalse(fixture.grpc.isServing());
             assertTrue(System.nanoTime() - started >= TimeUnit.MILLISECONDS.toNanos(300));
         }
     }
@@ -227,9 +296,9 @@ class FlexlbGrpcDrainTest {
                     .thenReturn(
                             ConfigService.parse(
                                     """
-                    {"requestLifecycle":{"request":{"timeoutMs":60000}},
-                     "grpcServer":{"shutdownQuietPeriodMs":%d}}
-                    """
+                                    {"requestLifecycle":{"request":{"timeoutMs":60000}},
+                                     "grpcServer":{"shutdownQuietPeriodMs":%d}}
+                                    """
                                             .formatted(quietMs)));
             grpc =
                     new FlexlbGrpcServer(
@@ -256,6 +325,8 @@ class FlexlbGrpcDrainTest {
                                             timing))
                             .build()
                             .start();
+            assertFalse(
+                    grpc.isServing(), "transport is not available until the server has started");
             ReflectionTestUtils.setField(grpc, "server", server);
             channel =
                     NettyChannelBuilder.forAddress("127.0.0.1", server.getPort())

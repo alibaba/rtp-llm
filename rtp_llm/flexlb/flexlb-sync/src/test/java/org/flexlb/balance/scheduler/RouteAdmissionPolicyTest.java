@@ -3,9 +3,9 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.OptionalLong;
@@ -17,171 +17,191 @@ import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.item;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.noCommittedWork;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.probe;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.project;
-import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.queue;
+import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.work;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * Exact observed-head admission policy on top of the pure route timeline.
+ * Work prediction and observed-head admission must remain independent.
  */
 class RouteAdmissionPolicyTest {
 
     @Test
-    void deliveryOnlyWaitPreservesTheQueueForecast() {
+    void decodeWaitDoesNotEraseKnownWorkPrediction() {
         GroupPlanner.Item head = item(1L, 50, 1L, 100L);
+        QueueSnapshot queue =
+                blockedQueue(
+                        false, head, semantics(RouteProjection.AfterProbeAdmission.INDEPENDENT));
         RouteProjection.Candidate result =
                 project(
-                        blockedQueue(false, head, null),
-                        noCommittedWork(),
+                        queue,
+                        work(List.of(), List.of(), 1L),
                         TOKEN_EVALUATOR,
                         probe(99L, 50, 20L, 0L),
                         ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
         assertEquals(OptionalLong.of(120L), result.projectedTtftMs());
         assertEquals(
                 RouteProjection.Candidate.InitialHeadDisposition.BEFORE_PROBE,
                 result.initialHeadDisposition());
+        assertNull(admissionBlockReason(queue, result, 50));
+        assertEquals(OptionalLong.of(120L), result.projectedTtftMs());
     }
 
     @Test
-    void fifoObservedHeadBlocksProbeWithoutInventingMilliseconds() {
-        GroupPlanner.Item head = item(1L, 50, 1L, 100L);
+    void deliveryOnlyWaitPreservesTheQueueForecast() {
+        QueueSnapshot queue = blockedQueue(false, item(1L, 50, 1L, 100L), null);
+        RouteProjection.Candidate result =
+                project(queue, noCommittedWork(), TOKEN_EVALUATOR, probe(99L, 50, 20L, 0L), ROUTE);
+
+        assertEquals(OptionalLong.of(120L), result.projectedTtftMs());
+        assertEquals(
+                RouteProjection.Candidate.InitialHeadDisposition.BEFORE_PROBE,
+                result.initialHeadDisposition());
+        assertNull(admissionBlockReason(queue, result, 50));
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {0L, 1L})
+    void fifoDecodeBlockedHeadAllowsHigherPriorityProbe(long unknownRequestCount) {
+        QueueSnapshot queue =
+                blockedQueue(
+                        false,
+                        item(1L, 50, 1L, 100L),
+                        semantics(RouteProjection.AfterProbeAdmission.INDEPENDENT));
         RouteProjection.Candidate result =
                 project(
-                        blockedQueue(
-                                false,
-                                head,
-                                semantics(RouteProjection.AfterProbeAdmission.BLOCKED)),
-                        noCommittedWork(),
+                        queue,
+                        work(List.of(), List.of(), unknownRequestCount),
                         TOKEN_EVALUATOR,
                         probe(99L, 100, 20L, 0L),
                         ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.BLOCKED, result.state());
-        assertEquals(OptionalLong.empty(), result.projectedTtftMs());
-        assertEquals("HEAD_CAPACITY_BLOCKED", result.detail());
-        assertFalse(result.selectable());
+        assertEquals(OptionalLong.of(120L), result.projectedTtftMs());
+        assertNull(admissionBlockReason(queue, result, 100));
     }
 
     @Test
     void prioritySameOrLowerProbeRemainsBehindObservedHead() {
-        GroupPlanner.Item head = item(1L, 50, 1L, 100L);
-        QueueSnapshot blocked =
-                blockedQueue(true, head, semantics(RouteProjection.AfterProbeAdmission.BLOCKED));
-
-        for (int probePriority : List.of(50, 49)) {
+        QueueSnapshot queue =
+                blockedQueue(
+                        true,
+                        item(1L, 50, 1L, 100L),
+                        semantics(RouteProjection.AfterProbeAdmission.BLOCKED));
+        for (int priority : List.of(50, 49)) {
             RouteProjection.Candidate result =
                     project(
-                            blocked,
+                            queue,
                             noCommittedWork(),
                             TOKEN_EVALUATOR,
-                            probe(99L, probePriority, 20L, 0L),
+                            probe(99L, priority, 20L, 0L),
                             ROUTE);
-            assertEquals(RouteProjection.Candidate.State.BLOCKED, result.state());
+            assertEquals(OptionalLong.of(120L), result.projectedTtftMs());
             assertEquals(
                     RouteProjection.Candidate.InitialHeadDisposition.BEFORE_PROBE,
                     result.initialHeadDisposition());
+            assertEquals("HEAD_CAPACITY_BLOCKED", admissionBlockReason(queue, result, priority));
         }
     }
 
     @Test
     void higherPriorityProbeCanRemainHardBlockedByCapturedSemantics() {
-        GroupPlanner.Item head = item(1L, 50, 1L, 100L);
+        QueueSnapshot queue =
+                blockedQueue(
+                        true,
+                        item(1L, 50, 1L, 100L),
+                        semantics(RouteProjection.AfterProbeAdmission.BLOCKED));
         RouteProjection.Candidate result =
-                project(
-                        blockedQueue(
-                                true, head, semantics(RouteProjection.AfterProbeAdmission.BLOCKED)),
-                        noCommittedWork(),
-                        TOKEN_EVALUATOR,
-                        probe(99L, 90, 20L, 0L),
-                        ROUTE);
+                project(queue, noCommittedWork(), TOKEN_EVALUATOR, probe(99L, 90, 20L, 0L), ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.BLOCKED, result.state());
-        assertEquals("AFTER_PROBE_CAPACITY_UNKNOWN", result.detail());
+        assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
+        assertEquals("AFTER_PROBE_CAPACITY_UNKNOWN", admissionBlockReason(queue, result, 90));
     }
 
-    @Test
-    void higherPriorityProbeCanBeUnavailableByCapturedSemantics() {
-        GroupPlanner.Item head = item(1L, 50, 1L, 100L);
+    @ParameterizedTest
+    @ValueSource(longs = {0L, 1L})
+    void higherPriorityProbeDoesNotInheritAnotherRequestsDecodeBlock(long unknownRequestCount) {
+        QueueSnapshot queue =
+                blockedQueue(
+                        true,
+                        item(1L, 50, 1L, 100L),
+                        semantics(RouteProjection.AfterProbeAdmission.INDEPENDENT));
         RouteProjection.Candidate result =
                 project(
-                        blockedQueue(
-                                true,
-                                head,
-                                semantics(
-                                        RouteProjection.AfterProbeAdmission.UNAVAILABLE,
-                                        RoleType.DECODE)),
-                        noCommittedWork(),
+                        queue,
+                        work(List.of(), List.of(), unknownRequestCount),
                         TOKEN_EVALUATOR,
                         probe(99L, 90, 20L, 0L),
                         ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, result.state());
-        assertEquals(OptionalLong.empty(), result.projectedTtftMs());
-        assertEquals("AFTER_PROBE_CAPACITY_UNKNOWN", result.detail());
-        assertEquals(RoleType.DECODE, result.blockerRole());
+        assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
+        assertEquals(
+                RouteProjection.Candidate.InitialHeadDisposition.AFTER_PROBE,
+                result.initialHeadDisposition());
+        assertNull(admissionBlockReason(queue, result, 90));
     }
 
     @Test
     void decodeCapacityEvidenceSurvivesAnObservedHeadAheadOfProbe() {
-        GroupPlanner.Item head = item(1L, 50, 1L, 100L);
+        QueueSnapshot queue =
+                blockedQueue(
+                        true,
+                        item(1L, 50, 1L, 100L),
+                        semantics(RouteProjection.AfterProbeAdmission.INDEPENDENT));
         RouteProjection.Candidate result =
-                project(
-                        blockedQueue(
-                                true,
-                                head,
-                                semantics(
-                                        RouteProjection.AfterProbeAdmission.UNAVAILABLE,
-                                        RoleType.DECODE)),
-                        noCommittedWork(),
-                        TOKEN_EVALUATOR,
-                        probe(99L, 40, 20L, 0L),
-                        ROUTE);
+                project(queue, noCommittedWork(), TOKEN_EVALUATOR, probe(99L, 40, 20L, 0L), ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.BLOCKED, result.state());
+        assertEquals(OptionalLong.of(120L), result.projectedTtftMs());
         assertEquals(
                 RouteProjection.Candidate.InitialHeadDisposition.BEFORE_PROBE,
                 result.initialHeadDisposition());
-        assertEquals(RoleType.DECODE, result.blockerRole());
+        assertEquals("HEAD_CAPACITY_BLOCKED", admissionBlockReason(queue, result, 40));
     }
 
     @Test
-    void unknownEngineCursorCannotProveOvertakeOfBlockedHead() {
-        GroupPlanner.Item head = item(1L, 50, 1L, 100L);
-        WorkSnapshot unknownWork = RouteProjectionTestSupport.work(List.of(), List.of(), 1L);
+    void unknownWorkDoesNotBypassSharedCapacityBlock() {
+        QueueSnapshot queue =
+                blockedQueue(
+                        true,
+                        item(1L, 50, 1L, 100L),
+                        semantics(RouteProjection.AfterProbeAdmission.BLOCKED));
         RouteProjection.Candidate result =
                 project(
-                        blockedQueue(
-                                true, head, semantics(RouteProjection.AfterProbeAdmission.BLOCKED)),
-                        unknownWork,
+                        queue,
+                        work(List.of(), List.of(), 1L),
                         TOKEN_EVALUATOR,
                         probe(99L, 90, 20L, 0L),
                         ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.BLOCKED, result.state());
-        assertEquals("HEAD_CAPACITY_BLOCKED", result.detail());
+        assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
+        assertEquals(
+                RouteProjection.Candidate.InitialHeadDisposition.AFTER_PROBE,
+                result.initialHeadDisposition());
+        assertEquals("AFTER_PROBE_CAPACITY_UNKNOWN", admissionBlockReason(queue, result, 90));
     }
 
-    @Test
-    void terminallyPrunedObservedHeadDoesNotBlockProbe() {
+    @ParameterizedTest
+    @ValueSource(longs = {0L, 1L})
+    void terminallyPrunedObservedHeadDoesNotBlockProbe(long unknownRequestCount) {
         GroupPlanner.Item expired = item(1L, 50, 1L, 100L, RouteProjectionTestSupport.NOW_MS);
+        QueueSnapshot queue =
+                blockedQueue(
+                        false, expired, semantics(RouteProjection.AfterProbeAdmission.BLOCKED));
         RouteProjection.Candidate result =
                 project(
-                        blockedQueue(
-                                false,
-                                expired,
-                                semantics(RouteProjection.AfterProbeAdmission.BLOCKED)),
-                        noCommittedWork(),
+                        queue,
+                        work(List.of(), List.of(), unknownRequestCount),
                         TOKEN_EVALUATOR,
                         probe(99L, 50, 20L, 0L),
                         ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
         assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
         assertEquals(
                 RouteProjection.Candidate.InitialHeadDisposition.TERMINAL_PRUNED,
                 result.initialHeadDisposition());
+        assertNull(admissionBlockReason(queue, result, 50));
     }
 
     @Test
@@ -194,15 +214,55 @@ class RouteAdmissionPolicyTest {
                         constraints(1, 0L),
                         List.of(head),
                         block(head, semantics(RouteProjection.AfterProbeAdmission.BLOCKED)));
-
         RouteProjection.Candidate result =
                 project(queue, noCommittedWork(), TOKEN_EVALUATOR, probe(99L, 50, 20L, 0L), ROUTE);
 
-        assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
         assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
         assertEquals(
                 RouteProjection.Candidate.InitialHeadDisposition.NONE,
                 result.initialHeadDisposition());
+        assertNull(admissionBlockReason(queue, result, 50));
+    }
+
+    @Test
+    void predictionFailureKeepsItsOwnReason() {
+        QueueSnapshot queue =
+                blockedQueue(
+                        false,
+                        item(1L, 50, 1L, 100L),
+                        semantics(RouteProjection.AfterProbeAdmission.INDEPENDENT));
+        RouteProjection.Candidate result =
+                project(queue, noCommittedWork(), null, probe(99L, 50, 20L, 0L), ROUTE);
+
+        assertFalse(result.hasPrediction());
+        assertEquals("PREDICTOR_MISSING", result.detail());
+        assertNull(admissionBlockReason(queue, result, 50));
+    }
+
+    @Test
+    void blockedSemanticsCannotOmitTheWaitReason() {
+        assertThrows(
+                NullPointerException.class,
+                () ->
+                        new RouteProjection.AdmissionBlockSemantics(
+                                null, RouteProjection.AfterProbeAdmission.INDEPENDENT, ""));
+        assertThrows(
+                NullPointerException.class,
+                () ->
+                        new RouteProjection.AdmissionBlockSemantics(
+                                "HEAD", RouteProjection.AfterProbeAdmission.BLOCKED, null));
+        assertThrows(
+                NullPointerException.class,
+                () -> new RouteProjection.AdmissionBlockSemantics("HEAD", null, ""));
+    }
+
+    private static String admissionBlockReason(
+            QueueSnapshot queue, RouteProjection.Candidate result, int priority) {
+        return RouteProjection.admissionBlockReason(
+                queue,
+                result,
+                item(99L, priority, Long.MAX_VALUE, 20L),
+                RouteProjectionTestSupport.NOW_MS);
     }
 
     private static QueueSnapshot blockedQueue(
@@ -220,12 +280,7 @@ class RouteAdmissionPolicyTest {
 
     private static RouteProjection.AdmissionBlockSemantics semantics(
             RouteProjection.AfterProbeAdmission afterProbe) {
-        return semantics(afterProbe, RoleType.PREFILL);
-    }
-
-    private static RouteProjection.AdmissionBlockSemantics semantics(
-            RouteProjection.AfterProbeAdmission afterProbe, RoleType blockerRole) {
         return new RouteProjection.AdmissionBlockSemantics(
-                "HEAD_CAPACITY_BLOCKED", afterProbe, "AFTER_PROBE_CAPACITY_UNKNOWN", blockerRole);
+                "HEAD_CAPACITY_BLOCKED", afterProbe, "AFTER_PROBE_CAPACITY_UNKNOWN");
     }
 }

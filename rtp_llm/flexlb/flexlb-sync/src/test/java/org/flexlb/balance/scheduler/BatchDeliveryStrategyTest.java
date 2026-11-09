@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.unavailable;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -73,6 +74,7 @@ class BatchDeliveryStrategyTest {
         if (images) {
             template.addMultimodalInputs(
                     EngineRpcService.MultimodalInputPB.newBuilder()
+                            .setMultimodalUrl("https://example.invalid/image")
                             .setMultimodalTensor(
                                     EngineRpcService.TensorPB.newBuilder()
                                             .setBf16Data(
@@ -119,11 +121,10 @@ class BatchDeliveryStrategyTest {
                                     assertEquals(images ? 1 : 0, input.getMultimodalInputsCount());
                                     if (images) {
                                         assertEquals(
-                                                20 * 1024 * 1024,
-                                                input.getMultimodalInputs(0)
-                                                        .getMultimodalTensor()
-                                                        .getBf16Data()
-                                                        .size());
+                                                "https://example.invalid/image",
+                                                input.getMultimodalInputs(0).getMultimodalUrl());
+                                        assertFalse(
+                                                input.getMultimodalInputs(0).hasMultimodalTensor());
                                     }
                                     response.addSuccesses(
                                             EngineRpcService.EnqueueBatchSuccessPB.newBuilder()

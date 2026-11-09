@@ -61,6 +61,7 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
     _settle_client_span_after_rpc,
     _trans_rpc_error_code,
     trans_input,
+    trans_master_input,
     trans_output,
 )
 from rtp_llm.cpp.model_rpc.proto import model_rpc_service_pb2_grpc
@@ -413,6 +414,24 @@ class ModelRpcClientTest(TestCase):
         async for res in client.enqueue(input):
             responses.extend(res.generate_outputs)
         return responses
+
+    def test_trans_input_preserves_qos_priority(self):
+        cases = [
+            ({"x-dashscope-inner-qos-level": "40"}, 50, 40),
+            ({"x-dashscope-inner-qos-level": "50"}, 40, 50),
+            ({}, 40, 40),
+            ({"x-dashscope-inner-qos-level": "invalid"}, 50, 50),
+            ({}, None, 50),
+        ]
+        for headers, configured, expected in cases:
+            with self.subTest(headers=headers, configured=configured):
+                input_py = self._make_generate_input(
+                    GenerateConfig(qos_priority=configured)
+                )
+                input_py.headers = headers
+                wire = trans_input(input_py)
+                restored = type(wire).FromString(wire.SerializeToString())
+                self.assertEqual(restored.priority, expected)
 
     def test_trans_input_serializes_typed_request_info(self):
         input_py = GenerateInput(
@@ -3642,6 +3661,214 @@ class ClientSpanSettlementTest(TestCase):
 
         self.assertEqual(raised.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
         self.assertEqual(raised.exception.message, "future error")
+
+
+class V41DirectUploadTest(unittest.IsolatedAsyncioTestCase):
+    def make_input(self):
+        from types import SimpleNamespace
+
+        return GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([1, 2]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(max_new_tokens=1),
+            v41_inputs=SimpleNamespace(
+                token_types=[-1, 0],
+                image_mask=torch.tensor([False, True]),
+                images=[
+                    SimpleNamespace(
+                        start=1,
+                        n_vit_h=1,
+                        n_vit_w=1,
+                        types=torch.tensor([0]),
+                        patches=torch.ones((1024, 512), dtype=torch.bfloat16),
+                        content_sha256="hash",
+                        processor_identity="processor",
+                    )
+                ],
+            ),
+        )
+
+    async def test_upload_then_master_serialization_omits_patches(self):
+        from dataclasses import replace
+
+        request = self.make_input()
+        client = ModelRpcClient([], {})
+        stub = MagicMock()
+        stub.UploadV41Inputs = AsyncMock()
+        stub.ReleaseV41Inputs = AsyncMock()
+        vit = RoleAddr(role=RoleType.VIT, ip="127.0.0.1", http_port=1, grpc_port=2)
+        client._channel_pool = MagicMock()
+        client._channel_pool.get = AsyncMock(return_value=object())
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.MultimodalRpcServiceStub",
+            return_value=stub,
+        ):
+            with self.assertRaises(FtRuntimeException):
+                trans_master_input(request)
+            await client.upload_v41_inputs(request, vit, 5)
+            upload = stub.UploadV41Inputs.call_args.args[0]
+            self.assertGreater(upload.ByteSize(), 1024**2)
+            self.assertEqual(
+                trans_tensor(upload.inputs.images[0].patches).shape, (1024, 512)
+            )
+            master = trans_master_input(request)
+            self.assertLess(master.ByteSize(), 1024)
+            self.assertFalse(master.v41_inputs.images[0].HasField("patches"))
+            self.assertEqual(master.v41_inputs.payload_id, upload.payload_id)
+            self.assertEqual(list(master.v41_inputs.token_types), [-1, 0])
+            self.assertTrue(
+                torch.equal(
+                    request.v41_inputs.images[0].patches,
+                    torch.ones((1024, 512), dtype=torch.bfloat16),
+                )
+            )
+            retry = replace(request, request_id=456)
+            self.assertFalse(retry.v41_payload_id)
+            self.assertIsNone(retry.v41_payload_vit)
+            await client.release_v41_inputs(request)
+            release = stub.ReleaseV41Inputs.call_args.args[0]
+            self.assertEqual(release.request_id, 123)
+            self.assertEqual(release.payload_id, upload.payload_id)
+            self.assertFalse(request.v41_payload_id)
+            await client.release_v41_inputs(request)
+            self.assertEqual(stub.ReleaseV41Inputs.await_count, 1)
+
+    async def test_frontend_upload_and_backend_reference_cross_real_grpc(self):
+        from concurrent import futures
+
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+            MultimodalInputsPB,
+            MultimodalOutputPB,
+        )
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+            MultimodalRpcServiceServicer,
+            MultimodalRpcServiceStub,
+            add_MultimodalRpcServiceServicer_to_server,
+        )
+        from rtp_llm.server.v41_input_transfer import V41InputTransfer
+
+        class EchoVit(V41InputTransfer, MultimodalRpcServiceServicer):
+            def RemoteMultimodalEmbedding(self, request, context):
+                resolved = self.resolve_v41_inputs(request, context)
+                return MultimodalOutputPB(
+                    multimodal_embedding=resolved.v41_inputs.images[0].patches
+                )
+
+        pool = futures.ThreadPoolExecutor(max_workers=2)
+        server = grpc.server(pool)
+        handler = EchoVit()
+        add_MultimodalRpcServiceServicer_to_server(handler, server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        client = ModelRpcClient([], {})
+        request = self.make_input()
+        try:
+            vit = RoleAddr(
+                role=RoleType.VIT, ip="127.0.0.1", http_port=1, grpc_port=port
+            )
+            await client.upload_v41_inputs(request, vit, 5)
+            wire = GenerateInputPB.FromString(
+                trans_master_input(request).SerializeToString()
+            )
+            channel = await client._channel_pool.get(f"127.0.0.1:{port}")
+            response = await MultimodalRpcServiceStub(
+                channel
+            ).RemoteMultimodalEmbedding(
+                MultimodalInputsPB(
+                    request_id=wire.request_id, v41_inputs=wire.v41_inputs
+                ),
+                timeout=5,
+            )
+            self.assertTrue(
+                torch.equal(
+                    trans_tensor(response.multimodal_embedding),
+                    request.v41_inputs.images[0].patches,
+                )
+            )
+            self.assertLess(wire.ByteSize(), 1024)
+        finally:
+            await client.release_v41_inputs(request)
+            await client.close()
+            server.stop(0).wait()
+            pool.shutdown()
+        self.assertEqual(handler._v41_bytes, 0)
+
+    async def test_batch_fetch_releases_upload_before_receiving_results(self):
+        request = self.make_input()
+        request.enqueued_by_master = True
+        request.v41_payload_id = "a" * 32
+        request.generate_config.role_addrs = [_prefill_role_addr("prefill", 9000)]
+        client = ModelRpcClient([], {})
+        client._channel_pool = _FakeChannelPool()
+        released = []
+
+        async def release(input):
+            released.append(input.request_id)
+            input.v41_payload_id = ""
+
+        client.release_v41_inputs = release
+
+        class WaitingFetch:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                self_test.assertEqual(released, [request.request_id])
+                raise StopAsyncIteration
+
+            def cancel(self):
+                pass
+
+        self_test = self
+        stub = MagicMock()
+        stub.FetchResponse.return_value = WaitingFetch()
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub", return_value=stub
+        ):
+            _ = [output async for output in client.enqueue(request)]
+        self.assertEqual(released, [request.request_id])
+
+    async def test_upload_backpressure_and_old_vit_have_typed_errors(self):
+        client = ModelRpcClient([], {})
+        client._channel_pool = _FakeChannelPool()
+        vit = RoleAddr(role=RoleType.VIT, ip="127.0.0.1", http_port=1, grpc_port=2)
+        for status, expected in (
+            (StatusCode.RESOURCE_EXHAUSTED, ExceptionType.CONCURRENCY_LIMIT_ERROR),
+            (StatusCode.UNIMPLEMENTED, ExceptionType.MM_NOT_SUPPORTED_ERROR),
+            (StatusCode.UNAVAILABLE, ExceptionType.CONNECT_FAILED),
+        ):
+            stub = MagicMock()
+            stub.UploadV41Inputs = AsyncMock(side_effect=_FakeRpcError(status))
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.MultimodalRpcServiceStub",
+                return_value=stub,
+            ):
+                with self.assertRaises(FtRuntimeException) as failure:
+                    await client.upload_v41_inputs(self.make_input(), vit, 5)
+            self.assertEqual(failure.exception.exception_type, expected)
+
+    async def test_lost_upload_ack_still_has_release_receipt(self):
+        request = self.make_input()
+        client = ModelRpcClient([], {})
+        client._channel_pool = MagicMock()
+        client._channel_pool.get = AsyncMock(return_value=object())
+        stub = MagicMock()
+        stub.UploadV41Inputs = AsyncMock(side_effect=asyncio.CancelledError())
+        stub.ReleaseV41Inputs = AsyncMock()
+        vit = RoleAddr(role=RoleType.VIT, ip="127.0.0.1", http_port=1, grpc_port=2)
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.MultimodalRpcServiceStub",
+            return_value=stub,
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await client.upload_v41_inputs(request, vit, 5)
+            payload_id = request.v41_payload_id
+            self.assertTrue(payload_id)
+            await client.release_v41_inputs(request)
+            self.assertEqual(
+                stub.ReleaseV41Inputs.call_args.args[0].payload_id, payload_id
+            )
 
 
 if __name__ == "__main__":

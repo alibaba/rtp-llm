@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
@@ -32,6 +33,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -188,7 +190,7 @@ class WorkerBatcherSchedulingTest {
                         projection,
                         now);
         assertTrue(
-                candidate.selectable(),
+                candidate.hasPrediction(),
                 "a delivery-only wait must leave incoming backlog selectable");
 
         ScheduledRequest backlog = item(config, endpoint, 22L, 50, now + 1L);
@@ -340,6 +342,73 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void decodeRecoveryBeforeWindowWaitRegistrationIsNotLost() throws Exception {
+        try (DecodeWindowFixture fixture = new DecodeWindowFixture()) {
+            // The worker has produced its one-member window decision, but has
+            // not registered that wait yet. Its head remains B after C recovers.
+            fixture.thirdReady.set(true);
+            fixture.thirdListeners.forEach(Runnable::run);
+            fixture.allowWait.countDown();
+
+            await(fixture.delivery.prepared);
+            assertEquals(List.of(fixture.second, fixture.third), fixture.delivery.selected.get());
+            assertEquals(1, fixture.delivery.prepareCalls.get());
+        }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void decodeRecoveryExtendsWindowWithoutChangingHead() throws Exception {
+        try (DecodeWindowFixture fixture = new DecodeWindowFixture()) {
+            fixture.allowWait.countDown();
+            fixture.awaitSleeping();
+            assertEquals(0, fixture.delivery.prepareCalls.get());
+
+            fixture.thirdReady.set(true);
+            fixture.thirdListeners.forEach(Runnable::run);
+
+            await(fixture.delivery.prepared);
+            assertEquals(List.of(fixture.second, fixture.third), fixture.delivery.selected.get());
+            assertEquals(1, fixture.delivery.prepareCalls.get());
+        }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void unchangedDecodeNotificationsKeepWindowPredictionAndProjectionCached() throws Exception {
+        try (DecodeWindowFixture fixture = new DecodeWindowFixture()) {
+            fixture.allowWait.countDown();
+            fixture.awaitSleeping();
+            assertEquals(1, fixture.firstListeners.size());
+            assertEquals(1, fixture.secondListeners.size());
+            assertEquals(1, fixture.thirdListeners.size());
+            RouteProjection.Inputs inputs = fixture.runtime.captureRouteProjectionInputs();
+            int predictions = fixture.delivery.predictions.get();
+
+            for (int notification = 0; notification < 10; notification++) {
+                fixture.thirdListeners.forEach(Runnable::run);
+                fixture.firstListeners.forEach(Runnable::run);
+            }
+            TimeUnit.MILLISECONDS.sleep(100L);
+
+            assertEquals(
+                    predictions,
+                    fixture.delivery.predictions.get(),
+                    "unchanged Decode readiness must not repeat group prediction");
+            assertEquals(0, fixture.delivery.prepareCalls.get());
+            assertSame(
+                    inputs,
+                    fixture.runtime.captureRouteProjectionInputs(),
+                    "a local strategy wake must not invalidate route projection inputs");
+            assertNull(fixture.runtime.stopAndAwait());
+            assertTrue(fixture.firstListeners.isEmpty());
+            assertTrue(fixture.secondListeners.isEmpty());
+            assertTrue(fixture.thirdListeners.isEmpty());
+        }
+    }
+
     @ParameterizedTest
     @CsvSource({
         "NON_BATCH,SINGLE,1,0,single_request",
@@ -362,16 +431,6 @@ class WorkerBatcherSchedulingTest {
             decision.setMaxCollectionWaitMs(windowMs);
         }
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
-        when(endpoint.reserveRouteOwnership(
-                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
-                .thenAnswer(
-                        ignored ->
-                                new org.flexlb.balance.endpoint.PrefillState.ReservationResult<>(
-                                        org.flexlb.balance.endpoint.PrefillState.CapacityStatus
-                                                .ACQUIRED,
-                                        mock(
-                                                org.flexlb.balance.endpoint.PrefillState
-                                                        .RouteReservation.class)));
         DeliveryStrategy delivery = mock(DeliveryStrategy.class);
         List<org.flexlb.dao.pv.DecisionGroup> published = new CopyOnWriteArrayList<>();
         when(delivery.prepare(
@@ -497,6 +556,73 @@ class WorkerBatcherSchedulingTest {
         await(delivery.firstAttempt);
     }
 
+    private static ScheduledRequest decodeItem(
+            FlexlbConfig config,
+            PrefillEndpoint endpoint,
+            long requestId,
+            long enqueuedAtMs,
+            AtomicBoolean ready,
+            DecodeEndpoint decode) {
+        ScheduledRequest item = spy(item(config, endpoint, requestId, 50, enqueuedAtMs));
+        doAnswer(invocation -> ready.get()).when(item).decodeReadyForDispatch();
+        doAnswer(invocation -> decode).when(item).decodeEp();
+        return item;
+    }
+
+    private static ScheduledRequest item(
+            FlexlbConfig config,
+            PrefillEndpoint endpoint,
+            long requestId,
+            int priority,
+            long enqueuedAtMs) {
+        Request request = new Request();
+        request.setRequestId(Long.toString(requestId));
+        request.setPriority(priority);
+        request.setSeqLen(10L);
+        BalanceContext context = new BalanceContext(config);
+        context.setRequest(request);
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
+        return new ScheduledRequest(
+                context,
+                new CompletableFuture<Response>(),
+                null,
+                null,
+                null,
+                endpoint,
+                null,
+                null,
+                enqueuedAtMs);
+    }
+
+    private static DecodeEndpoint decode(CopyOnWriteArrayList<Runnable> listeners) {
+        DecodeEndpoint endpoint = mock(DecodeEndpoint.class);
+        doAnswer(
+                        invocation -> {
+                            listeners.add(invocation.getArgument(0));
+                            return null;
+                        })
+                .when(endpoint)
+                .addEngineDispatchCapacityListener(
+                        org.mockito.ArgumentMatchers.any(Runnable.class));
+        doAnswer(
+                        invocation -> {
+                            listeners.remove(invocation.<Runnable>getArgument(0));
+                            return null;
+                        })
+                .when(endpoint)
+                .removeEngineDispatchCapacityListener(
+                        org.mockito.ArgumentMatchers.any(Runnable.class));
+        return endpoint;
+    }
+
+    private static void awaitCondition(BooleanSupplier condition) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
+        while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+            TimeUnit.MILLISECONDS.sleep(1L);
+        }
+        assertTrue(condition.getAsBoolean(), "worker did not enter its strategy wait");
+    }
+
     private WorkerBatcher runningRuntime(
             FlexlbConfig config, PrefillEndpoint endpoint, DeliveryStrategy delivery) {
         WorkerBatcher runtime =
@@ -528,31 +654,6 @@ class WorkerBatcherSchedulingTest {
         decision.setMaxPredictedExecutionMs(500L);
         SchedulingTestConfig.useBatchDispatcher(config);
         return config;
-    }
-
-    private static ScheduledRequest item(
-            FlexlbConfig config,
-            PrefillEndpoint endpoint,
-            long requestId,
-            int priority,
-            long enqueuedAtMs) {
-        Request request = new Request();
-        request.setRequestId(Long.toString(requestId));
-        request.setPriority(priority);
-        request.setSeqLen(10L);
-        BalanceContext context = new BalanceContext(config);
-        context.setRequest(request);
-        context.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
-        return new ScheduledRequest(
-                context,
-                new CompletableFuture<Response>(),
-                null,
-                null,
-                null,
-                endpoint,
-                null,
-                null,
-                enqueuedAtMs);
     }
 
     private static PrefillEndpoint stableEndpoint(WorkerStatus status) {
@@ -621,8 +722,123 @@ class WorkerBatcherSchedulingTest {
                 new RouteProjection.AdmissionBlockSemantics(
                         "TEST_CAPACITY",
                         RouteProjection.AfterProbeAdmission.BLOCKED,
-                        "TEST_CAPACITY",
-                        RoleType.PREFILL));
+                        "TEST_CAPACITY"));
+    }
+
+    /**
+     * A waits for D1; B is ready; C can make B's fixed window full.
+     */
+    private final class DecodeWindowFixture implements AutoCloseable {
+        private final CopyOnWriteArrayList<Runnable> firstListeners = new CopyOnWriteArrayList<>();
+        private final CopyOnWriteArrayList<Runnable> secondListeners = new CopyOnWriteArrayList<>();
+        private final CopyOnWriteArrayList<Runnable> thirdListeners = new CopyOnWriteArrayList<>();
+        private final AtomicBoolean thirdReady = new AtomicBoolean();
+        private final CountDownLatch allowWait = new CountDownLatch(1);
+        private final CountDownLatch leftWaitBoundary = new CountDownLatch(1);
+        private final AtomicReference<Thread> worker = new AtomicReference<>();
+        private final WindowDelivery delivery = new WindowDelivery();
+        private final WorkerBatcher runtime;
+        private final ScheduledRequest second;
+        private final ScheduledRequest third;
+
+        private DecodeWindowFixture() {
+            FlexlbConfig config = fixedConfig();
+            CountDownLatch statusRead = new CountDownLatch(1);
+            CountDownLatch allowStatusRead = new CountDownLatch(1);
+            PrefillEndpoint endpoint =
+                    stableEndpoint(gatedFirstStatusRead(statusRead, allowStatusRead));
+            runtime = runningRuntime(config, endpoint, delivery);
+            long now = System.currentTimeMillis();
+            ScheduledRequest first =
+                    decodeItem(
+                            config,
+                            endpoint,
+                            101L,
+                            now,
+                            new AtomicBoolean(),
+                            decode(firstListeners));
+            DecodeEndpoint secondDecode = decode(secondListeners);
+            second =
+                    decodeItem(
+                            config,
+                            endpoint,
+                            102L,
+                            now + 1L,
+                            new AtomicBoolean(true),
+                            secondDecode);
+            third =
+                    decodeItem(
+                            config, endpoint, 103L, now + 2L, thirdReady, decode(thirdListeners));
+            CountDownLatch beforeWait = new CountDownLatch(1);
+            AtomicBoolean firstWait = new AtomicBoolean(true);
+            doAnswer(
+                            invocation -> {
+                                if (Thread.currentThread().isVirtual()) {
+                                    worker.set(Thread.currentThread());
+                                    if (firstWait.compareAndSet(true, false)) {
+                                        beforeWait.countDown();
+                                        await(allowWait);
+                                        leftWaitBoundary.countDown();
+                                    }
+                                }
+                                return secondDecode;
+                            })
+                    .when(second)
+                    .decodeEp();
+            try {
+                assertTrue(runtime.offer(first));
+                await(statusRead);
+                assertTrue(runtime.offer(second));
+                assertTrue(runtime.offer(third));
+            } finally {
+                allowStatusRead.countDown();
+            }
+            await(beforeWait);
+        }
+
+        @Override
+        public void close() {
+            allowWait.countDown();
+        }
+
+        private void awaitSleeping() throws Exception {
+            await(leftWaitBoundary);
+            awaitCondition(
+                    () -> {
+                        Thread current = worker.get();
+                        return current != null && current.getState() == Thread.State.TIMED_WAITING;
+                    });
+        }
+    }
+
+    /**
+     * Controls delivery availability and records preparation to test collection-window scheduling.
+     */
+    private static final class WindowDelivery extends BoundaryDelivery {
+        private final AtomicInteger predictions = new AtomicInteger();
+        private final AtomicInteger prepareCalls = new AtomicInteger();
+        private final AtomicReference<List<ScheduledRequest>> selected = new AtomicReference<>();
+        private final CountDownLatch prepared = new CountDownLatch(1);
+        private final TestAvailability capacity = new TestAvailability();
+
+        @Override
+        public double projectGroupDurationMs(
+                List<ScheduledRequest> items, PrefillTimePredictor.Evaluator evaluator) {
+            predictions.incrementAndGet();
+            return items.size() * 100.0;
+        }
+
+        @Override
+        public Transaction prepare(
+                List<ScheduledRequest> candidates,
+                PrefillTimePredictor.Evaluator evaluator,
+                OptionalLong plannedPrediction) {
+            prepareCalls.incrementAndGet();
+            selected.set(List.copyOf(candidates));
+            prepared.countDown();
+            return WorkerBatcherTestSupport.boundaryOnly(
+                    candidates.getFirst(), unavailable(capacity));
+        }
     }
 
     /**

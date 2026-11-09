@@ -157,8 +157,8 @@ class RouteDeliveryStrategyTest {
                                 second, DeliveryResult.delivered())),
                 fixture.slots.completions());
         assertEquals(List.of(List.of(first, second)), fixture.telemetry.routes());
-        verify(fixture.capabilities.routeReservation(first)).updatePrediction(first, 90L);
-        verify(fixture.capabilities.routeReservation(second)).updatePrediction(second, 90L);
+        verify(fixture.capabilities.routeCommit()).reserve(first, 90L);
+        verify(fixture.capabilities.routeCommit()).reserve(second, 90L);
         verify(fixture.capabilities.routeCommit())
                 .commit(
                         org.mockito.ArgumentMatchers.eq(List.of(first, second)),
@@ -189,6 +189,7 @@ class RouteDeliveryStrategyTest {
                 fixture.context.emptyBoundary().result().status());
         assertEquals(List.of(head), fixture.slots.prepared());
         assertTrue(fixture.slots.committed().isEmpty());
+        verify(fixture.capabilities.routeReservation(head)).close();
         assertTrue(fixture.telemetry.routes().isEmpty());
     }
 
@@ -292,7 +293,7 @@ class RouteDeliveryStrategyTest {
                         fixture.strategy, List.of(head), "lost-commit", 0, OptionalLong.empty());
 
         assertEquals("NOT_COMMITTED", result);
-        verify(fixture.capabilities.routeReservation(head), never()).close();
+        verify(fixture.capabilities.routeReservation(head)).close();
         verify(fixture.capabilities.permit(head)).release();
         verify(fixture.capabilities.permit(head), never()).dispatch();
         assertTrue(fixture.telemetry.routes().isEmpty());

@@ -42,7 +42,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -63,23 +62,12 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     private static final String DECODE_DOMAIN = "mock.decode.hosts.address";
     private static final String MODEL_NAME = "mock-model";
 
-    /** Master SYNC_STATUS_INTERVAL default — the production re-pull cadence. */
+    /**
+     * Master SYNC_STATUS_INTERVAL default — the production re-pull cadence.
+     */
     private static final long SYNC_INTERVAL_MS = 20L;
 
     private static final long CONVERGENCE_CAP_MS = 10_000L;
-
-    /**
-     * Upstream's schedule refactor made disappearance eviction
-     * staleness-gated (retireMissingGenerationIfExpired): a worker dropped
-     * from discovery is retired only once its last successful status poll
-     * is older than this threshold — the 15-arg constructor defaults to
-     * 10 s, which would land exactly on Phase 3's 10 s convergence cap.
-     * The 16-arg constructor exists to inject a short staleness so this
-     * test verifies the eviction mechanism without waiting out the
-     * production TTL.
-     */
-    private static final long STATUS_STALE_AFTER_US = 500_000L;
-
     @TempDir Path tempDir;
     private MockPrefillWorker workerB;
     private MockPrefillWorker workerC;
@@ -214,16 +202,17 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         engineWorkerStatus,
                         workerAddressService,
                         statusCheckExecutor,
+                        statusCheckExecutor,
+                        statusCheckExecutor,
                         healthReporter,
                         engineGrpcService,
                         RoleType.PREFILL,
                         cacheAwareService,
                         cacheIntervalService,
                         5_000L,
-                        new LongAdder(),
+                        0L,
                         1L,
-                        false,
-                        STATUS_STALE_AFTER_US);
+                        false);
 
         EngineSyncRunner decodeSyncRunner =
                 new EngineSyncRunner(
@@ -231,16 +220,17 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         engineWorkerStatus,
                         workerAddressService,
                         statusCheckExecutor,
+                        statusCheckExecutor,
+                        statusCheckExecutor,
                         healthReporter,
                         engineGrpcService,
                         RoleType.DECODE,
                         cacheAwareService,
                         cacheIntervalService,
                         5_000L,
-                        new LongAdder(),
+                        0L,
                         1L,
-                        false,
-                        STATUS_STALE_AFTER_US);
+                        false);
 
         syncScheduler =
                 Executors.newSingleThreadScheduledExecutor(
@@ -383,7 +373,8 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 "worker C must keep serving after A's removal");
 
         System.out.printf(
-                "FileDiscoveryDynamicScaleEndToEndTest convergence: initial=%dms, add=%dms, remove=%dms%n",
+                "FileDiscoveryDynamicScaleEndToEndTest convergence: initial=%dms, add=%dms,"
+                        + " remove=%dms%n",
                 initialConvergenceMs, addConvergenceMs, removeConvergenceMs);
     }
 
@@ -472,7 +463,9 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                         });
     }
 
-    /** Submit {@code count} requests and wait for every ACK to complete successfully. */
+    /**
+     * Submit {@code count} requests and wait for every ACK to complete successfully.
+     */
     private void drainRequests(int count) throws Exception {
         List<CompletableFuture<Response>> futures = new ArrayList<>(count);
         long firstId = requestIdCounter.getAndAdd(count);

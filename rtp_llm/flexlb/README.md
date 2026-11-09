@@ -157,21 +157,35 @@ delivery, routing, worker synchronization, and observability; file paths are not
 The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fields,
 `null`, scalar coercion, numeric enums, and trailing JSON fail startup.
 
-| Setting                                             | Schema 3 behavior                                                                                                                                                                                                                                                      |
-| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dispatcher.maxInflightPerPrefillWorker`            | Positive integer, default 2 in every mode. BATCH counts batches; NON_BATCH / DIRECT count requests.                                                                                                                                                                    |
-| `dispatcher.fetchAttachTimeoutMs`                   | Positive integer, default 3000 ms. BATCH sends this as Engine `fetch_attach_timeout_ms`, limiting the wait for `FetchResponse` attachment. Engine caps it by the remaining request timeout when present. Once attached, this timer does not limit generation duration. |
-| Prefill ownership                                   | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination.                                                                              |
-| `requestLifecycle.request.timeoutMs`                | Required positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. No default.                                                                                                                                          |
-| `workerRegistry.health.cleanupIntervalMs`           | Positive integer, default 3000 ms; scan interval for retiring workers whose status exceeds `statusStaleAfterMs`.                                                                                                                                                       |
-| `requestLifecycle.decision.lifetime`                | Finite number ≥ 1, default 2.0. At delivery, remaining Prefill time (including waiting) × lifetime + 10000 ms sets the deadline. Only observed running predecessors consume elapsed time; unstarted work keeps its full estimate. Independent of request age.          |
-| `scheduler.queueTimeoutMs`                          | QUEUE only, positive, default 3600000 ms; actual queue TTL. DIRECT has no queue timer and rejects this field.                                                                                                                                                          |
-| Removed capacity controls                           | `scheduler.capacity` and delivered-not-accepted count limits are removed. Per-Prefill concurrency uses the single dispatcher limit; lifetimes bound waiting. The old `maxUncachedTokens` field is rejected.                                                            |
-| Removed routing controls                            | Prefill candidate randomization/LRU and outlier filters, legacy Decode decay controls/outlier filters, and output-estimate truncation are rejected.                                                                                                                    |
-| `router.roles.decode.costEstimator.expression`      | Default `kvcache_used_ratio`; smallest cost wins within the same availability tier. Using `max_running_size` requires a positive `availability.maxEngineRequests`.                                                                                                     |
-| Transport timeout                                   | `flexlb.engine-grpc.enqueue-timeout-ms`, default 5000; outside the scheduling JSON.                                                                                                                                                                                    |
-| `scheduler.ordering.preemption.timeoutMs`           | Default 1000 ms, positive; Engine-owned Decode preemption only. Starts after the Cancel ACK phase and bounds the wait for the Engine terminal. ACK timeout stays internal, 50 ms.                                                                                      |
-| `scheduler.ordering.preemption.allowedVictimStages` | PRIORITY defaults to all three stages: `PREFILL_QUEUED`, `DECODE_RESERVED`, `DECODE_ENGINE_OWNED`, including when `preemption` is omitted. An explicit non-empty list replaces the defaults.                                                                           |
+Executor and event-loop sizes take effect at process startup; changing them requires a restart.
+
+| Setting                                                                     | Schema 3 behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dispatcher.maxInflightPerPrefillWorker`                                    | Positive integer, default 2 in every mode. BATCH counts batches; NON_BATCH / DIRECT count requests reserved for delivery or still in flight. QUEUE waiting requests do not consume this limit; full workers remain eligible for cache-affinity selection.                                                                                                                                                                                                                                                                                                                          |
+| `dispatcher.fetchAttachTimeoutMs`                                           | Positive integer, default 3000 ms. BATCH sends this as Engine `fetch_attach_timeout_ms`, limiting the wait for `FetchResponse` attachment. Engine caps it by the remaining request timeout when present. Once attached, this timer does not limit generation duration.                                                                                                                                                                                                                                                                                                             |
+| Prefill ownership                                                           | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination.                                                                                                                                                                                                                                                                                                                                                                                          |
+| `requestLifecycle.request.timeoutMs`                                        | Required positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. No default.                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `workerRegistry.health.cleanupIntervalMs`                                   | Positive integer, default 3000 ms; interval for completing confirmed worker retirements.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `workerRegistry.executors.cacheStatusThreads`                               | Positive integer, default 32; Cache response processing.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `workerRegistry.executors.cacheDiffParallelism`                             | Integer 1–32767, default 8; Cache diff ForkJoin parallelism, capped by available processors.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `engineGrpc.executorThreads` / `executorQueueCapacity` / `eventLoopThreads` | Positive integers, defaults 32 / 10000 / 8; Engine gRPC callbacks, callback queue capacity, and client I/O threads.                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Worker health                                                               | Three valid not-alive responses mark a worker unavailable. RPC failures preserve established health and neither increment nor reset the count; a valid healthy response resets it before retirement. Confirmed discovery removal retires the worker immediately. Status age does not determine health. Exceptions alone cannot confirm a crashed worker while discovery still lists it; no engine-specific error metadata is required.                                                                                                                                             |
+| Worker status polling                                                       | Each worker generation has at most one RPC in flight and one response queued or applying locally. RPC polling continues during local application; scheduling uses the last committed state.                                                                                                                                                                                                                                                                                                                                                                                        |
+| Discovery failures                                                          | Timeout, query failure or executor rejection preserves existing workers and continues status polling. Only a successful discovery result confirms removed addresses.                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `requestLifecycle.decision.lifetime`                                        | Finite number ≥ 1, default 2.0. At delivery, remaining Prefill time (including waiting) × lifetime + 10000 ms sets the deadline. Only observed running predecessors consume elapsed time; unstarted work keeps its full estimate. Independent of request age.                                                                                                                                                                                                                                                                                                                      |
+| `scheduler.queueTimeoutMs`                                                  | QUEUE only, positive, default 3600000 ms; actual queue TTL. DIRECT has no queue timer and rejects this field.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Removed capacity controls                                                   | `scheduler.capacity` and delivered-not-accepted count limits are removed. Per-Prefill concurrency uses the single dispatcher limit; lifetimes bound waiting. The old `maxUncachedTokens` field is rejected.                                                                                                                                                                                                                                                                                                                                                                        |
+| Removed routing controls                                                    | Prefill candidate randomization/LRU and outlier filters, legacy Decode decay controls/outlier filters, and output-estimate truncation are rejected.                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `router.roles.decode.costEstimator.expression`                              | Default `kvcache_used_ratio`; smallest cost wins within the same availability tier. Using `max_running_size` requires a positive `availability.maxEngineRequests`.                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Transport timeout                                                           | `flexlb.engine-grpc.enqueue-timeout-ms`, default 5000; outside the scheduling JSON.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| KV cache response limit                                                     | `engineGrpc.kvCacheMaxInboundMessageBytes` in `FLEXLB_CONFIG`, positive integer, default 134217728 (128 MiB); applies to Engine KV cache status channels. Read at startup; restart Master after changing it. This is a per-message ceiling, not a preallocated buffer; actual large responses and concurrent polls can increase peak direct and heap memory.                                                                                                                                                                                                                       |
+| Engine channel keepalive                                                    | `flexlb.engine-grpc.keep-alive-time-ms`, positive, default 2000 (grpc-java raises anything below 10000 to 10000); `flexlb.engine-grpc.keep-alive-without-calls`, default `true`. Outside the scheduling JSON. rtp-llm's gRPC server tolerates idle pings. An engine whose gRPC server keeps grpc's default keepalive rules (the dashllm worker-status server today) answers the third ping on a connection with no running call with `GOAWAY too_many_pings` and closes it, failing any call still running on that channel; set `keep-alive-without-calls=false` for such engines. |
+| `scheduler.ordering.preemption.timeoutMs`                                   | Default 1000 ms, positive; Engine-owned Decode preemption only. Starts after the Cancel ACK phase and bounds the wait for the Engine terminal. ACK timeout stays internal, 50 ms.                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `scheduler.ordering.preemption.allowedVictimStages`                         | PRIORITY defaults to all three stages: `PREFILL_QUEUED`, `DECODE_RESERVED`, `DECODE_ENGINE_OWNED`, including when `preemption` is omitted. An explicit non-empty list replaces the defaults.                                                                                                                                                                                                                                                                                                                                                                                       |
+
+`workerRegistry.health.statusStaleAfterMs` is removed; delete it from existing schema-3 configurations. It is not a supported health tuning option. RPC failures and elapsed time alone do not retire a worker.
+
+For the packed cache-key protocol, upgrade all Masters before upgrading engines. Roll back engines before Masters; a legacy Master cannot read the new engine cache-key list. See [worker synchronization](docs/architecture/04-worker-sync-and-cache.md).
 
 The request timeout below is an explicit workload value; decision lifetime 2.0 is the default:
 
@@ -222,6 +236,114 @@ Omit `router.roles.decode.costEstimator` to balance by KV usage ratio. Set its
 ```
 
 `workerRegistry`, `observability.cacheHit`, and `router.groupSelector` remain available.
+
+Allocator diagnostics are configured under `scheduler.nettyMemoryReporter` in the same
+`FLEXLB_CONFIG` document, for both QUEUE and DIRECT. Both switches default to **false**:
+
+```json
+{
+  "scheduler": {
+    "nettyMemoryReporter": {
+      "enabled": false,
+      "intervalMs": 10000,
+      "autoCapture": {
+        "enabled": false,
+        "thresholdBytes": 5368709120,
+        "cooldownMs": 300000
+      }
+    }
+  }
+}
+```
+
+Merge this fragment into the existing configuration; it is not a complete workload config.
+Changes take effect at process startup. With sampling disabled there is no allocator
+discovery, scan, meter registration, or diagnostic thread. Enabled sampling runs on one
+daemon thread with fixed delay (at least 1000 ms), never on RPC or scrape threads. Netty's
+reserved/pinned getters acquire arena locks and traverse chunks; start at 10 seconds
+and measure impact before increasing the frequency. No message-size traversal is added.
+
+The reporter reads the existing Netty default pool and gRPC 1.65.1's allocator singleton
+without replacing either allocator. Shared instances are counted once. Labels identify
+allocator instances (`netty_default` / `grpc_default`), not exclusive traffic ownership;
+HTTP or forwarding may share these pools. If the gRPC allocator cannot be read or is
+unpooled, startup emits `event=netty_memory_allocator_unavailable`; its memory is not
+silently reported as zero.
+
+Metrics are `app.netty.direct.reserved.bytes`, `app.netty.direct.pinned.bytes`
+(tag `allocator`), `app.netty.memory.sample.duration.ms`, and
+`app.netty.memory.sample.timestamp.ms` (last completed scan, Unix milliseconds).
+Prometheus deployments must
+append `flexlb_app_netty_` to their existing `flexlb.monitor.metric-whitelist` prefixes;
+KMonitor uses the existing FlexMonitor registration path.
+
+`autoCapture.enabled=true` requires sampling to be enabled. When JVM direct memory or
+the sum of monitored allocator reservations reaches `thresholdBytes`, the existing scan
+is written to application logs as `event=netty_memory_capture`, at most once per
+`cooldownMs` (at least 1000 ms). Capture adds no allocator scan and does not start GC,
+thread dumps, JFR, heap dumps, or external commands. It preserves memory-accounting
+evidence, not a buffer ownership graph. The default threshold is 5 GiB; adjust it to
+the deployment's direct-memory limit.
+
+Status failures are counted by `app.status.failure.detail`, with fixed labels
+`role`, `operation`, `stage`, `reason`, `origin`, and `grpc_code`.
+Only confirmed local memory, executor, or socket-binding failures use `origin=MASTER`; other failures
+remain `UNCONFIRMED`. `grpc_code=NONE` means an unsuccessful application result
+without a gRPC exception. Existing health counters and generation cleanup remain
+independent of these diagnostics. Prometheus deployments must append
+`flexlb_app_status_failure_detail` to their existing metric-whitelist prefixes.
+
+Outbound `EngineGrpcClient` failures are counted once per logical RPC by
+`app.grpc.call.failure` (QPS, PRECISE), only after the final failure. A successful
+read-only retry reports success only; its first failure produces no failure metric
+or exception log. If the retry also fails, the first cause is preserved as a suppressed
+exception on the final failure. Fixed labels are `service` (the channel's service
+suffix), `retry` (whether a retry was attempted), `phase`, `reason`, `origin`,
+`grpc_code`, `transport_stage`, `transport_event`, and `transport_cause`.
+Phases identify local boundaries: `CHANNEL_SETUP`, `CALL_START`,
+`CALLBACK_REGISTRATION`, or asynchronous `CALL_RESULT`; they do not prove that the
+worker received the request. This metric and final status-failure metrics overlap and
+must not be added together. Add `flexlb_app_grpc_call_failure` to the Prometheus
+metric whitelist.
+
+Typed causes distinguish connection timeout/failure, no route, EOF, channel already
+closed, local interrupt, and asynchronous local close. With the current NIO transport,
+refused/reset/broken-pipe observations additionally require exact known text on the
+matching socket exception; unknown text stays generic. These are transport observations,
+not proof of worker failure. `CONNECT_REFUSED` establishes that the target endpoint did
+not accept the connection, rather than a response timeout. It does not distinguish an
+absent listener from a stale endpoint or an active network rejection.
+Bare gRPC status descriptions are never parsed as evidence.
+
+The NIO observer retains the first event on the exact physical connection used by a
+stream. `PEER_EOF` means a socket read returned EOF without local input shutdown;
+`READ_RESET`, `WRITE_RESET`, and `WRITE_BROKEN_PIPE` identify the failing operation.
+A later broken pipe/channel-close error can therefore be correlated with an earlier
+peer EOF. A bare `EOFException` is not sufficient to assert TCP peer closure.
+Read-allocation failures before the socket read are also observed: a local OOM followed
+by a generic channel-close error reports `origin=MASTER` and
+`transport_cause=LOCAL_MEMORY_EXHAUSTED`, and does not trigger a channel retry.
+Events after response trailers or stream termination cannot change that call's attribution.
+
+`transport_stage` records progress at termination: `WAITING_TRANSPORT`,
+`WAITING_HEADERS_WRITE`, `WAITING_RESPONSE`, `RECEIVING_RESPONSE`, or
+`RESPONSE_TRAILERS_RECEIVED`. Headers written do not prove the entire request reached
+the worker. `WAITING_RESPONSE` alone cannot separate network delay, worker queue/execution,
+and Master event-loop delay; that requires correlated worker-side receive/handler/send
+evidence. No message size calculation or payload traversal is performed.
+
+`app.grpc.delivery.delay_ms` (GAUGE, PRECISE) reports `STREAM_CLOSED_TO_CALLBACK`
+and `TRAILERS_TO_CALLBACK` under the `stage` label, plus `service` and `retry`.
+These measure local delivery/processing delay, not just executor queue wait; unknown
+intervals are omitted. Delayed successful callbacks remain successful. Add
+`flexlb_app_grpc_delivery_delay_ms` to the Prometheus metric whitelist.
+Local channel closes log `event=engine_grpc_channel_close` with `DISCOVERY_REMOVED`,
+`REPLACED`, `CLIENT_SHUTDOWN`, or `DUPLICATE_DISCARDED`; final-failure debug logs use
+the same channel key and creation time, transport timings and `localCloseForced` for
+correlation. A graceful close request does not cancel existing RPCs. A local close may follow a
+remote failure and does not by itself change attribution. `app.grpc.channel.pool.size`
+counts pooled objects, not live TCP connections; remote disconnects do not remove entries.
+
 Only schema 3 is accepted. Write the configuration directly with explicit values for
 `requestLifecycle.request.timeoutMs`, which has no default. A matching Engine request
 status renews this deadline. Once it expires, FlexLB releases the exact local
@@ -294,23 +416,44 @@ command-line properties, such as `--server.port` and
 `--flexlb.engine-grpc.enqueue-timeout-ms`.
 HA currently retains `HIPPO_ROLE` as its existing election group identifier.
 
-The gRPC server executor and shutdown quiet period are configured in `FLEXLB_CONFIG`:
+The gRPC server executor, shutdown quiet period and HTTP/2 keepalive policy are configured in `FLEXLB_CONFIG`:
 
 ```json
 "grpcServer": {
   "executorCoreSize": 1000,
   "executorMaxSize": 1000,
   "executorQueueSize": 1000,
-  "shutdownQuietPeriodMs": 5000
+  "maxReceivingRequests": 1024,
+  "maxReceivingControlRequests": 128,
+  "receiveBudgetBytes": 0,
+  "receiveTimeoutMs": 30000,
+  "shutdownQuietPeriodMs": 5000,
+  "permitKeepAliveTimeMs": 10000,
+  "permitKeepAliveWithoutCalls": true
 }
 ```
 
 All three executor settings default to 1000. Core size may be 0; maximum size and queue size
 must be positive, and maximum size must be at least core size.
+`maxReceivingRequests` limits concurrent calls from HEADERS to decoded half-close;
+accepted scheduler/inference time does not consume this limit. Cancel has its own
+`maxReceivingControlRequests` limit. These counts are configured directly and do not
+reserve a fixed number of bytes per call. `receiveBudgetBytes=0` uses one quarter of
+the JVM Direct limit for received body bytes. The body watchdog defaults to 30 seconds.
+See [receiving limits](docs/grpc-receiving-guard.md) for byte accounting and cleanup.
 `shutdownQuietPeriodMs` (静默时间) defaults to 5000 ms and must be positive.
 The quiet period starts when shutting down; each Schedule arrival restarts it.
 After it elapses, gRPC waits for accepted RPCs to finish before serving resources
 are destroyed. Normal idle serving does not start an exit timer.
+
+`permitKeepAliveTimeMs` is the shortest HTTP/2 PING interval the server accepts from a client
+(default 10000 ms, non-negative). grpc-java's own default is 5 minutes: a client that pings more often
+gets `GOAWAY too_many_pings` and its connection is closed on the third PING that arrives with no
+response written in between, which fails every in-flight Schedule on that connection at once
+(a stalled master, e.g. one with every prefill slot occupied, writes nothing for as long as it is stalled).
+`permitKeepAliveWithoutCalls` (default true) makes PINGs on a connection with no running call count as
+valid; when false each one is a strike. Keep `permitKeepAliveTimeMs` at or below the smallest PING
+interval any client uses (grpc-java clients never ping more often than every 10 s).
 
 ### Scheduler, ordering, decision, and dispatcher
 

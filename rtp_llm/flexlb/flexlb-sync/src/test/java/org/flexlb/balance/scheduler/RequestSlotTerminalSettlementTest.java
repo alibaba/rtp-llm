@@ -106,7 +106,7 @@ class RequestSlotTerminalSettlementTest {
                 .thenReturn(false, true);
         var failed =
                 PrefillState.WorkerStatusFact.terminal(
-                        f.item(), PrefillState.WorkerStatusFact.Kind.FAILED, 9L);
+                        f.item().execution(), PrefillState.WorkerStatusFact.Kind.FAILED, 9L);
 
         f.slot().processPrefillStatus(f.item().prefillEp(), RoleType.PREFILL, failed);
         assertFalse(
@@ -157,7 +157,7 @@ class RequestSlotTerminalSettlementTest {
         slot.onInactivityDeadline(inactivity, Long.MAX_VALUE);
         assertEquals(ended, slot.snapshot());
         verify(f.item().decodeEp()).release(RESERVATION, DecodeEndpoint.ReleaseReason.EXPIRED);
-        verify(f.item().prefillEp()).expireCommittedItem(f.item());
+        verify(f.item().prefillEp()).expireCommittedItem(f.item().execution());
     }
 
     @Test

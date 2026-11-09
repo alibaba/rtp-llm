@@ -30,8 +30,6 @@ public class AppStateHookServer {
     private final ApplicationLifecycle applicationLifecycle;
     private final GracefulLifecycleReporter lifecycleReporter;
 
-    private volatile boolean processReady = false;
-
     private volatile InetAddress localAddress;
 
     public AppStateHookServer(
@@ -48,7 +46,6 @@ public class AppStateHookServer {
         } catch (Exception e) {
             log.warn("Failed to get local host address", e);
         }
-        processReady = true;
     }
 
     @Bean
@@ -64,7 +61,7 @@ public class AppStateHookServer {
         if (isNonLocalRequest(request)) {
             return buildErrorResponse("handleProcessOk");
         }
-        if (processReady) {
+        if (applicationLifecycle.isProcessReady()) {
             log.info("handleProcessOk success.");
             lifecycleReporter.reportProcessOk();
             return ServerResponse.ok().body(Mono.just("ok"), String.class);

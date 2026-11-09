@@ -21,6 +21,7 @@ struct V41ImageInput {
 };
 
 struct V41RequestInputs {
+    std::string                payload_id;   // Direct upload on the selected remote ViT.
     torch::Tensor              token_types;  // CPU int32 [canonical tokens], text=-1, image types=0..3.
     torch::Tensor              image_mask;   // CPU bool [canonical tokens], including all three delimiters.
     std::vector<V41ImageInput> images;

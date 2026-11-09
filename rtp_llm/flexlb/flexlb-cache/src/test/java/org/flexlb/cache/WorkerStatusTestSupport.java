@@ -2,9 +2,9 @@ package org.flexlb.cache;
 
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.KvCacheGroupMode;
+import org.flexlb.testfixture.WorkerStatusResponse;
 
 import java.util.Map;
 
@@ -35,11 +35,11 @@ public final class WorkerStatusTestSupport {
                 WorkerStatus.createDiscovered(role, "default", ip, port, port + 1, "");
         publishObservation(workerStatus, role, alive, cacheMatchRollbackBlocks);
         if (cacheStatus != null) {
-            workerStatus.lock.lock();
+            workerStatus.cacheMutationLock.lock();
             try {
                 workerStatus.publishCacheStatus(cacheStatus);
             } finally {
-                workerStatus.lock.unlock();
+                workerStatus.cacheMutationLock.unlock();
             }
         }
         return workerStatus;
@@ -60,10 +60,12 @@ public final class WorkerStatusTestSupport {
         workerStatus.lock.lock();
         try {
             WorkerStatus.StatusObservation observation =
-                    workerStatus.freezeStatusResponse(response);
-            WorkerStatus.PreparedStatus prepared = workerStatus.prepareNewStatus(observation);
+                    org.flexlb.testfixture.WorkerStatusTestFixtures.observation(
+                            workerStatus, response);
+            WorkerStatus.PreparedStatus prepared =
+                    org.flexlb.testfixture.WorkerStatusTestFixtures.prepare(
+                            workerStatus, observation);
             workerStatus.publishPreparedStatus(prepared);
-            workerStatus.recordSuccessfulPoll(alive);
         } finally {
             workerStatus.lock.unlock();
         }

@@ -70,8 +70,7 @@ public class DefaultBatchDispatcher {
             new RouteProjection.AdmissionBlockSemantics(
                     "DELIVERY_CAPACITY_BATCH_ADMISSION",
                     RouteProjection.AfterProbeAdmission.BLOCKED,
-                    "DELIVERY_CAPACITY_BATCH_ADMISSION",
-                    RoleType.PREFILL);
+                    "DELIVERY_CAPACITY_BATCH_ADMISSION");
 
     private final EngineGrpcClient grpcClient;
     private final ConfigService configService;
@@ -175,7 +174,9 @@ public class DefaultBatchDispatcher {
         this.maxInflightBytes = Math.max(1L, maxInflightBytes);
         this.inflightPayloadBytes = new AtomicLong(0L);
         Logger.info(
-                "FlexLB dispatch executor config: poolSize={}, logicalAdmissionCapacity={}, maxInflightBytes={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
+                "FlexLB dispatch executor config: poolSize={}, logicalAdmissionCapacity={},"
+                        + " maxInflightBytes={}, threadFactory=flexlb-dispatch-executor,"
+                        + " rejectionPolicy=AbortPolicy",
                 poolSize,
                 admissionCapacity,
                 this.maxInflightBytes);
@@ -460,7 +461,8 @@ public class DefaultBatchDispatcher {
                                     if (ex != null) {
                                         Throwable cause = unwrapCompletionFailure(ex);
                                         Logger.debug(
-                                                "EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
+                                                "EnqueueBatch failed batchId: {}, entrypoint:"
+                                                        + " {}:{}, err: {}",
                                                 batchId,
                                                 prefillIp,
                                                 prefillGrpcPort,
@@ -564,11 +566,17 @@ public class DefaultBatchDispatcher {
                     "generateInputPb is missing for request " + item.requestId());
         }
         EngineRpcService.GenerateInputPB.Builder input =
-                EngineRpcService.GenerateInputPB.newBuilder();
-        input.mergeFrom(generateInput);
+                GenerateInputPayload.parse(generateInput).toWireBuilder();
         if (!Objects.equals(RequestId.parse(input), item.requestId())) {
             throw new IllegalArgumentException(
                     "request_id mismatch between schedule request and GenerateInputPB");
+        }
+        // Prefill resolves generic multimodal inputs from URLs and preprocessing metadata.
+        // Inline tensors are unused on that path and must not inflate the batch RPC.
+        for (int index = 0; index < input.getMultimodalInputsCount(); index++) {
+            if (input.getMultimodalInputs(index).hasMultimodalTensor()) {
+                input.getMultimodalInputsBuilder(index).clearMultimodalTensor();
+            }
         }
         // This batch RPC carries independent requests. Propagate each Schedule
         // parent in its own payload, never in the shared RPC metadata.
@@ -596,7 +604,19 @@ public class DefaultBatchDispatcher {
         // (metrics tagging only). normalize() always sets 1-100, so every
         // dispatched request carries its priority into the proto field.
         Request request = item.ctx().getRequest();
+        if (input.hasV41Inputs() && !input.getV41Inputs().getPayloadId().isEmpty()) {
+            if (request == null || request.getSelectedVit() == null) {
+                throw new IllegalArgumentException("V4.1 upload requires the selected ViT route");
+            }
+            if (input.getV41Inputs().getImagesList().stream()
+                    .anyMatch(image -> image.hasPatches())) {
+                throw new IllegalArgumentException("V4.1 upload reference contains inline patches");
+            }
+        }
         if (request != null) {
+            if (request.getSelectedVit() != null) {
+                addRoleAddr(config, buildRoleAddr(request.getSelectedVit()));
+            }
             input.setPriority(request.getPriority());
         }
         return input.build();
@@ -609,6 +629,17 @@ public class DefaultBatchDispatcher {
             return;
         }
         config.addRoleAddrs(roleAddress);
+    }
+
+    private static EngineRpcService.RoleAddrPB buildRoleAddr(ServerStatus serverStatus) {
+        RoleType role = serverStatus.getRole();
+        return EngineRpcService.RoleAddrPB.newBuilder()
+                .setRole(RoleTypeProtoConverter.toRoleAddrProto(role))
+                .setRoleStr(role.getCode())
+                .setIp(serverStatus.getServerIp())
+                .setHttpPort(serverStatus.getHttpPort())
+                .setGrpcPort(serverStatus.getGrpcPort())
+                .build();
     }
 
     private void failItems(
@@ -846,17 +877,6 @@ public class DefaultBatchDispatcher {
         }
     }
 
-    private static EngineRpcService.RoleAddrPB buildRoleAddr(ServerStatus serverStatus) {
-        RoleType role = serverStatus.getRole();
-        return EngineRpcService.RoleAddrPB.newBuilder()
-                .setRole(RoleTypeProtoConverter.toRoleAddrProto(role))
-                .setRoleStr(role.getCode())
-                .setIp(serverStatus.getServerIp())
-                .setHttpPort(serverStatus.getHttpPort())
-                .setGrpcPort(serverStatus.getGrpcPort())
-                .build();
-    }
-
     private static boolean sameRoleAddr(
             EngineRpcService.RoleAddrPB cached, ServerStatus serverStatus) {
         RoleType role = serverStatus.getRole();
@@ -909,7 +929,9 @@ public class DefaultBatchDispatcher {
                                             long bytes = wireSizeUpperBound(items);
                                             if (!tryChargeBytes(bytes)) {
                                                 Logger.warn(
-                                                        "EnqueueBatch byte budget exhausted; failing batch {} ({}B > budget {}B, in-flight {}B) as NOT_SENT",
+                                                        "EnqueueBatch byte budget exhausted;"
+                                                                + " failing batch {} ({}B > budget {}B,"
+                                                                + " in-flight {}B) as NOT_SENT",
                                                         batchId,
                                                         bytes,
                                                         maxInflightBytes,

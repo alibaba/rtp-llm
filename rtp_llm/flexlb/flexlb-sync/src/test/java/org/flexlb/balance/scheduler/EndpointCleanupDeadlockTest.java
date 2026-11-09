@@ -178,7 +178,8 @@ class EndpointCleanupDeadlockTest {
                                     invocation -> {
                                         assertFalse(
                                                 Thread.holdsLock(slot),
-                                                "reservation release must not hold the Slot monitor");
+                                                "reservation release must not hold the Slot"
+                                                        + " monitor");
                                         slotHeld.countDown();
                                         assertTrue(endpointHeld.await(5, TimeUnit.SECONDS));
                                         return invocation.callRealMethod();
@@ -292,10 +293,8 @@ class EndpointCleanupDeadlockTest {
 
         private static void verifyTimerClose() throws Exception {
             var config = SchedulingTestConfig.batchConfig();
-            ConfigService service = mock(ConfigService.class);
-            when(service.loadBalanceConfig()).thenReturn(config);
             RequestRegistry registry = mock(RequestRegistry.class);
-            ExpirationTimer timer = new ExpirationTimer(registry, service);
+            ExpirationTimer timer = new ExpirationTimer(registry);
             RequestSlot slot =
                     new RequestSlot(
                             mock(RequestCompletionPublisher.class),

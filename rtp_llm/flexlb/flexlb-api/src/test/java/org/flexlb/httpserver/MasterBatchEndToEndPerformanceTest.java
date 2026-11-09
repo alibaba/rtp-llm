@@ -34,9 +34,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.consistency.MasterElectService;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.TaskPhase;
@@ -54,6 +52,8 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -123,7 +123,9 @@ import static org.mockito.Mockito.withSettings;
 class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private static final int WARMUP_REQUESTS = 64;
 
-    /** Per-request schedule deadline; a stalled Master fails fast instead of hanging. */
+    /**
+     * Per-request schedule deadline; a stalled Master fails fast instead of hanging.
+     */
     private static final long REQUEST_DEADLINE_SECONDS = 20L;
 
     private static final int REAL_REQUEST_TEMPLATE_COUNT = 128;
@@ -901,7 +903,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 constructorOnlyCacheMetricsReporter,
                 grpcClient,
                 constructorOnlyLoopResources,
-                engineWorkerStatus);
+                engineWorkerStatus,
+                new org.flexlb.service.monitor.StatusFailureReporter(new NoOpFlexMonitor()));
     }
 
     private static Stream<Arguments> engineScales() {
@@ -1162,7 +1165,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
     }
 
-    /** Validate BATCH routes; NON_BATCH models frontend delivery after Schedule returns. */
+    /**
+     * Validate BATCH routes; NON_BATCH models frontend delivery after Schedule returns.
+     */
     private void trackCompletedRoute(
             long requestId,
             int requestIndex,
@@ -1348,7 +1353,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         });
     }
 
-    /** Apply per-worker terminal deltas through the production endpoint/lifecycle transaction. */
+    /**
+     * Apply per-worker terminal deltas through the production endpoint/lifecycle transaction.
+     */
     private void applySimulatedCompletions() {
         try {
             while (!Thread.currentThread().isInterrupted()) {

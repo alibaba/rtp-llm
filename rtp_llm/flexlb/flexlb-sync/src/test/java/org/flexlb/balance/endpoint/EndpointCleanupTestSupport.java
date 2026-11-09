@@ -1,9 +1,11 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
 
 import java.util.Comparator;
 import java.util.List;
@@ -43,6 +45,7 @@ public final class EndpointCleanupTestSupport {
     public static final class PrefillLedger {
         private final boolean batch;
 
+        private final WorkerStatus schedulingWorker = mock(WorkerStatus.class);
         private final AtomicLong clock = new AtomicLong(100);
         private final ReentrantLock lock = new ReentrantLock();
         private final PrefillState state =
@@ -57,12 +60,17 @@ public final class EndpointCleanupTestSupport {
 
         public PrefillLedger(boolean batch) {
             this.batch = batch;
+            when(schedulingWorker.isAvailableForScheduling()).thenReturn(true);
         }
 
         public Owner commit(String requestId, long batchId, long predictedMs) {
             ScheduledRequest item = mock(ScheduledRequest.class);
             when(item.requestId()).thenReturn(requestId);
             when(item.seqLen()).thenReturn(100L);
+            RequestExecution execution = mock(RequestExecution.class);
+            when(execution.requestId()).thenReturn(requestId);
+            when(execution.seqLen()).thenReturn(100L);
+            when(item.execution()).thenReturn(execution);
             if (batch) {
                 lock.lock();
                 try {
@@ -122,8 +130,8 @@ public final class EndpointCleanupTestSupport {
                         ((PrefillState.BatchReservation) owner.reservation()).batchId(),
                         work.batches().getFirst().batchId());
                 // Check the actual admission gate, not just the derived batch count.
-                assertFalse(state.batchAvailability(1).isAvailable());
-                assertTrue(state.batchAvailability(2).isAvailable());
+                assertFalse(state.batchAvailability(1, schedulingWorker).isAvailable());
+                assertTrue(state.batchAvailability(2, schedulingWorker).isAvailable());
             } else {
                 assertTrue(work.batches().isEmpty());
                 assertEquals(
@@ -133,7 +141,7 @@ public final class EndpointCleanupTestSupport {
         }
 
         public void assertStaleReleaseIsIgnored(Owner old) {
-            assertFalse(state.terminalizeCommittedItem(old.item()));
+            assertFalse(state.terminalizeCommittedItem(old.item().execution()));
             old.reservation().close();
         }
 
@@ -144,7 +152,7 @@ public final class EndpointCleanupTestSupport {
             assertTrue(state.committedSnapshot().requests().isEmpty());
             assertTrue(state.committedSnapshot().batches().isEmpty());
             assertEquals(0L, state.committedSnapshot().totalRemainingWorkMs().orElseThrow());
-            assertTrue(state.batchAvailability(1).isAvailable());
+            assertTrue(state.batchAvailability(1, schedulingWorker).isAvailable());
         }
 
         public record Owner(ScheduledRequest item, PrefillState.Reservation reservation) {}

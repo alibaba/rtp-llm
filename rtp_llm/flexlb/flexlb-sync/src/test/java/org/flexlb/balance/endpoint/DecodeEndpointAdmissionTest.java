@@ -2,12 +2,12 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -326,7 +326,7 @@ class DecodeEndpointAdmissionTest {
                 endpoint.routingView().engineFacingKvUsed(),
                 "queued expected KV must not poison the dispatch gate");
         assertEquals(600, endpoint.realKvAvailable());
-        assertEquals(1_000, endpoint.routingView().engineFacingKvAvailable());
+        assertEquals(1_000, endpoint.routingView().dispatchUsage().availableKvAfterReservations());
 
         DecodeEndpoint.EngineDispatchPermitAcquisition first =
                 endpoint.acquireDispatchPermit(
@@ -358,7 +358,7 @@ class DecodeEndpointAdmissionTest {
 
         assertEquals(TRANSFERRED, first.permit().dispatch());
         assertEquals(900, endpoint.routingView().engineFacingKvUsed());
-        assertEquals(600, endpoint.routingView().engineFacingKvAvailable());
+        assertEquals(600, endpoint.routingView().dispatchUsage().availableKvAfterReservations());
     }
 
     @Test

@@ -34,6 +34,7 @@ from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.transport.proxy_router import MMOutputProxyRouter
 from rtp_llm.server.request_headers import dashscope_greennet_metadata
+from rtp_llm.server.v41_input_transfer import V41InputTransfer
 from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
 
 # Proxy forwarding includes transport and serialization after the worker's
@@ -391,7 +392,7 @@ class WorkerConnectionPool:
             self.stubs.clear()
 
 
-class VitProxyRpcServer(MultimodalRpcServiceServicer):
+class VitProxyRpcServer(V41InputTransfer, MultimodalRpcServiceServicer):
     """VIT 代理 RPC 服务器，将请求转发到工作进程"""
 
     def __init__(
@@ -401,6 +402,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         default_rpc_timeout_seconds: float = DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
         transport_config=None,
     ):
+        V41InputTransfer.__init__(self)
         self.load_balancer = load_balancer
         self.connection_pool = connection_pool
         self.default_rpc_timeout_seconds = default_rpc_timeout_seconds
@@ -451,6 +453,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         self, request: MultimodalInputsPB, context
     ) -> MultimodalOutputPB:
         """将请求转发到工作进程"""
+        request = self.resolve_v41_inputs(request, context)
         tags = {"source": "vit_proxy"}
         rpc_start_us = _now_us()
         lifecycle_reported = False

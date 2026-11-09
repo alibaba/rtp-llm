@@ -101,6 +101,62 @@ class ConfigServiceTest {
     }
 
     @Test
+    void receivingCountsDefaultIndependentlyOfExecutorAndAcceptExplicitOverrides() {
+        var defaults = ConfigTestFixtures.parse("{}").getGrpcServer();
+        assertEquals(1024, defaults.getMaxReceivingRequests());
+        assertEquals(128, defaults.getMaxReceivingControlRequests());
+        var configured =
+                ConfigTestFixtures.parse(
+                                """
+                {"grpcServer":{"executorCoreSize":64,"executorMaxSize":64,
+                 "maxReceivingRequests":4096,"maxReceivingControlRequests":16}}
+                """)
+                        .getGrpcServer();
+        assertEquals(4096, configured.getMaxReceivingRequests());
+        assertEquals(16, configured.getMaxReceivingControlRequests());
+        for (String field : new String[] {"maxReceivingRequests", "maxReceivingControlRequests"}) {
+            assertThrows(
+                    ConfigValidationException.class,
+                    () -> ConfigTestFixtures.parse("{\"grpcServer\":{\"" + field + "\":-1}}"));
+        }
+    }
+
+    @Test
+    void grpcKeepAlivePermitDefaultsAndOverridesAreValidated() {
+        FlexlbConfig.GrpcServerConfig defaults = ConfigTestFixtures.parse("{}").getGrpcServer();
+        assertEquals(10_000L, defaults.getPermitKeepAliveTimeMs());
+        assertTrue(defaults.isPermitKeepAliveWithoutCalls());
+        FlexlbConfig.GrpcServerConfig grpc =
+                ConfigTestFixtures.parse(
+                                """
+                {"grpcServer":{"permitKeepAliveTimeMs":30000,"permitKeepAliveWithoutCalls":false}}
+                """)
+                        .getGrpcServer();
+        assertEquals(30_000L, grpc.getPermitKeepAliveTimeMs());
+        assertFalse(grpc.isPermitKeepAliveWithoutCalls());
+        assertEquals(
+                0L,
+                ConfigTestFixtures.parse(
+                                """
+                {"grpcServer":{"permitKeepAliveTimeMs":0}}
+                """)
+                        .getGrpcServer()
+                        .getPermitKeepAliveTimeMs());
+        for (String patch :
+                new String[] {
+                    "{\"grpcServer\":{\"permitKeepAliveTimeMs\":-1}}",
+                    "{\"grpcServer\":{\"permitKeepAliveTimeMs\":null}}",
+                    "{\"grpcServer\":{\"permitKeepAliveTimeMs\":\"30000\"}}",
+                    "{\"grpcServer\":{\"permitKeepAliveTimeMs\":1.5}}",
+                    "{\"grpcServer\":{\"permitKeepAliveWithoutCalls\":\"true\"}}",
+                    "{\"grpcServer\":{\"permitKeepAliveWithoutCalls\":null}}"
+                }) {
+            assertThrows(
+                    ConfigValidationException.class, () -> ConfigTestFixtures.parse(patch), patch);
+        }
+    }
+
+    @Test
     void requires_explicit_request_timeout_and_defaults_decision_lifetime() {
         assertThrows(ConfigValidationException.class, () -> new ConfigService((String) null));
         assertThrows(ConfigValidationException.class, () -> new ConfigService("   "));
@@ -145,7 +201,6 @@ class ConfigServiceTest {
         var health = config.getWorkerRegistry().getHealth();
         assertEquals(20L, health.getStatusPollIntervalMs());
         assertEquals(5000L, health.getStatusRpcTimeoutMs());
-        assertEquals(10000L, health.getStatusStaleAfterMs());
         assertEquals(3000L, health.getCleanupIntervalMs());
         var cache = config.getWorkerRegistry().getCacheStatus();
         assertEquals(30, cache.getTargetDiffSize());
@@ -546,6 +601,7 @@ class ConfigServiceTest {
         Map<String, String> removed =
                 Map.ofEntries(
                         Map.entry("autoTpmEnabled", "true"),
+                        Map.entry("workerRegistry.health.statusStaleAfterMs", "10000"),
                         Map.entry("autoTpmSloLengthBuckets", "\"*:100\""),
                         Map.entry("router.availabilityHysteresisPercent", "15"),
                         Map.entry("router.roles.prefill.availability.maxPendingRequests", "32"),
@@ -684,7 +740,6 @@ class ConfigServiceTest {
                     "{\"requestLifecycle\":{\"decision\":{\"lifetime\":0.99}}}",
                     "{\"router\":{\"roles\":{\"decode\":{\"availability\":{\"maxEngineRequests\":0}}}}}",
                     "{\"router\":{\"roles\":{\"decode\":{\"availability\":{\"maxKvUsagePercent\":101}}}}}",
-                    "{\"workerRegistry\":{\"health\":{\"statusStaleAfterMs\":9999}}}",
                     "{\"workerRegistry\":{\"health\":{\"cleanupIntervalMs\":0}}}",
                     "{\"workerRegistry\":{\"health\":{\"cleanupIntervalMs\":-1}}}",
                     "{\"workerRegistry\":{\"cacheStatus\":{\"minRefreshIntervalMs\":100,\"maxRefreshIntervalMs\":99}}}"

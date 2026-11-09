@@ -133,11 +133,11 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->calculate_loss           = config_proto->calculate_loss();
     generate_config->is_streaming             = config_proto->is_streaming();
     TRANS_OPTIONAL(aux_info);
-    generate_config->timeout_ms               = config_proto->timeout_ms();
-    generate_config->sp_edit                  = config_proto->sp_edit();
-    generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
-    generate_config->force_sp_accept          = config_proto->force_sp_accept();
-    generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
+    generate_config->timeout_ms           = config_proto->timeout_ms();
+    generate_config->sp_edit              = config_proto->sp_edit();
+    generate_config->force_disable_sp_run = config_proto->force_disable_sp_run();
+    generate_config->force_sp_accept      = config_proto->force_sp_accept();
+    generate_config->return_cum_log_probs = config_proto->return_cum_log_probs();
     if (config_proto->return_all_probs_mode() != 0) {
         // new client: explicit mode (offset 1). Clamp out-of-range values to NONE
         // so a malformed client can't synthesize an undefined ReturnAllProbsMode.
@@ -284,6 +284,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
                                         + std::to_string(typed.schema_version()));
         }
         auto prepared         = std::make_shared<V41RequestInputs>();
+        prepared->payload_id  = typed.payload_id();
         prepared->token_types = torch::from_blob(const_cast<int32_t*>(typed.token_types().data()),
                                                  {typed.token_types_size()},
                                                  torch::kInt32)
@@ -297,7 +298,14 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             image.start   = source.start();
             image.n_vit_h = source.n_vit_h();
             image.n_vit_w = source.n_vit_w();
-            image.patches = transTensor(source.patches());
+            if (typed.payload_id().empty()) {
+                if (!source.has_patches()) {
+                    throw std::invalid_argument("V4.1 image requires patches or a direct-upload reference");
+                }
+                image.patches = transTensor(source.patches());
+            } else if (source.has_patches()) {
+                throw std::invalid_argument("V4.1 direct-upload reference must not contain inline patches");
+            }
             image.types =
                 torch::from_blob(const_cast<int32_t*>(source.types().data()), {source.types_size()}, torch::kInt32)
                     .clone();

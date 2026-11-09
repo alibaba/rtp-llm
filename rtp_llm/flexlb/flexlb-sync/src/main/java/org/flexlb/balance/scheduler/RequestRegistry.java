@@ -78,8 +78,8 @@ public class RequestRegistry {
             RequestSchedulerReporter requestReporter) {
         this.reporter = Objects.requireNonNull(reporter, "reporter");
         this.requestReporter = Objects.requireNonNull(requestReporter);
-        this.expirationTimer =
-                new ExpirationTimer(this, Objects.requireNonNull(configService, "configService"));
+        Objects.requireNonNull(configService, "configService");
+        this.expirationTimer = new ExpirationTimer(this);
         this.completionPublisher =
                 new RequestCompletionPublisher(completionPublisherWorkers(configService), reporter);
         this.terminalCleanup = new RequestTerminalCleanup(expirationTimer, requestReporter);
@@ -583,7 +583,7 @@ public class RequestRegistry {
         }
     }
 
-    void projectPrefillRetirementItem(PrefillEndpoint source, ScheduledRequest exact) {
+    void projectPrefillRetirementItem(PrefillEndpoint source, RequestExecution exact) {
         if (exact == null || exact.prefillEp() != source) {
             return;
         }
@@ -643,6 +643,9 @@ public class RequestRegistry {
                             buildErrorResponse(
                                     StrategyErrorType.DISPATCH_FAILED,
                                     "request scheduler is shutting down"));
+                }
+                if (!context.getConfig().getDispatcher().requiresGenerateInput()) {
+                    context.setGenerateInputPb(null);
                 }
                 boolean queueScheduling = context.getConfig().isQueue();
                 slot =
@@ -733,16 +736,6 @@ public class RequestRegistry {
         }
     }
 
-    void onQueuedItemPreempted(ScheduledRequest victim, ScheduledRequest incoming) {
-        finishYielded(victim, "preempted by higher-priority request " + incoming.requestId());
-        requestReporter.reportVictim(
-                victim.priority(),
-                incoming.priority(),
-                "prefill_queued",
-                "prefill_inflight_requests");
-        requestReporter.reportPriorityPreempt("prefill_queued");
-    }
-
     /**
      * Retain registered IDs, including terminal records, during endpoint orphan cleanup.
      * Called under endpoint locks: never acquire a Slot lock here. Read the current
@@ -790,7 +783,7 @@ public class RequestRegistry {
                 if (!isCurrentSlot(slot)) {
                     return null;
                 }
-                ScheduledRequest active = slot.activeItem();
+                ScheduledRequest active = slot.scheduledItem();
                 if (active == null || active.priority() >= incomingPriority) {
                     return null;
                 }
@@ -872,7 +865,7 @@ public class RequestRegistry {
         }
     }
 
-    private static CancelTarget cancelTarget(ScheduledRequest item) {
+    private static CancelTarget cancelTarget(RequestExecution item) {
         ServerStatus prefill = item == null ? null : item.prefill();
         return prefill == null
                 ? null

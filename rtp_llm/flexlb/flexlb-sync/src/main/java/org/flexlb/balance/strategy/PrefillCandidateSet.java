@@ -9,8 +9,8 @@ import java.util.Arrays;
  * Reusable columns for modeled Prefill candidates from one fleet snapshot.
  */
 final class PrefillCandidateSet {
-    private static final int INITIAL_CAPACITY = 16;
 
+    private static final int INITIAL_CAPACITY = 16;
     private String[] endpointAddresses = new String[0];
     private PrefillEndpoint[] endpoints = new PrefillEndpoint[0];
     private long[] projectedTtftMs = new long[0];
@@ -18,20 +18,19 @@ final class PrefillCandidateSet {
     private long[] cacheHitTokens = new long[0];
     private long[] routingCacheMatchTokens = new long[0];
     private long[] ownershipVersions = new long[0];
-
+    private String[] admissionBlocks = new String[0];
     private int size;
-    long minimumTtftRank;
-    boolean hasKnownTtft;
+    long minimumProjectedTtftMs;
     long maximumCacheHit;
     long maximumRoutingCacheMatchTokens;
 
     void reset(int expectedCapacity) {
         Arrays.fill(endpointAddresses, 0, size, null);
         Arrays.fill(endpoints, 0, size, null);
+        Arrays.fill(admissionBlocks, 0, size, null);
         ensureCapacity(expectedCapacity);
         size = 0;
-        minimumTtftRank = Long.MAX_VALUE;
-        hasKnownTtft = false;
+        minimumProjectedTtftMs = Long.MAX_VALUE;
         maximumCacheHit = 0L;
         maximumRoutingCacheMatchTokens = 0L;
     }
@@ -41,8 +40,17 @@ final class PrefillCandidateSet {
             PrefillEndpoint endpoint,
             RouteProjection.CandidateView candidate,
             long ownershipVersion) {
-        if (!candidate.selectable() && !candidate.engineWorkUnmodeled()) {
-            throw new IllegalArgumentException("candidate requires available capacity");
+        addCandidate(address, endpoint, candidate, null, ownershipVersion);
+    }
+
+    void addCandidate(
+            String address,
+            PrefillEndpoint endpoint,
+            RouteProjection.CandidateView candidate,
+            String admissionBlock,
+            long ownershipVersion) {
+        if (!candidate.hasPrediction()) {
+            throw new IllegalArgumentException("candidate requires a work prediction");
         }
         ensureCapacity(size + 1);
         endpointAddresses[size] = address;
@@ -52,16 +60,12 @@ final class PrefillCandidateSet {
         cacheHitTokens[size] = candidate.cacheHitTokens();
         routingCacheMatchTokens[size] = candidate.routingCacheMatchTokens();
         ownershipVersions[size] = ownershipVersion;
-        hasKnownTtft |= projectedTtftMs[size] >= 0L;
-        minimumTtftRank = Math.min(minimumTtftRank, ttftRank(size));
+        admissionBlocks[size] = admissionBlock;
+        minimumProjectedTtftMs = Math.min(minimumProjectedTtftMs, projectedTtftMs[size]);
         maximumCacheHit = Math.max(maximumCacheHit, cacheHitTokens[size]);
         maximumRoutingCacheMatchTokens =
                 Math.max(maximumRoutingCacheMatchTokens, routingCacheMatchTokens[size]);
         size++;
-    }
-
-    long ttftRank(int index) {
-        return projectedTtftMs[index] < 0L ? Long.MAX_VALUE : projectedTtftMs[index];
     }
 
     PrefillEndpoint endpoint(int index) {
@@ -92,6 +96,10 @@ final class PrefillCandidateSet {
         return ownershipVersions[index];
     }
 
+    String admissionBlock(int index) {
+        return admissionBlocks[index];
+    }
+
     int size() {
         return size;
     }
@@ -109,5 +117,6 @@ final class PrefillCandidateSet {
         cacheHitTokens = Arrays.copyOf(cacheHitTokens, capacity);
         routingCacheMatchTokens = Arrays.copyOf(routingCacheMatchTokens, capacity);
         ownershipVersions = Arrays.copyOf(ownershipVersions, capacity);
+        admissionBlocks = Arrays.copyOf(admissionBlocks, capacity);
     }
 }

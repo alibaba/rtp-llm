@@ -354,8 +354,7 @@ class WorkerBatcherPerformanceTest {
                             new RouteProjection.AdmissionBlockSemantics(
                                     "PERF_BLOCK",
                                     RouteProjection.AfterProbeAdmission.BLOCKED,
-                                    "PERF_BLOCK",
-                                    RoleType.PREFILL)));
+                                    "PERF_BLOCK")));
         }
 
         @Override

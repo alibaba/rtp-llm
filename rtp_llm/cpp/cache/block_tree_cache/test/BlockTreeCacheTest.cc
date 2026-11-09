@@ -192,7 +192,7 @@ void initializeSingleMemberGroupSets(const std::vector<GroupSetPtr>&        grou
         groups.push_back(block_transfer_engine_test::makeTestGroupBase(
             policy, {static_cast<int>(group_set_id)}, logical_layer_bytes, 0, 128, seq_size_per_block));
     }
-    auto topology = block_transfer_engine_test::makeTestTopology(std::move(groups));
+    auto   topology     = block_transfer_engine_test::makeTestTopology(std::move(groups));
     size_t group_set_id = 0;
     for (const auto& tag : topology->groupTags()) {
         group_sets[group_set_id]->initialize(group_set_id, topology, {tag});
@@ -1104,14 +1104,14 @@ TEST_F(BlockTreeCacheTest, DropLifetimeAndIdletimeCoverDiskAndPrunedResources) {
     dependent_desc.source_tier        = Tier::HOST;
     task.dependent_prune_descs.push_back(dependent_desc);
     task.dependent_prune_timings.push_back(task.primary_timing);
-    task.dependent_prune_timings.back().tier_enter_time_us = 110000;
+    task.dependent_prune_timings.back().tier_enter_time_us  = 110000;
     task.dependent_prune_timings.back().last_access_time_us = 135000;
 
     TransferDescriptor cascade_desc = task.primary_desc;
     cascade_desc.source_tier        = Tier::DEVICE;
     task.cascade_descs.push_back(cascade_desc);
     task.cascade_timings.push_back(task.primary_timing);
-    task.cascade_timings.back().tier_enter_time_us = 130000;
+    task.cascade_timings.back().tier_enter_time_us  = 130000;
     task.cascade_timings.back().last_access_time_us = 145000;
 
     for (const char* trigger_type : {"watermark", "force_drop"}) {
@@ -3558,7 +3558,11 @@ TEST_F(BlockTreeCacheTest, EventPublicationExcludesHostAndCancelledLoad) {
     auto cache     = makeHostOnlyLoadCache(makeStructuralDevicePools(1, "event_host"));
     auto publisher = std::make_shared<RecordingCachePublisher>();
     cache->setEventPublisher(publisher, {"group0"});
-    EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{200}));
+    const auto keys_snapshot = cache->getKeySnapshot();
+    EXPECT_EQ(keys_snapshot.keys, (CacheKeysType{200}));
+    EXPECT_TRUE(cache->getKeySnapshot(keys_snapshot.version).keys.empty());
+    EXPECT_EQ(cache->getKeySnapshot(-1).keys, keys_snapshot.keys);
+    EXPECT_EQ(cache->getKeySnapshot(keys_snapshot.version + 1).keys, keys_snapshot.keys);
     EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
     auto result  = cache->match({200});
     auto context = takeLoadContext(result);

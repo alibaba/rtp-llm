@@ -877,10 +877,32 @@ class DefaultBatchDispatcherTest {
     // ---- task40: priority passthrough to GenerateInputPB ----
 
     @Test
-    void dispatchForwardsCarriedPriorityIntoGenerateInput() throws Exception {
+    void dispatchPreservesPriorityTokensAndMultimodalMetadataWithoutTensorBytes() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
         item.ctx().getRequest().setPriority(60);
+        var original =
+                EngineRpcService.GenerateInputPB.parseFrom(item.ctx().getGenerateInputPb())
+                        .toBuilder()
+                        .addAllTokenIds(List.of(0, 127, 128, 129264, -1, Integer.MIN_VALUE))
+                        .addMultimodalInputs(
+                                EngineRpcService.MultimodalInputPB.newBuilder()
+                                        .setMultimodalUrl("https://example.com/image.jpg")
+                                        .setMultimodalType(1)
+                                        .setMmPreprocessConfig(
+                                                EngineRpcService.MMPreprocessConfigPB.newBuilder()
+                                                        .setWidth(448)
+                                                        .setHeight(448))
+                                        .setMultimodalTensor(
+                                                EngineRpcService.TensorPB.newBuilder()
+                                                        .setFp16Data(
+                                                                com.google.protobuf.ByteString
+                                                                        .copyFrom(
+                                                                                new byte
+                                                                                        [1024
+                                                                                                * 1024]))))
+                        .build();
+        item.ctx().setGenerateInputPb(original.toByteString());
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
         when(grpcClient.batchEnqueueAsync(
@@ -894,7 +916,98 @@ class DefaultBatchDispatcherTest {
         submit(List.of(item), 1L, 100, "test", callback);
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
-        assertEquals(60, sentInput(sent.getFirst()).getPriority());
+        var encoded = sentInput(sent.getFirst());
+        assertEquals(60, encoded.getPriority());
+        assertEquals(0, encoded.getTokenIdsCount(), "dispatcher must keep tokens encoded");
+        var received =
+                sentInput(
+                        EngineRpcService.EnqueueBatchRequestPB.parseFrom(
+                                sent.getFirst().toByteString()));
+        assertEquals(original.getTokenIdsList(), received.getTokenIdsList());
+        assertEquals(1, received.getMultimodalInputsCount());
+        assertFalse(received.getMultimodalInputs(0).hasMultimodalTensor());
+        assertEquals(
+                original.getMultimodalInputs(0).toBuilder().clearMultimodalTensor().build(),
+                received.getMultimodalInputs(0));
+        assertTrue(received.getSerializedSize() < 2048, "batch must not carry the 1 MiB tensor");
+        assertTrue(
+                original.getMultimodalInputs(0).hasMultimodalTensor(),
+                "dispatch must not mutate the incoming payload");
+        assertEquals(60, received.getPriority());
+        assertEquals("PREFILL", received.getGenerateConfig().getRoleAddrs(0).getRoleStr());
+    }
+
+    @Test
+    void dispatchPreservesV41UploadReferenceAndSelectedVit() throws Exception {
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, createPrefillEndpoint());
+        ServerStatus vit = new ServerStatus();
+        vit.setRole(RoleType.VIT);
+        vit.setServerIp("10.0.0.9");
+        vit.setHttpPort(8081);
+        vit.setGrpcPort(8091);
+        item.ctx().getRequest().setSelectedVit(vit);
+        var typed =
+                EngineRpcService.V41RequestInputsPB.newBuilder()
+                        .setSchemaVersion(1)
+                        .setPayloadId("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                        .addTokenTypes(0)
+                        .addImageMask(true)
+                        .addImages(
+                                EngineRpcService.V41ImageInputPB.newBuilder()
+                                        .setStart(0)
+                                        .setNVitH(1)
+                                        .setNVitW(1)
+                                        .addTypes(0)
+                                        .setContentSha256("image-hash")
+                                        .setProcessorIdentity("processor"))
+                        .build();
+        item.ctx()
+                .setGenerateInputPb(
+                        EngineRpcService.GenerateInputPB.parseFrom(item.ctx().getGenerateInputPb())
+                                .toBuilder()
+                                .setV41Inputs(typed)
+                                .build()
+                                .toByteString());
+        List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+                .thenAnswer(
+                        inv -> {
+                            sent.add(inv.getArgument(2));
+                            return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
+                        });
+        submit(List.of(item), 1L, 100, "test", callback);
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        var received =
+                sentInput(
+                        EngineRpcService.EnqueueBatchRequestPB.parseFrom(
+                                sent.getFirst().toByteString()));
+        assertEquals(typed, received.getV41Inputs());
+        var selected =
+                received.getGenerateConfig().getRoleAddrsList().stream()
+                        .filter(addr -> addr.getRoleStr().equals("VIT"))
+                        .findFirst()
+                        .orElseThrow();
+        assertEquals("10.0.0.9", selected.getIp());
+        assertEquals(8091, selected.getGrpcPort());
+        assertFalse(received.getV41Inputs().getImages(0).hasPatches());
+    }
+
+    @Test
+    void dispatchRejectsV41ReferenceWithoutSelectedVit() throws Exception {
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, createPrefillEndpoint());
+        item.ctx()
+                .setGenerateInputPb(
+                        EngineRpcService.GenerateInputPB.parseFrom(item.ctx().getGenerateInputPb())
+                                .toBuilder()
+                                .setV41Inputs(
+                                        EngineRpcService.V41RequestInputsPB.newBuilder()
+                                                .setSchemaVersion(1)
+                                                .setPayloadId("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+                                .build()
+                                .toByteString());
+        submit(List.of(item), 1L, 100, "test", callback);
+        assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
     }
 
     @Test

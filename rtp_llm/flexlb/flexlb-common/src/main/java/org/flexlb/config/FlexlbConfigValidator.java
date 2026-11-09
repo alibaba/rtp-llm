@@ -14,8 +14,6 @@ import org.flexlb.util.PriorityNormalizer;
  * Cross-field validation for the public configuration contract.
  */
 public final class FlexlbConfigValidator {
-    private static final int MIN_STALE_TIMEOUT_TO_RPC_TIMEOUT_RATIO = 2;
-
     private FlexlbConfigValidator() {}
 
     public static void validateDocumentShape(JsonNode document) {
@@ -27,7 +25,7 @@ public final class FlexlbConfigValidator {
         if (scheduler.isObject()) {
             String type = effectiveDocument.path("scheduler").path("type").asText("QUEUE");
             if ("DIRECT".equals(type)) {
-                rejectFieldsExcept(scheduler, "scheduler", "type");
+                rejectFieldsExcept(scheduler, "scheduler", "type", "nettyMemoryReporter");
             } else if ("QUEUE".equals(type)) {
                 validateOrderingShape(
                         scheduler.path("ordering"),
@@ -65,12 +63,23 @@ public final class FlexlbConfigValidator {
     }
 
     public static void validate(FlexlbConfig config) {
+        require(config.getEngineGrpc() != null, "engineGrpc", "is required");
+        require(
+                config.getEngineGrpc().getKvCacheMaxInboundMessageBytes() > 0,
+                "engineGrpc.kvCacheMaxInboundMessageBytes",
+                "must be positive");
+        positive(config.getEngineGrpc().getExecutorThreads(), "engineGrpc.executorThreads");
+        positive(
+                config.getEngineGrpc().getExecutorQueueCapacity(),
+                "engineGrpc.executorQueueCapacity");
+        positive(config.getEngineGrpc().getEventLoopThreads(), "engineGrpc.eventLoopThreads");
         require(
                 config.getSchemaVersion() == FlexlbConfig.CURRENT_SCHEMA_VERSION,
                 "schemaVersion",
                 "must equal " + FlexlbConfig.CURRENT_SCHEMA_VERSION);
         require(config.getScheduler() != null, "scheduler", "is required");
         require(config.getScheduler().getType() != null, "scheduler.type", "is required");
+        validateNettyMemoryReporter(config.getScheduler().getNettyMemoryReporter());
         require(config.getDispatcher() != null, "dispatcher", "is required");
         require(config.getRouter() != null, "router", "is required");
         require(config.getWorkerRegistry() != null, "workerRegistry", "is required");
@@ -98,7 +107,13 @@ public final class FlexlbConfigValidator {
         nonNegative(grpc.getExecutorCoreSize(), "grpcServer.executorCoreSize");
         positive(grpc.getExecutorMaxSize(), "grpcServer.executorMaxSize");
         positive(grpc.getExecutorQueueSize(), "grpcServer.executorQueueSize");
+        nonNegative(grpc.getReceiveBudgetBytes(), "grpcServer.receiveBudgetBytes");
+        nonNegative(grpc.getMaxReceivingRequests(), "grpcServer.maxReceivingRequests");
+        nonNegative(
+                grpc.getMaxReceivingControlRequests(), "grpcServer.maxReceivingControlRequests");
+        positive(grpc.getReceiveTimeoutMs(), "grpcServer.receiveTimeoutMs");
         positive(grpc.getShutdownQuietPeriodMs(), "grpcServer.shutdownQuietPeriodMs");
+        nonNegative(grpc.getPermitKeepAliveTimeMs(), "grpcServer.permitKeepAliveTimeMs");
         require(
                 grpc.getExecutorMaxSize() >= grpc.getExecutorCoreSize(),
                 "grpcServer.executorMaxSize",
@@ -178,6 +193,33 @@ public final class FlexlbConfigValidator {
         }
     }
 
+    private static void validateNettyMemoryReporter(NettyMemoryReporterConfig memory) {
+        String path = "scheduler.nettyMemoryReporter";
+        require(memory != null, path, "is required");
+        require(memory.getIntervalMs() >= 1_000L, path + ".intervalMs", "must be at least 1000 ms");
+        var capture = memory.getAutoCapture();
+        require(capture != null, path + ".autoCapture", "is required");
+        positive(capture.getThresholdBytes(), path + ".autoCapture.thresholdBytes");
+        require(
+                capture.getCooldownMs() >= 1_000L,
+                path + ".autoCapture.cooldownMs",
+                "must be at least 1000 ms");
+        require(
+                !capture.isEnabled() || memory.isEnabled(),
+                path + ".autoCapture.enabled",
+                "requires nettyMemoryReporter.enabled=true");
+    }
+
+    private static void require(boolean condition, String field, String message) {
+        if (!condition) {
+            throw new ConfigValidationException(field, message);
+        }
+    }
+
+    private static void positive(long value, String field) {
+        require(value > 0, field, "must be greater than zero");
+    }
+
     private static void validateQueue(SchedulerConfig queue) {
         positive(queue.getQueueTimeoutMs(), "scheduler.queueTimeoutMs");
         require(
@@ -237,16 +279,6 @@ public final class FlexlbConfigValidator {
                     ordering.getPreemption() == null,
                     "scheduler.ordering.preemption",
                     "is supported only with PRIORITY");
-        }
-    }
-
-    private static void positive(long value, String field) {
-        require(value > 0, field, "must be greater than zero");
-    }
-
-    private static void require(boolean condition, String field, String message) {
-        if (!condition) {
-            throw new ConfigValidationException(field, message);
         }
     }
 
@@ -372,6 +404,14 @@ public final class FlexlbConfigValidator {
     }
 
     private static void validateWorkerRegistry(WorkerRegistryConfig workers) {
+        require(workers.getExecutors() != null, "workerRegistry.executors", "is required");
+        var executors = workers.getExecutors();
+        positive(executors.getCacheStatusThreads(), "workerRegistry.executors.cacheStatusThreads");
+        range(
+                executors.getCacheDiffParallelism(),
+                1,
+                32767,
+                "workerRegistry.executors.cacheDiffParallelism");
         require(workers.getHealth() != null, "workerRegistry.health", "is required");
         positive(
                 workers.getHealth().getStatusPollIntervalMs(),
@@ -382,12 +422,6 @@ public final class FlexlbConfigValidator {
         positive(
                 workers.getHealth().getCleanupIntervalMs(),
                 "workerRegistry.health.cleanupIntervalMs");
-        require(
-                workers.getHealth().getStatusRpcTimeoutMs()
-                        <= workers.getHealth().getStatusStaleAfterMs()
-                                / MIN_STALE_TIMEOUT_TO_RPC_TIMEOUT_RATIO,
-                "workerRegistry.health.statusStaleAfterMs",
-                "must be at least twice statusRpcTimeoutMs");
         require(workers.getCacheStatus() != null, "workerRegistry.cacheStatus", "is required");
         positive(
                 workers.getCacheStatus().getTargetDiffSize(),

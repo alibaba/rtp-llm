@@ -47,7 +47,13 @@ public class ProjectionDifferential {
                         };
                 items.add(
                         new GroupPlanner.Item(
-                                i, random.nextInt(8), i, 980 + i % 15, expiry, tokens, hit));
+                                Integer.toString(i),
+                                random.nextInt(8),
+                                i,
+                                980 + i % 15,
+                                expiry,
+                                tokens,
+                                hit));
             }
             Comparator<GroupPlanner.Item> order =
                     Comparator.comparingLong(GroupPlanner.Item::enqueueSeq);
@@ -79,7 +85,7 @@ public class ProjectionDifferential {
                             trial % 4 == 0
                                     ? List.of(
                                             new WorkSnapshot.RequestWork(
-                                                    9999, WorkSnapshot.Phase.ENGINE_RUNNING, 500))
+                                                    "9999", WorkSnapshot.Phase.ENGINE_RUNNING, 500))
                                     : List.of(),
                             List.of(),
                             0);
@@ -88,7 +94,7 @@ public class ProjectionDifferential {
                             new QueueSnapshot(1000, true, order, limits, items, null), committed);
             var probe =
                     new RouteProjection.Probe(
-                            trial % 50 == 0 ? 1 : 999999,
+                            trial % 50 == 0 ? "1" : "999999",
                             random.nextInt(10),
                             1000,
                             trial % 7 == 0 ? 1015 : Long.MAX_VALUE,
@@ -98,7 +104,7 @@ public class ProjectionDifferential {
             for (var policy : List.of(batchPolicy, routePolicy)) {
                 var candidate = RouteProjection.project(inputs, probe, model, policy);
                 add(digest, candidate);
-                states.merge(candidate.state().name(), 1, Integer::sum);
+                states.merge(candidate.detail(), 1, Integer::sum);
             }
         }
         System.out.println(

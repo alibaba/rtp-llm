@@ -23,6 +23,7 @@ import static org.flexlb.balance.scheduler.PrefillAdmissionResources.failed;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.missingEndpoint;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.prepareMember;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rejected;
+import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rejectedPrefill;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackMember;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackReservation;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.sameIdentitySequence;
@@ -216,7 +217,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         private ScheduledRequest blockedItem;
         private CapacityBoundary blockedResult;
         private ArrayList<PrefillState.RouteReservation> reservations;
-        private ArrayList<Boolean> itemOwnedReservations;
+        private PrefillEndpoint.RouteCommitAdmission routeAdmission;
 
         private final java.util.IdentityHashMap<ScheduledRequest, Long> predictions =
                 new java.util.IdentityHashMap<>();
@@ -228,7 +229,6 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             this.owner = owner;
             this.prefill = prefill;
             reservations = new ArrayList<>(1);
-            itemOwnedReservations = new ArrayList<>(1);
             members = new ArrayList<>(1);
         }
 
@@ -264,58 +264,19 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 throw new IllegalArgumentException(
                         "route commit does not match prepared identities");
             }
-            if (reservations.isEmpty()
-                    || reservations.size() != members.size()
-                    || itemOwnedReservations.size() != members.size()) {
+            if (reservations.isEmpty() || reservations.size() != members.size()) {
                 throw new IllegalStateException(
                         "route admission reservation/member ownership diverged");
             }
-            // Validate every item-owned capability before transferring any of
-            // them.  commitUnderLock runs under the endpoint queue lock, so an
-            // ACTIVE terminal path cannot remove a validated item between this
-            // pass and the transfer pass below.
-            for (int index = 0; index < reservations.size(); index++) {
-                if (itemOwnedReservations.get(index)
-                        && items.get(index).publishedRouteReservation()
-                                != reservations.get(index)) {
-                    throw new IllegalStateException(
-                            "ACTIVE NON_BATCH request lost its exact route reservation: request_id="
-                                    + items.get(index).requestId());
-                }
-            }
-            PrefillEndpoint.RouteCommitAdmission routeCommit =
-                    prefill.tryBeginRouteCommitAdmission();
-            if (routeCommit == null) {
-                throw PrefillAdmissionResources.retired("Prefill", items.get(0));
-            }
-            try (routeCommit) {
-                // Allocate the committed owner before transferring any reservation
-                // from its ACTIVE item. After the first successful CAS below,
-                // the remainder of this transaction must be allocation-free.
-                PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted =
-                        createCommittedOwner(members);
-                for (int index = 0; index < reservations.size(); index++) {
-                    if (itemOwnedReservations.get(index)
-                            && !items.get(index)
-                                    .takePublishedRouteReservation(reservations.get(index))) {
-                        throw new IllegalStateException(
-                                "ACTIVE NON_BATCH request lost its exact route reservation: request_id="
-                                        + items.get(index).requestId());
-                    }
-                    if (itemOwnedReservations.get(index)) {
-                        // The transaction is now the sole owner. If a later
-                        // commit operation fails, rollbackPrepared closes it.
-                        itemOwnedReservations.set(index, false);
-                    }
-                }
-                PrefillState.CommittedHandoff handoff = routeCommit.commit(items, reservations);
-                exactCommitted.bindPrefillHandoff(handoff);
-                committed = exactCommitted;
-                reservations = null;
-                itemOwnedReservations = null;
-                members = null;
-                return handoff.precedingWork();
-            }
+            PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted =
+                    createCommittedOwner(members);
+            PrefillState.CommittedHandoff handoff = routeAdmission.commit(items, reservations);
+            exactCommitted.bindPrefillHandoff(handoff);
+            committed = exactCommitted;
+            routeAdmission = null;
+            reservations = null;
+            members = null;
+            return handoff.precedingWork();
         }
 
         @Override
@@ -366,35 +327,42 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 int capacity = Math.addExact(members.size(), 1);
                 reservations.ensureCapacity(capacity);
                 members.ensureCapacity(capacity);
+                predictions.put(exact, predictedMs);
             } catch (Throwable failure) {
                 return failed(failure);
             }
 
-            PrefillState.RouteReservation published = exact.publishedRouteReservation();
+            final PrefillState.RouteReservation reservation;
             try {
-                if (published == null) {
-                    return failed(
-                            new IllegalStateException(
-                                    "ACTIVE NON_BATCH request lost its publish-time route reservation: request_id="
-                                            + exact.requestId()));
+                if (routeAdmission == null) {
+                    routeAdmission = prefill.tryBeginRouteCommitAdmission();
+                    if (routeAdmission == null) {
+                        return failed(PrefillAdmissionResources.retired("Prefill", exact));
+                    }
                 }
-                published.updatePrediction(exact, predictedMs);
+                var result = routeAdmission.reserve(exact, predictedMs);
+                if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
+                    return rejectedPrefill(
+                            exact,
+                            result.status(),
+                            CapacityBoundary.deliveryUnavailable(
+                                    prefill.routeAdmissionAvailability()));
+                }
+                reservation = result.reservation();
             } catch (Throwable failure) {
                 return failed(failure);
             }
-            predictions.put(exact, predictedMs);
-            PrefillState.RouteReservation reservation = published;
             final CapacityBoundary.Attempt<PrefillAdmissionResources.Member> memberAttempt;
             try {
                 memberAttempt = prepareMember(exact);
             } catch (Throwable failure) {
-                return failed(failure);
+                return failed(rollbackReservation(reservation, failure));
             }
             if (!memberAttempt.accepted()) {
-                return rejected(memberAttempt.boundary());
+                Throwable cleanup = rollbackReservation(reservation, null);
+                return cleanup == null ? rejected(memberAttempt.boundary()) : failed(cleanup);
             }
             reservations.add(reservation);
-            itemOwnedReservations.add(true);
             members.add(memberAttempt.value());
             return acceptedItem;
         }
@@ -417,7 +385,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
 
         private void requirePrepared(String operation) {
-            if (reservations == null || itemOwnedReservations == null || members == null) {
+            if (reservations == null || members == null) {
                 throw new IllegalStateException(operation + " requires PREPARED route admission");
             }
         }
@@ -433,27 +401,31 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
 
         private Throwable rollbackPrepared(Throwable priorFailure) {
             List<PrefillState.RouteReservation> exactReservations;
-            List<Boolean> exactItemOwnedReservations;
+            PrefillEndpoint.RouteCommitAdmission exactAdmission;
             List<PrefillAdmissionResources.Member> exactMembers;
             synchronized (this) {
                 if (reservations == null) {
                     return priorFailure;
                 }
                 exactReservations = reservations;
-                exactItemOwnedReservations = itemOwnedReservations;
+                exactAdmission = routeAdmission;
                 exactMembers = members;
                 reservations = null;
-                itemOwnedReservations = null;
+                routeAdmission = null;
                 members = null;
             }
             Throwable failure = priorFailure;
             for (PrefillAdmissionResources.Member member : exactMembers) {
                 failure = rollbackMember(member, failure);
             }
-            for (int index = 0; index < exactReservations.size(); index++) {
-                if (!exactItemOwnedReservations.get(index)) {
-                    failure = rollbackReservation(exactReservations.get(index), failure);
-                }
+            for (PrefillState.RouteReservation reservation : exactReservations) {
+                failure = rollbackReservation(reservation, failure);
+            }
+            // Release the generation only after every provisional send slot is returned.
+            if (exactAdmission != null) {
+                failure =
+                        RouteDeliveryStrategy.append(
+                                failure, RouteDeliveryStrategy.close(exactAdmission));
             }
             return failure;
         }
@@ -487,7 +459,17 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 GroupPlanner.Plan<GroupPlanner.Item> plan,
                 RouteProjection.Predictions predictions) {
             RouteService service = SERVICE.get();
-            service.reset(plan, predictions);
+            service.reset(plan, predictions, null);
+            return service;
+        }
+
+        @Override
+        public RouteProjection.GroupService service(
+                GroupPlanner.Plan<GroupPlanner.Item> plan,
+                RouteProjection.Predictions predictions,
+                RouteProjection.GroupPlanning planning) {
+            RouteService service = SERVICE.get();
+            service.reset(plan, predictions, (RoutePlanning) planning);
             return service;
         }
 
@@ -500,10 +482,8 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
          * prefix.
          */
         private static final class RoutePlanning implements RouteProjection.GroupPlanning {
-            private GroupPlanner.Item[] previous = new GroupPlanner.Item[0];
             private long[] offsets = new long[0];
 
-            private int previousSize;
             private int computedThrough;
 
             private RouteProjection.Predictions predictions;
@@ -513,20 +493,9 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 if (requiredThroughIndex < 0 || requiredThroughIndex >= prefix.size()) {
                     throw new IndexOutOfBoundsException(requiredThroughIndex);
                 }
-                if (!isIdentityPrefix(prefix)) {
-                    ensureCapacity(prefix.size());
-                    for (int index = 0; index < prefix.size(); index++) {
-                        previous[index] = prefix.get(index);
-                    }
-                    previousSize = prefix.size();
-                    computedThrough = -1;
-                } else if (previousSize < prefix.size()) {
-                    ensureCapacity(prefix.size());
-                    for (int index = previousSize; index < prefix.size(); index++) {
-                        previous[index] = prefix.get(index);
-                    }
-                    previousSize = prefix.size();
-                }
+                // GroupPlanning owns one append-only selection. A new group,
+                // reordered membership or model always receives a fresh reset.
+                ensureCapacity(requiredThroughIndex + 1);
                 while (computedThrough < requiredThroughIndex) {
                     int next = computedThrough + 1;
                     long prior = next == 0 ? 0L : offsets[next - 1];
@@ -539,28 +508,16 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
 
             private void reset(RouteProjection.Predictions exactPredictions) {
                 predictions = exactPredictions;
-                previousSize = 0;
                 computedThrough = -1;
             }
 
-            private boolean isIdentityPrefix(List<GroupPlanner.Item> next) {
-                if (previousSize > next.size()) {
-                    return false;
-                }
-                for (int index = 0; index < previousSize; index++) {
-                    if (previous[index] != next.get(index)) {
-                        return false;
-                    }
-                }
-                return true;
-            }
-
             private void ensureCapacity(int size) {
-                if (previous.length >= size) {
+                if (offsets.length >= size) {
                     return;
                 }
-                previous = java.util.Arrays.copyOf(previous, size);
-                offsets = java.util.Arrays.copyOf(offsets, size);
+                offsets =
+                        java.util.Arrays.copyOf(
+                                offsets, Math.max(size, Math.max(8, offsets.length * 2)));
             }
         }
 
@@ -596,13 +553,20 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
 
             private void reset(
                     GroupPlanner.Plan<GroupPlanner.Item> exactPlan,
-                    RouteProjection.Predictions exactPredictions) {
+                    RouteProjection.Predictions exactPredictions,
+                    RoutePlanning exactPlanning) {
                 plan = exactPlan;
                 predictions = exactPredictions;
                 if (offsets.length < exactPlan.items().size()) {
                     offsets = java.util.Arrays.copyOf(offsets, exactPlan.items().size());
                 }
                 computedThrough = -1;
+                if (exactPlanning != null) {
+                    int known =
+                            Math.min(exactPlan.items().size(), exactPlanning.computedThrough + 1);
+                    System.arraycopy(exactPlanning.offsets, 0, offsets, 0, known);
+                    computedThrough = known - 1;
+                }
             }
         }
     }

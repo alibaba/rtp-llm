@@ -20,10 +20,12 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -53,7 +55,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             EngineCancelChannel cancelChannel) {
         Objects.requireNonNull(prepareBatchSubmission, "prepareBatchSubmission");
         this.lifecycle = new RequestRegistry(configService, batchReporter, requestReporter);
-        this.endpointEvents = new EndpointEventProjector(lifecycle);
+        this.endpointEvents =
+                new EndpointEventProjector(
+                        lifecycle, org.mockito.Mockito.mock(StatusFailureReporter.class));
         AtomicLong batchIds = new AtomicLong();
         DeliveryMetrics deliveryMetrics = new DeliveryMetrics(batchReporter);
         DeliveryStrategy delivery =
@@ -117,7 +121,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         router.bind(exactRouter);
     }
 
-    /** Translate fixture response metadata into an exact queue admission. */
+    /**
+     * Translate fixture response metadata into an exact queue admission.
+     */
     public PlacementResult<RouteAdmission, PlacementKey> routeResult(
             BalanceContext context, Response response) {
         Objects.requireNonNull(context, "context");
@@ -155,42 +161,62 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
     }
 
-    /** Apply a newer worker status or refresh liveness from a same-version heartbeat. */
+    /**
+     * Applies a worker response through the poll and status application boundaries.
+     */
     public void applyStatus(WorkerStatus status, WorkerStatusResponse response) {
-        Objects.requireNonNull(status, "status");
         Objects.requireNonNull(response, "response");
-        RoleType role = Objects.requireNonNull(response.getRole(), "response role");
-        WorkerEndpoint endpoint = registry.get(role, status.getIpPort(), status);
-        if (endpoint == null) {
-            throw new IllegalStateException(
-                    "status generation has no published endpoint: "
-                            + status.getIpPort()
-                            + "#"
-                            + status.getGenerationId());
-        }
+        applyStatus(status, WorkerStatusTestFixtures.observation(status, response));
+    }
 
+    /**
+     * Records each poll once and applies only valid alive observations to the matching generation.
+     */
+    public void applyStatus(WorkerStatus status, WorkerStatus.StatusObservation observation) {
+        Objects.requireNonNull(status, "status");
+        Objects.requireNonNull(observation, "observation");
+        WorkerStatus.PollLease application =
+                WorkerStatusTestFixtures.tryBeginStatusApplication(status, observation);
+        if (application == null) {
+            return;
+        }
         Runnable projection;
-        status.lock.lock();
         try {
-            long responseVersion =
-                    Objects.requireNonNull(response.getStatusVersion(), "response status version");
-            long committedVersion = status.appliedStatusCursor().statusVersion();
-            if (responseVersion < committedVersion) {
-                throw new IllegalArgumentException(
-                        "worker status version regressed: committed="
-                                + committedVersion
-                                + ", response="
-                                + responseVersion);
-            }
-            WorkerStatus.StatusObservation observation = status.freezeStatusResponse(response);
-            if (responseVersion == committedVersion) {
-                projection = endpoint.observeStatusHeartbeat(status, observation);
-            } else {
-                WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation);
-                projection = endpoint.applyPreparedStatus(status, prepared);
+            status.lock.lock();
+            try {
+                if (!status.isActiveGeneration() || status.retirementReason() != null) {
+                    return;
+                }
+                RoleType role = observation.role();
+                WorkerEndpoint endpoint = registry.get(role, status.getIpPort(), status);
+                if (endpoint == null) {
+                    throw new IllegalStateException(
+                            "status generation has no published endpoint: "
+                                    + status.getLogicalIpPort()
+                                    + "#"
+                                    + status.getGenerationId());
+                }
+                long responseVersion = observation.statusVersion();
+                long committedVersion = status.appliedStatusCursor().statusVersion();
+                if (responseVersion < committedVersion) {
+                    throw new IllegalArgumentException(
+                            "worker status version regressed: committed="
+                                    + committedVersion
+                                    + ", response="
+                                    + responseVersion);
+                }
+                if (responseVersion == committedVersion) {
+                    projection = endpoint.observeStatusHeartbeat(status, observation);
+                } else {
+                    WorkerStatus.PreparedStatus prepared =
+                            status.prepareNewStatus(observation, application);
+                    projection = endpoint.applyPreparedStatus(status, prepared);
+                }
+            } finally {
+                status.lock.unlock();
             }
         } finally {
-            status.lock.unlock();
+            status.finishStatusApplication(application);
         }
         projection.run();
     }

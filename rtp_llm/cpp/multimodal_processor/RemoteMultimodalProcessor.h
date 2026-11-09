@@ -55,6 +55,7 @@ public:
         request.set_request_id(request_id);
         auto* typed = request.mutable_v41_inputs();
         typed->set_schema_version(1);
+        typed->set_payload_id(inputs.payload_id);
         auto token_types = inputs.token_types.to(torch::kCPU).to(torch::kInt32).contiguous();
         auto image_mask  = inputs.image_mask.to(torch::kCPU).to(torch::kBool).contiguous();
         for (int64_t index = 0; index < token_types.numel(); ++index) {
@@ -68,7 +69,9 @@ public:
             output->set_start(image.start);
             output->set_n_vit_h(image.n_vit_h);
             output->set_n_vit_w(image.n_vit_w);
-            TensorPbConvert::torchToPb(output->mutable_patches(), image.patches);
+            if (inputs.payload_id.empty()) {
+                TensorPbConvert::torchToPb(output->mutable_patches(), image.patches);
+            }
             auto types = image.types.to(torch::kCPU).to(torch::kInt32).contiguous();
             for (int64_t index = 0; index < types.numel(); ++index) {
                 output->add_types(types.data_ptr<int32_t>()[index]);

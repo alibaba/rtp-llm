@@ -31,6 +31,8 @@ public final class FlexlbConfig {
     private boolean enableFallback;
     private long fallbackBatchTokenCapacity = 1_048_576L;
 
+    private EngineGrpcConfig engineGrpc = new EngineGrpcConfig();
+
     @JsonIgnore
     private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();
 
@@ -109,7 +111,9 @@ public final class FlexlbConfig {
         throw new IllegalStateException("fixed-window decision configuration is not active");
     }
 
-    /** Resolve the QUEUE decision policy from its single configuration owner. */
+    /**
+     * Resolve the QUEUE decision policy from its single configuration owner.
+     */
     @JsonIgnore
     public DecisionPolicyConfig decisionPolicy() {
         return queueScheduler().getDecision();
@@ -125,17 +129,66 @@ public final class FlexlbConfig {
     }
 
     /**
+     * Configures Engine gRPC callback and I/O pools and the maximum received KVCM message size.
+     */
+    @Getter
+    @Setter
+    public static final class EngineGrpcConfig {
+        private int kvCacheMaxInboundMessageBytes = 128 * 1024 * 1024;
+        private int executorThreads = 32;
+        private int executorQueueCapacity = 10_000;
+        private int eventLoopThreads = 8;
+    }
+
+    /**
      * Sets serving executor capacities and the quiet-period duration in milliseconds used during
      * shutdown.
      */
     @Getter
     @Setter
     public static final class GrpcServerConfig {
+        public static final int DEFAULT_MAX_RECEIVING_REQUESTS = 1024;
+        public static final int DEFAULT_MAX_RECEIVING_CONTROL_REQUESTS = 128;
+
         private int executorCoreSize = 1000;
         private int executorMaxSize = 1000;
         private int executorQueueSize = 1000;
 
-        /** 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。 */
+        /**
+         * Zero derives Direct / 4 as a logical receiving wire-byte budget at startup.
+         */
+        private long receiveBudgetBytes = 0L;
+
+        /**
+         * Concurrent Schedule calls from HEADERS to decoded half-close. Zero uses the default.
+         */
+        private int maxReceivingRequests = DEFAULT_MAX_RECEIVING_REQUESTS;
+
+        /**
+         * Independent concurrent Cancel receiving limit. Zero uses the default.
+         */
+        private int maxReceivingControlRequests = DEFAULT_MAX_RECEIVING_CONTROL_REQUESTS;
+
+        /**
+         * Headers to decoded half-close; does not limit accepted scheduler queue time.
+         */
+        private long receiveTimeoutMs = 30_000L;
+
+        /**
+         * 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。
+         */
         private long shutdownQuietPeriodMs = 5_000L;
+
+        /**
+         * HTTP/2 keepalive: the shortest PING interval the server accepts from a client. grpc-java closes a
+         * connection with GOAWAY too_many_pings on the third PING that arrives sooner than this with no
+         * response written in between; its own default is 5 minutes.
+         */
+        private long permitKeepAliveTimeMs = 10_000L;
+
+        /**
+         * HTTP/2 keepalive: whether PINGs on a connection with no running call count as valid.
+         */
+        private boolean permitKeepAliveWithoutCalls = true;
     }
 }
