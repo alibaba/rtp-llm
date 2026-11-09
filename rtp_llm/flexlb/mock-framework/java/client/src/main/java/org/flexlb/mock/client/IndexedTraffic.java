@@ -14,8 +14,10 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.zip.CRC32;
-import org.flexlb.mock.client.input.ClientInput.Image;
-import org.flexlb.mock.client.input.ClientInput.Request;
+import org.flexlb.engine.grpc.EngineRpcService.GenerateConfigPB;
+import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
+import org.flexlb.engine.grpc.EngineRpcService.MMPreprocessConfigPB;
+import org.flexlb.engine.grpc.EngineRpcService.MultimodalInputPB;
 
 /** One immutable dataset. All positions are absolute except request offsets relative to the payload. */
 final class IndexedTraffic implements AutoCloseable {
@@ -26,7 +28,7 @@ final class IndexedTraffic implements AutoCloseable {
     private static final int MAX_REQUEST = 1024 * 1024;
     private static final int PAGE_BYTES = 4096, CACHE_PAGES = 256;
 
-    record Entry(Request input, List<Integer> expectedImageTokens) {}
+    record Entry(long arrivalMs, int priority, GenerateInputPB input, List<Integer> expectedImageTokens) {}
     private record Chain(long first, long parent, int size, int symbol) {}
 
     final long count, lastArrival;
@@ -99,7 +101,7 @@ final class IndexedTraffic implements AutoCloseable {
             if (imageToken == 0) Arrays.fill(text, position + 1, position + chain.size, 1);
             position += chain.size;
         }
-        var request = Request.newBuilder().setArrivalOffsetMs(arrival).setMaxNewTokens(output).setPriority(priority);
+        var request = GenerateInputPB.newBuilder().setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(output));
         var expected = new ArrayList<Integer>(images);
         int previous = 0;
         for (int i = 0; i < images; i++) {
@@ -111,9 +113,9 @@ final class IndexedTraffic implements AutoCloseable {
             int width = geometry.getInt(), height = geometry.getInt();
             if (width < 1 || width > 32768 || height < 1 || height > 32768) throw invalid("invalid media dimensions");
             for (int t = previous; t < at; t++) request.addTokenIds(text[t]);
-            request.addImages(Image.newBuilder().setUrl("mock-image:" + id).setWidth(width).setHeight(height)
-                .setOffset(request.getTokenIdsCount()));
-            request.addTokenIds(imageToken >= 0 ? imageToken : 0);
+            request.addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("mock-image:" + id)
+                .setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(width).setHeight(height)));
+            request.addTokenIds(imageToken);
             previous = at;
             expected.add(expectedTokens);
         }
@@ -121,7 +123,7 @@ final class IndexedTraffic implements AutoCloseable {
         var input = request.build();
         if (input.getTokenIdsCount() == 0 || input.getSerializedSize() > MAX_REQUEST)
             throw invalid("invalid or oversized input");
-        return new Entry(input, List.copyOf(expected));
+        return new Entry(arrival, priority, input, List.copyOf(expected));
     }
 
     private static int token(int symbol, int imageToken) {

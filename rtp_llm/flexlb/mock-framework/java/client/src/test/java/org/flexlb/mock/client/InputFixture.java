@@ -7,20 +7,13 @@ import java.nio.file.*;
 import java.security.MessageDigest;
 import java.util.*;
 import java.util.zip.CRC32;
-import org.flexlb.mock.client.input.ClientInput.Request;
 import org.flexlb.mock.client.ClientProtocol.Start;
 
 final class InputFixture {
-    static Request request() { return Request.newBuilder().addAllTokenIds(List.of(1, 2, 3)).setMaxNewTokens(3).setPriority(20).build(); }
-
-    static Path write(Path path, List<Request> requests) throws Exception {
+    static Path write(Path path, List<Long> arrivals) throws Exception {
         var rows = new ArrayList<ByteBuffer>();
-        long last = 0;
-        for (var request : requests) {
-            last = request.getArrivalOffsetMs();
-            rows.add(ByteBuffer.allocate(24).putLong(last).putLong(3).putInt(request.getMaxNewTokens()).putInt(request.getPriority()));
-        }
-        return indexed(path, rows, ByteBuffer.allocate(20).putLong(1).putLong(0).putInt(3), last, List.of());
+        for (long arrival : arrivals) rows.add(ByteBuffer.allocate(24).putLong(arrival).putLong(3).putInt(3).putInt(20));
+        return indexed(path, rows, ByteBuffer.allocate(20).putLong(1).putLong(0).putInt(3), arrivals.getLast(), List.of());
     }
 
     static Path indexed(Path path, List<ByteBuffer> rows, ByteBuffer chains, long last, List<int[]> media) throws Exception {
@@ -58,7 +51,7 @@ final class InputFixture {
     }
 
     static Start plan(Path directory, List<String> masters, int count, double qps, int slots, int queue, long timeout, long drain) throws Exception {
-        var path = write(directory.resolve(UUID.randomUUID() + ".mckidx"), Collections.nCopies(count, request()));
+        var path = write(directory.resolve(UUID.randomUUID() + ".mckidx"), Collections.nCopies(count, 0L));
         return new Start(masters, path.toString(), qps, null, slots, queue, timeout, drain);
     }
 }

@@ -38,7 +38,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         this.id = id; this.topology = topology; this.directory = directory;
         api = new ControlServer(new InetSocketAddress("127.0.0.1", 0)).route("client/start", Start.class, Ack.class, this::start)
             .route("client/stop", Empty.class, Summary.class, this::stop)
-            .route("worker/prepare", Shard.class, Ack.class, this::prepare)
+            .route("worker/prepare", WorkerPlan.class, Ack.class, this::prepare)
             .route("worker/begin", Begin.class, Ack.class, this::begin)
             .route("worker/halt", Sequence.class, Ack.class, this::halt)
             .route("worker/state", Sequence.class, State.class, this::state)
@@ -64,7 +64,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         if (!result.isObject() || result.size() != 1 || !result.has("result")) throw new IOException("Invalid Client response");
         return result.get("result");
     }
-    @Override public synchronized Ack prepare(Shard args) throws Exception {
+    @Override public synchronized Ack prepare(WorkerPlan args) throws Exception {
         if (closed || args.sequence() <= workerSequence || worker != null && !worker.state().done())
             throw new IllegalStateException("Previous Client playback has not ended or stale prepare");
         var playback = directory.resolve("playback/" + args.sequence());
@@ -120,9 +120,9 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
             int clients = created.peers.size();
             for (int i = 0; i < clients; i++) {
                 if (created.stop || closed) throw new IOException("Client start stopped during preparation");
-                long count = total / clients + (i < total % clients ? 1 : 0);
+                long count = ClientProtocol.requestCount(total, i, clients);
                 int slots = args.concurrency() / clients + (i < args.concurrency() % clients ? 1 : 0);
-                call(created.peers.get(i), "worker/prepare", new Shard(created.number, args.masters(), args.requests_file(),
+                call(created.peers.get(i), "worker/prepare", new WorkerPlan(created.number, args.masters(), args.requests_file(),
                     count, i, clients, created.firstId, identity, args.qps(), args.replay_speed(), slots,
                     args.queue_capacity(), args.request_timeout_ms(), args.drain_timeout_ms(), args.reuse_cache()));
             }

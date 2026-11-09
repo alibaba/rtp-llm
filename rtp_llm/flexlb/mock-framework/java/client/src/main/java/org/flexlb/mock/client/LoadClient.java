@@ -8,13 +8,13 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
-import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
 import org.flexlb.mock.client.ClientProtocol.*;
 
 /** Owns playback pacing, admission, concurrency and request lifetimes. */
 final class LoadClient implements AutoCloseable {
-    private final Shard plan;
+    record Item(long requestId, IndexedTraffic.Entry entry) {}
+    private final WorkerPlan plan;
     private final NativeClient client;
     private final RequestJournal journal;
     private final MasterDiscovery discovery;
@@ -32,13 +32,13 @@ final class LoadClient implements AutoCloseable {
     private final AtomicLong produced = new AtomicLong();
     private long issued, finished, drainDeadline = Long.MAX_VALUE;
 
-    LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id) throws Exception {
+    LoadClient(WorkerPlan plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id) throws Exception {
         this(plan, metrics, topology, evidence, id, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN);
     }
-    LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id, int imageToken) throws Exception {
+    LoadClient(WorkerPlan plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id, int imageToken) throws Exception {
         this(plan, metrics, topology, evidence, id, imageToken, 0, 0L, 1);
     }
-    LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id, int imageToken, int blockSize, long seed, int prefillCpSize) throws Exception {
+    LoadClient(WorkerPlan plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id, int imageToken, int blockSize, long seed, int prefillCpSize) throws Exception {
         this.imageToken = imageToken; this.blockSize = blockSize;
         this.plan = plan; this.metrics = metrics;
         queue = new ArrayBlockingQueue<>(plan.queue_capacity());
@@ -65,25 +65,25 @@ final class LoadClient implements AutoCloseable {
         });
         LockSupport.unpark(dispatcher);
     }
-    /** Use the shared source time origin for every shard. */
-    static void play(Shard plan, long startNanos, Consumer<Item> submit) throws IOException, InterruptedException {
+    static void play(WorkerPlan plan, long startNanos, Consumer<Item> submit) throws IOException, InterruptedException {
         play(plan, startNanos, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN, submit);
     }
 
-    static void play(Shard plan, long startNanos, int imageToken, Consumer<Item> submit) throws IOException, InterruptedException {
+    static void play(WorkerPlan plan, long startNanos, int imageToken, Consumer<Item> submit) throws IOException, InterruptedException {
         try (var indexed = new IndexedTraffic(Path.of(plan.requests_file()))) {
-            long expected = indexed.count / plan.stride() + (plan.first_index() < indexed.count % plan.stride() ? 1 : 0);
+            long expected = ClientProtocol.requestCount(indexed.count, plan.first_index(), plan.stride());
             if (!indexed.identity.equals(plan.sha256()) || expected != plan.count())
                 throw new IOException("Indexed traffic changed after planning");
+            delayNanos(indexed.count - 1, indexed.lastArrival, plan.qps(), plan.replay_speed());
             for (long position = 0; position < plan.count(); position++) {
                 if (Thread.interrupted()) throw new InterruptedException();
                 long index = plan.first_index() + position * plan.stride();
                 var entry = indexed.entry(index, imageToken);
-                long due = startNanos + delayNanos(index, entry.input().getArrivalOffsetMs(), plan.qps(), plan.replay_speed());
+                long due = startNanos + delayNanos(index, entry.arrivalMs(), plan.qps(), plan.replay_speed());
                 long left;
                 while ((left = due - System.nanoTime()) > 0) TimeUnit.NANOSECONDS.sleep(left);
                 if (Thread.interrupted()) throw new InterruptedException();
-                submit.accept(new Item(plan.first_request_id() + index, index, entry.input(), entry.expectedImageTokens()));
+                submit.accept(new Item(plan.first_request_id() + index, entry));
             }
         }
     }
@@ -139,22 +139,20 @@ final class LoadClient implements AutoCloseable {
                         cancel = List.copyOf(active.values());
                     } else if (begun && !stopped && !queue.isEmpty() && active.size() < plan.concurrency()) {
                         var item = queue.remove();
-                        var input = GenerateInputPB.newBuilder().setRequestId(item.request_id()).addAllTokenIds(item.input().getTokenIdsList())
-                            .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(item.input().getMaxNewTokens())
-                                .setReuseCache(Boolean.TRUE.equals(plan.reuse_cache())).setIgnoreEos(true).setCanUsePdSeparation(true).setReturnIncremental(true).setIsStreaming(true));
-                        for (var image : item.input().getImagesList()) {
-                            input.setTokenIds(image.getOffset(), imageToken);
-                            input.addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl(image.getUrl())
-                                .setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(image.getWidth()).setHeight(image.getHeight())));
-                        }
-                        var request = FlexlbScheduleRequestPB.newBuilder().setRequestId(item.request_id())
-                            .setCacheKeyBlockSize(blockSize).setSeqLen(item.input().getTokenIdsList().size()).setMaxNewTokens(item.input().getMaxNewTokens())
-                            .setPriority(item.input().hasPriority() ? item.input().getPriority() : 50).setGenerateInput(input.build().toByteString()).build();
-                        var call = client.send(request, Duration.ofMillis(plan.request_timeout_ms()), item.expectedImageTokens());
-                        active.put(item.request_id(), call); issued++; metrics.issued();
+                        var entry = item.entry();
+                        var input = entry.input().toBuilder().setRequestId(item.requestId());
+                        input.getGenerateConfigBuilder().setReuseCache(Boolean.TRUE.equals(plan.reuse_cache()))
+                            .setIgnoreEos(true).setCanUsePdSeparation(true).setReturnIncremental(true).setIsStreaming(true);
+                        var generateInput = input.build();
+                        var request = FlexlbScheduleRequestPB.newBuilder().setRequestId(item.requestId())
+                            .setCacheKeyBlockSize(blockSize).setSeqLen(input.getTokenIdsCount())
+                            .setMaxNewTokens(input.getGenerateConfig().getMaxNewTokens()).setPriority(entry.priority())
+                            .setGenerateInput(generateInput.toByteString()).build();
+                        var call = client.send(request, generateInput, Duration.ofMillis(plan.request_timeout_ms()), entry.expectedImageTokens());
+                        active.put(item.requestId(), call); issued++; metrics.issued();
                         call.completion().whenComplete((result, error) -> {
                             synchronized (LoadClient.this) {
-                                active.remove(item.request_id()); finished++;
+                                active.remove(item.requestId()); finished++;
                                 if (error != null) fail("Request execution failed: " + error);
                                 else { metrics.finished(result); outcomes.merge(result.outcome().name(), 1L, Long::sum); }
                                 LockSupport.unpark(dispatcher);

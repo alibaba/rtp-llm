@@ -40,8 +40,7 @@ class IndexedTrafficTest {
             assertEquals(List.of(2, 1, 0, 1, 1), image.input().getTokenIdsList());
             assertEquals(List.of(2, 1, 3, 1), branch.getTokenIdsList());
             assertEquals(List.of(2, 1), shortPrefix.getTokenIdsList());
-            assertEquals("mock-image:1", image.input().getImages(0).getUrl());
-            assertEquals(2, image.input().getImages(0).getOffset());
+            assertEquals("mock-image:1", image.input().getMultimodalInputs(0).getMultimodalUrl());
             assertEquals(List.of(924), image.expectedImageTokens());
         }
     }
@@ -54,19 +53,34 @@ class IndexedTrafficTest {
         // Corrupt only ordinal 0. A player assigned to 1 and 3 must still finish.
         data[96 + 5 * 16 + 28 + 12] ^= 1;
         Files.write(path, data);
-        var odd = new Shard(1, null, path.toString(), 2, 1, 2, 100, identity, null, 2.0, 1, 4, 1000, 1000);
-        var items = new ArrayList<Item>();
+        var odd = new WorkerPlan(1, null, path.toString(), 2, 1, 2, 100, identity, null, 2.0, 1, 4, 1000, 1000);
+        var items = new ArrayList<LoadClient.Item>();
         long past = System.nanoTime() - 1_000_000_000;
         LoadClient.play(odd, past, items::add);
-        assertEquals(List.of(1L, 3L), items.stream().map(Item::index).toList());
-        assertEquals(List.of(101L, 103L), items.stream().map(Item::request_id).toList());
+        assertEquals(List.of(101L, 103L), items.stream().map(LoadClient.Item::requestId).toList());
         assertEquals(List.of(5_000_000L, 15_000_000L), items.stream().map(item -> {
-            try { return LoadClient.delayNanos(item.index(), item.input().getArrivalOffsetMs(), null, 2.0); }
+            try { return LoadClient.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), null, 2.0); }
             catch (IOException error) { throw new AssertionError(error); }
         }).toList());
-        assertEquals(10_000_000L, LoadClient.delayNanos(1, items.getFirst().input().getArrivalOffsetMs(), 100.0, null));
-        var even = new Shard(1, null, path.toString(), 3, 0, 2, 100, identity, null, 2.0, 1, 4, 1000, 1000);
+        assertEquals(10_000_000L, LoadClient.delayNanos(1, items.getFirst().entry().arrivalMs(), 100.0, null));
+        var even = new WorkerPlan(1, null, path.toString(), 3, 0, 2, 100, identity, null, 2.0, 1, 4, 1000, 1000);
         assertThrows(IOException.class, () -> LoadClient.play(even, past, ignored -> fail()));
+    }
+
+    @Test void fixedTotalQpsInterleavesWorkerDeadlines() throws Exception {
+        var path = fixture();
+        try (var input = new IndexedTraffic(path)) {
+            long past = System.nanoTime() - 1_000_000_000;
+            var expected = List.of(List.of(0L, 20_000_000L, 40_000_000L), List.of(10_000_000L, 30_000_000L));
+            for (int worker = 0; worker < 2; worker++) {
+                var plan = new WorkerPlan(1, null, path.toString(), expected.get(worker).size(), worker, 2,
+                    100, input.identity, 100.0, null, 1, 4, 1000, 1000);
+                var times = new ArrayList<Long>();
+                LoadClient.play(plan, past, item -> times.add(assertDoesNotThrow(() ->
+                    LoadClient.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), plan.qps(), null))));
+                assertEquals(expected.get(worker), times);
+            }
+        }
     }
 
     @Test void publicStartUsesOneSharedFileWithoutWritingShards() throws Exception {
