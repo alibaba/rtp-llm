@@ -1,8 +1,44 @@
+diff --git a/atom/model_ops/attention_gdn.py b/atom/model_ops/attention_gdn.py
+--- a/atom/model_ops/attention_gdn.py
++++ b/atom/model_ops/attention_gdn.py
+@@ -344,6 +344,9 @@
+                 1, num_tokens_nonspec, -1, self.head_v_dim
+             )
+ 
++        use_flydsl_mtp = bool(getattr(gdn_metadata, "rtp_flydsl_mtp", False))
++        if use_flydsl_mtp and use_replayssm:
++            raise ValueError("FlyDSL GDN MTP cannot run ReplaySSM")
+         use_flydsl_decode = False
+         if (
+             flydsl_policy is not None
+@@ -369,7 +372,7 @@
+                 non_spec_state_indices_tensor,
+             )
+ 
+-        if use_lossy_gdn_decode or use_flydsl_decode:
++        if use_lossy_gdn_decode or use_flydsl_decode or use_flydsl_mtp:
+             g_spec = None
+             beta_spec = None
+             g_non_spec = None
+@@ -398,7 +401,13 @@
+ 
+         # 2.1: Process the multi-query part
+         if spec_sequence_masks is not None:
+-            if use_replayssm:
++            if use_flydsl_mtp:
++                from atom.model_ops.fla_ops.gdn_flydsl import mtp_rtp
++                core_attn_out_spec, last_recurrent_state = mtp_rtp(
++                    query_spec, key_spec, value_spec, a, b, ssm_state,
++                    self.A_log, self.dt_bias, gdn_metadata.rtp_flydsl_read_indices,
++                    spec_state_indices_tensor, core_attn_out[:query_spec.shape[1]])
++            elif use_replayssm:
+                 # No per-draft state snapshot: the kernel rebuilds the state
+                 # from the checkpoint plus the committed records, so the
+                 # rejected drafts of the previous step are undone simply by
 diff --git a/atom/model_ops/attentions/qwen4_exp_attn.py b/atom/model_ops/attentions/qwen4_exp_attn.py
-index dd73067..b8782a1 100644
 --- a/atom/model_ops/attentions/qwen4_exp_attn.py
 +++ b/atom/model_ops/attentions/qwen4_exp_attn.py
-@@ -80,6 +80,8 @@ class Qwen4ExpQSAMetadata:
+@@ -80,6 +80,8 @@
      state_page_size: int = 0
      state_read_pages: torch.Tensor | None = None
      state_candidate_pages: torch.Tensor | None = None
@@ -11,11 +47,35 @@ index dd73067..b8782a1 100644
  
      def for_tokens(self, num_tokens: int) -> "Qwen4ExpQSAMetadata":
          """Draft step zero uses real rows, without the target graph's padding."""
+diff --git a/atom/model_ops/fla_ops/gdn_flydsl.py b/atom/model_ops/fla_ops/gdn_flydsl.py
+--- a/atom/model_ops/fla_ops/gdn_flydsl.py
++++ b/atom/model_ops/fla_ops/gdn_flydsl.py
+@@ -344,3 +344,21 @@
+         need_shuffle_state=False,
+     )
+     return output.transpose(0, 1), state
++
++
++def mtp_rtp(q, k, v, a, b, state, A_log, dt_bias, reads, writes, out):
++    from aiter.ops.flydsl.linear_attention_kernels import flydsl_gdr_mtp_rtp
++    batch, width = writes.shape
++    if q.shape[1] != batch * width:
++        raise ValueError("FlyDSL MTP requires fixed-length candidate chains")
++    if state.stride(-2) != 1:
++        raise ValueError("FlyDSL MTP state must use physical VK storage")
++    query = q.reshape(batch, width, *q.shape[-2:])
++    key = k.reshape(batch, width, *k.shape[-2:])
++    value = v.reshape(batch, width, *v.shape[-2:])
++    output = out.reshape(batch, width, *v.shape[-2:])
++    flydsl_gdr_mtp_rtp(query, key, value, a.reshape(batch, width, -1),
++                       b.reshape(batch, width, -1), dt_bias, A_log,
++                       state.transpose(-1, -2), output, (reads if reads.ndim == 1 else reads[:, 0].contiguous()),
++                       writes, use_qk_l2norm=True)
++    return out.unsqueeze(0), None
 diff --git a/atom/model_ops/fla_ops/replayssm.py b/atom/model_ops/fla_ops/replayssm.py
-index 8c4b424..a6c273b 100644
 --- a/atom/model_ops/fla_ops/replayssm.py
 +++ b/atom/model_ops/fla_ops/replayssm.py
-@@ -701,6 +701,15 @@ def _replayssm_fwd_kernel(
+@@ -701,6 +701,15 @@
      stride_bufg_pos: tl.constexpr,
      stride_bufg_hv: tl.constexpr,
      stride_beta_tok: tl.constexpr,
@@ -31,7 +91,7 @@ index 8c4b424..a6c273b 100644
      USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
      IS_KDA: tl.constexpr,
      IS_BETA_HEADWISE: tl.constexpr,
-@@ -788,10 +797,10 @@ def _replayssm_fwd_kernel(
+@@ -788,10 +797,10 @@
          # The l2 norms need the whole vector, so take them before tiling; the
          # per-tile reloads below are [BKT] slices of the same two vectors.
          if USE_QK_L2NORM_IN_KERNEL:
@@ -44,7 +104,7 @@ index 8c4b424..a6c273b 100644
                  tl.float32
              )
              q_rn = 1.0 / tl.sqrt(tl.sum(b_qf * b_qf) + 1e-6)
-@@ -807,14 +816,14 @@ def _replayssm_fwd_kernel(
+@@ -807,14 +816,14 @@
          b_kq = 0.0
          p_ckpt = ckpt + slot * stride_ckpt_slot + i_hv * K * V
          b_qt = (
@@ -61,7 +121,7 @@ index 8c4b424..a6c273b 100644
                  tl.float32
              )
              * k_rn
-@@ -867,7 +876,7 @@ def _replayssm_fwd_kernel(
+@@ -867,7 +876,7 @@
          b_sk += tl.sum(b_ck[:, None] * b_ru, 0)
          b_sq += tl.sum(b_cq[:, None] * b_ru, 0)
  
@@ -70,7 +130,7 @@ index 8c4b424..a6c273b 100644
              tl.float32
          )
          if IS_BETA_HEADWISE:
-@@ -942,13 +951,13 @@ def _replayssm_fwd_kernel(
+@@ -942,13 +951,13 @@
          # A flush is the one step that still needs S_h as a value, and it is
          # one step in `cap - 1`.
          p_o = o + (bos * HV + i_hv) * V + o_v
@@ -87,7 +147,7 @@ index 8c4b424..a6c273b 100644
              tl.float32
          )
          if USE_QK_L2NORM_IN_KERNEL:
-@@ -1028,9 +1037,9 @@ def _replayssm_fwd_kernel(
+@@ -1028,9 +1037,9 @@
          tl.store(p_ckpt_hv, b_h.to(p_ckpt_hv.dtype.element_ty), mask=mask_h)
  
      # ---- 3. this step's tokens ---------------------------------------------
@@ -100,7 +160,7 @@ index 8c4b424..a6c273b 100644
      p_o = o + (bos * HV + i_hv) * V + o_v
      if IS_BETA_HEADWISE:
          p_beta = beta + (bos * HV + i_hv) * V + o_v
-@@ -1101,9 +1110,9 @@ def _replayssm_fwd_kernel(
+@@ -1101,9 +1110,9 @@
              else:
                  tl.store(p_bg2 + i_hv * stride_bufg_hv, b_g.to(p_bg2.dtype.element_ty))
  
@@ -113,7 +173,7 @@ index 8c4b424..a6c273b 100644
          p_o += HV * V
          p_beta += stride_beta_tok
          p_g += HV * K if IS_KDA else HV
-@@ -1411,7 +1420,7 @@ def replayssm_gated_delta_rule(
+@@ -1411,7 +1420,7 @@
      BK = triton.next_power_of_2(K)
      assert triton.cdiv(K, BK) == 1, "K must fit one block"
  
@@ -122,7 +182,7 @@ index 8c4b424..a6c273b 100644
      if o is None:
          o = q.new_empty(1, T_tot, HV, V)
      else:
-@@ -1442,6 +1451,7 @@ def replayssm_gated_delta_rule(
+@@ -1442,6 +1451,7 @@
          # the K.K^T and Q.K^T gemms) does not depend on the V split, so
          # splitting V would replicate it NV times.  Measured 2.9x worse at
          # BV=32/NV=4 than BV=V/NV=1.
@@ -130,7 +190,7 @@ index 8c4b424..a6c273b 100644
          BV_UT = triton.next_power_of_2(V)
          BT = triton.next_power_of_2(max_query_len)
          BH_UT = max(16, triton.next_power_of_2(cap - max_query_len))
-@@ -1532,6 +1542,15 @@ def replayssm_gated_delta_rule(
+@@ -1532,6 +1542,15 @@
          stride_bufg_pos=buf_g.stride(2),
          stride_bufg_hv=buf_g.stride(1),
          stride_beta_tok=beta.stride(1),
@@ -147,10 +207,9 @@ index 8c4b424..a6c273b 100644
          IS_KDA=is_kda,
          IS_BETA_HEADWISE=beta.ndim == v.ndim,
 diff --git a/atom/model_ops/qwen4_exp/qsa_attention.py b/atom/model_ops/qwen4_exp/qsa_attention.py
-index b30eeb5..d8f3d76 100644
 --- a/atom/model_ops/qwen4_exp/qsa_attention.py
 +++ b/atom/model_ops/qwen4_exp/qsa_attention.py
-@@ -32,6 +32,8 @@ arithmetically once the group is behind the current chunk. That is what
+@@ -32,6 +32,8 @@
  raw index keys so pooling can read them back.
  """
  
@@ -159,10 +218,11 @@ index b30eeb5..d8f3d76 100644
  from types import SimpleNamespace
  
  import aiter
-@@ -65,6 +67,14 @@ from atom.plugin.prepare import is_plugin_mode
+@@ -64,6 +66,14 @@
+ from atom.plugin.prepare import is_plugin_mode
  from atom.utils import envs
  from atom.utils.forward_context import get_forward_context
- 
++
 +_FLYDSL_WIDTHS = (1027, 2051, 3075, 4099)
 +_FLYDSL_PREFILL = os.getenv("ATOM_QSA_FLYDSL_ATTN", "0") == "1"
 +
@@ -170,11 +230,10 @@ index b30eeb5..d8f3d76 100644
 +def _flydsl_attention_op():
 +    from aiter.ops.flydsl.kernels.qsa.attention import qsa_sparse_attention_flydsl
 +    return qsa_sparse_attention_flydsl
-+
+ 
  
  def build_qwen4_exp_rope(config, head_size: int):
-     """mRoPE over the leading `rotary_dim` channels of `head_size`.
-@@ -368,6 +378,29 @@ class Qwen4ExpAttention(nn.Module):
+@@ -368,6 +378,29 @@
              v_scale=self.v_scale_cache,
          )
  
@@ -204,7 +263,7 @@ index b30eeb5..d8f3d76 100644
      def _select_tokens(
          self,
          hidden_states: torch.Tensor,
-@@ -480,17 +513,14 @@ class Qwen4ExpAttention(nn.Module):
+@@ -480,17 +513,14 @@
              qsa = qsa.for_tokens(num_tokens)
              self._store_kv(key, value, qsa.slot_mapping)
              selected = self._select_tokens(hidden_states, positions, qsa)
@@ -230,7 +289,7 @@ index b30eeb5..d8f3d76 100644
  
          if is_per_token_fp8_linear(self.o_proj):
              gated, gated_scale = sigmoid_mul_quant(
-@@ -522,6 +552,12 @@ class Qwen4ExpAttention(nn.Module):
+@@ -522,6 +552,12 @@
              block_tables=torch.arange(pages, device=device, dtype=torch.int32)[None],
              seq_lens=torch.tensor([tokens], device=device, dtype=torch.int32),
              max_seq_len=tokens,
@@ -244,18 +303,14 @@ index b30eeb5..d8f3d76 100644
          names = (
              "k_cache",
 diff --git a/atom/model_ops/topK.py b/atom/model_ops/topK.py
-index 77a8152..461bf1b 100644
 --- a/atom/model_ops/topK.py
 +++ b/atom/model_ops/topK.py
-@@ -210,39 +210,19 @@ def rocm_aiter_topk_softmax_impl(
+@@ -210,39 +210,19 @@
      fused_shared_experts_scoring_func: str | None = None,
      num_valid_rows: torch.Tensor | None = None,
  ) -> tuple[torch.Tensor, torch.Tensor]:
 -    from aiter import topk_softmax
-+    # Keep standalone and RTP on the same pinned AITER ABI bridge. This wheel
-+    # calls the eight-argument topk API, while AITER cbccc02fd exposes seven.
-+    from atom.plugin.rtpllm.utils.topk_compat import rtp_topk_softmax
- 
+-
 -    token = gating_output.shape[0]
 -    device = gating_output.device
 -    if num_fused_shared_experts > 0:
@@ -278,6 +333,10 @@ index 77a8152..461bf1b 100644
 -        topk_weights,
 -        topk_ids,
 -        token_expert_indicies,
++    # Keep standalone and RTP on the same pinned AITER ABI bridge. This wheel
++    # calls the eight-argument topk API, while AITER cbccc02fd exposes seven.
++    from atom.plugin.rtpllm.utils.topk_compat import rtp_topk_softmax
++
 +    return rtp_topk_softmax(
          gating_output,
 +        topk,
@@ -295,12 +354,9 @@ index 77a8152..461bf1b 100644
  
  def rocm_aiter_biased_grouped_topk_impl(
 diff --git a/atom/plugin/rtpllm/models/qwen4_exp.py b/atom/plugin/rtpllm/models/qwen4_exp.py
-old mode 100644
-new mode 100755
-index a65f17e..adf1d34
 --- a/atom/plugin/rtpllm/models/qwen4_exp.py
 +++ b/atom/plugin/rtpllm/models/qwen4_exp.py
-@@ -18,6 +18,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
+@@ -18,6 +18,7 @@
      ple_state_desc,
  )
  from rtp_llm.ops import (
@@ -308,19 +364,19 @@ index a65f17e..adf1d34
      DataType,
      HybridAttentionType,
      KVCacheSpecType,
-@@ -34,6 +35,11 @@ from atom.plugin.rtpllm.models.qwen3_5 import (
+@@ -33,6 +34,11 @@
+ )
  
  logger = logging.getLogger("atom.plugin.rtpllm.models")
- 
++
 +# The GDN state is much larger than QSA/PLE state. One checkpoint per 1024
 +# prompt tokens lets the prefix cache serve common 6K/7K prefixes without
 +# retaining every 64-token state page of a long request.
 +GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS = 16
-+
+ 
  
  class _Qwen4ExpAttnPyObj(_ATOMAttnPyObj):
-     # Graph replay refreshes and consumes device block tables only. The host
-@@ -77,10 +83,13 @@ class _ATOMQwen4ExpRuntime(_ATOMQwen35MoeRuntime):
+@@ -77,10 +83,13 @@
                  raise ValueError("Qwen4Exp MTP requires positive request capacity")
              self._rtp_mtp_request_capacity = max_batch
          self._atom_attn_pyobj = _Qwen4ExpAttnPyObj(self)
@@ -336,7 +392,7 @@ index a65f17e..adf1d34
  
      def prepare_fmha_impl(self, inputs, is_cuda_graph: bool = False):
          tagged = inputs.attention_inputs
-@@ -720,6 +729,9 @@ class ATOMQwen4Exp(ATOMQwen35Moe):
+@@ -720,6 +729,9 @@
              for desc in layer:
                  if desc.cache_type == KVCacheSpecType.LINEAR:
                      desc.dtype = DataType.TYPE_BF16
@@ -347,12 +403,9 @@ index a65f17e..adf1d34
  
      @classmethod
 diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
-old mode 100644
-new mode 100755
-index e600c2f..2beb5d2
 --- a/atom/plugin/rtpllm/utils/qwen4_exp_context.py
 +++ b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
-@@ -6,6 +6,8 @@ from collections.abc import Iterator
+@@ -6,6 +6,8 @@
  from contextlib import contextmanager
  from typing import Any
  
@@ -361,7 +414,7 @@ index e600c2f..2beb5d2
  import torch
  import triton
  import triton.language as tl
-@@ -387,6 +389,9 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+@@ -387,13 +389,19 @@
                  caches[f"layer_{layer_num}"].v_cache = state
                  caches[f"layer_{layer_num}"].k_cache = conv
  
@@ -371,16 +424,37 @@ index e600c2f..2beb5d2
          # AITER decode expects physical VK storage exposed as a logical KV
          # view. Bind that view before the first state write; the prefill path
          # and Triton decode fallback both honor its inner strides. MTP target
-@@ -738,6 +743,8 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+         # verification still uses the original KV state layout.
+-        if not getattr(
+-            model_config, "atom_qwen4_exp_mtp_target", False
+-        ) and not getattr(model_config, "is_mtp", False):
++        flydsl_mtp = os.getenv("ATOM_RTP_FLYDSL_GDN_MTP", "0") == "1"
++        if flydsl_mtp and os.getenv("ATOM_RTP_ENABLE_REPLAYSSM", "0") == "1":
++            raise ValueError("FlyDSL GDN MTP and ReplaySSM are mutually exclusive")
++        if (not getattr(model_config, "atom_qwen4_exp_mtp_target", False)
++            and not getattr(model_config, "is_mtp", False)) or (
++                flydsl_mtp and getattr(model_config, "atom_qwen4_exp_mtp_target", False)):
+             for layer_num, layer in layer_maps[0].items():
+                 state = caches[f"layer_{layer_num}"].v_cache
+                 k_dim, v_dim = state.shape[-2:]
+@@ -738,6 +746,16 @@
                  gdn_metadata.ssm_conv_state_len = (
                      int(model.config.linear_conv_kernel_dim) - 1
                  )
++            if gdn_metadata is not None:
++                gdn_metadata.rtp_flydsl_mtp = (
++                    os.getenv("ATOM_RTP_FLYDSL_GDN_MTP", "0") == "1"
++                    and gdn_metadata.num_spec_decodes > 0
++                    and gdn_metadata.num_prefills == 0 and gdn_metadata.num_decodes == 0
++                )
++            if gdn_metadata is not None and getattr(gdn_metadata, "rtp_flydsl_mtp", False):
++                gdn_metadata.rtp_flydsl_read_indices = gdn_metadata.spec_state_indices_in_tensor[:, 0].contiguous()
 +            from atom.plugin.rtpllm.utils.replayssm_rtp import prepare_metadata
 +            prepare_metadata(runtime, gdn_metadata)
              cls._configure_gdn_backends(
                  metadata.gdn_metadata,
                  resolved_layer_maps[0],
-@@ -929,6 +936,33 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+@@ -929,6 +947,33 @@
                      raw_slots.copy_(candidate_slots)
                  else:
                      raw_slots = candidate_slots
@@ -414,7 +488,7 @@ index e600c2f..2beb5d2
              metadata.qsa_metadata = Qwen4ExpQSAMetadata(
                  block_tables=full_blocks,
                  slot_mapping=slots,
-@@ -950,6 +984,8 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+@@ -950,6 +995,8 @@
                  state_page_size=int(runtime.kv_cache.get_seq_size_per_block("indexer_state")),
                  state_read_pages=state_read_pages,
                  state_candidate_pages=state_candidate_pages,

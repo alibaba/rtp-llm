@@ -1,0 +1,56 @@
+diff --git a/aiter/ops/flydsl/linear_attention_kernels.py b/aiter/ops/flydsl/linear_attention_kernels.py
+--- a/aiter/ops/flydsl/linear_attention_kernels.py
++++ b/aiter/ops/flydsl/linear_attention_kernels.py
+@@ -830,6 +830,7 @@
+                 has_tree,
+                 disable_state_update,
+                 min_live_slot=min_live_slot,
++                separate_read=(mode == MTP_MODE_CHAIN and inter_indices is not None),
+                 **kwargs_,
+             )
+ 
+@@ -1067,3 +1068,19 @@
+         disable_state_update=disable_state_update,
+         stream=stream,
+     )
++
++
++def flydsl_gdr_mtp_rtp(query, key, value, a, b, dt_bias, A_log, state, out,
++                       read_indices, write_indices, use_qk_l2norm=True, stream=None):
++    """Chain verify with independent read slots and a checkpoint per candidate."""
++    _mtp_common_checks(query, key, value, a, b, dt_bias, A_log, state, out)
++    _require_index("read_indices", read_indices, query, dims=1)
++    _require_index("write_indices", write_indices, query, dims=2,
++                   layout="[batch, token]", covers=True)
++    _mtp_launch(mode=MTP_MODE_CHAIN, query=query, key=key, value=value,
++                a=a, b=b, dt_bias=dt_bias, A_log=A_log, state=state, out=out,
++                state_indices=write_indices.contiguous(), num_accepted=None,
++                inter_indices=read_indices.contiguous(), parent_tokens=None,
++                inter_buffer=None, use_qk_l2norm=use_qk_l2norm, min_live_slot=0,
++                has_tree=False, disable_state_update=False,
++                stream=_mtp_stream(query, stream))
+diff --git a/aiter/ops/flydsl/kernels/gdr_decode.py b/aiter/ops/flydsl/kernels/gdr_decode.py
+--- a/aiter/ops/flydsl/kernels/gdr_decode.py
++++ b/aiter/ops/flydsl/kernels/gdr_decode.py
+@@ -605,6 +605,7 @@
+     # Unused here; a parameter so it joins the cache key.
+     WAVES_PER_EU: int = 0,
+     min_live_slot: int = 0,
++    separate_read: bool = False,
+ ):
+     """Gated delta rule over a speculative draft window.
+ 
+@@ -766,7 +767,12 @@
+         if const_expr(CHAIN):
+             token_slots = [_slot_at(t) for t in range_constexpr(seq_length)]
+ 
+-        if const_expr(CHAIN):
++        if const_expr(CHAIN and separate_read):
++            read_view = _gview(inter_indices, None, (batch_size, 1), (1, 1))
++            read_slot = fx.Int32(
++                _load_vec(cp_i32, fx.slice(read_view, (b_i, None)), 1, fx.Int32)
++            )
++        elif const_expr(CHAIN):
+             nacc_view = _gview(num_accepted, None, (batch_size, 1), (1, 1))
+             read_token = fx.Int32(
+                 _load_vec(cp_i32, fx.slice(nacc_view, (b_i, None)), 1, fx.Int32)
