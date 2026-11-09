@@ -259,6 +259,14 @@ class SharedNativeCache(NativeCacheBridge):
     def read_csa(self, layer, request, positions):
         return self._copy_rows((layer, "csa_state"), request, positions)
 
+    def _batched_swa_enabled(self):
+        return (
+            os.environ.get("RTP_V41_PPU_CP8_BATCHED_SWA", "1") == "1"
+            and self._is_prefill
+            and self.sharded
+            and self.cp["size"] == 8
+        )
+
     def stage_swa(
         self, layer, positions, requests, packed, prefixes, *, retain_rows=True, retain_prefix_tail=True
     ):
@@ -266,10 +274,7 @@ class SharedNativeCache(NativeCacheBridge):
         if not self.lengths:
             return
         batch_swa = (
-            os.environ.get("RTP_V41_PPU_CP8_BATCHED_SWA", "0") == "1"
-            and self._is_prefill
-            and self.sharded
-            and self.cp["size"] == 8
+            self._batched_swa_enabled()
             and retain_rows
             and retain_prefix_tail
             and packed.is_cuda
@@ -357,6 +362,17 @@ class SharedNativeCache(NativeCacheBridge):
         if saved is None:
             return self._copy_rows((layer, "swa_kv"), request, positions)
         domain, values = saved
+        if (
+            self._batched_swa_enabled()
+            and values.is_cuda
+            and domain.is_contiguous()
+            and values.is_contiguous()
+            and positions.ndim == 1
+            and positions.is_contiguous()
+        ):
+            from rtp_llm.models_py.modules.dsv41.ppu.prefill_swa import read_staged_rows
+
+            return read_staged_rows(domain, values, positions)
         index = torch.searchsorted(domain, positions)
         present = (index < domain.numel()) & (domain[index.clamp_max(max(domain.numel() - 1, 0))] == positions)
         result = values.new_zeros((positions.numel(), values.shape[-1]))

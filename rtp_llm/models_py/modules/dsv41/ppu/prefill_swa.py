@@ -61,6 +61,28 @@ def _write_slice(
     tl.store(pool + block * SLICE + local_byte, value, owned)
 
 
+@jit
+def _read_staged(
+    domain,
+    packed,
+    positions,
+    indices,
+    output,
+    domain_size,
+    WIDTH: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    row = tl.program_id(0)
+    index = tl.load(indices + row)
+    position = tl.load(positions + row)
+    in_range = index < domain_size
+    found = tl.load(domain + index, in_range, other=-1)
+    valid = in_range & (position == found)
+    column = tl.arange(0, TILE)
+    value = tl.load(packed + index * WIDTH + column, valid & (column < WIDTH), other=0)
+    tl.store(output + row.to(tl.int64) * WIDTH + column, value, column < WIDTH)
+
+
 def gather_tails(pool, placement, prefixes, window):
     """Take one rank-major snapshot of the old SWA pages for the batch."""
     from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
@@ -129,3 +151,15 @@ def write_rows(pool, placement, request, positions, packed):
         width,
         512,
     )
+
+
+def read_staged_rows(domain, packed, positions):
+    """Keep the searchsorted contract, copying hits and zeroing misses in place."""
+    width = _WIDTH["swa_kv"]
+    output = packed.new_empty((positions.numel(), width))
+    if positions.numel():
+        indices = torch.searchsorted(domain, positions)
+        _read_staged[(positions.numel(),)](
+            domain, packed, positions, indices, output, domain.numel(), width, 1024
+        )
+    return output
