@@ -41,16 +41,19 @@ from __future__ import annotations
 import math
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from itertools import accumulate
 from typing import Any
 
 import torch
 
+from rtp_llm.models_py.modules.qwen4_exp.qsa import grid_prep_triton
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     _normalized_rope_style_name,
     build_qsa_rope,
     build_qsa_rope_from_logical_positions,
+    cached_inv_freq,
     is_qsa_rope_style,
-    mrope_decode_tail_verdict,
+    mrope_decode_tail_verdict_packed,
     validate_mrope_decode_tail,
 )
 
@@ -178,6 +181,28 @@ def host_input_mirror(main_inputs: Any, name: str) -> torch.Tensor | None:
     return mirror
 
 
+def host_cu_seqlens_mirror(main_inputs: Any, batch_size: int) -> torch.Tensor | None:
+    """The engine's pinned host mirror of ``cu_seqlens_device``, if usable.
+
+    The host-input engine and the CUDA-graph runner keep ``cu_seqlens`` as
+    the pinned CPU tensor whose contents they upload to
+    ``cu_seqlens_device`` (the OpDefs.h naming convention); the device-input
+    engine leaves it empty.  Only a fully-shaped int32 CPU mirror qualifies --
+    anything else keeps the legacy device comparison, which also preserves
+    the legacy behavior for a device tensor of the wrong length.
+    """
+    mirror = getattr(main_inputs, "cu_seqlens", None)
+    if (
+        not isinstance(mirror, torch.Tensor)
+        or mirror.device.type != "cpu"
+        or mirror.dtype != torch.int32
+        or mirror.dim() != 1
+        or int(mirror.numel()) != batch_size + 1
+    ):
+        return None
+    return mirror
+
+
 @dataclass(frozen=True)
 class PrefillMirrorFacts:
     """Host facts over one step's input_lengths/prefix_lengths mirrors.
@@ -257,13 +282,18 @@ def prefill_mirror_facts(main_inputs: Any) -> PrefillMirrorFacts | None:
 def has_nonzero_prefill_prefix(main_inputs: Any) -> bool:
     """Whether any request in this step carries a non-zero reused prefix.
 
-    The per-layer sparse-GQA dispatch gate (three-plus calls per layer) reads
-    this frozen verdict instead of recomputing ``torch.any(prefixes !=
-    0).item()`` on the mirror.
+    The per-layer sparse-GQA dispatch gate and the attention layer's two
+    prefix gates (the prefix-reuse projection gate and the prefill dispatch)
+    read this frozen verdict instead of recomputing the
+    ``torch.any(prefixes != 0).item()`` host chain per call site per layer.
+    Inputs objects without a usable prefix mirror (component-test adapters)
+    decline: no prefix, no reuse.
     """
     facts = prefill_mirror_facts(main_inputs)
     if facts is None:
         prefixes = host_input_mirror(main_inputs, "prefix_lengths")
+        if not isinstance(prefixes, torch.Tensor):
+            return False
         return bool(prefixes.numel()) and bool(torch.any(prefixes != 0).item())
     return facts.has_nonzero_prefix
 
@@ -338,6 +368,9 @@ class Qwen4ExpPrefillStepPlan:
     input_lengths_i32: torch.Tensor | None = None
     cu_seqlens: torch.Tensor | None = None
     logical_positions: torch.Tensor | None = None
+    # int32 [B, max_len] padded visible lengths: the same grid serves
+    # visible_lengths_i32 (flattened) and padded_kv_lens; no consumer reads
+    # the int64 copy the legacy chain built and cast away.
     visible_lengths: torch.Tensor | None = None
     visible_lengths_i32: torch.Tensor | None = None
     compressed_lengths: torch.Tensor | None = None
@@ -552,21 +585,269 @@ def _build_selection_padding(
     )
 
 
-def _build_kv_lens_rows(
-    prefixes_i32: torch.Tensor,
+@dataclass(frozen=True)
+class _StepGridPrep:
+    """Step-plan grid tensors produced by one batched prep pass.
+
+    The [B]/[B+1]-grade outputs are host arithmetic on the length/prefix
+    mirrors uploaded as one pinned staging batch per dtype; the
+    [B, max_len]/[T]-grade grid tensors and both score-weight tables come
+    from a single Triton launch (or the byte-exact eager aten fallback when
+    the fused prep declines the geometry).
+    """
+
+    cu_host: list[int]
+    prefixes_i64: torch.Tensor
+    prefixes_i32: torch.Tensor
+    input_lengths_i32: torch.Tensor
+    cu_seqlens: torch.Tensor
+    cu_kv_seqlens: torch.Tensor
+    logical_positions: torch.Tensor
+    block_starts: torch.Tensor
+    mrope_sources: torch.Tensor
+    visible_lengths: torch.Tensor
+    visible_lengths_i32: torch.Tensor
+    compressed_lengths: torch.Tensor
+    required_kv_columns: torch.Tensor
+    required_state_columns: torch.Tensor
+    required_state_columns_device: torch.Tensor
+    selection_valid: torch.Tensor
+    selection_row_map: torch.Tensor
+    selection_valid_rows: torch.Tensor
+    score_weights: torch.Tensor
+    padded_score_weights: torch.Tensor
+
+
+def _int32_staging(values: list[int]) -> torch.Tensor:
+    """Stage host ints as int32 without raising on overflow.
+
+    Out-of-range values only occur on geometries the caller rejects right
+    after the prep (its int32 headroom checks); the legacy chain staged the
+    same tensors through silent int64->int32 casts, so those values are
+    never consumed.
+    """
+    limit = torch.iinfo(torch.int32).max
+    floor = torch.iinfo(torch.int32).min
+    return torch.tensor(
+        [
+            value if floor <= value <= limit else (value & 0xFFFFFFFF) - (1 << 32)
+            for value in values
+        ],
+        dtype=torch.int32,
+    )
+
+
+def _eager_step_grid(
+    prefixes_i64: torch.Tensor,
     lengths: list[int],
     *,
     device: torch.device,
-) -> tuple[torch.Tensor, ...]:
-    """Per-request [1, length] visible-KV lengths (legacy fmha-prep rows)."""
-    return tuple(
+    ratio: int,
+    max_len: int,
+    token_count: int,
+    head_num: int,
+    head_dim: int,
+):
+    """The legacy aten chain as the byte-exact fallback for fused declines.
+
+    The int32 padded grid replaces the legacy int64 ``visible_lengths``:
+    every downstream consumer (``visible_lengths_i32``, ``padded_kv_lens``,
+    the per-request FMHA rows) reads the int32 values, which the legacy
+    chain itself produced by casting the int64 tensor right away.
+    """
+    row_offsets = torch.arange(max_len, dtype=torch.int64, device=device)
+    lengths_i64 = torch.tensor(lengths, dtype=torch.int64, device=device)
+    visible_lengths = prefixes_i64[:, None] + row_offsets[None, :] + 1
+    valid_rows = row_offsets[None, :] < lengths_i64[:, None]
+    visible_lengths = torch.where(valid_rows, visible_lengths, 0)
+    grid = visible_lengths.to(torch.int32)
+    compressed_lengths = (visible_lengths // ratio).to(torch.int32)
+    selection_row_map, selection_valid_rows, selection_valid = _build_selection_padding(
+        lengths, device=device
+    )
+    score_scale = 1.0 / math.sqrt(head_dim)
+    score_weights = torch.full(
+        (token_count, head_num), score_scale, dtype=torch.float32, device=device
+    )
+    # The legacy padded table was an index_select of the constant score
+    # weights: every row holds the same 1/sqrt(head_dim) fill.
+    padded_score_weights = torch.full(
+        (len(lengths) * max_len, head_num),
+        score_scale,
+        dtype=torch.float32,
+        device=device,
+    )
+    return (
+        grid,
+        compressed_lengths,
+        selection_valid,
+        selection_row_map,
+        selection_valid_rows,
+        score_weights,
+        padded_score_weights,
+    )
+
+
+def _build_step_grid_prep(
+    *,
+    lengths: list[int],
+    prefix_values: list[int],
+    device: torch.device,
+    ratio: int,
+    head_num: int,
+    head_dim: int,
+    kv_entries_per_block: int,
+    state_tokens_per_block: int,
+) -> _StepGridPrep:
+    """Compute the step-plan grid tensors in one batched prep.
+
+    Everything the legacy chain built as [B]/[B+1]/[B, max_len]/[T]-grade
+    aten launches (arange/add/where/floor_divide/remainder/fill plus the
+    selection-padding host loops) is produced here as host arithmetic on
+    the length/prefix mirrors, two pinned staging uploads and one Triton
+    launch.  ``visible_lengths`` keeps only its int32 padded grid: no
+    consumer ever reads the int64 copy the legacy chain built and cast
+    away.
+    """
+    batch_size = len(lengths)
+    max_len = max(lengths)
+    token_count = sum(lengths)
+    ends = [prefix + length for prefix, length in zip(prefix_values, lengths)]
+    cu_host = [0] + list(accumulate(lengths))
+    cu_kv_host = [0] + list(accumulate(ends))
+    # Degenerate page sizes keep the legacy error path: the caller raises
+    # before any of these tensors is consumed, so zero placeholders keep
+    # the staging shapes intact without dividing by zero here.
+    required_kv_values = (
+        [
+            (end // ratio + kv_entries_per_block - 1) // kv_entries_per_block
+            for end in ends
+        ]
+        if kv_entries_per_block > 0
+        else [0] * batch_size
+    )
+    required_state_values = (
+        [
+            (prefix + length + state_tokens_per_block - 1) // state_tokens_per_block
+            for prefix, length in zip(prefix_values, lengths)
+        ]
+        if state_tokens_per_block > 0
+        else [0] * batch_size
+    )
+    positions: list[int] = []
+    block_start_values: list[int] = []
+    source_values: list[int] = []
+    token_index = 0
+    for prefix, length in zip(prefix_values, lengths):
+        for row in range(length):
+            position = prefix + row
+            positions.append(position)
+            remainder = position % ratio
+            block_start_values.append(position - remainder)
+            source_values.append(token_index - remainder)
+            token_index += 1
+
+    # One pinned int32 batch: the [B]/[B+1]-grade outputs only.
+    host_i32 = torch.cat(
         (
-            prefixes_i32[request_idx]
-            + torch.arange(1, length + 1, dtype=torch.int32, device=device)
+            _int32_staging(prefix_values),
+            _int32_staging(lengths),
+            _int32_staging(cu_host),
+            _int32_staging(cu_kv_host),
+            _int32_staging(required_kv_values),
+            _int32_staging(required_state_values),
         )
-        .unsqueeze(0)
-        .contiguous()
-        for request_idx, length in enumerate(lengths)
+    )
+    device_i32 = _pinned_to_device(host_i32, device)
+    prefixes_i32 = device_i32[:batch_size]
+    input_lengths_i32 = device_i32[batch_size : 2 * batch_size]
+    cursor = 2 * batch_size
+    cu_seqlens = device_i32[cursor : cursor + batch_size + 1]
+    cursor += batch_size + 1
+    cu_kv_seqlens = device_i32[cursor : cursor + batch_size + 1]
+    cursor += batch_size + 1
+    required_kv_columns = device_i32[cursor : cursor + batch_size]
+    cursor += batch_size
+    required_state_columns_device = device_i32[cursor : cursor + batch_size]
+    # The host mirror of the state-columns segment ([5B + 2, 6B + 2) of the
+    # [prefixes, lengths, cu, cu_kv, required_kv, required_state] batch).
+    required_state_columns = host_i32[
+        5 * batch_size + 2 : 6 * batch_size + 2
+    ]
+
+    # One pinned int64 batch: the prefixes plus the [T]-grade position
+    # tables the rope builders consume (block starts and the MRoPE block
+    # sources the legacy chain derived with remainder/sub/arange launches).
+    host_i64 = torch.cat(
+        (
+            torch.tensor(prefix_values, dtype=torch.int64),
+            torch.tensor(positions, dtype=torch.int64),
+            torch.tensor(block_start_values, dtype=torch.int64),
+            torch.tensor(source_values, dtype=torch.int64),
+        )
+    )
+    device_i64 = _pinned_to_device(host_i64, device)
+    prefixes_i64 = device_i64[:batch_size]
+    cursor64 = batch_size
+    logical_positions = device_i64[cursor64 : cursor64 + token_count]
+    cursor64 += token_count
+    block_starts = device_i64[cursor64 : cursor64 + token_count]
+    cursor64 += token_count
+    mrope_sources = device_i64[cursor64 : cursor64 + token_count]
+
+    # The [B, max_len]-grade grid tensors and both score-weight tables in
+    # one launch; the eager chain keeps identical values elsewhere.
+    fused = grid_prep_triton.build_incremental_grid(
+        prefixes_i32,
+        input_lengths_i32,
+        cu_seqlens,
+        max_len=max_len,
+        token_count=token_count,
+        ratio=ratio,
+        head_num=head_num,
+        score_scale=1.0 / math.sqrt(head_dim),
+    )
+    if fused is None:
+        fused = _eager_step_grid(
+            prefixes_i64,
+            lengths,
+            device=device,
+            ratio=ratio,
+            max_len=max_len,
+            token_count=token_count,
+            head_num=head_num,
+            head_dim=head_dim,
+        )
+    (
+        visible_lengths,
+        compressed_lengths,
+        selection_valid,
+        selection_row_map,
+        selection_valid_rows,
+        score_weights,
+        padded_score_weights,
+    ) = fused
+    return _StepGridPrep(
+        cu_host=cu_host,
+        prefixes_i64=prefixes_i64,
+        prefixes_i32=prefixes_i32,
+        input_lengths_i32=input_lengths_i32,
+        cu_seqlens=cu_seqlens,
+        cu_kv_seqlens=cu_kv_seqlens,
+        logical_positions=logical_positions,
+        block_starts=block_starts,
+        mrope_sources=mrope_sources,
+        visible_lengths=visible_lengths,
+        visible_lengths_i32=visible_lengths.reshape(-1),
+        compressed_lengths=compressed_lengths,
+        required_kv_columns=required_kv_columns,
+        required_state_columns=required_state_columns,
+        required_state_columns_device=required_state_columns_device,
+        selection_valid=selection_valid,
+        selection_row_map=selection_row_map,
+        selection_valid_rows=selection_valid_rows,
+        score_weights=score_weights,
+        padded_score_weights=padded_score_weights,
     )
 
 
@@ -696,15 +977,24 @@ def build_incremental_step_plan(
             f"qwen4_exp QSA {label} requires every prefix length to be "
             f"{requirement}"
         )
-    prefixes = prefix_source.to(
-        device=device, dtype=torch.int64, non_blocking=True
-    ).contiguous()
-    prefixes_i32 = prefix_source.to(
-        device=device, dtype=torch.int32, non_blocking=True
-    ).contiguous()
-    input_lengths_i32 = main_inputs.input_lengths.to(
-        device=device, dtype=torch.int32, non_blocking=True
-    ).contiguous()
+    # One batched prep produces every grid/selection tensor the plan
+    # freezes: host arithmetic on the mirrors, one pinned staging upload
+    # per dtype and (on supported CUDA geometry) a single Triton launch,
+    # replacing the per-step arange/add/where/floor_divide/remainder/fill
+    # chain.  The page sizes only shape the host formulas here; their
+    # validation below keeps the legacy errors.
+    kv_tokens_per_block = int(context.indexer_kv_cache.seq_size_per_block)
+    state_tokens_per_block = int(context.indexer_state_cache.seq_size_per_block)
+    prep = _build_step_grid_prep(
+        lengths=lengths,
+        prefix_values=prefix_values,
+        device=device,
+        ratio=ratio,
+        head_num=head_num,
+        head_dim=head_dim,
+        kv_entries_per_block=kv_tokens_per_block // ratio,
+        state_tokens_per_block=state_tokens_per_block,
+    )
     sequence_lengths = main_inputs.sequence_lengths
     if sequence_lengths.numel() != 0:
         raise RuntimeError(
@@ -712,8 +1002,11 @@ def build_incremental_step_plan(
         )
 
     cu_seqlens = main_inputs.cu_seqlens_device
-    expected_cu = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
-    expected_cu[1:] = torch.tensor(lengths, dtype=torch.int32, device=device).cumsum(0)
+    # The expected boundaries are the batched prep's host arithmetic (python
+    # accumulate) riding its single pinned int32 batch; the wrapped host copy
+    # feeds the host-mirror validation below without another staging upload.
+    expected_cu = prep.cu_seqlens
+    expected_cu_host = _int32_staging(prep.cu_host)
     if (
         cu_seqlens.dim() != 1
         or cu_seqlens.dtype != torch.int32
@@ -723,7 +1016,26 @@ def build_incremental_step_plan(
             "qwen4_exp QSA draft incremental prefill cu_seqlens do not "
             "match input_lengths"
         )
-    if qsa_strict_validation_enabled():
+    # The engine uploads cu_seqlens_device from its pinned host mirror, so a
+    # usable mirror answers the same invariant host-side: zero device work,
+    # and the async verdict raises fail-fast instead of trapping.  A
+    # device-only source (RTP_LLM_DEVICE_INPUT engines, component fixtures)
+    # keeps the legacy device comparison against the pinned staging upload.
+    cu_seqlens_host = host_cu_seqlens_mirror(main_inputs, batch_size)
+    if cu_seqlens_host is not None and int(cu_seqlens.numel()) == batch_size + 1:
+        if qsa_strict_validation_enabled():
+            if not bool(torch.equal(cu_seqlens_host, expected_cu_host)):
+                raise RuntimeError(
+                    "qwen4_exp QSA draft incremental prefill cu_seqlens do not "
+                    "match input_lengths"
+                )
+        else:
+            qsa_assert_valid(
+                (cu_seqlens_host == expected_cu_host).all(),
+                "qwen4_exp QSA draft incremental prefill cu_seqlens do not "
+                "match input_lengths",
+            )
+    elif qsa_strict_validation_enabled():
         if not bool(torch.equal(cu_seqlens, expected_cu)):
             raise RuntimeError(
                 "qwen4_exp QSA draft incremental prefill cu_seqlens do not "
@@ -735,8 +1047,7 @@ def build_incremental_step_plan(
             "qwen4_exp QSA draft incremental prefill cu_seqlens do not "
             "match input_lengths",
         )
-    expected_cu_kv = torch.zeros_like(expected_cu)
-    visible_ends = prefixes + torch.tensor(lengths, dtype=torch.int64, device=device)
+    expected_cu_kv = prep.cu_kv_seqlens
     # int32 headroom is host arithmetic on the mirror values; no device read.
     int32_max = torch.iinfo(torch.int32).max
     if max(
@@ -750,7 +1061,6 @@ def build_incremental_step_plan(
             "qwen4_exp QSA draft incremental prefill cumulative KV lengths "
             "exceed int32"
         )
-    expected_cu_kv[1:] = visible_ends.to(torch.int32).cumsum(0)
     cu_kv_seqlens = main_inputs.cu_kv_seqlens_device
     if (
         cu_kv_seqlens.dim() != 1
@@ -795,14 +1105,10 @@ def build_incremental_step_plan(
             "match prefix+input lengths",
         )
 
-    # prefix_values already came from the pinned host mirror above; no device
-    # readback is needed for the logical positions.
-    logical_positions = torch.cat(
-        [
-            torch.arange(prefix, prefix + length, device=device)
-            for prefix, length in zip(prefix_values, lengths)
-        ]
-    ).to(torch.int64)
+    # prefix_values already came from the pinned host mirror above; the
+    # logical positions ride the prep's pinned int64 batch instead of a
+    # per-request arange chain.
+    logical_positions = prep.logical_positions
     position_ids = main_inputs.combo_position_ids
     index_factor = int(rope_config.index_factor)
     if position_ids is None or int(position_ids.numel()) != token_count * index_factor:
@@ -818,26 +1124,36 @@ def build_incremental_step_plan(
         and is_qsa_rope_style(rope_config, "Mrope")
     )
     try:
-        if target_mrope:
-            offset = 0
+        if target_mrope and any(length % ratio for length in lengths):
+            # Ratio-aligned requests have no unfinished tail to validate, so
+            # only steps with at least one ragged request pay for the check.
             position_rows = position_ids.reshape(token_count, index_factor)
-            for length in lengths:
-                if qsa_strict_validation_enabled():
-                    validate_mrope_decode_tail(
-                        position_rows[offset : offset + length], ratio
+            if qsa_strict_validation_enabled():
+                if not bool(
+                    mrope_decode_tail_verdict_packed(
+                        position_rows, expected_cu, ratio
                     )
-                else:
-                    # One enqueue-only device assert per request; a violation
-                    # traps fail-stop at the next host synchronization.
-                    qsa_assert_valid(
-                        mrope_decode_tail_verdict(
+                ):
+                    # Slow path only on failure: the legacy per-request
+                    # validation reproduces the exact error and its order.
+                    offset = 0
+                    for length in lengths:
+                        validate_mrope_decode_tail(
                             position_rows[offset : offset + length], ratio
-                        ),
-                        "qwen4_exp QSA unfinished MRoPE compression group requires "
-                        "a consecutive equal-axis text tail ending at the maximum "
-                        "position",
-                    )
-                offset += length
+                        )
+                        offset += length
+            else:
+                # One enqueue-only batched device assert replaces the
+                # per-request assert chain; a violation traps fail-stop at the
+                # next host synchronization.
+                qsa_assert_valid(
+                    mrope_decode_tail_verdict_packed(
+                        position_rows, expected_cu, ratio
+                    ),
+                    "qwen4_exp QSA unfinished MRoPE compression group requires "
+                    "a consecutive equal-axis text tail ending at the maximum "
+                    "position",
+                )
         current_cos, current_sin = build_qsa_rope(
             position_ids,
             rope_config,
@@ -845,14 +1161,19 @@ def build_incremental_step_plan(
             dtype=torch.bfloat16,
             device=device,
             logical_positions=None if target_mrope else logical_positions,
+            # Text-shaped transports (Base style, or MRoPE whose rows the
+            # logical-positions check inside build_qsa_rope proves
+            # equal-axis) engage the fused text kernel; target MRoPE keeps
+            # the eager builder.
+            inv_freq=None if target_mrope else cached_inv_freq(rope_config, device),
         )
     except ValueError as error:
         raise RuntimeError(
             f"qwen4_exp QSA draft incremental prefill {error}"
         ) from error
 
-    kv_tokens_per_block = int(context.indexer_kv_cache.seq_size_per_block)
-    state_tokens_per_block = int(context.indexer_state_cache.seq_size_per_block)
+    # Page sizes were read once above for the batched prep; the legacy
+    # validation keeps its exact checks and messages.
     if kv_tokens_per_block <= 0 or kv_tokens_per_block % ratio:
         raise RuntimeError(
             "qwen4_exp QSA indexer KV page size must be positive and divisible "
@@ -868,34 +1189,31 @@ def build_incremental_step_plan(
         )
     kv_entries_per_block = kv_tokens_per_block // ratio
 
-    row_offsets = torch.arange(max(lengths), dtype=torch.int64, device=device)
-    visible_lengths = prefixes[:, None] + row_offsets[None, :] + 1
-    valid_rows = (
-        row_offsets[None, :]
-        < torch.tensor(lengths, dtype=torch.int64, device=device)[:, None]
+    # The frozen grid tensors came from the batched prep above.  The int32
+    # padded grid doubles as the padded KV lengths and (flattened) as the
+    # visible-length rows the selection consumer reads; the per-request
+    # [1, length] FMHA rows are contiguous views into it (a leading size-1
+    # dim keeps them contiguous), so the plan never materializes the int64
+    # grid the legacy chain built only to cast away.
+    visible_lengths = prep.visible_lengths
+    compressed_lengths = prep.compressed_lengths
+    required_kv_columns = prep.required_kv_columns
+    required_state_columns = prep.required_state_columns
+    kv_lens_rows = tuple(
+        visible_lengths[request_idx : request_idx + 1, :length]
+        for request_idx, length in enumerate(lengths)
     )
-    visible_lengths = torch.where(valid_rows, visible_lengths, 0)
-    compressed_lengths = (visible_lengths // ratio).to(torch.int32)
-    final_compressed_lengths = (visible_ends // ratio).to(torch.int32)
-    required_kv_columns = (
-        final_compressed_lengths + kv_entries_per_block - 1
-    ) // kv_entries_per_block
+    padded_kv_lens = visible_lengths
 
-    required_state_columns = torch.tensor(
-        [
-            (prefix + length + state_tokens_per_block - 1) // state_tokens_per_block
-            for prefix, length in zip(prefix_values, lengths)
-        ],
-        dtype=torch.int32,
-    )
-
-    block_starts = logical_positions - logical_positions.remainder(ratio)
+    block_starts = prep.block_starts
     try:
         if target_mrope:
             # Each page-aligned suffix contains the first row of every new
             # group, including image groups with unequal/nonlinear axes.
-            sources = torch.arange(token_count, device=device)
-            sources = sources - logical_positions.remainder(ratio)
+            # Multimodal positions keep the eager MRoPE builder (which now
+            # reads the shared cached inv_freq table); the fused text kernel
+            # is only valid for proven equal-axis text transports.
+            sources = prep.mrope_sources
             block_positions = (
                 position_ids.to(device=device)
                 .reshape(token_count, index_factor)
@@ -915,30 +1233,18 @@ def build_incremental_step_plan(
                 token_count=token_count,
                 dtype=torch.bfloat16,
                 device=device,
+                inv_freq=cached_inv_freq(rope_config, device),
             )
     except ValueError as error:
         raise RuntimeError(
             f"qwen4_exp QSA draft incremental prefill {error}"
         ) from error
 
-    # Per-step selection constants that every layer previously rebuilt.
-    selection_row_map, selection_valid_rows, selection_valid = _build_selection_padding(
-        lengths, device=device
-    )
-    score_weights = torch.full(
-        (token_count, head_num),
-        1.0 / math.sqrt(head_dim),
-        dtype=torch.float32,
-        device=device,
-    )
-    padded_score_weights = score_weights.index_select(0, selection_row_map)
-    kv_lens_rows = _build_kv_lens_rows(prefixes_i32, lengths, device=device)
-    padded_kv_lens = torch.where(
-        selection_valid,
-        prefixes_i32.unsqueeze(1)
-        + torch.arange(1, max(lengths) + 1, dtype=torch.int32, device=device),
-        torch.zeros((), dtype=torch.int32, device=device),
-    ).contiguous()
+    score_weights = prep.score_weights
+    padded_score_weights = prep.padded_score_weights
+    selection_row_map = prep.selection_row_map
+    selection_valid_rows = prep.selection_valid_rows
+    selection_valid = prep.selection_valid
 
     return Qwen4ExpPrefillStepPlan(
         mode=(
@@ -959,11 +1265,7 @@ def build_incremental_step_plan(
         source_tensors=_collect_source_tensors(main_inputs),
         lengths=lengths,
         prefix_values=prefix_values,
-        cu_host=[0]
-        + [
-            total
-            for total in torch.tensor(lengths).cumsum(0).tolist()
-        ],
+        cu_host=prep.cu_host,
         tokens=token_count,
         batch_size=batch_size,
         max_len=max(lengths),
@@ -979,14 +1281,14 @@ def build_incremental_step_plan(
         kv_entries_per_block=kv_entries_per_block,
         state_tokens_per_block=state_tokens_per_block,
         required_state_columns=required_state_columns,
-        required_state_columns_device=required_state_columns.to(device),
-        prefixes_i64=prefixes,
-        prefixes_i32=prefixes_i32,
-        input_lengths_i32=input_lengths_i32,
+        required_state_columns_device=prep.required_state_columns_device,
+        prefixes_i64=prep.prefixes_i64,
+        prefixes_i32=prep.prefixes_i32,
+        input_lengths_i32=prep.input_lengths_i32,
         cu_seqlens=expected_cu,
-        logical_positions=logical_positions,
+        logical_positions=prep.logical_positions,
         visible_lengths=visible_lengths,
-        visible_lengths_i32=visible_lengths.reshape(-1).to(torch.int32),
+        visible_lengths_i32=prep.visible_lengths_i32,
         compressed_lengths=compressed_lengths,
         required_kv_columns=required_kv_columns,
         current_cos=current_cos,
@@ -1100,6 +1402,23 @@ def build_cold_step_plan(
             f"{token_count} tokens"
         )
     positions = position_ids.reshape(token_count, index_factor)
+    # One batched verdict replaces the per-request tail validation inside the
+    # loop below; only a failed verdict re-runs the legacy per-request checks,
+    # so their exact per-request error attribution is preserved.
+    mrope_tail_failed = False
+    if (
+        not context.is_mtp_draft
+        and is_qsa_rope_style(rope_config, "Mrope")
+        and any(seq_len % ratio for seq_len in lengths)
+    ):
+        packed_cu = torch.tensor(
+            [0] + list(torch.tensor(lengths).cumsum(0).tolist()),
+            dtype=torch.int32,
+            device=device,
+        )
+        mrope_tail_failed = not bool(
+            mrope_decode_tail_verdict_packed(positions, packed_cu, ratio)
+        )
     max_len = max(lengths)
     rotary_dim = int(rope_config.dim)
     rope_cos = torch.zeros(
@@ -1121,7 +1440,7 @@ def build_cold_step_plan(
                 seq_len, dtype=torch.int64, device=device
             )
         try:
-            if not context.is_mtp_draft and is_qsa_rope_style(rope_config, "Mrope"):
+            if mrope_tail_failed:
                 validate_mrope_decode_tail(positions[offset:end], ratio)
             cos, sin = build_qsa_rope(
                 positions[offset:end].reshape(-1),

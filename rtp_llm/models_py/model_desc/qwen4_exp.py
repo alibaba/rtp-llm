@@ -47,6 +47,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
     Qwen4ExpQSARuntimeContext,
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    has_nonzero_prefill_prefix,
     host_input_mirror,
 )
 from rtp_llm.models_py.modules import FMHAImplBase
@@ -203,16 +204,11 @@ class Qwen4ExpAttention(Qwen3NextAttention):
         )
 
         def _prefix_present(inputs) -> bool:
-            # Per-step mirror read: a device prefix_lengths tensor
-            # (RTP_LLM_DEVICE_INPUT) is read back once per step and cached by
-            # (inputs object, fingerprint); the layers of one step reuse it
-            # without another synchronization.
-            prefixes = host_input_mirror(inputs, "prefix_lengths")
-            return (
-                isinstance(prefixes, torch.Tensor)
-                and bool(prefixes.numel())
-                and bool(torch.any(prefixes != 0).item())
-            )
+            # Per-step frozen verdict: the mirror facts compute the
+            # ``torch.any(prefixes != 0).item()`` host chain once per step;
+            # this per-layer gate reads the cached boolean instead of
+            # re-dispatching that chain on every layer.
+            return has_nonzero_prefill_prefix(inputs)
 
         # A prefix-reuse target prefill may hand the runtime the raw query so
         # the fused preparation kernel owns the gemma norm; the runtime then
@@ -287,8 +283,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 rope_config=self.qsa_rope_config,
                 **({"raw_query": True} if raw_query else {}),
             )
-        prefixes = host_input_mirror(qsa_runtime.main_inputs, "prefix_lengths")
-        has_prefix = bool(prefixes.numel()) and bool(torch.any(prefixes != 0).item())
+        has_prefix = has_nonzero_prefill_prefix(qsa_runtime.main_inputs)
         if not bool(qsa_runtime.main_inputs.is_target_verify) and has_prefix:
             if self.is_mtp_draft:
                 input_lengths = host_input_mirror(
@@ -445,13 +440,18 @@ class Qwen4ExpAttention(Qwen3NextAttention):
 
                 with record_function_range("qwen4.qsa.indexer"):
                     prepared = None
+                    # Every packed window up to the context bound -- decode and
+                    # draft graphs, target verification and the prefill plan
+                    # window (previously the 33..4092 hole, which quantized the
+                    # same hidden states twice per layer, once for the gate and
+                    # once for the indexer q/k projection) -- shares the pair's
+                    # single input quantization. Both projections keep their
+                    # own weight scale and GEMM; the shared quant is bit-exact
+                    # for the input bytes and both outputs.
                     if (
                         type(self.qsa_indexer) is Qwen4ExpQSAIndexer
                         and hidden_states.ndim == 2
-                        and (
-                            1 <= hidden_states.shape[0] <= 32
-                            or 4093 <= hidden_states.shape[0] <= 32768
-                        )
+                        and 1 <= hidden_states.shape[0] <= 32768
                         and not any(
                             name in self.qsa_indexer.__dict__
                             for name in ("project", "project_raw", "split_projected")

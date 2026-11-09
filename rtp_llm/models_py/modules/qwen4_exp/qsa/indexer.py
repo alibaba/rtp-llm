@@ -49,6 +49,11 @@ def _normalized_rope_style_name(style: Any) -> str:
     return {"base": "Base", "mrope": "Mrope"}.get(value.lower(), value)
 
 
+# One constant inv_freq table per (base, rope_dim, device) geometry; see
+# cached_inv_freq below.
+_INV_FREQ_TABLES: dict = {}
+
+
 def is_qsa_rope_style(rope_config: Any, expected_style: str) -> bool:
     """Match a QSA RoPE style across pybind enum, string and integer forms."""
     return _normalized_rope_style_name(
@@ -112,6 +117,34 @@ def _validate_logical_cache_positions(
             f" actual[:6]={actual_head}, actual[-3:]={actual_tail},"
             f" expected_rows={expected.numel()})"
         )
+
+
+def cached_inv_freq(rope_config: Any, device: Any) -> torch.Tensor:
+    """Return the constant inverse-frequency table for one RoPE geometry.
+
+    The eager builders recompute ``base ** (-2 * arange(dim/2) / dim)`` on
+    every call, but the table only depends on ``(base, rope_dim, device)``,
+    so it is built once per geometry and reused.  The fused Triton text
+    kernel requires exactly this constant ``float32 [dim/2]`` table, and the
+    same values keep the eager fallback bit-identical.
+    """
+    base = float(rope_config.base)
+    rope_dim = int(rope_config.dim)
+    device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        # Resolve the implicit current device so cuda and cuda:N share one
+        # entry; tensor devices always carry an explicit index.
+        device = torch.device("cuda", torch.cuda.current_device())
+    key = (base, rope_dim, device)
+    table = _INV_FREQ_TABLES.get(key)
+    if table is None:
+        table = base ** (
+            -2.0
+            * torch.arange(rope_dim // 2, dtype=torch.float32, device=device)
+            / rope_dim
+        )
+        _INV_FREQ_TABLES[key] = table
+    return table
 
 
 def build_interleaved_mrope(
@@ -178,9 +211,9 @@ def build_interleaved_mrope(
     axes[1 : 3 * sections[1] : 3] = 1
     axes[2 : 3 * sections[2] : 3] = 2
 
-    inv_freq = float(rope_config.base) ** (
-        -2.0 * torch.arange(rotary_pairs, dtype=torch.float32, device=device) / rope_dim
-    )
+    # Shared per-geometry cache: drops the per-call arange/pow chain while
+    # producing the exact table the eager reference computes.
+    inv_freq = cached_inv_freq(rope_config, device)
     scale = _rope_scale(rope_config, "MRoPE")
     angle = positions[:, axes].float().div(scale) * inv_freq.unsqueeze(0)
     cos_half = torch.cos(angle)
@@ -276,6 +309,7 @@ def build_qsa_rope(
     dtype: torch.dtype,
     device: torch.device,
     logical_positions: Optional[torch.Tensor] = None,
+    inv_freq: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Dispatch the QSA indexer RoPE builder from ``rope_config.style``.
 
@@ -283,6 +317,10 @@ def build_qsa_rope(
     position component addresses the same absolute cache row.  Prefix-free
     target MRoPE prefill intentionally omits that check so its existing
     multimodal position behavior is unchanged.
+
+    ``inv_freq`` (e.g. :func:`cached_inv_freq`) lets the Base-style fused
+    text kernel engage; text-shaped transports pass it while multimodal
+    MRoPE keeps the eager builder either way.
     """
     _validate_indexer_rope_layout(rope_config)
     if is_qsa_rope_style(rope_config, "Base"):
@@ -293,6 +331,7 @@ def build_qsa_rope(
             dtype=dtype,
             device=device,
             logical_positions=logical_positions,
+            inv_freq=inv_freq,
         )
     if is_qsa_rope_style(rope_config, "Mrope"):
         if logical_positions is not None:
@@ -331,6 +370,74 @@ def mrope_decode_tail_verdict(
         tail_count - 1, -1, -1, device=positions.device
     )
     return (tail == expected[:, None].expand_as(tail)).all()
+
+
+def mrope_decode_tail_verdict_packed(
+    position_rows: torch.Tensor, cu_seqlens: torch.Tensor, compress_ratio: int
+) -> torch.Tensor:
+    """0-dim boolean verdict for validate_mrope_decode_tail over a packed batch.
+
+    ``position_rows`` is the packed ``[T, index_factor]`` position matrix and
+    ``cu_seqlens`` the matching integer ``[B + 1]`` partition of it
+    (``cu[0] == 0``, monotonic, ``cu[-1] == T``).  The verdict is True iff
+    :func:`mrope_decode_tail_verdict` is True for every request slice
+    ``position_rows[cu[b] : cu[b + 1]]``, computed by one masked batched
+    predicate instead of a per-request loop: a whole step validates without a
+    per-request kernel sequence or host synchronization.
+    """
+    if position_rows.dim() != 2:
+        raise ValueError(
+            "position_rows must be [T, index_factor], got "
+            f"{tuple(position_rows.shape)}"
+        )
+    if cu_seqlens.dim() != 1 or int(cu_seqlens.numel()) < 1:
+        raise ValueError("cu_seqlens must be an int [B + 1] vector")
+    if cu_seqlens.dtype not in (torch.int32, torch.int64):
+        raise ValueError(
+            f"cu_seqlens must be int32 or int64, got {cu_seqlens.dtype}"
+        )
+    if cu_seqlens.device != position_rows.device:
+        # The partition describes the packed rows, so it follows them across
+        # devices (host-transported combo positions with a device cu, or the
+        # reverse in component fixtures); the [B + 1] copy is a no-op on the
+        # matching-device hot path, matching the legacy per-request verdict
+        # that computed on each slice's own device.
+        cu_seqlens = cu_seqlens.to(position_rows.device)
+    if compress_ratio <= 0:
+        raise ValueError(f"compress_ratio must be positive, got {compress_ratio}")
+    token_count = int(position_rows.shape[0])
+    batch_size = int(cu_seqlens.numel()) - 1
+    ends = cu_seqlens[1:].to(torch.long)
+    lengths = ends - cu_seqlens[:-1].to(torch.long)
+    tail_counts = lengths % compress_ratio
+    request_ids = torch.repeat_interleave(
+        torch.arange(batch_size, dtype=torch.long, device=position_rows.device),
+        lengths,
+        output_size=token_count,
+    )
+    rows = position_rows.to(torch.long)
+    # The per-request verdict compares the tail against the request's global
+    # maximum position (over every axis), so reduce the axes first and the
+    # requests second.  Empty requests keep the neutral fill value: they have
+    # no tail rows, so their maximum is never read.
+    request_max = torch.full(
+        (batch_size,),
+        torch.iinfo(torch.long).min,
+        dtype=torch.long,
+        device=rows.device,
+    ).scatter_reduce_(
+        0, request_ids, rows.max(dim=1).values, reduce="amax", include_self=True
+    )
+    # A tail row is a token whose distance from the request end is smaller
+    # than the request's unfinished-group size; its expected value on every
+    # axis is the request maximum minus that distance.
+    distance_from_end = (ends - 1).index_select(0, request_ids) - torch.arange(
+        token_count, dtype=torch.long, device=rows.device
+    )
+    in_tail = distance_from_end < tail_counts.index_select(0, request_ids)
+    expected = request_max.index_select(0, request_ids) - distance_from_end
+    matched = (rows == expected.unsqueeze(1)).all(dim=1)
+    return (matched | ~in_tail).all()
 
 
 def validate_mrope_decode_tail(positions: torch.Tensor, compress_ratio: int) -> None:

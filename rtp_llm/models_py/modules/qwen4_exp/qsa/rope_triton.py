@@ -1,7 +1,7 @@
 """Text indexer RoPE with the existing BF16 rounding boundaries.
 
-Partial rotation is validated on SM90 and SM120; text-cache construction
-retains its SM120-only dispatch.
+Partial rotation and the fused text-cache construction are both validated
+on SM90 and SM120; every geometry/dtype/inv_freq guard is unchanged.
 """
 
 import math
@@ -12,13 +12,13 @@ import triton.language as tl
 from triton.language.extra.cuda import libdevice
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS"])
 def _text_rope(
     POS,
     INV_FREQ,
     COS,
     SIN,
-    ROWS: tl.constexpr,
+    ROWS,
     STRIDE: tl.constexpr,
     INV_SCALE: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -48,7 +48,7 @@ def try_build_text_rope(positions, config, style, *, dtype, device, inv_freq=Non
         positions.is_cuda
         and positions.device == device
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(device) == (12, 0)
+        and torch.cuda.get_device_capability(device) in ((9, 0), (12, 0))
         and positions.dtype in (torch.int32, torch.int64)
         and positions.ndim == 1
         and positions.numel() > 0
