@@ -48,7 +48,6 @@ def _load_config(*, tp_size=1, tp_rank=0, dtype=torch.float32, quant_config=None
             is_enabled=lambda: False,
             is_prefill_enabled=lambda: False,
         ),
-        ffn_disaggregate_config=types.SimpleNamespace(enable_ffn_disaggregate=False),
         get_attn_tp_size=lambda: tp_size,
         get_attn_tp_rank=lambda: tp_rank,
         get_ffn_tp_size=lambda: tp_size,

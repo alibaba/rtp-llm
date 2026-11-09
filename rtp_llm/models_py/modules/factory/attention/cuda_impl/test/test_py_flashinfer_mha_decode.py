@@ -763,8 +763,13 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
                     inputs[:active] = 1
                     count = 4 if capacity_inputs else active
                     params.fill_params(
-                        empty, lengths[:count], inputs[:count], blocks[:count], 64,
-                        forbid_realloc=forbid_realloc, planned_batch_size=4,
+                        empty,
+                        lengths[:count],
+                        inputs[:count],
+                        blocks[:count],
+                        64,
+                        forbid_realloc=forbid_realloc,
+                        planned_batch_size=4,
                     )
 
                 fill(4, False)
@@ -773,7 +778,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
                 slots = params.slot_mapping.view(4)
                 positions = params.positions_d.view(4)
                 batch_indices = params.batch_indice_d.view(4)
-                addresses = [value.data_ptr() for value in (slots, positions, batch_indices)]
+                addresses = [
+                    value.data_ptr() for value in (slots, positions, batch_indices)
+                ]
                 torch.cuda.synchronize()
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
@@ -785,12 +792,29 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
                     fill(active, True)
                     graph.replay()
                     torch.cuda.synchronize()
-                    expected_slots = [10 * (i + 1) * 64 + lengths[i].item() for i in range(active)]
-                    self.assertEqual(observed_slots.cpu().tolist(), expected_slots + [-1] * (4 - active))
-                    self.assertEqual(observed_positions.cpu().tolist(), lengths[:active].tolist() + [0] * (4 - active))
-                    self.assertEqual(observed_batches.cpu().tolist(), list(range(active)) + [0] * (4 - active))
+                    expected_slots = [
+                        10 * (i + 1) * 64 + lengths[i].item() for i in range(active)
+                    ]
+                    self.assertEqual(
+                        observed_slots.cpu().tolist(),
+                        expected_slots + [-1] * (4 - active),
+                    )
+                    self.assertEqual(
+                        observed_positions.cpu().tolist(),
+                        lengths[:active].tolist() + [0] * (4 - active),
+                    )
+                    self.assertEqual(
+                        observed_batches.cpu().tolist(),
+                        list(range(active)) + [0] * (4 - active),
+                    )
                     self.assertEqual(params.slot_mapping.numel(), active)
-                    self.assertEqual([value.data_ptr() for value in (slots, positions, batch_indices)], addresses)
+                    self.assertEqual(
+                        [
+                            value.data_ptr()
+                            for value in (slots, positions, batch_indices)
+                        ],
+                        addresses,
+                    )
 
     def test_device_decode_graph_tracks_active_slots_with_stale_tail(self):
         """A capacity-sized input is not an all-active batch on graph replay."""

@@ -426,11 +426,6 @@ def _validate_supported_parallelism(parallelism_config: Any) -> None:
                     "Context parallelism is not supported by the Qwen dense "
                     "newloader slice"
                 )
-    ffn_disaggregate = getattr(parallelism_config, "ffn_disaggregate_config", None)
-    if bool(getattr(ffn_disaggregate, "enable_ffn_disaggregate", False)):
-        raise ValueError(
-            "FFN disaggregation is not supported by the Qwen dense newloader slice"
-        )
 
 
 class Qwen3ForCausalLM(GptModelBase):
@@ -484,7 +479,6 @@ class Qwen3ForCausalLM(GptModelBase):
         if parallelism_config is None:
             raise ValueError("Qwen3 newloader requires parallelism_config")
         fmha_config = getattr(load_config, "fmha_config", None)
-        device_resource_config = getattr(load_config, "device_resource_config", None)
 
         super().__init__(
             config=model_config,
@@ -492,7 +486,6 @@ class Qwen3ForCausalLM(GptModelBase):
             weight=None,
             max_generate_batch_size=0,
             fmha_config=fmha_config,
-            device_resource_config=device_resource_config,
         )
 
         cfg = _extract_config_values(model_config, load_config)
@@ -577,9 +570,7 @@ class Qwen3ForCausalLM(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         for i, layer in enumerate(self.layers):
-            layer_fmha_impl = select_fmha_impl_for_layer(
-                fmha_impl, self.kv_cache, i
-            )
+            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
             hidden_states = layer(
                 hidden_states,
                 layer_fmha_impl,

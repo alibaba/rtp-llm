@@ -43,7 +43,6 @@ class MultimodalMixinFactory:
                     force_cpu_load_weights=(
                         engine_config.load_config.force_cpu_load_weights
                     ),
-                    device_resource_config=engine_config.device_resource_config,
                     parallelism_config=engine_config.parallelism_config,
                     moe_config=engine_config.moe_config,
                 )

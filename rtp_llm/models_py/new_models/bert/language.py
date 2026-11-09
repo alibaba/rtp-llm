@@ -435,7 +435,6 @@ class _BertNewLoaderBase(GptModelBase):
                 "hw_kernel_config",
                 None,
             ),
-            device_resource_config=getattr(load_config, "device_resource_config", None),
         )
         # The service derives ep_size=tp_size*dp_size even for dense models.
         # BERT has no expert weights or EP collectives; only TP shards apply.

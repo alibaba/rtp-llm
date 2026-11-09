@@ -71,7 +71,6 @@ def _model_config(checkpoint_path: str):
     config.tie_word_embeddings = False
     config.enable_fp32_lm_head = False
     config.attn_config.use_mla = True
-    config.mla_ops_type = "FLASH_INFER"
     config.attn_config.head_num = 2
     config.attn_config.kv_head_num = 2
     config.attn_config.q_lora_rank = 0
@@ -131,7 +130,6 @@ def _load_config(**overrides):
                 is_enabled=lambda: False,
                 is_prefill_enabled=lambda: False,
             ),
-            ffn_disaggregate_config=SimpleNamespace(enable_ffn_disaggregate=False),
         ),
         moe_config=SimpleNamespace(
             ll_num_max_token=1,
@@ -318,7 +316,7 @@ class KimiLinearNewLoaderTest(unittest.TestCase):
         for mode in (None, "generation_prefill_graph"):
             with self.subTest(mode=mode), patch(
                 "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
-                side_effect=lambda model_config, parallelism_config, weight, attn_inputs, fmha_config, is_cuda_graph, cuda_graph_selection_mode: SimpleNamespace(
+                side_effect=lambda model_config, parallelism_config, weight, attn_inputs, fmha_config, is_cuda_graph, cuda_graph_selection_mode, decode_cascade_max_requests=0: SimpleNamespace(
                     weight=weight, group_inputs=attn_inputs
                 ),
             ) as factory:

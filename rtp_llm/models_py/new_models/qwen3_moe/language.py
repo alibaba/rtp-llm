@@ -316,7 +316,6 @@ class Qwen3MoeForCausalLM(GptModelBase):
             weight=None,
             max_generate_batch_size=0,
             fmha_config=getattr(load_config, "fmha_config", None),
-            device_resource_config=getattr(load_config, "device_resource_config", None),
         )
         cfg = _extract_moe_config_values(model_config, load_config)
         tie_word_embeddings = getattr(model_config, "tie_word_embeddings", False)

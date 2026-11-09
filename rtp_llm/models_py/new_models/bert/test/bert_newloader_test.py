@@ -397,10 +397,16 @@ class BertNewloaderTest(unittest.TestCase):
             for rank in (0, 1):
                 with self.subTest(model_type=model_type, rank=rank):
                     model = self._load(
-                        _config(model_type), _weights(model_type),
-                        tp_size=2, tp_rank=rank, ep_size=2, ep_rank=rank,
+                        _config(model_type),
+                        _weights(model_type),
+                        tp_size=2,
+                        tp_rank=rank,
+                        ep_size=2,
+                        ep_rank=rank,
                     )
-                    self.assertEqual(model.embeddings.word_embeddings.weight.shape, (7, 4))
+                    self.assertEqual(
+                        model.embeddings.word_embeddings.weight.shape, (7, 4)
+                    )
 
     def test_position_embeddings_allow_shorter_deployment(self):
         for model_type in ("bert", "roberta"):
@@ -411,7 +417,9 @@ class BertNewloaderTest(unittest.TestCase):
                 model = self._load(config, weights)
                 torch.testing.assert_close(
                     model.embeddings.position_embeddings.weight,
-                    weights[f"{model_type}.embeddings.position_embeddings.weight"][:3].half(),
+                    weights[f"{model_type}.embeddings.position_embeddings.weight"][
+                        :3
+                    ].half(),
                 )
 
     def test_position_embeddings_reject_short_checkpoint(self):

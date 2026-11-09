@@ -85,7 +85,6 @@ def _base_model(config, hw_kernel_config=None):
             load_method=LoadMethod.SCRATCH,
             vit_config=None,
             merge_lora=False,
-            device_resource_config=None,
         )
     model.tokenizer = None
     return model
@@ -106,7 +105,6 @@ def _parallelism_config():
             is_enabled=lambda: False,
             is_prefill_enabled=lambda: False,
         ),
-        ffn_disaggregate_config=types.SimpleNamespace(enable_ffn_disaggregate=False),
         get_attn_tp_size=lambda: 1,
         get_attn_tp_rank=lambda: 0,
         get_ffn_tp_size=lambda: 1,
@@ -144,7 +142,6 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                 probe = object.__new__(BaseModel)
                 probe.model_config = kwargs["model_config"]
                 probe.parallelism_config = kwargs["parallelism_config"]
-                probe.device_resource_config = kwargs["device_resource_config"]
                 probe.load_method = kwargs["load_method"]
                 probe.force_cpu_load_weights = kwargs["force_cpu_load_weights"]
                 probe.moe_config = kwargs["moe_config"]
@@ -180,7 +177,6 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
             kv_cache_config=None,
             fmha_config=None,
             moe_config=None,
-            device_resource_config=None,
             runtime_config=types.SimpleNamespace(
                 warm_up=False,
                 model_warm_up=False,
@@ -524,8 +520,13 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
             is_quanted=True,
             dynamic=True,
         )
-        self.assertIsNone(model._new_loader_unsupported_reason())
-        self.assertTrue(model._use_new_loader())
+        # Dynamic per-tensor MoE is a CUDA/PPU execution capability, not a
+        # ROCm one. Test routing explicitly, independent of the test host.
+        with patch(
+            "rtp_llm.device.device_type.get_device_type", return_value=DeviceType.Cuda
+        ):
+            self.assertIsNone(model._new_loader_unsupported_reason())
+            self.assertTrue(model._use_new_loader())
 
     def test_device_moe_strategy_matrix_routes_or_fails_early(self):
         config = _model_config()
@@ -975,7 +976,6 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         base_model.model_config = config
         base_model.parallelism_config = _parallelism_config()
         base_model.force_cpu_load_weights = False
-        base_model.device_resource_config = None
         base_model.moe_config = None
 
         with self.assertRaisesRegex(ValueError, "p-tuning is not supported"):
@@ -988,7 +988,6 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         base_model.model_config = config
         base_model.parallelism_config = _parallelism_config()
         base_model.force_cpu_load_weights = False
-        base_model.device_resource_config = None
         base_model.moe_config = None
 
         with self.assertRaisesRegex(ValueError, "EPLB is not supported"):
@@ -1001,7 +1000,6 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         base_model.model_config = config
         base_model.parallelism_config = _parallelism_config()
         base_model.force_cpu_load_weights = False
-        base_model.device_resource_config = None
         base_model.moe_config = None
 
         with self.assertRaisesRegex(
@@ -1009,26 +1007,17 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         ):
             base_model._load_with_new_loader()
 
-    def test_layer_micro_batch_is_rejected_by_public_load(self):
+    def test_loader_route_without_retired_device_config(self):
         config = _model_config()
+        config.use_new_loader = True
         base_model = object.__new__(BaseModel)
         base_model.model_config = config
         base_model.parallelism_config = _parallelism_config()
         base_model.force_cpu_load_weights = False
         base_model.load_method = LoadMethod.SCRATCH
         base_model.moe_config = None
-        base_model.fmha_config = None
-        base_model.tokenizer = None
-        base_model.hw_kernel_config = types.SimpleNamespace(enable_cuda_graph=False)
-        base_model.device_resource_config = types.SimpleNamespace(
-            enable_layer_micro_batch=1
-        )
-
-        with patch.dict(os.environ, {"USE_NEW_LOADER": "1"}, clear=False):
-            with self.assertRaisesRegex(
-                ValueError, "layer micro-batch is not supported"
-            ):
-                base_model.load()
+        base_model.custom_module = None
+        self.assertIsNone(base_model._new_loader_unsupported_reason())
 
 
 if __name__ == "__main__":

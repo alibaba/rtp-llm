@@ -350,11 +350,6 @@ def _validate_supported_parallelism(parallelism_config: Any) -> None:
                     "Context parallelism is not supported by the dense GQA "
                     "newloader path"
                 )
-    ffn_disaggregate = getattr(parallelism_config, "ffn_disaggregate_config", None)
-    if bool(getattr(ffn_disaggregate, "enable_ffn_disaggregate", False)):
-        raise ValueError(
-            "FFN disaggregation is not supported by the dense GQA newloader path"
-        )
 
 
 class Qwen2ForCausalLM(GptModelBase):
@@ -411,7 +406,6 @@ class Qwen2ForCausalLM(GptModelBase):
         if parallelism_config is None:
             raise ValueError("Dense GQA newloader requires parallelism_config")
         fmha_config = getattr(load_config, "fmha_config", None)
-        device_resource_config = getattr(load_config, "device_resource_config", None)
 
         super().__init__(
             config=model_config,
@@ -419,7 +413,6 @@ class Qwen2ForCausalLM(GptModelBase):
             weight=None,
             max_generate_batch_size=0,
             fmha_config=fmha_config,
-            device_resource_config=device_resource_config,
         )
 
         cfg = _extract_config_values(model_config, load_config)

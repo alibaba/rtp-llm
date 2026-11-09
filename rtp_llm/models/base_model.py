@@ -515,7 +515,6 @@ class BaseModel(object):
             self.model_config,
             skip_python_model=skip_python_model,
             force_cpu_load_weights=self.force_cpu_load_weights,
-            device_resource_config=self.device_resource_config,
             parallelism_config=self.parallelism_config,
             moe_config=self.moe_config,
         )
@@ -727,7 +726,6 @@ class BaseModel(object):
             parallelism_config=self.parallelism_config,
             moe_config=self.moe_config,
             fmha_config=self.fmha_config,
-            device_resource_config=self.device_resource_config,
             keep_mla_checkpoint_weights=self.keep_mla_checkpoint_weights,
             custom_weight_mappings=custom_weight_mappings,
         )

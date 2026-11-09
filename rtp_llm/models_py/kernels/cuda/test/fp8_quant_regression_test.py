@@ -1,4 +1,4 @@
-import os
+from contextlib import nullcontext
 from unittest import SkipTest, TestCase, main, mock
 
 import torch
@@ -16,20 +16,62 @@ from rtp_llm.models_py.kernels.cuda.fp8_quant import (  # isort: skip
 
 
 class Fp8ScaleAllocationTest(TestCase):
+    def test_dense_silu_rounding_flag_reaches_v2(self):
+        x = torch.ones((2, 1024), dtype=torch.bfloat16)
+        module = "rtp_llm.models_py.kernels.cuda.fp8_quant"
+        with mock.patch(module + "._validate_native_quant_input"), mock.patch(
+            module + ".torch.cuda.device", return_value=nullcontext()
+        ), mock.patch(module + "._resolve_compute_op") as resolve:
+            output, scale = sgl_per_token_group_quant_fp8(
+                x,
+                group_size=128,
+                fuse_silu_and_mul=True,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=True,
+                preserve_silu_mul_rounding=True,
+            )
+        resolve.assert_called_once_with("per_token_group_quant_fp8_v2")
+        self.assertEqual(
+            resolve.return_value.call_args.kwargs, {"preserve_silu_mul_rounding": True}
+        )
+        self.assertEqual(output.shape, (2, 512))
+        self.assertEqual(scale.shape, (2, 1))
+
+    def test_dense_silu_rounding_rejects_incompatible_layout(self):
+        for dtype, width in ((torch.float16, 1024), (torch.bfloat16, 512)):
+            with self.subTest(dtype=dtype, width=width):
+                with self.assertRaisesRegex(ValueError, "Dense SiLU quant requires"):
+                    sgl_per_token_group_quant_fp8(
+                        torch.ones((2, width), dtype=dtype),
+                        group_size=128,
+                        fuse_silu_and_mul=True,
+                        column_major_scales=True,
+                        scale_tma_aligned=True,
+                        scale_ue8m0=True,
+                        preserve_silu_mul_rounding=True,
+                    )
+
     def test_ue8m0_group32_and_group128_packed_layout(self):
         for group_size in (32, 128):
             for tokens in (0, 1, 5, 8):
                 for groups in (1, 3, 4, 5):
-                    with self.subTest(group_size=group_size, tokens=tokens, groups=groups):
+                    with self.subTest(
+                        group_size=group_size, tokens=tokens, groups=groups
+                    ):
                         scale = create_per_token_group_quant_fp8_output_scale(
-                            (tokens, groups * group_size), "cpu", group_size,
+                            (tokens, groups * group_size),
+                            "cpu",
+                            group_size,
                             column_major_scales=True,
                             scale_tma_aligned=True,
                             scale_ue8m0=True,
                         )
                         self.assertEqual(scale.dtype, torch.int32)
                         self.assertEqual(scale.shape, (tokens, (groups + 3) // 4))
-                        self.assertEqual(scale.stride(), (1, max(1, (tokens + 3) // 4 * 4)))
+                        self.assertEqual(
+                            scale.stride(), (1, max(1, (tokens + 3) // 4 * 4))
+                        )
 
 
 class Fp8QuantRegressionTest(TestCase):
@@ -79,19 +121,10 @@ class Fp8QuantRegressionTest(TestCase):
                     scale, expected_scale.reshape(1, 1), rtol=0, atol=0
                 )
 
-    def test_forced_legacy_rejects_v2_only_features(self):
-        x = torch.ones((2, 256), dtype=torch.bfloat16, device="cuda")
-        with mock.patch.dict(
-            os.environ, {"DSV4_FP8_QUANT_KERNEL": "legacy"}, clear=False
-        ), self.assertRaisesRegex(ValueError, "legacy does not support"):
-            sgl_per_token_group_quant_fp8(x, group_size=128, fuse_silu_and_mul=True)
-
-    def test_forced_v2_rejects_unsupported_group_size(self):
-        x = torch.ones((2, 192), dtype=torch.bfloat16, device="cuda")
-        with mock.patch.dict(
-            os.environ, {"DSV4_FP8_QUANT_KERNEL": "v2"}, clear=False
-        ), self.assertRaisesRegex(ValueError, "v2 does not support"):
-            sgl_per_token_group_quant_fp8(x, group_size=96)
+    def test_fused_quant_rejects_unsupported_v2_group_size(self):
+        x = torch.ones((2, 384), dtype=torch.bfloat16, device="cuda")
+        with self.assertRaisesRegex(ValueError, "not supported by v2"):
+            sgl_per_token_group_quant_fp8(x, group_size=96, fuse_silu_and_mul=True)
 
     def test_v2_large_offset_matches_reference_at_first_and_last_rows(self):
         if getattr(torch.version, "hip", None) is not None:
@@ -129,8 +162,7 @@ class Fp8QuantRegressionTest(TestCase):
         x[0].copy_(first_pattern)
         x[-1].copy_(last_pattern)
 
-        with mock.patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "v2"}):
-            quantized, scales = sgl_per_token_group_quant_fp8(x, group_size=group_size)
+        quantized, scales = sgl_per_token_group_quant_fp8(x, group_size=group_size)
         torch.cuda.synchronize()
 
         boundary_input = torch.stack((x[0], x[-1])).float()

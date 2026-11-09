@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING, Optional, Protocol
 
 if TYPE_CHECKING:
     from rtp_llm.config.model_config import ModelConfig
-    from rtp_llm.ops import DeviceResourceConfig, MoeConfig, ParallelismConfig
+    from rtp_llm.ops import MoeConfig, ParallelismConfig
 
 
 class NewLoaderConfigSource(Protocol):
@@ -29,7 +29,6 @@ def new_loader_unsupported_reason(
     *,
     skip_python_model: bool = False,
     force_cpu_load_weights: bool = False,
-    device_resource_config: Optional["DeviceResourceConfig"] = None,
     parallelism_config: Optional["ParallelismConfig"] = None,
     moe_config: Optional["MoeConfig"] = None,
 ) -> Optional[str]:
@@ -109,11 +108,6 @@ def new_loader_unsupported_reason(
                     f"{device_type.name} {moe_runtime_method} MoE is unsupported "
                     "by NewLoader; no matching fused-MoE strategy is registered"
                 )
-    if (
-        device_resource_config is not None
-        and device_resource_config.enable_layer_micro_batch != 0
-    ):
-        return "layer micro-batch is not supported by this newloader slice"
     if parallelism_config is None:
         return None
 
@@ -147,6 +141,4 @@ def new_loader_unsupported_reason(
             "Independent FFN TP/sequence parallelism is not supported by this "
             "newloader slice"
         )
-    if parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate:
-        return "FFN disaggregation is not supported by this newloader slice"
     return None

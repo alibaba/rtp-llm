@@ -73,16 +73,24 @@ class QuantConfigTest(unittest.TestCase):
     def test_modelopt_exclusion_aliases_reach_legacy_consumers(self):
         for schema in (self._flat_modelopt_config(), self._grouped_modelopt_config()):
             with self.subTest(schema=schema):
-                schema.update({
-                    "ignore": ["a"], "ignored_layers": ["b"],
-                    "ignore_patterns": ["c"], "modules_to_not_convert": ["d"],
-                    "exclude": ["e"], "exclude_modules": ["f"],
-                })
+                schema.update(
+                    {
+                        "ignore": ["a"],
+                        "ignored_layers": ["b"],
+                        "ignore_patterns": ["c"],
+                        "modules_to_not_convert": ["d"],
+                        "exclude": ["e"],
+                        "exclude_modules": ["f"],
+                    }
+                )
                 config = self._load_config({"quantization_config": schema})
                 self.assertEqual(config.exclude_modules, set("abcdef"))
 
     def test_checkpoint_quant_method_is_validated(self):
-        for key, method_key in (("quantization_config", "quant_method"), ("quantization", "quant_algo")):
+        for key, method_key in (
+            ("quantization_config", "quant_method"),
+            ("quantization", "quant_algo"),
+        ):
             for value in (None, "", " ", 1, True):
                 with self.subTest(key=key, value=value):
                     with self.assertRaisesRegex(ValueError, method_key):

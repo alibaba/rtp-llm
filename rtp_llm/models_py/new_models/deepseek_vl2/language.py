@@ -34,7 +34,6 @@ from rtp_llm.models_py.new_models.deepseek_v3.language import (
     build_rope_cache,
     nonnegative_int,
     positive_int,
-    validate_deepseek_mla_backend,
     validate_deepseek_newloader_eplb,
 )
 from rtp_llm.models_py.new_models.deepseek_v3.mlp import DeepSeekV32MLP
@@ -163,7 +162,6 @@ def _extract_config_values(
             f"use_mla mismatch: ModelConfig({use_mla})/"
             f"checkpoint({checkpoint_use_mla})"
         )
-    validate_deepseek_mla_backend(model_config, use_mla, "DeepSeek-VL2")
     q_lora_rank_value = raw_config.get("q_lora_rank", 1536)
     q_lora_rank = (
         0
@@ -534,7 +532,6 @@ class DeepSeekVLV2ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
             weight=None,
             max_generate_batch_size=0,
             fmha_config=load_config.fmha_config,
-            device_resource_config=load_config.device_resource_config,
         )
         ckpt_path = model_config.ckpt_path
         raw_config = _read_language_config(ckpt_path)

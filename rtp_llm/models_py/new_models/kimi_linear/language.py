@@ -34,7 +34,6 @@ from rtp_llm.models_py.new_models.deepseek_v3.language import (
     checkpoint_path,
     positive_int,
     read_config_json,
-    validate_deepseek_mla_backend,
     validate_deepseek_newloader_eplb,
 )
 from rtp_llm.models_py.new_models.deepseek_v3.mlp import DeepSeekV32MLP
@@ -120,7 +119,6 @@ def _extract_config_values(
     use_mla = _strict_bool(attn_config.use_mla, "attn_config.use_mla")
     if not use_mla:
         raise ValueError("Kimi Linear full-attention layers require MLA")
-    validate_deepseek_mla_backend(model_config, use_mla, "Kimi Linear")
 
     hidden_size = positive_int(raw["hidden_size"], "hidden_size")
     checkpoint_layers = positive_int(raw["num_hidden_layers"], "num_hidden_layers")
@@ -1052,7 +1050,6 @@ class KimiLinearForCausalLM(GptModelBase):
             weight=None,
             max_generate_batch_size=0,
             fmha_config=load_config.fmha_config,
-            device_resource_config=load_config.device_resource_config,
         )
         self._cfg = cfg
         self._checkpoint_num_layers = cfg["checkpoint_layers"]

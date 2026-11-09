@@ -26,7 +26,6 @@ def _parallelism(ep_size=1):
             is_enabled=lambda: False,
             is_prefill_enabled=lambda: False,
         ),
-        ffn_disaggregate_config=types.SimpleNamespace(enable_ffn_disaggregate=False),
         get_attn_tp_size=lambda: 1,
         get_attn_tp_rank=lambda: 0,
         get_ffn_tp_size=lambda: 1,
@@ -349,8 +348,7 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
         fmha_impl = types.SimpleNamespace(fmha_params=None)
 
         with mock.patch(
-            "rtp_llm.models_py.new_models.qwen3_vl.model."
-            "select_fmha_impl_for_layer",
+            "rtp_llm.models_py.new_models.qwen3_vl.model." "select_fmha_impl_for_layer",
             return_value=fmha_impl,
         ):
             outputs = model(inputs, fmha_impl)
@@ -423,8 +421,7 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
             "reshape_extra_input_to_deepstack",
             return_value=deepstack,
         ), mock.patch(
-            "rtp_llm.models_py.new_models.qwen3_vl.model."
-            "select_fmha_impl_for_layer",
+            "rtp_llm.models_py.new_models.qwen3_vl.model." "select_fmha_impl_for_layer",
             return_value=fmha_impl,
         ) as select_fmha:
             outputs = model(inputs, fmha_impl)

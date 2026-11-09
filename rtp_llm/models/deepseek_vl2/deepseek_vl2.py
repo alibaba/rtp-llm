@@ -7,7 +7,6 @@ from transformers import AutoTokenizer
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.ops import MlaOpsType
 from rtp_llm.utils.model_weight import yarn_get_mscale
 
 
@@ -113,9 +112,7 @@ class DeepSeekVLV2(BaseModel):
             )
             config.attn_config.rope_config.dim = config.attn_config.rope_head_dim
             config.attn_config.rope_config.offset = config.attn_config.nope_head_dim
-            config.attn_config.rope_config.style = (
-                5 if config.mla_ops_type == MlaOpsType.MHA else 0
-            )
+            config.attn_config.rope_config.style = 0
             rope_scaling = config_json.get("rope_scaling")
             if rope_scaling is not None:
                 if not isinstance(rope_scaling, dict):

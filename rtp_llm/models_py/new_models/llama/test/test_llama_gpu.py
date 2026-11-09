@@ -43,9 +43,6 @@ class LlamaGpuTest(unittest.TestCase):
                 is_enabled=lambda: False,
                 is_prefill_enabled=lambda: False,
             ),
-            ffn_disaggregate_config=types.SimpleNamespace(
-                enable_ffn_disaggregate=False
-            ),
             get_attn_tp_size=lambda: 1,
             get_attn_tp_rank=lambda: 0,
             get_ffn_tp_size=lambda: 1,

@@ -60,7 +60,6 @@ def _parallelism(
             is_enabled=lambda: False,
             is_prefill_enabled=lambda: False,
         ),
-        ffn_disaggregate_config=types.SimpleNamespace(enable_ffn_disaggregate=False),
     )
 
 

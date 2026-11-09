@@ -203,7 +203,6 @@ class Qwen2LoadTest(unittest.TestCase):
         lm_head_tp_rank=None,
         cp_enabled=False,
         prefill_cp_enabled=False,
-        ffn_disaggregate=False,
     ):
         attn_tp_size = tp_size if attn_tp_size is None else attn_tp_size
         attn_tp_rank = tp_rank if attn_tp_rank is None else attn_tp_rank
@@ -219,9 +218,6 @@ class Qwen2LoadTest(unittest.TestCase):
             prefill_cp_config=types.SimpleNamespace(
                 is_enabled=lambda: cp_enabled,
                 is_prefill_enabled=lambda: prefill_cp_enabled,
-            ),
-            ffn_disaggregate_config=types.SimpleNamespace(
-                enable_ffn_disaggregate=ffn_disaggregate
             ),
             get_attn_tp_size=lambda: attn_tp_size,
             get_attn_tp_rank=lambda: attn_tp_rank,
@@ -415,11 +411,12 @@ class Qwen2LoadTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Independent FFN"):
             Qwen2ForCausalLM(self._config(), load_config)
 
-    def test_ffn_disaggregation_is_rejected(self):
-        load_config = self._load_config(ffn_disaggregate=True)
-
-        with self.assertRaisesRegex(ValueError, "FFN disaggregation"):
-            Qwen2ForCausalLM(self._config(), load_config)
+    def test_load_without_retired_ffn_config(self):
+        load_config = self._load_config()
+        self.assertFalse(
+            hasattr(load_config.parallelism_config, "ffn_disaggregate_config")
+        )
+        Qwen2ForCausalLM(self._config(), load_config)
 
     def test_separate_lm_head_topology_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "lm_head_tp partition"):

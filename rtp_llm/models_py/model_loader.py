@@ -131,7 +131,6 @@ class NewLoaderConfig:
     parallelism_config: Any = None
     moe_config: Any = None
     fmha_config: Any = None
-    device_resource_config: Any = None
     attn_tp_size: Optional[int] = None
     attn_tp_rank: Optional[int] = None
     ffn_tp_size: Optional[int] = None

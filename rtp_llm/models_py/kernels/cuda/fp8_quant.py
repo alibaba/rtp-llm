@@ -1,7 +1,6 @@
 """CUDA FP8 quant helpers without grouped-GEMM package initialization."""
 
 import importlib
-import os
 from functools import lru_cache
 from typing import List, Optional, Tuple, Union
 
@@ -176,6 +175,7 @@ def sgl_per_token_group_quant_fp8(
     scale_ue8m0: bool = False,
     fuse_silu_and_mul: bool = False,
     masked_m: Optional[torch.Tensor] = None,
+    preserve_silu_mul_rounding: bool = False,
 ):
     if x.ndim < 2:
         raise ValueError(
@@ -191,6 +191,21 @@ def sgl_per_token_group_quant_fp8(
         raise ValueError("FP8 group quantization input must be contiguous")
     if fuse_silu_and_mul and x.shape[-1] % 2 != 0:
         raise ValueError(f"fused SiLU input width must be even, got {x.shape[-1]}")
+    if preserve_silu_mul_rounding and not (
+        fuse_silu_and_mul
+        and masked_m is None
+        and x.ndim == 2
+        and x.dtype == torch.bfloat16
+        and group_size == 128
+        and x.shape[-1] % 1024 == 0
+        and column_major_scales
+        and scale_tma_aligned
+        and scale_ue8m0
+    ):
+        raise ValueError(
+            "Dense SiLU quant requires BF16 [tokens, 2 * hidden], hidden divisible by 512, "
+            "group 128, unmasked input, and TMA-aligned column-major UE8M0 scales"
+        )
 
     out_shape = (*x.shape[:-1], x.shape[-1] // (2 if fuse_silu_and_mul else 1))
     if out_shape[-1] % group_size != 0:
@@ -209,7 +224,6 @@ def sgl_per_token_group_quant_fp8(
         scale_ue8m0=scale_ue8m0,
     )
     if x.numel() > 0:
-        quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
 
         def can_use_v2() -> bool:
             if group_size not in (16, 32, 64, 128):
@@ -227,34 +241,21 @@ def sgl_per_token_group_quant_fp8(
             # consistently once the quantized matrix has at least ~4M elements.
             return x.numel() >= 4 * 1024 * 1024
 
-        if quant_kernel not in ("auto", "legacy", "v2"):
-            raise ValueError(
-                "DSV4_FP8_QUANT_KERNEL must be one of auto, legacy, v2; "
-                f"got {quant_kernel!r}"
-            )
-
         requires_v2 = masked_m is not None or fuse_silu_and_mul
-        if quant_kernel == "legacy" and requires_v2:
-            raise ValueError(
-                "DSV4_FP8_QUANT_KERNEL=legacy does not support masked_m or "
-                "fuse_silu_and_mul"
-            )
-        if quant_kernel == "v2" and not can_use_v2():
-            raise ValueError(
-                "DSV4_FP8_QUANT_KERNEL=v2 does not support this group_size or "
-                "masked/fused configuration"
-            )
-        if quant_kernel == "auto" and requires_v2 and not can_use_v2():
+        if requires_v2 and not can_use_v2():
             raise ValueError(
                 "masked_m/fuse_silu_and_mul requires the v2 FP8 quant kernel, "
                 "but this configuration is not supported by v2"
             )
 
-        use_v2 = quant_kernel == "v2" or (
-            quant_kernel == "auto" and should_auto_use_v2()
-        )
+        use_v2 = should_auto_use_v2()
         with torch.cuda.device(x.device):
             if use_v2:
+                rounding_kwargs = (
+                    {"preserve_silu_mul_rounding": True}
+                    if preserve_silu_mul_rounding
+                    else {}
+                )
                 _resolve_compute_op("per_token_group_quant_fp8_v2")(
                     x,
                     x_q,
@@ -266,6 +267,7 @@ def sgl_per_token_group_quant_fp8(
                     scale_ue8m0,
                     fuse_silu_and_mul,
                     masked_m,
+                    **rounding_kwargs,
                 )
             else:
                 _resolve_compute_op("per_token_group_quant_fp8")(

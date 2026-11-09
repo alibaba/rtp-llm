@@ -629,7 +629,9 @@ class DeepSeekV32MlaAttention(RtpModule):
             and attn_inputs.cache_store_inputs is not None
             and attn_inputs.cache_store_writer is not None
         ):
-            attn_inputs.cache_store_writer.write(attn_inputs.cache_store_inputs, kv_cache)
+            attn_inputs.cache_store_writer.write(
+                attn_inputs.cache_store_inputs, kv_cache
+            )
         return topk_indices
 
     def forward(

@@ -23,7 +23,6 @@ from rtp_llm.models_py.new_models.deepseek_vl2.vision import (
 )
 from rtp_llm.models_py.quant_methods import QuantizationConfig
 from rtp_llm.models_py.registry import get_model_class
-from rtp_llm.ops import MlaOpsType
 
 _RUN_LEGACY_TESTS = os.environ.get("RTP_LLM_RUN_DEEPSEEK_VL2_LEGACY_TESTS", "0") == "1"
 
@@ -59,7 +58,6 @@ def _parallelism(
             is_enabled=lambda: False,
             is_prefill_enabled=lambda: False,
         ),
-        ffn_disaggregate_config=types.SimpleNamespace(enable_ffn_disaggregate=False),
         get_attn_tp_size=lambda: resolved_attn_tp_size,
         get_attn_tp_rank=lambda: resolved_attn_tp_rank,
         get_ffn_tp_size=lambda: tp_size,
@@ -171,7 +169,6 @@ def _model_config(
         enable_fp32_lm_head=False,
         tie_word_embeddings=tie_word_embeddings,
         eplb_config=types.SimpleNamespace(enable_eplb=False),
-        mla_ops_type=MlaOpsType.AUTO,
         attn_config=types.SimpleNamespace(
             head_num=2,
             kv_head_num=2,
@@ -956,7 +953,7 @@ class DeepSeekVLV2NewloaderTest(unittest.TestCase):
             self.assertEqual(config["topk_method"], "greedy")
             self.assertFalse(config["correction_bias"])
 
-    def test_eplb_and_mla_mha_fallback_fail_before_model_construction(self):
+    def test_eplb_fails_before_model_construction(self):
         with tempfile.TemporaryDirectory() as model_path:
             raw = _raw_language_config(use_mla=True)
             config = _model_config(model_path, use_mla=True)
@@ -964,14 +961,8 @@ class DeepSeekVLV2NewloaderTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "EPLB is not supported"):
                 _extract_config_values(config, _load_config(), raw)
 
-            config.eplb_config.enable_eplb = False
-            config.mla_ops_type = MlaOpsType.MHA
-            with self.assertRaisesRegex(ValueError, "expanded-MHA fallback"):
-                _extract_config_values(config, _load_config(), raw)
-
             non_mla_raw = _raw_language_config(use_mla=False)
             non_mla_config = _model_config(model_path, use_mla=False)
-            non_mla_config.mla_ops_type = MlaOpsType.MHA
             values = _extract_config_values(
                 non_mla_config,
                 _load_config(),
@@ -1376,7 +1367,6 @@ class DeepSeekVLV2NewloaderTest(unittest.TestCase):
         model.max_generate_batch_size = 1
         model.fmha_config = object()
         model.hw_kernel_config = object()
-        model.device_resource_config = object()
         constructed = object()
         with mock.patch(
             "rtp_llm.models_py.model_desc.generic_moe.GenericMoeModel",

@@ -126,3 +126,25 @@ The real two-GPU embedding deployment remains blocked by the host's missing
 `iommu=pt`; no RCCL safety check or host setting was bypassed. Sparse MLA PD,
 CUDA MLA graph shrink and SM100 group-32 still require their specified hardware.
 These outstanding deployment checks must not be presented as completed smoke.
+
+### Rebase compatibility validation: 2026-11-09
+
+Rebased onto main `4085c8177c89fdc925e1ce70138cdd803dae69af` in an
+independent worktree. The unvalidated `qwen_3_dspark` draft registration and
+runtime refactor are not included; the target-side auxiliary-capture fix is.
+
+* Updated NewLoader consumers of the removed DeviceResourceConfig,
+  FFN-disaggregation configuration and expanded-MHA selector. Tests now use
+  the remaining public configuration contract instead of obsolete fixtures.
+* Preserved main's dense SiLU FP8 rounding flag through the shared quantizer,
+  including validation and v2 dispatch assertions. The retired
+  `DSV4_FP8_QUANT_KERNEL` switch is not reintroduced.
+* All 2,058 project Python files passed syntax parsing. The selected regression
+  set passed 222 tests with 11 legacy-only cases initially disabled; enabling
+  the DeepSeek-VL2 legacy compatibility target then passed all 41 of its tests,
+  including those 11 cases. BERT/RoBERTa TP2 uses real CPU/Gloo processes.
+
+These checks reused the container's existing Torch 2.10/ROCm 7.2 native
+libraries; main's validated Torch version is now 2.11. They do not establish a
+fresh native build, CUDA/H20/SM100 smoke success, or trained DSpARK draft
+generation. No large-model GPU job was started because the host GPUs were busy.

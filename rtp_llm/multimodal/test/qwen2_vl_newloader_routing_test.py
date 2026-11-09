@@ -43,7 +43,6 @@ class Qwen2VLNewLoaderRoutingTest(unittest.TestCase):
                 load_method=LoadMethod.SCRATCH,
                 force_cpu_load_weights=False,
             ),
-            device_resource_config=types.SimpleNamespace(enable_layer_micro_batch=0),
             parallelism_config=None,
             moe_config=None,
         )
@@ -89,7 +88,6 @@ class Qwen2VLNewLoaderRoutingTest(unittest.TestCase):
                 load_method=LoadMethod.SCRATCH,
                 force_cpu_load_weights=False,
             ),
-            device_resource_config=types.SimpleNamespace(enable_layer_micro_batch=0),
             parallelism_config=None,
             moe_config=None,
         )

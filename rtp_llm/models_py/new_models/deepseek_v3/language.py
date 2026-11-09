@@ -31,7 +31,6 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.new_models.model_base import select_fmha_impl_for_layer
 from rtp_llm.models_py.weight_mapper import WeightsMapper
-from rtp_llm.ops import MlaOpsType
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
@@ -496,20 +495,6 @@ def validate_deepseek_newloader_eplb(
         raise ValueError(f"EPLB is not supported by the {model_name} newloader path")
 
 
-def validate_deepseek_mla_backend(
-    model_config: Any,
-    use_mla: bool,
-    model_name: str,
-) -> None:
-    """Reject the legacy expanded-MHA fallback for an MLA checkpoint."""
-
-    if use_mla and getattr(model_config, "mla_ops_type", None) == MlaOpsType.MHA:
-        raise ValueError(
-            f"{model_name} newloader does not support the legacy expanded-MHA "
-            "fallback for an MLA checkpoint"
-        )
-
-
 # ------------------------------------------------------------------ #
 #  Config extraction (mirrors DeepSeekV2._from_hf)
 # ------------------------------------------------------------------ #
@@ -581,7 +566,6 @@ def extract_config_values(
                 "DeepSeek newloader requires an MLA attention backend; "
                 "the legacy expanded-MHA fallback is not supported"
             )
-        validate_deepseek_mla_backend(model_config, use_mla, "DeepSeek")
 
     rms_norm_eps = _positive_float(
         _get(
@@ -957,7 +941,6 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
     ):
         parallelism_config = load_config.parallelism_config
         fmha_config = load_config.fmha_config
-        device_resource_config = load_config.device_resource_config
 
         super().__init__(
             config=model_config,
@@ -965,7 +948,6 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
             weight=None,
             max_generate_batch_size=0,
             fmha_config=fmha_config,
-            device_resource_config=device_resource_config,
         )
         self._keep_mla_checkpoint_weights = load_config.keep_mla_checkpoint_weights
         self._mla_kernel_layout: Optional[MlaKernelWeightLayout] = None

@@ -1602,18 +1602,14 @@ class TestAiterPrefillAttnOpPagedCudaGraphWorkspace(unittest.TestCase):
         device = torch.device("cuda")
         block_table = torch.zeros(3, 4, dtype=torch.int32, device=device)
         fmha_params = SimpleNamespace(
-            cu_seqlens_q=torch.tensor(
-                [0, 8, 16, 24], dtype=torch.int32, device=device
-            ),
+            cu_seqlens_q=torch.tensor([0, 8, 16, 24], dtype=torch.int32, device=device),
             cu_seqlens_k=torch.tensor(
                 [0, 40, 80, 120], dtype=torch.int32, device=device
             ),
             kv_cache_block_id_device=block_table,
         )
         attn_inputs = SimpleNamespace(
-            input_lengths_device=torch.full(
-                (3,), 8, dtype=torch.int32, device=device
-            ),
+            input_lengths_device=torch.full((3,), 8, dtype=torch.int32, device=device),
             prefix_lengths_device=torch.full(
                 (3,), 32, dtype=torch.int32, device=device
             ),

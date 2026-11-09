@@ -530,15 +530,24 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 expected_config = {"qk_rope_head_dim": 8, "rope_theta": 50000.0}
                 if original_max:
                     expected_config["rope_scaling"] = {
-                        "type": "yarn", "factor": 4.0,
+                        "type": "yarn",
+                        "factor": 4.0,
                         "original_max_position_embeddings": 16,
-                        "beta_fast": 32.0, "beta_slow": 1.0,
-                        "mscale": 1.0, "mscale_all_dim": 0.0,
+                        "beta_fast": 32.0,
+                        "beta_slow": 1.0,
+                        "mscale": 1.0,
+                        "mscale_all_dim": 0.0,
                     }
-                actual = build_rope_cache(disk_config, 32, torch.device("cpu"), model_config=config)
+                actual = build_rope_cache(
+                    disk_config, 32, torch.device("cpu"), model_config=config
+                )
                 expected = build_rope_cache(expected_config, 32, torch.device("cpu"))
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-                self.assertFalse(torch.equal(actual, build_rope_cache(disk_config, 32, torch.device("cpu"))))
+                self.assertFalse(
+                    torch.equal(
+                        actual, build_rope_cache(disk_config, 32, torch.device("cpu"))
+                    )
+                )
 
     def test_local_rope_cache_preserves_reference_numerics(self):
         max_seq_len = 32
@@ -1619,15 +1628,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                         NewModelLoader._validate_runtime_backends(indexer, "cuda")
         self._clear_indexer_runtime_dependency_caches()
 
-    def test_config_rejects_legacy_expanded_mha_fallback(self):
+    def test_mla_loader_route_without_retired_backend_selector(self):
         config = _model_config()
-        config.mla_ops_type = "MHA"
-        with self.assertRaisesRegex(ValueError, "expanded-MHA fallback"):
-            extract_config_values(config, _load_config(), _raw_config())
-
-    def test_expanded_mha_loader_route_falls_back_unless_explicit(self):
-        config = _model_config()
-        config.mla_ops_type = "MHA"
         config.require_weight_update = False
         model = object.__new__(DeepSeekV2)
         model.model_config = config
@@ -1637,11 +1639,10 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             BaseModel, "_new_loader_unsupported_reason", return_value=None
         ):
             config.use_new_loader = None
-            self.assertFalse(model._use_new_loader())
+            self.assertTrue(model._use_new_loader())
 
             config.use_new_loader = True
-            with self.assertRaisesRegex(ValueError, "expanded-MHA fallback"):
-                model._use_new_loader()
+            self.assertTrue(model._use_new_loader())
 
     def test_sparse_indexer_publishes_its_own_prefill_cache_group(self):
         attention = object.__new__(DeepSeekV32MlaAttention)
@@ -1657,7 +1658,9 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             (True, False, True),
             (True, True, False),
         ):
-            with self.subTest(is_prefill=is_prefill, has_inputs=has_inputs, has_writer=has_writer):
+            with self.subTest(
+                is_prefill=is_prefill, has_inputs=has_inputs, has_writer=has_writer
+            ):
                 writer = mock.Mock()
                 store_inputs = object() if has_inputs else None
                 inputs = types.SimpleNamespace(
@@ -1666,7 +1669,9 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                     cache_store_writer=writer if has_writer else None,
                 )
                 impl = types.SimpleNamespace(
-                    fmha_params=object(), attn_inputs=inputs, cp_params=None,
+                    fmha_params=object(),
+                    attn_inputs=inputs,
+                    cp_params=None,
                     is_sparse=lambda: True,
                 )
                 result = attention._run_sparse_indexer(

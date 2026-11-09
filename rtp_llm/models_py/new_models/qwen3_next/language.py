@@ -1906,7 +1906,6 @@ class Qwen3NextForCausalLM(GptModelBase):
         )
         parallelism_config = cfg["parallelism_config"]
         fmha_config = getattr(load_config, "fmha_config", None)
-        device_resource_config = getattr(load_config, "device_resource_config", None)
 
         super().__init__(
             config=model_config,
@@ -1914,7 +1913,6 @@ class Qwen3NextForCausalLM(GptModelBase):
             weight=None,
             max_generate_batch_size=0,
             fmha_config=fmha_config,
-            device_resource_config=device_resource_config,
         )
 
         self._cfg = cfg

@@ -149,7 +149,6 @@ class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
     ):
         parallelism_config = getattr(load_config, "parallelism_config", None)
         fmha_config = getattr(load_config, "fmha_config", None)
-        device_resource_config = getattr(load_config, "device_resource_config", None)
 
         super().__init__(
             config=model_config,
@@ -157,7 +156,6 @@ class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
             weight=None,
             max_generate_batch_size=0,
             fmha_config=fmha_config,
-            device_resource_config=device_resource_config,
         )
         self._keep_mla_checkpoint_weights = load_config.keep_mla_checkpoint_weights
         self._mla_kernel_layout = None
