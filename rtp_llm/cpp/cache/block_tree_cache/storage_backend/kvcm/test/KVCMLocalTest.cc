@@ -853,9 +853,11 @@ TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
     auto* quarantine_metrics = metrics_reporter->getMetricsGroup<RtpLLMRemoteCacheQuarantineMetrics>();
     ASSERT_NE(quarantine_metrics, nullptr);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    for (int period = 0; period < 3; ++period) {
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    }
 
     kv_cache_manager::Locations locations{
         kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_uri"}}};
@@ -899,18 +901,22 @@ TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
-    // Snapshot consumes gauge samples; inspect the unchanged quarantine state only once.
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
+    // Healthy I/O must leave the reported quarantine stocks unchanged.
+    for (int period = 0; period < 3; ++period) {
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
+    }
 
     backend.backend->shutdown();
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
     EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    for (int period = 0; period < 3; ++period) {
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    }
 }
 
 TEST(KVCMLocalTest, RankZeroAbortsWhenQuarantinedBlocksExceedConfiguredRatio) {
