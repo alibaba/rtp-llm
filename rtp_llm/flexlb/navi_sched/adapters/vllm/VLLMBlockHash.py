@@ -79,7 +79,19 @@ def calculate_vllm_block_hashes(
     """Return vLLM sha256_cbor block hashes as uint64 wire values."""
     if block_size <= 0:
         raise ValueError("block_size must be positive")
-    token_ids = tuple(int(token_id) for token_id in prompt_token_ids)
+    return _hash_normalized_token_ids(
+        tuple(map(int, prompt_token_ids)), block_size, request=request
+    )
+
+
+def _hash_normalized_token_ids(
+    token_ids: tuple[int, ...],
+    block_size: int,
+    *,
+    request=None,
+) -> list[int]:
+    if block_size <= 0:
+        raise ValueError("block_size must be positive")
     full_block_count = len(token_ids) // block_size
     parent_hash = hashlib.sha256(_encode_text("0")).digest()
     hash_request = None

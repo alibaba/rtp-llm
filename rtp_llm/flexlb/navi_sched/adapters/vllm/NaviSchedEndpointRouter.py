@@ -10,7 +10,7 @@ import zlib
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 
-from .VLLMBlockHash import calculate_vllm_block_hashes
+from .VLLMBlockHash import _hash_normalized_token_ids
 
 logger = logging.getLogger("vllm.navi_sched.client")
 _MAX_REPLAY_BYTES = 2 * 1024 * 1024
@@ -87,7 +87,7 @@ class NaviSchedEndpointRouter:
             options["explicit_cache_checkpoint_position"] = (
                 explicit_cache_checkpoint_position
             )
-        token_ids = [int(token_id) for token_id in prompt_token_ids]
+        token_ids = tuple(map(int, prompt_token_ids))
         if type(
             explicit_cache_checkpoint_position
         ) is not int or not 0 <= explicit_cache_checkpoint_position <= len(token_ids):
@@ -95,7 +95,7 @@ class NaviSchedEndpointRouter:
                 "explicit cache checkpoint position must be within the prompt"
             )
         hashes = (
-            calculate_vllm_block_hashes(
+            _hash_normalized_token_ids(
                 token_ids,
                 self._block_size,
                 request=block_hash_request,
