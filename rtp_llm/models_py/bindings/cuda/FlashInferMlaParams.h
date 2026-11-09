@@ -31,7 +31,7 @@ private:
     torch::Tensor slot_mapping_h_;
     torch::Tensor slot_mapping_d_;
 
-    // Helper method to refresh buffer shapes and copy to device (single memcpy)
+    // Refresh shapes and copy up to three ranges, skipping unused page-index capacity.
     void
     refreshBuffer(int batch_size, int input_token_num, int page_num, int reuse_page_num, int batch_reuse_info_size);
 
