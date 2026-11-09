@@ -78,5 +78,39 @@ class MultiprocessPreprocessExecutorTest(unittest.TestCase):
         executor._rebuild_pool.assert_not_called()
 
 
+    def test_queue_wait_timeout_without_progress_counts_toward_rebuild(self):
+        executor = MultiprocessPreprocessExecutor.__new__(
+            MultiprocessPreprocessExecutor
+        )
+        executor._pool_lock = threading.Lock()
+        executor._consecutive_timeouts = 0
+        executor._max_consecutive_timeouts = 1
+        executor._completed_tasks = 0
+        executor._last_timeout_completed = 0
+        executor._rebuild_pool = Mock()
+
+        executor._on_wait_timeout([])
+
+        executor._rebuild_pool.assert_called_once()
+        self.assertEqual(executor._consecutive_timeouts, 0)
+
+    def test_queue_wait_timeout_with_progress_keeps_pool(self):
+        executor = MultiprocessPreprocessExecutor.__new__(
+            MultiprocessPreprocessExecutor
+        )
+        executor._pool_lock = threading.Lock()
+        executor._consecutive_timeouts = 0
+        executor._max_consecutive_timeouts = 1
+        executor._completed_tasks = 1
+        executor._last_timeout_completed = 0
+        executor._rebuild_pool = Mock()
+
+        executor._on_wait_timeout([])
+
+        executor._rebuild_pool.assert_not_called()
+        self.assertEqual(executor._consecutive_timeouts, 0)
+        self.assertEqual(executor._last_timeout_completed, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

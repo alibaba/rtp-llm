@@ -199,6 +199,10 @@ message MultimodalInputsPB {
     int64 timeout_ms = 4;
     reserved 5;
     reserved "v41_inputs";
+    // Request-level download region parsed by the sender from the
+    // gateway-injected x_dashscope_inner_workspace_meta header. One value
+    // applies to every multimodal_inputs entry of this request.
+    string region = 6;
 }
 
 enum TensorDataTypePB {
@@ -582,6 +586,8 @@ message StartProfileRequestPB {
     string trace_name = 1;
     int32 start_step = 2;
     int32 num_steps = 3;
+    // Notify all world ranks (TP and DP) via the receiving TP leader.
+    // start_step is counted locally; this does not synchronize execution steps.
     bool enable_all_rank = 4;
 }
 
@@ -727,6 +733,54 @@ service EmbeddingRpcService {
     rpc health(EmbeddingHealthRequestPB) returns (EmptyPB);
 }
 
+// Coordinator sends this only after it no longer needs completion evidence.
+message ForgetTransferTasksRequestPB {
+    repeated string task_ids = 1;
+}
+
+// Read-only query of worker-local memory transfer execution records.
+message QueryTransferTasksRequestPB {
+    repeated string task_ids = 1;
+}
+
+message QueryTransferTasksResponsePB {
+    message TaskState {
+        enum State {
+            NOT_FOUND = 0;  // No completion evidence; never treat as finished.
+            RUNNING = 1;    // Completion has not been confirmed.
+            FINISHED = 2;   // No further block access, whether successful or failed.
+        }
+        string task_id = 1;
+        State state = 2;
+    }
+    // One entry per requested ID, including duplicates and missing IDs.
+    // Clients match by ID; a missing response entry is not completion evidence.
+    repeated TaskState tasks = 1;
+}
+
+// Coordinator sends this only after it no longer needs completion evidence.
+message ForgetKVCMOperationsRequestPB {
+    repeated string operation_ids = 1;
+}
+
+// Read-only query of worker-local KVCM operation execution records.
+message QueryKVCMOperationsRequestPB {
+    repeated string operation_ids = 1;
+}
+
+message QueryKVCMOperationsResponsePB {
+    message OperationState {
+        enum State {
+            NOT_FOUND = 0;  // No completion evidence; never treat as finished.
+            RUNNING = 1;
+            FINISHED = 2;   // No further block access, whether successful or failed.
+        }
+        string operation_id = 1;
+        State state = 2;
+    }
+    repeated OperationState operations = 1;
+}
+
 message MemoryOperationRequestPB {
     message CopyItem {
         int32 mem_block = 1;
@@ -754,6 +808,7 @@ message MemoryOperationRequestPB {
     // Optional diagnostics. Older peers omit these and retain task-local grouping.
     uint64 transfer_workflow_id = 7;
     uint64 transfer_parent_id = 8;
+    string task_id = 9;  // One execution ID shared by every rank in this submission.
 }
 
 message MemoryOperationResponsePB {
@@ -924,6 +979,8 @@ message RemoteOperationRequestPB {
     // Empty preserves one block per URI. Otherwise each positive count gives
     // the number of consecutive physical group_tags/block_ids for that URI.
     repeated uint32 uri_block_counts = 9;
+    // One execution ID shared by every rank in this payload submission.
+    string operation_id = 10;
 }
 
 message RemoteMetadataRequestPB {
@@ -991,6 +1048,10 @@ message RemoteOperationResponsePB {
     // submitted payload I/O stopped accessing caller buffers. It does not prove
     // a metadata commit or remote target drain. Absent/false remains unknown.
     bool payload_buffer_safe = 6;
+    // Absent means unknown, not SDK success. This is not a buffer-safety proof.
+    oneof sdk_result {
+        bool sdk_failed = 7;
+    }
 }
 
 message FunctionResponsePB {
@@ -1108,6 +1169,10 @@ service RpcService {
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
+    rpc ForgetTransferTasks(ForgetTransferTasksRequestPB) returns (EmptyPB);
+    rpc ForgetKVCMOperations(ForgetKVCMOperationsRequestPB) returns (EmptyPB);
+    rpc QueryTransferTasks(QueryTransferTasksRequestPB) returns (QueryTransferTasksResponsePB);
+    rpc QueryKVCMOperations(QueryKVCMOperationsRequestPB) returns (QueryKVCMOperationsResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
     rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);

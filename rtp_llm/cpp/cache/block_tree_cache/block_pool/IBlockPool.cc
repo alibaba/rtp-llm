@@ -2,14 +2,31 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <sstream>
 
 namespace rtp_llm {
+namespace {
+
+std::unique_lock<std::mutex> lockFrozenObserver(const std::shared_ptr<FrozenBlockObserver>& observer) {
+    if (observer && observer->mutex != nullptr) {
+        return std::unique_lock<std::mutex>(*observer->mutex);
+    }
+    return {};
+}
+
+}  // namespace
 
 IBlockPool::IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config): config_(std::move(config)) {
     RTP_LLM_CHECK(config_ != nullptr);
     RTP_LLM_CHECK(config_->physical_block_count > 1);
+    RTP_LLM_CHECK_WITH_INFO(std::isfinite(config_->frozen_block_abort_ratio)
+                               && config_->frozen_block_abort_ratio >= 0.0
+                               && config_->frozen_block_abort_ratio <= 1.0,
+                           "frozen_block_abort_ratio must be a finite number in [0, 1]");
     allocated_.assign(config_->physical_block_count, 0);
     tree_refcounts_.assign(config_->physical_block_count, 0);
     for (std::vector<uint32_t>& typed_refcounts : tree_refcounts_by_type_) {
@@ -25,6 +42,15 @@ IBlockPool::IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config): confi
 void IBlockPool::setCapacityChangeCallback(std::function<void()> callback) {
     std::lock_guard<std::mutex> lock(mutex_);
     capacity_change_callback_ = std::move(callback);
+}
+
+void IBlockPool::setFrozenBlockObserver(std::shared_ptr<FrozenBlockObserver> observer) {
+    std::atomic_store(&frozen_block_observer_, std::move(observer));
+}
+
+void IBlockPool::clearFrozenBlockObserver(const std::shared_ptr<FrozenBlockObserver>& expected) {
+    auto current = expected;
+    std::atomic_compare_exchange_strong(&frozen_block_observer_, &current, std::shared_ptr<FrozenBlockObserver>{});
 }
 
 const std::string& IBlockPool::poolName() const {
@@ -98,6 +124,17 @@ void IBlockPool::incTreeRef(BlockIdxType block, BlockTreeRefType ref_type) {
 
 void IBlockPool::incTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type) {
     const size_t ref_type_index = treeRefTypeIndex(ref_type);
+    if (ref_type != BlockTreeRefType::FROZEN) {
+        incTreeRefImpl(blocks, ref_type_index);
+        return;
+    }
+    const auto observer = std::atomic_load(&frozen_block_observer_);
+    const auto lock     = lockFrozenObserver(observer);
+    incTreeRefImpl(blocks, ref_type_index);
+    notifyFrozenBlocks(observer, blocks);
+}
+
+void IBlockPool::incTreeRefImpl(const BlockIdList& blocks, size_t ref_type_index) {
     mutateAllocatedBlocks(
         blocks,
         [](BlockIdxType) {},
@@ -118,15 +155,78 @@ void IBlockPool::incTreeRefNoLock(BlockIdxType block, size_t ref_type_index) {
         ++tree_referenced_block_counts_[ref_type_index];
     }
     ++typed_refcount;
+    if (ref_type_index == static_cast<size_t>(BlockTreeRefType::FROZEN)) {
+        RTP_LLM_LOG_DEBUG("cache block freeze pool=%s block=%d frozen_ref_count=%u frozen_blocks=%zu",
+                          poolName().c_str(),
+                          block,
+                          typed_refcount,
+                          tree_referenced_block_counts_[ref_type_index]);
+    }
     updateActiveBlocksNumNoLock(block, was_active);
     updateAvailableBlocksNumNoLock(block, was_available);
 }
 
 void IBlockPool::freezeBlock(BlockIdxType block) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
-    checkInitializedNoLock();
-    checkAllocatedNoLock(block);
-    incTreeRefNoLock(block, treeRefTypeIndex(BlockTreeRefType::FROZEN));
+    const auto observer = std::atomic_load(&frozen_block_observer_);
+    const auto lock     = lockFrozenObserver(observer);
+    freezeBlockImpl(block, observer);
+}
+
+void IBlockPool::freezeBlockLocked(BlockIdxType block) noexcept {
+    freezeBlockImpl(block, std::atomic_load(&frozen_block_observer_));
+}
+
+void IBlockPool::freezeBlockImpl(BlockIdxType block, const std::shared_ptr<FrozenBlockObserver>& observer) noexcept {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        checkInitializedNoLock();
+        checkAllocatedNoLock(block);
+        // Each transfer task holds its own FROZEN reference. Overlapping tasks
+        // (e.g. an eviction copy and a remote write) each add one hold; the block
+        // stays frozen until every holder has confirmed its I/O has stopped.
+        const size_t frozen_index = treeRefTypeIndex(BlockTreeRefType::FROZEN);
+        incTreeRefNoLock(block, frozen_index);
+        if (config_->frozen_block_abort_ratio > 0.0) {
+            const size_t frozen_blocks = tree_referenced_block_counts_[frozen_index];
+            const size_t total_blocks  = totalBlocksNumNoLock();
+            const double frozen_ratio  = static_cast<double>(frozen_blocks) / static_cast<double>(total_blocks);
+            if (frozen_ratio > config_->frozen_block_abort_ratio) {
+                RTP_LLM_LOG_ERROR("pool [%s] frozen blocks exceed abort ratio %.6f: frozen=%zu total=%zu",
+                                  config_->pool_name.c_str(),
+                                  config_->frozen_block_abort_ratio,
+                                  frozen_blocks,
+                                  total_blocks);
+                fflush(stdout);
+                fflush(stderr);
+                std::abort();
+            }
+        }
+    }
+    if (observer && observer->on_changed) {
+        observer->on_changed(this, block);
+    }
+}
+
+void IBlockPool::unfreezeBlock(BlockIdxType block) {
+    const auto observer = std::atomic_load(&frozen_block_observer_);
+    const auto lock     = lockFrozenObserver(observer);
+    unfreezeBlockImpl(block, observer);
+}
+
+void IBlockPool::unfreezeBlockLocked(BlockIdxType block) {
+    unfreezeBlockImpl(block, std::atomic_load(&frozen_block_observer_));
+}
+
+void IBlockPool::unfreezeBlockImpl(BlockIdxType block, const std::shared_ptr<FrozenBlockObserver>& observer) {
+    decTreeRefImpl(BlockIdList{block}, treeRefTypeIndex(BlockTreeRefType::FROZEN), observer);
+}
+
+void IBlockPool::notifyFrozenBlocks(const std::shared_ptr<FrozenBlockObserver>& observer, const BlockIdList& blocks) {
+    if (observer && observer->on_changed) {
+        for (const BlockIdxType block : blocks) {
+            observer->on_changed(this, block);
+        }
+    }
 }
 
 bool IBlockPool::isFrozen(BlockIdxType block) const {
@@ -142,6 +242,18 @@ void IBlockPool::decTreeRef(BlockIdxType block, BlockTreeRefType ref_type) {
 
 void IBlockPool::decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type) {
     const size_t ref_type_index = treeRefTypeIndex(ref_type);
+    if (ref_type != BlockTreeRefType::FROZEN) {
+        decTreeRefImpl(blocks, ref_type_index);
+        return;
+    }
+    const auto observer = std::atomic_load(&frozen_block_observer_);
+    const auto lock     = lockFrozenObserver(observer);
+    decTreeRefImpl(blocks, ref_type_index, observer);
+}
+
+void IBlockPool::decTreeRefImpl(const BlockIdList&                          blocks,
+                                size_t                                      ref_type_index,
+                                const std::shared_ptr<FrozenBlockObserver>& observer) {
     mutateAllocatedBlocks(
         blocks,
         [this, ref_type_index](BlockIdxType block) {
@@ -168,7 +280,15 @@ void IBlockPool::decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type
             }
             updateActiveBlocksNumNoLock(block, was_active);
             updateAvailableBlocksNumNoLock(block, was_available);
-        });
+            if (ref_type_index == static_cast<size_t>(BlockTreeRefType::FROZEN)) {
+                RTP_LLM_LOG_DEBUG("cache block unfreeze pool=%s block=%d frozen_ref_count=%u frozen_blocks=%zu",
+                                  poolName().c_str(),
+                                  block,
+                                  typed_refcount,
+                                  tree_referenced_block_counts_[ref_type_index]);
+            }
+        },
+        [this, &observer, &blocks] { notifyFrozenBlocks(observer, blocks); });
 }
 
 uint32_t IBlockPool::treeRefCount(BlockIdxType block) const {

@@ -477,7 +477,7 @@ def forward_layers(
                 and h.dtype == torch.bfloat16
                 and h.is_contiguous()
                 and h.ndim == 2
-                and h.shape[0] >= 8192
+                and h.shape[0] > 0
                 and h.shape[1] == 5120
                 and v4.hc_mult == 4
                 and not torch.cuda.is_current_stream_capturing()
@@ -577,12 +577,8 @@ def forward_layers(
                 # each rank-local request chunk is therefore not necessarily the
                 # request's absolute start position. Use CP metadata instead of
                 # deriving request ids from rank-local cu_seqlens.
-                sp_per_req = cp_ctx.prefix_lengths.to(
-                    device=positions.device, dtype=torch.int64
-                ).contiguous()
-                req_id_per_token = cp_ctx.req_id_per_token.to(
-                    device=positions.device, dtype=torch.int32
-                ).contiguous()
+                sp_per_req = cp_ctx.prefix_lengths
+                req_id_per_token = cp_ctx.req_id_per_token
             elif cu_seqlens is not None and cu_seqlens.numel() >= 2:
                 starts = cu_seqlens[:-1].to(device=positions.device, dtype=torch.int64)
                 sp_per_req = (

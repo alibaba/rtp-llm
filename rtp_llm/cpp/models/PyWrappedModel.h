@@ -90,20 +90,21 @@ public:
     const torch::Tensor& proposalLogitsBuffer() const {
         return proposal_logits_buffer_;
     }
-    GptModelOutputs            forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
-    void                       releaseBuffers() override;
-    torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
-    torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
-    bool                       hasMtpTargetHiddenBuffer() const override;
-    void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void                       prepareAttentionInputs(const GptModelInputs& inputs,
-                                                      bool                  skip_forward_event_sync,
-                                                      const GptModelInputs* cache_store_host_inputs = nullptr,
-                                                      bool                  defer_graph_prepare     = false);
-    void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
-    std::string                waitCacheStorePublication() override;
-    HiddenStateCaptureStats    hiddenStateCaptureStats() const;
-    std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
+    GptModelOutputs                       forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
+    void                                  releaseBuffers() override;
+    std::optional<DSparkCapturedCapacity> capturedDSparkCapacity(int64_t batch) const override;
+    torch::Tensor                         getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor                         getMtpLastHiddenStates(int64_t num_tokens) override;
+    bool                                  hasMtpTargetHiddenBuffer() const override;
+    void                                  prepareAttentionInputs(const GptModelInputs& inputs) override;
+    void                                  prepareAttentionInputs(const GptModelInputs& inputs,
+                                                                 bool                  skip_forward_event_sync,
+                                                                 const GptModelInputs* cache_store_host_inputs = nullptr,
+                                                                 bool                  defer_graph_prepare = false);
+    void                                  updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    std::string                           waitCacheStorePublication() override;
+    HiddenStateCaptureStats               hiddenStateCaptureStats() const;
+    std::optional<std::string>            takeDeferredHiddenStateCaptureError() override;
 
 private:
     friend struct test::PyWrappedModelTestPeer;
@@ -180,6 +181,7 @@ private:
         std::unique_ptr<GraphBase> runner;
         CudaGraphState             state;
     };
+    int                                dspark_capacity_query_width_{0};
     std::vector<DSparkCudaGraphBudget> dspark_graph_budgets_;
     std::vector<DSparkBudgetGraph>     dspark_budget_graphs_;
     py::object                         py_model_;
@@ -515,6 +517,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                            params.sp_config.sp_dspark_verify_budget,
                                            params.sp_config.sp_dspark_verify_budget_mode == "adaptive");
             dspark_budget_graphs_.reserve(dspark_graph_budgets_.size());
+#if USING_CUDA
+            dspark_capacity_query_width_ =
+                params.parallelism_config.tp_size == 1 && params.sp_config.model_type == "deepseek_v41_dspark"
+                        && params.sp_config.sp_dspark_verify_budget_mode == "fixed" && dspark_graph_budgets_.size() == 1
+                        && dspark_graph_budgets_[0].packed && dspark_graph_budgets_[0].budget >= 0
+                        && dspark_graph_budgets_[0].budget < params.sp_config.gen_num_per_cycle ?
+                    static_cast<int>(params.sp_config.gen_num_per_cycle + 1) :
+                    0;
+#endif
             RTP_LLM_LOG_INFO("[dspark-graph] role=%s mode=%s budgets=%zu gamma=%ld",
                              dspark_model_role_ == DSparkModelRole::COMMIT ? "commit" : "target",
                              params.sp_config.sp_dspark_verify_budget_mode.c_str(),
@@ -536,9 +547,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             syncCudaGraphCaptureRanks(params.parallelism_config, "after_initialize_before_initCapture");
             if (use_dspark_budget_graphs) {
                 for (const auto& budget : dspark_graph_budgets_) {
-                    auto budget_params                    = graph_params;
-                    budget_params.num_tokens_per_bs       = budget.tokensPerBatch();
-                    budget_params.is_packed_target_verify = budget.packed;
+                    auto budget_params                        = graph_params;
+                    budget_params.num_tokens_per_bs           = budget.tokensPerBatch();
+                    budget_params.dspark_capacity_query_width = dspark_capacity_query_width_;
+                    budget_params.is_packed_target_verify     = budget.packed;
                     RTP_LLM_LOG_INFO("[dspark-graph] capture role=%s budget=%d packed=%d tokens_per_batch=%d",
                                      dspark_model_role_ == DSparkModelRole::COMMIT ? "commit" : "target",
                                      budget.budget,

@@ -8,6 +8,12 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "transfer_task_registry",
+    hdrs = ["transfer/TransferTaskRegistry.h", "transfer/TransferTaskId.h"],
+    visibility = ["//visibility:public"],
+)
+
 # Leaf pool target: DeviceBlockPool owns its backing and inherits the common
 # IBlockPool lifecycle. Keeping this target below allocator/group targets avoids
 # a cycle with the full block_tree_cache library.
@@ -120,6 +126,7 @@ cc_library(
         "CacheStageMetrics.h",
         "group_set/GroupSetResource.h",
         "evict/BlockTreeEvictor.h",
+        "evict/VictimSelectionMetrics.h",
         "evict/EvictionTaskRunner.h",
         "load/BlockTreeLoader.h",
         "load/LoadJoinRegistry.h",
@@ -137,8 +144,11 @@ cc_library(
         "ScopeRollback.h",
         "storage_backend/StorageBackend.h",
         "storage_backend/StorageBackendExecutor.h",
+        "storage_backend/KVCMOperationId.h",
+        "storage_backend/KVCMOperationRegistry.h",
         "TreeNode.h",
         "transfer/BlockTransferDispatcher.h",
+        "transfer/FrozenTask.h",
         "transfer/MultiRankBlockTransferEngine.h",
         "transfer/PerRankBlockTransferEngine.h",
         "transfer/TransferExecutor.h",
@@ -154,6 +164,7 @@ cc_library(
         "transfer/TransferTypes.h",
         "transfer/TransferStageTimer.h",
         "transfer/CompletionStage.h",
+        "transfer/TransferTaskId.h",
         "block_pool/DiskBlockIO.h",
         "block_pool/DiskBlockPool.h",
         "block_pool/DiskMountGuard.h",
@@ -167,6 +178,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/cache/events:kv_cache_event",
         ":block_tree_task_pool",
+        ":transfer_task_registry",
         ":crc_dump_writer",
         ":device_block_pool",
         ":storage_completion_admission",

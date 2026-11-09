@@ -23,6 +23,7 @@
 #include <c10/core/InferenceMode.h>
 #include <algorithm>
 #include <chrono>
+#include <cinttypes>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -929,7 +930,9 @@ absl::Status NormalEngine::step() try {
         if (propose_params_) {
             step_profiler_.startStep();
         }
-        RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
+        ++execute_step_;
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+            "engine.normal.execute(step=%" PRId64 ",stream_size=%zu)", execute_step_, streams.size());
         status = executor_->process(streams, tps_schedule_time_us);
         if (propose_params_) {
             step_profiler_.finishStep();

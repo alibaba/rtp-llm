@@ -91,8 +91,8 @@ def _max_with_nan(a, b):
 @triton.jit
 def _torch_amax(values, BLOCK_SIZE: tl.constexpr):
     if BLOCK_SIZE <= 4:
-        # TILE=128 uses one lane per reduced value for B<=4 in the qualified
-        # CUDA13 toolchain, matching Torch's descending-offset shuffle tree.
+        # On the qualified CUDA13 toolchain this reduction matches Torch's
+        # descending-offset shuffle tree for B<=4.
         return tl.reduce(values, 1, _max_with_nan)
     else:
         # Larger groups may span registers: force the Torch tree explicitly.
@@ -382,7 +382,8 @@ def select_candidates(
     if not build_bitmap:
         flags = None
         if nblocks <= topk_blocks and not (
-            topk_blocks == 2048 and candidate_topk.is_available("prefill", logits.device)
+            topk_blocks == 2048
+            and candidate_topk.is_available("prefill", logits.device)
         ):
             # Every block is selected, so only pooling/pinning/filtering remain.
             _prefill_candidate_pool_kernel[(rows, triton.cdiv(out.shape[1], 128))](
@@ -404,12 +405,8 @@ def select_candidates(
                 token_indices is not None,
             )
             return out, None
-    # Long rows must retain Torch's NaN-before-+inf selection contract. The
-    # native coarse-bin selector does not guarantee that at overflow boundaries.
-    use_v3 = (
-        topk_blocks == 2048
-        and nblocks <= 2048
-        and candidate_topk.is_available("prefill", logits.device)
+    use_v3 = topk_blocks == 2048 and candidate_topk.is_available(
+        "prefill", logits.device
     )
     block_lengths = (
         torch.empty(rows, dtype=torch.int32, device=logits.device) if use_v3 else None
@@ -417,7 +414,7 @@ def select_candidates(
     # Keep the pooled TopK input FP32 even for raw BF16 logits: narrowing the
     # reduction output would change the existing selection/tie contract.
     scores = torch.empty((rows, nblocks), dtype=torch.float32, device=logits.device)
-    _prefill_candidate_pool_kernel[(rows, triton.cdiv(nblocks, 128))](
+    _prefill_candidate_pool_kernel[(rows, triton.cdiv(nblocks, 256))](
         logits,
         visible,
         scores,
@@ -426,7 +423,7 @@ def select_candidates(
         visible.stride(0),
         block_size,
         nblocks,
-        128,
+        256,
         MASK_TAIL=mask_tail,
         token_indices=token_indices,
         token_ends=token_ends,
@@ -434,7 +431,10 @@ def select_candidates(
         block_lengths=block_lengths,
     )
     if use_v3:
-        indices = candidate_topk.select(scores, block_lengths)
+        # Native TopK requires a contiguous exact-K output. Reuse the final
+        # candidate buffer when it has that layout; publication filters in place.
+        native_out = out if out.shape == (rows, 2048) and out.is_contiguous() else None
+        indices = candidate_topk.select(scores, block_lengths, out=native_out)
         values = scores
     else:
         values, indices = scores.topk(count, dim=-1, largest=True, sorted=build_bitmap)

@@ -223,6 +223,189 @@ class PrefillGlobalGateTest(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class PrefillGlobalCudaTest(unittest.TestCase):
+    def test_mapped_compress_and_state_single_launch(self):
+        for rows, batch, offset in (
+            (1, 1, 0),
+            (97, 3, 17),
+            (8192, 9, 17),
+            (65536, 1, 0),
+        ):
+            with self.subTest(rows=rows, batch=batch, offset=offset):
+                ref = _case(rows, 2, strided=True, batch=batch, tile_offset=offset)
+                got = _case(rows, 2, strided=True, batch=batch, tile_offset=offset)
+                if rows == 1:
+                    ref.carry = got.carry = None
+                padded = triton.cdiv(rows, 4) * 4
+                order = torch.randperm(padded, device="cuda")[:rows]
+                projected = torch.empty((padded, 1024), device="cuda")
+                projected[order, :512] = got.values
+                projected[order, 512:] = got.scores
+                restore = torch.zeros(11 + rows, device="cuda", dtype=torch.long)
+                restore[11:] = order
+                source_map = (restore, 11, 0, padded, padded)
+                expected = _compress(ref)
+                self.assertTrue(
+                    fused.store_states(
+                        ref.values, ref.scores, ref.state_slots, ref.state
+                    )
+                )
+                carry_out = torch.empty((2, 512), device="cuda")
+                actual = fused.compress_main_and_store_states(
+                    projected[:, :512],
+                    projected[:, 512:],
+                    got.norm,
+                    got.eps,
+                    got.positions,
+                    got.req_ids,
+                    got.starts,
+                    got.previous,
+                    got.boundary_indices,
+                    got.freqs,
+                    got.main_pool,
+                    got.main_slots,
+                    got.carry,
+                    got.state_slots,
+                    got.state,
+                    carry_out,
+                    source_map,
+                )
+                for name, left, right in (
+                    ("latent", actual, expected),
+                    ("main pool", got.main_pool, ref.main_pool),
+                    ("state", got.state, ref.state),
+                    ("carry value", carry_out[0], ref.values[-1]),
+                    ("carry score", carry_out[1], ref.scores[-1]),
+                ):
+                    torch.testing.assert_close(left, right, rtol=0, atol=0, msg=name)
+
+    def test_mapped_cp_rows_match_restored_rows(self):
+        for ratio in (1, 2):
+            with self.subTest(ratio=ratio):
+                restored = _case(97, ratio, strided=True, batch=3)
+                mapped = _case(97, ratio, strided=True, batch=3)
+                if ratio == 1:
+                    restored.values = restored.values.bfloat16()
+                    mapped.values = mapped.values.bfloat16()
+                dtype = mapped.values.dtype
+                projected = torch.empty((100, 1024), device="cuda", dtype=dtype)
+                order = torch.randperm(100, device="cuda")[:97]
+                projected[order, :512] = mapped.values
+                projected[order, 512:] = mapped.scores.to(dtype)
+                full_local_rows, local_rows, local_start, global_start = 100, 25, 7, 11
+                restore = torch.zeros(
+                    global_start + 97, device="cuda", dtype=torch.long
+                )
+                restore[global_start:] = (
+                    order // local_rows * full_local_rows
+                    + local_start
+                    + order % local_rows
+                )
+                source_map = (
+                    restore,
+                    global_start,
+                    local_start,
+                    full_local_rows,
+                    local_rows,
+                )
+                expected = _compress(restored)
+                carry = None
+                if ratio == 2:
+                    carry = torch.empty((2, 512), device="cuda", dtype=torch.float32)
+                    actual = fused.compress_main_and_store_states(
+                        projected[:, :512],
+                        projected[:, 512:],
+                        mapped.norm,
+                        mapped.eps,
+                        mapped.positions,
+                        mapped.req_ids,
+                        mapped.starts,
+                        mapped.previous,
+                        mapped.boundary_indices,
+                        mapped.freqs,
+                        mapped.main_pool,
+                        mapped.main_slots,
+                        mapped.carry,
+                        mapped.state_slots,
+                        mapped.state,
+                        carry,
+                        source_map,
+                    )
+                else:
+                    actual = fused.compress_main(
+                        projected[:, :512],
+                        None,
+                        mapped.norm,
+                        mapped.eps,
+                        mapped.positions,
+                        mapped.req_ids,
+                        mapped.starts,
+                        mapped.previous,
+                        mapped.boundary_indices,
+                        mapped.freqs,
+                        mapped.main_pool,
+                        mapped.main_slots,
+                        ratio,
+                        mapped.carry,
+                        source_map=source_map,
+                    )
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    mapped.main_pool, restored.main_pool, rtol=0, atol=0
+                )
+                if ratio == 2:
+                    assert fused.store_states(
+                        restored.values,
+                        restored.scores,
+                        restored.state_slots,
+                        restored.state,
+                    )
+                    torch.testing.assert_close(
+                        mapped.state, restored.state, rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        carry[0], restored.values[-1], rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        carry[1], restored.scores[-1], rtol=0, atol=0
+                    )
+                    next_restored = _case(4, 2, strided=True, tile_offset=97)
+                    next_mapped = _case(4, 2, strided=True, tile_offset=97)
+                    next_restored.carry = (restored.values[-1:], restored.scores[-1:])
+                    next_order = torch.tensor([2, 0, 3, 1], device="cuda")
+                    next_projected = torch.empty((4, 1024), device="cuda")
+                    next_projected[next_order, :512] = next_mapped.values
+                    next_projected[next_order, 512:] = next_mapped.scores
+                    next_source_map = (next_order, 0, 0, 1, 1)
+                    next_expected = _compress(next_restored)
+                    next_actual = fused.compress_main(
+                        next_projected[:, :512],
+                        next_projected[:, 512:],
+                        next_mapped.norm,
+                        next_mapped.eps,
+                        next_mapped.positions,
+                        next_mapped.req_ids,
+                        next_mapped.starts,
+                        next_mapped.previous,
+                        next_mapped.boundary_indices,
+                        next_mapped.freqs,
+                        next_mapped.main_pool,
+                        next_mapped.main_slots,
+                        2,
+                        (carry[:1], carry[1:]),
+                        source_map=next_source_map,
+                    )
+                    torch.testing.assert_close(
+                        next_actual, next_expected, rtol=0, atol=0
+                    )
+
+    def test_ratio_one_bf16_projection_matches_promoted_input(self):
+        bf16, fp32 = _case(1024, 1), _case(1024, 1)
+        bf16.values = bf16.values.bfloat16()
+        fp32.values = bf16.values.float()
+        actual, expected = _compress(bf16), _compress(fp32)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(bf16.main_pool, fp32.main_pool, rtol=0, atol=0)
+
     def _compare(self, rows, ratio, **kwargs):
         ref, got = _case(rows, ratio, **kwargs), _case(rows, ratio, **kwargs)
         unchanged = [

@@ -42,7 +42,7 @@ def functions():
         os=os,
         torch=torch,
         F=F,
-        _PRODUCE_GLOBAL_TILE_ROWS=32768,
+        _PRODUCE_GLOBAL_TILE_ROWS=metadata._RAW_TILE_ROWS,
         INDEXER_KV="index",
         CSA_STATE="state",
     )
@@ -98,17 +98,39 @@ def slot_reference(region, positions, requests, state_end=None, rank=0):
 
 
 class ProducerMetadataCPU(unittest.TestCase):
-    def test_fixed_tile_plan_matches_independent_closed_pair_oracle(self):
+    def test_request_aligned_ranges_match_owned_slot_counts(self):
+        lengths = (1, 129, 131071, 7)
+        prefixes = (0, 2049, 1, 31744)
+        ranges = [(0, 130), (130, 65666), (65666, 131201), (131201, 131208)]
+        for ratio in (1, 2):
+            for rank in range(4):
+                plan = list(
+                    metadata.raw_tile_plan(
+                        lengths, prefixes, ratio, 4, rank, 256, ranges=ranges
+                    )
+                )
+                self.assertEqual([(a, b) for a, b, _ in plan], ranges)
+                owned = []
+                for prefix, length in zip(prefixes, lengths):
+                    owned.extend(
+                        (prefix + offset + 1) % ratio == 0
+                        and ((prefix + offset) // 256) % 4 == rank
+                        for offset in range(length)
+                    )
+                for start, end, count in plan:
+                    self.assertEqual(count, sum(owned[start:end]))
+
+    def test_fixed_tile_plan_matches_independent_owned_entry_oracle(self):
         rng = random.Random(20261031)
         cases = [
             ((1,), (0,)),
             ((1,), (1,)),
-            ((32767,), (0,)),
-            ((32768,), (1,)),
-            ((32769,), (0,)),
+            ((65535,), (0,)),
+            ((65536,), (1,)),
+            ((65537,), (0,)),
             ((1048576,), (1,)),
             ((2049,) * 64, tuple(i % 2 for i in range(64))),
-            ((1, 3, 32767, 32769, 9), (1, 0, 1, 0, 1)),
+            ((1, 3, 65535, 65537, 9), (1, 0, 1, 0, 1)),
         ]
         cases += [
             (
@@ -124,26 +146,33 @@ class ProducerMetadataCPU(unittest.TestCase):
             if prefixes is None:
                 prefixes = tuple(rng.randrange(0, 1048576) for _ in lengths)
             for ratio in (1, 2):
-                closed_rows = []
-                base = 0
-                for length, prefix in zip(lengths, prefixes):
-                    closed_rows.extend(
-                        base + offset
-                        for offset in range(length)
-                        if (prefix + offset + 1) % ratio == 0
+                for rank in range(4):
+                    owned_rows = []
+                    base = 0
+                    for length, prefix in zip(lengths, prefixes):
+                        owned_rows.extend(
+                            base + offset
+                            for offset in range(length)
+                            if (prefix + offset + 1) % ratio == 0
+                            and (prefix + offset) // 128 % 4 == rank
+                        )
+                        base += length
+                    plan = list(
+                        metadata.raw_tile_plan(lengths, prefixes, ratio, 4, rank, 128)
                     )
-                    base += length
-                plan = list(metadata.raw_tile_plan(lengths, prefixes, ratio))
-                self.assertEqual(
-                    [(start, end) for start, end, _, _ in plan],
-                    [
-                        (start, min(start + 32768, base))
-                        for start in range(0, base, 32768)
-                    ],
-                )
-                for start, end, first, stop in plan:
-                    self.assertEqual(first, bisect_left(closed_rows, start))
-                    self.assertEqual(stop, bisect_left(closed_rows, end))
+                    self.assertEqual(
+                        [(start, end) for start, end, _ in plan],
+                        [
+                            (start, min(start + 65536, base))
+                            for start in range(0, base, 65536)
+                        ],
+                    )
+                    for start, end, count in plan:
+                        self.assertEqual(
+                            count,
+                            bisect_left(owned_rows, end)
+                            - bisect_left(owned_rows, start),
+                        )
 
     def test_whole_raw_tile_reuses_metadata_views(self):
         backing = torch.arange(6 * 16, dtype=torch.int64).reshape(6, 16)
@@ -209,7 +238,7 @@ class ProducerMetadataCPU(unittest.TestCase):
     def test_existing_forward_boundary_discards_counts_and_bounds(self):
         shared = {
             "layers": {0: object(), 8: object()},
-            "prefill_score_bounds": {("producer_key_counts", 2): object()},
+            "prefill_score_bounds": {("batch_key_counts", 2): object()},
             "prefill_sparse_plans": object(),
         }
         scope = functions()
@@ -246,7 +275,7 @@ class ProducerMetadataCPU(unittest.TestCase):
             )
         )
 
-    def test_batched_selection_reuses_only_matching_producer_counts(self):
+    def test_batched_selection_reuses_matching_counts(self):
         spec = importlib.util.spec_from_file_location(
             PACKAGE + ".select_counts_test", ROOT / "_v41_batched_prefill_select.py"
         )
@@ -254,7 +283,6 @@ class ProducerMetadataCPU(unittest.TestCase):
         spec.loader.exec_module(select)
         prefix, length = torch.tensor([128, 256]), torch.tensor([3, 5])
         cp = SimpleNamespace(prefix_lengths=prefix, input_lengths_global=length)
-        counts = (prefix + length).div(2, rounding_mode="floor").int()
         score = Mock(return_value=None)
         package = ModuleType(PACKAGE)
         package._v41_prefill_topk = SimpleNamespace()
@@ -270,46 +298,7 @@ class ProducerMetadataCPU(unittest.TestCase):
                 + ".attention_v41": SimpleNamespace(_apply_prefill_candidates=None),
             },
         ):
-            for same in (True, False):
-                shared = {
-                    "prefill_score_bounds": {
-                        ("producer_key_counts", 2): (
-                            prefix if same else prefix.clone(),
-                            length,
-                            counts,
-                        )
-                    }
-                }
-                attn = SimpleNamespace(
-                    _shared_attention=shared, _cp_ctx=cp, compress_ratio=2
-                )
-                self.assertFalse(
-                    select.try_select_batched(
-                        attn,
-                        SimpleNamespace(is_cuda=True),
-                        None,
-                        None,
-                        [None, None],
-                        (slice(0, 1), slice(1, 2)),
-                        None,
-                        None,
-                        candidate_source=-1,
-                        publish_candidates=False,
-                        candidate_size=8,
-                        candidate_blocks=2048,
-                        req_ids=torch.tensor([0, 1]),
-                    )
-                )
-                actual = score.call_args.kwargs["key_counts"]
-                torch.testing.assert_close(actual, counts, rtol=0, atol=0)
-                self.assertEqual(actual is counts, same)
-
-            shared = {
-                "prefill_score_bounds": {
-                    ("producer_key_counts", 2): (prefix, length, counts)
-                }
-            }
-            attn._shared_attention = shared
+            attn = SimpleNamespace(_shared_attention={}, _cp_ctx=cp, compress_ratio=2)
 
             def consume():
                 select.try_select_batched(
@@ -330,11 +319,11 @@ class ProducerMetadataCPU(unittest.TestCase):
                 return score.call_args.kwargs["key_counts"]
 
             first = consume()
-            cache = shared["prefill_score_bounds"]
-            cache[("producer_key_counts", 2)] = (prefix, length, counts.clone())
+            torch.testing.assert_close(first, ((prefix + length) // 2).int())
             self.assertIs(consume(), first)
+            cache = attn._shared_attention["prefill_score_bounds"]
             cache[("grouped", "stale")] = object()
-            shared["prefill_sparse_plans"] = object()
+            attn._shared_attention["prefill_sparse_plans"] = object()
             cp.prefix_lengths = prefix + 10
             replaced = consume()
             torch.testing.assert_close(
@@ -342,16 +331,16 @@ class ProducerMetadataCPU(unittest.TestCase):
             )
             self.assertIsNot(replaced, first)
             self.assertNotIn(("grouped", "stale"), cache)
-            self.assertNotIn("prefill_sparse_plans", shared)
+            self.assertNotIn("prefill_sparse_plans", attn._shared_attention)
 
     def test_raw_tile_rows_default_and_finite_gate(self):
         cp, pos, req, starts, lengths = inputs([1, 0], [65535, 130])
-        self.assertEqual(metadata._RAW_TILE_ROWS, 32768)
+        self.assertEqual(metadata._RAW_TILE_ROWS, 65536)
         for ratio in (1, 2):
             self.assertEqual(
-                metadata._raw_plan(cp, ratio), metadata._raw_plan(cp, ratio, 32768)
+                metadata._raw_plan(cp, ratio), metadata._raw_plan(cp, ratio, 65536)
             )
-        for tile_rows in (None, True, 0, -32768, 16384, 65535, 65536, 131072, 65536.0):
+        for tile_rows in (None, True, 0, -65536, 16384, 65535, 131072, 65536.0):
             with self.subTest(tile_rows=tile_rows), patch.object(
                 torch, "empty", side_effect=AssertionError("invalid tile allocates")
             ):
@@ -370,13 +359,13 @@ class ProducerMetadataCPU(unittest.TestCase):
                     )
                 )
 
-    def test_raw_host_plan_preserves_32768_cross_request_boundaries(self):
+    def test_raw_host_plan_preserves_65536_cross_request_boundaries(self):
         for ratio in (1, 2):
             for prefixes, lengths in (
-                ([0, 1, 512, 513], [32767, 1, 1, 32770]),
+                ([0, 1, 512, 513], [65535, 1, 1, 65538]),
                 ([0] * 32, [1] * 32),
                 ([i % 2 for i in range(32)], [1 + i * 137 for i in range(32)]),
-                ([1, 0], [32768, 32769]),
+                ([1, 0], [65536, 65537]),
             ):
                 cp, pos, _, _, _ = inputs(prefixes, lengths)
                 segments, rows, count = metadata._raw_plan(cp, ratio)
@@ -384,14 +373,32 @@ class ProducerMetadataCPU(unittest.TestCase):
                 self.assertEqual(count, len(full))
                 self.assertEqual(rows, sum(lengths))
                 for start, (end, first, stop, _) in segments.items():
-                    self.assertEqual(start % 32768, 0)
-                    self.assertEqual(end, min(start + 32768, rows))
+                    self.assertEqual(start % 65536, 0)
+                    self.assertEqual(end, min(start + 65536, rows))
                     expected = torch.where((pos[start:end] + 1) % ratio == 0)[0]
                     torch.testing.assert_close(
-                        full[first:stop] % 32768, expected, rtol=0, atol=0
+                        full[first:stop] % 65536, expected, rtol=0, atol=0
                     )
                 if ratio == 2 and prefixes == [0] * 32:
                     self.assertEqual(count, 0)
+
+    def test_raw_host_plan_accepts_bounded_request_cohorts(self):
+        cp, pos, _, _, _ = inputs([1, 0, 513], [129, 7, 65537])
+        ranges = ((0, 136), (136, 65672), (65672, 65673))
+        for ratio in (1, 2):
+            segments, rows, count = metadata._raw_plan(cp, ratio, ranges=ranges)
+            self.assertEqual(rows, len(pos))
+            self.assertEqual(count, int(((pos + 1) % ratio == 0).sum()))
+            self.assertEqual(
+                [(start, end) for start, (end, _, _, _) in segments.items()],
+                list(ranges),
+            )
+            for start, (end, first, stop, _) in segments.items():
+                self.assertEqual(
+                    stop - first,
+                    int(((pos[start:end] + 1) % ratio == 0).sum()),
+                )
+            self.assertIsNone(metadata._raw_plan(cp, ratio, ranges=((0, 136),)))
 
     def test_raw_gates_cpu_metadata_and_budget_before_allocation(self):
         cp, pos, req, starts, lengths = inputs([0, 1], [129, 257])
@@ -449,6 +456,7 @@ class ProducerMetadataCPU(unittest.TestCase):
                 )
             }
         )
+        predecessor = Mock()
         package = SimpleNamespace(
             _v41_fp4_triton=fp4,
             _v41_prefill_global=SimpleNamespace(
@@ -460,6 +468,7 @@ class ProducerMetadataCPU(unittest.TestCase):
             _v41_prefill_metadata=SimpleNamespace(
                 try_slot_mapping=lambda *a, **kw: torch.empty(0),
                 try_chunk_metadata=lambda *a, **kw: (torch.empty(0),) * 3,
+                read_predecessor_states=predecessor,
             ),
             _v41_swa_triton=SimpleNamespace(),
         )
@@ -494,6 +503,7 @@ class ProducerMetadataCPU(unittest.TestCase):
                     "cpu",
                 )
         self.assertEqual(raw_warmup.call_args_list, [call(2, 4, "cpu")])
+        self.assertEqual(predecessor.call_count, 2)
         self.assertEqual(seen["main"], {(0, 0), (0, 8), (8, 0), (8, 8)})
         self.assertEqual(seen["index"], seen["main"])
         self.assertEqual(seen["state"], {0, 8})
@@ -516,7 +526,7 @@ class ProducerMetadataRawCUDA(unittest.TestCase):
             "raw_slot_old", ROOT.parent.parent / "dsv4/fp8/_cp_slot_mapping.py"
         )
 
-    def _case(self, prefixes, lengths, ratio, rank=0, stride=1, tile_rows=32768):
+    def _case(self, prefixes, lengths, ratio, rank=0, stride=1, tile_rows=65536):
         cp, *cpu = inputs(prefixes, lengths)
 
         def transfer(t):
@@ -584,11 +594,15 @@ class ProducerMetadataRawCUDA(unittest.TestCase):
             slots=slots,
         )
 
-    def _check(self, c, plan):
+    def _check(self, c, plan, ranges=None):
         self.assertIsNotNone(plan)
         torch.testing.assert_close(plan.seq_ends, c.starts + c.sizes, rtol=0, atol=0)
-        for start in range(0, len(c.pos), c.tile_rows):
-            end = min(start + c.tile_rows, len(c.pos))
+        if ranges is None:
+            ranges = (
+                (start, min(start + c.tile_rows, len(c.pos)))
+                for start in range(0, len(c.pos), c.tile_rows)
+            )
+        for start, end in ranges:
             idx = torch.where((c.pos[start:end] + 1) % c.ratio == 0)[0]
             bp, br = c.pos[start:end][idx], c.req[start:end][idx]
             wanted = [
@@ -616,16 +630,14 @@ class ProducerMetadataRawCUDA(unittest.TestCase):
                             expected.contiguous().view(torch.uint8),
                         )
                     )
-        if c.tile_rows == 65536 and len(c.pos) >= 65536:
-            self.assertTrue(bool((plan.tile(0, 65536)[0] >= 32768).any()))
 
     def test_raw_bytes_crossings_odd_empty_pairs_all_ranks_strides(self):
         fixtures = [
-            ([0, 1, 512, 513], [32767, 1, 1, 32770]),
+            ([0, 1, 512, 513], [65535, 1, 1, 65538]),
             ([i % 2 + 512 for i in range(32)], [1 + i * 137 for i in range(32)]),
             ([0] * 32, [1] * 32),
-            ([0, 0], [32768, 1]),
-            ([1, 0], [32768, 32769]),
+            ([0, 0], [65536, 1]),
+            ([1, 0], [65536, 65537]),
         ]
         for ratio in (1, 2):
             for rank in range(4):
@@ -636,11 +648,29 @@ class ProducerMetadataRawCUDA(unittest.TestCase):
                         )
                         self._check(c, c.build())
 
+    def test_raw_request_cohorts_preserve_slots_and_tile_indices(self):
+        ranges = ((0, 136), (136, 65672), (65672, 65673))
+        for ratio in (1, 2):
+            for rank in range(4):
+                c = self._case([1, 0, 513], [129, 7, 65537], ratio, rank)
+                plan = metadata.prepare_raw(
+                    c.cp,
+                    c.pos,
+                    c.req,
+                    c.starts,
+                    c.sizes,
+                    ratio,
+                    c.slots,
+                    ("main", "index", "state"),
+                    ranges=ranges,
+                )
+                self._check(c, plan, ranges)
+
     def test_raw_graph_replay_updates_all_integer_outputs(self):
-        for ratio, tile_rows in ((1, 32768), (2, 32768)):
+        for ratio, tile_rows in ((1, 65536), (2, 65536)):
             c = self._case(
                 [0, 513, 1024],
-                [32767, 4, 32768],
+                [65535, 4, 65536],
                 ratio,
                 stride=2,
                 tile_rows=tile_rows,
@@ -662,11 +692,11 @@ class ProducerMetadataRawCUDA(unittest.TestCase):
             graph.replay()
             self._check(c, plan)
 
-    def test_raw_32768_crossings_all_ranks_strides_and_empty_tail(self):
+    def test_raw_65536_crossings_all_ranks_strides_and_empty_tail(self):
         for ratio in (1, 2):
             for rank in range(4):
                 for prefixes, lengths in (
-                    ([1, 3, 5, 7], [32767, 2, 32768, 3]),
+                    ([1, 3, 5, 7], [65535, 2, 65536, 3]),
                     ([0, 0], [65536, 1]),
                     ([1, 0], [64511, 3]),
                     ([1, 0], [65535, 130]),
@@ -679,12 +709,12 @@ class ProducerMetadataRawCUDA(unittest.TestCase):
                             ratio,
                             rank,
                             stride=2 if rank % 2 else 1,
-                            tile_rows=32768,
+                            tile_rows=65536,
                         )
                         self._check(c, c.build())
 
     def test_raw_side_stream_and_unsupported_strides(self):
-        c = self._case([0, 1], [32769, 129], 2, stride=2)
+        c = self._case([0, 1], [65537, 129], 2, stride=2)
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
@@ -734,8 +764,8 @@ class ProducerMetadataRawCUDA(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class FusedProducerMetadataCUDA(unittest.TestCase):
-    def test_fixed_input_compression_and_pool_writes_match_scalar_metadata(self):
-        """The fused tile plan must preserve producer math and physical writes."""
+    def test_request_cohorts_preserve_compression_and_physical_writes(self):
+        """Request-aligned tiles preserve producer math and physical writes."""
         spec = importlib.util.spec_from_file_location(
             "fixed_input_slot_reference", ROOT / "_v41_prefill_metadata.py"
         )
@@ -744,7 +774,7 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
         global_ops = __import__(
             PACKAGE + "._v41_prefill_global", fromlist=("compress_main",)
         )
-        prefixes, sizes = (1, 31744), (32767, 32769)
+        prefixes, sizes = (1, 31744), (65535, 65537)
         _, pos_cpu, req_cpu, starts_cpu, lengths_cpu = inputs(prefixes, sizes)
         pos, req = pos_cpu.cuda(), req_cpu.cuda()
         starts, lengths = starts_cpu.cuda(), lengths_cpu.cuda()
@@ -769,7 +799,8 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
             device="cuda",
             dtype=torch.complex64,
         )
-        scratch = torch.empty((8, 32768), device="cuda", dtype=torch.int64)
+        scratch = torch.empty((8, 65536), device="cuda", dtype=torch.int64)
+        ranges = ((0, 65535), (65535, 98307), (98307, 131072))
         for ratio in (1, 2):
             layouts = tuple(
                 metadata.SlotLayout(table, eb, tpb, 128, 4, 0)
@@ -798,8 +829,10 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
                 )
                 outputs = []
                 carry = None
-                for tile in metadata.raw_tile_plan(sizes, prefixes, ratio):
-                    t0, t1, _, _ = tile
+                for tile in metadata.raw_tile_plan(
+                    sizes, prefixes, ratio, 4, 0, 128, ranges=ranges
+                ):
+                    t0, t1, _ = tile
                     if fused:
                         (
                             tile_pos,
@@ -815,7 +848,9 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
                         )
                     else:
                         tile_pos, tile_req = pos[t0:t1], req[t0:t1]
-                        keep = torch.where((tile_pos + 1) % ratio == 0)[0]
+                        keep = torch.where(
+                            ((tile_pos + 1) % ratio == 0) & ((tile_pos // 128) % 4 == 0)
+                        )[0]
                         boundary_pos, boundary_req = tile_pos[keep], tile_req[keep]
                         main_slots, index_slots = (
                             mapper.try_slot_mapping(
@@ -906,7 +941,7 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
         mapper = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mapper)
         cases = (
-            ((1, 0, 2049, 31744), (1, 32768, 32769, 1024)),
+            ((1, 0, 2049, 31744), (1, 65536, 65537, 1024)),
             ((1,), (1048576,)),
         )
         for prefixes, sizes in cases:
@@ -917,7 +952,12 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
             table = torch.arange(
                 1, len(sizes) * columns + 1, dtype=torch.int32, device="cuda"
             ).reshape(len(sizes), columns)
-            scratch = torch.empty((8, 32768), device="cuda", dtype=torch.int64)
+            scratch = torch.empty((8, 65536), device="cuda", dtype=torch.int64)
+            ranges = (
+                ((0, 1), (1, 65537), (65537, 98309), (98309, 131074), (131074, 132098))
+                if len(sizes) > 1
+                else None
+            )
             for ratio in (1, 2):
                 layouts = tuple(
                     metadata.SlotLayout(table, eb, tpb, 128, 4, 0)
@@ -926,13 +966,17 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
                     ]
                 )
                 seq_ends = starts + lengths
-                for tile in metadata.raw_tile_plan(sizes, prefixes, ratio):
-                    t0, t1, _, _ = tile
+                for tile in metadata.raw_tile_plan(
+                    sizes, prefixes, ratio, 4, 0, 128, ranges=ranges
+                ):
+                    t0, t1, _ = tile
                     got = metadata.prepare_fused_tile(
                         starts, lengths, ratio, layouts, tile, scratch
                     )
                     pos_tile, req_tile = pos[t0:t1], req[t0:t1]
-                    keep = torch.where((pos_tile + 1) % ratio == 0)[0]
+                    keep = torch.where(
+                        ((pos_tile + 1) % ratio == 0) & ((pos_tile // 128) % 4 == 0)
+                    )[0]
                     expected = (
                         pos_tile,
                         req_tile,
@@ -979,16 +1023,17 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
         )
         mapper = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mapper)
-        sizes = (1, 32767, 32768, 32769) + tuple(1024 + (i % 7) * 19 for i in range(60))
+        sizes = (1, 65535, 65536, 65537) + tuple(1024 + (i % 7) * 19 for i in range(60))
         prefixes = tuple(0 if i % 11 == 0 else 31744 + i % 2 for i in range(64))
         _, pos_cpu, req_cpu, starts_cpu, lengths_cpu = inputs(prefixes, sizes)
         pos, req = pos_cpu.cuda(), req_cpu.cuda()
-        starts, lengths = starts_cpu.cuda(), lengths_cpu.cuda()
+        starts = starts_cpu.cuda()
+        lengths = lengths_cpu.to(device="cuda", dtype=torch.int32)
         columns = (max(p + n for p, n in zip(prefixes, sizes)) + 127) // 128 + 4
         table = torch.arange(
             1, 64 * columns + 1, dtype=torch.int32, device="cuda"
         ).reshape(64, columns)
-        scratch = torch.empty((8, 32768), device="cuda", dtype=torch.int64)
+        scratch = torch.empty((8, 65536), device="cuda", dtype=torch.int64)
         for ratio in (1, 2):
             for rank in range(4):
                 with self.subTest(ratio=ratio, rank=rank):
@@ -998,13 +1043,18 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
                             : (3 if ratio == 2 else 2)
                         ]
                     )
-                    for tile in metadata.raw_tile_plan(sizes, prefixes, ratio):
-                        t0, t1, _, _ = tile
+                    for tile in metadata.raw_tile_plan(
+                        sizes, prefixes, ratio, 4, rank, 128
+                    ):
+                        t0, t1, _ = tile
                         got = metadata.prepare_fused_tile(
                             starts, lengths, ratio, layouts, tile, scratch
                         )
                         tile_pos, tile_req = pos[t0:t1], req[t0:t1]
-                        keep = torch.where((tile_pos + 1) % ratio == 0)[0]
+                        keep = torch.where(
+                            ((tile_pos + 1) % ratio == 0)
+                            & ((tile_pos // 128) % 4 == rank)
+                        )[0]
                         expected = (
                             tile_pos,
                             tile_req,
@@ -1053,7 +1103,7 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
         spec.loader.exec_module(mapper)
         for batch in (129, 257, 1024):
             sizes = tuple(
-                32769 if batch in (129, 1024) and i == 0 else 1 + i % 4
+                65537 if batch in (129, 1024) and i == 0 else 1 + i % 4
                 for i in range(batch)
             )
             prefixes = tuple(127 + i % 3 for i in range(batch))
@@ -1064,7 +1114,7 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
             table = torch.arange(
                 1, batch * columns + 1, dtype=torch.int32, device="cuda"
             ).reshape(batch, columns)
-            scratch = torch.empty((8, 32768), device="cuda", dtype=torch.int64)
+            scratch = torch.empty((8, 65536), device="cuda", dtype=torch.int64)
             for ratio in (1, 2):
                 for rank in range(4):
                     with self.subTest(batch=batch, ratio=ratio, rank=rank):
@@ -1074,13 +1124,18 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
                                 : (3 if ratio == 2 else 2)
                             ]
                         )
-                        for tile in metadata.raw_tile_plan(sizes, prefixes, ratio):
-                            t0, t1, _, _ = tile
+                        for tile in metadata.raw_tile_plan(
+                            sizes, prefixes, ratio, 4, rank, 128
+                        ):
+                            t0, t1, _ = tile
                             got = metadata.prepare_fused_tile(
                                 starts, lengths, ratio, layouts, tile, scratch
                             )
                             tile_pos, tile_req = pos[t0:t1], req[t0:t1]
-                            keep = torch.where((tile_pos + 1) % ratio == 0)[0]
+                            keep = torch.where(
+                                ((tile_pos + 1) % ratio == 0)
+                                & ((tile_pos // 128) % 4 == rank)
+                            )[0]
                             expected = (
                                 tile_pos,
                                 tile_req,
@@ -1103,7 +1158,13 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
                                     rank,
                                     owner_tokens_per_block=128,
                                 )
-                                torch.testing.assert_close(actual, want, rtol=0, atol=0)
+                                if want is None:
+                                    self.assertEqual(keep.numel(), 0)
+                                    self.assertEqual(actual.numel(), 0)
+                                else:
+                                    torch.testing.assert_close(
+                                        actual, want, rtol=0, atol=0
+                                    )
                             if ratio == 2:
                                 layout = layouts[2]
                                 want = mapper.try_slot_mapping(
@@ -1155,7 +1216,7 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
         *,
         strided=False,
         dtype=torch.int32,
-        tile_rows=32768,
+        tile_rows=65536,
         table_dtype=torch.int32,
         offset=0
     ):
@@ -1275,10 +1336,10 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
                 self._check(
                     ratio,
                     [0, 127, 129, 513],
-                    [32767, 3, 32766, 1],
+                    [65535, 3, 32766, 1],
                     rank,
                     strided=True,
-                    tile_rows=32768,
+                    tile_rows=65536,
                 )
                 self._check(ratio, [1, 0], [65536, 3], rank, dtype=torch.int64)
         self._check(2, [0] * 32, [1] * 32, 0)

@@ -229,6 +229,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     // any beam slice or legacy greedy slice clears it so consumers read the
     // materialized matrix.
     bool all_probs_point_mass = inputs.all_probs_point_mass;
+    std::vector<torch::Tensor> sampling_probs;
 
     while (from_batch_idx_in < inputs.batch_size) {
         auto cur_num_beams_in  = num_beams_in[from_batch_idx_in];
@@ -321,7 +322,11 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  all_probs.has_value() && inputs.all_probs_indices.defined() ?
                      std::optional<torch::Tensor>(
                          inputs.all_probs_indices.narrow(0, from_batch_idx_in, batch_size_in)) :
-                     std::nullopt});
+                     std::nullopt,
+                 inputs.return_logprobs});
+            if (inputs.return_logprobs) {
+                sampling_probs.push_back(greedy_output.sampling_probs);
+            }
             all_probs_point_mass = all_probs_point_mass && greedy_output.all_probs_point_mass;
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
@@ -364,6 +369,12 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto sequence_lengths_t = sequence_lengths_reshaped.to(torch::kCUDA);
             auto cum_log_probs_in_t = cum_log_probs_in_reshaped.to(torch::kCUDA);
 
+            if (inputs.return_logprobs) {
+                // Beam search scores the processed logits with log-softmax before
+                // adding cumulative scores. Keep that per-input-row distribution.
+                sampling_probs.push_back(
+                    torch::softmax(logits_t.reshape({(int64_t)batch_size_in, (int64_t)vocab_size}), -1));
+            }
             auto output = execSampleBeamSearch({logits_t,
                                                 token_ids_in_t,
                                                 input_lengths_t,
@@ -405,9 +416,44 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     // rejection sampling must synthesize q from token_ids instead of reading it.
     output.token_ids_are_point_mass = all_probs_point_mass;
     output.all_probs_indices        = inputs.all_probs_indices;
-    output.raw_logprobs_logits      = inputs.raw_logprobs_logits;
-    output.raw_logprobs_row_indices = inputs.raw_logprobs_row_indices;
+    if (inputs.return_logprobs && !all_probs_point_mass) {
+        output.sampling_probs = sampling_probs.size() == 1 ? sampling_probs.front() : torch::cat(sampling_probs, 0);
+    }
     return output;
+}
+
+SamplingLogprobs computeSamplingLogprobs(const torch::Tensor& probs,
+                                         const torch::Tensor& candidate_ids,
+                                         const torch::Tensor& point_mass_token_ids,
+                                         const torch::Tensor& emitted_token_ids,
+                                         int64_t              max_top_logprobs) {
+    SamplingLogprobs result;
+    auto             tokens = emitted_token_ids.reshape({-1}).to(torch::kLong);
+    if (point_mass_token_ids.defined()) {
+        auto ids                     = point_mass_token_ids.reshape({-1});
+        result.token_logprobs        = tokens.eq(ids).to(torch::kFloat32).log();
+        const int64_t k              = max_top_logprobs > 0 ? 1 : 0;
+        result.top_logprob_token_ids = ids.to(torch::kInt32).unsqueeze(1).narrow(1, 0, k);
+        result.top_logprobs          = torch::zeros({tokens.numel(), k}, result.token_logprobs.options());
+        return result;
+    }
+    RTP_LLM_CHECK(probs.defined() && probs.dim() == 2 && probs.size(0) == tokens.numel());
+    torch::Tensor token_probs;
+    if (candidate_ids.defined()) {
+        // A replacement token is looked up in target p, never in (p - q)+.
+        token_probs = probs.masked_fill(candidate_ids.ne(tokens.unsqueeze(1)), 0).sum(1);
+    } else {
+        auto valid  = tokens.ge(0).logical_and(tokens.lt(probs.size(1)));
+        token_probs = probs.gather(1, tokens.clamp(0, probs.size(1) - 1).unsqueeze(1)).squeeze(1);
+        token_probs = token_probs.masked_fill(~valid, 0);
+    }
+    result.token_logprobs = token_probs.to(torch::kFloat32).log();
+    const int64_t k       = std::min<int64_t>(std::max<int64_t>(max_top_logprobs, 0), probs.size(1));
+    auto          top     = probs.topk(k, -1, true, true);
+    result.top_logprobs   = std::get<0>(top).to(torch::kFloat32).log();
+    result.top_logprob_token_ids =
+        (candidate_ids.defined() ? candidate_ids.gather(1, std::get<1>(top)) : std::get<1>(top)).to(torch::kInt32);
+    return result;
 }
 
 std::vector<std::optional<ErrorInfo>> Sampler::preprocessLogits(const SamplerInputs& inputs) {

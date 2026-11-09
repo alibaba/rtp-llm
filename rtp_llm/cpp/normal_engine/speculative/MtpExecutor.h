@@ -159,8 +159,9 @@ protected:
                                     const torch::Tensor& confidence_hidden_logits = torch::Tensor());
     struct DSparkVerifyPlan {
         // -1 means the original full-width path (full budget, or no plan).
-        int64_t              draft_budget = -1;
-        std::vector<int64_t> stable_order;
+        int64_t                           draft_budget = -1;
+        std::optional<DSparkCapacityPlan> capacity;
+        std::vector<int64_t>              stable_order;
         // Adaptive observations preserve proposal row identities even if the
         // scheduler reorders or retires streams before the D2H copy completes.
         std::vector<int64_t>          request_ids;
@@ -185,13 +186,6 @@ protected:
                               const torch::Tensor&                         confidence_rates         = torch::Tensor(),
                               const torch::Tensor&                         confidence_valid_lengths = torch::Tensor(),
                               int64_t                                      verify_draft_token_num   = -1);
-    std::shared_ptr<MtpTargetLogprobs>
-                 launchEarlyMtpTargetLogprobsFinalize(const StreamGroups&                          stream_groups,
-                                                      const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                                      MtpTargetLogprobs                            target_logprobs,
-                                                      std::shared_ptr<torch::Event>                rejection_event);
-    void         finishEarlyMtpTargetLogprobsFinalize(std::shared_ptr<MtpTargetLogprobs>& early_finalize_state,
-                                                      MtpTargetLogprobs&                  target_logprobs);
     absl::Status dispatchDecodeOutput(const StreamGroups&                          stream_groups,
                                       const std::list<GenerateStreamPtr>&          streams,
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,

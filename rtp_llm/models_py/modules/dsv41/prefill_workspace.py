@@ -54,7 +54,7 @@ _PREFILL_WS_ALIGN_BYTES = 1 << 30
 
 
 def _dtype_size(dtype: torch.dtype) -> int:
-    return torch.empty((), dtype=dtype).element_size()
+    return dtype.itemsize
 
 
 class PrefillWorkspace:

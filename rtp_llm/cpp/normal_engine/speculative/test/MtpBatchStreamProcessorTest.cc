@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <limits>
@@ -582,7 +583,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
     auto draft    = torch::zeros({2, 1}, torch::kInt32);
     auto mixed    = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(mixed.ok());
-    EXPECT_EQ(mixed->all_probs.size(1), 4096);
+    EXPECT_EQ(mixed->all_probs.size(1), speculative::dsparkForceTopK());
     EXPECT_TRUE(mixed->all_probs_indices.defined());
 
     auto mapped = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft, nullptr, true);
@@ -607,7 +608,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
     second->generateConfig()->top_p = 0.95f;
     auto pure_no_k_p95 = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(pure_no_k_p95.ok());
-    EXPECT_EQ(pure_no_k_p95->all_probs.size(1), 4096);
+    EXPECT_EQ(pure_no_k_p95->all_probs.size(1), speculative::dsparkForceTopK());
     EXPECT_TRUE(pure_no_k_p95->all_probs_indices.defined());
 
     first->generateConfig()->top_p  = 1.0f;
@@ -629,7 +630,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
     second->generateConfig()->do_sample = false;
     auto mixed_greedy = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(mixed_greedy.ok());
-    EXPECT_EQ(mixed_greedy->all_probs.size(1), 4096);
+    EXPECT_EQ(mixed_greedy->all_probs.size(1), speculative::dsparkForceTopK());
     EXPECT_TRUE(mixed_greedy->all_probs_indices.defined());
 
     model_config.vocab_size = 129280;
@@ -651,21 +652,21 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
     auto large_mixed =
         large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
     ASSERT_TRUE(large_mixed.ok());
-    EXPECT_EQ(large_mixed->all_probs.size(1), 4096);
+    EXPECT_EQ(large_mixed->all_probs.size(1), speculative::dsparkForceTopK());
     EXPECT_TRUE(large_mixed->all_probs_indices.defined());
 
     large_second->generateConfig()->top_p = 0.95f;
     auto large_mixed_topp =
         large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
     ASSERT_TRUE(large_mixed_topp.ok());
-    EXPECT_EQ(large_mixed_topp->all_probs.size(1), 4096);
+    EXPECT_EQ(large_mixed_topp->all_probs.size(1), speculative::dsparkForceTopK());
     EXPECT_TRUE(large_mixed_topp->all_probs_indices.defined());
 
     large_first->generateConfig()->top_k = 41;
     auto bounded_mixed_topp =
         large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
     ASSERT_TRUE(bounded_mixed_topp.ok());
-    EXPECT_EQ(bounded_mixed_topp->all_probs.size(1), 4096);
+    EXPECT_EQ(bounded_mixed_topp->all_probs.size(1), speculative::dsparkForceTopK());
     EXPECT_TRUE(bounded_mixed_topp->all_probs_indices.defined());
 
     for (const auto& stream : {large_first, large_second}) {
@@ -675,7 +676,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
     auto large_pure =
         large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
     ASSERT_TRUE(large_pure.ok());
-    EXPECT_EQ(large_pure->all_probs.size(1), 4096);
+    EXPECT_EQ(large_pure->all_probs.size(1), speculative::dsparkForceTopK());
     EXPECT_TRUE(large_pure->all_probs_indices.defined());
 
     large_first->generateConfig()->top_k = 40;
@@ -716,12 +717,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkMixedTargetUsesFixedCandidateWidth
     EXPECT_FALSE(large_eight_joint->all_probs_indices.defined());
 }
 
-// Logits ownership elision: when the verify round is provably free of logits
-// writers (point-mass greedy declaration, identity penalty values, no vocab
-// mask processor, full-width contiguous CUDA fp32 logits, single beam), the
-// gather must hand the sampler the model-output view directly instead of a
-// 2 * rows * vocab * 4-byte DtoD clone. Each writer condition on its own must
-// restore the private per-round clone.
+// Per-round logits are consumable; gathering does not clone them.
 TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAliasesLogitsWhenNoWriterActive) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
@@ -781,7 +777,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAliasesLogitsWhenN
 #endif
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputClonesLogitsWhenAnyWriterPossible) {
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputConsumesLogitsWithTemperatureAndPadding) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -797,9 +793,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputClonesLogitsWhenAn
 
     auto draft_token_ids = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
 
-    // (a) A non-identity temperature makes sampleGreedy's processLogits apply
-    // an in-place penalty kernel, so the round needs a private buffer even
-    // though the point-mass declaration still holds.
+    // Temperature may modify the shared per-round storage.
     {
         ResourceContext   resource_context;
         GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
@@ -822,13 +816,11 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputClonesLogitsWhenAn
         ASSERT_TRUE(status.ok());
         const auto& sampler_inputs = status.value();
         EXPECT_TRUE(sampler_inputs.all_probs_point_mass);
-        EXPECT_NE(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
+        EXPECT_EQ(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
         EXPECT_TRUE(torch::equal(model_output.logits, sampler_inputs.logits));
     }
 
-    // (b) A TP-padded logits width trims the narrow view, which is strided;
-    // the fused kernel contract requires contiguity, so the clone stays and
-    // drops the synthetic padding columns.
+    // Padding is cropped with a view; the sampler chooses a compatible kernel.
     {
         ResourceContext   resource_context;
         GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
@@ -850,15 +842,14 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputClonesLogitsWhenAn
         ASSERT_TRUE(status.ok());
         const auto& sampler_inputs = status.value();
         EXPECT_EQ((std::vector<int64_t>{8, 4}), sampler_inputs.logits.sizes().vec());
-        EXPECT_NE(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
-        EXPECT_TRUE(sampler_inputs.logits.is_contiguous());
+        EXPECT_EQ(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
+        EXPECT_FALSE(sampler_inputs.logits.is_contiguous());
         EXPECT_TRUE(torch::equal(model_output.logits.narrow(1, 0, 4), sampler_inputs.logits));
     }
 }
 
-// An active spec-logits vocab mask writes the packed allow-mask into the
-// sampler logits in place, which must never reach the model output buffer.
-TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputClonesLogitsUnderActiveMask) {
+// Speculative masks do not read sampler history; penalties still do.
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputSkipsMaskedHistoryUnlessPenaltyNeedsIt) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -871,49 +862,70 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputClonesLogitsUnderA
     model_config.num_layers     = 1;
     sp_config.gen_num_per_cycle = 2;
 
-    ResourceContext   resource_context;
-    GenerateStreamPtr stream =
-        createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1, {7}, {8, 9});
-    stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
-    stream->generateConfig()->top_k = 1;
+    for (bool with_penalty : {false, true}) {
+        SCOPED_TRACE(with_penalty);
+        ResourceContext   resource_context;
+        GenerateStreamPtr stream =
+            createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1, {7}, {8, 9});
+        stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+        stream->generateConfig()->top_k            = 1;
+        stream->generateConfig()->presence_penalty = with_penalty ? 0.5f : 0.0f;
 
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    StreamGroups stream_groups({stream});
+        MtpBatchStreamProcessor processor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+        StreamGroups stream_groups({stream});
 
-    GptModelOutputs model_output;
-    model_output.logits = torch::zeros({3, 16}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        GptModelOutputs model_output;
+        model_output.logits = torch::zeros({3, 16}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
 
-    SpecLogitsVerifyRunner             runner;
-    SpecLogitsVerifyRunner::LaunchTask task;
-    task.total_streams = 1;
-    task.propose_step  = static_cast<int>(sp_config.gen_num_per_cycle);
-    task.vocab_size    = model_config.vocab_size;
-    task.draft_tokens  = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
-    for (const auto& processor_ptr : stream->getAllLogitsProcessorPtr()) {
-        ASSERT_NE(processor_ptr, nullptr);
-        task.active.push_back({processor_ptr, /*stream_idx=*/0});
-    }
-    ASSERT_EQ(1u, task.active.size());
-    auto spec_result = runner.run(task);
-    ASSERT_TRUE(spec_result.has_active_processor);
+        model_output.logits.select(1, 7).fill_(2.0f);
+        model_output.logits.select(1, 3).fill_(1.0f);
 
-    auto status = processor.gatherSpecSamplerInput(stream_groups, model_output, spec_result, task.draft_tokens);
-    ASSERT_TRUE(status.ok());
-    const auto& sampler_inputs = status.value();
+        SpecLogitsVerifyRunner             runner;
+        SpecLogitsVerifyRunner::LaunchTask task;
+        task.total_streams = 1;
+        task.propose_step  = static_cast<int>(sp_config.gen_num_per_cycle);
+        task.vocab_size    = model_config.vocab_size;
+        task.draft_tokens  = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
+        for (const auto& processor_ptr : stream->getAllLogitsProcessorPtr()) {
+            ASSERT_NE(processor_ptr, nullptr);
+            task.active.push_back({processor_ptr, /*stream_idx=*/0});
+        }
+        ASSERT_EQ(1u, task.active.size());
+        auto spec_result = runner.run(task);
+        ASSERT_TRUE(spec_result.has_active_processor);
 
-    // Private clone: the mask lands on it, the model output stays untouched.
-    EXPECT_NE(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
-    EXPECT_TRUE(model_output.logits.eq(0).all().item<bool>());
-    const float neg_inf = -std::numeric_limits<float>::max();
-    for (int i = 0; i < 3; ++i) {
-        EXPECT_EQ(neg_inf, sampler_inputs.logits[i][7].item<float>());
+        auto status = processor.gatherSpecSamplerInput(stream_groups, model_output, spec_result, task.draft_tokens);
+        ASSERT_TRUE(status.ok());
+        const auto& sampler_inputs = status.value();
+
+#if USING_CUDA
+        EXPECT_EQ(processor.sampler_input_copy_stream_.has_value(), with_penalty);
+#endif
+        if (with_penalty) {
+            auto history = sampler_inputs.token_ids.narrow(1, 0, 4).cpu();
+            EXPECT_TRUE(
+                torch::equal(history, torch::tensor({{1, 2, 1, 2}, {1, 2, 1, 2}, {1, 2, 1, 2}}, torch::kInt32)));
+        }
+
+        // No clone is needed to preserve raw logits for logprobs.
+        EXPECT_EQ(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
+        EXPECT_TRUE(torch::equal(model_output.logits, sampler_inputs.logits));
+        const float neg_inf = -std::numeric_limits<float>::max();
+        for (int i = 0; i < 3; ++i) {
+            EXPECT_EQ(neg_inf, sampler_inputs.logits[i][7].item<float>());
+        }
+#if USING_CUDA
+        Sampler sampler({3});
+        auto    output = sampler.forward(sampler_inputs);
+        EXPECT_TRUE(output.token_ids.select(1, output.token_ids.size(1) - 1).eq(3).all().item<bool>());
+#endif
     }
 }
 
 // Dead sampler-input elision: with production-equivalent defaults
 // (return_all_probs DEFAULT as the MTP executor sets it, identity penalties,
-// no ngram ban, single beam, no logits processor) no consumer reads the
+// no ngram ban, single beam) no consumer reads the
 // history columns on device, so the gather skips the host snapshot fill,
 // full upload and proposal scatter. Only the matrix
 // geometry is defined; committed and proposal columns are don't-care (the
@@ -996,6 +1008,45 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputSkipsHistoryMateri
     gather_and_check_dead({stream1, stream2}, draft2, /*expected_width=*/7);
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testInternalTargetProbsIgnorePublicReturnAllProbs) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 32;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 1;
+    RuntimeConfig              runtime_config;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.gen_num_per_cycle = 1;
+    sp_config.type              = SP_TYPE_DSPARK;
+    auto processor              = MtpBatchStreamProcessor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), sp_config, false);
+    Sampler sampler(SamplerInitParams{});
+    for (auto mode : {ReturnAllProbsMode::NONE, ReturnAllProbsMode::DEFAULT, ReturnAllProbsMode::ORIGINAL}) {
+        ResourceContext resource_context;
+        auto            stream = createContextStream(model_config, runtime_config, resource_context, {0}, 1);
+        stream->setScoreLen(2);
+        stream->setReturnAllProbs(mode);
+        stream->generateConfig()->top_k       = 2;
+        stream->generateConfig()->top_p       = 1.f;
+        stream->generateConfig()->temperature = 2.f;
+        GptModelOutputs model_output;
+        auto            options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+        model_output.logits =
+            torch::tensor({2 * std::log(.5f), 2 * std::log(.3f), 2 * std::log(.19f), 2 * std::log(.01f), 100.f, 100.f},
+                          options)
+                .repeat({2, 1});
+        auto input = processor.gatherSpecSamplerInput(
+            StreamGroups({stream}), model_output, {}, torch::tensor({1}, torch::kInt32).reshape({1, 1}));
+        ASSERT_TRUE(input.ok());
+        EXPECT_TRUE(input->all_probs.defined());
+        EXPECT_FALSE(input->return_original_all_probs);
+        EXPECT_EQ(input->logits.data_ptr(), model_output.logits.data_ptr());
+        auto output   = sampler.forward(*input);
+        auto expected = torch::tensor({.625f, .375f, 0.f, 0.f}, options).repeat({2, 1});
+        EXPECT_TRUE(torch::allclose(output.all_probs, expected, 1e-5, 1e-6));
+        EXPECT_TRUE(model_output.logits.narrow(1, 4, 2).eq(100).all().item<bool>());
+    }
+}
+
 // Each reader-side gate condition on its own must restore the materialized
 // full-upload path with the current committed history and proposals.
 TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputDeadHistoryGateFlipsRestoreMaterialization) {
@@ -1068,9 +1119,134 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputDeadHistoryGateFli
         [](const GenerateStreamPtr& s) { s->generateConfig()->no_repeat_ngram_size = 3; },
         /*expect_all_probs=*/true);
     run_flip_case(
-        "return_all_probs_none",
-        [](const GenerateStreamPtr& s) { s->setReturnAllProbs(ReturnAllProbsMode::NONE); },
-        /*expect_all_probs=*/false);
+        "penalty_with_return_all_probs_none",
+        [](const GenerateStreamPtr& s) {
+            s->setReturnAllProbs(ReturnAllProbsMode::NONE);
+            s->generateConfig()->presence_penalty = 0.5f;
+        },
+        /*expect_all_probs=*/true);
+}
+
+// The four per-row penalty arrays are only materialized when some stream can
+// actually run a penalty kernel. An all-default batch leaves them undefined, so
+// Sampler::forward narrows them to std::nullopt and processLogits neither scans
+// them for activity nor launches the repetition/presence/frequency/ngram
+// kernels. Undefined is the "every row is default" contract the dead-history
+// elision relies on, so that gate must keep firing in this state.
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputLeavesDefaultPenaltyArraysUndefined) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 3;
+    sp_config.type              = SP_TYPE_DSPARK;
+
+    ResourceContext resource_context;
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+    for (auto& stream : {stream1, stream2}) {
+        stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    }
+
+    auto processor = MtpBatchStreamProcessor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({8, 7}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto draft          = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
+
+    auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, {}, draft);
+    ASSERT_TRUE(status.ok());
+    const auto& sampler_inputs = status.value();
+
+    // Nothing is allocated for a penalty path that cannot run.
+    EXPECT_FALSE(sampler_inputs.repetition_penalty.defined());
+    EXPECT_FALSE(sampler_inputs.presence_penalty.defined());
+    EXPECT_FALSE(sampler_inputs.frequency_penalty.defined());
+    EXPECT_FALSE(sampler_inputs.no_repeat_ngram_size.defined());
+    // Undefined reads as "all rows default", not as "reader active".
+    EXPECT_FALSE(NormalSamplerInputGatherer::anyPenaltyRowActive(sampler_inputs));
+
+    // The dead-history elision still fires: no pinned history snapshot and no
+    // copy stream are created for this round.
+#if USING_CUDA
+    EXPECT_FALSE(processor.sampler_input_copy_stream_.has_value());
+#endif
+}
+
+// One non-default penalty anywhere in the batch enables the batch-wide penalty
+// path: all four arrays are materialized and every row of every stream is
+// filled. The kernels consume one row per request, so a partially filled array
+// would read garbage for the rows that did not trigger the allocation.
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputMaterializesPenaltyArraysBatchWide) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 3;
+    sp_config.type              = SP_TYPE_DSPARK;
+
+    ResourceContext resource_context;
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+    for (auto& stream : {stream1, stream2}) {
+        stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    }
+    // Only this stream carries a non-default penalty; the other keeps defaults.
+    stream1->generateConfig()->repetition_penalty = 1.05f;
+
+    auto processor = MtpBatchStreamProcessor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({8, 7}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto draft          = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
+
+    auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, {}, draft);
+    ASSERT_TRUE(status.ok());
+    const auto& sampler_inputs = status.value();
+
+    ASSERT_TRUE(sampler_inputs.repetition_penalty.defined());
+    ASSERT_TRUE(sampler_inputs.presence_penalty.defined());
+    ASSERT_TRUE(sampler_inputs.frequency_penalty.defined());
+    ASSERT_TRUE(sampler_inputs.no_repeat_ngram_size.defined());
+
+    // Both streams contribute score_len rows (4 each); the array is batch-wide.
+    const int64_t expected_rows = 8;
+    EXPECT_EQ(sampler_inputs.repetition_penalty.numel(), expected_rows);
+    EXPECT_EQ(sampler_inputs.presence_penalty.numel(), expected_rows);
+    EXPECT_EQ(sampler_inputs.frequency_penalty.numel(), expected_rows);
+    EXPECT_EQ(sampler_inputs.no_repeat_ngram_size.numel(), expected_rows);
+    EXPECT_TRUE(sampler_inputs.repetition_penalty.device().is_cpu());
+
+    // Every row is filled: the triggering stream keeps its value and the
+    // default stream keeps the identity value (no untouched/garbage rows).
+    EXPECT_EQ((sampler_inputs.repetition_penalty == 1.05f).sum().item<int64_t>(), 4);
+    EXPECT_EQ((sampler_inputs.repetition_penalty == 1.0f).sum().item<int64_t>(), 4);
+    EXPECT_TRUE(sampler_inputs.presence_penalty.eq(0.0f).all().item<bool>());
+    EXPECT_TRUE(sampler_inputs.frequency_penalty.eq(0.0f).all().item<bool>());
+    EXPECT_TRUE(sampler_inputs.no_repeat_ngram_size.eq(0).all().item<bool>());
+    EXPECT_TRUE(NormalSamplerInputGatherer::anyPenaltyRowActive(sampler_inputs));
+
+    // The penalty kernel reads the token history, so the elision flips off and
+    // the copy stream that uploads the history is created.
+#if USING_CUDA
+    EXPECT_TRUE(processor.sampler_input_copy_stream_.has_value());
+#endif
 }
 
 // Re-enabling a history reader must upload the current host history in full,
@@ -2642,6 +2818,67 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyMatchesPlannerAndPack
     }
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testDSparkCapacityBudgetKeepsFullGammaPackedAndCommitGeometry) {
+    const c10::cuda::CUDAGuard  guard(0);
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_config;
+    auto                        cache_config = makeProcessorCacheConfig();
+    SpeculativeExecutionConfig  sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 5;
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
+    const auto              ints = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    for (int64_t batch : {3, 5, 9}) {
+        const int64_t                             rows   = batch == 3 ? 16 : batch == 5 ? 30 : 54;
+        const int64_t                             budget = rows - batch;
+        MtpBatchStreamProcessor::DSparkRoundState round;
+        round.anchors                  = torch::arange(batch, ints) + 10;
+        round.committed_ends           = torch::arange(batch, ints) * 512 + 127;
+        round.position_bases           = torch::arange(batch * 3, ints).reshape({batch, 3}) * 7;
+        round.engram_windows           = round.anchors.unsqueeze(1) - torch::arange(4, ints).unsqueeze(0);
+        auto                 proposals = torch::arange(batch * 5, ints).reshape({batch, 5}) + 100;
+        auto                 rates     = torch::ones({batch, 5}, ints.dtype(torch::kFloat32));
+        std::vector<int64_t> order;
+        for (int64_t row = batch - 1; row >= 0; --row) {
+            order.push_back(row);
+        }
+        auto expected_lengths = speculative::SpeculativeSampler::buildValidDraftLengths(
+            rates, torch::tensor(order, ints.dtype(torch::kInt64)), budget);
+        TensorHolder   holder;
+        GptModelInputs expected, actual;
+        auto           expected_layout = processor.prepareDSparkPackedTargetVerifyModelInput(
+            round, expected, proposals, expected_lengths, budget, holder, nullptr, true);
+        torch::Tensor lengths, owned;
+        auto          layout = processor.prepareDSparkBoundedTargetVerifyModelInput(
+            round, actual, proposals, rates, order, budget, holder, lengths, &owned, true);
+        ASSERT_TRUE(layout.packed_to_dense.defined());
+        EXPECT_EQ(actual.combo_tokens.numel(), rows);
+        EXPECT_EQ(lengths.sum().item<int64_t>(), budget);
+        EXPECT_TRUE(torch::equal(lengths, expected_lengths));
+        expectDSparkBoundedVerifyInputsEqual(actual, layout, expected, expected_layout);
+        if (batch == 5) {
+            EXPECT_TRUE(torch::equal(layout.packed_to_dense, torch::arange(rows, ints.dtype(torch::kInt64))));
+            GptModelInputs legacy;
+            auto           legacy_layout =
+                processor.prepareDSparkPackedTargetVerifyModelInput(round, legacy, proposals, lengths, budget, holder);
+            EXPECT_FALSE(legacy_layout.packed_to_dense.defined());
+        }
+        actual.is_packed_target_verify = true;
+        const auto target_lengths      = actual.input_lengths;
+        const auto target_positions    = actual.combo_position_ids;
+        auto       features            = torch::arange(rows * 3, ints.dtype(torch::kFloat32)).reshape({rows, 3});
+        processor.updateDecodePostDSparkCommitInput(actual, features, batch);
+        EXPECT_TRUE(actual.is_packed_target_verify);
+        EXPECT_EQ(actual.input_lengths.data_ptr(), target_lengths.data_ptr());
+        EXPECT_EQ(actual.combo_position_ids.data_ptr(), target_positions.data_ptr());
+        EXPECT_EQ(actual.last_hidden_states.data_ptr(), features.data_ptr());
+        auto snapshot = owned.clone();
+        proposals.fill_(-1);
+        EXPECT_TRUE(torch::equal(owned, snapshot));
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyRetainsRoundsAcrossReorderAndShrink) {
     const c10::cuda::CUDAGuard  guard(0);
     ModelConfig                 model_config;
@@ -3847,8 +4084,9 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillTargetLogprobsUseEmittedFirstToke
         torch::tensor({0.05f, 0.15f, 0.20f, 0.25f, 0.35f}, torch::kFloat32).reshape({1, 5});
 
     auto raw_logits      = torch::tensor({3.0f, -1.0f, 0.5f, 2.0f, 1.0f}, torch::kFloat32).reshape({1, 5});
-    auto target_logprobs = computeMtpTargetLogprobs(raw_logits, 2, /*real_vocab_size=*/5);
-    finalizeMtpTargetLogprobs(target_logprobs, torch::tensor({2}, torch::kInt32));
+    auto target_logprobs = captureMtpTargetProbs(
+        SamplerOutput{.all_probs = torch::softmax(raw_logits.narrow(1, 0, 5).to(torch::kFloat32), -1)}, 2);
+    finalizeSelectedMtpTargetLogprobs(target_logprobs, torch::tensor({2}, torch::kInt32), {0});
     auto new_tokens_all = torch::empty({1, 1}, torch::kInt32);
 
     std::vector<StreamSpecUpdateInfo> update_infos;
@@ -3969,22 +4207,15 @@ TEST_F(MtpBatchStreamProcessorTest, testDecodeTargetLogprobsCoverReplacementAcce
                                           {4.0f, 3.0f, 2.0f, 1.0f, 0.0f},
                                           {0.0f, 1.0f, 2.0f, 3.0f, 4.0f}},
                                        torch::kFloat32);
-    auto target_logprobs = captureMtpTargetLogprobs(target_logits, 3, /*real_vocab_size=*/5);
-    EXPECT_FALSE(target_logprobs.row_max.defined());
-    EXPECT_FALSE(target_logprobs.row_shifted_logsumexp.defined());
-    EXPECT_FALSE(target_logprobs.top_logits.defined());
-    EXPECT_FALSE(shouldFinalizeMtpTargetLogprobsEarly(/*stream_async_enabled=*/false, target_logprobs));
-    EXPECT_TRUE(shouldFinalizeMtpTargetLogprobsEarly(/*stream_async_enabled=*/true, target_logprobs));
+    auto target_logprobs = captureMtpTargetProbs(
+        SamplerOutput{.all_probs = torch::softmax(target_logits.narrow(1, 0, 5).to(torch::kFloat32), -1)}, 3);
 
-    // Mirror the stream-async identity path: finalize accepted rows before the
-    // regular bookkeeping worker assembles StreamSpecUpdateInfo. The latter
-    // must consume this compact payload without attempting a second finalize.
+    // Preparing stream updates must reuse scores that have already been finalized.
     processor.finalizeDecodeTargetLogprobs(stream_groups, spec_output, target_logprobs);
     ASSERT_TRUE(target_logprobs.finalized());
-    ASSERT_FALSE(target_logprobs.retainsFullLmHeadStorage());
-    auto early_token_logprobs = target_logprobs.token_logprobs.clone();
-    auto early_top_ids        = target_logprobs.top_logprob_token_ids.clone();
-    auto early_top_logprobs   = target_logprobs.top_logprobs.clone();
+    auto finalized_token_logprobs = target_logprobs.token_logprobs.clone();
+    auto finalized_top_ids        = target_logprobs.top_logprob_token_ids.clone();
+    auto finalized_top_logprobs   = target_logprobs.top_logprobs.clone();
 
     std::vector<StreamSpecUpdateInfo> update_infos;
     processor.prepareDecodeSpecUpdateInfo(
@@ -3992,9 +4223,9 @@ TEST_F(MtpBatchStreamProcessorTest, testDecodeTargetLogprobsCoverReplacementAcce
 
     ASSERT_EQ(update_infos.size(), 3);
     ASSERT_TRUE(target_logprobs.finalized());
-    EXPECT_TRUE(torch::equal(target_logprobs.token_logprobs, early_token_logprobs));
-    EXPECT_TRUE(torch::equal(target_logprobs.top_logprob_token_ids, early_top_ids));
-    EXPECT_TRUE(torch::equal(target_logprobs.top_logprobs, early_top_logprobs));
+    EXPECT_TRUE(torch::equal(target_logprobs.token_logprobs, finalized_token_logprobs));
+    EXPECT_TRUE(torch::equal(target_logprobs.top_logprob_token_ids, finalized_top_ids));
+    EXPECT_TRUE(torch::equal(target_logprobs.top_logprobs, finalized_top_logprobs));
     // Only 1+2+3 accepted rows are reduced, rather than all 3*(P+1)=9.
     EXPECT_EQ(target_logprobs.token_logprobs.size(0), 6);
     const std::vector<int64_t> row_offsets = {0, 1, 3};
@@ -4077,11 +4308,11 @@ TEST_F(MtpBatchStreamProcessorTest, testDecodeTargetLogprobsKeepOnlyContentSuffi
     draft_output.sampler_output.all_probs       = torch::full({3, 8}, 0.125f, torch::kFloat32);
 
     auto target_logits   = torch::arange(0, 144, torch::kFloat32).reshape({18, 8});
-    auto target_logprobs = captureMtpDecodeTargetLogprobs(target_logits, /*max_top_logprobs=*/8, /*real_vocab_size=*/8);
+    auto target_logprobs = captureMtpTargetProbs(
+        SamplerOutput{.all_probs = torch::softmax(target_logits.narrow(1, 0, 8).to(torch::kFloat32), -1)}, 8);
     processor.finalizeDecodeTargetLogprobs(stream_groups, spec_output, target_logprobs);
 
     ASSERT_TRUE(target_logprobs.finalized());
-    ASSERT_FALSE(target_logprobs.retainsFullLmHeadStorage());
     // Dense selected rows are crossing[3,4] => [9,10], then content[0] => 12.
     ASSERT_EQ(target_logprobs.token_logprobs.size(0), 3);
     // The thinking-only k=20 stream contributes no row. The crossing stream
@@ -4168,23 +4399,17 @@ TEST_F(MtpBatchStreamProcessorTest, testDecodeTargetLogprobsDeferMixedCompaction
                                           {1.0f, 0.0f, 5.0f, 4.0f, 3.0f},
                                           {2.0f, 1.0f, 0.0f, 5.0f, 3.0f}},
                                       torch::kFloat32);
-    auto target_logprobs = captureMtpDecodeTargetLogprobs(dense_logits, /*max_top_logprobs=*/2, /*real_vocab_size=*/5);
-    EXPECT_EQ(target_logprobs.raw_logits.size(0), 4);
+    auto target_logprobs = captureMtpTargetProbs(
+        SamplerOutput{.all_probs = torch::softmax(dense_logits.narrow(1, 0, 5).to(torch::kFloat32), -1)}, 2);
+    EXPECT_EQ(target_logprobs.probs.size(0), 4);
     EXPECT_EQ(target_logprobs.dense_row_count, 4);
-    EXPECT_EQ(target_logprobs.raw_logits.data_ptr<float>(), dense_logits.data_ptr<float>());
-    EXPECT_TRUE(target_logprobs.captured_dense_row_indices.empty());
-    EXPECT_TRUE(target_logprobs.retainsFullLmHeadStorage());
-    EXPECT_TRUE(shouldFinalizeMtpTargetLogprobsEarly(/*stream_async_enabled=*/true, target_logprobs));
-    EXPECT_FALSE(target_logprobs.row_max.defined());
-    EXPECT_FALSE(target_logprobs.row_shifted_logsumexp.defined());
-    EXPECT_FALSE(target_logprobs.top_logits.defined());
+    EXPECT_FALSE(target_logprobs.token_logprobs.defined());
 
     // The mixed decode capture stays zero-copy until acceptance. Early finalize
     // then reduces only the one accepted row belonging to the requesting
     // stream; the regular worker consumes the compact result idempotently.
     processor.finalizeDecodeTargetLogprobs(stream_groups, spec_output, target_logprobs);
     ASSERT_TRUE(target_logprobs.finalized());
-    ASSERT_FALSE(target_logprobs.retainsFullLmHeadStorage());
 
     std::vector<StreamSpecUpdateInfo> update_infos;
     processor.prepareDecodeSpecUpdateInfo(stream_groups, spec_output, draft_output, target_logprobs, update_infos);
@@ -4243,8 +4468,9 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchPrefillStagesCompactLogprobsToCp
                                     torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA))
                           .reshape({1, 5});
     auto expected        = torch::log_softmax(raw_logits.to(torch::kFloat32), -1);
-    auto target_logprobs = computeMtpTargetLogprobs(raw_logits, 2, /*real_vocab_size=*/5);
-    finalizeMtpTargetLogprobs(target_logprobs, target_output.sampler_output.token_ids.select(1, 1));
+    auto target_logprobs = captureMtpTargetProbs(
+        SamplerOutput{.all_probs = torch::softmax(raw_logits.narrow(1, 0, 5).to(torch::kFloat32), -1)}, 2);
+    finalizeSelectedMtpTargetLogprobs(target_logprobs, target_output.sampler_output.token_ids.select(1, 1), {0});
 
     auto status =
         processor.dispatchPrefill(stream_groups, target_output, draft_output, torch::Tensor(), target_logprobs);
@@ -4457,7 +4683,8 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecMaskExcludesPaddedSamplerLogitsWitho
     auto sampled_token_ids = masked_logits.argmax(/*dim=*/1);
     EXPECT_EQ(toVec<int64_t>(sampled_token_ids), (std::vector<int64_t>{3, 1}));
     EXPECT_TRUE(torch::all(sampled_token_ids < model_config.vocab_size).item<bool>());
-    EXPECT_TRUE(torch::equal(model_output.logits, original_logits));
+    EXPECT_TRUE(torch::equal(model_output.logits.narrow(1, 5, 3), original_logits.narrow(1, 5, 3)));
+    EXPECT_EQ(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
 }
 
 }  // namespace rtp_llm

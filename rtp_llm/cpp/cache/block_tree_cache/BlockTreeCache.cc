@@ -37,7 +37,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
         *metrics_reporter_,
         mutex_,
         config_.host_cache_sync_timeout_ms,
-        config_.disk_cache_sync_timeout_ms,
+        config_.disk_cache_evict_timeout_ms,
         config_.max_descriptors_per_transfer_batch,
         [this](Tier tier) { return config_.isTierEnabled(tier); },
         [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }),
@@ -59,11 +59,18 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
             *metrics_reporter_,
             mutex_,
             config_.host_cache_sync_timeout_ms,
-            config_.disk_cache_sync_timeout_ms,
+            config_.disk_cache_evict_timeout_ms,
             storage_backend_,
             [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }) {
     if (storage_backend_)
         storage_backend_->setStageMetricsReporter(metrics_reporter_);
+    if (storage_backend_ && transfer_dispatcher_) {
+        storage_backend_->setFrozenTaskRetainer(
+            [dispatcher = transfer_dispatcher_.get()](FrozenTask task) { dispatcher->retainFrozenTask(std::move(task)); });
+        storage_backend_->setFinishedOperationHandler([dispatcher = transfer_dispatcher_.get()](const std::string& id) {
+            dispatcher->enqueueFinishedKVCMOperation(id);
+        });
+    }
 }
 
 bool BlockTreeCache::init() {
@@ -107,6 +114,7 @@ bool BlockTreeCache::init() {
 }
 
 BlockTreeCache::~BlockTreeCache() {
+    if (transfer_dispatcher_) transfer_dispatcher_->stopFrozenPolling();
     full_prefix_scanner_.reset();
     RTP_LLM_LOG_INFO("destroying, closing load tickets...");
     shutdownLoads();
@@ -136,9 +144,18 @@ void BlockTreeCache::shutdownLoads() {
 }
 
 TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
+    const auto task_id = task.taskId();
+    if (!task_id.empty() && !transfer_task_registry_.start(task_id)) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "duplicate transfer task id");
+    }
     auto context = transfer_dispatcher_->executePerRank(std::move(task));
     context->waitDone();
     auto result = context->result();
+    // Conservatively permit recovery only after a successful worker transfer.
+    // Failed transfers remain RUNNING, even when some failure paths are quiescent.
+    if (result.ok()) {
+        transfer_task_registry_.finish(task_id);
+    }
     if (!result.ok()) {
         RTP_LLM_LOG_WARNING("per-rank block transfer failed: %s", result.status.ToString().c_str());
     }
@@ -227,13 +244,18 @@ std::vector<BlockTreePoolMetricsSnapshot> BlockTreeCache::poolMetricsSnapshots()
 
 void BlockTreeCache::reportMetrics() const {
     std::vector<BlockTreeEvictableMetricsSnapshot> snapshots;
+    VictimSelectionMetrics                         victim_selection;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         snapshots = metrics_reporter_->collectEvictableMetricsSnapshots(tree_->groupSets(), evictor_);
+        victim_selection = evictor_.takeVictimSelectionMetrics();
     }
     metrics_reporter_->reportEvictableCandidateCount(snapshots);
+    metrics_reporter_->reportVictimSelectionMetrics(victim_selection);
     metrics_reporter_->reportQueueBacklog(task_pool_->queueSizes(), "business");
     metrics_reporter_->reportQueueBacklog(transfer_dispatcher_->queueSizes(), "transfer");
+    if (storage_backend_)
+        metrics_reporter_->reportQueueBacklog(storage_backend_->queueSizes(), "remote");
 }
 
 void BlockTreeCache::setEventPublisher(KVCacheEventPublisherPtr        publisher,

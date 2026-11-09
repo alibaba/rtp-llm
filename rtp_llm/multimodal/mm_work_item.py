@@ -135,6 +135,7 @@ class MMWorkItem:
         defer_feature_hashes: bool = False,
         deadline: Optional[float] = None,
         require_cache_key: bool = False,
+        region: Optional[str] = None,
     ):
         self.deadline = deadline
         if not mm_inputs:
@@ -157,6 +158,8 @@ class MMWorkItem:
             for input in self.mm_inputs
         )
         self.mm_type = self.mm_inputs[0].mm_type
+        # Passthrough workspace region for proxy-routed media downloads.
+        self.region: Optional[str] = region
 
         self.preprocess_result: Optional[Any] = None
         self.capture_inspection_sources = False

@@ -58,6 +58,7 @@ _ENGRAM_SM100_TESTS = [
 ]
 
 _TESTS = [
+    "test_cp_metadata_high_batch",
     "test_dspark_commit_wkv",
     "mega_moe_static_buf_test",
     "test_dspark_cuda_graph_contract",
@@ -178,4 +179,182 @@ dsv4_sm100_py_test(
         "//rtp_llm:testlib",
         "//rtp_llm/models_py:modules",
     ],
+)
+
+# This metadata test needs only Python's standard library, on any CPU.
+py_test(
+    name = "test_engram_manifest",
+    srcs = ["test_engram_manifest.py"],
+    main = "test_engram_manifest.py",
+    deps = ["//rtp_llm/models_py:engram_manifest"],
+    legacy_create_init = 0,
+)
+
+# Standalone unittest entry points: the real modules are declared as deps,
+# while native allocation / CUDA graph behavior is injected by the CPU tests.
+# Do not route these through pytest_main, testlib or the GPU _TESTS loop.
+py_test(
+    name = "test_engram_storage",
+    size = "small",
+    srcs = ["test_engram_storage.py"],
+    main = "test_engram_storage.py",
+    deps = [
+        "//rtp_llm/models_py:engram_manifest",
+        "//rtp_llm/models_py:engram_storage_cpu",
+        "//rtp_llm/models_py:engram_model_attach_cpu",
+    ],
+    legacy_create_init = 0,
+)
+
+# Capacity policy and arithmetic must run without torch or CUDA.
+py_test(
+    name = "test_engram_capacity",
+    size = "small",
+    env = {"GPU_COUNT": "0"},
+    srcs = ["test_engram_capacity.py"],
+    main = "test_engram_capacity.py",
+    deps = ["//rtp_llm/models_py:engram_capacity"],
+    legacy_create_init = 0,
+)
+
+# This test loads the lightweight helper by file path and injects every model
+# factory. It must run without torch, CUDA, native libraries or the RTP engine.
+py_test(
+    name = "test_engram_model_attach",
+    size = "small",
+    env = {"GPU_COUNT": "0"},
+    srcs = ["test_engram_model_attach.py"],
+    main = "test_engram_model_attach.py",
+    deps = ["//rtp_llm/models_py:engram_model_attach_cpu"],
+    legacy_create_init = 0,
+)
+
+# The test imports test_engram_manifest.py as its standard document fixture;
+# declaring it explicitly is required for sandboxed runfiles. Real CPU hash
+# constants come from the narrow engram_model_cpu closure, never :modules.
+py_test(
+    name = "test_engram_bootstrap",
+    size = "small",
+    env = {"GPU_COUNT": "0"},
+    srcs = ["test_engram_bootstrap.py", "test_engram_manifest.py"],
+    main = "test_engram_bootstrap.py",
+    deps = ["//rtp_llm/models_py:engram_bootstrap_cpu"],
+    legacy_create_init = 0,
+    target_compatible_with = select({
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+# CPU execution with the validated CUDA13 ARM dependency versions. These
+# tests need modern FP8/E8M0 torch/safetensors, but no GPU allocation or runtime.
+[
+    py_test(
+        name = name,
+        size = "small",
+        env = {"GPU_COUNT": "0"} if name == "test_engram_checkpoint" else {},
+        srcs = [name + ".py"],
+        main = name + ".py",
+        deps = ["//rtp_llm/models_py:" + library],
+        legacy_create_init = 0,
+        target_compatible_with = select({
+            "@//:using_cuda13_arm": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for name, library in [
+        ("test_engram_checkpoint", "engram_checkpoint_cpu"),
+        ("test_engram_external_checkpoint", "engram_model_cpu"),
+        ("test_engram_external_warmup", "engram_warmup_cpu"),
+        ("test_engram_external_scale_source", "engram_scale_source_cpu"),
+    ]
+]
+
+# Distributed layout and rollback tests do not import Torch or CUDA.
+[
+    py_test(
+        name = name,
+        size = "small",
+        srcs = [name + ".py"],
+        main = name + ".py",
+        deps = ["//rtp_llm/models_py:engram_storage_cpu"],
+        legacy_create_init = 0,
+    )
+    for name in ["test_engram_shard", "test_engram_shard_config", "test_engram_shard_storage"]
+]
+
+py_test(
+    name = "test_engram_descriptors",
+    size = "small",
+    srcs = ["test_engram_descriptors.py"],
+    main = "test_engram_descriptors.py",
+    deps = ["//rtp_llm/models_py:engram_descriptors_cpu"],
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_engram_publish",
+    size = "small",
+    srcs = ["test_engram_publish.py"],
+    main = "test_engram_publish.py",
+    deps = ["//rtp_llm/models_py:engram_publish_cpu"],
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_engram_exchange",
+    size = "small",
+    srcs = ["test_engram_exchange.py"],
+    main = "test_engram_exchange.py",
+    deps = [
+        "//rtp_llm/models_py:engram_exchange_cpu",
+        "//tools/engram_sidecar/framework:exchange_test_certs",
+    ],
+    # Uses localhost TLS sockets and the test host's openssl command.
+    tags = ["requires-network", "requires-openssl"],
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_engram_local_cuda",
+    size = "large",
+    timeout = "long",
+    srcs = ["test_engram_local_cuda.py"],
+    main = "test_engram_local_cuda.py",
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//tools/engram_sidecar/native:native_runtime",
+    ],
+    env = {"GPU_COUNT": "4"},
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "4"},
+    tags = ["SM103_CU13"],
+    legacy_create_init = 0,
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "test_engram_local_cuda_config",
+    size = "small",
+    srcs = ["test_engram_local_cuda.py"],
+    main = "test_engram_local_cuda.py",
+    args = ["LocalCudaEngramConfigTest"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+    ],
+    env = {"GPU_COUNT": "0"},
+    legacy_create_init = 0,
+)
+
+py_test(
+    name = "test_engram_cuda_fabric_config",
+    size = "small",
+    srcs = ["test_engram_cuda_fabric.py"],
+    main = "test_engram_cuda_fabric.py",
+    deps = ["//rtp_llm/models_py:modules"],
+    env = {"GPU_COUNT": "0"},
+    legacy_create_init = 0,
 )

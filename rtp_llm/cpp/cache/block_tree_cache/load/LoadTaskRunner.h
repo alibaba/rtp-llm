@@ -5,12 +5,14 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 
 namespace rtp_llm {
 
@@ -24,8 +26,7 @@ public:
     struct Task {
         enum class Phase {
             CREATED,
-            HOST_TO_DEVICE,
-            DISK_TO_DEVICE,
+            TRANSFERRING,
             FINISHED
         };
 
@@ -39,8 +40,7 @@ public:
             target_installed(load_descs.size(), false),
             context(std::move(load_context)) {}
 
-        // A HOST failure can finish a mixed workflow before DISK was submitted.
-        // Link settlement to the completed phase, rather than an unstarted DISK ID.
+        // Called after both directions settle; prefer DISK when it has a recorded result.
         const TransferTask& completionTransfer() const {
             return !disk_result.block_errors.empty() || host_to_device_task.descriptors().empty() ?
                        disk_to_device_task :
@@ -54,9 +54,16 @@ public:
         TransferResult    host_result;
         TransferResult    disk_result;
         std::vector<bool> target_installed;
+        bool              host_source_frozen{false};
+        bool              disk_source_frozen{false};
         // A submitted task owns the committed context until settlement completes.
         std::shared_ptr<LoadAsyncContext> context;
         Phase                             phase{Phase::CREATED};
+        std::mutex                        wait_mutex;
+        bool                              host_completed{false};
+        bool                              disk_completed{false};
+        SharedTransferStageTimer          direction_wait;
+        SharedTransferStageTimer          wait;
     };
     using TaskPtr = std::shared_ptr<Task>;
 
@@ -70,10 +77,6 @@ public:
     void    releaseTaskResources(const Task& task);
 
 private:
-    void startDiskTransfer(TaskPtr                        task,
-                           const BlockTransferDispatcher& transfer_dispatcher,
-                           BlockTreeCacheMetricsReporter& metrics_reporter,
-                           TransferDoneCallback           callback);
     void reportStageFinished(const Task&                            task,
                              BlockTreeCacheMetricsReporter&         metrics_reporter,
                              Tier                                   source_tier,

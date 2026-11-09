@@ -9,9 +9,9 @@ complex64 GPT-J frequencies and BF16 rounding before either cache quantizer.
 CP ownership is supplied as slot mappings, rather than using vLLM's ring.
 
 The caller snapshots/all-reduces predecessor state before these stages. The
-compressor only reads that immutable snapshot and the preceding tile's carry;
-state stores and publication of the next carry happen afterwards on the same
-stream. Neither communication nor carry lifetime is changed by this module.
+compressor reads that immutable snapshot and the preceding tile's carry.
+Compression and state writes use independent CTAs in one launch; the caller
+double-buffers carry so the next tile cannot overwrite the current input.
 """
 
 from __future__ import annotations
@@ -96,6 +96,27 @@ def _trap():
     tl.inline_asm_elementwise(
         "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
     )
+
+
+@triton.jit
+def _projected_row(
+    restore,
+    row,
+    global_start,
+    local_start,
+    full_local_rows,
+    local_rows,
+    mapped: tl.constexpr,
+):
+    row = row.to(tl.int64)
+    if mapped:
+        index = tl.load(restore + global_start + row)
+        return (
+            (index // full_local_rows) * local_rows
+            + index % full_local_rows
+            - local_start
+        )
+    return row
 
 
 @triton.jit
@@ -188,6 +209,12 @@ def _prefill_compress_main_kernel(
     pool,
     slots,
     output,
+    restore,
+    global_start,
+    local_start,
+    full_local_rows,
+    local_rows,
+    MAPPED: tl.constexpr,
     VALUE_STRIDE: tl.constexpr,
     SCORE_STRIDE: tl.constexpr,
     PREVIOUS_STRIDE: tl.constexpr,
@@ -202,12 +229,15 @@ def _prefill_compress_main_kernel(
 ):
     row = tl.program_id(0).to(tl.int64)
     token = tl.load(boundary_indices + row).to(tl.int64)
+    source = _projected_row(
+        restore, token, global_start, local_start, full_local_rows, local_rows, MAPPED
+    )
     columns = tl.arange(0, 512)
-    current = tl.load(values + token * VALUE_STRIDE + columns)
+    current = tl.load(values + source * VALUE_STRIDE + columns).to(tl.float32)
     position = tl.load(positions + token).to(tl.int64)
     if RATIO == 2:
         request = tl.load(requests + token).to(tl.int64)
-        current_score = tl.load(scores + token * SCORE_STRIDE + columns)
+        current_score = tl.load(scores + source * SCORE_STRIDE + columns)
         if position == tl.load(starts + request):
             prev = tl.load(previous + request * PREVIOUS_STRIDE + columns)
             prev_score = tl.load(previous + request * PREVIOUS_STRIDE + 512 + columns)
@@ -220,8 +250,17 @@ def _prefill_compress_main_kernel(
                 # request starts above always use the immutable snapshot.
                 prev, prev_score = current, current_score
         else:
-            prev = tl.load(values + (token - 1) * VALUE_STRIDE + columns)
-            prev_score = tl.load(scores + (token - 1) * SCORE_STRIDE + columns)
+            previous_row = _projected_row(
+                restore,
+                token - 1,
+                global_start,
+                local_start,
+                full_local_rows,
+                local_rows,
+                MAPPED,
+            )
+            prev = tl.load(values + previous_row * VALUE_STRIDE + columns)
+            prev_score = tl.load(scores + previous_row * SCORE_STRIDE + columns)
         maximum = tl.maximum(prev_score, current_score)
         e0 = libdevice.exp(prev_score - maximum)
         e1 = libdevice.exp(current_score - maximum)
@@ -257,7 +296,7 @@ def _prefill_compress_main_kernel(
         )
 
 
-@triton.jit(do_not_specialize=["STATE_ROWS"])
+@triton.jit(do_not_specialize=["ROWS", "STATE_ROWS"])
 def _prefill_state_store_kernel(
     values,
     scores,
@@ -266,23 +305,156 @@ def _prefill_state_store_kernel(
     VALUE_STRIDE: tl.constexpr,
     SCORE_STRIDE: tl.constexpr,
     STATE_STRIDE: tl.constexpr,
+    ROWS,
     STATE_ROWS,
     TRAP: tl.constexpr,
 ):
-    row = tl.program_id(0).to(tl.int64)
-    slot = tl.load(slots + row).to(tl.int64)
-    if slot >= 0:
+    row = (tl.program_id(0) * 8 + tl.arange(0, 8)).to(tl.int64)
+    slot = tl.load(slots + row, row < ROWS, other=-1).to(tl.int64)
+    if TRAP:
+        if tl.max(slot, 0) >= STATE_ROWS:
+            _trap()
+    valid = slot >= 0
+    d = tl.arange(0, 512)
+    value = tl.load(
+        values + row[:, None] * VALUE_STRIDE + d[None, :], valid[:, None], other=0
+    )
+    score = tl.load(
+        scores + row[:, None] * SCORE_STRIDE + d[None, :], valid[:, None], other=0
+    )
+    tl.store(state + slot[:, None] * STATE_STRIDE + d[None, :], value, valid[:, None])
+    tl.store(
+        state + slot[:, None] * STATE_STRIDE + 512 + d[None, :],
+        score,
+        valid[:, None],
+    )
+
+
+@triton.jit(do_not_specialize=["POOL_STRIDE", "BLOCKS", "ROWS", "STATE_ROWS"])
+def _prefill_compress_state_kernel(
+    values,
+    scores,
+    weight,
+    positions,
+    requests,
+    starts,
+    previous,
+    boundary_indices,
+    carry_values,
+    carry_scores,
+    frequencies,
+    pool,
+    slots,
+    output,
+    restore,
+    state_slots,
+    state_pool,
+    carry_out,
+    global_start,
+    local_start,
+    full_local_rows,
+    local_rows,
+    value_stride,
+    score_stride,
+    previous_stride,
+    state_stride,
+    ROWS,
+    count,
+    entries,
+    POOL_STRIDE,
+    BLOCKS,
+    STATE_ROWS,
+    EPS: tl.constexpr,
+    TRAP: tl.constexpr,
+    REDUCE_WIDTH: tl.constexpr,
+    HAS_CARRY: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    if pid < count:
+        _prefill_compress_main_kernel(
+            values,
+            scores,
+            weight,
+            positions,
+            requests,
+            starts,
+            previous,
+            boundary_indices,
+            carry_values,
+            carry_scores,
+            frequencies,
+            pool,
+            slots,
+            output,
+            restore,
+            global_start,
+            local_start,
+            full_local_rows,
+            local_rows,
+            True,
+            value_stride,
+            score_stride,
+            previous_stride,
+            HAS_CARRY,
+            2,
+            EPS,
+            entries,
+            POOL_STRIDE,
+            BLOCKS,
+            TRAP,
+            REDUCE_WIDTH,
+        )
+    else:
+        # Pair compression and state copy have different owner maps and grids.
+        # Keep their CTA work independent while using one launch per source tile.
+        row = ((pid - count) * 4 + tl.arange(0, 4)).to(tl.int64)
+        slot = tl.load(state_slots + row, row < ROWS, other=-1).to(tl.int64)
         if TRAP:
-            if slot >= STATE_ROWS:
+            if tl.max(slot, 0) >= STATE_ROWS:
                 _trap()
-        d = tl.arange(0, 512)
-        tl.store(
-            state + slot * STATE_STRIDE + d, tl.load(values + row * VALUE_STRIDE + d)
+        valid = slot >= 0
+        source = _projected_row(
+            restore,
+            tl.minimum(row, ROWS - 1),
+            global_start,
+            local_start,
+            full_local_rows,
+            local_rows,
+            True,
+        )
+        col = tl.arange(0, 512)
+        value = tl.load(
+            values + source[:, None] * value_stride + col[None, :],
+            valid[:, None],
+            other=0,
+        )
+        score = tl.load(
+            scores + source[:, None] * score_stride + col[None, :],
+            valid[:, None],
+            other=0,
         )
         tl.store(
-            state + slot * STATE_STRIDE + 512 + d,
-            tl.load(scores + row * SCORE_STRIDE + d),
+            state_pool + slot[:, None] * state_stride + col[None, :],
+            value,
+            valid[:, None],
         )
+        tl.store(
+            state_pool + slot[:, None] * state_stride + 512 + col[None, :],
+            score,
+            valid[:, None],
+        )
+        if pid - count == tl.cdiv(ROWS, 4) - 1:
+            last = _projected_row(
+                restore,
+                tl.full((), ROWS - 1, tl.int64),
+                global_start,
+                local_start,
+                full_local_rows,
+                local_rows,
+                True,
+            )
+            tl.store(carry_out + col, tl.load(values + last * value_stride + col))
+            tl.store(carry_out + 512 + col, tl.load(scores + last * score_stride + col))
 
 
 @triton.jit(do_not_specialize=["POOL_STRIDE", "BLOCKS"])
@@ -355,6 +527,7 @@ def compress_main(
     main_slots,
     ratio,
     carry=None,
+    source_map=None,
 ):
     """Return compact pre-RoPE BF16 latent and store the owned main-cache rows.
 
@@ -368,14 +541,16 @@ def compress_main(
     """
     if not _enabled(values) or values.ndim != 2:
         return None
-    rows, device = values.shape[0], values.device
+    rows = positions.numel() if source_map is not None else values.shape[0]
+    device = values.device
     count = boundary_indices.numel()
     if not (
         ratio in (1, 2)
         and 0 <= count <= rows
         and math.isfinite(eps)
         and eps > 0
-        and _matrix(values, rows, 512, torch.float32, device)
+        and values.dtype in (torch.float32, torch.bfloat16)
+        and _matrix(values, values.shape[0], 512, values.dtype, device)
         and _vector(norm, 512, device, (torch.float32, torch.bfloat16))
         and _vector(positions, rows, device)
         and _vector(boundary_indices, count, device)
@@ -385,7 +560,8 @@ def compress_main(
     ):
         return None
     if ratio == 2 and not (
-        _matrix(scores, rows, 512, torch.float32, device)
+        values.dtype == torch.float32
+        and _matrix(scores, values.shape[0], 512, torch.float32, device)
         and _vector(req_ids, rows, device)
         and isinstance(starts, torch.Tensor)
         and _vector(starts, starts.numel(), device)
@@ -399,6 +575,21 @@ def compress_main(
         )
     ):
         return None
+    if source_map is not None:
+        restore, global_start, local_start, full_local_rows, local_rows = source_map
+        if not (
+            _vector(restore, restore.numel(), device)
+            and 0 <= global_start
+            and 0 <= local_start
+            and 0 < full_local_rows
+            and 0 < local_rows
+            and global_start + rows <= restore.numel()
+            and values.shape[0] % local_rows == 0
+        ):
+            return None
+    else:
+        restore = None
+        global_start = local_start = full_local_rows = local_rows = 0
     output = torch.empty((count, 512), device=device, dtype=torch.bfloat16)
     if count == 0:
         return output
@@ -416,6 +607,12 @@ def compress_main(
         main_pool,
         main_slots,
         output,
+        restore,
+        global_start,
+        local_start,
+        full_local_rows,
+        local_rows,
+        source_map is not None,
         values.stride(0),
         scores.stride(0) if ratio == 2 else 0,
         previous.stride(0) if ratio == 2 else 0,
@@ -448,7 +645,7 @@ def store_states(values, scores, state_slots, state_pool):
     ):
         return False
     if rows:
-        _prefill_state_store_kernel[(rows,)](
+        _prefill_state_store_kernel[(triton.cdiv(rows, 8),)](
             values,
             scores,
             state_slots,
@@ -456,11 +653,82 @@ def store_states(values, scores, state_slots, state_pool):
             values.stride(0),
             scores.stride(0),
             state_pool.stride(0),
+            rows,
             state_pool.shape[0],
             trap_invalid_kv_access_enabled(),
             num_warps=4,
         )
     return True
+
+
+def compress_main_and_store_states(
+    values,
+    scores,
+    norm,
+    eps,
+    positions,
+    req_ids,
+    starts,
+    previous,
+    boundary_indices,
+    freqs,
+    main_pool,
+    main_slots,
+    carry,
+    state_slots,
+    state_pool,
+    carry_out,
+    source_map,
+):
+    """Compress owned pairs and copy owned state rows on independent CTA grids."""
+    restore, global_start, local_start, full_local_rows, local_rows = source_map
+    rows, count = positions.numel(), boundary_indices.numel()
+    assert rows > 0 and state_slots.numel() == rows
+    assert values.dtype == scores.dtype == state_pool.dtype == torch.float32
+    assert values.shape == scores.shape and values.shape[1] == 512
+    assert main_slots.numel() == count and carry_out.shape == (2, 512)
+    assert values.shape[0] % local_rows == 0
+    output = torch.empty((count, 512), device=values.device, dtype=torch.bfloat16)
+    _prefill_compress_state_kernel[(count + triton.cdiv(rows, 4),)](
+        values,
+        scores,
+        norm,
+        positions,
+        req_ids,
+        starts,
+        previous,
+        boundary_indices,
+        *(carry if carry is not None else (None, None)),
+        freqs.view(torch.float32),
+        main_pool,
+        main_slots,
+        output,
+        restore,
+        state_slots,
+        state_pool,
+        carry_out,
+        global_start,
+        local_start,
+        full_local_rows,
+        local_rows,
+        values.stride(0),
+        scores.stride(0),
+        previous.stride(0),
+        state_pool.stride(0),
+        rows,
+        count,
+        main_pool.shape[1],
+        main_pool.stride(0),
+        main_pool.shape[0],
+        state_pool.shape[0],
+        eps,
+        trap_invalid_kv_access_enabled(),
+        min(128, 512 // min(1 << (count.bit_length() - 1), 16)) if count else 32,
+        carry is not None,
+        num_warps=4,
+        enable_fp_fusion=False,
+    )
+    return output
 
 
 def store_index(projected, norm, eps, positions, freqs, index_pool, index_slots, ratio):

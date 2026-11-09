@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 
 namespace rtp_llm {
 
@@ -64,9 +65,12 @@ struct BlockTreeCacheConfig {
     size_t transfer_worker_count{4};
     size_t transfer_queue_max_size{10000};
 
-    // ---- Cross-rank transfer timeout ----
+    // ---- Transfer deadlines, including queue wait and cross-rank work ----
     int host_cache_sync_timeout_ms{10000};
+    // Preserve the existing name for disk loads.
     int disk_cache_sync_timeout_ms{30000};
+    // Outbound disk transfers from both eviction and store.
+    int disk_cache_evict_timeout_ms{30000};
 
     // Total max-stride staging blocks per rank, split evenly across Full/SWA pools.
     // Default guarantees at least 64 Full blocks; actual capacities depend on payload sizes.
@@ -173,6 +177,13 @@ public:
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
     TransferResult executeTransfer(TransferTask task);
+    TransferTaskRegistry::State queryTransferTask(const std::string& task_id) const {
+        return transfer_task_registry_.query(task_id);
+    }
+
+    bool forgetTransferTask(const std::string& task_id) {
+        return transfer_task_registry_.forget(task_id);
+    }
 
     // Accessors
     BlockTree* tree() const {
@@ -214,6 +225,7 @@ private:
     BlockTreeCacheConfig                           config_;
     std::unique_ptr<BlockTree>                     tree_;
     std::shared_ptr<StorageBackend>                storage_backend_;
+    TransferTaskRegistry                          transfer_task_registry_;
     std::unique_ptr<BlockTransferDispatcher>       transfer_dispatcher_;
     std::unique_ptr<BlockTreeTaskPool>             task_pool_;
     std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;

@@ -477,11 +477,10 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         return y
 
     def prepare_mhc_inputs(self, x: torch.Tensor) -> MegaMoEInputs | None:
-        """Expose native group-32 decode destinations without writing them."""
+        """Expose native group-32 destinations without writing them."""
         buf = self._mega_buf
         if (
-            not self.cfg.is_decode_role
-            or self.cfg.shared_fp8_block_size != 32
+            self.cfg.shared_fp8_block_size != 32
             or self.cfg.dim != 5120
             or x.ndim != 2
             or x.shape[1] != self.cfg.dim

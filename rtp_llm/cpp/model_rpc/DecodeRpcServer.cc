@@ -167,7 +167,7 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
         return ret;
     }
     requires_group_drain_ = maga_init_params.parallelism_config.world_size > 1;
-    const auto& peers     = maga_init_params.runtime_config.shutdown_worker_grpc_addrs;
+    const auto& peers     = maga_init_params.runtime_config.world_worker_grpc_addrs;
     if (peers.size() == size_t(maga_init_params.parallelism_config.world_size)) {
         shutdown_coordinator_ = std::make_unique<ShutdownCoordinator>(
             peers,

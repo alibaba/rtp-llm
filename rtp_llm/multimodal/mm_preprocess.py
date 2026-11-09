@@ -41,6 +41,29 @@ _worker_preprocess_func: Optional[Callable] = None
 _worker_inspection = None
 
 
+def _set_download_region(region: Optional[str]):
+    """Expose the passthrough workspace region to the downloader for one task.
+
+    Returns a context token, or None when the internal download proxy is
+    unavailable (open-source build) or the request carries no region.
+    """
+    if not region:
+        return None
+    try:
+        from internal_source.rtp_llm.utils.download_proxy import current_download_region
+    except ImportError:
+        return None
+    return current_download_region.set(region)
+
+
+def _reset_download_region(token) -> None:
+    if token is None:
+        return
+    from internal_source.rtp_llm.utils.download_proxy import current_download_region
+
+    current_download_region.reset(token)
+
+
 class _PreprocessTaskError(Exception):
     """Keep task I/O failures distinct from broken pool communication."""
 
@@ -68,13 +91,20 @@ def _run_preprocess_task(
     mm_inputs: List[MultimodalInput],
     vit_config: VitConfig,
     preprocess_params: dict,
+    region: Optional[str] = None,
 ) -> PreprocessTaskResult:
     """Run preprocessing and return total and media-load durations in ms."""
     started_at = time.monotonic()
     with collect_vit_preprocess_metrics() as preprocess_metrics:
         with collect_download_timing() as download_timing:
             with Timer() as route_timer:
-                result = preprocess_func(mm_inputs, vit_config, **preprocess_params)
+                # Expose the passthrough workspace region to the downloader
+                # for this task only; concurrent tasks keep their own value.
+                region_token = _set_download_region(region)
+                try:
+                    result = preprocess_func(mm_inputs, vit_config, **preprocess_params)
+                finally:
+                    _reset_download_region(region_token)
     return PreprocessTaskResult(
         result,
         route_timer.cost_ms(),
@@ -141,13 +171,13 @@ def _worker_process_task(
     capture_inspection_sources: bool = False,
     deadline: Optional[float] = None,
     inspection_task=None,
+    region: Optional[str] = None,
 ) -> PreprocessTaskResult:
     """
     只接收变化的 `mm_inputs` 参数。
     """
     if _worker_preprocess_func is None:
         raise RuntimeError("Worker process has not been initialized correctly.")
-
     params = dict(_worker_preprocess_params)
     if capture_inspection_sources:
         params.update(capture_inspection_sources=True, deadline=deadline)
@@ -160,7 +190,11 @@ def _worker_process_task(
             raise TimeoutError("ViT request expired before CPU preprocessing")
         try:
             payload = _run_preprocess_task(
-                _worker_preprocess_func, mm_inputs, _worker_vit_config, params
+                _worker_preprocess_func,
+                mm_inputs,
+                _worker_vit_config,
+                params,
+                region=region,
             )
         except (OSError, EOFError) as error:
             # For example, PIL's UnidentifiedImageError is an OSError. Letting it
@@ -260,10 +294,10 @@ class PreprocessExecutor:
                 if not event.wait(
                     timeout=min(item.remaining_timeout_s() for item in pending)
                 ):
-                    self._on_wait_timeout()
+                    self._on_wait_timeout(pending)
                     raise TimeoutError("CPU preprocessing result wait timed out")
 
-    def _on_wait_timeout(self):
+    def _on_wait_timeout(self, pending):
         pass
 
     @staticmethod
@@ -313,6 +347,7 @@ class LocalPreprocessExecutor(PreprocessExecutor):
                 work_item.mm_inputs,
                 self.vit_config,
                 params,
+                region=work_item.region,
             )
             result, preprocess_time, download_time, samples = payload
             self._set_result(work_item, result)
@@ -386,6 +421,10 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         self.pool: Optional[multiprocessing.pool.Pool] = None
         self._consecutive_timeouts = 0
         self._max_consecutive_timeouts = vit_config.mm_preprocess_max_workers
+        # Counts completed tasks so a timeout can tell a stuck pool (no
+        # progress) from an overloaded one (slow but draining).
+        self._completed_tasks = 0
+        self._last_timeout_completed = 0
         # Track accepted work items independently of multiprocessing.Pool's
         # private task queue. The gauge includes both running and waiting tasks.
         self._preprocess_queue_lock = threading.Lock()
@@ -435,12 +474,29 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             ),
         )
 
-    def _on_wait_timeout(self):
+    def _on_wait_timeout(self, pending):
         with self._pool_lock:
-            self._consecutive_timeouts += 1
-            if self._consecutive_timeouts >= self._max_consecutive_timeouts:
-                self._rebuild_pool()
-                self._consecutive_timeouts = 0
+            self._record_timeout_locked()
+
+    def _record_timeout_locked(self):
+        # Distinguish a stuck pool (no task completed since the last timeout)
+        # from an overloaded one (tasks are still draining). Rebuilding an
+        # overloaded pool would discard queued work and make the backlog worse.
+        completed = self._completed_tasks
+        if completed != self._last_timeout_completed:
+            self._consecutive_timeouts = 0
+            self._last_timeout_completed = completed
+            return
+        self._consecutive_timeouts += 1
+        if self._consecutive_timeouts >= self._max_consecutive_timeouts:
+            logging.warning(
+                f"Hit {self._consecutive_timeouts} consecutive timeouts "
+                f"with no completed tasks, rebuilding pool "
+                f"(workers may be stuck)"
+            )
+            self._rebuild_pool()
+            self._consecutive_timeouts = 0
+            self._last_timeout_completed = self._completed_tasks
 
     def _track_preprocess_task(self) -> int:
         with self._preprocess_queue_lock:
@@ -456,6 +512,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             if task_id not in self._pending_preprocess_tasks:
                 return
             self._pending_preprocess_tasks.remove(task_id)
+            self._completed_tasks = getattr(self, "_completed_tasks", 0) + 1
         # multiprocessing.Pool invokes callbacks on its single result-handler
         # thread, before waking ApplyResult.get(). Never run telemetry or I/O
         # here; the consuming request thread reports the latest count.
@@ -495,6 +552,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                     work_item.capture_inspection_sources,
                     work_item.deadline,
                     inspection_task,
+                    work_item.region,
                 ),
                 callback=completed,
                 error_callback=completed,
@@ -590,14 +648,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             raise e.error from e
         except multiprocessing.pool.TimeoutError:
             with self._pool_lock:
-                self._consecutive_timeouts += 1
-                if self._consecutive_timeouts >= self._max_consecutive_timeouts:
-                    logging.warning(
-                        f"Hit {self._consecutive_timeouts} consecutive timeouts, "
-                        f"rebuilding pool (workers may be stuck)"
-                    )
-                    self._rebuild_pool()
-                    self._consecutive_timeouts = 0
+                self._record_timeout_locked()
             raise TimeoutError(
                 f"Preprocessing timeout after {work_item.mm_timeout_ms}ms"
             )

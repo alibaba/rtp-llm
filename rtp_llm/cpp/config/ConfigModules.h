@@ -163,6 +163,7 @@ struct FMHAConfig {
 
 constexpr double kDefaultDeviceLowWatermarkRatio  = 0.82;
 constexpr double kDefaultDeviceHighWatermarkRatio = 0.90;
+constexpr double kDefaultDeviceFrozenAbortRatio   = 0.30;
 constexpr double kDefaultMemoryLowWatermarkRatio  = 0.90;
 constexpr double kDefaultMemoryHighWatermarkRatio = 0.94;
 constexpr double kDefaultDiskLowWatermarkRatio    = 0.92;
@@ -181,11 +182,16 @@ struct KVCacheConfig {
     int64_t                                 disk_cache_size_mb                              = 0;
     bool                                    disk_cache_buffered_io                          = true;
     int64_t                                 disk_cache_sync_timeout_ms                      = 30000;
+    // Evict/store override; -1 inherits the load timeout above.
+    int64_t                                 disk_cache_evict_timeout_ms                     = -1;
     int64_t                                 disk_cache_staging_block_count                  = 128;
     int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 8;
     int64_t                                 block_tree_transfer_worker_count                = 4;
     int64_t                                 block_tree_business_queue_max_size              = 10000;
     int64_t                                 block_tree_transfer_queue_max_size              = 10000;
+    // Abort when any DEVICE/HOST/DISK pool's frozen fraction exceeds this ratio; 0 disables the guard.
+    // The existing device-prefixed field name is retained for configuration compatibility.
+    double block_tree_device_frozen_abort_ratio = kDefaultDeviceFrozenAbortRatio;
     double block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
     double block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
     double block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
@@ -274,8 +280,8 @@ struct KVCacheConfig {
     std::string kvcm_model_user_data                 = "";
     std::string kvcm_model_extra_info                = "";
     std::string kvcm_instance_id_salt                = "";
-    size_t      kvcm_asyncwrapper_thread_num         = 16;
-    size_t      kvcm_asyncwrapper_queue_size         = 1000;
+    size_t      kvcm_asyncwrapper_thread_num         = 4;
+    size_t      kvcm_asyncwrapper_queue_size         = 10000;
     // Retained for parsing compatibility; BTC remote broadcasts inherit the task deadline.
     int         kvcm_get_broadcast_timeout = 15000;
     int         kvcm_put_broadcast_timeout = 15000;
@@ -546,7 +552,7 @@ struct RuntimeConfig {
     std::string              model_name = "";
     std::vector<std::string> worker_grpc_addrs;
     // All engine ranks in world-rank order, unlike the TP-only worker addresses.
-    std::vector<std::string> shutdown_worker_grpc_addrs;
+    std::vector<std::string> world_worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
 
     // Fields merged from PyDeviceResourceConfig

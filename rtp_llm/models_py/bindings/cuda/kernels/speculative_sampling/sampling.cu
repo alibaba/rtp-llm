@@ -532,24 +532,52 @@ __global__ void rejection_sampling_kernel(DType*         draft_probs,
 // Align draft probabilities to target candidates without a full-vocabulary
 // scatter. Each block owns one draft/verify row and builds a shared hash table
 // for the draft candidate IDs. Missing IDs have probability zero.
-__global__ void remap_draft_topk_kernel(const int32_t* draft_candidate_ids,
-                                        const float*   draft_probs,
-                                        const int32_t* draft_token_ids,
-                                        const int32_t* target_candidate_ids,
-                                        const float*   target_probs,
-                                        float*         aligned_draft_probs,
-                                        float*         accept_target_probs,
-                                        float*         accept_draft_probs,
-                                        int            num_speculative_tokens,
-                                        int            compact_width,
-                                        int            draft_prob_width,
-                                        int            table_size) {
+//
+// Every table entry packs a 16-bit fingerprint of the draft candidate ID with
+// the candidate's position inside the compact row:
+//     entry = (fingerprint << 16) | index        (empty slot = -1)
+// The probe loops therefore compare fingerprints in shared memory only. The
+// candidate ID array is read once per fingerprint match, only to confirm the
+// match exactly and to fetch the probability; a miss - the common case, because
+// draft and target candidates only partially overlap - never reads it. Indices
+// stay below compact_width <= 4096 < 2^16, so a live entry can never spell the
+// all-ones empty marker.
+//
+// The hash function and the probe rule are unchanged, so which slot an ID lands
+// in and which duplicate wins are identical to the index-only table this
+// replaces. The launcher may grow the table capacity (quarter-load instead of
+// half-load), which shortens probe runs but cannot change any result.
+__global__ void remap_draft_topk_kernel(const int32_t* __restrict__ draft_candidate_ids,
+                                        const float* __restrict__ draft_probs,
+                                        const int32_t* __restrict__ draft_token_ids,
+                                        const int32_t* __restrict__ target_candidate_ids,
+                                        const float* __restrict__ target_probs,
+                                        float* __restrict__ aligned_draft_probs,
+                                        float* __restrict__ accept_target_probs,
+                                        float* __restrict__ accept_draft_probs,
+                                        int num_speculative_tokens,
+                                        int compact_width,
+                                        int draft_compact_width,
+                                        int draft_prob_width,
+                                        int table_size) {
+    constexpr unsigned kFingerprintShift = 16;
+    constexpr unsigned kIndexMask        = (1u << kFingerprintShift) - 1u;
+    constexpr int      kEmpty            = -1;
+
     const int             row        = blockIdx.x;
     const int             target_row = row + row / num_speculative_tokens;
     const int             sampled_id = draft_token_ids[row];
+    const unsigned        table_mask = static_cast<unsigned>(table_size - 1);
     const int32_t*        target_ids = target_candidate_ids + target_row * compact_width;
     const float*          target_q   = target_probs + target_row * compact_width;
     float*                aligned_p  = aligned_draft_probs + row * compact_width;
+    // The draft may run a narrower candidate cap than the target: every draft
+    // lookup/stride below uses the draft width, while the aligned output keeps the
+    // target width (a target candidate outside the draft cap simply gets 0, i.e.
+    // q = 0 there, which is exactly what the residual expects).
+    const bool            compact    = draft_candidate_ids != nullptr;
+    const int32_t*        draft_ids  = compact ? draft_candidate_ids + row * draft_compact_width : nullptr;
+    const float*          draft_p    = compact ? draft_probs + row * draft_compact_width : nullptr;
     extern __shared__ int table[];
     if (threadIdx.x == 0) {
         accept_target_probs[row] = 0.0f;
@@ -557,25 +585,35 @@ __global__ void remap_draft_topk_kernel(const int32_t* draft_candidate_ids,
                                        0.0f :
                                        draft_probs[row * draft_prob_width + sampled_id];
     }
-    if (draft_candidate_ids) {
-        const int32_t* draft_ids = draft_candidate_ids + row * compact_width;
-        const float*   draft_p   = draft_probs + row * compact_width;
+    if (compact) {
         for (int i = threadIdx.x; i < table_size; i += blockDim.x) {
-            table[i] = -1;
+            table[i] = kEmpty;
         }
-        __syncthreads();
-        for (int i = threadIdx.x; i < compact_width; i += blockDim.x) {
-            const int id = draft_ids[i];
+    }
+    // Also orders the accept_* initialisation above before the lookups below, so
+    // the sampled-token write in the lookup loop cannot be overwritten by it.
+    __syncthreads();
+    if (compact) {
+        for (int i = threadIdx.x; i < draft_compact_width; i += blockDim.x) {
+            const int      id    = draft_ids[i];
+            const unsigned hash  = static_cast<unsigned>(id) * 2654435761u;
+            const unsigned fp    = hash >> kFingerprintShift;
+            const unsigned entry = (fp << kFingerprintShift) | static_cast<unsigned>(i);
             if (id == sampled_id) {
                 accept_draft_probs[row] = draft_p[i];
             }
-            unsigned slot = static_cast<unsigned>(id) * 2654435761u & (table_size - 1);
+            unsigned slot = hash & table_mask;
             while (true) {
-                const int old = atomicCAS(&table[slot], -1, i);
-                if (old == -1 || draft_ids[old] == id) {
+                const int old = atomicCAS(&table[slot], kEmpty, static_cast<int>(entry));
+                if (old == kEmpty) {
                     break;
                 }
-                slot = (slot + 1) & (table_size - 1);
+                if ((static_cast<unsigned>(old) >> kFingerprintShift) == fp
+                    && draft_ids[static_cast<unsigned>(old) & kIndexMask] == id) {
+                    // Duplicate ID already present: keep the first insertion, as before.
+                    break;
+                }
+                slot = (slot + 1) & table_mask;
             }
         }
     }
@@ -583,19 +621,23 @@ __global__ void remap_draft_topk_kernel(const int32_t* draft_candidate_ids,
     for (int i = threadIdx.x; i < compact_width; i += blockDim.x) {
         const int id    = target_ids[i];
         float     value = 0.0f;
-        if (draft_candidate_ids) {
-            const int32_t* draft_ids = draft_candidate_ids + row * compact_width;
-            unsigned       slot      = static_cast<unsigned>(id) * 2654435761u & (table_size - 1);
+        if (compact) {
+            const unsigned hash = static_cast<unsigned>(id) * 2654435761u;
+            const unsigned fp   = hash >> kFingerprintShift;
+            unsigned       slot = hash & table_mask;
             while (true) {
-                const int j = table[slot];
-                if (j == -1) {
+                const unsigned cur = static_cast<unsigned>(table[slot]);
+                if (cur == static_cast<unsigned>(kEmpty)) {
                     break;
                 }
-                if (draft_ids[j] == id) {
-                    value = draft_probs[row * compact_width + j];
-                    break;
+                if ((cur >> kFingerprintShift) == fp) {
+                    const unsigned j = cur & kIndexMask;
+                    if (draft_ids[j] == id) {
+                        value = draft_p[j];
+                        break;
+                    }
                 }
-                slot = (slot + 1) & (table_size - 1);
+                slot = (slot + 1) & table_mask;
             }
         } else if (id >= 0 && id < draft_prob_width) {
             value = draft_probs[row * draft_prob_width + id];
@@ -606,6 +648,48 @@ __global__ void remap_draft_topk_kernel(const int32_t* draft_candidate_ids,
         }
     }
 }
+
+namespace {
+
+// Largest dynamic shared memory the remap table may request. The half-load
+// table (2 slots per candidate) is the historical size; the quarter-load table
+// (4 slots per candidate) halves the unsuccessful probe length, which is what
+// production ID distributions - candidates spread over the whole vocabulary, so
+// misses walk the table - actually pay for. On the widest compact row
+// (4096 candidates -> 16384 slots = 64 KiB) the quarter-load table exceeds the
+// 48 KiB default, so raise the attribute once per device and cache the answer;
+// every failure path keeps the half-load table.
+size_t remapTableSharedMemoryLimit() {
+    constexpr size_t kDefaultLimit = 48 * 1024;
+    constexpr size_t kWantedLimit  = 64 * 1024;
+    constexpr int    kMaxDevices   = 16;
+
+    static thread_local size_t cached[kMaxDevices];  // zero == not probed yet
+
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess || device < 0 || device >= kMaxDevices) {
+        (void)cudaGetLastError();
+        return kDefaultLimit;
+    }
+    if (cached[device] != 0) {
+        return cached[device];
+    }
+    size_t limit     = kDefaultLimit;
+    int    optin_kib = 0;
+    if (cudaDeviceGetAttribute(&optin_kib, cudaDevAttrMaxSharedMemoryPerBlockOptin, device) == cudaSuccess
+        && optin_kib >= static_cast<int>(kWantedLimit)
+        && cudaFuncSetAttribute(
+               remap_draft_topk_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kWantedLimit))
+               == cudaSuccess) {
+        limit = kWantedLimit;
+    } else {
+        (void)cudaGetLastError();  // drop the sticky error, keep the default limit
+    }
+    cached[device] = limit;
+    return limit;
+}
+
+}  // namespace
 
 cudaError_t invokeRemapDraftTopk(const int32_t* draft_candidate_ids,
                                  const float*   draft_probs,
@@ -618,20 +702,39 @@ cudaError_t invokeRemapDraftTopk(const int32_t* draft_candidate_ids,
                                  int            batch_size,
                                  int            num_speculative_tokens,
                                  int            compact_width,
+                                 int            draft_compact_width,
                                  int            draft_prob_width,
                                  cudaStream_t   stream) {
     if (batch_size == 0 || num_speculative_tokens == 0) {
         return cudaSuccess;
     }
-    int table_size = 1;
-    while (table_size < 2 * compact_width) {
-        table_size *= 2;
+    // The hash table holds the *draft* candidates (the target ids are only looked
+    // up in it), so it is sized from the draft width. With a mixed-width batch the
+    // draft width is the smaller one, which keeps the shared-memory footprint proportional to draft support.
+    const int table_width = draft_candidate_ids ? draft_compact_width : compact_width;
+    int       half_table  = 1;
+    while (half_table < 2 * table_width) {
+        half_table *= 2;
     }
-    if (table_size > 8192) {
+    if (half_table > 8192) {
         return cudaErrorInvalidValue;
     }
+    // half_table <= 8192 <=> table_width <= 4096 < 2^16: the kernel packs the
+    // candidate index into the low 16 bits of every hash-table slot.
+    int table_size = half_table;
+    if (draft_candidate_ids) {
+        const int quarter_table = half_table * 2;
+        const size_t bytes         = static_cast<size_t>(quarter_table) * sizeof(int);
+        // K<=2048 needs no opt-in or device query; only K4096 may exceed 48 KiB.
+        if (bytes <= 48 * 1024 || bytes <= remapTableSharedMemoryLimit()) {
+            table_size = quarter_table;
+        }
+    }
+    // One block per draft row means a single wave on the served topology, so the
+    // per-block latency is the kernel time: more warps per block is what hides it.
+    const int threads = compact_width >= 1024 ? 1024 : 256;
     remap_draft_topk_kernel<<<batch_size * num_speculative_tokens,
-                              256,
+                              threads,
                               draft_candidate_ids ? table_size * sizeof(int) : 0,
                               stream>>>(draft_candidate_ids,
                                         draft_probs,
@@ -643,6 +746,7 @@ cudaError_t invokeRemapDraftTopk(const int32_t* draft_candidate_ids,
                                         accept_draft_probs,
                                         num_speculative_tokens,
                                         compact_width,
+                                        draft_compact_width,
                                         draft_prob_width,
                                         table_size);
     return cudaGetLastError();

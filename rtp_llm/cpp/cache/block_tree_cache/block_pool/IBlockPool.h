@@ -3,12 +3,14 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/Types.h"
@@ -18,6 +20,15 @@
 namespace rtp_llm {
 
 using BlockIdList = std::vector<BlockIdxType>;
+
+class IBlockPool;
+
+// The owning cache serializes frozen-reference mutations with eviction-heap
+// updates. Registration and removal require the cache's lifecycle quiescence.
+struct FrozenBlockObserver {
+    std::mutex*                                    mutex{nullptr};
+    std::function<void(IBlockPool*, BlockIdxType)> on_changed;
+};
 
 enum class BlockPoolType {
     DEVICE,
@@ -42,6 +53,8 @@ struct BlockPoolConfigBase {
     BlockPoolType pool_type{BlockPoolType::DEVICE};
     std::string   pool_name;
     size_t        physical_block_count{0};
+    // Per-pool capacity protection for every tier; 0 disables the abort threshold.
+    double        frozen_block_abort_ratio{0.3};
 };
 
 // IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.
@@ -51,6 +64,8 @@ public:
     virtual ~IBlockPool() = default;
 
     void setCapacityChangeCallback(std::function<void()> callback);
+    void setFrozenBlockObserver(std::shared_ptr<FrozenBlockObserver> observer);
+    void clearFrozenBlockObserver(const std::shared_ptr<FrozenBlockObserver>& expected);
 
     const std::string&  poolName() const;
     virtual std::string debugString() const;
@@ -69,8 +84,15 @@ public:
     // Checks tree and external ownership together under the pool mutex.
     bool canReclaimCacheBlock(BlockIdxType block) const;
 
-    // Add one FROZEN reference; the caller decides when to release its hold.
+    // Each transfer task holds its own frozen reference; overlapping tasks each
+    // add one hold (a single task still deduplicates via FrozenTask::freeze).
+    // unfreezeBlock releases exactly one hold; the block stays frozen while any
+    // holder remains, and is reclaimed only after the last tree reference goes away.
     void freezeBlock(BlockIdxType block) noexcept;
+    void unfreezeBlock(BlockIdxType block);
+    // The caller already holds the registered observer's mutex.
+    void freezeBlockLocked(BlockIdxType block) noexcept;
+    void unfreezeBlockLocked(BlockIdxType block);
     bool isFrozen(BlockIdxType block) const;
 
     // Number of distinct blocks carrying at least one tree reference of this type.
@@ -113,7 +135,16 @@ protected:
 
     template<typename Validator, typename Mutator>
     void mutateAllocatedBlocks(const BlockIdList& blocks, Validator&& validate, Mutator&& mutate) {
+        mutateAllocatedBlocks(blocks, std::forward<Validator>(validate), std::forward<Mutator>(mutate), [] {});
+    }
+
+    template<typename Validator, typename Mutator, typename AfterMutate>
+    void mutateAllocatedBlocks(const BlockIdList& blocks,
+                               Validator&&        validate,
+                               Mutator&&          mutate,
+                               AfterMutate&&      after_mutate) {
         std::function<void()> notify;
+        std::exception_ptr    notification_error;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             checkInitializedNoLock();
@@ -131,8 +162,18 @@ protected:
                 mutate(block);
             }
             if (availableFreeBlocksNoLock() > free_before || available_blocks_num_ > available_before) {
-                notify = capacity_change_callback_;
+                try {
+                    notify = capacity_change_callback_;
+                } catch (...) {
+                    notification_error = std::current_exception();
+                }
             }
+        }
+        // Publish internal state before user capacity observers can throw, even
+        // if copying their callback failed after the mutation committed.
+        after_mutate();
+        if (notification_error) {
+            std::rethrow_exception(notification_error);
         }
         if (notify) {
             notify();
@@ -179,6 +220,13 @@ private:
     void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
     static size_t treeRefTypeIndex(BlockTreeRefType ref_type);
     void          incTreeRefNoLock(BlockIdxType block, size_t ref_type_index);
+    void          incTreeRefImpl(const BlockIdList& blocks, size_t ref_type_index);
+    void          decTreeRefImpl(const BlockIdList&                          blocks,
+                                 size_t                                      ref_type_index,
+                                 const std::shared_ptr<FrozenBlockObserver>& observer = {});
+    void          freezeBlockImpl(BlockIdxType block, const std::shared_ptr<FrozenBlockObserver>& observer) noexcept;
+    void          unfreezeBlockImpl(BlockIdxType block, const std::shared_ptr<FrozenBlockObserver>& observer);
+    void          notifyFrozenBlocks(const std::shared_ptr<FrozenBlockObserver>& observer, const BlockIdList& blocks);
 
     size_t       totalBlocksNumNoLock() const;
     void         refillAscendingFreeBlocksNoLock();
@@ -189,6 +237,7 @@ private:
     std::shared_ptr<const BlockPoolConfigBase>                config_;
     bool                                                      initialized_{false};
     std::function<void()>                                     capacity_change_callback_;
+    std::shared_ptr<FrozenBlockObserver>                      frozen_block_observer_;
     std::vector<uint8_t>                                      allocated_;
     std::unique_ptr<PhysicalDecodeOrigins>                    decode_origins_;
     std::vector<uint32_t>                                     tree_refcounts_;

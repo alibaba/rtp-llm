@@ -180,7 +180,11 @@ std::vector<SingleTypeCacheManagerPtr> alignCoordinatorGroups(const CacheConfig&
 }
 
 std::shared_ptr<HostBlockPool>
-createHostPool(const std::string& name, const BackingLayout& layout, size_t usable_blocks, size_t alignment) {
+createHostPool(const std::string& name,
+               const BackingLayout& layout,
+               size_t usable_blocks,
+               size_t alignment,
+               double frozen_abort_ratio) {
     if (layout.payload_bytes == 0 || usable_blocks == 0) {
         return nullptr;
     }
@@ -188,6 +192,7 @@ createHostPool(const std::string& name, const BackingLayout& layout, size_t usab
     config->pool_type            = BlockPoolType::HOST;
     config->pool_name            = name;
     config->physical_block_count = usable_blocks + 1;
+    config->frozen_block_abort_ratio = frozen_abort_ratio;
     config->payload_bytes        = layout.payload_bytes;
     config->stride_bytes         = layout.pool_stride;
     config->alignment            = alignment;
@@ -227,6 +232,7 @@ BlockTreeDiskBlockPoolPtr createDiskPool(const KVCacheConfig&                   
     config->physical_block_count = usable_blocks + 1;
     config->disk_size_bytes      = config->physical_block_count * config->stride_bytes;
     config->buffered_io          = kv_config.disk_cache_buffered_io;
+    config->frozen_block_abort_ratio = kv_config.block_tree_device_frozen_abort_ratio;
     config->mount_guard          = guard;
     auto pool                    = std::make_shared<BlockTreeDiskBlockPool>(config);
     return pool->init() ? pool : nullptr;
@@ -606,8 +612,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                              (usable[group_set_id] + 1) * strides[group_set_id],
                              bytes,
                              kv_cache_config.memory_cache_swa_block_ratio);
-            host_pools[group_set_id] =
-                createHostPool(pool_name, backing_layouts[group_set_id], usable[group_set_id], pool_alignment);
+            host_pools[group_set_id] = createHostPool(pool_name,
+                                                      backing_layouts[group_set_id],
+                                                      usable[group_set_id],
+                                                      pool_alignment,
+                                                      kv_cache_config.block_tree_device_frozen_abort_ratio);
             if (!host_pools[group_set_id]) {
                 return nullptr;
             }
@@ -755,6 +764,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     config.disk_cache_sync_timeout_ms =
         disk_enabled ? checkedTimeout(kv_cache_config.disk_cache_sync_timeout_ms, "disk_cache_sync_timeout_ms") :
                        config.host_cache_sync_timeout_ms;
+    config.disk_cache_evict_timeout_ms =
+        disk_enabled && kv_cache_config.disk_cache_evict_timeout_ms != -1 ?
+            checkedTimeout(kv_cache_config.disk_cache_evict_timeout_ms, "disk_cache_evict_timeout_ms") :
+            config.disk_cache_sync_timeout_ms;
     config.transfer_worker_count =
         checkedSize(kv_cache_config.block_tree_transfer_worker_count, "block_tree_transfer_worker_count");
     config.business_queue_max_size =
@@ -810,7 +823,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             group_sets, std::move(broadcast_manager), cache_metrics_reporter);
     }
     auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(
-        std::move(per_rank_engine), std::move(multi_rank_engine), config.max_descriptors_per_transfer_batch);
+        std::move(per_rank_engine), std::move(multi_rank_engine), config.max_descriptors_per_transfer_batch, storage_backend);
     const size_t business_queue_size = config.business_queue_max_size == 0 ?
                                            0 :
                                            config.business_queue_max_size + BlockTreeTaskPool::kLoadReservedSlots;

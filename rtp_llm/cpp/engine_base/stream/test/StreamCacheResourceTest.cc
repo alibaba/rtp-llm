@@ -284,9 +284,14 @@ protected:
                                         const KVCacheConfig&    kv_cache_config = {}) {
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type = role_type;
-        cache_manager_ = std::make_shared<KVCacheManager>(
-            cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config,
-            ParallelismConfig{}, RuntimeConfig{}, SpeculativeExecutionConfig{}, pd_sep_config);
+        cache_manager_          = std::make_shared<KVCacheManager>(cache_config,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          kv_cache_config,
+                                                          ParallelismConfig{},
+                                                          RuntimeConfig{},
+                                                          SpeculativeExecutionConfig{},
+                                                          pd_sep_config);
         ASSERT_TRUE(cache_manager_->init());
         size_t expected_free_blocks = 0;
         for (const auto& group : cache_manager_->cacheConfig().topology().groups()) {
@@ -313,19 +318,19 @@ protected:
         stream_->generate_status_->status = StreamState::RUNNING;
     }
 
-    std::shared_ptr<StreamReadStorageBackend> prepareStorageBackendResource(bool     block_matches,
-                                                                            bool     seed_host     = false,
-                                                                            RoleType role_type     = RoleType::PDFUSION,
-                                                                            bool     seed_resident = false,
-                                                                            std::chrono::milliseconds timeout =
-                                                                                std::chrono::seconds(10),
-                                                                            int min_replica_count = 0) {
+    std::shared_ptr<StreamReadStorageBackend>
+    prepareStorageBackendResource(bool                      block_matches,
+                                  bool                      seed_host         = false,
+                                  RoleType                  role_type         = RoleType::PDFUSION,
+                                  bool                      seed_resident     = false,
+                                  std::chrono::milliseconds timeout           = std::chrono::seconds(10),
+                                  int                       min_replica_count = 0) {
         KVCacheConfig kv_cache_config;
-        kv_cache_config.enable_remote_cache   = true;
+        kv_cache_config.enable_remote_cache    = true;
         kv_cache_config.kvcm_min_replica_count = min_replica_count;
-        kv_cache_config.enable_memory_cache   = seed_host;
-        kv_cache_config.memory_cache_size_mb  = seed_host ? 1 : 0;
-        KVCacheConfig manager_kv_cache_config = kv_cache_config;
+        kv_cache_config.enable_memory_cache    = seed_host;
+        kv_cache_config.memory_cache_size_mb   = seed_host ? 1 : 0;
+        KVCacheConfig manager_kv_cache_config  = kv_cache_config;
         // The manager must not construct a real KVCM client before this test
         // replaces its BlockTreeCache with the controllable fake backend.
         manager_kv_cache_config.enable_remote_cache = false;
@@ -1207,8 +1212,7 @@ TEST_F(StreamCacheResourceTest, RequestFinishFiltersRemoteReuseOnlyForSingleRepl
         SCOPED_TRACE(role);
         for (const int replicas : {0, 1, 2}) {
             SCOPED_TRACE(replicas);
-            auto backend = prepareStorageBackendResource(false, false, role, false,
-                                                           std::chrono::seconds(10), replicas);
+            auto backend = prepareStorageBackendResource(false, false, role, false, std::chrono::seconds(10), replicas);
             auto& resource = stream_->streamCacheResource();
             ASSERT_TRUE(resource.initKVBlock().ok());
             ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
@@ -1262,7 +1266,7 @@ TEST_F(StreamCacheResourceTest, AdoptedRemoteCountsControlRequestFinishWrites) {
 }
 
 TEST_F(StreamCacheResourceTest, OverallDeadlineReturnsBeforeReadAndLateCompletionCannotPublishReuse) {
-    auto backend = prepareStorageBackendResource(false, false, RoleType::PREFILL, false, std::chrono::seconds(1));
+    auto  backend  = prepareStorageBackendResource(false, false, RoleType::PREFILL, false, std::chrono::seconds(1));
     auto& resource = stream_->streamCacheResource();
     backend->blockReads();
     block_tree_cache_detail::ScopeRollback release_read([&] { backend->releaseReads(); });
@@ -1271,12 +1275,11 @@ TEST_F(StreamCacheResourceTest, OverallDeadlineReturnsBeforeReadAndLateCompletio
     auto context = std::dynamic_pointer_cast<LoadAsyncContext>(resource.allocator_load_context_);
     ASSERT_NE(context, nullptr);
     const auto original_resource = resource.batch_kv_cache_resource_;
-    const auto original_blocks = original_resource->blocks(0, "default");
+    const auto original_blocks   = original_resource->blocks(0, "default");
     ASSERT_FALSE(original_blocks.empty());
     auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
-    block_tree_cache_test::BoundedThread<absl::Status> waiter([stream = stream_] {
-        return stream->streamCacheResource().waitForAllocatorLoad();
-    });
+    block_tree_cache_test::BoundedThread<absl::Status> waiter(
+        [stream = stream_] { return stream->streamCacheResource().waitForAllocatorLoad(); });
     ASSERT_EQ(waiter.waitFor(std::chrono::seconds(5)), std::future_status::ready);
     EXPECT_EQ(waiter.get().code(), absl::StatusCode::kDeadlineExceeded);
     EXPECT_NE(resource.batch_kv_cache_resource_, original_resource);
@@ -1743,6 +1746,134 @@ TEST_F(StreamCacheResourceTest, testPrefillLoadFailureDetachesSharedSuffix) {
     }
 }
 
+TEST_F(StreamCacheResourceTest, HostSuccessDiskFailureKeepsJointPrefixAndDetachesOnlySuffix) {
+    prepareResourceWithInputTokens({1, 2, 3, 4, 5, 6, 7, 8}, true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    auto&      batch    = resource.kvCacheMutable();
+    const auto original = batch.blocks(0, "default");
+    ASSERT_EQ(original.size(), 4u);
+    const auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+    for (const auto block : original) {
+        pool->incTreeRef(block, BlockTreeRefType::CACHE);
+    }
+    stream_->setReuseLength(2);
+    stream_->setInitialReuseLength(2);
+    stream_->setLocalReuseLength(2);
+    auto context = makeAllocatorLoadContext(4, {Tier::DEVICE, Tier::HOST, Tier::DISK, Tier::HOST}, false);
+    context->setLocalMatchLengths(1, 2);
+    ASSERT_TRUE(context->commit());
+    ASSERT_TRUE(context->completeTransfers(2, true, Tier::HOST));
+    EXPECT_FALSE(context->done());
+    ASSERT_TRUE(context->completeTransfers(1, false, Tier::DISK));
+    ASSERT_EQ(context->deviceReadyBlocks(), 2u);
+    resource.allocator_load_context_ = context;
+
+    ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
+    EXPECT_EQ(stream_->reuseLength(), 4);
+    EXPECT_EQ(stream_->initialReuseLength(), 4);
+    EXPECT_EQ(stream_->localReuseLength(), 4);
+    EXPECT_EQ(stream_->deviceReuseLength(), 2);
+    EXPECT_EQ(stream_->hostReuseLength(), 2);
+    EXPECT_EQ(stream_->diskReuseLength(), 0);
+    EXPECT_EQ(batch.cacheResource(0).deviceReuseBlockNum(), 1u);
+    EXPECT_EQ(batch.cacheResource(0).memoryReuseBlockNum(), 1u);
+    EXPECT_EQ(batch.cacheResource(0).diskReuseBlockNum(), 0u);
+    EXPECT_FALSE(resource.cache_reuse_metrics_.load_success);
+    for (size_t index = 0; index < original.size(); ++index) {
+        EXPECT_EQ(batch.blocks(0, "default")[index] == original[index], index < 2);
+        pool->decTreeRef(original[index], BlockTreeRefType::CACHE);
+    }
+    stream_->releaseResource();
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+}
+
+TEST_F(StreamCacheResourceTest, HostSuccessDiskFailureUsesJointPrefixWithCpReuseUnit) {
+    prepareResourceWithInputTokens(std::vector<int>(16, 1), true, RoleType::PREFILL);
+    cache_manager_->cp_slot_mapper_ = std::make_shared<CPSlotMapper>(0, 2, 2);
+    auto&     resource              = stream_->streamCacheResource();
+    const int unit                  = resource.reuseBlockTokens();
+    stream_->setReuseLength(unit);
+    auto context = makeAllocatorLoadContext(4, {Tier::DEVICE, Tier::HOST, Tier::DISK, Tier::HOST}, false);
+    context->setLocalMatchLengths(1, 2);
+    ASSERT_TRUE(context->commit());
+    ASSERT_TRUE(context->completeTransfers(1, false, Tier::DISK));
+    EXPECT_FALSE(context->done());
+    ASSERT_TRUE(context->completeTransfers(2, true, Tier::HOST));
+    resource.allocator_load_context_ = context;
+    ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
+    EXPECT_EQ(stream_->reuseLength(), 2 * unit);
+    EXPECT_EQ(stream_->deviceReuseLength(), unit);
+    EXPECT_EQ(stream_->hostReuseLength(), unit);
+    EXPECT_EQ(stream_->diskReuseLength(), 0);
+}
+
+TEST_F(StreamCacheResourceTest, PartialLoadFailureRetainsDecodeSourcesOnlyForReadyPrefix) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    for (const bool host_first : {false, true}) {
+        for (const bool host_success : {false, true}) {
+            SCOPED_TRACE(host_first);
+            SCOPED_TRACE(host_success);
+            prepareResourceWithInputTokens(std::vector<int>(16, 1), true, RoleType::PREFILL);
+            cache_manager_->cp_slot_mapper_ = std::make_shared<CPSlotMapper>(0, 2, 2);
+            auto&                 resource  = stream_->streamCacheResource();
+            const int             unit      = resource.reuseBlockTokens();
+            kmonitor::MetricsTags tags;
+            stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
+            const std::vector<Tier> tiers{Tier::DEVICE, Tier::HOST, Tier::DISK, Tier::HOST};
+            auto                    sources = std::make_shared<DecodeReuseSources>();
+            for (size_t i = 0; i < tiers.size(); ++i) {
+                auto origin =
+                    std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{std::string(32, 'a'),
+                                                                                0,
+                                                                                static_cast<int64_t>(i * unit),
+                                                                                static_cast<int64_t>((i + 1) * unit),
+                                                                                4 * unit,
+                                                                                4 * unit + 1});
+                sources->push_back({std::move(origin), tiers[i]});
+            }
+            stream_->setReuseLength(unit);
+            const auto device_sources =
+                std::make_shared<const DecodeReuseSources>(DecodeReuseSources{sources->front()});
+            const auto device_host_sources =
+                std::make_shared<const DecodeReuseSources>(sources->begin(), sources->begin() + 2);
+            resource.adoptDecodeReuse(device_sources, unit);
+            ASSERT_TRUE(resource.hasPendingDecodeReuse());
+            auto context = makeAllocatorLoadContext(4, tiers, false);
+            context->setLocalMatchLengths(1, 2);
+            context->setLocalDecodeSources(sources, device_sources, device_host_sources);
+            EXPECT_FALSE(context->decodeSources(true));
+            ASSERT_TRUE(context->commit());
+            const auto complete_host = [&] { ASSERT_TRUE(context->completeTransfers(2, host_success, Tier::HOST)); };
+            const auto complete_disk = [&] { ASSERT_TRUE(context->completeTransfers(1, false, Tier::DISK)); };
+            if (host_first) {
+                complete_host();
+                EXPECT_FALSE(context->done());
+                complete_disk();
+            } else {
+                complete_disk();
+                EXPECT_FALSE(context->done());
+                complete_host();
+            }
+            EXPECT_FALSE(context->success());
+            EXPECT_FALSE(context->decodeSources());
+            resource.allocator_load_context_ = context;
+            ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
+            EXPECT_EQ(stream_->reuseLength(), (host_success ? 2 : 1) * unit);
+            ASSERT_TRUE(resource.hasPendingDecodeReuse());
+            EXPECT_FALSE(resource.decode_reuse_use_state_.consume(false));
+            const auto counts = resource.decode_reuse_use_state_.consume(true);
+            ASSERT_TRUE(counts);
+            EXPECT_EQ(counts->by_tier[static_cast<size_t>(Tier::DEVICE)], unit);
+            EXPECT_EQ(counts->by_tier[static_cast<size_t>(Tier::HOST)], host_success ? unit : 0);
+            EXPECT_EQ(counts->by_tier[static_cast<size_t>(Tier::DISK)], 0);
+            EXPECT_EQ(counts->by_tier[static_cast<size_t>(Tier::REMOTE)], 0);
+            EXPECT_EQ(counts->total(), (host_success ? 2 : 1) * unit);
+            EXPECT_FALSE(resource.decode_reuse_use_state_.consume(true));
+        }
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testPrefillLoadFailureDetachShortfallRearmsAllocation) {
     prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
@@ -1952,7 +2083,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadFailureIsTerminal) {
 
 TEST_F(StreamCacheResourceTest, AllocatorLoadTimeoutPreservesDeadlineStatus) {
     prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
-    auto& resource = stream_->streamCacheResource();
+    auto& resource                   = stream_->streamCacheResource();
     resource.allocator_load_context_ = std::make_shared<CompletedAsyncContext>(
         ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "remote cache transfer timed out"));
 

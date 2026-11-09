@@ -260,6 +260,69 @@ def try_slot_mapping(
     return out
 
 
+@triton.jit(do_not_specialize=["TABLE_STRIDE", "COLS", "POOL_ROWS"])
+def _predecessor_state_kernel(
+    prefixes,
+    table,
+    pool,
+    output,
+    PREFIX_STRIDE: tl.constexpr,
+    TABLE_STRIDE,
+    POOL_STRIDE: tl.constexpr,
+    COLS,
+    EB: tl.constexpr,
+    TPB: tl.constexpr,
+    CP: tl.constexpr,
+    RANK: tl.constexpr,
+    POOL_ROWS,
+):
+    request = tl.program_id(0)
+    pos = tl.maximum(tl.load(prefixes + request * PREFIX_STRIDE).to(tl.int64) - 1, 0)
+    column = (pos // TPB) % COLS
+    offset = pos % (EB * CP)
+    owned = offset // EB == RANK
+    block = tl.load(table + request * TABLE_STRIDE + column, owned, other=0).to(
+        tl.int64
+    )
+    slot = block * EB + offset % EB
+    valid = owned & (block > 0)
+    if valid & (slot >= POOL_ROWS):
+        tl.inline_asm_elementwise(
+            "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+        )
+    width = tl.arange(0, 1024)
+    value = tl.load(
+        pool + tl.where(valid, slot, 0) * POOL_STRIDE + width, valid, other=0
+    )
+    tl.store(output + request * 1024 + width, value)
+
+
+def read_predecessor_states(
+    prefixes, table, pool, entries_per_block, tokens_per_block, cp_size, cp_rank
+):
+    """Read the CP-owned state before the suffix overwrites its ring slot."""
+    output = torch.empty(
+        (prefixes.numel(), 1024), dtype=torch.float32, device=prefixes.device
+    )
+    _predecessor_state_kernel[(prefixes.numel(),)](
+        prefixes,
+        table,
+        pool,
+        output,
+        prefixes.stride(0),
+        table.stride(0),
+        pool.stride(0),
+        table.shape[1],
+        entries_per_block,
+        tokens_per_block,
+        cp_size,
+        cp_rank,
+        pool.shape[0],
+        num_warps=4,
+    )
+    return output
+
+
 @triton.jit(do_not_specialize=["ROWS", "WIDTH"])
 def _prefill_bounds_kernel(
     positions,

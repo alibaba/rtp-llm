@@ -77,6 +77,17 @@ SGL_DEVICE bool is_nan(float x) {
     return (__float_as_uint(x) & 0x7fffffffu) > 0x7f800000u;
 }
 
+SGL_DEVICE bool above_coarse_threshold(float x, float upper) {
+    // The boundary above +inf (and every NaN bin) saturates at FLT_MAX
+    // or overflows to +inf. Only NaNs rank above either boundary.
+    return is_nan(x) || (upper < FLT_MAX && x >= upper);
+}
+
+SGL_DEVICE bool in_coarse_threshold(float x, float lower, float upper) {
+    // A saturated upper boundary includes +inf in the final numeric bin.
+    return x >= lower && (upper >= FLT_MAX || x < upper);
+}
+
 template<uint32_t kBits>
 SGL_DEVICE uint32_t extract_coarse_bin(float x) {
     static_assert(0 < kBits && kBits < 15);
@@ -290,7 +301,8 @@ struct TopKConfig {
         const uint32_t tx = threadIdx.x;
         if (tx == 0) {
             const uint32_t lo_key      = extract_exact_bin(v_lo);
-            const uint32_t hi_key      = extract_exact_bin(nextafterf(v_hi, -FLT_MAX));
+            const uint32_t hi_key      = extract_exact_bin(v_hi >= FLT_MAX ? std::numeric_limits<float>::infinity() :
+                                                                        nextafterf(v_hi, -FLT_MAX));
             uint32_t       prefix      = 0;
             uint32_t       first_round = 0;
 #pragma unroll
@@ -321,7 +333,7 @@ struct TopKConfig {
             for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
                 const float    value = problem.load(idx);
                 const uint32_t key   = extract_exact_bin(value);
-                if (value >= v_lo && value < v_hi && (key & mask) == prefix) {
+                if (in_coarse_threshold(value, v_lo, v_hi) && (key & mask) == prefix) {
                     atomicAdd(&smem->histogram[0][(key >> shift) & 0xffu], 1u);
                 }
             }
@@ -367,7 +379,7 @@ struct TopKConfig {
         uint32_t my_above = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
             const float value = problem.load(idx);
-            if (value >= v_lo && value < v_hi && extract_exact_bin(value) > pivot) {
+            if (in_coarse_threshold(value, v_lo, v_hi) && extract_exact_bin(value) > pivot) {
                 ++my_above;
             }
         }
@@ -376,7 +388,7 @@ struct TopKConfig {
         uint32_t       run_above  = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
             const float value = problem.load(idx);
-            if (value >= v_lo && value < v_hi && extract_exact_bin(value) > pivot) {
+            if (in_coarse_threshold(value, v_lo, v_hi) && extract_exact_bin(value) > pivot) {
                 problem.emit(output_base + base_above + run_above++, idx);
             }
         }
@@ -387,7 +399,7 @@ struct TopKConfig {
         uint32_t my_eq = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
             const float value = problem.load(idx);
-            if (value >= v_lo && value < v_hi && extract_exact_bin(value) == pivot) {
+            if (in_coarse_threshold(value, v_lo, v_hi) && extract_exact_bin(value) == pivot) {
                 ++my_eq;
             }
         }
@@ -396,7 +408,7 @@ struct TopKConfig {
         uint32_t       run_eq  = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
             const float value = problem.load(idx);
-            if (value >= v_lo && value < v_hi && extract_exact_bin(value) == pivot) {
+            if (in_coarse_threshold(value, v_lo, v_hi) && extract_exact_bin(value) == pivot) {
                 const uint32_t pos = output_base + smem->total_scratch[0] + base_eq + run_eq++;
                 if (pos < problem.topk) {
                     problem.emit(pos, idx);
@@ -838,7 +850,7 @@ struct TopKRegister: TopKRadixBase<12> {
         const auto threshold_bin = smem->threshold_bin;
         const auto v_hi          = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
         const auto v_lo          = coarse_bin_lower_bound<kHistBits>(threshold_bin);
-        const auto is_above      = [&](float val) { return is_nan(val) || val >= v_hi; };
+        const auto is_above      = [&](float val) { return above_coarse_threshold(val, v_hi); };
         // Deterministic positions: count per thread, take a thread-order block
         // prefix, then emit/append in the same iteration order. The atomicAdd
         // version ordered both the above-threshold emissions and the tie-buffer
@@ -969,7 +981,7 @@ public:
         uint32_t my_gt = 0;
         uint32_t my_eq = 0;
         for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float val, uint32_t) {
-            if (is_nan(val) || val >= v_hi)
+            if (above_coarse_threshold(val, v_hi))
                 ++my_gt;
             else if (val >= v_lo)
                 ++my_eq;
@@ -980,7 +992,7 @@ public:
         uint32_t   run_gt  = 0;
         uint32_t   run_eq  = 0;
         for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float val, uint32_t idx) {
-            if (is_nan(val) || val >= v_hi) {
+            if (above_coarse_threshold(val, v_hi)) {
                 const auto pos = base_gt + run_gt++;
                 if (pos < topk) [[likely]] {
                     problem.emit(pos, idx);
@@ -1111,7 +1123,7 @@ private:
         uint32_t my_gt = 0;
         uint32_t my_eq = 0;
         for_each_input<kAlignedInput>(problem.in, local_seq_len, [&](float val, uint32_t) {
-            if (is_nan(val) || val >= v_hi)
+            if (above_coarse_threshold(val, v_hi))
                 ++my_gt;
             else if (val >= v_lo)
                 ++my_eq;
@@ -1123,7 +1135,7 @@ private:
         uint32_t   run_eq  = 0;
         for_each_input<kAlignedInput>(problem.in, local_seq_len, [&](float val, uint32_t local_idx) {
             const auto idx = chunk_start + local_idx;
-            if (is_nan(val) || val >= v_hi) {
+            if (above_coarse_threshold(val, v_hi)) {
                 const auto pos = base_gt + run_gt++;
                 if (pos < topk) [[likely]] {
                     // rank 0's slots [0, a0) are final; other ranks stage raw indices and

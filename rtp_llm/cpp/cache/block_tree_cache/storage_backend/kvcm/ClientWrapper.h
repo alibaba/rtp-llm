@@ -26,7 +26,8 @@ class Subscriber;
 class ClientWrapper {
 public:
     using ConfigMap = std::map<std::string, KVCMConfigPtr>;
-    explicit ClientWrapper(std::unique_ptr<ClientFactory> client_factory = std::make_unique<ClientFactory>());
+    explicit ClientWrapper(std::unique_ptr<ClientFactory> client_factory = std::make_unique<ClientFactory>(),
+                           std::chrono::milliseconds reinit_interval = std::chrono::seconds(10));
     virtual ~ClientWrapper();
     virtual bool
     init(const ConfigMap& config_str_map, const kv_cache_manager::InitParams& init_params, const std::string& tag);
@@ -127,15 +128,10 @@ private:
                   const std::vector<std::string>&      tags);
     using MetaClientMap = std::map<std::string, std::shared_ptr<kv_cache_manager::MetaClient>>;
     bool initMetaClient(const std::string& unique_id, KVCMConfigPtr config);
-    // reinit if address_snapshot_ change
-    bool
-    reinit(const std::string& unique_id, ConfigMap::iterator& config_iter, MetaClientMap::iterator& meta_client_iter);
-    bool                                          tryReinit(const std::string& unique_id);
     std::shared_ptr<kv_cache_manager::MetaClient> getMetaClient(const std::string& unique_id);
-    bool                                          checkError(kv_cache_manager::ClientErrorCode ec);
-    void                                          requestReinit();
+    bool checkError(kv_cache_manager::ClientErrorCode ec,
+                    const std::shared_ptr<kv_cache_manager::MetaClient>& client);
     void                                          reinitWorkerLoop() noexcept;
-    bool                                          reinitAllMetaClients();
     bool                                          waitForRetry(int sleep_time_ms);
     void observeTransfer(bool is_read, size_t completed_bytes, bool completion_unknown) const noexcept;
 
@@ -148,12 +144,7 @@ private:
     ConfigMap                config_map_;
     MetaClientMap            meta_client_map_;
     std::vector<std::string> address_snapshot_;
-    // rr_mutex_ protects registry structure/lifecycle; reinit_mutex_ protects
-    // VIP config updates and metadata pointer publication/snapshot acquisition.
-    // Acquire in that order and retain the snapshot across each RPC.
-    std::shared_mutex reinit_mutex_;
-
-    // for re-registration
+    // Only shutdown takes this lock exclusively; recovery must not reject calls.
     std::shared_mutex rr_mutex_;
     // Transfer I/O remains available while metadata clients are re-registering.
     // Shutdown takes this lock exclusively before destroying the pool transfer clients.
@@ -173,18 +164,23 @@ private:
     std::shared_ptr<PendingTransfer> pending_transfers_;
 
 
-    // when slaver reaches 3, need reinitAllMetaClients
-    std::atomic<int> grpc_error_count_{0};
-
     std::unique_ptr<ClientFactory>                                 client_factory_;
     std::vector<std::unique_ptr<kv_cache_manager::TransferClient>> transfer_clients_;
     std::unique_ptr<kvcm::Subscriber>                              subscriber_;
 
+    // Protects recovery state and metadata client snapshots; SDK calls run unlocked.
     std::mutex              reinit_worker_mutex_;
     std::mutex              shutdown_mutex_;
     std::condition_variable reinit_worker_cv_;
     std::thread             reinit_worker_;
-    bool                    reinit_requested_ = false;
+    const std::chrono::milliseconds reinit_interval_;
+    std::string            bound_address_;
+    enum class ReinitAction {
+        NONE,
+        REGISTER,
+        FIND_LEADER
+    };
+    ReinitAction            reinit_action_ = ReinitAction::NONE;
     bool                    stop_requested_   = false;
 };
 

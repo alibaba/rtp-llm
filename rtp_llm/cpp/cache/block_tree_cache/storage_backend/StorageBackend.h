@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 
 namespace rtp_llm {
 
@@ -114,6 +115,7 @@ struct StorageRequest {
     std::optional<int64_t> prefill_computed_tokens;
     std::shared_ptr<void> completion_budget_lease;
     std::shared_ptr<StorageCompletionAdmission> completion_admission;
+    std::string operation_id;
 
     bool empty() const {
         for (const auto& key_handles : handles) {
@@ -148,7 +150,7 @@ private:
     friend class StorageBackend;
 };
 
-// Asynchronous facade for synchronous derived I/O. Owners must call shutdown
+// Asynchronous facade for derived I/O. Owners must call shutdown
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
@@ -171,6 +173,7 @@ public:
     using Done           = std::function<void(ErrorInfo error)>;
     using PoolsByTag     = std::unordered_map<std::string, DeviceBlockPoolPtr>;
     using BufferResolver = std::function<std::vector<BlockInfo>(int layer_id, const std::string& tag, int block_id)>;
+    using FinishedOperationHandler = std::function<void(const std::string& operation_id)>;
 
     // An injected executor may be observed by its owner but belongs to only
     // one backend; init rejects binding the same instance a second time.
@@ -181,6 +184,9 @@ public:
     virtual ~StorageBackend();
     // Atomic replacement allows attaching the cache reporter before or after init.
     void setStageMetricsReporter(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter);
+    virtual BlockTreeQueueSizes queueSizes() const {
+        return executor_ ? executor_->queueSizes() : BlockTreeQueueSizes{};
+    }
 
     // Initialization is single-attempt. A failed start may permanently stop
     // an injected executor; create a fresh backend/executor to retry.
@@ -197,7 +203,7 @@ public:
     void read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
     // Returns admission only, not the I/O result; never waits for completion.
-    // Source pins live until execution or rejection.
+    // Source pins live through payload completion and publication.
     bool write(StorageWriteTask task);
     // Optional EOS publication. Non-supporting backends keep their original
     // behavior; admission is not a successful remote commit.
@@ -206,8 +212,23 @@ public:
     }
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
+    void setFrozenTaskRetainer(std::function<void(FrozenTask)> retainer);
+    void setFinishedOperationHandler(FinishedOperationHandler handler);
+    virtual bool supportsLocalCompletionQueries() const noexcept { return false; }
+    virtual std::vector<TaskCompletion> queryLocalKVCMOperations(const std::vector<std::string>& ids) const {
+        return std::vector<TaskCompletion>(ids.size(), TaskCompletion::UNKNOWN);
+    }
+    virtual bool forgetLocalKVCMOperations(const std::vector<std::string>&) { return false; }
 
 protected:
+    using Task = StorageBackendExecutor::Task;
+    // The completion callable only checks results and updates local state; it
+    // must not start blocking I/O on the RPC completion/settlement thread.
+    using ReadCompletion = std::function<void(Task)>;
+    // Only a pool worker may publish or abort a write. On queue rejection the
+    // result can still check the rank responses and settle the source pins.
+    using WriteResult = std::function<void(bool on_worker)>;
+    using WriteCompletion = std::function<void(WriteResult)>;
     // Worker RPC payloads bypass the executor. Count their whole transaction,
     // including publishing an UNKNOWN outcome, before shutdown may finalize.
     ExternalIoGuard trackExternalIo();
@@ -223,7 +244,21 @@ protected:
     virtual StorageMatchResult matchImpl(const StorageRequest& request)                             = 0;
     virtual void               readImpl(const StorageRequest&                           request,
                                         const std::shared_ptr<StorageBackendMatchMeta>& match_meta) = 0;
+    // Synchronous payloads run on one worker. A deferred payload spans dispatch through completion.
+    virtual bool usesAsyncPayload(const StorageRequest&, bool /*is_write*/) const noexcept { return false; }
+    // False preserves the synchronous path. True transfers completion to done;
+    // the request and pins remain alive until its callable has been settled.
+    virtual bool readAsyncImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&, ReadCompletion) {
+        return false;
+    }
     virtual void               writeImpl(const StorageRequest& request)                             = 0;
+    // False means the write finished on this worker. True keeps the request and
+    // its source pins alive until the result passed to done has been settled.
+    virtual bool startWriteImpl(const StorageRequest& request, WriteCompletion) {
+        writeImpl(request);
+        return false;
+    }
+    virtual bool               supportsCompletionQueries() const noexcept { return false; }
     virtual void               shutdownImpl() noexcept {}
     virtual void               onRemoteCacheSkipped(const char*) noexcept {}
     virtual void               onQuarantined(bool, StorageQuarantineReason, size_t) noexcept {}
@@ -253,7 +288,7 @@ private:
         FINALIZING,
         STOPPED
     };
-    using Operation = std::function<void(Lifecycle outcome)>;
+    using Operation = std::function<void(Lifecycle outcome, Task finished)>;
 
     std::shared_ptr<storage_backend_detail::StorageTaskState>
     prepare(StorageRequest request, bool for_write = false, uint64_t trace_id = 0);
@@ -267,11 +302,13 @@ private:
                                         const char*           operation,
                                         uint64_t              trace_id) const noexcept;
     void validateRequest(const StorageRequest& request, bool allow_null_blocks, bool for_write = false) const;
-    bool dispatch(Operation operation, BlockTreeTaskClass task_class, bool run_inline = false);
+    bool dispatch(Operation operation, BlockTreeTaskClass task_class, bool run_inline = false,
+                  std::optional<StorageBackendExecutor::Clock::time_point> io_deadline = std::nullopt);
     void                                 taskFinished();
     void quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state,
                         bool                                                             is_write,
                         StorageQuarantineReason                                          reason);
+    void releaseQuarantine(bool is_write, StorageQuarantineReason reason, size_t block_count);
     std::shared_ptr<const CacheTopology> topology_;
     std::atomic<bool>                    remote_cache_enabled_{true};
     PoolsByTag                           pools_by_tag_;
@@ -292,11 +329,20 @@ private:
     std::mutex quarantine_mutex_;
     std::condition_variable quarantine_cv_;
     std::shared_ptr<storage_backend_detail::StorageTaskState> protected_quarantine_;
-    // Preserve the per-operation quarantine metrics and abort threshold.
+    // Current per-operation quarantine counts; cumulative events are reported separately.
     size_t                     quarantined_task_count_{0};
     size_t                     quarantined_block_count_{0};
     uint64_t                   quarantine_generation_{0};
     StorageQuarantineBreakdown quarantined_breakdown_{};
+    struct QuarantineRecovery;
+    std::shared_ptr<QuarantineRecovery> quarantine_recovery_;
+
+    std::mutex frozen_mutex_;
+    std::vector<FrozenTask> frozen_tasks_;
+    std::function<void(FrozenTask)> frozen_task_retainer_;
+
+    std::mutex finished_operation_mutex_;
+    FinishedOperationHandler finished_operation_handler_;
 
     friend class LoadAsyncContext;
 };

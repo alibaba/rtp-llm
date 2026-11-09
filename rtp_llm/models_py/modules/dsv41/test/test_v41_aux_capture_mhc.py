@@ -21,6 +21,9 @@ from rtp_llm.models_py.modules.dsv41.transformer import V4Transformer
 def capture_model(blocks, hidden, captures):
     rows = hidden.shape[0] * hidden.shape[1]
     dim = hidden.shape[-1]
+    for block in blocks:
+        if block.engram is not None:
+            block.engram.embed_tokens = SimpleNamespace(_device_scale_lease=None)
     model = SimpleNamespace(
         layers=blocks,
         hc_mult=4,
@@ -105,6 +108,38 @@ class AuxCaptureMHCCPUTest(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class AuxCaptureMHCCudaTest(unittest.TestCase):
+    @torch.inference_mode()
+    def test_prefill_capture_matches_mean_and_preserves_tail(self):
+        for rows in (1, 256, 1024):
+            hidden = torch.randn(rows, 4, 5120, device="cuda", dtype=torch.bfloat16)
+            buffer = torch.full(
+                (rows + 2, 3 * 5120), -1, device="cuda", dtype=torch.bfloat16
+            )
+            model = SimpleNamespace(
+                capture_aux_hidden_layer_ids=(37, 38, 39),
+                _mtp_hidden_buffer=buffer,
+            )
+            V4Transformer.capture_aux_hidden(model, 38, hidden)
+            torch.testing.assert_close(
+                buffer[:rows, 5120:10240], hidden.mean(-2), rtol=0, atol=0
+            )
+            self.assertTrue((buffer[rows:] == -1).all())
+
+        noncontiguous = hidden.transpose(1, 2).contiguous().transpose(1, 2)
+        V4Transformer.capture_aux_hidden(model, 38, noncontiguous)
+        torch.testing.assert_close(
+            buffer[:rows, 5120:10240], noncontiguous.mean(-2), rtol=0, atol=0
+        )
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            V4Transformer.capture_aux_hidden(model, 38, hidden)
+        hidden.fill_(2)
+        buffer.fill_(-1)
+        graph.replay()
+        self.assertTrue((buffer[:rows, 5120:10240] == 2).all())
+        self.assertTrue((buffer[rows:] == -1).all())
+
     @torch.inference_mode()
     def test_graph_updates_captured_entry_after_real_mega_mhc(self):
         if torch.cuda.get_device_capability()[0] != 10:

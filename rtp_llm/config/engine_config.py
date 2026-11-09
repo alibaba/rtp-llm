@@ -319,7 +319,7 @@ def update_worker_addrs(
                 f"{member.ip}:{member.rpc_server_port}, {member.cache_store_listen_port}, "
                 f"{member.cache_store_rdma_listen_port} to local rank {local_rank}, world rank {member.world_rank}"
             )
-    runtime_config.shutdown_worker_grpc_addrs = [
+    runtime_config.world_worker_grpc_addrs = [
         f"{member.ip}:{member.rpc_server_port}"
         for member in sorted(world_info.members, key=lambda member: member.world_rank)
     ]

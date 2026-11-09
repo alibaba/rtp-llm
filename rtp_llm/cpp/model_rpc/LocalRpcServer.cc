@@ -879,16 +879,30 @@ LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileReq
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                             "enable_all_rank start_profile must be sent to tp_rank 0");
     }
-    if (!tp_broadcaster_) {
-        if (maga_init_params_.parallelism_config.tp_size <= 1) {
-            RTP_LLM_LOG_INFO("start_profile enable_all_rank with tp_size=1, fallback to local start");
-            engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
-            return grpc::Status::OK;
-        }
-        return grpc::Status(grpc::StatusCode::INTERNAL, "tp broadcaster unavailable for enable_all_rank start_profile");
+    const auto& worker_addrs = maga_init_params_.runtime_config.world_worker_grpc_addrs;
+    const auto  world_size   = maga_init_params_.parallelism_config.world_size;
+    if (worker_addrs.empty() && world_size == 1) {
+        engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
+        return grpc::Status::OK;
+    }
+    if (worker_addrs.size() != size_t(world_size)) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                            "enable_all_rank start_profile requires all world worker addresses: expected "
+                                + std::to_string(world_size) + ", got " + std::to_string(worker_addrs.size()));
     }
 
-    std::vector<StartProfileInternalRequestPB> requests(tp_broadcaster_->workerNum());
+    // Reuse the RPC pool and completion thread across profiling requests.
+    std::call_once(world_broadcaster_init_, [this] {
+        auto broadcaster = std::make_unique<BroadcastManager>(maga_init_params_.runtime_config.world_worker_grpc_addrs);
+        if (broadcaster->init()) {
+            world_broadcaster_ = std::move(broadcaster);
+        }
+    });
+    if (!world_broadcaster_) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to initialize world profiler broadcaster");
+    }
+
+    std::vector<StartProfileInternalRequestPB> requests(world_broadcaster_->workerNum());
     for (auto& internal_request : requests) {
         internal_request.set_trace_name(request->trace_name());
         internal_request.set_start_step(request->start_step());
@@ -900,14 +914,16 @@ LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileReq
                        grpc::CompletionQueue*                      completion_queue) {
         return stub->AsyncStartProfileInternal(context.get(), internal_request, completion_queue);
     };
-    auto broadcast_result =
-        tp_broadcaster_->broadcast<StartProfileInternalRequestPB, EmptyPB>(requests, /*timeout_ms=*/3000, rpc_call);
+    auto broadcast_result = world_broadcaster_->broadcast<StartProfileInternalRequestPB, EmptyPB>(
+        requests, /*timeout_ms=*/3000, rpc_call, std::nullopt, "start_profile", /*fatal_on_error=*/false);
     if (!broadcast_result) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to broadcast start_profile_internal to tp group");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to broadcast start_profile_internal to world group");
     }
-    broadcast_result->waitDone();
+    broadcast_result->waitDone(/*timeout_ms=*/0, /*fatal_on_error=*/false);
     if (!broadcast_result->success()) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, "broadcast start_profile_internal to tp group failed");
+        return grpc::Status(
+            broadcast_result->deadlineExceeded() ? grpc::StatusCode::DEADLINE_EXCEEDED : grpc::StatusCode::INTERNAL,
+            "broadcast start_profile_internal to world group failed: " + broadcast_result->failureSummary());
     }
     return grpc::Status::OK;
 }
@@ -1168,6 +1184,55 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
     if (metrics_reporter_) {
         metrics_reporter_->report<RpcCacheStatusMetrics, RpcCacheStatusMetricsCollector>(nullptr, &collector);
     }
+}
+
+::grpc::Status LocalRpcServer::ForgetTransferTasks(::grpc::ServerContext* context,
+                                                  const ForgetTransferTasksRequestPB* request, EmptyPB*) {
+    if (context->IsCancelled()) return {grpc::StatusCode::CANCELLED, "request cancelled"};
+    auto manager = engine_ ? engine_->getCacheManager() : nullptr;
+    auto cache = manager ? manager->blockTreeCache() : nullptr;
+    if (!cache) return {grpc::StatusCode::UNAVAILABLE, "block tree cache unavailable"};
+    bool finished = true;
+    for (const auto& id : request->task_ids()) {
+        if (!cache->forgetTransferTask(id)) finished = false;
+    }
+    if (!finished) return {grpc::StatusCode::FAILED_PRECONDITION, "transfer still running"};
+    return grpc::Status::OK;
+}
+
+::grpc::Status LocalRpcServer::QueryTransferTasks(::grpc::ServerContext* context,
+                                                 const QueryTransferTasksRequestPB* request,
+                                                 QueryTransferTasksResponsePB* response) {
+    if (context->IsCancelled()) return {grpc::StatusCode::CANCELLED, "request cancelled"};
+    auto manager = engine_ ? engine_->getCacheManager() : nullptr;
+    if (!manager) return {grpc::StatusCode::UNAVAILABLE, "cache manager unavailable"};
+    if (!manager->queryTransferTasks(*request, *response))
+        return {grpc::StatusCode::UNIMPLEMENTED, "transfer queries unavailable"};
+    return grpc::Status::OK;
+}
+
+::grpc::Status LocalRpcServer::ForgetKVCMOperations(::grpc::ServerContext* context,
+                                                    const ForgetKVCMOperationsRequestPB* request, EmptyPB*) {
+    if (context->IsCancelled()) return {grpc::StatusCode::CANCELLED, "request cancelled"};
+    auto manager = engine_ ? engine_->getCacheManager() : nullptr;
+    if (!manager) return {grpc::StatusCode::UNAVAILABLE, "cache manager unavailable"};
+    bool finished = true;
+    for (const auto& id : request->operation_ids()) {
+        if (!manager->forgetKVCMOperation(id)) finished = false;
+    }
+    if (!finished) return {grpc::StatusCode::FAILED_PRECONDITION, "KVCM operation still running"};
+    return grpc::Status::OK;
+}
+
+::grpc::Status LocalRpcServer::QueryKVCMOperations(::grpc::ServerContext* context,
+                                                   const QueryKVCMOperationsRequestPB* request,
+                                                   QueryKVCMOperationsResponsePB* response) {
+    if (context->IsCancelled()) return {grpc::StatusCode::CANCELLED, "request cancelled"};
+    auto manager = engine_ ? engine_->getCacheManager() : nullptr;
+    if (!manager) return {grpc::StatusCode::UNAVAILABLE, "cache manager unavailable"};
+    if (!manager->queryKVCMOperations(*request, *response))
+        return {grpc::StatusCode::UNIMPLEMENTED, "KVCM operation queries unavailable"};
+    return grpc::Status::OK;
 }
 
 ::grpc::Status LocalRpcServer::ExecuteFunction(::grpc::ServerContext*     context,

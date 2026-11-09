@@ -36,8 +36,6 @@ deepselect_cuda_copts = [
     "--cuda-include-ptx=sm_100a", "--cuda-gpu-arch=sm_100a",
     "--cuda-include-ptx=sm_103a", "--cuda-gpu-arch=sm_103a",
 ]
-deepselect_bf16_cuda_copts = ["-DRTP_DEEPSELECT_BF16_ENABLED"] + deepselect_cuda_copts
-deepselect_fp32_cuda_copts = ["-DRTP_DEEPSELECT_FP32_ENABLED"] + deepselect_cuda_copts
 
 # Compile the same headers as the locked FlashInfer wheel (no extra download,
 # Python dispatch or service-time JIT). These are the transitive header inputs
@@ -271,9 +269,9 @@ cc_library(
         "deepselect/**/*.cuh",
     ]),
     copts = copts() + cuda_default_copts_without_arch() + draft_topk_copts + select({
-        "@//:using_cuda13_x86": deepselect_fp32_cuda_copts,
-        "@//:using_cuda13_arm": deepselect_fp32_cuda_copts,
-        "@//:using_cuda12_9": deepselect_fp32_cuda_copts,
+        "@//:using_cuda13_x86": deepselect_cuda_copts,
+        "@//:using_cuda13_arm": deepselect_cuda_copts,
+        "@//:using_cuda12_9": deepselect_cuda_copts,
         "//conditions:default": [],
     }),
     deps = torch_deps() + [
@@ -442,9 +440,9 @@ cc_library(
         "deepselect/**/*.cuh",
     ]),
     copts = copts() + cuda_default_copts_without_arch() + select({
-        "@//:using_cuda13_x86": deepselect_bf16_cuda_copts,
-        "@//:using_cuda13_arm": deepselect_bf16_cuda_copts,
-        "@//:using_cuda12_9": deepselect_bf16_cuda_copts,
+        "@//:using_cuda13_x86": deepselect_cuda_copts,
+        "@//:using_cuda13_arm": deepselect_cuda_copts,
+        "@//:using_cuda12_9": deepselect_cuda_copts,
         "//conditions:default": [],
     }),
     deps = torch_deps() + [

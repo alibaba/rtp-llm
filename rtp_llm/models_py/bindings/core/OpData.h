@@ -336,6 +336,9 @@ struct GreedyParams {
     bool                         all_probs_point_mass = false;
     int                          force_topk           = 0;
     std::optional<torch::Tensor> output_all_probs_indices;
+    // Also return the normalized distribution when output_all_probs requests
+    // pre-filter probabilities. Otherwise reuse output_all_probs storage.
+    bool return_sampling_probs = false;
 };
 
 struct GreedyOutput {
@@ -345,6 +348,7 @@ struct GreedyOutput {
     // the distribution as a one-hot at the sampled token. Callers must never
     // read all_probs values when this is set.
     bool all_probs_point_mass = false;
+    torch::Tensor sampling_probs;
 };
 
 struct BeamSearchParams {

@@ -917,6 +917,11 @@ class DashScRequestControls:
     request_headers: dict[str, str] = field(default_factory=dict)
     log_input_output: bool = True
     tpm_recheck: TpmRecheckConfig | None = None
+    # Per-request override for the early first packet. ``None`` keeps the
+    # process-wide DASHSC_ENABLE_FAKE_FIRST_PACKET default.
+    enable_estimated_usage: bool | None = None
+    # Gateway capability gate for the early first packet. Missing is false.
+    support_frontend_estimated_usage: bool = False
 
 
 @dataclass(frozen=True)
@@ -1231,6 +1236,13 @@ _TPM_RECHECK_META_HEADERS = (
 _TPM_RECHECK_CALLBACK_HEADER = "x-dashscope-inner-usage-callback"
 _TPM_RECHECK_DEFAULT_INTERVAL_ENV = "DASHSC_TPM_RECHECK_DEFAULT_INTERVAL_MS"
 
+# Per-request switch for the early first packet (estimated usage frame).
+_ESTIMATED_USAGE_HEADER = "x-dashscope-inner-enableestimatedusage"
+# Gateway capability gate for the early first packet. Missing is false.
+_SUPPORT_FRONTEND_ESTIMATED_USAGE_HEADER = (
+    "x-dashscope-inner-support-frontend-estimatedusage"
+)
+
 
 def _default_tpm_recheck_interval_ms() -> int | None:
     raw = os.environ.get(_TPM_RECHECK_DEFAULT_INTERVAL_ENV, "")
@@ -1349,6 +1361,22 @@ def parse_request_controls(
 
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
     tpm_recheck = _parse_tpm_recheck_config(ds_attrs, invocation_metadata)
+    raw_estimated_usage = _request_header_value(
+        ds_attrs, invocation_metadata, _ESTIMATED_USAGE_HEADER
+    )
+    if raw_estimated_usage is None:
+        raw_estimated_usage = _lookup_ds_request_control(
+            ds_attrs, _ESTIMATED_USAGE_HEADER
+        )
+    enable_estimated_usage = _parse_optional_bool(raw_estimated_usage)
+    raw_support = _request_header_value(
+        ds_attrs, invocation_metadata, _SUPPORT_FRONTEND_ESTIMATED_USAGE_HEADER
+    )
+    if raw_support is None:
+        raw_support = _lookup_ds_request_control(
+            ds_attrs, _SUPPORT_FRONTEND_ESTIMATED_USAGE_HEADER
+        )
+    support_frontend_estimated_usage = _parse_optional_bool(raw_support) is True
     enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
     if enable_thinking is None:
         enable_thinking = _parse_optional_bool(
@@ -1426,6 +1454,15 @@ def parse_request_controls(
         if value is not None:
             request_headers[header_name] = value
 
+    # The gateway serializes this header with dash separators inside
+    # ``ds_header_attributes``; normalize to the underscore name read
+    # downstream (``extract_workspace_region``).
+    workspace_meta = _normalize_non_empty_str(
+        ds_attrs.get("x-dashscope-inner-workspace-meta")
+    )
+    if workspace_meta is not None:
+        request_headers["x_dashscope_inner_workspace_meta"] = workspace_meta
+
     # Keep the full upstream ID for inspection; tracing may truncate its copy.
     for header_name in ("x-dashscope-request-id", "x-dashscope-requestid"):
         value = _normalize_non_empty_str(
@@ -1452,6 +1489,8 @@ def parse_request_controls(
             chain(ds_attrs.items(), invocation_metadata)
         ),
         tpm_recheck=tpm_recheck,
+        enable_estimated_usage=enable_estimated_usage,
+        support_frontend_estimated_usage=support_frontend_estimated_usage,
     )
 
 

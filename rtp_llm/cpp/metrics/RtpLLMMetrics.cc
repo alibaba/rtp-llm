@@ -334,6 +334,11 @@ bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(waiting_oldest_age_us_metric, "rtp_llm_scheduler_waiting_oldest_age_us");
     REGISTER_MUTABLE_METRIC_BASE(
         group_fallback_acc_metric, "rtp_llm_scheduler_group_fallback_acc", kmonitor::COUNTER, kmonitor::NORMAL);
+    REGISTER_GAUGE_MUTABLE_METRIC(cache_exposed_wait_us_metric, "rtp_llm_scheduler_cache_exposed_wait_us");
+    REGISTER_MUTABLE_METRIC_BASE(cache_exposed_wait_event_acc_metric,
+                                 "rtp_llm_scheduler_cache_exposed_wait_event_acc",
+                                 kmonitor::COUNTER,
+                                 kmonitor::NORMAL);
     return true;
 }
 
@@ -350,6 +355,12 @@ void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSch
     if (collector->group_fallback_count > 0) {
         REPORT_MUTABLE_METRIC(group_fallback_acc_metric, collector->group_fallback_count);
     }
+}
+
+void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags*               tags,
+                                    RtpLLMSchedulerCacheStallMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(cache_exposed_wait_us_metric, collector->cache_exposed_wait_us);
+    REPORT_MUTABLE_METRIC(cache_exposed_wait_event_acc_metric, 1);
 }
 
 bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -882,6 +893,11 @@ bool RtpLLMCacheEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(eviction_blocks_count_metric, "rtp_llm_kv_cache_eviction_blocks_count");
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_lifetime_ms_metric, "rtp_llm_kv_cache_evicted_block_lifetime_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_idletime_ms_metric, "rtp_llm_kv_cache_evicted_block_idletime_ms");
+    REGISTER_QPS_MUTABLE_METRIC(choose_victim_qps_metric, "rtp_llm_kv_cache_choose_victim_qps");
+    REGISTER_QPS_MUTABLE_METRIC(choose_victim_latency_sum_us_metric, "rtp_llm_kv_cache_choose_victim_latency_sum_us");
+    REGISTER_QPS_MUTABLE_METRIC(choose_victim_scanned_candidates_qps_metric,
+                                "rtp_llm_kv_cache_choose_victim_scanned_candidates_qps");
+    REGISTER_QPS_MUTABLE_METRIC(choose_victim_skip_qps_metric, "rtp_llm_kv_cache_choose_victim_skip_qps");
     return true;
 }
 
@@ -918,6 +934,25 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tag
         evicted_block_lifetime_ms_metric->Report(&eviction_tags, collector->block_lifetime_ms);
         evicted_block_idletime_ms_metric->Report(&eviction_tags, collector->block_idletime_ms);
     }
+}
+
+void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*                tags,
+                                        RtpLLMCacheVictimSelectionMetricsCollector* collector) {
+    kmonitor::MetricsTags selection_tags = tags ? *tags : kmonitor::MetricsTags{};
+    if (collector->skip_reason != nullptr) {
+        selection_tags.AddTag("reason", collector->skip_reason);
+        choose_victim_skip_qps_metric->Report(&selection_tags, collector->skipped);
+        return;
+    }
+    choose_victim_latency_sum_us_metric->Report(&selection_tags, collector->latency_sum_us);
+    choose_victim_scanned_candidates_qps_metric->Report(&selection_tags, collector->scanned_candidates);
+    // AddTag inserts without replacing an existing key. Keep the result tag sets separate.
+    auto selected_tags = selection_tags;
+    selected_tags.AddTag("selected", "true");
+    choose_victim_qps_metric->Report(&selected_tags, collector->selected);
+    auto not_selected_tags = selection_tags;
+    not_selected_tags.AddTag("selected", "false");
+    choose_victim_qps_metric->Report(&not_selected_tags, collector->calls - collector->selected);
 }
 
 bool RtpLLMCacheInsertMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -1052,7 +1087,7 @@ bool RtpLLMRemoteCacheControlMetrics::init(kmonitor::MetricsGroupManager* manage
     return true;
 }
 
-void RtpLLMRemoteCacheControlMetrics::report(const kmonitor::MetricsTags* tags,
+void RtpLLMRemoteCacheControlMetrics::report(const kmonitor::MetricsTags*              tags,
                                              RtpLLMRemoteCacheControlMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(enabled_metric, collector->enabled ? 1 : 0);
 }
@@ -1165,8 +1200,10 @@ bool RtpLLMRemoteCacheSDKMetrics::init(kmonitor::MetricsGroupManager* manager) {
 void RtpLLMRemoteCacheSDKMetrics::report(const kmonitor::MetricsTags*          tags,
                                          RtpLLMRemoteCacheSDKMetricsCollector* collector) {
     REPORT_QPS(remote_sdk_fail_qps);
-    REPORT_MUTABLE_METRIC(remote_sdk_block_num_metric, collector->remote_sdk_block_num);
-    REPORT_MUTABLE_METRIC(remote_sdk_cost_time_us_metric, collector->remote_sdk_cost_time_us);
+    if (collector->report_details) {
+        REPORT_MUTABLE_METRIC(remote_sdk_block_num_metric, collector->remote_sdk_block_num);
+        REPORT_MUTABLE_METRIC(remote_sdk_cost_time_us_metric, collector->remote_sdk_cost_time_us);
+    }
 }
 
 bool RtpLLMRemoteCacheQuarantineMetrics::init(kmonitor::MetricsGroupManager* manager) {

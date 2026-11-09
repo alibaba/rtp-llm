@@ -326,17 +326,18 @@ class HWKernelConfigPickleTest(unittest.TestCase):
 
 
 class RuntimeConfigPickleTest(unittest.TestCase):
-    def test_shutdown_group_round_trip_and_previous_formats(self):
+    def test_world_group_round_trip_and_previous_formats(self):
         config = RuntimeConfig()
-        config.shutdown_worker_grpc_addrs = ["host0:8001", "host1:8001"]
+        config.world_worker_grpc_addrs = ["host0:8001", "host1:8001"]
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(
-            restored.shutdown_worker_grpc_addrs, config.shutdown_worker_grpc_addrs
+            restored.world_worker_grpc_addrs, config.world_worker_grpc_addrs
         )
+        self.assertEqual(config.__getstate__()[14], config.world_worker_grpc_addrs)
         for size in (12, 13, 14):
             restored = RuntimeConfig.__new__(RuntimeConfig)
             restored.__setstate__(config.__getstate__()[:size])
-            self.assertEqual(restored.shutdown_worker_grpc_addrs, [])
+            self.assertEqual(restored.world_worker_grpc_addrs, [])
 
     def test_output_dispatcher_worker_count_round_trip(self):
         config = RuntimeConfig()

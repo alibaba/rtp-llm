@@ -779,6 +779,48 @@ TEST_F(BlockTreeCacheFactoryTest, SingleTypeBindsExistingTargetGroupAndPool) {
     expectTargetGroupsBoundByTag(cache, allocator);
 }
 
+TEST_F(BlockTreeCacheFactoryTest, FrozenAbortRatioPropagatesToHostAndDiskPools) {
+    for (const double ratio : {0.0, 0.6}) {
+        SCOPED_TRACE(ratio);
+        const auto config    = makeSingleConfig();
+        auto       allocator = initAllocator<CoordinatorCacheManager>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_frozen_ratio");
+        KVCacheConfig                            kv_cache_config;
+        kv_cache_config.enable_memory_cache                  = true;
+        kv_cache_config.memory_cache_size_mb                 = 1;
+        kv_cache_config.enable_disk_cache                    = true;
+        kv_cache_config.disk_cache_size_mb                   = 1;
+        kv_cache_config.disk_cache_paths                     = disk_dir.path;
+        kv_cache_config.block_tree_device_frozen_abort_ratio = ratio;
+        auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
+        ASSERT_NE(cache, nullptr);
+        ASSERT_EQ(cache->groupSets().size(), 1u);
+        const auto& group_set = cache->groupSets().front();
+        ASSERT_NE(group_set->hostPool(), nullptr);
+        ASSERT_NE(group_set->diskPool(), nullptr);
+
+        const std::array<std::shared_ptr<IBlockPool>, 2> pools{group_set->hostPool(), group_set->diskPool()};
+        for (const auto& pool : pools) {
+            SCOPED_TRACE(pool->poolName());
+            ASSERT_DOUBLE_EQ(pool->config_->frozen_block_abort_ratio, ratio);
+            ASSERT_GE(pool->totalBlocksNum(), 10u);
+            // Freeze more than the default 30% so a missing configuration
+            // override cannot silently pass once the guard covers all tiers.
+            const auto blocks = pool->malloc((pool->totalBlocksNum() + 1) / 2);
+            ASSERT_TRUE(blocks.has_value());
+            for (const auto block : *blocks) {
+                pool->freezeBlock(block);
+            }
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), blocks->size());
+            for (const auto block : *blocks) {
+                pool->unfreezeBlock(block);
+            }
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+            EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+        }
+    }
+}
+
 TEST_F(BlockTreeCacheFactoryTest, RemoteResolverMatchesAllocatorForNonContiguousGlobalLayers) {
     {
         const auto    config    = makeHybridConfig();
@@ -2043,6 +2085,64 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutHostCache) {
         EXPECT_EQ(group_set->hostPool(), nullptr);
         EXPECT_NE(group_set->diskPool(), nullptr);
     }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DiskEvictionTimeoutOverridesAndInheritsLoadTimeout) {
+    const auto config = makeSingleConfig();
+    struct TimeoutCase {
+        int64_t load;
+        int64_t evict;
+        int     expected_evict;
+    };
+    const TimeoutCase cases[]{{30000, -1, 30000}, {4321, -1, 4321}, {200, 45000, 45000}};
+    for (const auto& expected : cases) {
+        SCOPED_TRACE("load=" + std::to_string(expected.load) + " evict=" + std::to_string(expected.evict));
+        auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_disk_timeouts");
+        KVCacheConfig                            runtime;
+        runtime.enable_disk_cache           = true;
+        runtime.disk_cache_size_mb          = 1;
+        runtime.disk_cache_paths            = disk_dir.path;
+        runtime.disk_cache_sync_timeout_ms  = expected.load;
+        runtime.disk_cache_evict_timeout_ms = expected.evict;
+        auto cache                          = createBlockTreeCache(config, runtime, allocator);
+        ASSERT_NE(cache, nullptr);
+        EXPECT_EQ(cache->config().disk_cache_sync_timeout_ms, expected.load);
+        EXPECT_EQ(cache->config().disk_cache_evict_timeout_ms, expected.expected_evict);
+        EXPECT_EQ(cache->config().host_cache_sync_timeout_ms, 10000);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, InvalidDiskTimeoutsAreRejected) {
+    CoreDumpGuard guard;
+    const auto    config = makeSingleConfig();
+    for (const bool load : {true, false}) {
+        for (const int64_t invalid : {int64_t{0}, int64_t{-2}, int64_t{std::numeric_limits<int>::max()} + 1}) {
+            SCOPED_TRACE("load=" + std::to_string(load) + " timeout=" + std::to_string(invalid));
+            auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
+            block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_invalid_disk_timeouts");
+            KVCacheConfig                            runtime;
+            runtime.enable_disk_cache  = true;
+            runtime.disk_cache_size_mb = 1;
+            runtime.disk_cache_paths   = disk_dir.path;
+            auto& timeout = load ? runtime.disk_cache_sync_timeout_ms : runtime.disk_cache_evict_timeout_ms;
+            timeout       = invalid;
+            EXPECT_ANY_THROW(createBlockTreeCache(config, runtime, allocator));
+        }
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DisabledDiskCacheKeepsHostTimeouts) {
+    const auto    config    = makeSingleConfig();
+    auto          allocator = initAllocator<CoordinatorCacheManager>(config);
+    KVCacheConfig runtime;
+    runtime.memory_cache_sync_timeout_ms = 1234;
+    runtime.disk_cache_sync_timeout_ms   = 0;
+    runtime.disk_cache_evict_timeout_ms  = 0;
+    auto cache                           = createBlockTreeCache(config, runtime, allocator);
+    ASSERT_NE(cache, nullptr);
+    EXPECT_EQ(cache->config().disk_cache_sync_timeout_ms, 1234);
+    EXPECT_EQ(cache->config().disk_cache_evict_timeout_ms, 1234);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, RejectsDiskCacheForReusableLinearGroupSet) {

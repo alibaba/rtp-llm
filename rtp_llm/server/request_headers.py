@@ -1,3 +1,4 @@
+import json
 from typing import Any, Dict, Mapping, Optional
 
 REQUEST_HEADER_NAMES = (
@@ -99,6 +100,36 @@ def dashscope_greennet_metadata(headers: Optional[Mapping[str, Any]]) -> tuple:
     if request_id:
         metadata += (("x-dashscope-request-id", request_id),)
     return metadata
+
+
+def extract_workspace_region(headers: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """读取网关注入的 x_dashscope_inner_workspace_meta, 提取 region 字段。
+
+    该 header 是 JSON 字符串, 形如
+    '{"model_logging_policy":"default","region":"ap-southeast-1",...}'。
+    与 dashscope-serving request_region.extract_request_region 一致: 解析失败、
+    非 dict、region 非字符串时返回 None (等价无 workspace 信息)。
+    """
+    if not headers:
+        return None
+    raw = headers.get("x_dashscope_inner_workspace_meta")
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        try:
+            meta = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(raw, dict):
+        meta = raw
+    else:
+        return None
+    if not isinstance(meta, dict):
+        return None
+    region = meta.get("region")
+    if isinstance(region, str) and region.strip():
+        return region.strip()
+    return None
 
 
 def extract_qos_priority(input: Any) -> int:

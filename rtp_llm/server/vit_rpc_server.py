@@ -58,6 +58,19 @@ def _now_us() -> int:
     return time.monotonic_ns() // 1000
 
 
+def _multimodal_inputs_region(multimodal_inputs):
+    """Read the request-level download region carried by the inputs message.
+
+    One value per request: the preprocess engine fans it out to every
+    multimodal input of this request. None when absent (older peer or the
+    gateway injected no workspace region); a cache-only hash probe may pass
+    no inputs at all.
+    """
+    if multimodal_inputs is None:
+        return None
+    return getattr(multimodal_inputs, "region", "") or None
+
+
 _EXCEPTION_CATEGORY_TO_GRPC_STATUS = {
     ExceptionCategory.BAD_REQUEST: grpc.StatusCode.INVALID_ARGUMENT,
     ExceptionCategory.TOO_LONG: grpc.StatusCode.INVALID_ARGUMENT,
@@ -175,6 +188,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                     external_request_id=extract_correlation_request_id(headers),
                     cancellation_event=cancellation,
                     binary_hashes=True,
+                    region=_multimodal_inputs_region(inputs),
                 )
             )
         except NotImplementedError as error:
@@ -222,6 +236,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 user_id=headers.get("x-dashscope-uid", ""),
                 service_name=headers.get("x-dashscope-service", ""),
                 external_request_id=extract_correlation_request_id(headers),
+                region=_multimodal_inputs_region(multimodal_inputs),
             )
             return EmptyPB()
         except FtRuntimeException as error:
@@ -251,6 +266,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 user_id=headers.get("x-dashscope-uid", ""),
                 service_name=headers.get("x-dashscope-service", ""),
                 external_request_id=extract_correlation_request_id(headers),
+                region=_multimodal_inputs_region(multimodal_inputs),
             )
             if verdict is None:
                 raise RuntimeError("ViT GreenNet returned no verdict")
@@ -346,6 +362,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 user_id=headers.get("x-dashscope-uid", ""),
                 service_name=headers.get("x-dashscope-service", ""),
                 external_request_id=extract_correlation_request_id(headers),
+                region=_multimodal_inputs_region(multimodal_inputs),
             )
             res = merge_embedding_results(results)
             output_pb = self._transport.transfer(multimodal_inputs, res)

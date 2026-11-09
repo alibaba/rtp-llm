@@ -12,6 +12,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/KVCMOperationRegistry.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
@@ -19,6 +21,139 @@
 
 namespace rtp_llm {
 namespace {
+
+TEST(BlockTransferDispatcherTest, StopWakesSleepingPollerAndJoinsBeforeDestruction) {
+    auto multi = std::make_shared<MultiRankBlockTransferEngine>(std::vector<GroupSetPtr>{}, nullptr);
+    BlockTransferDispatcher dispatcher(nullptr, multi);
+    EXPECT_TRUE(dispatcher.frozen_thread_.joinable());
+    const auto begin = std::chrono::steady_clock::now();
+    dispatcher.stopFrozenPolling();
+    EXPECT_FALSE(dispatcher.frozen_thread_.joinable());
+    EXPECT_LT(std::chrono::steady_clock::now() - begin, std::chrono::seconds(1));
+    EXPECT_NO_THROW(dispatcher.stopFrozenPolling());
+}
+
+TEST(BlockTransferDispatcherTest, LocalOnlyDispatcherDoesNotStartPoller) {
+    BlockTransferDispatcher dispatcher(nullptr);
+    EXPECT_FALSE(dispatcher.frozen_thread_.joinable());
+    EXPECT_NO_THROW(dispatcher.stopFrozenPolling());
+}
+
+class LocalCompletionBackend final: public StorageBackend {
+public:
+    explicit LocalCompletionBackend(bool supported = true): supported_(supported) {}
+
+    bool supportsLocalCompletionQueries() const noexcept override { return supported_; }
+
+    std::vector<TaskCompletion> queryLocalKVCMOperations(const std::vector<std::string>& ids) const override {
+        std::vector<TaskCompletion> result;
+        for (const auto& id : ids) {
+            const auto state = registry.query(id);
+            result.push_back(state == KVCMOperationRegistry::State::FINISHED ? TaskCompletion::FINISHED :
+                             state == KVCMOperationRegistry::State::RUNNING ? TaskCompletion::PENDING :
+                                                                            TaskCompletion::UNKNOWN);
+        }
+        return result;
+    }
+
+    bool forgetLocalKVCMOperations(const std::vector<std::string>& ids) override {
+        ++forget_calls;
+        if (forget_failures > 0) {
+            --forget_failures;
+            return false;
+        }
+        bool forgotten = true;
+        for (const auto& id : ids) forgotten = registry.forget(id) && forgotten;
+        return forgotten;
+    }
+
+    KVCMOperationRegistry registry;
+    size_t forget_calls{0};
+    size_t forget_failures{0};
+
+private:
+    bool initImpl() override { return true; }
+    StorageMatchResult matchImpl(const StorageRequest&) override { return {}; }
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {}
+    void writeImpl(const StorageRequest&) override {}
+
+    bool supported_;
+};
+
+class RecoveryBlockPool final: public IBlockPool {
+public:
+    RecoveryBlockPool(): IBlockPool([] {
+        auto config = std::make_shared<BlockPoolConfigBase>();
+        config->pool_type = BlockPoolType::HOST;
+        config->physical_block_count = 8;
+        return config;
+    }()) {
+        markInitialized();
+    }
+
+    size_t blockSizeBytes() const override { return 1; }
+};
+
+TEST(BlockTransferDispatcherTest, LocalKVCMProviderPollsAndRecoversOnlyFinishedOperations) {
+    auto backend = std::make_shared<LocalCompletionBackend>();
+    BlockTransferDispatcher dispatcher(nullptr, nullptr, 8, backend);
+    EXPECT_TRUE(dispatcher.frozen_thread_.joinable());
+    dispatcher.stopFrozenPolling();
+
+    auto pool = std::make_shared<RecoveryBlockPool>();
+    const auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    TransferResult result{ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "local SDK completion unknown")};
+    result.recovery_task_ids = {"local"};
+    FrozenTask frozen(result, FrozenTask::QueryKind::KVCM);
+    frozen.freeze(pool, *block);
+    dispatcher.retainFrozenTask(std::move(frozen));
+
+    // A missing record cannot prove that the SDK stopped touching the block.
+    dispatcher.pollFrozenTasks();
+    EXPECT_TRUE(pool->isFrozen(*block));
+    ASSERT_TRUE(backend->registry.start("local"));
+    dispatcher.pollFrozenTasks();
+    EXPECT_TRUE(pool->isFrozen(*block));
+    EXPECT_EQ(backend->forget_calls, 0u);
+
+    ASSERT_TRUE(backend->registry.finish("local"));
+    dispatcher.pollFrozenTasks();
+    EXPECT_FALSE(pool->isAllocated(*block));
+    EXPECT_TRUE(dispatcher.frozen_tasks_.empty());
+    EXPECT_EQ(backend->registry.query("local"), KVCMOperationRegistry::State::FINISHED);
+
+    dispatcher.pollFrozenTasks();
+    EXPECT_EQ(backend->registry.query("local"), KVCMOperationRegistry::State::NOT_FOUND);
+    EXPECT_TRUE(dispatcher.local_kvcm_finished_ids_.empty());
+}
+
+TEST(BlockTransferDispatcherTest, LocalKVCMCleanupRetriesNormalCompletionWithoutFrozenTasks) {
+    auto backend = std::make_shared<LocalCompletionBackend>();
+    BlockTransferDispatcher dispatcher(nullptr, nullptr, 8, backend);
+    dispatcher.stopFrozenPolling();
+    ASSERT_TRUE(backend->registry.start("local"));
+    ASSERT_TRUE(backend->registry.finish("local"));
+    backend->forget_failures = 1;
+    dispatcher.enqueueFinishedKVCMOperation("local");
+
+    dispatcher.pollFrozenTasks();
+    EXPECT_EQ(backend->registry.query("local"), KVCMOperationRegistry::State::FINISHED);
+    EXPECT_EQ(dispatcher.local_kvcm_finished_ids_.count("local"), 1u);
+    dispatcher.pollFrozenTasks();
+    EXPECT_EQ(backend->registry.query("local"), KVCMOperationRegistry::State::NOT_FOUND);
+    EXPECT_EQ(backend->forget_calls, 2u);
+    EXPECT_TRUE(dispatcher.local_kvcm_finished_ids_.empty());
+}
+
+TEST(BlockTransferDispatcherTest, UnsupportedLocalBackendDoesNotStartPollerOrRetainBackend) {
+    auto backend = std::make_shared<LocalCompletionBackend>(false);
+    std::weak_ptr<StorageBackend> weak_backend = backend;
+    BlockTransferDispatcher dispatcher(nullptr, nullptr, 8, backend);
+    EXPECT_FALSE(dispatcher.frozen_thread_.joinable());
+    backend.reset();
+    EXPECT_TRUE(weak_backend.expired());
+}
 
 std::shared_ptr<TransferAsyncContext> okContext() {
     return std::make_shared<CompletedTransferAsyncContext>(ErrorInfo::OkStatus());

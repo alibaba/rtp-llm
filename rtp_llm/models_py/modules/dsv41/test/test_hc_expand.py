@@ -11,7 +11,7 @@ from rtp_llm.models_py.modules.dsv41.prefill._hc_expand_triton import expand_hc
 class TestHCExpand(unittest.TestCase):
     def test_exact_independent_lanes_and_tail(self):
         with torch.inference_mode():
-            for tokens in (8193, 16384, 126980):
+            for tokens in (1, 3, 128, 8082, 8193, 16384, 126980):
                 source = torch.randint(
                     0, 32767, (tokens, 5120), device="cuda", dtype=torch.int16
                 ).view(torch.bfloat16)

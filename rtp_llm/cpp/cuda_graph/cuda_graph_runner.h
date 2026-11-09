@@ -49,6 +49,8 @@ public:
     captureKernelBlockTableWidth(const CacheTopology& topology, size_t max_seq_len, size_t max_reserved_step);
     static int64_t captureKernelBlockTableWidth(const CacheTopology& topology, size_t fake_physical_block_count);
 
+    std::optional<DSparkCapturedCapacity> capturedDSparkCapacity(int64_t batch) const override;
+
     CudaGraphRunner(const GraphParams&                         graph_params,
                     py::object                                 py_instance,
                     const char*                                forward_method_name = "forward",
@@ -58,6 +60,7 @@ public:
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
         is_packed_target_verify_(graph_params.is_packed_target_verify),
+        dspark_capacity_query_width_(graph_params.dspark_capacity_query_width),
         role_(graph_params.role),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
@@ -254,6 +257,7 @@ private:
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     bool                    is_packed_target_verify_{false};
+    int                     dspark_capacity_query_width_{0};
     CudaGraphRole           role_{CudaGraphRole::AUTO};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};

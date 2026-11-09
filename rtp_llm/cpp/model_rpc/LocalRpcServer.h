@@ -62,6 +62,8 @@ public:
 
     grpc::Status SetLogLevel(grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response);
 
+    // enable_all_rank fans out from any TP leader to every worker in the world.
+    // Workers count steps locally; RPC completion is not a step barrier.
     grpc::Status StartProfile(grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response);
 
     grpc::Status
@@ -104,6 +106,15 @@ public:
     void reportWorkerStatusTime(int64_t request_begin_time_us, int64_t request_after_lb_time_us);
 
     void reportCacheStatusTime(int64_t request_begin_time_us);
+    ::grpc::Status ForgetTransferTasks(::grpc::ServerContext* context,
+                                       const ForgetTransferTasksRequestPB* request, EmptyPB* response);
+    ::grpc::Status QueryTransferTasks(::grpc::ServerContext* context, const QueryTransferTasksRequestPB* request,
+                                      QueryTransferTasksResponsePB* response);
+    ::grpc::Status ForgetKVCMOperations(::grpc::ServerContext* context,
+                                        const ForgetKVCMOperationsRequestPB* request, EmptyPB* response);
+    ::grpc::Status QueryKVCMOperations(::grpc::ServerContext* context,
+                                       const QueryKVCMOperationsRequestPB* request,
+                                       QueryKVCMOperationsResponsePB* response);
 
     ::grpc::Status
     ExecuteFunction(::grpc::ServerContext* context, const ::FunctionRequestPB* request, ::FunctionResponsePB* response);
@@ -166,6 +177,8 @@ protected:
     std::shared_ptr<RpcServerRuntimeMeta> meta_;
     py::object                            weight_manager_;
     std::shared_ptr<BroadcastManager>     tp_broadcaster_;
+    std::once_flag                        world_broadcaster_init_;
+    std::unique_ptr<BroadcastManager>     world_broadcaster_;
     bool                                  torch_allocator_dump_enabled_{false};
     std::string                           torch_allocator_dump_auth_token_;
     double                                torch_allocator_dump_cooldown_seconds_{60.0};

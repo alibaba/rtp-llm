@@ -160,6 +160,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":model_rpc_pool",
+        "//rtp_llm/cpp/utils:error_code",
     ],
 )
 

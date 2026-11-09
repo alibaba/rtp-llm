@@ -316,7 +316,7 @@ class MoE(nn.Module):
         return self._gate_pack_static and (not self._has_visual_tokens)
 
     def prepare_mhc_inputs(self, x: torch.Tensor) -> MegaMoEInputs | None:
-        """Request direct FP8 output only for the existing native decode route.
+        """Request direct FP8 output for the native MegaMHC route.
 
         Requires group-32 Mega-SE and the native BF16 gate.
         """
@@ -324,8 +324,7 @@ class MoE(nn.Module):
         from .strategies.mega_se import MegaMoEStrategySE
 
         if (
-            not self._is_decode_role
-            or not self._use_gate_pack()
+            not self._use_gate_pack()
             or type(self._strategy) is not MegaMoEStrategySE
             or x.ndim not in (2, 3)
             or x.shape[-1] != self.dim
@@ -494,7 +493,7 @@ class MoE(nn.Module):
             # The block passes this only after a successful MegaMHC write.
             # No allocation, activation pack, or shared-scale staging here.
             if routing_metadata is not None or _dbg:
-                raise ValueError("Prepared MegaMHC inputs require plain decode routing")
+                raise ValueError("Prepared MegaMHC inputs require plain routing")
             with record_function_range("dsv4.moe.routed_experts"):
                 y = self._strategy.forward_from_mhc(
                     x,

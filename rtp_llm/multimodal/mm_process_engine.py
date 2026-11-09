@@ -737,6 +737,7 @@ class MMProcessEngine:
         user_id: str = "",
         service_name: str = "",
         external_request_id: str = "",
+        region: Optional[str] = None,
     ) -> GreenNetVerdict:
         """Block until every input's greennet verdict is decided; return the
         first non-passing verdict (first-failure-wins), else a passing verdict.
@@ -772,6 +773,7 @@ class MMProcessEngine:
                 user_id=user_id,
                 service_name=service_name,
                 external_request_id=external_request_id,
+                region=region,
                 cached_inspection_inputs=(
                     cached_inspection_inputs
                     if self._request_scoped_inspection()
@@ -884,6 +886,7 @@ class MMProcessEngine:
         deadline: Optional[float] = None,
         inspection_handle: Optional[SourceInspection] = None,
         external_request_id: str = "",
+        region: Optional[str] = None,
     ) -> Tuple[MMEmbeddingRes, List[MMWorkItem]]:
         """Internal implementation that also exposes canonical work-item values.
 
@@ -926,6 +929,7 @@ class MMProcessEngine:
                             inspection_handle, SourceInspection
                         ),
                         inspection_handle=inspection_handle,
+                        region=region,
                     )
                     self._wait_for_preprocessing(work_items, scheduled, deadline)
                     if isinstance(inspection_handle, SourceInspection):
@@ -995,6 +999,7 @@ class MMProcessEngine:
         deadline: Optional[float] = None,
         capture_inspection_sources: bool = False,
         inspection_handle: Optional[SourceInspection] = None,
+        region: Optional[str] = None,
     ) -> List[MMWorkItem]:
         """Create work items and submit preprocessing tasks."""
         # Request-level image-count cap BEFORE any preprocessing: a request whose
@@ -1031,6 +1036,7 @@ class MMProcessEngine:
                     defer_feature_hashes=defer_feature_hashes,
                     deadline=deadline,
                     require_cache_key=self._remote_embedding_cache is not None,
+                    region=region,
                 )
                 work_items.append(work_item)
                 work_item.capture_inspection_sources = capture_inspection_sources
@@ -1188,6 +1194,7 @@ class MMProcessEngine:
         user_id: str = "",
         service_name: str = "",
         external_request_id: str = "",
+        region: Optional[str] = None,
     ) -> List[str]:
         """Asynchronously submit multimodal URLs for embedding computation.
 
@@ -1203,6 +1210,7 @@ class MMProcessEngine:
                 user_id=user_id,
                 service_name=service_name,
                 external_request_id=external_request_id,
+                region=region,
             )
             return [cache_key for cache_key, _ in claims]
         except Exception as error:
@@ -1220,6 +1228,7 @@ class MMProcessEngine:
         user_id: str = "",
         service_name: str = "",
         external_request_id: str = "",
+        region: Optional[str] = None,
     ) -> List[MMEmbeddingRes]:
         """Retrieve embedding results, blocking until ready if necessary.
 
@@ -1247,6 +1256,7 @@ class MMProcessEngine:
                 user_id=user_id,
                 service_name=service_name,
                 external_request_id=external_request_id,
+                region=region,
                 cached_inspection_inputs=(
                     cached_inspection_inputs
                     if self._request_scoped_inspection()
@@ -1364,6 +1374,7 @@ class MMProcessEngine:
         service_name: str = "",
         cached_inspection_inputs: Optional[List[MultimodalInput]] = None,
         external_request_id: str = "",
+        region: Optional[str] = None,
     ) -> List[Tuple[str, MMEmbeddingCacheEntry]]:
         self._raise_if_async_request_cancelled(request_id, cancellation_event)
         # Validate every input before creating any shared PENDING entries.
@@ -1410,6 +1421,7 @@ class MMProcessEngine:
                 user_id=user_id,
                 service_name=service_name,
                 external_request_id=external_request_id,
+                region=region,
             )
             self._raise_if_async_request_cancelled(request_id, cancellation_event)
             return claims
@@ -1654,6 +1666,7 @@ class MMProcessEngine:
         user_id: str = "",
         service_name: str = "",
         external_request_id: str = "",
+        region: Optional[str] = None,
     ) -> Optional[concurrent.futures.Future]:
         if time.monotonic() >= deadline:
             error = FtRuntimeException(
@@ -1671,6 +1684,7 @@ class MMProcessEngine:
             user_id=user_id,
             service_name=service_name,
             external_request_id=external_request_id,
+            region=region,
         )
 
     def _submit_async_compute_batch(
@@ -1681,6 +1695,7 @@ class MMProcessEngine:
         user_id: str = "",
         service_name: str = "",
         external_request_id: str = "",
+        region: Optional[str] = None,
     ) -> None:
         if not pending:
             return
@@ -1730,6 +1745,7 @@ class MMProcessEngine:
                         user_id,
                         service_name,
                         external_request_id,
+                        region,
                     )
                     self._async_tasks[entry].future = future
                     future.add_done_callback(
@@ -1758,6 +1774,7 @@ class MMProcessEngine:
         *,
         deadline: float,
         external_request_id: str = "",
+        region: Optional[str] = None,
     ) -> Optional[concurrent.futures.Future]:
         handle = None
         if not self.is_proxy_mode:
@@ -1784,6 +1801,7 @@ class MMProcessEngine:
                 defer_cache_complete=True,
                 request_id=request_id,
                 external_request_id=external_request_id,
+                region=region,
                 report_embedding_length=False,
                 report_image_count=False,
                 report_vit_error=False,

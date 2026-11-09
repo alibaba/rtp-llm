@@ -44,6 +44,7 @@ struct GraphParams {
     bool             is_prefill_cuda_graph_mode   = false;
     bool             is_target_verify             = false;
     bool             is_packed_target_verify      = false;
+    int              dspark_capacity_query_width  = 0;  // V41 fixed-bank capacity reuse; 0 retains legacy.
     CudaGraphRole    role                         = CudaGraphRole::AUTO;
     int              max_seq_len                  = 0;
     int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
@@ -101,6 +102,10 @@ public:
     // Refresh only captured kv_cache_kernel_block_id state and FlashInfer plan
     // buffers after page-table changes. Other captured fields stay untouched.
     virtual void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {}
+
+    virtual std::optional<DSparkCapturedCapacity> capturedDSparkCapacity(int64_t /*batch*/) const {
+        return std::nullopt;
+    }
 
     py::object py_instance_;
 };

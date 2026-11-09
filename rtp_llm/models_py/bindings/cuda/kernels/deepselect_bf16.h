@@ -40,4 +40,17 @@ void deepselect_bf16_dense_sorted(const torch::Tensor& logits, const torch::Tens
 // alignment/ends contract as above; output is int32 [M,2048].
 void deepselect_bf16_candidates(const torch::Tensor& scores, const torch::Tensor& ends, torch::Tensor& output);
 
+// Draft selection support: FP32 [B,V] logits with unit inner stride, B <= 65535,
+// native K in {512,1024,4096}, V >= K, padded V < 2^23, CUDA SM100/SM103.
+bool draft_markov_topk_bf16_supported(const torch::Tensor& logits, int64_t k);
+
+// Form BF16 corrected scores, select K, then divide selected values by temperature.
+// Bias is contiguous BF16 [B,V]; temperature is contiguous FP32 [B], finite and
+// positive. All tensors share a device. Scores may contain -INF masks but no NaN.
+// Returns FP32 values and distinct int32 token IDs [B,K] in unspecified order.
+std::tuple<torch::Tensor, torch::Tensor> draft_markov_topk_bf16(const torch::Tensor& logits,
+                                                                const torch::Tensor& markov_bias,
+                                                                const torch::Tensor& temperature,
+                                                                int64_t              k);
+
 }  // namespace torch_ext

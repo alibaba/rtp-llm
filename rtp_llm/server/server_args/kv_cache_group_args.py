@@ -4,6 +4,20 @@ import math
 from rtp_llm.server.server_args.util import str2bool
 
 
+def _frozen_abort_ratio(value):
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "device frozen abort ratio must be a finite number in [0, 1]"
+        ) from error
+    if not math.isfinite(ratio) or not 0 <= ratio <= 1:
+        raise argparse.ArgumentTypeError(
+            "device frozen abort ratio must be a finite number in [0, 1]"
+        )
+    return ratio
+
+
 def _positive_finite_ratio(value):
     try:
         ratio = float(value)
@@ -340,7 +354,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "disk_cache_sync_timeout_ms"),
         type=int,
         default=30000,
-        help="磁盘 KV cache 同步超时，单位毫秒。",
+        help="磁盘 KV cache load 传输超时，包含排队时间，单位毫秒；evict/store 未单独配置时也沿用此值。",
+    )
+    kv_cache_group.add_argument(
+        "--disk_cache_evict_timeout_ms",
+        env_name="DISK_CACHE_EVICT_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "disk_cache_evict_timeout_ms"),
+        type=int,
+        default=-1,
+        help="磁盘 KV cache evict/store 写盘传输超时，包含排队时间，单位毫秒；必须为正数，默认 -1 沿用 DISK_CACHE_SYNC_TIMEOUT_MS。",
     )
     kv_cache_group.add_argument(
         "--disk_cache_staging_block_count",
@@ -357,6 +379,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=8,
         help="各传输方向共用的最大 descriptor 批大小；Disk->Device 还受 staging 容量限制，Device->Disk 保留单项提交。",
+    )
+    kv_cache_group.add_argument(
+        "--block_tree_device_frozen_abort_ratio",
+        env_name="BLOCK_TREE_DEVICE_FROZEN_ABORT_RATIO",
+        bind_to=(kv_cache_config, "block_tree_device_frozen_abort_ratio"),
+        type=_frozen_abort_ratio,
+        default=0.3,
+        help="单个 DEVICE/HOST/DISK pool 冻结 block 占比严格超过此值时 core，范围 [0, 1]，默认 0.3；0 关闭各介质保护。沿用原 device 配置名，启动时配置。",
     )
     kv_cache_group.add_argument(
         "--block_tree_transfer_worker_count",
@@ -507,7 +537,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kvcm_storage_thread_num"),
         type=int,
         default=4,
-        help="kvcm SdkWrapper中任务处理线程数量",
+        help="KVCM SDK 任务池线程数。多 rank 普通 remote 搬运在每个 rank 使用独立的 RTP 读池和写池，各用此线程数。",
     )
     kv_cache_group.add_argument(
         "--kvcm_storage_queue_size",
@@ -570,16 +600,16 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="RECO_ASYNCWRAPPER_THREAD_NUM",
         bind_to=(kv_cache_config, "kvcm_asyncwrapper_thread_num"),
         type=int,
-        default=16,
-        help="异步包装器线程数量",
+        default=4,
+        help="Remote Cache 读写共用的业务线程数，独立于 BTC。单 rank 本地搬运池使用相同的线程数。",
     )
     kv_cache_group.add_argument(
         "--kvcm_asyncwrapper_queue_size",
         env_name="RECO_ASYNCWRAPPER_QUEUE_SIZE",
         bind_to=(kv_cache_config, "kvcm_asyncwrapper_queue_size"),
         type=int,
-        default=1000,
-        help="异步包装器队列大小",
+        default=10000,
+        help="Remote Cache 业务队列容量，另为读任务预留 64 个位置。各 RTP 搬运池也用此值配置队列容量。0 表示不限长度。",
     )
     kv_cache_group.add_argument(
         "--kvcm_get_broadcast_timeout",

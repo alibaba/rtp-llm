@@ -3,8 +3,8 @@
 All collective sizes come from common host lengths. Scratch is allocated once
 and reused in stream order, including when an outer caller uses a side stream.
 Only the request outputs survive the next group; no packet aliases escape.
-The configured fixed scratch cap covers send/receive, slots and inverse
-row metadata.
+The configured fixed scratch cap covers the gathered buffer, slots and inverse
+row metadata. The send view aliases the current rank's gathered slice.
 All BF16 keys and index outputs are separately reported required model outputs;
 their lifetime is independent of transport grouping and they never alias scratch.
 """
@@ -110,7 +110,7 @@ def plan_segmented_groups(counts, *, cp_size, owner_rows):
         or any(type(count) is not int or count < 0 for count in counts)
     ):
         return None
-    scratch_per_local = _BYTES * (cp_size + 1 if cp_size > 1 else 1) + 16
+    scratch_per_local = _BYTES * cp_size + 16
     alignment = lcm(cp_size * owner_rows, 256)
     limit = _MAX_SCRATCH_MB * 1024**2
     groups = []
@@ -177,7 +177,7 @@ def plan_segmented_groups(counts, *, cp_size, owner_rows):
 @lru_cache(maxsize=128, typed=True)
 def _plan_groups_cached(counts, cp_size, owner_rows, limit):
     """Retain immutable host plans only; no request tensors or device state."""
-    scratch_per_local = _BYTES * (cp_size + 1 if cp_size > 1 else 1) + 16
+    scratch_per_local = _BYTES * cp_size + 16
     # Independent caps also bound the simultaneous maxima of different groups.
     local_cap = limit // (scratch_per_local + _INVERSE_BYTES * cp_size)
     output_cap = local_cap * cp_size
@@ -639,13 +639,8 @@ def _gather_planned(
             ),
         )
     device = seq_ends.device
-    send_buffer = torch.empty(
-        plan.max_local_rows * _BYTES, dtype=torch.uint8, device=device
-    )
-    receive_buffer = (
-        torch.empty(cp * plan.max_local_rows * _BYTES, dtype=torch.uint8, device=device)
-        if cp > 1
-        else send_buffer
+    receive_buffer = torch.empty(
+        cp * plan.max_local_rows * _BYTES, dtype=torch.uint8, device=device
     )
     slots = torch.empty(2 * plan.max_local_rows, dtype=torch.int64, device=device)
     inverse = torch.empty(2 * plan.max_output_rows, dtype=torch.int64, device=device)
@@ -678,8 +673,8 @@ def _gather_planned(
                 ),
                 PrefillIndexerKeys(oq[: counts[first]], os[: counts[first]]),
             )
-        send = send_buffer[: local * _BYTES]
         receive = receive_buffer[: cp * local * _BYTES]
+        send = receive[rank * local * _BYTES : (rank + 1) * local * _BYTES]
         if local:
             q, s, raw = joint._views(send, local)
             with record_function_range("dsv41.prefill.pool.owned.pack"):

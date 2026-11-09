@@ -676,7 +676,10 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [1, 2],
                 SamplingParams(),
-                DashScRequestControls(),
+                DashScRequestControls(
+                    enable_estimated_usage=True,
+                    support_frontend_estimated_usage=True,
+                ),
                 visitor,
                 rtp_llm_request_id=1,
                 yield_access_stats=True,
@@ -701,6 +704,77 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         real, _ = chunks[1]
         self.assertEqual(_gen_ids(real), [3])
 
+    async def test_fake_first_packet_request_override_enables(self) -> None:
+        req = self._minimal_request()
+        snapshot = MMRoutingSnapshot(
+            prompt_token_num=1200,
+            split_sizes=(600, 400),
+            feature_hashes=tuple(range(1000)),
+        )
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1200, reuse_len=0),
+        )
+        visitor = _RoutingFakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]),
+            snapshot,
+        )
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                DashScRequestControls(
+                    enable_estimated_usage=True,
+                    support_frontend_estimated_usage=True,
+                ),
+                visitor,
+                rtp_llm_request_id=1,
+                yield_access_stats=True,
+                mm_inputs=[object()],
+                enable_fake_first_packet=True,
+            )
+        )
+        self.assertEqual(len(chunks), 2)
+        self.assertTrue(
+            chunks[0][0].infer_response.parameters["estimated_usage"].bool_param
+        )
+
+    async def test_fake_first_packet_request_override_disables(self) -> None:
+        req = self._minimal_request()
+        snapshot = MMRoutingSnapshot(
+            prompt_token_num=1200,
+            split_sizes=(600, 400),
+            feature_hashes=tuple(range(1000)),
+        )
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1200, reuse_len=0),
+        )
+        visitor = _RoutingFakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]),
+            snapshot,
+        )
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                DashScRequestControls(
+                    enable_estimated_usage=False,
+                    support_frontend_estimated_usage=True,
+                ),
+                visitor,
+                rtp_llm_request_id=1,
+                yield_access_stats=True,
+                mm_inputs=[object()],
+                enable_fake_first_packet=True,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+
     async def test_fake_first_packet_text_only(self) -> None:
         req = self._minimal_request()
         out = GenerateOutput(
@@ -721,7 +795,10 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [1, 2],
                 SamplingParams(),
-                DashScRequestControls(),
+                DashScRequestControls(
+                    enable_estimated_usage=True,
+                    support_frontend_estimated_usage=True,
+                ),
                 visitor,
                 rtp_llm_request_id=1,
                 yield_access_stats=True,
@@ -776,6 +853,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             MMRoutingSnapshot(prompt_token_num=2, split_sizes=(), feature_hashes=()),
         )
         controls = DashScRequestControls(
+            enable_estimated_usage=True,
+            support_frontend_estimated_usage=True,
             tpm_recheck=TpmRecheckConfig(
                 request_ready_time_ms=int(time.time() * 1000),
                 interval_ms=10_000,
@@ -812,6 +891,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
         )
         controls = DashScRequestControls(
+            enable_estimated_usage=True,
+            support_frontend_estimated_usage=True,
             tpm_recheck=TpmRecheckConfig(
                 request_ready_time_ms=int(time.time() * 1000) - 5_000,
                 interval_ms=1_000,
@@ -849,6 +930,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             MMRoutingSnapshot(prompt_token_num=2, split_sizes=(), feature_hashes=()),
         )
         controls = DashScRequestControls(
+            enable_estimated_usage=True,
+            support_frontend_estimated_usage=True,
             tpm_recheck=TpmRecheckConfig(
                 request_ready_time_ms=int(time.time() * 1000) - 5_000,
                 interval_ms=1_000,
@@ -893,6 +976,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             MMRoutingSnapshot(prompt_token_num=2, split_sizes=(), feature_hashes=()),
         )
         controls = DashScRequestControls(
+            enable_estimated_usage=True,
+            support_frontend_estimated_usage=True,
             tpm_recheck=TpmRecheckConfig(
                 request_ready_time_ms=int(time.time() * 1000) - 5_000,
                 interval_ms=1_000,
@@ -958,6 +1043,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             MMRoutingSnapshot(prompt_token_num=2, split_sizes=(), feature_hashes=()),
         )
         controls = DashScRequestControls(
+            enable_estimated_usage=True,
+            support_frontend_estimated_usage=True,
             tpm_recheck=TpmRecheckConfig(
                 request_ready_time_ms=int(time.time() * 1000) - 5_000,
                 interval_ms=1_000,

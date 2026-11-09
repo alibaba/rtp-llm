@@ -329,6 +329,34 @@ class PrefillMetadataTest(unittest.TestCase):
                         )
                         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
+    def test_fused_predecessor_state_matches_slot_read(self):
+        for dtype in (torch.int32, torch.int64):
+            for batch in (9, 128, 1024):
+                source = torch.tensor(
+                    [0, 1, 7, 8, 9, 31, 512, 1025, 2048],
+                    dtype=dtype,
+                    device="cuda",
+                ).repeat((batch + 8) // 9)[:batch]
+                prefixes = torch.stack((source, source), dim=1)[:, 0]
+                table = (torch.arange(batch * 6, device="cuda") % 64 + 1).reshape(
+                    batch, 6
+                )[:, :4]
+                table[1, 0] = 0
+                pool = torch.randn(65 * 8, 1056, device="cuda")[:, :1024]
+                positions = (prefixes - 1).clamp_min(0)
+                requests = torch.arange(batch, device="cuda")
+                for rank in range(4):
+                    slots = cp_state_slot_mapping(
+                        positions, table, requests, 8, 512, 4, rank
+                    )
+                    expected = pool[slots.clamp_min(0)].masked_fill(
+                        (slots < 0)[:, None], 0
+                    )
+                    actual = fused.read_predecessor_states(
+                        prefixes, table, pool, 8, 512, 4, rank
+                    )
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_state_owner_span_independent_of_checkpoint_span(self):
         for dtype in (torch.int32, torch.int64):
             positions = torch.arange(0, 2049, device="cuda", dtype=dtype)

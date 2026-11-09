@@ -3326,9 +3326,7 @@ class AttentionFP8(nn.Module):
         if query_meta is None or not can_reuse_freqs:
             position_ids_eff = position_ids
             if cp_on:
-                position_ids_eff = _flat_1d(
-                    cp_ctx.global_positions.to(device=device, dtype=torch.long)
-                )
+                position_ids_eff = cp_ctx.global_positions
         if query_meta is None:
             with record_function_range("dsv4.fp8.meta.varlen.freqs_topk"):
                 freqs_cis = self.freqs_cis.index_select(
@@ -3342,11 +3340,7 @@ class AttentionFP8(nn.Module):
                 cu_seqlens_for_k = cu_seqlens
                 if cp_on:
                     if cp_ctx.cu_seqlens_global is not None:
-                        cu_seqlens_for_k = _flat_1d(
-                            cp_ctx.cu_seqlens_global.to(
-                                device=device, dtype=torch.int32
-                            )
-                        )
+                        cu_seqlens_for_k = cp_ctx.cu_seqlens_global
                 host_prefixes = getattr(cp_ctx, "prefix_lengths_host", None)
                 any_cont = (
                     any((prefix > 0 for prefix in host_prefixes))
@@ -4129,9 +4123,7 @@ class AttentionFP8(nn.Module):
             ).contiguous()
         if cp_on_write:
             write_B = int(cp_ctx.input_lengths_global.numel())
-            write_query_start_loc = _flat_1d(
-                cp_ctx.cu_seqlens_global.to(device=device, dtype=torch.int32)
-            ).contiguous()
+            write_query_start_loc = cp_ctx.cu_seqlens_global
             # A host-planned write consumes the existing prefix/length tensors
             # directly. Build their sum only for GPU fallback or prefix reads.
             write_combined_seq_lens = None
@@ -4320,10 +4312,8 @@ class AttentionFP8(nn.Module):
                     row_offsets=packed_row_offsets,
                 )
                 slot_in_flat = _swa_ops.compute_swa_slot_in_flat_from_cu(
-                    _flat_1d(
-                        cp_ctx.cu_seqlens_global.to(device=device, dtype=torch.int32)
-                    ),
-                    prefix_lengths.to(device=device)[:write_B],
+                    cp_ctx.cu_seqlens_global,
+                    prefix_lengths[:write_B],
                     num_tokens=cp_ctx.seq_len_full,
                     M=M,
                     window_size=win,

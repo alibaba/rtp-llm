@@ -1,84 +1,17 @@
-"""CPU contracts for the CP4 fixed-tile projected source stream."""
+"""Contracts for bounded CP source cohorts and zigzag row restoration."""
 
-import ast
 import bisect
 import random
-import sys
 import types
 import unittest
-from contextlib import contextmanager
-from pathlib import Path
-from unittest.mock import patch
 
 import torch
-import torch.nn.functional as F
 
-
-def _load():
-    path = Path(__file__).resolve().parents[1] / "attention_v41.py"
-    names = {
-        "_prefill_x_chunk_rows",
-        "_prefill_x_group_plan",
-        "_prefill_projected_x_groups",
-        "_prefill_x_tile_plan",
-        "_start_prefill_x_gather_async",
-        "_wait_prefill_x_gather",
-    }
-    constants = {"_PRODUCE_GLOBAL_TILE_ROWS", "_CP_PROJECTED_TRANSPORT_MAX_BYTES"}
-    nodes = [
-        node
-        for node in ast.parse(path.read_text()).body
-        if isinstance(node, ast.FunctionDef)
-        and node.name in names
-        or isinstance(node, ast.ClassDef)
-        and node.name == "_V41AsyncXGather"
-        or isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id in constants
-            for target in node.targets
-        )
-    ]
-    module = types.ModuleType("cp_stream_cpu")
-    module.torch = torch
-    exec(
-        compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"),
-        module.__dict__,
-    )
-    return module
-
-
-STREAM = _load()
-OPS = "rtp_llm.ops.compute_ops"
-
-
-@contextmanager
-def _native_gemm():
-    previous = sys.modules.get(OPS)
-    fake = types.ModuleType(OPS)
-    calls = []
-
-    def packed(x, weights, out):
-        rows = len(x)
-        calls.append((rows, len(out)))
-        for column, weight in enumerate(weights):
-            width = weight.shape[0]
-            out[:rows, column * width : (column + 1) * width] = F.linear(
-                x.float(), weight.float()
-            )
-
-    fake.rtp_llm_ops = types.SimpleNamespace(cublas_gemm_bf16_bf16_fp32_packed=packed)
-    sys.modules[OPS] = fake
-    try:
-        yield calls
-    finally:
-        if previous is None:
-            sys.modules.pop(OPS, None)
-        else:
-            sys.modules[OPS] = previous
+from rtp_llm.models_py.modules.dsv41.fp8 import attention_v41 as STREAM
 
 
 def _case(lengths):
-    """Build CP packed rows without using the stream planner."""
+    """Build CP4 packed rows independently of the source cohort planner."""
     chunks = tuple(2 * ((length + 7) // 8) for length in lengths)
     parts = [[] for _ in range(4)]
     base = 0
@@ -113,219 +46,165 @@ def _case(lengths):
     return cp, local, expected
 
 
-class CPStreamPlanCPU(unittest.TestCase):
-    def test_zigzag_and_bounded_groups(self):
-        rng = random.Random(20261031)
-        cases = [
-            (0,),
-            (1,),
-            (2,),
-            (3,),
-            (0, 1, 2, 3, 8, 9),
-            (127,),
-            (128,),
-            (129,),
-            (32767,),
-            (32768,),
-            (32769,),
-            (65537,),
-            (1048576,),
-            (2049,) * 64,
-            (1,) * 128,
-            (2,) * 1024,
-            (2049,) * 128,
-            (65537,) * 128,
-            (1, 3, 127, 2049, 65537),
-            (0, 1, 7, 8, 9, 127, 128, 129, 2049, 65537) * 102 + (0, 1, 7, 8),
-            (1048576,) + (2,) * 1023,
-            (65537,) * 1024,
-        ]
-        cases += [
-            tuple(
-                rng.choice((1, 7, 8, 9, 127, 129, 2048, 2049, 65537))
-                for _ in range(rng.randrange(1, 65))
+class CPSourceCohortPlanCPU(unittest.TestCase):
+    def test_other_cp_sizes_keep_global_order(self):
+        lengths = (1, 129, 65537, 131071, 10000000)
+        for cp_size in (2, 8):
+            chunks = tuple(
+                2 * ((length + 2 * cp_size - 1) // (2 * cp_size)) for length in lengths
             )
-            for _ in range(300)
+            cp = types.SimpleNamespace(
+                cp_size=cp_size,
+                input_lengths_global_host=lengths,
+                chunk_lengths_per_req=chunks,
+                seq_len_full=sum(lengths),
+                chunk_length=sum(chunks),
+            )
+            plan = STREAM._prefill_x_cohort_plan(cp, projected_row_bytes=4096)
+            self.assertEqual(plan[0][2], 0)
+            self.assertEqual(plan[-1][3], sum(lengths))
+            self.assertTrue(all(a[3] == b[2] for a, b in zip(plan, plan[1:])))
+            self.assertTrue(
+                all(
+                    cp_size * (local_end - local_start) * 4096
+                    <= STREAM._CP_SOURCE_RECEIVE_BYTES
+                    for local_start, local_end, _, _ in plan
+                )
+            )
+
+    def test_cohorts_cover_global_order_and_local_sources_with_bounded_memory(self):
+        rng = random.Random(20261105)
+        cases = [
+            (1,),
+            (129,) * 8,
+            (3330, 3331, 3332, 3333, 3334, 3330, 3331, 3332, 3333),
+            (1024,) * 32,
+            (1024,) * 64,
+            (8192,) * 8,
+            (131071,),
+            (131073,),
+            (262144,),
+            (1048576,),
+            (10000000,),
+            (1,) * 1024,
         ]
+        cases.extend(
+            tuple(rng.randrange(1, 131073) for _ in range(rng.randrange(1, 65)))
+            for _ in range(50)
+        )
         for lengths in cases:
-            chunks = tuple(2 * ((length + 7) // 8) for length in lengths)
+            with self.subTest(batch=len(lengths), fresh=sum(lengths)):
+                chunks = tuple(2 * ((n + 7) // 8) for n in lengths)
+                cp = types.SimpleNamespace(
+                    cp_size=4,
+                    input_lengths_global_host=lengths,
+                    chunk_lengths_per_req=chunks,
+                    seq_len_full=sum(lengths),
+                    chunk_length=sum(chunks),
+                )
+                global_ends = []
+                local_starts = []
+                global_cursor = local_cursor = 0
+                for length, chunk in zip(lengths, chunks):
+                    local_starts.append(local_cursor)
+                    global_cursor += length
+                    local_cursor += chunk
+                    global_ends.append(global_cursor)
+                plan = STREAM._prefill_x_cohort_plan(cp, projected_row_bytes=4096)
+                self.assertTrue(plan)
+                self.assertEqual(plan[0][2], 0)
+                self.assertEqual(plan[-1][3], cp.seq_len_full)
+                for index, (
+                    local_start,
+                    local_end,
+                    global_start,
+                    global_end,
+                ) in enumerate(plan):
+                    self.assertGreater(local_end, local_start)
+                    self.assertGreater(global_end, global_start)
+                    self.assertLessEqual(
+                        cp.cp_size * (local_end - local_start) * 4096,
+                        STREAM._CP_SOURCE_RECEIVE_BYTES,
+                    )
+                    if index:
+                        self.assertEqual(global_start, plan[index - 1][3])
+                    positions = [global_start, global_end - 1]
+                    if global_end - global_start > 2:
+                        positions.append((global_start + global_end) // 2)
+                    for position in positions:
+                        request = bisect.bisect_right(global_ends, position)
+                        request_start = global_ends[request - 1] if request else 0
+                        fresh = position - request_start
+                        half = chunks[request] // 2
+                        segment, offset = divmod(fresh, half)
+                        local = local_starts[request] + offset
+                        if segment >= cp.cp_size:
+                            local += half
+                        self.assertTrue(local_start <= local < local_end)
+
+    def test_long_request_keeps_global_order_and_bounded_tiles(self):
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_producer_metadata import (
+            raw_tile_plan,
+        )
+
+        for length in (131073, 159357, 262144, 1048576, 10000000):
+            chunk = 2 * ((length + 7) // 8)
             cp = types.SimpleNamespace(
                 cp_size=4,
-                chunk_lengths_per_req=chunks,
-                input_lengths_global_host=lengths,
-                chunk_length=sum(chunks),
-                padded_seq_len=4 * sum(chunks),
-                seq_len_full=sum(lengths),
+                input_lengths_global_host=(length,),
+                chunk_lengths_per_req=(chunk,),
+                seq_len_full=length,
+                chunk_length=chunk,
             )
-            x = types.SimpleNamespace(
-                ndim=2,
-                dtype=torch.bfloat16,
-                shape=(sum(chunks), 4),
-                is_contiguous=lambda: True,
-            )
-            self.assertEqual(STREAM._prefill_x_chunk_rows(cp, 1024), 8192)
-            self.assertEqual(STREAM._prefill_x_chunk_rows(cp, 512), 16384)
-            for width in (4, 8):
-                with patch.object(
-                    STREAM, "_CP_PROJECTED_TRANSPORT_MAX_BYTES", 5 * width * 4 * 8192
-                ):
-                    limit = STREAM._prefill_x_chunk_rows(cp, width)
-                    packets = list(
-                        STREAM._prefill_x_group_plan(x, cp, output_width=width)
+            for ratio, row_bytes in ((1, 1024), (2, 4096)):
+                with self.subTest(length=length, ratio=ratio):
+                    plan = STREAM._prefill_x_cohort_plan(
+                        cp, projected_row_bytes=row_bytes
                     )
-                cursor = 0
-                for pieces, counts, start, end in packets:
-                    self.assertEqual(start, cursor)
-                    self.assertGreater(end, start)
-                    self.assertLessEqual(end - start, 32768)
-                    self.assertLessEqual(max(counts), limit)
-                    self.assertEqual(sum(counts), end - start)
-                    self.assertEqual(sum(rows for _, _, rows, _ in pieces), end - start)
-                    offsets = [0] * 4
-                    row_offset = 0
-                    for owner, source, rows, destination in pieces:
-                        self.assertLessEqual(rows, limit)
-                        self.assertEqual(destination, start + row_offset)
-                        row_offset += rows
-                        offsets[owner] += rows
-                    self.assertEqual(tuple(offsets), counts)
-                    cursor = end
-                self.assertEqual(cursor, sum(lengths))
-            ends = []
-            bases = []
-            total = local_total = 0
-            for length, chunk in zip(lengths, chunks):
-                total += length
-                ends.append(total)
-                bases.append(local_total)
-                local_total += chunk
-            cursor = 0
-            for owner, source, rows in STREAM._prefill_x_tile_plan(cp, 8192):
-                self.assertGreater(rows, 0)
-                self.assertLessEqual(rows, 8192)
-                for global_row in (cursor, cursor + rows - 1):
-                    request = bisect.bisect_right(ends, global_row)
-                    request_start = ends[request - 1] if request else 0
-                    half = chunks[request] // 2
-                    position = global_row - request_start
-                    segment = position // half
-                    self.assertEqual(owner, min(segment, 7 - segment))
-                    self.assertEqual(
-                        source + global_row - cursor,
-                        bases[request]
-                        + (half if segment >= 4 else 0)
-                        + position % half,
+                    self.assertEqual(plan[0][2], 0)
+                    self.assertEqual(plan[-1][3], length)
+                    self.assertTrue(all(a[3] == b[2] for a, b in zip(plan, plan[1:])))
+                    for local_begin, local_end, global_begin, global_end in plan:
+                        self.assertLessEqual(
+                            4 * (local_end - local_begin) * row_bytes,
+                            STREAM._CP_SOURCE_RECEIVE_BYTES,
+                        )
+                    if length == 1048576:
+                        self.assertEqual(len(plan), 16 if ratio == 1 else 56)
+                    source_ranges = list(STREAM._prefill_source_tile_ranges(plan))
+                    self.assertTrue(
+                        all(0 < end - start <= 65536 for start, end in source_ranges)
                     )
-                cursor += rows
-            self.assertEqual(cursor, sum(lengths))
-
-    def test_four_rank_exchange_and_reuse(self):
-        for lengths in (
-            (5, 6, 65, 7, 2),
-            (127, 128, 129),
-            (1, 3, 17, 33),
-            (1025,),
-            (1, 127, 128, 2049, 32769),
-            (32769,),
-        ):
-            cp, local, raw = _case(lengths)
-            for weights in (
-                (torch.eye(4).bfloat16(),),
-                (torch.eye(4).bfloat16(), (torch.eye(4) / 8).bfloat16()),
-            ):
-                width = 4 * len(weights)
-                expected = torch.cat(
-                    [F.linear(raw.float(), weight.float()) for weight in weights], 1
-                )
-                with patch.object(
-                    STREAM, "_CP_PROJECTED_TRANSPORT_MAX_BYTES", 5 * width * 4 * 8
-                ), patch.object(STREAM, "_PRODUCE_GLOBAL_TILE_ROWS", 32):
-                    packets = list(
-                        STREAM._prefill_x_group_plan(local[0], cp, output_width=width)
+                    self.assertEqual(source_ranges[0][0], 0)
+                    self.assertEqual(source_ranges[-1][1], length)
+                    self.assertTrue(
+                        all(
+                            a[1] == b[0]
+                            for a, b in zip(source_ranges, source_ranges[1:])
+                        )
                     )
                     for rank in range(4):
-                        cp.cp_rank = rank
-                        pending_packets = iter(packets)
-
-                        def begin(send, unused_cp, tile, buffer, projection_weights=()):
-                            owner, source, rows = tile
-                            self.assertIs(unused_cp, cp)
-                            self.assertEqual(source, 0)
-                            self.assertFalse(projection_weights)
-                            pieces, counts, _, _ = next(pending_packets)
-                            packet_rows = max(counts)
-                            owners = [i for i, count in enumerate(counts) if count]
-                            self.assertEqual(
-                                owner, owners[0] if len(owners) == 1 else None
+                        tiles = list(
+                            raw_tile_plan(
+                                (length,),
+                                (31744,),
+                                ratio,
+                                4,
+                                rank,
+                                256,
+                                ranges=iter(source_ranges),
                             )
-                            self.assertEqual(
-                                rows,
-                                packet_rows if owner is not None else 4 * packet_rows,
-                            )
-                            packet = []
-                            for peer in range(4):
-                                part = torch.zeros((packet_rows, width))
-                                offset = 0
-                                for segment_owner, segment_source, count, _ in pieces:
-                                    if segment_owner == peer:
-                                        part[offset : offset + count] = torch.cat(
-                                            [
-                                                F.linear(
-                                                    local[peer][
-                                                        segment_source : segment_source
-                                                        + count
-                                                    ].float(),
-                                                    weight.float(),
-                                                )
-                                                for weight in weights
-                                            ],
-                                            1,
-                                        )
-                                        offset += count
-                                self.assertEqual(offset, counts[peer])
-                                packet.append(part)
-                            if owner is None or owner == rank:
-                                torch.testing.assert_close(
-                                    send, packet[rank], rtol=0, atol=0
-                                )
-                            buffer.copy_(
-                                packet[owner]
-                                if owner is not None
-                                else torch.cat(packet)
-                            )
-                            return types.SimpleNamespace(gathered=buffer)
-
-                        with patch.object(
-                            STREAM, "_start_prefill_x_gather_async", begin
-                        ), patch.object(
-                            STREAM,
-                            "_wait_prefill_x_gather",
-                            lambda handle: handle.gathered,
-                        ), _native_gemm() as calls:
-                            generator = STREAM._prefill_projected_x_groups(
-                                local[rank], cp, iter(packets), weights
-                            )
-                            tiles = [
-                                (start, value.clone()) for start, value in generator
-                            ]
-                        self.assertEqual(
-                            calls,
-                            [
-                                (counts[rank], max(counts))
-                                for _, counts, _, _ in packets
-                                if counts[rank]
-                            ],
                         )
                         self.assertEqual(
-                            [start for start, _ in tiles],
-                            list(range(0, len(raw), 32)),
+                            [(a, b) for a, b, _ in tiles],
+                            source_ranges,
                         )
-                        torch.testing.assert_close(
-                            torch.cat([value for _, value in tiles]),
-                            expected,
-                            rtol=0,
-                            atol=0,
-                        )
+
+    def test_replay_layout_is_rejected_before_collective(self):
+        cp, _, _ = _case((129, 1024))
+        cp.swa_replay_start = 1
+        with self.assertRaisesRegex(ValueError, "full zigzag"):
+            STREAM._prefill_x_cohort_plan(cp, projected_row_bytes=4096)
 
 
 if __name__ == "__main__":

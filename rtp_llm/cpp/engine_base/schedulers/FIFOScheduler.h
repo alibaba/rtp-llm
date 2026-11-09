@@ -1,8 +1,10 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <list>
+#include <optional>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -52,16 +54,15 @@ private:
         GROUP,
     };
 
-    // Per-round admission accounting for admitWaitingStreams(). Only streams that actually
-    // made scheduling progress contribute, so a stream whose KV malloc failed and stayed
-    // WAITING does not consume this round's token budget.
+    // Resource admission counts streams that made progress, including cache loads.
+    // The uncached prefill quota separately counts only this round's executable streams.
     struct ScheduleRuntime {
-        size_t admitted_stream_count                     = 0;
-        size_t admitted_prefill_token_size_with_cache    = 0;
-        size_t admitted_prefill_max_seq_len_with_cache   = 0;
-        size_t admitted_prefill_sequence_count           = 0;
-        size_t admitted_prefill_token_size_without_cache = 0;
-        size_t newly_inited_kv_streams                   = 0;
+        size_t admitted_stream_count                    = 0;
+        size_t admitted_prefill_token_size_with_cache   = 0;
+        size_t admitted_prefill_max_seq_len_with_cache  = 0;
+        size_t admitted_prefill_sequence_count          = 0;
+        size_t forward_prefill_token_size_without_cache = 0;
+        size_t newly_inited_kv_streams                  = 0;
     };
 
     const char* schedulerName() const override {
@@ -71,7 +72,7 @@ private:
                                const GenerateStreamPtr&            new_stream) override;
     // Counter-based admission check used by admitWaitingStreams(). evaluateRunningMemory()
     // is the list-based FIFOSchedulerBase entry point and delegates here.
-    bool   evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
+    bool evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
     // Overload for group-queue admission: the admitted streams are tracked as a list
     // because ScheduleRuntime is not built in the group-queue path.
     bool   evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
@@ -107,6 +108,7 @@ private:
     void moveGroupToAllocatingGroup(StreamGroup& group);
     void dispatchPreparedGroup(StreamGroup& group);
 
+    void    updateCacheExposedWait();
     void    cancelExtraStreams() override;
     bool    hasExtraStreams() const override;
     int64_t extraOnflightStreams() const override;
@@ -121,8 +123,8 @@ private:
     // Context-parallel prefill can opt into single-request admission until
     // the model-side path supports per-request layouts.
     const bool cp_force_single_prefill_ = false;
-    // Soft per-round quota on the tokens that are actually recomputed (prefix-cache hits
-    // excluded). 0 disables it.
+    // Soft per-forward prefill quota, excluding reused prefixes and pending
+    // cache loads/waiters. CP padding is included. 0 disables it.
     const size_t max_batch_tokens_without_cache_ = 0;
     const size_t prefill_cp_size_                = 1;
 
@@ -130,6 +132,8 @@ private:
     mutable std::atomic<int64_t> pending_group_fallback_count_ = 0;
     AdmissionLane                active_admission_lane_        = AdmissionLane::NONE;
     bool                         prefer_group_next_            = false;
+
+    std::optional<std::chrono::steady_clock::time_point> cache_exposed_wait_start_;
 
     // TODO @wangyin support different beams run togather
 };

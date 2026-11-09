@@ -23,17 +23,6 @@ from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import (
 
 
 class AttentionV41Test(unittest.TestCase):
-    def test_projected_cp_chunk_budget_is_shape_independent(self):
-        ctx = SimpleNamespace(cp_size=4)
-        for width in (512, 1024):
-            rows = attention_v41_module._prefill_x_chunk_rows(ctx, width)
-            self.assertGreater(rows, 0)
-            self.assertLessEqual(rows, attention_v41_module._PRODUCE_GLOBAL_TILE_ROWS)
-            self.assertLessEqual(
-                (ctx.cp_size + 1) * rows * width * 4,
-                attention_v41_module._CP_PROJECTED_TRANSPORT_MAX_BYTES,
-            )
-
     def test_prefill_qkv_cp_gather_receives_token_major_rows(self):
         attn = AttentionV41FP8.__new__(AttentionV41FP8)
         torch.nn.Module.__init__(attn)
@@ -546,41 +535,6 @@ class AttentionV41Test(unittest.TestCase):
         )
         self.assertEqual(next_meta, (0, 1, 0))
         self.assertIsNot(next_meta, actual)
-
-    def test_cp_hidden_tiles_restore_padded_multiple_requests(self):
-        for cp_size in (2, 4):
-            lengths = (5, 19, 1, 32)
-            chunks = tuple(
-                2 * ((n + 2 * cp_size - 1) // (2 * cp_size)) for n in lengths
-            )
-            local = [[] for _ in range(cp_size)]
-            expected = []
-            for request, (length, chunk) in enumerate(zip(lengths, chunks)):
-                values = torch.arange(length) + request * 100
-                padded = torch.full((cp_size * chunk,), -1)
-                padded[:length] = values
-                halves = padded.reshape(2 * cp_size, chunk // 2)
-                for rank in range(cp_size):
-                    local[rank].extend((halves[rank], halves[-rank - 1]))
-                expected.append(values)
-            local = [torch.cat(parts) for parts in local]
-            context = SimpleNamespace(
-                cp_size=cp_size,
-                chunk_lengths_per_req=chunks,
-                input_lengths_global_host=lengths,
-            )
-            for tile_rows in (1, 3, 7, 32768):
-                plan = list(
-                    attention_v41_module._prefill_x_tile_plan(context, tile_rows)
-                )
-                actual = torch.cat(
-                    [
-                        local[owner][source : source + rows]
-                        for owner, source, rows in plan
-                    ]
-                )
-                torch.testing.assert_close(actual, torch.cat(expected))
-                self.assertTrue(all(0 < rows <= tile_rows for _, _, rows in plan))
 
     def test_cp_gather_updates_input_with_symm_memory_wrapper(self):
         from rtp_llm.models_py.distributed import collective_torch as collectives

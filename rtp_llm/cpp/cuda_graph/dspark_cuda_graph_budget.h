@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -52,6 +53,54 @@ inline std::optional<size_t> selectDSparkCudaGraphBudget(const std::vector<DSpar
         }
     }
     return std::nullopt;
+}
+
+// Actual immutable capture geometry, queried before any proposal RNG draw.
+struct DSparkCapturedCapacity {
+    int64_t graph_batch;
+    int64_t token_capacity;
+    int     capture_budget;
+
+    bool operator==(const DSparkCapturedCapacity& other) const {
+        return graph_batch == other.graph_batch && token_capacity == other.token_capacity
+               && capture_budget == other.capture_budget;
+    }
+};
+
+struct DSparkCapacityPlan {
+    DSparkCapturedCapacity graph;
+    int64_t                real_batch;
+    int64_t                query_rows;
+
+    int64_t draftBudget() const {
+        return query_rows - real_batch;
+    }
+};
+
+inline std::optional<DSparkCapacityPlan>
+makeDSparkCapacityPlan(const DSparkCapturedCapacity& graph, int64_t real_batch, int gamma) {
+    if (gamma <= 0 || gamma == std::numeric_limits<int>::max() || graph.capture_budget < 0
+        || graph.capture_budget >= gamma || real_batch <= 0 || graph.graph_batch < real_batch
+        || graph.token_capacity > std::numeric_limits<int32_t>::max()) {
+        return std::nullopt;
+    }
+    const int64_t width = static_cast<int64_t>(graph.capture_budget) + 1;
+    if (graph.graph_batch > std::numeric_limits<int64_t>::max() / width
+        || graph.token_capacity != graph.graph_batch * width
+        || real_batch > std::numeric_limits<int64_t>::max() / (gamma + 1)) {
+        return std::nullopt;
+    }
+    return DSparkCapacityPlan{graph, real_batch, std::min(graph.token_capacity, real_batch * (gamma + 1))};
+}
+
+// A unique fixed bank serves its frozen capacity plan, or the unchanged
+// B*(k+1) geometry used by whole-idle-DP fake alignment. No Q/B bank inference.
+inline bool isDSparkCapacityShape(const DSparkCapacityPlan& plan, int64_t rows) {
+    return rows == plan.query_rows || rows == plan.real_batch * (plan.graph.capture_budget + 1);
+}
+
+inline int64_t dsparkDummyQueryLength(int64_t real_rows, int64_t capacity, int64_t ghost, int width) {
+    return std::clamp<int64_t>(capacity - real_rows - ghost * width, 0, width);
 }
 
 }  // namespace rtp_llm

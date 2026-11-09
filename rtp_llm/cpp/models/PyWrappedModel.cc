@@ -114,6 +114,13 @@ torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tenso
     return cuda_tensor;
 }
 
+std::optional<DSparkCapturedCapacity> PyWrappedModel::capturedDSparkCapacity(int64_t batch) const {
+    if (!dspark_capacity_query_width_ || dspark_budget_graphs_.size() != 1 || !dspark_budget_graphs_[0].runner) {
+        return std::nullopt;
+    }
+    return dspark_budget_graphs_[0].runner->capturedDSparkCapacity(batch);
+}
+
 std::optional<size_t>
 PyWrappedModel::selectDSparkGraphIndex(const torch_ext::PyAttentionInputs& attention_inputs) const {
     if (dspark_graph_budgets_.empty() || !attention_inputs.is_target_verify || !attention_inputs.input_lengths.defined()
@@ -126,6 +133,14 @@ PyWrappedModel::selectDSparkGraphIndex(const torch_ext::PyAttentionInputs& atten
         && attention_inputs.input_lengths.is_contiguous()) {
         const auto* lengths = attention_inputs.input_lengths.data_ptr<int32_t>();
         tokens              = std::accumulate(lengths, lengths + attention_inputs.input_lengths.numel(), int64_t{0});
+    }
+    if (dspark_capacity_query_width_ && attention_inputs.is_packed_target_verify) {
+        const auto geometry = capturedDSparkCapacity(attention_inputs.input_lengths.size(0));
+        const auto plan     = geometry ? makeDSparkCapacityPlan(*geometry,
+                                                            attention_inputs.input_lengths.size(0),
+                                                            dspark_capacity_query_width_ - 1) :
+                                         std::nullopt;
+        return plan && isDSparkCapacityShape(*plan, tokens) ? std::optional<size_t>{0} : std::nullopt;
     }
     return selectDSparkCudaGraphBudget(dspark_graph_budgets_,
                                        attention_inputs.is_packed_target_verify,
@@ -1651,8 +1666,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                             && last_hidden.size(0) <= proposal_logits_buffer_.size(0) ?
                                         proposal_logits_buffer_.narrow(0, 0, last_hidden.size(0)) :
                                         torch::Tensor();
-                logits            = torch_ext::cublas_gemm_bf16_bf16_fp32_out(
-                    last_hidden.to(torch::kBFloat16), lm_head->kernel, output);
+                logits            = torch_ext::cublas_gemm_bf16_bf16_out(
+                    last_hidden.to(torch::kBFloat16), lm_head->kernel, output, torch::kFloat32);
             } else
 #endif
             {

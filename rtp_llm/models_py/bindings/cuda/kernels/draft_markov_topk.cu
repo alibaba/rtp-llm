@@ -7,7 +7,7 @@
 #include <flashinfer/fast_topk_clusters_exact.cuh>
 
 namespace {
-constexpr int kDraft = 4096;
+constexpr int kMaxDraftTopK = 4096;
 
 template<typename Bias>
 __global__ void correctedHalf(const float* logits, int64_t stride, const Bias* bias, __half* out, int pitch, int v) {
@@ -21,9 +21,12 @@ __global__ void correctedHalf(const float* logits, int64_t stride, const Bias* b
     }
 }
 
-__global__ void scaleSelected(const __half* selected, const float* temperature, float* output) {
-    const int row = blockIdx.y, i = row * kDraft + blockIdx.x * blockDim.x + threadIdx.x;
-    output[i] = __half2float(selected[i]) / temperature[row];
+__global__ void scaleSelected(const __half* selected, const float* temperature, float* output, int k) {
+    const int row = blockIdx.y, col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < k) {
+        const int i = row * k + col;
+        output[i] = __half2float(selected[i]) / temperature[row];
+    }
 }
 }  // namespace
 #endif
@@ -32,16 +35,16 @@ namespace torch_ext {
 std::tuple<torch::Tensor, torch::Tensor>
 draft_markov_topk(const torch::Tensor& logits, const torch::Tensor& bias, const torch::Tensor& temperature, int64_t k) {
 #ifdef RTP_FLASHINFER_DRAFT_TOPK
-    if (k == kDraft && logits.is_cuda()) {
+    if (k > 0 && k <= kMaxDraftTopK && logits.is_cuda() && logits.dim() == 2 && k < logits.size(1)) {
         const auto* p = at::cuda::getDeviceProperties(logits.get_device());
         if (p->major == 10 && (p->minor == 0 || p->minor == 3)) {
-            TORCH_CHECK(logits.scalar_type() == at::kFloat && logits.dim() == 2 && logits.stride(1) == 1
-                            && logits.size(0) > 0 && logits.size(0) <= 65535 && logits.size(1) > k
+            TORCH_CHECK(logits.scalar_type() == at::kFloat && logits.stride(1) == 1
+                            && logits.size(0) > 0 && logits.size(0) <= 65535
                             && logits.size(1) <= INT_MAX / 4 && bias.sizes() == logits.sizes() && bias.is_contiguous()
                             && bias.device() == logits.device() && temperature.device() == logits.device()
                             && temperature.scalar_type() == at::kFloat && temperature.dim() == 1
                             && temperature.size(0) == logits.size(0) && temperature.is_contiguous(),
-                        "invalid DSpARK draft K4096 inputs");
+                        "invalid DSpARK draft TopK inputs");
             const c10::cuda::CUDAGuard guard(logits.device());
             const int                  b = logits.size(0), v = logits.size(1), pitch = (v + 3) / 4 * 4;
             auto                       stream = at::cuda::getCurrentCUDAStream(logits.get_device());
@@ -68,7 +71,7 @@ draft_markov_topk(const torch::Tensor& logits, const torch::Tensor& bias, const 
             // vectorized CTA stripe per cluster, including the last partial round.
             const int clusters = v < 8192 ? 1 : b <= 32 ? 8 : b < 128 ? 4 : b < 256 ? 2 : 1;
             const int ovf      = ((v - 1) / (4096 * clusters) + 1) * 4096;
-            const int cached   = (int(p->sharedMemPerBlockOptin) / 2 - (kDraft + 5 + 3 * 256 + 8) * 4 - 1024) / 16;
+            const int cached   = (int(p->sharedMemPerBlockOptin) / 2 - (k + 5 + 3 * 256 + 8) * 4 - 1024) / 16;
             auto      work     = torch::empty({b, int64_t(4) * clusters * ovf}, logits.options().dtype(at::kInt));
             flashinfer::sampling::launch_fast_topk_clusters_exact<__half, int64_t>(
                 reinterpret_cast<const __half*>(scores.data_ptr<at::Half>()),
@@ -80,20 +83,21 @@ draft_markov_topk(const torch::Tensor& logits, const torch::Tensor& bias, const 
                 ovf,
                 b,
                 pitch,
-                kDraft,
+                k,
                 cached,
                 clusters,
                 false,
-                kDraft,
+                k,
                 stream);
             C10_CUDA_KERNEL_LAUNCH_CHECK();
             // Positive row temperatures preserve ordering. Scale after selection so
             // small temperatures cannot overflow FP16. All q and verification math stays FP32.
             auto output = torch::empty({b, k}, logits.options());
-            scaleSelected<<<dim3(kDraft / 256, b), 256, 0, stream>>>(
+            scaleSelected<<<dim3((k + 255) / 256, b), 256, 0, stream>>>(
                 reinterpret_cast<const __half*>(values.data_ptr<at::Half>()),
                 temperature.data_ptr<float>(),
-                output.data_ptr<float>());
+                output.data_ptr<float>(),
+                k);
             C10_CUDA_KERNEL_LAUNCH_CHECK();
             return {output, ids};
         }

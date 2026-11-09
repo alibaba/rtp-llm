@@ -745,6 +745,7 @@ class KVCacheConfig:
     block_tree_transfer_worker_count: int
     block_tree_business_queue_max_size: int
     block_tree_transfer_queue_max_size: int
+    block_tree_device_frozen_abort_ratio: float
     block_tree_device_evict_low_watermark_ratio: float
     block_tree_device_evict_high_watermark_ratio: float
     block_tree_memory_evict_low_watermark_ratio: float
@@ -771,6 +772,7 @@ class KVCacheConfig:
     disk_cache_size_mb: int
     disk_cache_buffered_io: bool
     disk_cache_sync_timeout_ms: int
+    disk_cache_evict_timeout_ms: int
     disk_cache_staging_block_count: int
     memory_cache_max_descriptors_per_transfer_batch: int
     multi_task_prompt: str
@@ -1702,7 +1704,7 @@ class RuntimeConfig:
     model_warm_up: bool
     worker_addrs: list[str]
     worker_grpc_addrs: list[str]
-    shutdown_worker_grpc_addrs: list[str]
+    world_worker_grpc_addrs: list[str]
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
