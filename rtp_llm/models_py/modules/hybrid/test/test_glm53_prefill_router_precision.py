@@ -1,7 +1,9 @@
 """GLM53 Prefill routing is invariant to batch tails and token shard ownership."""
 
+import os
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
@@ -66,6 +68,9 @@ def route(logits, bias):
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class Glm53PrefillRouterPrecisionTest(unittest.TestCase):
     def setUp(self):
+        legacy = patch.dict(os.environ, {"GLM53_PREFILL_ROUTER_BF16_PARTS": "0"})
+        legacy.start()
+        self.addCleanup(legacy.stop)
         self.old_tf32 = torch.backends.cuda.matmul.allow_tf32
         torch.backends.cuda.matmul.allow_tf32 = False
         self.addCleanup(
@@ -155,6 +160,34 @@ class Glm53PrefillRouterPrecisionTest(unittest.TestCase):
         layout = token_shard_layout(1, 8, 7)
         actual = self.model(prefill(), self.x[:1], layout)
         torch.testing.assert_close(actual, torch.zeros_like(actual), rtol=0, atol=0)
+
+    @unittest.skipUnless(
+        torch.cuda.is_available()
+        and torch.cuda.get_device_capability() in ((10, 0), (10, 3)),
+        "compensated prefill projection requires SM100 or SM103",
+    )
+    def test_compensated_projection_preserves_fp32_logits_and_shard_padding(self):
+        gen = torch.Generator(device="cuda").manual_seed(5282)
+        weight = torch.randn(4096, 288, generator=gen, device="cuda") / 64
+        layout = token_shard_layout(8201, 8, 7)
+        x = torch.randn(layout.local_tokens, 4096, generator=gen, device="cuda")
+        x = x.to(torch.bfloat16)
+        for parts in (2, 3):
+            with self.subTest(parts=parts), patch.dict(
+                os.environ, {"GLM53_PREFILL_ROUTER_BF16_PARTS": str(parts)}
+            ):
+                gate = Glm53FP32Router(weight)
+                model = _Model(gate)
+                reference = fixed_reference(x, gate.weight)
+                with patch.object(
+                    gate, "_fixed_projection", side_effect=AssertionError("fixed-M path")
+                ):
+                    actual = model(prefill(), x)
+                    shard = model(prefill(), x, layout)
+                torch.testing.assert_close(actual, reference, rtol=2e-4, atol=1e-4)
+                valid = layout.local_valid_tokens
+                torch.testing.assert_close(shard[:valid], actual[:valid], rtol=0, atol=0)
+                self.assertEqual(int(torch.count_nonzero(shard[valid:])), 0)
 
     def test_explicit_fixed_m_override_keeps_its_requested_reduction(self):
         x = self.x.repeat(99, 1)

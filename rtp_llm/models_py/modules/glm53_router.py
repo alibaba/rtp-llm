@@ -1,4 +1,4 @@
-"""Batched GLM53 routing; set GLM53_ROUTER_BF16_PARTS=0 for FP32 linear."""
+"""Batched GLM53 routing with compensated BF16 weight decomposition."""
 
 import logging
 import os
@@ -30,10 +30,19 @@ class Glm53FP32Router(nn.Module):
         self.split_parts = int(os.environ.get("GLM53_ROUTER_BF16_PARTS", "2"))
         if self.split_parts not in (0, 2, 3):
             raise ValueError("GLM53_ROUTER_BF16_PARTS must be 0, 2, or 3")
-        if self.split_parts and self.weight.shape in ((256, 4096), (288, 4096)):
+        self.prefill_split_parts = int(
+            os.environ.get("GLM53_PREFILL_ROUTER_BF16_PARTS", str(self.split_parts))
+        )
+        if self.prefill_split_parts not in (0, 2, 3):
+            raise ValueError("GLM53_PREFILL_ROUTER_BF16_PARTS must be 0, 2, or 3")
+        if (self.split_parts or self.prefill_split_parts) and self.weight.shape in (
+            (256, 4096),
+            (288, 4096),
+        ):
             logging.info(
-                "[GLM53 router opt] BF16 parts=%d weight_shape=%s",
+                "[GLM53 router opt] BF16 parts decode=%d prefill=%d weight_shape=%s",
                 self.split_parts,
+                self.prefill_split_parts,
                 tuple(self.weight.shape),
             )
             from rtp_llm.models_py.triton_kernels.glm53_router_split import (
@@ -145,7 +154,7 @@ class Glm53FP32Router(nn.Module):
         if torch.backends.cuda.matmul.allow_tf32:
             raise RuntimeError("GLM-5.3 FP32 router requires matmul.allow_tf32=False")
         if metadata_cache() is not None and not tokenwise_router_enabled():
-            return self._fixed_projection(hidden_states, _PREFILL_PROJECTION_ROWS)
+            return self._project_prefill(hidden_states)
         # Keep Decode/MTP rows together, including the explicit FP32 fallback.
         # The optional BF16 decomposition approximates the FP32 weight; it is
         # independent of the Prefill fixed-M precision policy.
@@ -155,6 +164,43 @@ class Glm53FP32Router(nn.Module):
             [self._project(x) for x in hidden_states.split(self.chunk_rows)],
             dim=0,
         )
+
+    def _project_prefill(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if not (
+            self.prefill_split_parts
+            and hidden_states.is_cuda
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.ndim == 2
+            and hidden_states.is_contiguous()
+            and hidden_states.shape[0] > 0
+            and hidden_states.shape[1] == 4096
+            and self.weight.shape in ((256, 4096), (288, 4096))
+            and torch.cuda.get_device_capability(hidden_states.device) in ((10, 0), (10, 3))
+        ):
+            return self._fixed_projection(hidden_states, _PREFILL_PROJECTION_ROWS)
+
+        # Use the same BF16 components as Decode. Large M benefits from
+        # DeepGEMM's BF16 GEMM and in-place FP32 residual accumulation.
+        try:
+            from deep_gemm import bf16_gemm_nt
+        except ImportError:
+            from rtp_llm.models_py.triton_kernels.glm53_router_split import router
+
+            return router(
+                hidden_states,
+                (self.split_weight_0, self.split_weight_1, self.split_weight_2),
+                config=(128, 64, 64, 4, 3),
+                parts=self.prefill_split_parts,
+            )
+
+        logits = hidden_states.new_empty(
+            (hidden_states.shape[0], self.weight.shape[0]), dtype=torch.float32
+        )
+        bf16_gemm_nt(hidden_states, self.split_weight_0, logits)
+        bf16_gemm_nt(hidden_states, self.split_weight_1, logits, c=logits)
+        if self.prefill_split_parts == 3:
+            bf16_gemm_nt(hidden_states, self.split_weight_2, logits, c=logits)
+        return logits
 
     def _fixed_projection(self, hidden_states: torch.Tensor, rows: int) -> torch.Tensor:
         # The final cuBLAS chunk otherwise changes M with the request batch.
@@ -215,9 +261,9 @@ class Glm53FP32Router(nn.Module):
         ):
             raise ValueError("invalid router token layout")
         if metadata_cache() is not None and not tokenwise_router_enabled():
-            # Fixed-M Prefill projections can consume local rows directly;
-            # no padding to the global router's variable final chunk is needed.
-            output = self._fixed_projection(hidden_states, _PREFILL_PROJECTION_ROWS)
+            # Token shards contain all input features. Prefill projects local
+            # rows directly and clears padding before routing.
+            output = self._project_prefill(hidden_states)
             output[valid:].zero_()
             return output
         if (
