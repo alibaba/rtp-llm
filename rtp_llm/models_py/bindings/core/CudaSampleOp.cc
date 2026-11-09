@@ -761,7 +761,12 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     if (std::any_of(params.temperature.data_ptr<float>(),
                     params.temperature.data_ptr<float>() + batch_size,
                     [&](auto t) { return t != 1.0f; })) {
-        auto temperature_gpu = params.temperature.to(torch::kCUDA);
+        // A blocking 24-byte H2D copy can synchronize behind the entire
+        // target forward on ROCm. Stage this small vector in pinned
+        // storage and enqueue it on the current HIP stream.
+        auto pinned_temperature = params.temperature.is_pinned() ? params.temperature
+                                                                : params.temperature.pin_memory();
+        auto temperature_gpu = pinned_temperature.to(torch::kCUDA, /*non_blocking=*/true);
         invokeBatchApplyTemperaturePenalty(params.logits.data_ptr<float>(),
                                            (float*)nullptr,  // embedding_bias
                                            temperature_gpu.data_ptr<float>(),
