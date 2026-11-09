@@ -47,24 +47,10 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
     def tearDown(self):
         flashinfer_ar.destroy_flashinfer_allreduce()
 
-    def test_existing_custom_ar_switch_is_opt_in(self):
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(flashinfer_ar.enabled_by_env())
-        for value in ("0", "false", "off", "no"):
-            with self.subTest(value=value), patch.dict(
-                os.environ, {"FT_DISABLE_CUSTOM_AR": value}, clear=True
-            ):
-                self.assertTrue(flashinfer_ar.enabled_by_env())
-        with patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": "1"}, clear=True):
-            self.assertFalse(flashinfer_ar.enabled_by_env())
+    def test_custom_ar_is_pinned_disabled(self):
+        self.assertFalse(flashinfer_ar.enabled_by_config())
 
-    def test_explicit_custom_ar_config_overrides_environment(self):
-        with patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": "0"}, clear=True):
-            self.assertFalse(flashinfer_ar.enabled_by_config(True))
-        with patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": "1"}, clear=True):
-            self.assertTrue(flashinfer_ar.enabled_by_config(False))
-
-    def test_collective_forwards_explicit_custom_ar_config(self):
+    def test_collective_init_no_longer_forwards_custom_ar_config(self):
         communicator_module = MagicMock()
         group = object()
         config = SimpleNamespace(tp_size=2, local_rank=0, local_world_size=2)
@@ -72,16 +58,12 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         with patch.object(
             collective, "_get_flashinfer_allreduce", return_value=communicator_module
         ), patch.object(collective, "_get_group", return_value=group):
-            collective._init_flashinfer_allreduce(
-                config,
-                disable_custom_all_reduce=True,
-            )
+            collective._init_flashinfer_allreduce(config)
 
         communicator_module.init_flashinfer_allreduce.assert_called_once_with(
             group,
             torch.device("cuda", 0),
             single_node=True,
-            disable_custom_all_reduce=True,
         )
 
     def test_shape_and_dtype_eligibility(self):

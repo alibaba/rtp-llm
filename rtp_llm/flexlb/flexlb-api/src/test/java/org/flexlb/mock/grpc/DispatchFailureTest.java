@@ -15,7 +15,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Verifies cleanup and recovery when EnqueueBatch returns an error response. */
+/**
+ * Verifies cleanup and recovery when EnqueueBatch returns an error response.
+ */
 class DispatchFailureTest extends FlexLBMockTestBase {
 
     @Override

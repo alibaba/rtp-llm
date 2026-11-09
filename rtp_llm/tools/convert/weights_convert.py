@@ -22,7 +22,6 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.ops import (
-    DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
     MoeConfig,
@@ -176,7 +175,6 @@ class WeightConverter:
         pc.world_rank = _env_int("WORLD_RANK", 0)
         pc.local_world_size = _env_int("LOCAL_WORLD_SIZE", 1)
         pc.ep_size = _env_int("EP_SIZE", 0)
-        pc.ffn_sp_size = _env_int("FFN_SP_SIZE", 1)
 
         if pc.world_size > 1 and pc.local_world_size == 1:
             n = (
@@ -205,9 +203,8 @@ class WeightConverter:
         pc.dp_rank = _env_int("DP_RANK", pc.world_rank // pc.tp_size)
         pc.ep_rank = pc.world_rank % pc.ep_size
         pc.local_rank = pc.world_rank % pc.local_world_size
-        pc.ffn_tp_size = pc.tp_size // pc.ffn_sp_size
+        pc.ffn_tp_size = pc.tp_size
         pc.ffn_tp_rank = pc.tp_rank % pc.ffn_tp_size if pc.ffn_tp_size else 0
-        pc.enable_sp = pc.ffn_sp_size > 1
         return pc
 
     @timer_wrapper("convert 1 tp")
@@ -273,7 +270,6 @@ class WeightConverter:
         hw_kernel_config = HWKernelConfig()
         fmha_config = FMHAConfig()
         moe_config = MoeConfig()
-        device_resource_config = DeviceResourceConfig()
         vit_config = VitConfig()
 
         model = self.model_cls.from_config(
@@ -287,7 +283,6 @@ class WeightConverter:
             max_generate_batch_size=0,
             vit_config=vit_config,
             merge_lora=False,
-            device_resource_config=device_resource_config,
             skip_python_model=True,
         )
         loader = model.create_model_loader()

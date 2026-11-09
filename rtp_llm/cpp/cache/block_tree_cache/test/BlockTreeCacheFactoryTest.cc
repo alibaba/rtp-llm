@@ -26,7 +26,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -34,19 +33,6 @@
 namespace rtp_llm {
 
 namespace {
-
-class CoreDumpGuard {
-public:
-    CoreDumpGuard(): old_(StaticConfig::user_ft_core_dump_on_exception) {
-        StaticConfig::user_ft_core_dump_on_exception = false;
-    }
-    ~CoreDumpGuard() {
-        StaticConfig::user_ft_core_dump_on_exception = old_;
-    }
-
-private:
-    bool old_;
-};
 
 // value == nullptr removes the variable for the guard's lifetime.
 class ScopedEnvVar {
@@ -458,7 +444,6 @@ SingleTypeCacheManagerPtr cloneGroupWithPool(const SingleTypeCacheManagerPtr& so
 void expectFactoryRejects(const CacheConfig&                              config,
                           const std::shared_ptr<CoordinatorCacheManager>& allocator,
                           const KVCacheConfig&                            kv_cache_config = {}) {
-    CoreDumpGuard guard;
     try {
         EXPECT_EQ(createBlockTreeCache(config, kv_cache_config, allocator), nullptr);
     } catch (const std::exception&) {
@@ -687,7 +672,6 @@ TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsFollowDeviceRatioWithinBud
 }
 
 TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsRejectUnusableCapacityAndOverflow) {
-    CoreDumpGuard guard;
     EXPECT_ANY_THROW(computeTierBlockCounts(4096, {8}, {4096}));
     EXPECT_ANY_THROW(computeTierBlockCounts(4 * 4096, {100, 2}, {4096, 4096}));
     EXPECT_ANY_THROW(computeTierBlockCounts(0, {8}, {4096}));
@@ -709,7 +693,6 @@ TEST(BlockTreeCacheFactoryUtilityTest, ResolveDiskMountPathUsesLocalRankAndRejec
     EXPECT_EQ(resolveDiskMountPath("/mnt/d0,/mnt/d1,/mnt/d2", 3, 0), "/mnt/d0");
     EXPECT_EQ(resolveDiskMountPath(" /mnt/d0 , /mnt/d1 ", 2, 1), "/mnt/d1");
 
-    CoreDumpGuard guard;
     EXPECT_ANY_THROW(resolveDiskMountPath("/mnt/d0,/mnt/d1", 3, 0));
     EXPECT_ANY_THROW(resolveDiskMountPath("", 1, 0));
     EXPECT_ANY_THROW(resolveDiskMountPath("/mnt/d0,/mnt/d1", 2, 2));
@@ -977,7 +960,6 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteBackendInitFailureIsFatal) {
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_remote_cache = true;
 
-    CoreDumpGuard guard;
     EXPECT_ANY_THROW(createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend));
     EXPECT_EQ(backend->initCalls(), 1u);
 }
@@ -2273,7 +2255,7 @@ TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
     KVCacheConfig scan_enabled;
     scan_enabled.block_tree_full_prefix_scan_interval_ms = 5000;
 
-    // Cache owner: tp_rank 0 of a non-FFN service, on a non-zero world/dp rank so the gate
+    // Cache owner: tp_rank 0, on a non-zero world/dp rank so the gate
     // cannot be mistaken for world_rank == 0.
     {
         ParallelismConfig owner;
@@ -2302,19 +2284,6 @@ TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
         ASSERT_NE(cache, nullptr);
         EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 0);
     }
-    // FFN service: it does not schedule normal requests, so it owns no mutable tree.
-    {
-        ParallelismConfig ffn;
-        ffn.tp_rank                                         = 0;
-        ffn.ffn_disaggregate_config.enable_ffn_disaggregate = true;
-        ffn.ffn_disaggregate_config.is_ffn_rank             = true;
-
-        auto allocator = initAllocator<CoordinatorCacheManager>(config);
-        auto cache     = createBlockTreeCache(config, scan_enabled, allocator, ffn);
-        ASSERT_NE(cache, nullptr);
-        EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 0);
-    }
-
     for (const int64_t invalid_interval : {int64_t{-1}, int64_t{999}, std::numeric_limits<int64_t>::max()}) {
         auto          allocator = initAllocator<CoordinatorCacheManager>(config);
         KVCacheConfig kv_cache_config;

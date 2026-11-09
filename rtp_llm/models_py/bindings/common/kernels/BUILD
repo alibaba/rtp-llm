@@ -6,11 +6,17 @@ cc_library(
     name = "block_id_copy",
     srcs = ["block_id_copy.cu"],
     hdrs = ["block_id_copy.h"],
-    deps = [
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ],
-    copts = cuda_copts(),
+    deps = select({
+        "@//:using_rocm": [
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:hip",
+        ],
+        "//conditions:default": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+    }),
+    copts = any_cuda_copts(),
 )
 
 any_cuda_deps = select({

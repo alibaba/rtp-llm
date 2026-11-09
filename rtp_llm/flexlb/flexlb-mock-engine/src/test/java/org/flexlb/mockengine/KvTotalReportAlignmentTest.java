@@ -23,31 +23,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Reported-total alignment with the built block pool (capacity model v2
- * reporting-caliber regression guard).
- *
- * <p>Regression fixed here: {@code --prefill-cache-blocks}/
- * {@code --decode-cache-blocks} shrink the pool the engine actually builds,
- * but the master-facing total used to stay at the per-role DEFAULT token
- * constant — so the master's used = total - available math read ~99.9% on a
- * 4-block decode pool, every decode engine tripped the KV-full gate, and the
- * whole KV case family parked structurally.
- *
- * <p>Production-caliber contract (the fix): every master-facing surface —
- * gRPC {@code getCacheStatus.totalKvCache}, gRPC
- * {@code getWorkerStatus.totalKvCache}, and HTTP {@code /snapshot}
- * {@code total_kv_tokens} — reports the allocator truth
- * {@code totalBlocks x blockSize}, the SAME value the pool is built from
- * ({@code MockLruBlockCache}), so {@code used = total - available} keeps its
- * production meaning at every pool size.
+ * Checks that reported KV totals reflect the block pool actually built from configured cache
+ * capacity.
  */
 class KvTotalReportAlignmentTest {
-
     private static final int SPB = 1024;
     private static final int BASE_PORT = 64_640;
 
     @TempDir Path tempDir;
-
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
     private ScheduledExecutorService scheduler;
@@ -85,57 +68,6 @@ class KvTotalReportAlignmentTest {
         scheduler.awaitTermination(3, TimeUnit.SECONDS);
         bossGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS);
         workerGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS);
-    }
-
-    /**
-     * Start ONE engine through the production construction path
-     * ({@code JavaMockEngineCluster.startEngine}) with a per-role
-     * block-count override, exactly like the CLI flags do.
-     */
-    private JavaMockEngineCluster.FastRpcService startOne(
-            String role, int blocksOverride, int grpcPort, long roleTotalKvTokens)
-            throws IOException {
-        JavaMockEngineCluster.Config config = new JavaMockEngineCluster.Config();
-        config.host = "127.0.0.1";
-        config.uniqueEngineIps = false;
-        if (roleTotalKvTokens > 0) {
-            if ("prefill".equals(role)) {
-                config.prefillTotalKvTokens = roleTotalKvTokens;
-            } else {
-                config.decodeTotalKvTokens = roleTotalKvTokens;
-            }
-        }
-        if ("prefill".equals(role)) {
-            config.prefillCacheBlocks = blocksOverride;
-        } else {
-            config.decodeCacheBlocks = blocksOverride;
-        }
-        return JavaMockEngineCluster.startEngine(
-                config,
-                model,
-                serversByPort,
-                bossGroup,
-                workerGroup,
-                services,
-                scheduler,
-                new JavaMockEngineCluster.ClusterStats(),
-                role,
-                role + "-0",
-                grpcPort,
-                0);
-    }
-
-    private static EngineRpcService.CacheStatusPB cacheStatus(
-            JavaMockEngineCluster.FastRpcService service) {
-        return unary(
-                observer ->
-                        service.getCacheStatus(
-                                EngineRpcService.CacheVersionPB.newBuilder().build(), observer));
-    }
-
-    /** The master's KV gate math on the reported pair: used = total - available. */
-    private static double usedRatio(long total, long available) {
-        return total <= 0 ? 1.0 : (double) (total - available) / total;
     }
 
     // ───────── decode side: --decode-cache-blocks 4 ─────────
@@ -276,5 +208,56 @@ class KvTotalReportAlignmentTest {
                 expectedTotal,
                 cacheStatus(decode).getAvailableKvCache(),
                 "clearing the pressure must restore full-pool availability");
+    }
+
+    /**
+     * Start ONE engine through the production construction path
+     * ({@code JavaMockEngineCluster.startEngine}) with a per-role
+     * block-count override, exactly like the CLI flags do.
+     */
+    private JavaMockEngineCluster.FastRpcService startOne(
+            String role, int blocksOverride, int grpcPort, long roleTotalKvTokens)
+            throws IOException {
+        JavaMockEngineCluster.Config config = new JavaMockEngineCluster.Config();
+        config.host = "127.0.0.1";
+        config.uniqueEngineIps = false;
+        if (roleTotalKvTokens > 0) {
+            if ("prefill".equals(role)) {
+                config.prefillTotalKvTokens = roleTotalKvTokens;
+            } else {
+                config.decodeTotalKvTokens = roleTotalKvTokens;
+            }
+        }
+        if ("prefill".equals(role)) {
+            config.prefillCacheBlocks = blocksOverride;
+        } else {
+            config.decodeCacheBlocks = blocksOverride;
+        }
+        return JavaMockEngineCluster.startEngine(
+                config,
+                model,
+                serversByPort,
+                bossGroup,
+                workerGroup,
+                services,
+                scheduler,
+                new JavaMockEngineCluster.ClusterStats(),
+                role,
+                role + "-0",
+                grpcPort,
+                0);
+    }
+
+    private static EngineRpcService.CacheStatusPB cacheStatus(
+            JavaMockEngineCluster.FastRpcService service) {
+        return unary(
+                observer ->
+                        service.getCacheStatus(
+                                EngineRpcService.CacheVersionPB.newBuilder().build(), observer));
+    }
+
+    /** The master's KV gate math on the reported pair: used = total - available. */
+    private static double usedRatio(long total, long available) {
+        return total <= 0 ? 1.0 : (double) (total - available) / total;
     }
 }

@@ -10,23 +10,7 @@ import org.flexlb.dao.route.RoleType;
  * flexlb-common must not depend on flexlb-grpc.</p>
  */
 public final class RoleTypeProtoConverter {
-
     private RoleTypeProtoConverter() {}
-
-    /**
-     * Convert proto enum to domain {@link RoleType}.
-     */
-    public static RoleType fromProto(EngineRpcService.RoleTypePB proto) {
-        return switch (proto) {
-            case ROLE_TYPE_PDFUSION -> RoleType.PDFUSION;
-            case ROLE_TYPE_PREFILL -> RoleType.PREFILL;
-            case ROLE_TYPE_DECODE -> RoleType.DECODE;
-            case ROLE_TYPE_VIT -> RoleType.VIT;
-            case ROLE_TYPE_FRONTEND -> RoleType.FRONTEND;
-            case ROLE_TYPE_ENCODER -> RoleType.ENCODER;
-            default -> null;
-        };
-    }
 
     /**
      * Convert the domain role to the RoleAddrPB field-1 enum, including Encoder.
@@ -77,6 +61,21 @@ public final class RoleTypeProtoConverter {
         }
         // The original proto3 enum omitted PDFUSION=0 from the wire.
         return resolved != null ? resolved : RoleType.PDFUSION;
+    }
+
+    /**
+     * Convert proto enum to domain {@link RoleType}.
+     */
+    public static RoleType fromProto(EngineRpcService.RoleTypePB proto) {
+        return switch (proto) {
+            case ROLE_TYPE_PDFUSION -> RoleType.PDFUSION;
+            case ROLE_TYPE_PREFILL -> RoleType.PREFILL;
+            case ROLE_TYPE_DECODE -> RoleType.DECODE;
+            case ROLE_TYPE_VIT -> RoleType.VIT;
+            case ROLE_TYPE_FRONTEND -> RoleType.FRONTEND;
+            case ROLE_TYPE_ENCODER -> RoleType.ENCODER;
+            default -> null;
+        };
     }
 
     private static RoleType requireKnown(RoleType role, String source) {

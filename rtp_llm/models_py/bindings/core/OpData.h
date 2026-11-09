@@ -67,6 +67,7 @@ struct GptModelInputs {
     std::vector<std::string> kv_cache_group_tags;      // Local payload row -> group identity; not transmitted by TP.
     torch::Tensor            kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
     torch::Tensor            kv_cache_update_mapping;  // [block_copy_num, 3]: payload row, src/dst physical block IDs
+    torch::Tensor            kv_cache_copy_token_lengths;  // CPU int32 [copy count]; zero means full copy.
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
@@ -146,8 +147,6 @@ struct GptModelOutputs {
 struct CopyParams {
     const torch::Tensor& dst;
     const torch::Tensor& src;
-    bool                 overlapped = false;
-    bool                 async      = true;
 
     void check() const {
         RTP_LLM_CHECK_WITH_INFO(src.scalar_type() == dst.scalar_type(), "copy dst and src need has same type.");
@@ -181,13 +180,6 @@ struct BatchCopyParams {
     };
 
     BatchCopyBuffers copy_buffers[TYPE_SIZE];
-
-    bool overlapped = false;
-
-    BatchCopyParams& set_overlapped(bool overlapped) {
-        this->overlapped = overlapped;
-        return *this;
-    }
 
     static CopyType  get_copy_type(MemoryType dst_type, MemoryType src_type);
     BatchCopyParams& reserve(CopyType copy_type, size_t size);
@@ -338,8 +330,7 @@ struct BeamSearchOutput {
 struct BroadcastParams {
     const std::vector<torch::Tensor>& buffers;
     const int64_t                     root;
-    ParallelMode                      mode       = ParallelMode::TP;
-    bool                              overlapped = false;
+    ParallelMode                      mode = ParallelMode::TP;
 };
 
 enum class ReduceOp {
@@ -353,8 +344,7 @@ enum class ReduceOp {
 struct AllReduceParams {
     torch::Tensor  buffer;
     const ReduceOp op;
-    bool           overlapped = false;
-    ParallelMode   mode       = ParallelMode::TP;
+    ParallelMode   mode = ParallelMode::TP;
     torch::Tensor  dest;  // undefined = no separate dest
 };
 
@@ -366,8 +356,7 @@ struct AllGatherParams {
     const std::vector<torch::Tensor>& recv_buffers;
     ParallelMode                      mode = ParallelMode::TP;
     std::vector<torch::Tensor>        send_buffers;
-    bool                              inplace    = true;
-    bool                              overlapped = false;
+    bool                              inplace = true;
 };
 
 struct RejectionSamplingParams {

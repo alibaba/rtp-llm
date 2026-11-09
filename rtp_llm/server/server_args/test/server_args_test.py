@@ -16,28 +16,6 @@ from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
 
-class CustomAllReduceArgumentsTest(TestCase):
-    def test_explicit_cli_value_is_preserved_for_python_collectives(self):
-        from rtp_llm.server.server_args import server_args
-
-        with patch.dict(os.environ, {}, clear=True):
-            disabled = server_args.setup_args(["--ft_disable_custom_ar", "1"])
-            enabled = server_args.setup_args(["--ft_disable_custom_ar", "0"])
-            unspecified = server_args.setup_args([])
-
-        self.assertIs(disabled.ft_disable_custom_ar_override, True)
-        self.assertIs(enabled.ft_disable_custom_ar_override, False)
-        self.assertIsNone(unspecified.ft_disable_custom_ar_override)
-
-    def test_environment_value_is_preserved_for_python_collectives(self):
-        from rtp_llm.server.server_args import server_args
-
-        with patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": "1"}, clear=True):
-            configs = server_args.setup_args([])
-
-        self.assertIs(configs.ft_disable_custom_ar_override, True)
-
-
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {
@@ -297,6 +275,77 @@ class CacheConfigArgumentsTest(TestCase):
                 self.assertEqual(getattr(restored, f"reco_{name}"), value)
                 setattr(restored, f"kvcm_{name}", type(value)())
                 self.assertEqual(getattr(restored, f"reco_{name}"), type(value)())
+
+
+class DecodeGraphCapacityArgumentsTest(TestCase):
+    @staticmethod
+    def create_engine(args=(), env=None):
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, env or {}, clear=True):
+            return EngineConfig.create(server_args.setup_args(list(args)))
+
+    def test_capture_buckets_do_not_resize_runtime_capacity(self):
+        for buckets in ("1,4", "2048,128,256,128"):
+            config = self.create_engine(
+                env={
+                    "CONCURRENCY_LIMIT": "8",
+                    "DECODE_CAPTURE_CONFIG": buckets,
+                }
+            )
+            self.assertEqual(config.runtime_config.max_generate_batch_size, 8)
+            self.assertEqual(config.concurrency_config.concurrency_limit, 8)
+            self.assertEqual(
+                config.hw_kernel_config.decode_capture_batch_sizes,
+                sorted(set(map(int, buckets.split(",")))),
+            )
+
+    def test_prefill_capacity_is_explicit_and_defaults_to_one(self):
+        limits = {"CONCURRENCY_LIMIT": "2048", "MAX_CONTEXT_BATCH_SIZE": "12"}
+        config = self.create_engine(env=limits)
+        self.assertEqual(
+            config.hw_kernel_config.generation_prefill_cuda_graph_max_requests, 1
+        )
+        config = self.create_engine(
+            env={**limits, "GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS": "3"}
+        )
+        self.assertEqual(
+            config.hw_kernel_config.generation_prefill_cuda_graph_max_requests, 3
+        )
+        config = self.create_engine(
+            ["--generation_prefill_cuda_graph_max_requests", "2"],
+            {**limits, "GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS": "3"},
+        )
+        self.assertEqual(
+            config.hw_kernel_config.generation_prefill_cuda_graph_max_requests, 2
+        )
+        self.assertEqual(config.runtime_config.max_generate_batch_size, 2048)
+
+    def test_cascade_is_opt_in_and_cli_overrides_environment(self):
+        self.assertFalse(
+            self.create_engine().hw_kernel_config.enable_decode_cascade_attention
+        )
+        self.assertTrue(
+            self.create_engine(
+                env={"ENABLE_DECODE_CASCADE_ATTENTION": "1"}
+            ).hw_kernel_config.enable_decode_cascade_attention
+        )
+        self.assertFalse(
+            self.create_engine(
+                ["--enable_decode_cascade_attention", "0"],
+                {"ENABLE_DECODE_CASCADE_ATTENTION": "1"},
+            ).hw_kernel_config.enable_decode_cascade_attention
+        )
+
+    def test_invalid_buckets_are_rejected(self):
+        for value in ("0", "1,-1", "1,0", "abc", "1,", "2147483647"):
+            with self.subTest(value=value), self.assertRaises(SystemExit):
+                self.create_engine(["--decode_capture_config", value])
+
+    def test_decode_capacity_option_remains_removed(self):
+        with self.assertRaises(SystemExit):
+            self.create_engine(["--decode_cuda_graph_max_batch_size", "8"])
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
@@ -636,9 +685,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(legacy_fifo_config.max_inited_kv_cache_streams, 0)
         self.assertEqual(legacy_fifo_config.max_batch_tokens_without_cache, 0)
         seven_slot_fifo_config = fifo_config_type.__new__(fifo_config_type)
-        seven_slot_fifo_config.__setstate__(
-            (32, 8192, "ratio", "2", False, 16, 2048)
-        )
+        seven_slot_fifo_config.__setstate__((32, 8192, "ratio", "2", False, 16, 2048))
         self.assertEqual(seven_slot_fifo_config.max_batch_tokens_without_cache, 2048)
         self.assertEqual(seven_slot_fifo_config.prefill_chunk_size, 0)
 
@@ -1818,10 +1865,14 @@ class GenerateArgsFromEnvTest(TestCase):
         with patch.dict(os.environ, {"ENABLE_CRC": "0"}, clear=True):
             value = read_env_value("ENABLE_CRC", True, str2bool)
         self.assertIs(value, False)
-        self.assertEqual(format_argument_pair("--enable_crc", value), ["--enable_crc", "0"])
+        self.assertEqual(
+            format_argument_pair("--enable_crc", value), ["--enable_crc", "0"]
+        )
 
     def test_invalid_str2bool_environment_value_is_rejected(self):
-        from rtp_llm.server.server_args.generate_args_from_env_clean import read_env_value
+        from rtp_llm.server.server_args.generate_args_from_env_clean import (
+            read_env_value,
+        )
         from rtp_llm.server.server_args.util import str2bool
 
         with patch.dict(os.environ, {"ENABLE_CRC": "not-a-bool"}, clear=True):

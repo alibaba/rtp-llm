@@ -10,7 +10,6 @@ import torch
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.ops import (
-    FfnDisAggregateConfig,
     ParallelismConfig,
     PrefillCPConfig,
     RoleType,
@@ -249,7 +248,6 @@ def _apply_auto_deepep_config(
 def set_parallelism_config(
     parallelism_config: ParallelismConfig,
     world_rank: Optional[int] = None,
-    py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
     py_prefill_cp_config: Optional[PrefillCPConfig] = None,
 ) -> None:
     """Update rank-related fields in ParallelismConfig from a given world_rank.
@@ -260,7 +258,6 @@ def set_parallelism_config(
     Args:
         parallelism_config: ParallelismConfig to update in place
         world_rank: World rank to apply (local_rank = world_rank % local_world_size, etc.). Default 0.
-        py_ffn_disaggregate_config: Optional FFN disaggregate config to apply when enabled.
     """
     world_size = parallelism_config.world_size
     need_local = world_size > 1 and parallelism_config.local_world_size == 1
@@ -295,9 +292,8 @@ def set_parallelism_config(
             == parallelism_config.tp_size * parallelism_config.dp_size
         ), f"ep_size must be equal to 1 or tp_size * dp_size, got ep_size={parallelism_config.ep_size}, tp_size={parallelism_config.tp_size}, dp_size={parallelism_config.dp_size}"
 
-    ffn_tp_size = parallelism_config.tp_size // parallelism_config.ffn_sp_size
+    ffn_tp_size = parallelism_config.tp_size
     parallelism_config.ffn_tp_size = ffn_tp_size
-    parallelism_config.enable_sp = parallelism_config.ffn_sp_size > 1
     if world_rank is not None:
         parallelism_config.world_rank = world_rank
     parallelism_config.local_rank = (
@@ -315,29 +311,6 @@ def set_parallelism_config(
     parallelism_config.ffn_tp_rank = (
         parallelism_config.tp_rank % parallelism_config.ffn_tp_size
     )
-
-    # FfnDisAggregate
-    if (
-        py_ffn_disaggregate_config
-        and py_ffn_disaggregate_config.enable_ffn_disaggregate
-    ):
-        assert (
-            parallelism_config.tp_size == 1 and parallelism_config.world_size > 1
-        ), "enable_ffn_disaggregate must be used in dp = 1 world_size > 1"
-        attention_dp_size = parallelism_config.world_size - 1
-        attention_tp_size = 1
-        ffn_tp_size = 1
-        assert (
-            attention_tp_size == ffn_tp_size
-        ), "attention_tp_size must be equal to ffn_tp_size"
-        parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate = True
-        parallelism_config.ffn_disaggregate_config.attention_tp_size = attention_tp_size
-        parallelism_config.ffn_disaggregate_config.attention_dp_size = attention_dp_size
-        parallelism_config.ffn_disaggregate_config.ffn_tp_size = ffn_tp_size
-        parallelism_config.ffn_disaggregate_config.ffn_dp_size = 1
-        parallelism_config.ffn_disaggregate_config.is_ffn_rank = (
-            parallelism_config.world_rank >= attention_tp_size * attention_dp_size
-        )
 
     if py_prefill_cp_config:
         parallelism_config.prefill_cp_config.method = py_prefill_cp_config.method
@@ -404,14 +377,6 @@ def setup_default_args(py_env_configs):
     if not py_env_configs.model_args.model_type:
         raise ValueError(
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
-        )
-
-    # add rocm env config, if using default value, change it to optimize version
-    # 这些特殊处理仍然需要设置环境变量（因为可能被 C++ 代码读取）
-    if os.path.exists("/dev/kfd") and os.getenv("FT_DISABLE_CUSTOM_AR") is None:
-        py_env_configs.py_hw_kernel_config.ft_disable_custom_ar = False
-        logging.info(
-            "[MI308X] enable FT_DISABLE_CUSTOM_AR by default, as amd has own implementation."
         )
 
     if (

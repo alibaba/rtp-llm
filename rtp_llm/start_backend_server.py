@@ -86,7 +86,6 @@ def local_rank_start(
         set_parallelism_config(
             py_env_configs.parallelism_config,
             world_rank,
-            py_env_configs.ffn_disaggregate_config,
             py_env_configs.prefill_cp_config,
         )
         local_rank = py_env_configs.parallelism_config.local_rank

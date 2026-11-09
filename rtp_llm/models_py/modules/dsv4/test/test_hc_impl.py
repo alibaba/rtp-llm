@@ -1,34 +1,12 @@
-import os
 import unittest
-from contextlib import contextmanager
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.hc import build_hc_head, build_hc_unit
-from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import (
-    FallbackHCHead,
-    FallbackHCUnit,
-)
+from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import (
     TileLangHCHead,
     TileLangHCUnit,
 )
-
-
-@contextmanager
-def _env(name: str, value: str | None):
-    old = os.environ.get(name)
-    if value is None:
-        os.environ.pop(name, None)
-    else:
-        os.environ[name] = value
-    try:
-        yield
-    finally:
-        if old is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = old
 
 
 def _weights(hc: int, dim: int, device: str = "cpu"):
@@ -41,67 +19,19 @@ def _weights(hc: int, dim: int, device: str = "cpu"):
 
 
 class TestHCImpl(unittest.TestCase):
-    def test_factory_fallback_cpu_shapes(self) -> None:
-        hc, dim = 4, 16
-        fn, base, scale = _weights(hc, dim)
-        with _env("DSV4_HC_IMPL", "fallback"):
-            unit = build_hc_unit(
-                fn,
-                base,
-                scale,
-                dim=dim,
-                hc_mult=hc,
-                hc_sinkhorn_iters=3,
-                norm_eps=1e-6,
-                hc_eps=1e-6,
-            )
-            head = build_hc_head(
-                fn[:hc],
-                base[:hc],
-                scale[:1],
-                dim=dim,
-                hc_mult=hc,
-                norm_eps=1e-6,
-                hc_eps=1e-6,
-            )
-        self.assertIsInstance(unit, FallbackHCUnit)
-        self.assertIsInstance(head, FallbackHCHead)
-        x = torch.randn(2, 5, hc, dim, dtype=torch.bfloat16)
-        y, post, comb = unit.pre(x)
-        self.assertEqual(tuple(y.shape), (2, 5, dim))
-        self.assertEqual(tuple(post.shape), (2, 5, hc, 1))
-        self.assertEqual(tuple(comb.shape), (2, 5, hc, hc))
-        torch.testing.assert_close(
-            comb.sum(dim=-1),
-            torch.ones_like(comb.sum(dim=-1)),
-            atol=5e-3,
-            rtol=5e-3,
-        )
-        torch.testing.assert_close(
-            comb.sum(dim=-2),
-            torch.ones_like(comb.sum(dim=-2)),
-            atol=5e-3,
-            rtol=5e-3,
-        )
-        out = unit.post(y, x, post, comb)
-        self.assertEqual(tuple(out.shape), tuple(x.shape))
-        reduced = head.head(x)
-        self.assertEqual(tuple(reduced.shape), (2, 5, dim))
-
     def test_factory_default_tilelang_fails_fast_on_cpu(self) -> None:
         hc, dim = 4, 16
         fn, base, scale = _weights(hc, dim)
-        with _env("DSV4_HC_IMPL", None):
-            unit = build_hc_unit(
-                fn,
-                base,
-                scale,
-                dim=dim,
-                hc_mult=hc,
-                hc_sinkhorn_iters=3,
-                norm_eps=1e-6,
-                hc_eps=1e-6,
-            )
+        unit = build_hc_unit(
+            fn,
+            base,
+            scale,
+            dim=dim,
+            hc_mult=hc,
+            hc_sinkhorn_iters=3,
+            norm_eps=1e-6,
+            hc_eps=1e-6,
+        )
         self.assertIsInstance(unit, TileLangHCUnit)
         x = torch.randn(2, 5, hc, dim, dtype=torch.bfloat16)
         with self.assertRaises(RuntimeError):
@@ -177,7 +107,7 @@ class TestHCImpl(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be contiguous"):
             unit.pre(x_noncontig)
 
-    def test_tilelang_head_requires_fused_when_enabled(self) -> None:
+    def test_tilelang_head_always_dispatches_fused_kernel(self) -> None:
         hc, dim = 4, 16
         fn, base, scale = _weights(hc, dim)
         head = TileLangHCHead(
@@ -197,16 +127,9 @@ class TestHCImpl(unittest.TestCase):
             calls.append("fused")
             return torch.ones(1, 5, dim, dtype=torch.bfloat16)
 
-        def fake_old(residual, *args, **kwargs):
-            calls.append("old")
-            return torch.zeros(1, 5, dim, dtype=torch.bfloat16)
-
         old_fused = tilelang_impl.tk_mhc_head_fused
-        old_head = tilelang_impl.tk_mhc_head
         tilelang_impl.tk_mhc_head_fused = fake_fused
-        tilelang_impl.tk_mhc_head = fake_old
         self.addCleanup(lambda: setattr(tilelang_impl, "tk_mhc_head_fused", old_fused))
-        self.addCleanup(lambda: setattr(tilelang_impl, "tk_mhc_head", old_head))
 
         x = torch.randn(5, hc, dim, dtype=torch.bfloat16)
         y = head.head(x)
@@ -222,76 +145,27 @@ class TestHCImpl(unittest.TestCase):
             head.head(x)
         self.assertEqual(calls, ["fused"])
 
-        calls.clear()
-        with _env("DSV4_MHC_HEAD_FUSED", "0"):
-            y = head.head(x)
-        self.assertEqual(calls, ["old"])
-        self.assertTrue(torch.all(y == 0))
-
     def test_shape_contract_is_checked_before_impl(self) -> None:
         hc, dim = 4, 16
         fn, base, scale = _weights(hc, dim)
-        for mode in ("fallback", "tilelang"):
-            with self.subTest(mode=mode), _env("DSV4_HC_IMPL", mode):
-                unit = build_hc_unit(
-                    fn,
-                    base,
-                    scale,
-                    dim=dim,
-                    hc_mult=hc,
-                    hc_sinkhorn_iters=3,
-                    norm_eps=1e-6,
-                    hc_eps=1e-6,
-                )
-                with self.assertRaises(ValueError):
-                    unit.pre(torch.randn(2, hc * dim))
-                residual = torch.randn(2, 5, hc, dim, dtype=torch.bfloat16)
-                x = torch.randn(2, 5, dim, dtype=torch.bfloat16)
-                bad_post = torch.randn(2, 5, hc)
-                comb = torch.randn(2, 5, hc, hc)
-                with self.assertRaises(ValueError):
-                    unit.post(x, residual, bad_post, comb)
-
-    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
-    def test_tilelang_matches_fallback_cuda(self) -> None:
-        hc, dim = 4, 128
-        fn, base, scale = _weights(hc, dim, device="cuda")
-        x = torch.randn(1, 64, hc, dim, device="cuda", dtype=torch.bfloat16)
-        sublayer = torch.randn(1, 64, dim, device="cuda", dtype=torch.bfloat16)
-
-        fallback = FallbackHCUnit(
+        unit = build_hc_unit(
             fn,
             base,
             scale,
             dim=dim,
             hc_mult=hc,
-            hc_sinkhorn_iters=20,
+            hc_sinkhorn_iters=3,
             norm_eps=1e-6,
             hc_eps=1e-6,
         )
-        tilelang = TileLangHCUnit(
-            fn,
-            base,
-            scale,
-            dim=dim,
-            hc_mult=hc,
-            hc_sinkhorn_iters=20,
-            norm_eps=1e-6,
-            hc_eps=1e-6,
-        )
-        with torch.inference_mode():
-            ref_y, ref_post, ref_comb = fallback.pre(x)
-            tk_y, tk_post, tk_comb = tilelang.pre(x)
-            ref_out = fallback.post(sublayer, x, ref_post, ref_comb)
-            tk_out = tilelang.post(sublayer, x, tk_post, tk_comb)
-        torch.testing.assert_close(tk_y, ref_y, atol=2e-2, rtol=2e-2)
-        torch.testing.assert_close(
-            tk_post.float(), ref_post.float(), atol=5e-3, rtol=5e-3
-        )
-        torch.testing.assert_close(
-            tk_comb.float(), ref_comb.float(), atol=5e-3, rtol=5e-3
-        )
-        torch.testing.assert_close(tk_out, ref_out, atol=2e-2, rtol=2e-2)
+        with self.assertRaises(ValueError):
+            unit.pre(torch.randn(2, hc * dim))
+        residual = torch.randn(2, 5, hc, dim, dtype=torch.bfloat16)
+        x = torch.randn(2, 5, dim, dtype=torch.bfloat16)
+        bad_post = torch.randn(2, 5, hc)
+        comb = torch.randn(2, 5, hc, hc)
+        with self.assertRaises(ValueError):
+            unit.post(x, residual, bad_post, comb)
 
     def test_tilelang_post_reuses_residual_buffer_in_place(self) -> None:
         # Pins the memory-saving wiring (no CUDA needed): _post_impl must pass
@@ -382,37 +256,6 @@ class TestHCImpl(unittest.TestCase):
         self.assertEqual(out_alias.data_ptr(), residual_alias.data_ptr())
         # in-place and fresh-buffer results must be bit-identical
         torch.testing.assert_close(out_alias, out_fresh, atol=0, rtol=0)
-
-    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
-    def test_tilelang_head_matches_fallback_cuda(self) -> None:
-        hc, dim = 4, 128
-        fn, base, scale = _weights(hc, dim, device="cuda")
-        head_fn = fn[:hc]
-        head_base = base[:hc]
-        head_scale = scale[:1]
-        x = torch.randn(1, 64, hc, dim, device="cuda", dtype=torch.bfloat16)
-        fallback = FallbackHCHead(
-            head_fn,
-            head_base,
-            head_scale,
-            dim=dim,
-            hc_mult=hc,
-            norm_eps=1e-6,
-            hc_eps=1e-6,
-        )
-        tilelang = TileLangHCHead(
-            head_fn,
-            head_base,
-            head_scale,
-            dim=dim,
-            hc_mult=hc,
-            norm_eps=1e-6,
-            hc_eps=1e-6,
-        )
-        with torch.inference_mode():
-            ref_y = fallback.head(x)
-            tk_y = tilelang.head(x)
-        torch.testing.assert_close(tk_y, ref_y, atol=2e-2, rtol=2e-2)
 
 
 if __name__ == "__main__":

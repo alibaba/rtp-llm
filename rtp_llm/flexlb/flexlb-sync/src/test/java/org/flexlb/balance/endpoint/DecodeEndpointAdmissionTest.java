@@ -46,9 +46,9 @@ import static org.mockito.Mockito.verify;
  * 11.5/17.2), and the reserved-only view after calibrate (10.1).
  */
 class DecodeEndpointAdmissionTest {
-
     private WorkerStatus status;
     private DecodeEndpoint endpoint;
+
     private final Map<Long, DecodeEndpoint.ReservationHandle> reservations = new HashMap<>();
 
     @BeforeEach
@@ -1135,18 +1135,60 @@ class DecodeEndpointAdmissionTest {
         }
     }
 
-    // ==================== helpers ====================
+    @Test
+    void physicalAndExpectedDeficitsRequireDifferentVictimReleases() {
+        var capacity = new DecodeEndpoint.AdmissionCapacity(0L, 90L);
+        var usage = new DecodeEndpoint.CapacityUsage(2L, 1000L, 150L, 200L, 850L);
+        assertEquals(
+                new DecodeEndpoint.CapacityDeficit(0L, 150L, 150L),
+                capacity.evaluate(usage, 100L, 200L));
+        assertEquals(
+                new DecodeEndpoint.CapacityDeficit(0L, 100L, 0L),
+                capacity.evaluate(
+                        usage, 100L, 200L, new DecodeEndpoint.CapacityRelease(1L, 50L, 200L)));
+        assertTrue(
+                capacity.evaluate(
+                                usage,
+                                100L,
+                                200L,
+                                new DecodeEndpoint.CapacityRelease(2L, 150L, 250L))
+                        .fits());
+    }
 
-    private void updateStatus(
-            Map<String, TaskInfo> running,
-            Map<String, TaskInfo> finished,
-            long availableKvCacheTokens) {
-        WorkerStatusResponse response = new WorkerStatusResponse();
-        response.setRunningTaskInfo(running);
-        response.setFinishedTaskInfo(finished);
-        response.setAvailableKvCacheTokens(availableKvCacheTokens);
-        response.setTotalKvCacheTokens(availableKvCacheTokens);
-        EndpointTestSupport.applyStatus(endpoint, response);
+    @Test
+    void removingEveryVictimCannotMakeAnOversizedOutputAllowanceFit() {
+        var capacity = new DecodeEndpoint.AdmissionCapacity(0L, 90L);
+        var usage = new DecodeEndpoint.CapacityUsage(1L, 1000L, 500L, 0L, 500L);
+        assertFalse(
+                capacity.evaluate(
+                                usage,
+                                100L,
+                                901L,
+                                new DecodeEndpoint.CapacityRelease(1L, 500L, 500L))
+                        .fits());
+    }
+
+    @Test
+    void overflowingUsageCannotDisappearIntoASaturatedMaximumBudget() {
+        var capacity = new DecodeEndpoint.AdmissionCapacity(Long.MAX_VALUE, 100L);
+        var usage =
+                new DecodeEndpoint.CapacityUsage(
+                        Long.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE, 0L, Long.MAX_VALUE);
+        assertEquals(
+                new DecodeEndpoint.CapacityDeficit(1L, 0L, 1L), capacity.evaluate(usage, 0L, 1L));
+        assertEquals(
+                Long.MAX_VALUE / 100L * 90L + Long.MAX_VALUE % 100L * 90L / 100L,
+                new DecodeEndpoint.AdmissionCapacity(0L, 90L).kvBudget(Long.MAX_VALUE));
+    }
+
+    @Test
+    void validKvPercentagePreservesUnknownCapacityBehavior() {
+        var usage = new DecodeEndpoint.CapacityUsage(0L, 0L, 0L, 0L, 0L);
+        for (long percent : new long[] {1L, 90L, 100L}) {
+            var capacity = new DecodeEndpoint.AdmissionCapacity(0L, percent);
+            assertTrue(capacity.evaluate(usage, 100L, 200L).fits());
+            assertEquals(percent, capacity.kvBudget(100L));
+        }
     }
 
     private static ReentrantLock decodeAdmissionLock(DecodeEndpoint target)
@@ -1256,6 +1298,20 @@ class DecodeEndpointAdmissionTest {
                 Math.max(10_000L, status.getAvailableKvCacheTokens()));
     }
 
+    // ==================== helpers ====================
+
+    private void updateStatus(
+            Map<String, TaskInfo> running,
+            Map<String, TaskInfo> finished,
+            long availableKvCacheTokens) {
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRunningTaskInfo(running);
+        response.setFinishedTaskInfo(finished);
+        response.setAvailableKvCacheTokens(availableKvCacheTokens);
+        response.setTotalKvCacheTokens(availableKvCacheTokens);
+        EndpointTestSupport.applyStatus(endpoint, response);
+    }
+
     private DecodeEndpoint.EngineDispatchPermit acquirePermit(
             long requestId, long concurrencyLimit) {
         DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
@@ -1276,62 +1332,6 @@ class DecodeEndpointAdmissionTest {
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new AssertionError("latch wait interrupted", interrupted);
-        }
-    }
-
-    @Test
-    void physicalAndExpectedDeficitsRequireDifferentVictimReleases() {
-        var capacity = new DecodeEndpoint.AdmissionCapacity(0L, 90L);
-        var usage = new DecodeEndpoint.CapacityUsage(2L, 1000L, 150L, 200L, 850L);
-        assertEquals(
-                new DecodeEndpoint.CapacityDeficit(0L, 150L, 150L),
-                capacity.evaluate(usage, 100L, 200L));
-        assertEquals(
-                new DecodeEndpoint.CapacityDeficit(0L, 100L, 0L),
-                capacity.evaluate(
-                        usage, 100L, 200L, new DecodeEndpoint.CapacityRelease(1L, 50L, 200L)));
-        assertTrue(
-                capacity.evaluate(
-                                usage,
-                                100L,
-                                200L,
-                                new DecodeEndpoint.CapacityRelease(2L, 150L, 250L))
-                        .fits());
-    }
-
-    @Test
-    void removingEveryVictimCannotMakeAnOversizedOutputAllowanceFit() {
-        var capacity = new DecodeEndpoint.AdmissionCapacity(0L, 90L);
-        var usage = new DecodeEndpoint.CapacityUsage(1L, 1000L, 500L, 0L, 500L);
-        assertFalse(
-                capacity.evaluate(
-                                usage,
-                                100L,
-                                901L,
-                                new DecodeEndpoint.CapacityRelease(1L, 500L, 500L))
-                        .fits());
-    }
-
-    @Test
-    void overflowingUsageCannotDisappearIntoASaturatedMaximumBudget() {
-        var capacity = new DecodeEndpoint.AdmissionCapacity(Long.MAX_VALUE, 100L);
-        var usage =
-                new DecodeEndpoint.CapacityUsage(
-                        Long.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE, 0L, Long.MAX_VALUE);
-        assertEquals(
-                new DecodeEndpoint.CapacityDeficit(1L, 0L, 1L), capacity.evaluate(usage, 0L, 1L));
-        assertEquals(
-                Long.MAX_VALUE / 100L * 90L + Long.MAX_VALUE % 100L * 90L / 100L,
-                new DecodeEndpoint.AdmissionCapacity(0L, 90L).kvBudget(Long.MAX_VALUE));
-    }
-
-    @Test
-    void validKvPercentagePreservesUnknownCapacityBehavior() {
-        var usage = new DecodeEndpoint.CapacityUsage(0L, 0L, 0L, 0L, 0L);
-        for (long percent : new long[] {1L, 90L, 100L}) {
-            var capacity = new DecodeEndpoint.AdmissionCapacity(0L, percent);
-            assertTrue(capacity.evaluate(usage, 100L, 200L).fits());
-            assertEquals(percent, capacity.kvBudget(100L));
         }
     }
 }

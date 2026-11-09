@@ -7,8 +7,6 @@ The packed int32 scales are suitable for V41MXFP8Linear's (1, 1, 32) recipe.
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
@@ -149,20 +147,12 @@ def rmsnorm_group32_quant(
     Otherwise out_norm must be disjoint from x and weight. Inputs are finite;
     their FP32 square sum and BF16 normalized output must not overflow.
     Numerical contract is the CUDA13 native FTZ build; no host tensor reads.
-    An omitted quant_kernel honors the existing DSV4_FP8_QUANT_KERNEL setting.
-    auto uses v2 at M*5120 >= 4Mi elements, exactly as V41MXFP8Linear does.
+    An omitted quant_kernel defaults to auto; auto uses v2 at M*5120 >= 4Mi
+    elements, exactly as V41MXFP8Linear does.
     """
     if not is_supported(x, weight):
         return None
-    mode = (
-        (
-            os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto")
-            if quant_kernel is None
-            else quant_kernel
-        )
-        .strip()
-        .lower()
-    )
+    mode = (quant_kernel if quant_kernel is not None else "auto").strip().lower()
     if out_norm is None:
         out_norm = torch.empty_like(x)
     m = x.shape[0]

@@ -3,13 +3,11 @@
 #include <cstdio>
 #include <future>
 #include <stdexcept>
-#include <sys/resource.h>
 #include <thread>
 #include <gtest/gtest.h>
 #include "grpc++/grpc++.h"
 
 #include "autil/NetUtil.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm::test {
@@ -605,26 +603,6 @@ TEST_F(BroadcastManagerTest, DeadlineFailsBroadcastAndThrowsOnWait) {
     EXPECT_THROW(result.waitDone(), RTPException);
 }
 
-TEST(BroadcastResultTest, FatalWaitHonorsCoreDumpOnException) {
-    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
-    EXPECT_EXIT(
-        {
-            rlimit no_core;
-            no_core.rlim_cur = 0;
-            no_core.rlim_max = 0;
-            (void)setrlimit(RLIMIT_CORE, &no_core);
-            StaticConfig::user_ft_core_dump_on_exception = true;
-            auto ctx                                     = makeIdleContext();
-            ctx->status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "deadline");
-            FunctionBroadcastResult result({ctx});
-            result.finishRank(0, true);
-            std::fputs("fatal broadcast wait reached\n", stderr);
-            std::fflush(stderr);
-            result.waitDone();
-        },
-        ::testing::KilledBySignal(SIGABRT),
-        "fatal broadcast wait reached");
-}
 
 TEST_F(BroadcastManagerTest, DeadlineSurvivesOtherRankFailuresInEitherArrivalOrder) {
     for (bool timeout_first : {false, true}) {

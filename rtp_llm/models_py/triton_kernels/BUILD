@@ -1,3 +1,4 @@
+load("@arch_config//:arch_select.bzl", "triton_deps")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 
 alias(
@@ -67,9 +68,20 @@ py_library(
 )
 
 py_library(
+    name = "attention",
+    srcs = glob(["attention/*.py"]),
+    deps = ["//rtp_llm:torch", "//rtp_llm:numpy"] + triton_deps(["triton"]) + select({
+        "@//:using_rocm": ["//rtp_llm:aiter"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "triton_kernels",
     srcs = ["legacy_fp8_indexer_score.py"],
     deps = [
+        ":attention",
         ":autotune_cache",
         ":fla",
         ":kimi_kda",
@@ -77,6 +89,6 @@ py_library(
         ":moe",
         ":common",
         ":sparse_mla",
-    ],
+    ] + triton_deps(["triton"]),
     visibility = ["//visibility:public"]
 )

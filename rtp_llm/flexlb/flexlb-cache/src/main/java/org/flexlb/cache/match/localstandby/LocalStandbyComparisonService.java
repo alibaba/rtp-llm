@@ -28,8 +28,8 @@ import java.util.function.Function;
 @Slf4j
 @Component
 public class LocalStandbyComparisonService {
-
     private final boolean enabled;
+
     private final LocalStandbyCacheMatchProvider localStandbyProvider;
     private final CacheMetricsReporter cacheMetricsReporter;
     private final Cache<LocalStandbyPredictionKey, PendingPrediction>
@@ -164,6 +164,44 @@ public class LocalStandbyComparisonService {
                         localStandbyPredictedHitTokens, -1, -1));
     }
 
+    private CacheHitComparisonResult result(
+            CacheHitFeedback feedback,
+            CacheHitComparisonResult.CachePrediction localStandbyPrediction) {
+        CacheHitComparisonResult.CachePrediction selectedSourcePrediction =
+                new CacheHitComparisonResult.CachePrediction(feedback.predictedHitTokens(), -1, -1);
+        CacheMatchSource source = CacheMatchSource.valueOf(feedback.cacheMatchSource());
+        CacheHitComparisonResult.CachePrediction kvcmPrediction =
+                source == CacheMatchSource.KVCM
+                        ? new CacheHitComparisonResult.CachePrediction(
+                                selectedSourcePrediction.predictedHitTokens(),
+                                feedback.kvcmMatchAvailable()
+                                        ? feedback.kvcmLocalMatchTokens()
+                                        : -1,
+                                feedback.kvcmMatchAvailable()
+                                        ? feedback.kvcmGlobalMatchTokens()
+                                        : -1)
+                        : null;
+        CacheHitComparisonResult.CachePrediction localSyncPrediction =
+                source == CacheMatchSource.LOCAL_SYNC ? selectedSourcePrediction : null;
+        CacheHitComparisonResult.CachePrediction effectiveLocalStandbyPrediction =
+                source == CacheMatchSource.LOCAL_STANDBY
+                        ? selectedSourcePrediction
+                        : localStandbyPrediction;
+        return new CacheHitComparisonResult(
+                feedback.eventType(),
+                feedback.requestId(),
+                feedback.cacheMatchSource(),
+                feedback.role(),
+                feedback.group(),
+                feedback.workerIdentity(),
+                feedback.taskState(),
+                feedback.inputTokens(),
+                feedback.actualHitTokens(),
+                kvcmPrediction,
+                localSyncPrediction,
+                effectiveLocalStandbyPrediction);
+    }
+
     private CacheHitComparisonResult withoutLocalStandbyPrediction(CacheHitFeedback feedback) {
         return feedback == null ? null : result(feedback, null);
     }
@@ -204,44 +242,6 @@ public class LocalStandbyComparisonService {
                 new PendingPrediction(prediction, selectedWorker));
     }
 
-    private CacheHitComparisonResult result(
-            CacheHitFeedback feedback,
-            CacheHitComparisonResult.CachePrediction localStandbyPrediction) {
-        CacheHitComparisonResult.CachePrediction selectedSourcePrediction =
-                new CacheHitComparisonResult.CachePrediction(feedback.predictedHitTokens(), -1, -1);
-        CacheMatchSource source = CacheMatchSource.valueOf(feedback.cacheMatchSource());
-        CacheHitComparisonResult.CachePrediction kvcmPrediction =
-                source == CacheMatchSource.KVCM
-                        ? new CacheHitComparisonResult.CachePrediction(
-                                selectedSourcePrediction.predictedHitTokens(),
-                                feedback.kvcmMatchAvailable()
-                                        ? feedback.kvcmLocalMatchTokens()
-                                        : -1,
-                                feedback.kvcmMatchAvailable()
-                                        ? feedback.kvcmGlobalMatchTokens()
-                                        : -1)
-                        : null;
-        CacheHitComparisonResult.CachePrediction localSyncPrediction =
-                source == CacheMatchSource.LOCAL_SYNC ? selectedSourcePrediction : null;
-        CacheHitComparisonResult.CachePrediction effectiveLocalStandbyPrediction =
-                source == CacheMatchSource.LOCAL_STANDBY
-                        ? selectedSourcePrediction
-                        : localStandbyPrediction;
-        return new CacheHitComparisonResult(
-                feedback.eventType(),
-                feedback.requestId(),
-                feedback.cacheMatchSource(),
-                feedback.role(),
-                feedback.group(),
-                feedback.workerIdentity(),
-                feedback.taskState(),
-                feedback.inputTokens(),
-                feedback.actualHitTokens(),
-                kvcmPrediction,
-                localSyncPrediction,
-                effectiveLocalStandbyPrediction);
-    }
-
     private record LocalStandbyPredictionKey(String requestId, RoleType roleType) {}
 
     private record PendingPrediction(
@@ -251,6 +251,9 @@ public class LocalStandbyComparisonService {
     private record SelectedWorker(
             RoleType role, String logicalWorkerId, String metricIpPort, long inputTokens) {}
 
+    /**
+     * Pairs a standby match result with the selected worker's predicted hit length.
+     */
     private record StandbyPrediction(Map<String, HostCacheMatch> matches, long blockSize) {
 
         private StandbyPrediction {

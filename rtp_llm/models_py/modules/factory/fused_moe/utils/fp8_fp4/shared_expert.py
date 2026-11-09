@@ -8,7 +8,6 @@ and only fuses the final add+cast when possible.
 
 from __future__ import annotations
 
-import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -16,11 +15,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
-    shared_expert_mode,
     strict_fused_moe_enabled,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
-    cuda_graph_warmup_forward_enabled,
 )
 from rtp_llm.models_py.utils.profiler import record_function_range
 
@@ -52,67 +47,6 @@ class _SharedExpertWorkspace:
 
 
 _SHARED_EXPERT_WORKSPACE_CACHE: dict[tuple, _SharedExpertWorkspace] = {}
-_SHARED_EXPERT_STREAM_CACHE: dict[int, torch.cuda.Stream] = {}
-
-
-def _normalize_cuda_device(device: torch.device) -> torch.device | None:
-    if not torch.cuda.is_available() or device.type != "cuda":
-        return None
-    device_index = device.index
-    if device_index is None:
-        device_index = torch.cuda.current_device()
-    return torch.device("cuda", device_index)
-
-
-def _ensure_shared_expert_stream(device: torch.device) -> torch.cuda.Stream | None:
-    device = _normalize_cuda_device(device)
-    if device is None:
-        return None
-    device_index = device.index
-    assert device_index is not None
-    stream = _SHARED_EXPERT_STREAM_CACHE.get(device_index)
-    if stream is None:
-        stream = torch.cuda.Stream(device=device)
-        _SHARED_EXPERT_STREAM_CACHE[device_index] = stream
-    return stream
-
-
-def _get_shared_expert_stream(
-    device: torch.device,
-    *,
-    allow_create: bool,
-) -> torch.cuda.Stream:
-    device = _normalize_cuda_device(device)
-    if device is None:
-        raise RuntimeError(f"shared expert overlap requires CUDA device, got {device}")
-    device_index = device.index
-    assert device_index is not None
-    stream = _SHARED_EXPERT_STREAM_CACHE.get(device_index)
-    if stream is not None:
-        return stream
-    if not allow_create:
-        raise RuntimeError(
-            "shared expert overlap stream was not created before CUDA graph "
-            f"capture for device cuda:{device_index}"
-        )
-    stream = torch.cuda.Stream(device=device)
-    _SHARED_EXPERT_STREAM_CACHE[device_index] = stream
-    return stream
-
-
-def _find_module_cuda_device(module: nn.Module) -> torch.device | None:
-    for tensor in list(module.parameters(recurse=True)) + list(
-        module.buffers(recurse=True)
-    ):
-        if tensor.is_cuda:
-            return tensor.device
-
-    for submodule in module.modules():
-        for attr in ("weight", "weight_scales", "bias"):
-            tensor = getattr(submodule, attr, None)
-            if isinstance(tensor, torch.Tensor) and tensor.is_cuda:
-                return tensor.device
-    return None
 
 
 class W13SharedExpert(nn.Module):
@@ -539,86 +473,6 @@ class MXFP8SharedExpertExecutor(SequentialSharedExpertExecutor):
             self._out = shared_experts(x)
 
 
-class OverlapSharedExpertExecutor(SharedExpertExecutor):
-    """Run shared expert on an aux stream while routed MoE runs on current stream."""
-
-    name = "overlap"
-
-    def __init__(
-        self,
-        fast_path: FusedSharedExpertFastPath | None = None,
-    ) -> None:
-        self._active_stream: torch.cuda.Stream | None = None
-        self._producer_stream: torch.cuda.Stream | None = None
-        self._input: torch.Tensor | None = None
-        self._out: torch.Tensor | None = None
-        self._fast_path = fast_path
-
-    def prepare(self, shared_experts: nn.Module) -> None:
-        if self._fast_path is not None:
-            self._fast_path.prepare(shared_experts)
-        device = _find_module_cuda_device(shared_experts)
-        if device is not None:
-            _ensure_shared_expert_stream(device)
-
-    def _can_overlap(self, x: torch.Tensor) -> bool:
-        if not (x.is_cuda and torch.cuda.is_available()):
-            return False
-        threshold = int(
-            os.environ.get("MOE_SHARED_EXPERT_STREAM_TOKEN_THRESHOLD", "4096")
-        )
-        if x.shape[0] > threshold:
-            return False
-        if torch.cuda.is_current_stream_capturing():
-            return False
-        if cuda_graph_warmup_forward_enabled():
-            return False
-        if os.environ.get("MOEDBG", "0") != "0":
-            return False
-        return True
-
-    def start(self, shared_experts: nn.Module, x: torch.Tensor) -> None:
-        if not self._can_overlap(x):
-            self._active_stream = None
-            self._producer_stream = None
-            self._input = None
-            with record_function_range("moe.shared_expert"):
-                self._out = _run_shared_expert(shared_experts, x, self._fast_path)
-            return
-        stream = _get_shared_expert_stream(x.device, allow_create=True)
-        producer_stream = torch.cuda.current_stream(x.device)
-        stream.wait_stream(producer_stream)
-        self._active_stream = stream
-        self._producer_stream = producer_stream
-        self._input = x
-        try:
-            with torch.cuda.stream(stream):
-                with record_function_range("moe.shared_expert"):
-                    self._out = _run_shared_expert(shared_experts, x, self._fast_path)
-        except Exception:
-            producer_stream.wait_stream(stream)
-            self._active_stream = None
-            self._producer_stream = None
-            self._input = None
-            raise
-
-    def finish(self) -> torch.Tensor:
-        assert self._out is not None
-        if self._active_stream is not None:
-            current_stream = torch.cuda.current_stream(self._out.device)
-            current_stream.wait_stream(self._active_stream)
-            producer_stream = self._producer_stream
-            assert producer_stream is not None
-            if producer_stream != current_stream:
-                producer_stream.wait_stream(self._active_stream)
-        out = self._out
-        self._input = None
-        self._out = None
-        self._active_stream = None
-        self._producer_stream = None
-        return out
-
-
 def _run_shared_expert(
     shared_experts: nn.Module,
     x: torch.Tensor,
@@ -647,20 +501,13 @@ def get_shared_expert_executor(
 ) -> SharedExpertExecutor:
     if native_mxfp8:
         return MXFP8SharedExpertExecutor()
-    mode = shared_expert_mode()
     fast_path = FusedSharedExpertExecutor(
         max_tokens_per_rank=max_tokens_per_rank,
         dim=dim,
         inter_dim=inter_dim,
         swiglu_limit=swiglu_limit,
     )
-    if mode == "sequential":
-        return SequentialSharedExpertExecutor(fast_path)
-    if mode in ("auto", "overlap"):
-        return OverlapSharedExpertExecutor(fast_path)
-    raise ValueError(
-        f"invalid MOE_SHARED_EXPERT_MODE={mode!r}; expected auto|sequential|overlap"
-    )
+    return SequentialSharedExpertExecutor(fast_path)
 
 
 def combine_routed_and_shared(
@@ -679,16 +526,6 @@ def combine_routed_and_shared(
             raise ValueError(
                 "combined MoE output must use the requested dtype and routed device"
             )
-
-    if os.environ.get("MOE_SHARED_EXPERT_BF16_ADD", "0") == "1":
-        if strict_fused_moe_enabled():
-            raise RuntimeError(
-                "MOE_STRICT_FUSED=1 forbids MOE_SHARED_EXPERT_BF16_ADD=1"
-            )
-        if out is None:
-            return (routed.to(out_dtype) + shared.to(out_dtype)).to(out_dtype)
-        torch.add(routed.to(out_dtype), shared.to(out_dtype), out=out)
-        return out
 
     try:
         from rtp_llm.models_py.triton_kernels.moe.shared_expert import (

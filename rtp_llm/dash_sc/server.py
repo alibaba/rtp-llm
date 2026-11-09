@@ -212,8 +212,8 @@ class DashScGrpcServer:
         # RPCs are coroutines on one loop, not threads, so any positive value
         # becomes a hard admission cap (RESOURCE_EXHAUSTED once N long streams
         # are in flight). Backpressure comes from the backend visitor's own
-        # concurrency instead. ``DashScGrpcConfig.max_server_workers`` is
-        # retained on the C++ struct for wire compatibility but ignored here.
+        # concurrency instead. (The former ``max_server_workers`` knob never
+        # reached this path and has been removed.)
         server = grpc.aio.server(options=opts, interceptors=interceptors)
 
         predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(servicer, server)

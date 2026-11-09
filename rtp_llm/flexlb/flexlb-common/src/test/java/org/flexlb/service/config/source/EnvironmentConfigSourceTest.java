@@ -13,6 +13,9 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Checks configuration loaded from environment variables.
+ */
 class EnvironmentConfigSourceTest {
 
     @Test

@@ -16,7 +16,6 @@ from collections.abc import Mapping
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 import torch
-from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -52,6 +51,7 @@ if TYPE_CHECKING:
     # non-load-bearing (module loads fine even if the cycle reappears).
     from rtp_llm.models_py.modules.dsv4.ppu.transformer import V4Transformer
 
+
 def _prefill_fast_path_layer_calls(
     v4: "V4Transformer",
 ) -> Optional[Tuple[_PrefillFastLayerCall, ...]]:
@@ -62,7 +62,9 @@ def _prefill_fast_path_layer_calls(
     layers = getattr(v4, "layers", None)
     if getattr(v4, "fp8_kv_cache", False) and layers:
         from rtp_llm.models_py.modules.dsv4.ppu.block import Block
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.attention import AttentionFP8
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.attention import (
+            AttentionFP8,
+        )
 
         calls = []
         for layer in layers:
@@ -91,6 +93,7 @@ def _prefill_fast_path_layer_calls(
     setattr(v4, _PREFILL_FAST_LAYER_CALLS_ATTR, layer_calls)
     return layer_calls
 
+
 def _prefill_fast_path_enabled(
     v4: "V4Transformer",
     prepare_hidden_fn: Optional[Any],
@@ -102,11 +105,12 @@ def _prefill_fast_path_enabled(
         return False
     if prepare_hidden_fn is not None:
         return False
-    if _rt.ENABLED or _fwd_dbg.enabled():
+    if _rt.ENABLED:
         return False
     if layer_calls is None:
         layer_calls = _prefill_fast_path_layer_calls(v4)
     return layer_calls is not None
+
 
 def _request_prefill_cu_seqlens(attn: Any) -> Optional[torch.Tensor]:
     """Return populated request boundaries from host or device input metadata."""
@@ -117,6 +121,7 @@ def _request_prefill_cu_seqlens(attn: Any) -> Optional[torch.Tensor]:
     if cu_seqlens_device is not None and cu_seqlens_device.numel() >= 2:
         return cu_seqlens_device
     return cu_seqlens
+
 
 def forward_layers(
     v4: V4Transformer,
@@ -593,17 +598,6 @@ def forward_layers(
         step = getattr(v4, "_dbg_step", 0)
         _rt.dump(step=step, extra=extra)
         v4._dbg_step = step + 1
-    if _fwd_dbg.enabled():
-        _fwd_dbg.print_prefill(
-            hidden=h,
-            input_ids=input_ids,
-            positions=positions,
-            cu_seqlens=cu_seqlens,
-            attn_inputs=attn_inputs,
-            cp_ctx=cp_ctx,
-            head_weight=getattr(v4, "head_weight", None),
-            step=int(getattr(v4, "_dbg_step", 0)),
-        )
     # The per-forward ``PrefillWorkspace`` (prefill-Q + optional CP
     # gather/restore scratch) is a local of this function: it drops here on
     # return, returning ~16 GiB to the caching allocator so the MTP draft
@@ -613,6 +607,7 @@ def forward_layers(
     if capture_context is not None and capture_context.enabled:
         return capture_context.finalize(h).hidden_states
     return h  # [T, dim]
+
 
 def forward_prefill(
     v4: V4Transformer,
@@ -736,9 +731,9 @@ def forward_prefill(
     fixed_mtp_buffer = v4._mtp_hidden_buffer
     temporary_mtp_buffer = None
     if fixed_mtp_buffer is not None and input_ids.numel() > fixed_mtp_buffer.size(0):
-        assert not (input_ids.is_cuda and torch.cuda.is_current_stream_capturing()), (
-            "captured prefill exceeds the bound MTP hidden capacity"
-        )
+        assert not (
+            input_ids.is_cuda and torch.cuda.is_current_stream_capturing()
+        ), "captured prefill exceeds the bound MTP hidden capacity"
         # preRun bypasses chunking; preserve Decode graph addresses and steady-state memory.
         temporary_mtp_buffer = fixed_mtp_buffer.new_empty(
             (input_ids.numel(), fixed_mtp_buffer.size(1))

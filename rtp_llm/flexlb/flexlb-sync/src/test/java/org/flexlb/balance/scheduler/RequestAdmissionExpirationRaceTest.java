@@ -28,7 +28,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** A selected failure must not consume the cleanup deadline while admission still owns resources. */
+/**
+ * A selected failure must not consume the cleanup deadline while admission still owns resources.
+ */
 class RequestAdmissionExpirationRaceTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})

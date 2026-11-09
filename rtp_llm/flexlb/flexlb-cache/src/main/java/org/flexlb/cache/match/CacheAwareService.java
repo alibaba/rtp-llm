@@ -17,11 +17,16 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
-/** Unified cache matching and metadata update service. */
+/**
+ * Unified cache matching and metadata update service.
+ *
+ * <p>Routing queries delegate to the source orchestrator and report the result. Worker-status and
+ * routed-request updates use their respective metadata contracts; prediction feedback and standby
+ * comparison remain separate from authoritative cache ownership.
+ */
 @Slf4j
 @Service
 public class CacheAwareService {
-
     private final CacheMetricsReporter cacheMetricsReporter;
     private final CacheMatchQueryOrchestrator queryOrchestrator;
     private final CacheHitFeedbackTracker feedbackTracker;
@@ -89,6 +94,11 @@ public class CacheAwareService {
         }
     }
 
+    public List<CompletableFuture<CacheHitComparisonResult>> observeCacheHitFeedback(
+            WorkerStatus worker, WorkerStatus.StatusObservation status) {
+        return feedbackTracker.observe(worker, status);
+    }
+
     private void reportSelectedPredictions(
             String requestId,
             RoleType role,
@@ -109,10 +119,5 @@ public class CacheAwareService {
         } catch (RuntimeException error) {
             log.warn("Local Standby selection metrics unavailable, requestId={}", requestId, error);
         }
-    }
-
-    public List<CompletableFuture<CacheHitComparisonResult>> observeCacheHitFeedback(
-            WorkerStatus worker, WorkerStatus.StatusObservation status) {
-        return feedbackTracker.observe(worker, status);
     }
 }

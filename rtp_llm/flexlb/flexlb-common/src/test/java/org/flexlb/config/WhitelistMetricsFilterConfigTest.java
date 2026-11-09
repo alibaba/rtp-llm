@@ -21,8 +21,10 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks metric whitelist filtering and its exposed metric names.
+ */
 class WhitelistMetricsFilterConfigTest {
-
     // The G3-collector-shaped whitelist (prometheus-form prefixes/full
     // names) — entries are copied verbatim from MASTER_PROMETHEUS_PREFIXES.
     private static final String G3_SHAPED_WHITELIST =
@@ -34,10 +36,6 @@ class WhitelistMetricsFilterConfigTest {
     @AfterEach
     void resetAllowedMetrics() {
         MicrometerFlexMonitor.setAllowedMetrics(null);
-    }
-
-    private static MeterFilter filterFor(String property) {
-        return new WhitelistMetricsFilterConfig(property).whitelistMetricsFilter();
     }
 
     @Test
@@ -275,5 +273,9 @@ class WhitelistMetricsFilterConfigTest {
                 result.get();
             }
         }
+    }
+
+    private static MeterFilter filterFor(String property) {
+        return new WhitelistMetricsFilterConfig(property).whitelistMetricsFilter();
     }
 }

@@ -17,8 +17,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * </ol>
  */
 public final class InflightAssertions {
-
     private InflightAssertions() {}
+
+    /**
+     * Assert that both prefill and decode endpoints have released all resources.
+     */
+    public static void assertAllResourcesReleased(
+            PrefillEndpoint prefillEp, DecodeEndpoint decodeEp) {
+        assertPrefillInflightEmpty(prefillEp);
+        assertDecodeInflightEmpty(decodeEp);
+    }
 
     /**
      * Assert that the PrefillEndpoint for the given ip:port has no inflight batches.
@@ -45,12 +53,20 @@ public final class InflightAssertions {
     }
 
     /**
-     * Assert that both prefill and decode endpoints have released all resources.
+     * Assert that all inflight resources are released within the given timeout.
      */
-    public static void assertAllResourcesReleased(
-            PrefillEndpoint prefillEp, DecodeEndpoint decodeEp) {
-        assertPrefillInflightEmpty(prefillEp);
-        assertDecodeInflightEmpty(decodeEp);
+    public static void assertResourcesReleasedWithin(
+            PrefillEndpoint prefillEp, DecodeEndpoint decodeEp, long timeoutMs) {
+        assertTrue(
+                waitForResourcesReleased(prefillEp, decodeEp, timeoutMs, 50),
+                "Inflight resources not released within "
+                        + timeoutMs
+                        + "ms"
+                        + " (prefill batches="
+                        + (prefillEp != null ? prefillEp.getInflightBatchCount() : "null")
+                        + ", decode inflight="
+                        + (decodeEp != null ? decodeEp.getInflightCount() : "null")
+                        + ")");
     }
 
     /**
@@ -79,22 +95,5 @@ public final class InflightAssertions {
             }
         }
         return false;
-    }
-
-    /**
-     * Assert that all inflight resources are released within the given timeout.
-     */
-    public static void assertResourcesReleasedWithin(
-            PrefillEndpoint prefillEp, DecodeEndpoint decodeEp, long timeoutMs) {
-        assertTrue(
-                waitForResourcesReleased(prefillEp, decodeEp, timeoutMs, 50),
-                "Inflight resources not released within "
-                        + timeoutMs
-                        + "ms"
-                        + " (prefill batches="
-                        + (prefillEp != null ? prefillEp.getInflightBatchCount() : "null")
-                        + ", decode inflight="
-                        + (decodeEp != null ? decodeEp.getInflightCount() : "null")
-                        + ")");
     }
 }

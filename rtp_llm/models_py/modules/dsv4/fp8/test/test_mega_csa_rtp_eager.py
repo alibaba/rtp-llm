@@ -361,7 +361,7 @@ class MegaCSARTPEagerTest(unittest.TestCase):
             )
 
         cls.device = torch.device("cuda", torch.cuda.current_device())
-        environment = {"DSV4_HC_IMPL": "tilelang"}
+        environment = {}
         test_tmpdir = os.environ.get("TEST_TMPDIR")
         if test_tmpdir:
             environment["TILELANG_CACHE_DIR"] = os.path.join(

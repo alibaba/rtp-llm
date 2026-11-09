@@ -79,9 +79,8 @@ protected:
         runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = max_inited_kv_cache_streams;
         PDSepConfig         pd_sep_config;
         ParallelismConfig   parallelism_config;
-        ModelSpecificConfig model_specific_config;
         return std::make_shared<FIFOScheduler>(
-            runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+            runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager_);
     }
 
     std::shared_ptr<PDFusionRatioScheduler> createPDFusionRatioScheduler(size_t max_generate_batch_size = 100) {
@@ -93,9 +92,8 @@ protected:
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type = RoleType::PDFUSION;
         ParallelismConfig   parallelism_config;
-        ModelSpecificConfig model_specific_config;
         return std::make_shared<PDFusionRatioScheduler>(
-            runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+            runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager_);
     }
 
     GenerateStreamPtr createStream(const std::vector<int>& input_tokens        = {1, 2, 3},

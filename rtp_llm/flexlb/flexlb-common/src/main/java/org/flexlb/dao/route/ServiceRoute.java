@@ -12,6 +12,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+/**
+ * Groups a model service's role endpoints and exposes their discovery topology.
+ */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class ServiceRoute {

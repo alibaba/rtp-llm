@@ -89,7 +89,6 @@ class Qwen3Model(GptModelBase):
         quant_config: Optional[object] = None,
         fmha_config=None,
         py_hw_kernel_config=None,
-        device_resource_config=None,
     ):
         super().__init__(
             config,
@@ -98,7 +97,6 @@ class Qwen3Model(GptModelBase):
             max_generate_batch_size=max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=device_resource_config,
         )
 
         self.embed_tokens = Embedding(

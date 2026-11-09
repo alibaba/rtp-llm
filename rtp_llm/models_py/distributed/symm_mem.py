@@ -411,44 +411,24 @@ class TorchSymmMemCommunicator:
 _symm_mem_comm: Optional[TorchSymmMemCommunicator] = None
 
 
-def _custom_all_reduce_enabled(
-    disable_custom_all_reduce: Optional[bool] = None,
-) -> bool:
-    """Honor an explicit config override, then the legacy environment switch."""
-    if disable_custom_all_reduce is not None:
-        return not disable_custom_all_reduce
-    value = os.getenv("FT_DISABLE_CUSTOM_AR")
-    return value is None or value.strip().lower() not in ("1", "true", "on", "yes")
-
-
 def init_symm_mem_communicator(
     tp_group: ProcessGroup,
-    *,
-    disable_custom_all_reduce: Optional[bool] = None,
 ) -> Optional[TorchSymmMemCommunicator]:
-    """Initialize TorchSymmMemCommunicator for TP group.
+    """AllReduce communicator initialization; permanently disabled.
 
-    Not wrapped in a catch-all any more. The constructor already absorbs the one
-    recoverable failure (the local multicast allocation) and votes on it, so all
-    ranks agree to fall back together. Anything still escaping means the group
-    agreement or the collective rendezvous itself failed, and there is no safe
-    rank-local fallback for that: returning None on a single rank is precisely
-    what used to leave its peers parked in torch_symm_mem.rendezvous() until the
-    100-year group timeout, surfacing two minutes later as a misleading
-    "CpuTpBroadcaster connect(...) failed after 2400 attempts". Let it raise so
-    startup fails fast, on every rank, with the real reason.
+    Every audited production deployment pinned the custom AllReduce off (stock
+    NCCL), so the global communicator is never initialized for the AllReduce
+    path and this stub keeps the historic contract: ``get_symm_mem_communicator``
+    returns None, direct symmetric-memory consumers fall back to NCCL
+    collectives, and the ``TorchSymmMemCommunicator`` class itself stays
+    available for them to construct directly.
     """
     global _symm_mem_comm
-    if not _custom_all_reduce_enabled(disable_custom_all_reduce):
-        logging.info("TorchSymmMemCommunicator disabled by FT_DISABLE_CUSTOM_AR")
-        _symm_mem_comm = None
-        return None
-    symm_mem_comm = TorchSymmMemCommunicator(tp_group, torch.cuda.current_device())
-    if symm_mem_comm.disabled:
-        logging.warning("TorchSymmMemCommunicator is disabled, skipping initialization")
-        return None
-    _symm_mem_comm = symm_mem_comm
-    return symm_mem_comm
+    logging.info(
+        "TorchSymmMemCommunicator not initialized: custom AllReduce is disabled"
+    )
+    _symm_mem_comm = None
+    return None
 
 
 def get_symm_mem_communicator() -> Optional[TorchSymmMemCommunicator]:

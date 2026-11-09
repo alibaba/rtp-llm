@@ -30,7 +30,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Canonical endpoint-queue contract exposed by {@link WorkerBatcher}. */
+/**
+ * Canonical endpoint-queue contract exposed by {@link WorkerBatcher}.
+ */
 class WorkerBatcherQueueTest {
 
     private final List<WorkerBatcher> runtimes = new ArrayList<>();
@@ -207,7 +209,9 @@ class WorkerBatcherQueueTest {
         return endpoint;
     }
 
-    /** Holds every exact head ACTIVE so snapshots can exercise live ordering. */
+    /**
+     * Holds every exact head ACTIVE so snapshots can exercise live ordering.
+     */
     private static final class BlockingDeliveryStrategy implements DeliveryStrategy {
 
         private final AtomicInteger attempts = new AtomicInteger();

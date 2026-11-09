@@ -59,10 +59,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** Final selector/pin ownership contracts for {@link DefaultRouter}. */
+/**
+ * Final selector/pin ownership contracts for {@link DefaultRouter}.
+ */
 class DefaultRouterTest {
     private DeliveryClaim lastDelivery;
-
     private CostBasedPrefillStrategy prefillSelector;
     private DecodeSelector decodeSelector;
     private RandomStrategy vitSelector;
@@ -514,34 +515,6 @@ class DefaultRouterTest {
         verify(decode).release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
     }
 
-    private static void stubPrefillCommit(PrefillEndpoint prefill) {
-        stubRouteCommit(
-                prefill,
-                new org.flexlb.balance.projection.WorkSnapshot(
-                        System.currentTimeMillis(), List.of(), List.of(), 0L));
-    }
-
-    private static void stubRouteCommit(
-            PrefillEndpoint endpoint, org.flexlb.balance.projection.WorkSnapshot precedingWork) {
-        var commit = mock(PrefillEndpoint.RouteCommitAdmission.class);
-        var handoff = mock(PrefillState.CommittedHandoff.class);
-        when(handoff.precedingWork()).thenReturn(precedingWork);
-        when(endpoint.tryBeginRouteCommitAdmission()).thenReturn(commit);
-        when(commit.commit(any(), any())).thenReturn(handoff);
-    }
-
-    private static DecodeEndpoint.EngineDispatchPermit stubDecodePermit(
-            DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
-        var permit = mock(DecodeEndpoint.EngineDispatchPermit.class);
-        when(endpoint.acquireDispatchPermit(eq(reservation), any()))
-                .thenReturn(
-                        new DecodeEndpoint.EngineDispatchPermitAcquisition(
-                                DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit));
-        when(permit.dispatch())
-                .thenReturn(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED);
-        return permit;
-    }
-
     @ParameterizedTest
     @EnumSource(
             value = RoleType.class,
@@ -727,6 +700,34 @@ class DefaultRouterTest {
         admitted.value().close();
 
         verify(prefillSelector).select(context, RoleType.PREFILL, null);
+    }
+
+    private static void stubPrefillCommit(PrefillEndpoint prefill) {
+        stubRouteCommit(
+                prefill,
+                new org.flexlb.balance.projection.WorkSnapshot(
+                        System.currentTimeMillis(), List.of(), List.of(), 0L));
+    }
+
+    private static void stubRouteCommit(
+            PrefillEndpoint endpoint, org.flexlb.balance.projection.WorkSnapshot precedingWork) {
+        var commit = mock(PrefillEndpoint.RouteCommitAdmission.class);
+        var handoff = mock(PrefillState.CommittedHandoff.class);
+        when(handoff.precedingWork()).thenReturn(precedingWork);
+        when(endpoint.tryBeginRouteCommitAdmission()).thenReturn(commit);
+        when(commit.commit(any(), any())).thenReturn(handoff);
+    }
+
+    private static DecodeEndpoint.EngineDispatchPermit stubDecodePermit(
+            DecodeEndpoint endpoint, DecodeEndpoint.ReservationHandle reservation) {
+        var permit = mock(DecodeEndpoint.EngineDispatchPermit.class);
+        when(endpoint.acquireDispatchPermit(eq(reservation), any()))
+                .thenReturn(
+                        new DecodeEndpoint.EngineDispatchPermitAcquisition(
+                                DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, permit));
+        when(permit.dispatch())
+                .thenReturn(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED);
+        return permit;
     }
 
     private RequestScheduler scheduler(DefaultRouter router, BalanceContext context) {

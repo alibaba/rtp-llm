@@ -41,6 +41,9 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks gRPC executor state metrics and rejection accounting across saturation and shutdown.
+ */
 @Timeout(10)
 class FlexlbGrpcExecutorMetricsTest {
     private static final List<String> METRICS =
@@ -105,18 +108,6 @@ class FlexlbGrpcExecutorMetricsTest {
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE, 1);
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE, 1);
             fixture.assertValue(MetricConstant.GRPC_SERVER_EXECUTOR_REJECTED_TASKS, 0);
-        }
-    }
-
-    @Configuration
-    @EnableScheduling
-    static class SchedulingConfiguration {
-        @Bean
-        TaskScheduler taskScheduler() {
-            ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
-            scheduler.setPoolSize(1);
-            scheduler.setDaemon(true);
-            return scheduler;
         }
     }
 
@@ -205,6 +196,24 @@ class FlexlbGrpcExecutorMetricsTest {
         return new FlexlbGrpcServer(null, config, new MockEnvironment(), null, monitor, null, null);
     }
 
+    /**
+     * Supplies the scheduled executor required by the metrics test context.
+     */
+    @Configuration
+    @EnableScheduling
+    static class SchedulingConfiguration {
+        @Bean
+        TaskScheduler taskScheduler() {
+            ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
+            scheduler.setPoolSize(1);
+            scheduler.setDaemon(true);
+            return scheduler;
+        }
+    }
+
+    /**
+     * Controls busy and queued executor work and captures the corresponding metric samples.
+     */
     private static class Fixture implements AutoCloseable {
         private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
         private final FlexlbGrpcServer server = newServer(new MicrometerFlexMonitor(registry));
@@ -226,6 +235,14 @@ class FlexlbGrpcExecutorMetricsTest {
                             rejectionHandler);
             ReflectionTestUtils.setField(server, "grpcExecutor", executor);
             ReflectionTestUtils.invokeMethod(server, "registerMetrics");
+        }
+
+        @Override
+        public void close() throws InterruptedException {
+            release.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS));
+            registry.close();
         }
 
         void blockFirstTaskAndQueueSecond() throws InterruptedException {
@@ -263,14 +280,6 @@ class FlexlbGrpcExecutorMetricsTest {
                             ? registry.get("flexlb." + metric).counter().count()
                             : registry.get("flexlb." + metric).gauge().value();
             assertEquals(expected, value, metric);
-        }
-
-        @Override
-        public void close() throws InterruptedException {
-            release.countDown();
-            executor.shutdownNow();
-            assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS));
-            registry.close();
         }
     }
 }

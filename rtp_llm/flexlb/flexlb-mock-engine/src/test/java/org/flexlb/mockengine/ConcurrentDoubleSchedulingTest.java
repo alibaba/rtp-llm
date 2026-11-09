@@ -28,26 +28,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Concurrent double-scheduling stress test for the Java mock engine.
- *
- * <p>Simulates the exact scenario discovered in Chris's load test: with a 2P/4D
- * cluster (2 prefill + 4 decode engines) and high replay speed, requests are
- * scheduled simultaneously via both {@code enqueueBatch} (prefill → decode)
- * and {@code generateStreamCall} (direct decode) paths for the same requestId.
- *
- * <p>The fix uses {@code putIfAbsent} in {@code scheduleDecodeCompletion} to
- * atomically check-and-insert, preventing double-counting of pendingRequests
- * and runningTasks. These tests verify the fix holds under high concurrency.
- *
- * <p>Test 1 ({@link #concurrentEnqueueAndGenerateStreamNoLeak}) exercises the
- * double-scheduling race: 100 requests, each scheduled via both paths
- * concurrently. The decode step is set high enough (100 ms with sleep_scale
- * 0.1) to ensure the first {@code scheduleDecodeCompletion} entry is still in
- * runningTasks when the second path arrives, maximising putIfAbsent collisions.
- *
- * <p>Test 2 ({@link #highConcurrencySinglePathNoLeak}) is a control group:
- * 100 requests all via {@code enqueueBatch} (single path), 100 concurrent
- * threads, verifying no leak without double-scheduling.
+ * Checks concurrent batch enqueue and direct Decode scheduling of the same request ID without
+ * duplicate execution or leaked accounting.
  */
 class ConcurrentDoubleSchedulingTest {
 

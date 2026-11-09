@@ -27,21 +27,6 @@ def _compute_num_split(block_k: int, k: int, grid_size: int) -> int:
     return max(split_k, 1)
 
 
-def _requested_backend() -> str:
-    requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
-    if requested in ("", "auto"):
-        # Experiment branch: enable DeepGEMM by default to validate DSV4
-        # greedy/golden semantics under the full SM100 smoke suite. This is
-        # intentionally hard: DeepGEMM/JIT failures must surface directly.
-        return "deepgemm"
-    aliases = {
-        "dg": "deepgemm",
-        "tilelang": "tilelang_single",
-        "single": "tilelang_single",
-    }
-    return aliases.get(requested, requested)
-
-
 def _run_tilelang_single_gemm(
     residual_flat: torch.Tensor,
     fn: torch.Tensor,
@@ -133,7 +118,7 @@ def mhc_pre_big_fuse(
     num_tokens = residual_flat.shape[0]
     fn_flat = fn
 
-    backend = _requested_backend() if backend is None else backend
+    backend = "deepgemm" if backend is None else backend
     if prenorm_output not in ("partials", "reduced"):
         raise ValueError("HC prenorm_output must be partials or reduced")
     if prenorm_output == "reduced" and prenorm_gemm is None:

@@ -8,6 +8,7 @@ from flashinfer.prefill import (
     BatchPrefillWithRaggedKVCacheWrapper,
 )
 
+from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
     MhaRotaryEmbeddingOp,
@@ -136,6 +137,25 @@ def _planned_flashinfer_workspace_size(
     """
     backend = getattr(wrapper, "_backend", None)
     plan_info = getattr(wrapper, "_plan_info", None)
+    # CUDA-core DecodePlanInfo (FlashInfer 0.6.x): fixed padded rows, FP32
+    # partial values/LSE, followed by integer-workspace offsets and flags.
+    if (
+        isinstance(wrapper, BatchDecodeWithPagedKVCacheWrapper)
+        # Older/vendor wrappers may not expose this property. Keep their
+        # original workspace unless the CUDA-core planner is identifiable.
+        and getattr(wrapper, "use_tensor_cores", None) is False
+        and plan_info is not None
+        and len(plan_info) == 10
+    ):
+        if not plan_info[9]:
+            return _FLASHINFER_WORKSPACE_ALIGNMENT
+        rows = int(plan_info[0]) * num_qo_heads
+        return _round_workspace_size(
+            max(
+                int(plan_info[1]) + rows * head_dim_vo * _FLASHINFER_ACCUMULATOR_BYTES,
+                int(plan_info[2]) + rows * _FLASHINFER_ACCUMULATOR_BYTES,
+            )
+        )
     # FA3 tensor-core decode is implemented through the SM90 batch-prefill
     # planner as well, whose eight-field plan contains only integer-workspace
     # offsets.  Do not generalize this to future/other FA3 wrappers: their
@@ -166,13 +186,19 @@ def _compact_graph_workspace(
     workspace: torch.Tensor,
     num_qo_heads: int,
     head_dim_vo: int,
+    other_wrappers: tuple = (),
 ) -> torch.Tensor:
-    """Replace a graph wrapper's staging workspace with its stable exact size."""
-    required_bytes = _planned_flashinfer_workspace_size(
-        wrapper, num_qo_heads, head_dim_vo
-    )
+    """Compact shared scratch before capture, retaining unknown planner formats."""
+    wrappers = (wrapper, *other_wrappers)
+    sizes = [
+        _planned_flashinfer_workspace_size(item, num_qo_heads, head_dim_vo)
+        for item in wrappers
+    ]
+    if any(size is None for size in sizes):
+        return workspace
+    required_bytes = max(sizes)
     current_bytes = workspace.numel() * workspace.element_size()
-    if required_bytes is None or required_bytes >= current_bytes:
+    if required_bytes >= current_bytes:
         return workspace
 
     # FlashInfer's plan() stages scheduler metadata with raw cudaMemcpyAsync
@@ -184,7 +210,12 @@ def _compact_graph_workspace(
         torch.cuda.current_stream(workspace.device).synchronize()
 
     compact = get_py_flashinfer_workspace_buffer(workspace.device, required_bytes)
-    wrapper.reset_workspace_buffer(compact, wrapper._int_workspace_buffer)
+    # The pool can contain scratch used by another operator. Decode requires
+    # initialized storage on first use. Both wrappers must drop the old pointer
+    # before it returns to the pool.
+    compact.zero_()
+    for item in wrappers:
+        item.reset_workspace_buffer(compact, item._int_workspace_buffer)
     release_py_flashinfer_workspace_buffer(workspace)
     return compact
 
@@ -1496,7 +1527,8 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
             refresh_sequence_lengths = getattr(
                 self.rope_impl, "refresh_sequence_lengths", None
             )
-            if refresh_sequence_lengths is None:
+            is_ppu = get_device_type() == DeviceType.Ppu
+            if refresh_sequence_lengths is None and not is_ppu:
                 # Non-CUDA backends use the C++ RoPE binding. Its prepare()
                 # accepts only attn_inputs and its params do not expose the
                 # CUDA-only stable sequence_lengths buffer.
@@ -1508,7 +1540,7 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
             common.copy_kv_cache_offset(
                 self.rope_params.kv_cache_offset, new_rope_params.kv_cache_offset
             )
-            if refresh_sequence_lengths is not None:
+            if refresh_sequence_lengths is not None or is_ppu:
                 self.rope_params.sequence_lengths = new_rope_params.sequence_lengths
 
     def support_cuda_graph(self) -> bool:

@@ -25,33 +25,20 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Pins the task #69 production-caliber decode model: per-step pricing with the
- * production DSv4 linear fit (step_ms = 19.5 + 0.175 × running) and the MTP
- * acceptance fold (2.6 tokens/step), plus the config-surface contracts.
- *
- * <p>Production anchors (task #68 measurements, /tmp/km68 buckets):
- * <ul>
- *   <li>step_ms = 20.15 + 0.174 × batch (R² = 0.82); TPOT = 8.33 + 0.0644 × batch (R² = 0.90)</li>
- *   <li>MTP accept 2.54–2.88 tokens/step (slightly lower at full batch)</li>
- *   <li>engine throughput: low batch (running ≈ 4) ≈ 519 tok/s, full batch (128) ≈ 7726 tok/s</li>
- * </ul>
- *
- * <p>The drain-rate assertions run ONE decode engine at a steady running count
- * and compare achieved tokens/s against those production anchors with a ±30%
- * band (scheduler-timer quantisation, host load, and the one extra ramp-up step at admission
- * account for a few percent; the band rejects the removed per-token caliber,
- * which would sit ~2.8×–5.5× off).
+ * Checks per-step Decode timing, accepted token progress and configured capacity against the
+ * production-derived mock model.
  */
 class ProductionCaliberDecodeTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private static final int BASE_PORT = 63800;
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
+
     private final Map<Integer, JavaMockEngineCluster.FastRpcService> services =
             new ConcurrentHashMap<>();
+
     private int nextPortOffset;
 
     @BeforeEach
@@ -186,32 +173,6 @@ class ProductionCaliberDecodeTest {
         assertWithinBand(tokPerSec, 119.0, 0.30, "single stream (running=1)");
     }
 
-    // ──────────── helpers ────────────
-
-    /** Load a model whose "decode" section is {@code extra} over the base. */
-    private MockPerformanceModel model(Map<String, Object> decodeExtra) throws IOException {
-        Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
-        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        Map<String, Object> decode = new LinkedHashMap<>();
-        decode.put("scale", 1.0);
-        decode.putAll(decodeExtra);
-        MAPPER.writeValue(
-                performance.toFile(),
-                Map.of(
-                        "block_size",
-                        1024,
-                        "sleep_scale",
-                        1.0,
-                        "jitter_pct",
-                        0.0,
-                        "prefill",
-                        Map.of("scale", 1.0),
-                        "decode",
-                        decode));
-        MockMasterConfig.writeWithPrefillExpression(master, "10");
-        return MockPerformanceModel.load(performance.toString(), master.toString());
-    }
-
     /**
      * Drains {@code streams} concurrent requests of {@code outputLen} tokens on
      * ONE decode engine at the production defaults and returns the achieved
@@ -271,12 +232,46 @@ class ProductionCaliberDecodeTest {
         return tokPerSec;
     }
 
-    private static void assertWithinBand(double actual, double anchor, double band, String label) {
-        assertTrue(
-                actual >= anchor * (1 - band) && actual <= anchor * (1 + band),
-                String.format(
-                        "%s: %.0f tok/s outside production anchor %.0f ±%.0f%%",
-                        label, actual, anchor, band * 100));
+    // ──────────── helpers ────────────
+
+    /** Load a model whose "decode" section is {@code extra} over the base. */
+    private MockPerformanceModel model(Map<String, Object> decodeExtra) throws IOException {
+        Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
+        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
+        Map<String, Object> decode = new LinkedHashMap<>();
+        decode.put("scale", 1.0);
+        decode.putAll(decodeExtra);
+        MAPPER.writeValue(
+                performance.toFile(),
+                Map.of(
+                        "block_size",
+                        1024,
+                        "sleep_scale",
+                        1.0,
+                        "jitter_pct",
+                        0.0,
+                        "prefill",
+                        Map.of("scale", 1.0),
+                        "decode",
+                        decode));
+        MockMasterConfig.writeWithPrefillExpression(master, "10");
+        return MockPerformanceModel.load(performance.toString(), master.toString());
+    }
+
+    private static boolean invokeScheduleDecodeCompletion(
+            JavaMockEngineCluster.FastRpcService service,
+            MockPerformanceModel.RequestShape shape,
+            long batchId,
+            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue)
+            throws Exception {
+        Method method =
+                JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod(
+                        "scheduleDecodeCompletion",
+                        MockPerformanceModel.RequestShape.class,
+                        long.class,
+                        LinkedBlockingQueue.class);
+        method.setAccessible(true);
+        return (Boolean) method.invoke(service, shape, batchId, responseQueue);
     }
 
     private static MockPerformanceModel.RequestShape shapeOf(
@@ -294,19 +289,11 @@ class ProductionCaliberDecodeTest {
         return model.shape(input.build(), new MockLruBlockCache(100));
     }
 
-    private static boolean invokeScheduleDecodeCompletion(
-            JavaMockEngineCluster.FastRpcService service,
-            MockPerformanceModel.RequestShape shape,
-            long batchId,
-            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue)
-            throws Exception {
-        Method method =
-                JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod(
-                        "scheduleDecodeCompletion",
-                        MockPerformanceModel.RequestShape.class,
-                        long.class,
-                        LinkedBlockingQueue.class);
-        method.setAccessible(true);
-        return (Boolean) method.invoke(service, shape, batchId, responseQueue);
+    private static void assertWithinBand(double actual, double anchor, double band, String label) {
+        assertTrue(
+                actual >= anchor * (1 - band) && actual <= anchor * (1 + band),
+                String.format(
+                        "%s: %.0f tok/s outside production anchor %.0f ±%.0f%%",
+                        label, actual, anchor, band * 100));
     }
 }

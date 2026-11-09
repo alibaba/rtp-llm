@@ -24,6 +24,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+/**
+ * Checks mock engine cluster startup, controls and shutdown.
+ */
 class JavaMockEngineClusterTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

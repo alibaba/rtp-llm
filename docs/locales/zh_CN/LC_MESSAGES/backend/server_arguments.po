@@ -103,15 +103,6 @@ msgid "Number of GPU devices used on the current node."
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "`--enable_ffn_disaggregate`"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid ""
-"Enables FFN disaggregation feature to separate attention and feed-forward"
-" network computations for performance optimization."
-msgstr ""
-
 #: ../../backend/server_arguments.md:17
 msgid "Concurrency Control"
 msgstr ""

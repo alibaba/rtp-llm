@@ -3,7 +3,9 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 
-/** Local cache metadata standby maintained from requests routed by FlexLB. */
+/**
+ * Local cache metadata standby maintained from requests routed by FlexLB.
+ */
 @Getter
 @Setter
 public final class LocalStandbyConfig {

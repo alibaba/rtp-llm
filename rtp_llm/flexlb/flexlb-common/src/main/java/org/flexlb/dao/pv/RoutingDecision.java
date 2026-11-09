@@ -5,7 +5,9 @@ import org.flexlb.dao.route.RoleType;
 import java.util.List;
 import java.util.Map;
 
-/** Immutable snapshot of an actual selector attempt; unknown estimates are null. */
+/**
+ * Immutable snapshot of an actual selector attempt; unknown estimates are null.
+ */
 public record RoutingDecision(
         RoleType role,
         String group,
@@ -25,7 +27,9 @@ public record RoutingDecision(
         candidates = List.copyOf(candidates);
     }
 
-    /** Configuration and population summary used by the current prefill selector, in explicit units. */
+    /**
+     * Configuration and population summary used by the current prefill selector, in explicit units.
+     */
     public record PrefillPolicy(
             long requestInputTokens,
             String candidateChoice,

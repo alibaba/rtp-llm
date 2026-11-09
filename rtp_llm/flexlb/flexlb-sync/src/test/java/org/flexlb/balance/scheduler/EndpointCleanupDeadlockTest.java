@@ -93,6 +93,9 @@ class EndpointCleanupDeadlockTest {
         }
     }
 
+    /**
+     * Runs endpoint cleanup and timer shutdown in isolation to detect deadlocks.
+     */
     public static class Reproducer {
         public static void main(String[] args) {
             try {
@@ -102,80 +105,6 @@ class EndpointCleanupDeadlockTest {
                 failure.printStackTrace();
                 System.exit(1);
             }
-        }
-
-        private static void verifyTimerClose() throws Exception {
-            var config = SchedulingTestConfig.batchConfig();
-            ConfigService service = mock(ConfigService.class);
-            when(service.loadBalanceConfig()).thenReturn(config);
-            RequestRegistry registry = mock(RequestRegistry.class);
-            ExpirationTimer timer = new ExpirationTimer(registry, service);
-            RequestSlot slot =
-                    new RequestSlot(
-                            mock(RequestCompletionPublisher.class),
-                            RequestLifecycleTestSupport.context(config, 992L),
-                            timer,
-                            new RequestTerminalCleanup(
-                                    timer,
-                                    mock(
-                                            org.flexlb.service.monitor.RequestSchedulerReporter
-                                                    .class)),
-                            () -> {});
-            CountDownLatch slotHeld = new CountDownLatch(1);
-            CountDownLatch closeReachesSlots = new CountDownLatch(1);
-            AtomicReference<Throwable> failure = new AtomicReference<>();
-            doAnswer(
-                            call -> {
-                                closeReachesSlots.countDown();
-                                return java.util.List.of(slot);
-                            })
-                    .when(registry)
-                    .snapshotSlots();
-            Thread holder =
-                    new Thread(
-                            () -> {
-                                try {
-                                    synchronized (slot) {
-                                        slotHeld.countDown();
-                                        assertTrue(closeReachesSlots.await(5, TimeUnit.SECONDS));
-                                        // close() is about to acquire Slot. Registration must
-                                        // remain available
-                                        // to reject this late request; holding it while waiting for
-                                        // Slot deadlocks.
-                                        assertThrows(
-                                                java.util.concurrent.RejectedExecutionException
-                                                        .class,
-                                                () ->
-                                                        timer.attachRequestDeadline(
-                                                                slot, Long.MAX_VALUE));
-                                    }
-                                } catch (Throwable error) {
-                                    failure.set(error);
-                                }
-                            },
-                            "slot-checks-timer-registration");
-            Thread closer =
-                    new Thread(
-                            () -> {
-                                try {
-                                    assertTrue(slotHeld.await(5, TimeUnit.SECONDS));
-                                    timer.close();
-                                } catch (Throwable error) {
-                                    failure.set(error);
-                                }
-                            },
-                            "timer-close-waits-for-slot");
-            holder.setDaemon(true);
-            closer.setDaemon(true);
-            holder.start();
-            closer.start();
-            holder.join(8_000);
-            closer.join(8_000);
-            if (failure.get() != null) {
-                throw new AssertionError(failure.get());
-            }
-            assertFalse(
-                    holder.isAlive() || closer.isAlive(), "Slot / timer registration lock cycle");
         }
 
         private static void run(String kind) throws Exception {
@@ -359,6 +288,80 @@ class EndpointCleanupDeadlockTest {
                 throw new AssertionError("Cleanup and business operation did not finish");
             }
             System.out.println("COMPLETED " + kind);
+        }
+
+        private static void verifyTimerClose() throws Exception {
+            var config = SchedulingTestConfig.batchConfig();
+            ConfigService service = mock(ConfigService.class);
+            when(service.loadBalanceConfig()).thenReturn(config);
+            RequestRegistry registry = mock(RequestRegistry.class);
+            ExpirationTimer timer = new ExpirationTimer(registry, service);
+            RequestSlot slot =
+                    new RequestSlot(
+                            mock(RequestCompletionPublisher.class),
+                            RequestLifecycleTestSupport.context(config, 992L),
+                            timer,
+                            new RequestTerminalCleanup(
+                                    timer,
+                                    mock(
+                                            org.flexlb.service.monitor.RequestSchedulerReporter
+                                                    .class)),
+                            () -> {});
+            CountDownLatch slotHeld = new CountDownLatch(1);
+            CountDownLatch closeReachesSlots = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            doAnswer(
+                            call -> {
+                                closeReachesSlots.countDown();
+                                return java.util.List.of(slot);
+                            })
+                    .when(registry)
+                    .snapshotSlots();
+            Thread holder =
+                    new Thread(
+                            () -> {
+                                try {
+                                    synchronized (slot) {
+                                        slotHeld.countDown();
+                                        assertTrue(closeReachesSlots.await(5, TimeUnit.SECONDS));
+                                        // close() is about to acquire Slot. Registration must
+                                        // remain available
+                                        // to reject this late request; holding it while waiting for
+                                        // Slot deadlocks.
+                                        assertThrows(
+                                                java.util.concurrent.RejectedExecutionException
+                                                        .class,
+                                                () ->
+                                                        timer.attachRequestDeadline(
+                                                                slot, Long.MAX_VALUE));
+                                    }
+                                } catch (Throwable error) {
+                                    failure.set(error);
+                                }
+                            },
+                            "slot-checks-timer-registration");
+            Thread closer =
+                    new Thread(
+                            () -> {
+                                try {
+                                    assertTrue(slotHeld.await(5, TimeUnit.SECONDS));
+                                    timer.close();
+                                } catch (Throwable error) {
+                                    failure.set(error);
+                                }
+                            },
+                            "timer-close-waits-for-slot");
+            holder.setDaemon(true);
+            closer.setDaemon(true);
+            holder.start();
+            closer.start();
+            holder.join(8_000);
+            closer.join(8_000);
+            if (failure.get() != null) {
+                throw new AssertionError(failure.get());
+            }
+            assertFalse(
+                    holder.isAlive() || closer.isAlive(), "Slot / timer registration lock cycle");
         }
     }
 }

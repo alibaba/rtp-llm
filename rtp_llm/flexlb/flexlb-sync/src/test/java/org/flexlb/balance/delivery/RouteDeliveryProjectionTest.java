@@ -44,6 +44,9 @@ class RouteDeliveryProjectionTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    /**
+     * Exposes route-duration predictions used by route delivery projection tests.
+     */
     @Nested
     @DisplayName("Route projection: lazy cumulative cursor")
     class RouteService {
@@ -129,6 +132,9 @@ class RouteDeliveryProjectionTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    /**
+     * Exposes batch-duration predictions used by route delivery projection tests.
+     */
     @Nested
     @DisplayName("Batch projection: per-prefix independent prediction")
     class BatchService {
@@ -184,25 +190,15 @@ class RouteDeliveryProjectionTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    /**
+     * Counts prediction calls to verify projection reuse.
+     */
     private static final class CountingPredictions implements RouteProjection.Predictions {
-
         private final Map<String, Integer> itemCalls = new HashMap<>();
+
         private Set<String> failingIds = Set.of();
+
         private int batchDurationCalls;
-
-        void failOn(long... ids) {
-            var set = new java.util.HashSet<String>();
-            for (long id : ids) set.add(Long.toString(id));
-            this.failingIds = set;
-        }
-
-        int itemCalls(long id) {
-            return itemCalls.getOrDefault(Long.toString(id), 0);
-        }
-
-        int batchDurationCalls() {
-            return batchDurationCalls;
-        }
 
         @Override
         public long itemDurationMs(GroupPlanner.Item item) {
@@ -222,6 +218,20 @@ class RouteDeliveryProjectionTest {
         public long batchDurationMs(List<GroupPlanner.Item> items) {
             batchDurationCalls++;
             return 100L * items.size(); // discriminating: prefix-size dependent
+        }
+
+        void failOn(long... ids) {
+            var set = new java.util.HashSet<String>();
+            for (long id : ids) set.add(Long.toString(id));
+            this.failingIds = set;
+        }
+
+        int itemCalls(long id) {
+            return itemCalls.getOrDefault(Long.toString(id), 0);
+        }
+
+        int batchDurationCalls() {
+            return batchDurationCalls;
         }
     }
 }

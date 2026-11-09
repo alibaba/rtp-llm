@@ -195,35 +195,19 @@ class QWenBase(BaseModel):
     def _create_python_model(self):
         model_config = self.model_config
         parallelism_config = self.parallelism_config
-        ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
         fmha_config = self.fmha_config
         py_hw_kernel_config = self.hw_kernel_config
         quant_config = self.model_config.quant_config
-        from rtp_llm.models_py.model_desc.disaggregate_qwen3 import (
-            Qwen3DisaggregateModel,
-        )
         from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 
-        if ffn_disaggregate_config.enable_ffn_disaggregate:
-            self.py_model = Qwen3DisaggregateModel(
-                model_config,
-                parallelism_config,
-                self.weight,
-                max_generate_batch_size=self.max_generate_batch_size,
-                fmha_config=fmha_config,
-                py_hw_kernel_config=py_hw_kernel_config,
-                device_resource_config=self.device_resource_config,
-            )
-        else:
-            self.py_model = Qwen3Model(
-                model_config,
-                parallelism_config,
-                self.weight,
-                max_generate_batch_size=self.max_generate_batch_size,
-                quant_config=quant_config,
-                fmha_config=fmha_config,
-                py_hw_kernel_config=py_hw_kernel_config,
-                device_resource_config=self.device_resource_config,
+        self.py_model = Qwen3Model(
+            model_config,
+            parallelism_config,
+            self.weight,
+            max_generate_batch_size=self.max_generate_batch_size,
+            quant_config=quant_config,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
             )
 
     def support_cuda_graph(self) -> bool:

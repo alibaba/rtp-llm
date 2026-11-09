@@ -48,7 +48,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Executable documentation for the RequestSlot delivery lock boundary. */
+/**
+ * Executable documentation for the RequestSlot delivery lock boundary.
+ */
 class RequestLifecycleDeliveryLockContractTest {
 
     private FlexlbConfig config;

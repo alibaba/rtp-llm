@@ -10,9 +10,6 @@ from typing import NoReturn
 import torch
 from rtp_llm.models_py.modules.dsv4.hc.base import HCHeadBase, HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
-    tk_mhc_head,
-    tk_mhc_head_fused,
-    tk_mhc_head_fused_enabled,
     tk_mhc_post,
     tk_mhc_pre,
 )

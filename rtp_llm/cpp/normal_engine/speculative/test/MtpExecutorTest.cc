@@ -889,10 +889,9 @@ public:
         executor->setSampler(std::move(fake_sampler));
     }
 
-    void runTargetOnlyPrefillScenario(RoleType                   role_type,
-                                      bool                       enable_ffn_disaggregate,
-                                      bool                       simulate_multi_dp,
-                                      bool                       expect_draft_forward,
+    void runTargetOnlyPrefillScenario(RoleType     role_type,
+                                      bool         simulate_multi_dp,
+                                      bool         expect_draft_forward,
                                       bool                       simulate_cp_mutation   = false,
                                       std::optional<std::string> deferred_capture_error = std::nullopt,
                                       SpeculativeType            sp_type                = SP_TYPE_MTP,
@@ -904,16 +903,11 @@ public:
             test_config.dspark_mask_token_id = 0;
         }
         auto components                               = createMtpExecutorComponents(test_config);
-        components.executor->enable_ffn_disaggregate_ = enable_ffn_disaggregate;
         if (simulate_multi_dp) {
             ASSERT_EQ(components.executor->parallelism_config_.tp_size, 1);
             components.executor->parallelism_config_.dp_size    = 2;
             components.executor->parallelism_config_.world_size = 2;
         }
-        if (simulate_cp_mutation) {
-            components.executor->parallelism_config_.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
-        }
-
         auto target_only_stream = createContextStream(
             components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3}, 0);
         EXPECT_TRUE(target_only_stream->generateConfig()->isPrefillOnly());
@@ -947,12 +941,6 @@ public:
         if (deferred_capture_error.has_value()) {
             components.fake_target_model->setDeferredHiddenStateCaptureError(*deferred_capture_error);
         }
-        if (simulate_cp_mutation) {
-            components.fake_target_model->setPostForwardInputMutation(torch::tensor({0, 1}, torch::kInt32),
-                                                                      torch::tensor({2}, torch::kInt32));
-            components.fake_target_model->setMtpTargetHiddenStates(target_output.all_hidden_states.narrow(0, 0, 2));
-            EXPECT_TRUE(components.fake_target_model->hasMtpTargetHiddenBuffer());
-        }
 
         if (expect_draft_forward) {
             auto draft_input                  = GptModelInputs{};
@@ -961,8 +949,7 @@ public:
             draft_input.input_lengths         = torch::tensor({4}, torch::kInt32);
             draft_input.prefix_lengths        = torch::tensor({0}, torch::kInt32);
             draft_input.lm_output_indexes     = torch::tensor({3}, torch::kInt32);
-            draft_input.last_hidden_states    = simulate_cp_mutation ? target_output.all_hidden_states.narrow(0, 0, 2) :
-                                                                       target_output.all_hidden_states;
+            draft_input.last_hidden_states = target_output.all_hidden_states;
             draft_input.skip_lm_head          = true;
             draft_input.capture_hidden_states = false;
             draft_forward_model->setInputs({draft_input});
@@ -1030,91 +1017,6 @@ public:
 
     void runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers = true);
     void runSingleBatchDecodeScenario(bool with_prefill_only);
-
-    void setupAlignmentModel(FakeModel*          model,
-                             vector<string>&     forward_trace,
-                             const string&       label,
-                             const vector<bool>& target_verify) {
-        model->setSkipInputCheck(true);
-        model->setExpectedTargetVerify(target_verify);
-        model->setForwardTrace(&forward_trace, label);
-        model->setOutputs(vector<GptModelOutputs>(target_verify.size()));
-    }
-
-    void runEmptyAlignmentScenario(RoleType              role_type,
-                                   SpeculativeType       sp_type,
-                                   size_t                propose_step,
-                                   bool                  is_ffn_rank,
-                                   const vector<string>& expected_trace,
-                                   const vector<size_t>& expected_counts,
-                                   const vector<bool>&   target_verify,
-                                   const vector<bool>&   draft_verify,
-                                   const vector<bool>&   commit_verify = {},
-                                   const string&         commit_label  = "") {
-        ASSERT_EQ(expected_counts.size(), 3);
-        MtpExecutorTestConfig test_config;
-        test_config.role_type         = role_type;
-        test_config.gen_num_per_cycle = propose_step;
-        test_config.sp_type           = sp_type;
-        if (sp_type == SP_TYPE_DSPARK) {
-            test_config.dspark_mask_token_id = 0;
-        }
-        auto components                               = createMtpExecutorComponents(test_config);
-        components.executor->enable_ffn_disaggregate_ = true;
-        components.executor->parallelism_config_.ffn_disaggregate_config.enable_ffn_disaggregate = true;
-        components.executor->parallelism_config_.ffn_disaggregate_config.is_ffn_rank             = is_ffn_rank;
-
-        vector<string> forward_trace;
-        auto*          target_model        = components.fake_target_model.get();
-        auto*          draft_model         = components.fake_draft_model.get();
-        auto*          draft_sampler       = components.fake_fast_topk_sampler.get();
-        auto*          speculative_sampler = components.fake_speculative_sampler.get();
-        auto*          target_sampler      = components.fake_sampler.get();
-        setupAlignmentModel(target_model, forward_trace, "target", target_verify);
-        setupAlignmentModel(
-            draft_model, forward_trace, sp_type == SP_TYPE_DSPARK ? "dspark_propose" : "draft", draft_verify);
-
-        // Exercise both commit installation paths, including the separately owned SP prefill slot.
-        std::shared_ptr<FakeModel> sp_prefill_draft_model;
-        FakeModel*                 commit_model = nullptr;
-        if (commit_label == "sp_prefill_draft") {
-            sp_prefill_draft_model = std::make_shared<FakeModel>();
-            commit_model           = sp_prefill_draft_model.get();
-        } else if (!commit_verify.empty()) {
-            commit_model = components.fake_draft_prefill_model.get();
-        }
-        if (commit_model) {
-            setupAlignmentModel(commit_model, forward_trace, commit_label, commit_verify);
-        }
-        std::unique_ptr<FakeModel> draft_prefill_model;
-        if (commit_model && !sp_prefill_draft_model) {
-            draft_prefill_model = std::move(components.fake_draft_prefill_model);
-        }
-        setupFakeModels(components.executor.get(),
-                        std::move(components.fake_target_model),
-                        std::move(components.fake_draft_model),
-                        std::move(components.fake_fast_topk_sampler),
-                        std::move(components.fake_speculative_sampler),
-                        std::move(components.fake_sampler),
-                        std::move(draft_prefill_model));
-        if (sp_prefill_draft_model) {
-            components.executor->sp_prefill_draft_model_ = sp_prefill_draft_model;
-        }
-
-        ASSERT_TRUE(components.executor->process({}).ok());
-        EXPECT_EQ(forward_trace, expected_trace);
-        EXPECT_EQ(target_model->forwardCount(), expected_counts[0]);
-        EXPECT_EQ(draft_model->forwardCount(), expected_counts[1]);
-        EXPECT_FALSE(target_model->hasPendingTargetVerify());
-        EXPECT_FALSE(draft_model->hasPendingTargetVerify());
-        if (commit_model) {
-            EXPECT_EQ(commit_model->forwardCount(), expected_counts[2]);
-            EXPECT_FALSE(commit_model->hasPendingTargetVerify());
-        }
-        EXPECT_EQ(draft_sampler->forwardCount(), 0);
-        EXPECT_EQ(speculative_sampler->forwardCount(), 0);
-        EXPECT_EQ(target_sampler->forwardCount(), 0);
-    }
 
     GptModelOutputs createRandomGptModelOutputs(size_t token_num, size_t vocab_size, size_t hidden_size) {
         auto output              = GptModelOutputs{};
@@ -1366,163 +1268,48 @@ TEST_F(MtpExecutorTest, testCpPrefillDoesNotFallBackWithoutHiddenBuffers) {
 }
 
 TEST_F(MtpExecutorTest, testTargetOnlyRunsTargetPrefillWithoutDraftOrSampling) {
-    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, false);
-}
-
-TEST_F(MtpExecutorTest, testTargetOnlyRunsDraftPrefillForFfnAlignmentWithoutSampling) {
-    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, false, true);
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false);
 }
 
 TEST_F(MtpExecutorTest, testTargetOnlyRunsDraftPrefillForMultiDpAlignmentWithoutSampling) {
-    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, true, true);
-}
-
-TEST_F(MtpExecutorTest, testDeferredCaptureErrorCompletesFfnDraftAlignmentBeforeFailing) {
-    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, false, true, false, "injected capture failure");
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, true);
 }
 
 TEST_F(MtpExecutorTest, testDeferredCaptureErrorDoesNotOverwriteExistingStreamError) {
     runTargetOnlyPrefillScenario(
-        RoleType::PREFILL, false, false, false, false, "injected capture failure", SP_TYPE_MTP, true);
+        RoleType::PREFILL, false, false, false, "injected capture failure", SP_TYPE_MTP, true);
 }
 
 TEST_F(MtpExecutorTest, testDeferredCaptureErrorCompletesMultiDpDraftAlignmentBeforeFailing) {
-    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, true, true, false, "injected capture failure");
-}
-
-TEST_F(MtpExecutorTest, testTargetOnlyRestoresCpInputBeforeDummyDraftShift) {
-    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, false, true, true);
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, true, false, "injected capture failure");
 }
 
 TEST_F(MtpExecutorTest, testDSparkTargetOnlySingleDpRunsCommitBeforeDispatch) {
-    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, true, false, std::nullopt, SP_TYPE_DSPARK);
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, true, false, std::nullopt, SP_TYPE_DSPARK);
 }
 
 TEST_F(MtpExecutorTest, testDSparkDeferredCaptureErrorSingleDpRunsCommitBeforeFailing) {
     runTargetOnlyPrefillScenario(
-        RoleType::PREFILL, false, false, true, false, "injected dspark capture failure", SP_TYPE_DSPARK);
-}
-
-TEST_F(MtpExecutorTest, testDSparkTargetOnlyFfnAlignmentRunsCommitDraftAfterTargetWithoutSampling) {
-    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, false, true, false, std::nullopt, SP_TYPE_DSPARK);
+        RoleType::PREFILL, false, true, false, "injected dspark capture failure", SP_TYPE_DSPARK);
 }
 
 TEST_F(MtpExecutorTest, testDSparkTargetOnlyMultiDpAlignmentRunsCommitDraftAfterTargetWithoutSampling) {
-    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, true, true, false, std::nullopt, SP_TYPE_DSPARK);
-}
-
-TEST_F(MtpExecutorTest, testDSparkTargetOnlyRestoresCpInputBeforeCommitAlignment) {
-    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, false, true, true, std::nullopt, SP_TYPE_DSPARK);
-}
-
-TEST_F(MtpExecutorTest, testDSparkDeferredCaptureErrorCompletesFfnCommitAlignmentBeforeFailing) {
-    runTargetOnlyPrefillScenario(
-        RoleType::PREFILL, true, false, true, false, "injected dspark capture failure", SP_TYPE_DSPARK);
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, true, false, std::nullopt, SP_TYPE_DSPARK);
 }
 
 TEST_F(MtpExecutorTest, testDSparkDeferredCaptureErrorCompletesMultiDpCommitAlignmentBeforeFailing) {
     runTargetOnlyPrefillScenario(
-        RoleType::PREFILL, false, true, true, false, "injected dspark capture failure", SP_TYPE_DSPARK);
+        RoleType::PREFILL, true, true, false, "injected dspark capture failure", SP_TYPE_DSPARK);
 }
 
-TEST_F(MtpExecutorTest, testEmptyFfnPrefillRunsAlignmentForwardsWithoutSampling) {
-    runEmptyAlignmentScenario(
-        RoleType::PREFILL, SP_TYPE_MTP, 4, true, {"target", "draft"}, {1, 1, 0}, {false}, {false});
+TEST_F(MtpExecutorTest, testTargetOnlyEarlyReturnRequiresSingleDpReplica) {
+    EXPECT_TRUE(MtpExecutor::canEarlyReturnTargetOnlyPrefill(1));
+    EXPECT_FALSE(MtpExecutor::canEarlyReturnTargetOnlyPrefill(2));
 }
 
-TEST_F(MtpExecutorTest, testEmptyFfnDecodeRunsAlignmentOrderAndUsesSpPrefillDraft) {
-    runEmptyAlignmentScenario(RoleType::DECODE,
-                              SP_TYPE_MTP,
-                              4,
-                              true,
-                              {"draft", "draft", "draft", "target", "sp_prefill_draft"},
-                              {1, 3, 1},
-                              {true},
-                              {false, false, false},
-                              {false},
-                              "sp_prefill_draft");
-}
-
-TEST_F(MtpExecutorTest, testEmptyFfnDecodeOneStepRunsTargetThenCommitWithoutDraftProposal) {
-    runEmptyAlignmentScenario(
-        RoleType::DECODE, SP_TYPE_MTP, 1, true, {"target", "commit"}, {1, 0, 1}, {true}, {}, {false}, "commit");
-}
-
-TEST_F(MtpExecutorTest, testDSparkEmptyFfnDecodeOneStepRunsProposeTargetCommitAlignment) {
-    runEmptyAlignmentScenario(RoleType::DECODE,
-                              SP_TYPE_DSPARK,
-                              1,
-                              true,
-                              {"dspark_propose", "target", "dspark_commit"},
-                              {1, 1, 1},
-                              {true},
-                              {true},
-                              {true},
-                              "dspark_commit");
-}
-
-TEST_F(MtpExecutorTest, testDSparkEmptyFfnDecodeMultiStepStillRunsOneProposeTargetCommitAlignment) {
-    runEmptyAlignmentScenario(RoleType::DECODE,
-                              SP_TYPE_DSPARK,
-                              4,
-                              true,
-                              {"dspark_propose", "target", "dspark_commit"},
-                              {1, 1, 1},
-                              {true},
-                              {true},
-                              {true},
-                              "dspark_commit");
-}
-
-TEST_F(MtpExecutorTest, testDecodeAlignmentRequiresCacheManager) {
-    MtpExecutorTestConfig test_config;
-    auto                  components = createMtpExecutorComponents(test_config);
-    components.executor->cache_manager_.reset();
-
-    GptModelInputs model_input;
-    try {
-        const auto status = components.executor->runDecodeAlignmentOnly(model_input);
-        FAIL() << "expected decode alignment to reject a null cache manager, got: " << status.ToString();
-    } catch (const std::exception& e) {
-        EXPECT_NE(std::string(e.what()).find("decode alignment requires cache manager"), std::string::npos);
-    }
-}
-
-TEST_F(MtpExecutorTest, testEmptyPdfusionAttentionRunsPrefillAndDecodeAlignmentWithoutSampling) {
-    runEmptyAlignmentScenario(RoleType::PDFUSION,
-                              SP_TYPE_MTP,
-                              4,
-                              false,
-                              {"target", "draft", "draft", "draft", "draft", "target", "draft"},
-                              {2, 5, 0},
-                              {false, true},
-                              {false, false, false, false, false});
-}
-
-TEST_F(MtpExecutorTest, testTargetOnlyEarlyReturnRequiresSingleDpReplicaWithoutFfn) {
-    EXPECT_TRUE(MtpExecutor::canEarlyReturnTargetOnlyPrefill(1, false));
-    EXPECT_FALSE(MtpExecutor::canEarlyReturnTargetOnlyPrefill(2, false));
-    EXPECT_FALSE(MtpExecutor::canEarlyReturnTargetOnlyPrefill(1, true));
-}
-
-TEST_F(MtpExecutorTest, testAlignmentOnlyDecodeSyncsOnceAcrossAllRanks) {
-    // The alignment-only branch is the single collective site for an empty
-    // FFN-disaggregate decode. Rank 0 must not also use the rank-0 pre-sync.
-    const std::vector<std::pair<bool, bool>> cases = {
-        {true, false},  // alignment-only: sync only in the shared branch
-        {false, true},  // normal decode: retain the rank-0 pre-sync
-    };
-    for (const auto& [alignment_only, should_sync_on_rank0] : cases) {
-        EXPECT_EQ(MtpExecutor::shouldSyncDecodeInputOnRank0(alignment_only), should_sync_on_rank0)
-            << "alignment_only=" << alignment_only;
-    }
-}
-
-TEST_F(MtpExecutorTest, testPdfusionEmptyDecodeDoesNotSkipFfnAlignment) {
-    EXPECT_TRUE(MtpExecutor::shouldSkipEmptyDecode(true, false));
-    EXPECT_FALSE(MtpExecutor::shouldSkipEmptyDecode(true, true));
-    EXPECT_FALSE(MtpExecutor::shouldSkipEmptyDecode(false, false));
-    EXPECT_FALSE(MtpExecutor::shouldSkipEmptyDecode(false, true));
+TEST_F(MtpExecutorTest, testEmptyDecodeIsSkipped) {
+    EXPECT_TRUE(MtpExecutor::shouldSkipEmptyDecode(true));
+    EXPECT_FALSE(MtpExecutor::shouldSkipEmptyDecode(false));
 }
 
 TEST_F(MtpExecutorTest, testHiddenStateCapturePolicy) {
@@ -1592,7 +1379,7 @@ TEST_F(MtpExecutorTest, testDpFakeDecodePreservesDecodeWorkContract) {
     EXPECT_EQ(fake_decode_stream->getSPOutputBuffer()->propose_step, propose_step);
 }
 
-TEST_F(MtpExecutorTest, testDecodeRoleRejectsPrefillOnlyWithoutModelWorkWhenFfnDisabled) {
+TEST_F(MtpExecutorTest, testDecodeRoleRejectsPrefillOnlyWithoutModelWork) {
     MtpExecutorTestConfig test_config;
     test_config.role_type = RoleType::DECODE;
     auto components       = createMtpExecutorComponents(test_config);

@@ -15,15 +15,12 @@ from rtp_llm.ops import (
     CacheStoreConfig,
     ConcurrencyConfig,
     DashScGrpcConfig,
-    DeviceResourceConfig,
     EPLBConfig,
-    FfnDisAggregateConfig,
     FMHAConfig,
     GrammarConfig,
     GrpcConfig,
     HWKernelConfig,
     MiscellaneousConfig,
-    ModelSpecificConfig,
     MoeConfig,
     ParallelismConfig,
     PDSepConfig,
@@ -59,6 +56,9 @@ class ServerConfig:
         self.ip: str = ""
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
         self.shutdown_timeout: int = 600  # graceful drain budget (seconds)
+        self.startup_health_check_timeout: int = (
+            3600  # startup readiness bound (seconds)
+        )
         self.monitor_interval: int = 1  # Monitor interval in seconds
         self.frontend_pre_stop_drain_seconds: float = 120.0
         self.dash_sc_grpc_pre_stop_drain_seconds: float = 120.0
@@ -714,7 +714,6 @@ class PyEnvConfigs:
         self.quantization_config: QuantizationConfig = QuantizationConfig()
         self.eplb_config: EPLBConfig = EPLBConfig()
         self.kv_cache_config: KVCacheConfig = KVCacheConfig()
-        self.device_resource_config: DeviceResourceConfig = DeviceResourceConfig()
         self.runtime_config: RuntimeConfig = RuntimeConfig()
         # EngineConfig has been merged into RuntimeConfig and ModelConfig
         # warm_up, warm_up_with_loss, and model_warm_up are in RuntimeConfig
@@ -723,8 +722,6 @@ class PyEnvConfigs:
         self.role_config: RoleConfig = RoleConfig()
         self.pd_separation_config: PDSepConfig = PDSepConfig()
         self.parallelism_config: ParallelismConfig = ParallelismConfig()
-        self.ffn_disaggregate_config: FfnDisAggregateConfig = FfnDisAggregateConfig()
-        self.model_specific_config = ModelSpecificConfig()
         self.fmha_config = FMHAConfig()
         self.misc_config = PyMiscellaneousConfig()
         self.concurrency_config = ConcurrencyConfig()
@@ -732,13 +729,6 @@ class PyEnvConfigs:
         self.master_config: MasterConfig = MasterConfig()
         self.jit_config = JITConfig()
         self.py_hw_kernel_config: HWKernelConfig = HWKernelConfig()
-        # Preserve whether FT_DISABLE_CUSTOM_AR was explicitly provided.  The
-        # legacy HWKernelConfig field has a concrete default, while Python
-        # custom-AllReduce implementations intentionally have their own
-        # defaults.  Keeping this value tri-state lets an explicit CLI/env
-        # override reach those implementations without changing the default
-        # behavior of servers that do not configure the switch.
-        self.ft_disable_custom_ar_override: Optional[bool] = None
         self.sp_config = SpeculativeExecutionConfig()
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()
@@ -769,18 +759,12 @@ class PyEnvConfigs:
             "[quantization_config]\n" + self.quantization_config.to_string() + "\n\n"
             "[eplb_config]\n" + self.eplb_config.to_string() + "\n\n"
             "[kv_cache_config]\n" + self.kv_cache_config.to_string() + "\n\n"
-            "[device_resource_config]\n"
-            + self.device_resource_config.to_string()
-            + "\n\n"
             "[sparse_config]\n" + self.sparse_config.to_string() + "\n\n"
             "[embedding_config]\n" + self.embedding_config.to_string() + "\n\n"
             "[role_config]\n" + self.role_config.to_string() + "\n\n"
             "[pd_separation_config]\n" + self.pd_separation_config.to_string() + "\n\n"
             "[parallelism_distributed_config]\n"
             + self.parallelism_distributed_config.to_string()
-            + "\n\n"
-            "[model_specific_config]\n"
-            + self.model_specific_config.to_string()
             + "\n\n"
             "[fmha_config]\n" + self.fmha_config.to_string() + "\n\n"
             "[misc_config]\n" + self.misc_config.to_string() + "\n\n"

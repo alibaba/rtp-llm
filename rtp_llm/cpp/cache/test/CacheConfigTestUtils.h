@@ -362,7 +362,7 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
 inline void setDefaultKvCacheSpec(ModelConfig& model_config) {
     KVCacheSpecDesc desc;
     desc.tag = "default";
-    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
+    if (model_config.attn_config.use_mla) {
         desc.cache_type = KVCacheSpecType::MultiHeadLatentAttention;
     } else {
         desc.cache_type = KVCacheSpecType::MultiHeadAttention;

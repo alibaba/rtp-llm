@@ -113,30 +113,6 @@ def init_vit_group_args(parser, vit_config):
         help="VIT是否和主进程进行分离",
     )
     vit_group.add_argument(
-        "--vit_trt",
-        env_name="VIT_TRT",
-        bind_to=(vit_config, "vit_trt"),
-        type=int,
-        default=0,
-        help="VIT是否使用TRT库",
-    )
-    vit_group.add_argument(
-        "--trt_cache_enabled",
-        env_name="TRT_CACHE_ENABLED",
-        bind_to=(vit_config, "trt_cache_enabled"),
-        type=int,
-        default=0,
-        help="是否使用TRT_CACHE",
-    )
-    vit_group.add_argument(
-        "--trt_cache_path",
-        env_name="TRT_CACHE_PATH",
-        bind_to=(vit_config, "trt_cache_path"),
-        type=str,
-        default=os.path.join(os.getcwd(), "trt_cache"),
-        help="TRT_CACHE路径",
-    )
-    vit_group.add_argument(
         "--download_headers",
         env_name="DOWNLOAD_HEADERS",
         bind_to=(vit_config, "download_headers"),
@@ -231,14 +207,6 @@ def init_vit_group_args(parser, vit_config):
         type=str2bool,
         default=False,
         help="是否开启biencoder预处理",
-    )
-    vit_group.add_argument(
-        "--extra_input_in_mm_embedding",
-        env_name="EXTRA_INPUT_IN_MM_EMBEDDING",
-        bind_to=(vit_config, "extra_input_in_mm_embedding"),
-        type=str,
-        default=None,
-        help='在多模态嵌入中使用额外的输入，可选值"INDEX"',
     )
     vit_group.add_argument(
         "--mm_timeout_ms",

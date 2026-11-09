@@ -13,6 +13,9 @@ import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 
+/**
+ * Builds the HTTP cross-origin filter used by the WebFlux server.
+ */
 @Configuration
 public class CorsConfig {
 

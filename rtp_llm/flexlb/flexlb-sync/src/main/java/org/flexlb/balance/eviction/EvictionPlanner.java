@@ -16,17 +16,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** Plans resource reclamation for the exact selected Decode endpoint. */
+/**
+ * Plans resource reclamation for the exact selected Decode endpoint.
+ */
 public final class EvictionPlanner {
-
-    private EvictionPlanner() {}
-
-    /** A decode plan never mixes Master-local removal with Engine Cancel. */
-    private enum VictimOwnership {
-        MASTER_LOCAL,
-        ENGINE_CANCEL
-    }
-
     // ==================== Decode reserved-only eviction (design doc 11-13) ====================
 
     /**
@@ -51,6 +44,8 @@ public final class EvictionPlanner {
                             v -> PriorityCostFunction.kvBucket(v.kvTokens()),
                             Comparator.reverseOrder())
                     .thenComparing(DecodeRequestView::requestId);
+
+    private EvictionPlanner() {}
 
     /**
      * Plan the cheapest decode eviction that clears the incoming request's
@@ -377,65 +372,6 @@ public final class EvictionPlanner {
                 null);
     }
 
-    /** Both physical prompt supply and the complete-output budget must be satisfied. */
-    private static DecodeVictimSet selectKvVictims(
-            int incomingPriority,
-            long inputKvTokens,
-            long inputAndMaxOutputKvTokens,
-            DecodeEndpointSnapshot ep,
-            CapacityRelease priorRelease,
-            Set<String> excludedVictimIds,
-            VictimOwnership ownership) {
-        List<DecodeRequestView> candidates =
-                lowerPriorityCandidates(incomingPriority, ep, excludedVictimIds, true, ownership);
-        candidates.sort(DECODE_KV_ORDER);
-        List<DecodeRequestView> victims = new ArrayList<>();
-        long cost = 0L;
-        CapacityRelease release = CapacityRelease.NONE;
-        PriorityHarmProfile.Builder harmProfile = PriorityHarmProfile.builder();
-        for (DecodeRequestView candidate : candidates) {
-            if (!ep.capacity()
-                    .evaluate(
-                            ep.usage(),
-                            inputKvTokens,
-                            inputAndMaxOutputKvTokens,
-                            priorRelease.plus(release))
-                    .needsKv()) {
-                break;
-            }
-            victims.add(candidate);
-            release = release.plus(candidate.placementRelease());
-            long stageCost = PriorityCostFunction.g(candidate.phase());
-            long lengthCost = PriorityCostFunction.lengthWasteCost(candidate.kvTokens());
-            long victimCost =
-                    PriorityCostFunction.saturatedMultiply(
-                            PriorityCostFunction.saturatedMultiply(
-                                    PriorityCostFunction.f(candidate.priority()), stageCost),
-                            lengthCost);
-            cost = PriorityCostFunction.saturatedAdd(cost, victimCost);
-            harmProfile.add(
-                    candidate.priority(),
-                    BigInteger.valueOf(PriorityCostFunction.H_DECODE_KV_FULL)
-                            .multiply(BigInteger.valueOf(stageCost))
-                            .multiply(BigInteger.valueOf(lengthCost)));
-        }
-        if (ep.capacity()
-                .evaluate(
-                        ep.usage(),
-                        inputKvTokens,
-                        inputAndMaxOutputKvTokens,
-                        priorRelease.plus(release))
-                .needsKv()) {
-            return DecodeVictimSet.fail("insufficient_releasable_kv");
-        }
-        return new DecodeVictimSet(
-                victims,
-                harmProfile.build(),
-                PriorityCostFunction.saturatedMultiply(PriorityCostFunction.H_DECODE_KV_FULL, cost),
-                release,
-                null);
-    }
-
     /**
      * Only strictly lower-priority entries are candidates. The
      * base pool is the reserved (engine-unconfirmed) entries; both confirmed
@@ -502,14 +438,6 @@ public final class EvictionPlanner {
         }
     }
 
-    private static Set<String> victimIds(List<DecodeRequestView> victims) {
-        Set<String> ids = new java.util.HashSet<>(victims.size());
-        for (DecodeRequestView victim : victims) {
-            ids.add(victim.requestId());
-        }
-        return ids;
-    }
-
     private static DecodeEvictionProposal buildDecodeProposal(
             DecodeEndpointSnapshot ep,
             String evictionCase,
@@ -525,6 +453,81 @@ public final class EvictionPlanner {
         PlanCost cost = new PlanCost(harmProfile, victims.size(), tieBreak);
         return new DecodeEvictionProposal(
                 ep.endpointId(), victims, evictionCase, totalCost, freedKvTokens, cost);
+    }
+
+    /** Both physical prompt supply and the complete-output budget must be satisfied. */
+    private static DecodeVictimSet selectKvVictims(
+            int incomingPriority,
+            long inputKvTokens,
+            long inputAndMaxOutputKvTokens,
+            DecodeEndpointSnapshot ep,
+            CapacityRelease priorRelease,
+            Set<String> excludedVictimIds,
+            VictimOwnership ownership) {
+        List<DecodeRequestView> candidates =
+                lowerPriorityCandidates(incomingPriority, ep, excludedVictimIds, true, ownership);
+        candidates.sort(DECODE_KV_ORDER);
+        List<DecodeRequestView> victims = new ArrayList<>();
+        long cost = 0L;
+        CapacityRelease release = CapacityRelease.NONE;
+        PriorityHarmProfile.Builder harmProfile = PriorityHarmProfile.builder();
+        for (DecodeRequestView candidate : candidates) {
+            if (!ep.capacity()
+                    .evaluate(
+                            ep.usage(),
+                            inputKvTokens,
+                            inputAndMaxOutputKvTokens,
+                            priorRelease.plus(release))
+                    .needsKv()) {
+                break;
+            }
+            victims.add(candidate);
+            release = release.plus(candidate.placementRelease());
+            long stageCost = PriorityCostFunction.g(candidate.phase());
+            long lengthCost = PriorityCostFunction.lengthWasteCost(candidate.kvTokens());
+            long victimCost =
+                    PriorityCostFunction.saturatedMultiply(
+                            PriorityCostFunction.saturatedMultiply(
+                                    PriorityCostFunction.f(candidate.priority()), stageCost),
+                            lengthCost);
+            cost = PriorityCostFunction.saturatedAdd(cost, victimCost);
+            harmProfile.add(
+                    candidate.priority(),
+                    BigInteger.valueOf(PriorityCostFunction.H_DECODE_KV_FULL)
+                            .multiply(BigInteger.valueOf(stageCost))
+                            .multiply(BigInteger.valueOf(lengthCost)));
+        }
+        if (ep.capacity()
+                .evaluate(
+                        ep.usage(),
+                        inputKvTokens,
+                        inputAndMaxOutputKvTokens,
+                        priorRelease.plus(release))
+                .needsKv()) {
+            return DecodeVictimSet.fail("insufficient_releasable_kv");
+        }
+        return new DecodeVictimSet(
+                victims,
+                harmProfile.build(),
+                PriorityCostFunction.saturatedMultiply(PriorityCostFunction.H_DECODE_KV_FULL, cost),
+                release,
+                null);
+    }
+
+    private static Set<String> victimIds(List<DecodeRequestView> victims) {
+        Set<String> ids = new java.util.HashSet<>(victims.size());
+        for (DecodeRequestView victim : victims) {
+            ids.add(victim.requestId());
+        }
+        return ids;
+    }
+
+    /**
+     * A decode plan never mixes Master-local removal with Engine Cancel.
+     */
+    private enum VictimOwnership {
+        MASTER_LOCAL,
+        ENGINE_CANCEL
     }
 
     /**

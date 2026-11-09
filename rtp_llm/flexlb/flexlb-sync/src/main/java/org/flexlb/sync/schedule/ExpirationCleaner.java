@@ -19,25 +19,16 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Periodically evicts workers that have stopped sending WorkerStatus reports
- * (crash, network partition, OOM kill, etc.) from the routing tables.
- *
- * <p>Once the last successful status report is older than
- * {@code workerRegistry.health.statusStaleAfterMs}, the cleaner retires the
- * exact WorkerStatus generation and its endpoint together. Removing both
- * owners prevents routing from retaining a worker which service discovery no
- * longer observes.
- *
- * <p>Runs at {@code workerRegistry.health.cleanupIntervalMs} (default 3 seconds)
- * via Spring {@link Scheduled}. The configured stale timeout is deliberately longer than
- * one status RPC timeout so a single delayed poll does not evict a live worker.
+ * Periodically detaches exact worker generations whose successful status reports exceed the
+ * configured stale timeout. It removes all expired workers before waiting for endpoint retirement,
+ * preventing one slow cleanup from delaying other removals.
  */
 @Component
 public class ExpirationCleaner {
-
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final long workerTimeoutUs;
+
     private final CacheAwareService cacheAwareService;
     private final WorkerDirectory workerDirectory;
 
@@ -49,6 +40,17 @@ public class ExpirationCleaner {
         this.cacheAwareService = Objects.requireNonNull(cacheAwareService, "cacheAwareService");
         this.workerDirectory = Objects.requireNonNull(workerDirectory, "workerDirectory");
         this.workerTimeoutUs = resolveWorkerTimeoutUs(configService);
+    }
+
+    @Scheduled(
+            fixedRateString =
+                    "#{@configService.loadBalanceConfig().workerRegistry.health.cleanupIntervalMs}")
+    public void cleanExpiredWorkers() {
+        List<PendingRetirement> retirements = new ArrayList<>();
+        for (RoleType role : RoleType.values()) {
+            retirements.addAll(beginExpiredRetirements(workerDirectory.statusSnapshot(role), role));
+        }
+        completeRetirements(retirements);
     }
 
     /**
@@ -67,17 +69,6 @@ public class ExpirationCleaner {
                         .getHealth()
                         .getStatusStaleAfterMs();
         return configMs * 1000L;
-    }
-
-    @Scheduled(
-            fixedRateString =
-                    "#{@configService.loadBalanceConfig().workerRegistry.health.cleanupIntervalMs}")
-    public void cleanExpiredWorkers() {
-        List<PendingRetirement> retirements = new ArrayList<>();
-        for (RoleType role : RoleType.values()) {
-            retirements.addAll(beginExpiredRetirements(workerDirectory.statusSnapshot(role), role));
-        }
-        completeRetirements(retirements);
     }
 
     /** Phase one: close every expired routing gate without waiting on drains. */

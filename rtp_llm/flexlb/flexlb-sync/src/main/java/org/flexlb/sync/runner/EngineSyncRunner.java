@@ -27,6 +27,10 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
 
+/**
+ * Reconciles one role's discovered workers, acquires exact poll leases and submits status or cache
+ * polling work. Rejected submissions release the leases they did not transfer.
+ */
 public class EngineSyncRunner implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");

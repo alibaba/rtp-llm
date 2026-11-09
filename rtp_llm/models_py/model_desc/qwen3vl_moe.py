@@ -34,7 +34,6 @@ class Qwen3VLMoeModel(GptModelBase):
         max_generate_batch_size: int,
         fmha_config=None,
         py_hw_kernel_config=None,
-        device_resource_config=None,
     ):
         super().__init__(
             model_config,
@@ -43,7 +42,6 @@ class Qwen3VLMoeModel(GptModelBase):
             max_generate_batch_size=max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=device_resource_config,
         )
         # Determine attention_type from model_config.attn_config.use_mla
         self.embed_tokens = Embedding(

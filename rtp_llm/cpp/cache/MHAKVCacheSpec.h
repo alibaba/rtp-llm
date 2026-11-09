@@ -52,6 +52,7 @@ struct MHAKVCacheSpec: public KVCacheSpec {
                                 static_cast<int>(desc.cache_type));
 
         spec->per_token_k_elems = static_cast<size_t>(local_kv_heads) * attn.size_per_head;
+        spec->head_dim_         = attn.size_per_head;
         if (spec->dtype_ == DataType::TYPE_INT8 || spec->dtype_ == DataType::TYPE_FP8_E4M3) {
             spec->per_token_k_scale_bytes = static_cast<size_t>(local_kv_heads) * sizeof(float);
         }
@@ -60,6 +61,14 @@ struct MHAKVCacheSpec: public KVCacheSpec {
 
     size_t block_size() const override {
         return k_block_size() + v_block_size();
+    }
+
+    uint32_t localKvHeads() const {
+        return local_kv_head_num;
+    }
+    // Zero denotes an unspecified layout, which requires whole-block copies.
+    uint32_t headDim() const {
+        return head_dim_;
     }
 
     size_t k_block_size() const override {
@@ -113,8 +122,9 @@ struct MHAKVCacheSpec: public KVCacheSpec {
 private:
     DataType dtype_ = DataType::TYPE_INVALID;
 
-    size_t per_token_k_elems       = 0;
-    size_t per_token_k_scale_bytes = 0;
+    size_t   per_token_k_elems       = 0;
+    size_t   per_token_k_scale_bytes = 0;
+    uint32_t head_dim_               = 0;
 };
 
 }  // namespace rtp_llm

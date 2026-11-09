@@ -42,6 +42,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks that gRPC drain waits for a full quiet period and completion of accepted calls.
+ */
 class FlexlbGrpcDrainTest {
     @Test
     void acceptedRpcCanEnterServiceAndFinishAfterQuietPeriod() throws Exception {
@@ -204,6 +207,9 @@ class FlexlbGrpcDrainTest {
         }
     }
 
+    /**
+     * Starts drain while retaining control of when accepted RPCs finish.
+     */
     private static class Fixture implements AutoCloseable {
         final LinkedBlockingQueue<StreamObserver<FlexlbScheduleResponsePB>> responses =
                 new LinkedBlockingQueue<>();
@@ -211,6 +217,7 @@ class FlexlbGrpcDrainTest {
         final FlexlbGrpcServer grpc;
         final Server server;
         final ManagedChannel channel;
+
         Thread drainer;
 
         Fixture(long quietMs) throws Exception {
@@ -256,6 +263,14 @@ class FlexlbGrpcDrainTest {
                             .build();
         }
 
+        public void close() throws Exception {
+            channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+            server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+            if (drainer != null) {
+                drainer.join(3000);
+            }
+        }
+
         com.google.common.util.concurrent.ListenableFuture<FlexlbScheduleResponsePB> request(
                 long id) {
             return FlexlbServiceGrpc.newFutureStub(channel)
@@ -278,14 +293,6 @@ class FlexlbGrpcDrainTest {
                                 interruptedOnReturn.set(Thread.currentThread().isInterrupted());
                             });
             drainer.start();
-        }
-
-        public void close() throws Exception {
-            channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
-            server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
-            if (drainer != null) {
-                drainer.join(3000);
-            }
         }
     }
 }

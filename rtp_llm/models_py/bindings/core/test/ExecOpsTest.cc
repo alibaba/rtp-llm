@@ -271,24 +271,14 @@ static void expectMlaPhysicalViewUsesExplicitStride(const torch::Tensor& kv_cach
 class ExecOpsTest: public ::testing::Test {
 protected:
     static void SetUpTestSuite() {
-        initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false,
-                    /*enable_comm_overlap=*/false,
-                    MlaOpsType::AUTO);
+        initRuntime(/*device_id=*/0);
     }
 };
 
 TEST_F(ExecOpsTest, testInitRuntimeIdempotent) {
     // Second call should be a no-op (already initialized).
-    auto mla = initRuntime(0, false, false, MlaOpsType::AUTO);
-    (void)mla;
+    initRuntime(0);
     ASSERT_TRUE(isRuntimeInitialized());
-}
-
-TEST_F(ExecOpsTest, testGetEnableCommOverlap) {
-    // Default DeviceResourceConfig has enable_comm_overlap = some value;
-    // just verify the accessor works.
-    (void)getEnableCommOverlap();
 }
 
 TEST_F(ExecOpsTest, testRuntimeSyncAndCheck) {

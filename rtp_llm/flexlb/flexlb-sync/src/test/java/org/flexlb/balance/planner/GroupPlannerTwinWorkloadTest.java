@@ -13,7 +13,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Twin r6/r7 inputs applied to the real pure planner, with a frozen clock. */
+/**
+ * Twin r6/r7 inputs applied to the real pure planner, with a frozen clock.
+ */
 class GroupPlannerTwinWorkloadTest {
 
     @Test

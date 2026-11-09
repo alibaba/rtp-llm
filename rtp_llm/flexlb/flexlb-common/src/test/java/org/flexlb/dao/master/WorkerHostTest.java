@@ -9,6 +9,9 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+/**
+ * Checks worker host parsing and address representation.
+ */
 class WorkerHostTest {
     @ParameterizedTest
     @NullAndEmptySource

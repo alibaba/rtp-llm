@@ -38,8 +38,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks server span parenting, business-error recording and trace-context propagation through gRPC
+ * callbacks.
+ */
 class GrpcTraceInterceptorTest {
-
     private RecordingExporter exporter;
     private OpenTelemetrySdk sdk;
 
@@ -429,11 +432,6 @@ class GrpcTraceInterceptorTest {
         return new Terminals(listener, handlerCall.get(), handlerContext.get());
     }
 
-    private record Terminals(
-            ServerCall.Listener<Object> listener,
-            ServerCall<Object, Object> handlerCall,
-            io.opentelemetry.context.Context handlerContext) {}
-
     private static String stringAttr(SpanData span, String key) {
         return span.getAttributes().get(io.opentelemetry.api.common.AttributeKey.stringKey(key));
     }
@@ -442,6 +440,14 @@ class GrpcTraceInterceptorTest {
         return span.getAttributes().get(io.opentelemetry.api.common.AttributeKey.longKey(key));
     }
 
+    private record Terminals(
+            ServerCall.Listener<Object> listener,
+            ServerCall<Object, Object> handlerCall,
+            io.opentelemetry.context.Context handlerContext) {}
+
+    /**
+     * Captures spans for assertions about server trace behavior.
+     */
     private static final class RecordingExporter implements SpanExporter {
         private final List<SpanData> spans = new ArrayList<>();
 

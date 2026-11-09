@@ -125,6 +125,16 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types.numel() : 0;
     shape_hints[GptModelInputIndex::kvCacheUpdateCopyNum] =
         inputs.kv_cache_update_mapping.defined() ? inputs.kv_cache_update_mapping.size(0) : 0;
+    RTP_LLM_CHECK_WITH_INFO(
+        !inputs.kv_cache_copy_token_lengths.defined()
+            || (inputs.kv_cache_copy_token_lengths.device().is_cpu()
+                && inputs.kv_cache_copy_token_lengths.scalar_type() == torch::kInt32
+                && inputs.kv_cache_copy_token_lengths.dim() == 1 && inputs.kv_cache_copy_token_lengths.is_contiguous()
+                && inputs.kv_cache_update_mapping.defined()
+                && inputs.kv_cache_copy_token_lengths.numel() == inputs.kv_cache_update_mapping.size(0)),
+        "KV copy live lengths must be CPU int32 [copy count]");
+    shape_hints[GptModelInputIndex::kvCacheCopyTokenLengths] =
+        inputs.kv_cache_copy_token_lengths.defined() ? inputs.kv_cache_copy_token_lengths.numel() : 0;
     shape_hints[GptModelInputIndex::lmOutputIndexes] =
         inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.numel() : 0;
     shape_hints[GptModelInputIndex::comboPositionIds] =
@@ -349,10 +359,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         static_cast<size_t>(checkedHint(GptModelInputIndex::kernelSeqSizePerBlock, "kernelSeqSizePerBlock"));
     if (inputs.skip_run) {
         inputs.kv_cache_group_tags.clear();
-        inputs.kv_cache_block_id        = torch::Tensor();
-        inputs.kv_cache_kernel_block_id = torch::Tensor();
-        inputs.kv_cache_group_types     = torch::Tensor();
-        inputs.kv_cache_update_mapping  = torch::Tensor();
+        inputs.kv_cache_block_id           = torch::Tensor();
+        inputs.kv_cache_kernel_block_id    = torch::Tensor();
+        inputs.kv_cache_group_types        = torch::Tensor();
+        inputs.kv_cache_update_mapping     = torch::Tensor();
+        inputs.kv_cache_copy_token_lengths = torch::Tensor();
         return;
     }
 
@@ -498,6 +509,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         } else {
             inputs.kv_cache_kernel_block_id = torch::Tensor();
         }
+        const auto live_count = checkedHint(GptModelInputIndex::kvCacheCopyTokenLengths, "kvCacheCopyTokenLengths");
+        inputs.kv_cache_copy_token_lengths =
+            live_count ? allocBuf(rtp_llm::DataType::TYPE_INT32, {live_count}) : torch::Tensor();
         const auto copy_count          = checkedHint(GptModelInputIndex::kvCacheUpdateCopyNum, "kvCacheUpdateCopyNum");
         inputs.kv_cache_update_mapping = copy_count ?
                                              allocBuf(rtp_llm::DataType::TYPE_INT32,
@@ -630,6 +644,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         collect(wire_group_types);
     }
     collect(wire_copy_mapping);
+    collect(inputs.kv_cache_copy_token_lengths);
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
     collect(inputs.lm_output_indexes);
@@ -791,10 +806,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         max_blocks || max_kernel_blocks || group_types_len || shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum];
     if (!has_cache_payload) {
         inputs.kv_cache_group_tags.clear();
-        inputs.kv_cache_block_id        = torch::Tensor();
-        inputs.kv_cache_kernel_block_id = torch::Tensor();
-        inputs.kv_cache_group_types     = torch::Tensor();
-        inputs.kv_cache_update_mapping  = torch::Tensor();
+        inputs.kv_cache_block_id           = torch::Tensor();
+        inputs.kv_cache_kernel_block_id    = torch::Tensor();
+        inputs.kv_cache_group_types        = torch::Tensor();
+        inputs.kv_cache_update_mapping     = torch::Tensor();
+        inputs.kv_cache_copy_token_lengths = torch::Tensor();
     } else {
         RTP_LLM_CHECK_WITH_INFO(legacy_untagged_cache || kv_cache_group_num == static_cast<int64_t>(sorted_rows.size()),
                                 "TP cache payload group count differs from configured identities (groups)");

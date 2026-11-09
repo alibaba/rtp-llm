@@ -46,7 +46,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Final batch admission, transport handoff, and completion-correlation contract. */
+/**
+ * Final batch admission, transport handoff, and completion-correlation contract.
+ */
 class BatchDeliveryStrategyTest {
 
     @ParameterizedTest
@@ -471,6 +473,9 @@ class BatchDeliveryStrategyTest {
         assertTrue(fixture.slots.remainingWorkMsAt(item, 2_000L).isEmpty());
     }
 
+    /**
+     * Creates request items and delivery dependencies for batch preparation tests.
+     */
     private static final class Fixture {
         private final TestBatchSubmission submission = new TestBatchSubmission();
         private final TestEndpointCapabilities capabilities = new TestEndpointCapabilities();

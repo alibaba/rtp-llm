@@ -1,5 +1,8 @@
 package org.flexlb.constant;
 
+/**
+ * Names the environment inputs used to construct the deployment identity.
+ */
 public class DeploymentIdentityConstants {
 
     public static final String SPECTRUM_WORKSPACE_ID = "SPECTRUM_WORKSPACE_ID";

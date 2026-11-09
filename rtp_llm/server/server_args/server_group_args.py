@@ -47,14 +47,6 @@ def init_server_group_args(parser, server_config, distribute_config):
         help="前端服务器序号",
     )
     server_group.add_argument(
-        "--vit_server_id",
-        env_name="VIT_SERVER_ID",
-        bind_to=(server_config, "vit_server_id"),
-        type=int,
-        default=0,
-        help="VIT服务器序号",
-    )
-    server_group.add_argument(
         "--worker_info_port_num",
         env_name="WORKER_INFO_PORT_NUM",
         bind_to=[
@@ -70,8 +62,19 @@ def init_server_group_args(parser, server_config, distribute_config):
         env_name="SHUTDOWN_TIMEOUT",
         bind_to=(server_config, "shutdown_timeout"),
         type=int,
-        default=-1,
-        help="Process manager shutdown timeout in seconds. Non-positive values are accepted for compatibility and bounded to the default timeout.",
+        default=600,
+        help="Shutdown drain budget in seconds; SIGKILL follows once exhausted. "
+        "-1 opts out (unbounded drain); other non-positive values fall back to the default.",
+    )
+    server_group.add_argument(
+        "--startup_health_check_timeout",
+        env_name="STARTUP_HEALTH_CHECK_TIMEOUT",
+        bind_to=(server_config, "startup_health_check_timeout"),
+        type=int,
+        default=3600,
+        help="Total bound for the startup health checks (restores the historical "
+        "one-hour pipe wait; slow cold loads stay well under it). -1 opts out "
+        "(unbounded wait); other non-positive values fall back to the default.",
     )
     server_group.add_argument(
         "--frontend_pre_stop_drain_seconds",

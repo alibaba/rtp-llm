@@ -18,33 +18,18 @@ import java.util.function.Function;
 
 /**
  * Thread-safe keyed cache for reusable gRPC channels.
+ *
+ * <p>Lookups reuse or create a keyed channel. Replacement and discovery cleanup retire the exact
+ * old channels; shutdown closes all retained channels and waits according to the supplied
+ * deadline.
  */
 @Slf4j
 public class GrpcChannelPool<K> {
-
     private final ConcurrentMap<K, PooledChannel> channels = new ConcurrentHashMap<>();
     private final Function<K, ManagedChannel> channelFactory;
 
     public GrpcChannelPool(Function<K, ManagedChannel> channelFactory) {
         this.channelFactory = Objects.requireNonNull(channelFactory, "channelFactory");
-    }
-
-    public PooledChannel getOrCreate(K key) {
-        PooledChannel current = channels.get(key);
-        if (current != null && current.isUsable()) {
-            return current;
-        }
-        return channels.compute(
-                key,
-                (ignored, existing) -> {
-                    if (existing != null && existing.isUsable()) {
-                        return existing;
-                    }
-                    if (existing != null) {
-                        existing.shutdown();
-                    }
-                    return create(key);
-                });
     }
 
     public PooledChannel replace(K key, PooledChannel old) {
@@ -66,6 +51,24 @@ public class GrpcChannelPool<K> {
 
         replacement.shutdown();
         return getOrCreate(key);
+    }
+
+    public PooledChannel getOrCreate(K key) {
+        PooledChannel current = channels.get(key);
+        if (current != null && current.isUsable()) {
+            return current;
+        }
+        return channels.compute(
+                key,
+                (ignored, existing) -> {
+                    if (existing != null && existing.isUsable()) {
+                        return existing;
+                    }
+                    if (existing != null) {
+                        existing.shutdown();
+                    }
+                    return create(key);
+                });
     }
 
     /**
@@ -116,6 +119,9 @@ public class GrpcChannelPool<K> {
         return new PooledChannel(String.valueOf(key), channel);
     }
 
+    /**
+     * Closes a cached channel once and bounds its termination wait before forcing shutdown.
+     */
     public static final class PooledChannel {
 
         private final String description;

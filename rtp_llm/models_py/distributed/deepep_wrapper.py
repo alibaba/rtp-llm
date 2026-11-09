@@ -154,13 +154,6 @@ class DeepepWrapperConfig:
         parallelism_config = config_adapter.parallelism_config
         moe_config = config_adapter.moe_config
 
-        ffn_config = parallelism_config.ffn_disaggregate_config
-        if ffn_config is not None and ffn_config.enable_ffn_disaggregate:
-            raise RuntimeError(
-                "enable_ffn_disaggregate needs the ACCL-EP M2N DeepEP buffer and is "
-                "not supported by the official DeepEP provider"
-            )
-
         return cls(
             # Parallelism parameters
             ep_rank=parallelism_config.ep_rank,

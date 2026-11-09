@@ -4,6 +4,9 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonValue;
 import lombok.Getter;
 
+/**
+ * Distinguishes reported task execution phases independently of the worker role.
+ */
 @Getter
 public enum TaskPhase {
     PENDING("pending"),

@@ -4,7 +4,6 @@
 
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -44,15 +43,12 @@ struct EngineInitParams {
                      const KVCacheConfig&               kv_cache_config,
                      const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                      const HWKernelConfig&              hw_kernel_config,
-                     const DeviceResourceConfig&        device_resource_config,
                      const MoeConfig&                   moe_config,
-                     const ModelSpecificConfig&         model_specific_config,
                      const SpeculativeExecutionConfig&  sp_config,
                      const CacheStoreConfig&            cache_store_config,
                      const MiscellaneousConfig&         misc_config,
                      const ArpcConfig&                  arpc_config,
                      const GrpcConfig&                  grpc_config,
-                     const FfnDisAggregateConfig&       ffn_disaggregate_config,
                      const VitConfig&                   vit_config,
                      rtp_llm::Weights&&                 gpt_weights,
                      py::object                         py_model       = py::none(),
@@ -70,23 +66,18 @@ struct EngineInitParams {
         kv_cache_config(kv_cache_config),
         profiling_debug_logging_config(profiling_debug_logging_config),
         hw_kernel_config(hw_kernel_config),
-        device_resource_config(device_resource_config),
         moe_config(moe_config),
-        model_specific_config(model_specific_config),
         sp_config(sp_config),
         cache_store_config(cache_store_config),
         misc_config(misc_config),
         arpc_config(arpc_config),
         grpc_config(grpc_config),
-        ffn_disaggregate_config(ffn_disaggregate_config),
         vit_config(vit_config),
         gpt_weights(std::move(gpt_weights)),
         py_model(py_model),
         py_eplb(py_eplb),
         py_sp_model(py_sp_model),
         weight_manager(weight_manager) {
-        StaticConfig::user_ft_core_dump_on_exception = profiling_debug_logging_config.ft_core_dump_on_exception;
-        StaticConfig::user_disable_pdl               = misc_config.disable_pdl;
         // default 1 minute and 1000
         ParallelInfo& global_parallel_info = ParallelInfo::globalParallelInfo();
         global_parallel_info.setTpSize(parallelism_config.tp_size);
@@ -112,16 +103,13 @@ struct EngineInitParams {
     KVCacheConfig                kv_cache_config;
     ProfilingDebugLoggingConfig  profiling_debug_logging_config;
     HWKernelConfig               hw_kernel_config;
-    DeviceResourceConfig         device_resource_config;
     MoeConfig                    moe_config;
-    ModelSpecificConfig          model_specific_config;
     SpeculativeExecutionConfig   sp_config;
     CacheStoreConfig             cache_store_config;
     MiscellaneousConfig          misc_config;
     ArpcConfig                   arpc_config;
     GrpcConfig                   grpc_config;
     GrammarConfig                grammar_config;
-    FfnDisAggregateConfig        ffn_disaggregate_config;
     VitConfig                    vit_config;
     rtp_llm::Weights             gpt_weights;
     py::object                   py_model;

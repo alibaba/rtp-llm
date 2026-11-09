@@ -21,18 +21,12 @@ For both layouts, HC pre/post/head preserve the leading token layout exactly:
 
 from __future__ import annotations
 
-from enum import Enum
 from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-
-
-class HCMode(str, Enum):
-    TILELANG = "tilelang"
-    FALLBACK = "fallback"
 
 
 class HCUnitBase(nn.Module):

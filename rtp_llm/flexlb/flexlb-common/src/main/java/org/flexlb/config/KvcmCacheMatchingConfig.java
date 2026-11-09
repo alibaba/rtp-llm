@@ -5,6 +5,9 @@ import lombok.Setter;
 
 import java.util.List;
 
+/**
+ * Configures KVCM RPC deadlines, health transitions and query retry limits.
+ */
 @Getter
 @Setter
 public final class KvcmCacheMatchingConfig implements CacheMatchingConfig {

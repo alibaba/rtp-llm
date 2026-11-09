@@ -44,6 +44,10 @@ import static org.mockito.Mockito.mock;
 class SchedulingErrorCodeMatrixTest {
     private static final long REQUEST_ID = 71_001L;
 
+    static Stream<String> modes() {
+        return Stream.concat(Stream.of("DIRECT"), queuedModes());
+    }
+
     static Stream<String> queuedModes() {
         return Stream.of("FIFO", "PRIORITY")
                 .flatMap(
@@ -58,10 +62,6 @@ class SchedulingErrorCodeMatrixTest {
                                                                                         + decision
                                                                                         + "/"
                                                                                         + dispatch)));
-    }
-
-    static Stream<String> modes() {
-        return Stream.concat(Stream.of("DIRECT"), queuedModes());
     }
 
     static Stream<String> batchModes() {
@@ -117,6 +117,10 @@ class SchedulingErrorCodeMatrixTest {
         }
     }
 
+    static Stream<Arguments> prefillPriorityCases() {
+        return directPriorityCases().filter(arguments -> (int) arguments.get()[0] > 0);
+    }
+
     static Stream<Arguments> directPriorityCases() {
         return Stream.of(
                 Arguments.of(70, 8430, HIGHER_PRIORITY_AHEAD, "higher-priority requests are ahead"),
@@ -127,10 +131,6 @@ class SchedulingErrorCodeMatrixTest {
                         RESOURCE_EXHAUSTED,
                         "admission capacity is temporarily exhausted"),
                 Arguments.of(0, 8432, UNSPECIFIED, "blocker priority attribution is unavailable"));
-    }
-
-    static Stream<Arguments> prefillPriorityCases() {
-        return directPriorityCases().filter(arguments -> (int) arguments.get()[0] > 0);
     }
 
     @ParameterizedTest(name = "DIRECT: Prefill owner P{0} -> {1}")
@@ -309,6 +309,9 @@ class SchedulingErrorCodeMatrixTest {
         assertTrue(response.getErrorMessage().contains(message), response.getErrorMessage());
     }
 
+    /**
+     * Owns the worker and scheduler resources used by scheduling error-code scenarios.
+     */
     private static final class Fixture implements AutoCloseable {
         final AutoTpmE2EHarness harness;
         final RouteService service;
@@ -344,6 +347,11 @@ class SchedulingErrorCodeMatrixTest {
             service = new RouteService(harness.scheduler, mock(TheoryCacheHitReporter.class));
         }
 
+        @Override
+        public void close() throws Exception {
+            harness.close();
+        }
+
         BalanceContext context() {
             return harness.context(REQUEST_ID, 50);
         }
@@ -359,11 +367,6 @@ class SchedulingErrorCodeMatrixTest {
                         endpoint.reserveUnqueued(
                                 pin, Long.toString(REQUEST_ID - 1), 0L, 0L, priority));
             }
-        }
-
-        @Override
-        public void close() throws Exception {
-            harness.close();
         }
     }
 }

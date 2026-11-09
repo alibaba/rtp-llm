@@ -7,6 +7,9 @@ import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+/**
+ * Checks priority ordering and FIFO behavior for equal priorities.
+ */
 class PriorityOrderingTest {
 
     private static final Comparator<Node> REFERENCE =
