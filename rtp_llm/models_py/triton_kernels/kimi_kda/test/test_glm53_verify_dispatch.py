@@ -20,7 +20,7 @@ class _LaunchRecorder:
 
 
 @pytest.mark.parametrize("tokens", range(1, 8))
-@pytest.mark.parametrize("batch", [1, 47, 48, 49, 64, 96])
+@pytest.mark.parametrize("batch", [1, 15, 16, 24, 32, 47, 48, 49, 64, 65, 96])
 @pytest.mark.parametrize("capability", [(8, 9), (10, 0), (10, 3)])
 @pytest.mark.parametrize("fast", [False, True])
 def test_verify_geometry_and_fallback(tokens, batch, capability, fast):
@@ -52,7 +52,10 @@ def test_verify_geometry_and_fallback(tokens, batch, capability, fast):
         expected = (16, 1, 2)
     if tokens == 4 and batch <= 64 and capability == (10, 0):
         expected = (16, 1, 3 if batch == 48 else 2)
-    if fast and batch == 48 and 2 <= tokens <= 6 and capability == (10, 0):
+    fast_verify_shape = (batch == 48 and 2 <= tokens <= 6) or (
+        tokens == 5 and 16 <= batch <= 64
+    )
+    if fast and fast_verify_shape and capability == (10, 0):
         expected = (16, 1, 3)
     actual = recorder.kwargs
     assert (actual["BV"], actual["num_warps"], actual["num_stages"]) == expected

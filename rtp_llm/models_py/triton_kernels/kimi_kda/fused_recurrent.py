@@ -29,7 +29,7 @@ def _verify_launch_config():
         or config[2] not in (1, 2, 3)
     ):
         raise ValueError("unsupported GLM53_KDA_VERIFY_CONFIG")
-    logger.info("GLM53 batch-48 KDA verify launch config: %s", config)
+    logger.info("GLM53 KDA verify launch config: %s", config)
     return config
 
 
@@ -349,8 +349,7 @@ def fused_recurrent_kda_fwd(
     if (
         _FAST_VERIFY_ENABLED
         and decode_low_warps
-        and N == 48
-        and 2 <= T <= 6
+        and ((N == 48 and 2 <= T <= 6) or (T == 5 and 16 <= N <= 64))
         and cu_seqlens is None
         and block_map is not None
         and H == HV == 64
