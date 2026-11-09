@@ -1,15 +1,132 @@
+diff --git a/aiter/ops/flydsl/kernels/gdr_decode.py b/aiter/ops/flydsl/kernels/gdr_decode.py
+--- a/aiter/ops/flydsl/kernels/gdr_decode.py
++++ b/aiter/ops/flydsl/kernels/gdr_decode.py
+@@ -605,6 +605,8 @@
+     # Unused here; a parameter so it joins the cache key.
+     WAVES_PER_EU: int = 0,
+     min_live_slot: int = 0,
++    separate_read: bool = False,
++    compact_record: bool = False,
+ ):
+     """Gated delta rule over a speculative draft window.
+ 
+@@ -628,7 +630,7 @@
+     NO_STATE_WRITE = bool(disable_state_update)
+     assert not TREE or SNAPSHOT, "the EAGLE tree is the snapshot mode's"
+     assert not TREE or len(inter_strides) == 5, "tree needs a snapshot buffer"
+-    SAVE_INTER = SNAPSHOT and len(inter_strides) == 5
++    SAVE_INTER = SNAPSHOT and len(inter_strides) == 5 and not compact_record
+ 
+     # Only an f32 snapshot reloads exactly; a narrower one rounds.
+     LOSSLESS_SNAPSHOT = TREE and "f32" in inter_dtype
+@@ -766,7 +768,12 @@
+         if const_expr(CHAIN):
+             token_slots = [_slot_at(t) for t in range_constexpr(seq_length)]
+ 
+-        if const_expr(CHAIN):
++        if const_expr(CHAIN and separate_read):
++            read_view = _gview(inter_indices, None, (batch_size, 1), (1, 1))
++            read_slot = fx.Int32(
++                _load_vec(cp_i32, fx.slice(read_view, (b_i, None)), 1, fx.Int32)
++            )
++        elif const_expr(CHAIN):
+             nacc_view = _gview(num_accepted, None, (batch_size, 1), (1, 1))
+             read_token = fx.Int32(
+                 _load_vec(cp_i32, fx.slice(nacc_view, (b_i, None)), 1, fx.Int32)
+@@ -852,6 +859,18 @@
+                 vec_shape,
+                 (state_strides[1], state_strides[2], VALUES_PER_THREAD_K, 1),
+             )
++
++        if const_expr(compact_record):
++            record_view = _gview(inter_buffer, None,
++                (batch_size, seq_length, num_v_heads, 3, head_k_dim, 1),
++                (seq_length*num_v_heads*3*head_k_dim,
++                 num_v_heads*3*head_k_dim, 3*head_k_dim, head_k_dim, 1, 1))
++            cp_record = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
++            cp_record_vec = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
++            record_k_view = _gview(inter_buffer, None,
++                (batch_size, seq_length, num_v_heads, 3, head_k_dim//VALUES_PER_THREAD_K, VALUES_PER_THREAD_K),
++                (seq_length*num_v_heads*3*head_k_dim,
++                 num_v_heads*3*head_k_dim, 3*head_k_dim, head_k_dim, VALUES_PER_THREAD_K, 1))
+ 
+         # One descriptor for the sequence's whole record: a step is a layout
+         # dimension, since the window's own span stays well inside 32 bits.
+@@ -1114,6 +1133,20 @@
+                     for ki in range_constexpr(WARP_TILE_K_ITERS):
+                         sq_vecs[ki] = sq_vecs[ki] * scale_vec
+ 
++                if const_expr(compact_record):
++                    def _record_key(_sq=sq_i, _decay=r_g):
++                        for ki in range_constexpr(WARP_TILE_K_ITERS):
++                            kv = warp_k_vec_start + ki * WARP_TILE_K
++                            _store_vec(cp_record_vec,
++                                fx.slice(record_k_view, (b_i, _sq, hv_i, 0, kv//VALUES_PER_THREAD_K, None)),
++                                sk_vecs[ki], VALUES_PER_THREAD_K, fx.Float32)
++                        if warp_k_vec_start == 0:
++                            _store_vec(cp_record,
++                                fx.slice(record_view, (b_i, _sq, hv_i, 2, 0, None)),
++                                _decay, 1, fx.Float32)
++                    if global_v_start == 0:
++                        _record_key()
++
+                 dot_kq_vec = fx.Vector.from_elements(
+                     [f32_0 for i in range_constexpr(VALUES_PER_THREAD_K)], fx.Float32
+                 )
+@@ -1182,8 +1215,15 @@
+ 
+                     if warp_k_vec_start == 0:
+                         _write_q()
+-
+-                if const_expr(CHAIN):
++                    if const_expr(compact_record):
++                        def _record_u(_u=v_new, _gv=global_v_i, _sq=sq_i):
++                            _store_vec(cp_record,
++                                fx.slice(record_view, (b_i, _sq, hv_i, 1, _gv, None)),
++                                _u, 1, fx.Float32)
++                        if warp_k_vec_start == 0:
++                            _record_u()
++
++                if const_expr(CHAIN and (not compact_record or sq_i == seq_length - 1)):
+                     write_slot = token_slots[sq_i]
+                     write_view = _state_at(write_slot)
+ 
+@@ -1208,8 +1248,12 @@
+                                     state_num,
+                                 )
+ 
+-                    if write_slot >= min_live_slot:
+-                        _checkpoint()
++                    if const_expr(compact_record):
++                        if (write_slot >= min_live_slot) & (write_slot != read_slot):
++                            _checkpoint()
++                    else:
++                        if write_slot >= min_live_slot:
++                            _checkpoint()
+ 
+                 if const_expr(snapshot != "no"):
+                     # The tree rereads a step when it walks to a child; nothing
 diff --git a/aiter/ops/flydsl/linear_attention_kernels.py b/aiter/ops/flydsl/linear_attention_kernels.py
 --- a/aiter/ops/flydsl/linear_attention_kernels.py
 +++ b/aiter/ops/flydsl/linear_attention_kernels.py
-@@ -830,6 +830,7 @@
+@@ -763,6 +763,7 @@
+     has_tree,
+     disable_state_update,
+     stream,
++    compact_record=False,
+ ):
+     batch_size, seq_length, num_k_heads, head_k_dim = query.shape
+     num_v_heads = value.shape[-2]
+@@ -830,6 +831,8 @@
                  has_tree,
                  disable_state_update,
                  min_live_slot=min_live_slot,
 +                separate_read=(mode == MTP_MODE_CHAIN and inter_indices is not None),
++                compact_record=compact_record,
                  **kwargs_,
              )
  
-@@ -1067,3 +1068,19 @@
+@@ -1067,3 +1070,36 @@
          disable_state_update=disable_state_update,
          stream=stream,
      )
@@ -29,28 +146,20 @@ diff --git a/aiter/ops/flydsl/linear_attention_kernels.py b/aiter/ops/flydsl/lin
 +                inter_buffer=None, use_qk_l2norm=use_qk_l2norm, min_live_slot=0,
 +                has_tree=False, disable_state_update=False,
 +                stream=_mtp_stream(query, stream))
-diff --git a/aiter/ops/flydsl/kernels/gdr_decode.py b/aiter/ops/flydsl/kernels/gdr_decode.py
---- a/aiter/ops/flydsl/kernels/gdr_decode.py
-+++ b/aiter/ops/flydsl/kernels/gdr_decode.py
-@@ -605,6 +605,7 @@
-     # Unused here; a parameter so it joins the cache key.
-     WAVES_PER_EU: int = 0,
-     min_live_slot: int = 0,
-+    separate_read: bool = False,
- ):
-     """Gated delta rule over a speculative draft window.
- 
-@@ -766,7 +767,12 @@
-         if const_expr(CHAIN):
-             token_slots = [_slot_at(t) for t in range_constexpr(seq_length)]
- 
--        if const_expr(CHAIN):
-+        if const_expr(CHAIN and separate_read):
-+            read_view = _gview(inter_indices, None, (batch_size, 1), (1, 1))
-+            read_slot = fx.Int32(
-+                _load_vec(cp_i32, fx.slice(read_view, (b_i, None)), 1, fx.Int32)
-+            )
-+        elif const_expr(CHAIN):
-             nacc_view = _gview(num_accepted, None, (batch_size, 1), (1, 1))
-             read_token = fx.Int32(
-                 _load_vec(cp_i32, fx.slice(nacc_view, (b_i, None)), 1, fx.Int32)
++
++
++def flydsl_gdr_mtp_hybrid(q,k,v,a,b,bias,alog,state,out,reads,writes,record):
++    """Save the full-accept state and FP32 records for partial-accept replay."""
++    _mtp_common_checks(q,k,v,a,b,bias,alog,state,out)
++    if state.dtype != torch.float32 or state.shape[-2:] != (128, 128):
++        raise ValueError("Hybrid replay requires FP32 128x128 state")
++    if (record.shape != (*q.shape[:2],v.shape[-2],3,128)
++            or record.dtype != torch.float32 or not record.is_contiguous()
++            or record.device != q.device):
++        raise ValueError("Invalid hybrid replay record buffer")
++    _require_index("reads",reads,q,dims=1)
++    _require_index("writes",writes,q,dims=2,layout="[batch, token]",covers=True)
++    _mtp_launch(mode=MTP_MODE_CHAIN, query=q,key=k,value=v,a=a,b=b,dt_bias=bias,A_log=alog,
++        state=state,out=out,state_indices=writes,num_accepted=None,inter_indices=reads,parent_tokens=None,
++        inter_buffer=record,use_qk_l2norm=True,min_live_slot=0,has_tree=False,disable_state_update=False,
++        stream=_mtp_stream(q,None),compact_record=True)

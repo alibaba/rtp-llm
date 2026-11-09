@@ -20,17 +20,33 @@ diff --git a/atom/model_ops/attention_gdn.py b/atom/model_ops/attention_gdn.py
              g_spec = None
              beta_spec = None
              g_non_spec = None
-@@ -398,7 +401,13 @@
+@@ -398,7 +401,29 @@
  
          # 2.1: Process the multi-query part
          if spec_sequence_masks is not None:
 -            if use_replayssm:
 +            if use_flydsl_mtp:
 +                from atom.model_ops.fla_ops.gdn_flydsl import mtp_rtp
-+                core_attn_out_spec, last_recurrent_state = mtp_rtp(
-+                    query_spec, key_spec, value_spec, a, b, ssm_state,
-+                    self.A_log, self.dt_bias, gdn_metadata.rtp_flydsl_read_indices,
-+                    spec_state_indices_tensor, core_attn_out[:query_spec.shape[1]])
++                hybrid_records = getattr(gdn_metadata, "rtp_hybrid_records", None)
++                if hybrid_records is not None:
++                    from aiter.ops.flydsl.linear_attention_kernels import flydsl_gdr_mtp_hybrid
++                    batch, width = spec_state_indices_tensor.shape
++                    output = core_attn_out[:query_spec.shape[1]]
++                    flydsl_gdr_mtp_hybrid(
++                        query_spec.reshape(batch,width,*query_spec.shape[-2:]),
++                        key_spec.reshape(batch,width,*key_spec.shape[-2:]),
++                        value_spec.reshape(batch,width,*value_spec.shape[-2:]),
++                        a.reshape(batch,width,-1), b.reshape(batch,width,-1),
++                        self.dt_bias,self.A_log,ssm_state.transpose(-1,-2),
++                        output.reshape(batch,width,*value_spec.shape[-2:]),
++                        gdn_metadata.rtp_flydsl_read_indices,spec_state_indices_tensor,
++                        hybrid_records[self.layer_num])
++                    core_attn_out_spec, last_recurrent_state = output.unsqueeze(0), None
++                else:
++                    core_attn_out_spec, last_recurrent_state = mtp_rtp(
++                        query_spec, key_spec, value_spec, a, b, ssm_state,
++                        self.A_log, self.dt_bias, gdn_metadata.rtp_flydsl_read_indices,
++                        spec_state_indices_tensor, core_attn_out[:query_spec.shape[1]])
 +            elif use_replayssm:
                  # No per-draft state snapshot: the kernel rebuilds the state
                  # from the checkpoint plus the committed records, so the
@@ -376,12 +392,14 @@ diff --git a/atom/plugin/rtpllm/models/qwen4_exp.py b/atom/plugin/rtpllm/models/
  
  
  class _Qwen4ExpAttnPyObj(_ATOMAttnPyObj):
-@@ -77,10 +83,13 @@
+@@ -77,10 +83,15 @@
                  raise ValueError("Qwen4Exp MTP requires positive request capacity")
              self._rtp_mtp_request_capacity = max_batch
          self._atom_attn_pyobj = _Qwen4ExpAttnPyObj(self)
 +        from atom.plugin.rtpllm.utils.replayssm_rtp import install_runtime
 +        install_runtime(self)
++        from atom.plugin.rtpllm.utils.replay_hybrid import install_runtime as install_hybrid
++        install_hybrid(self)
  
      def copy_plugin_cache_blocks(self, mapping: torch.Tensor, tags: list[str]) -> None:
 -        """All QSA and PLE pools are RTP-owned tagged regions, copied natively."""
@@ -392,7 +410,7 @@ diff --git a/atom/plugin/rtpllm/models/qwen4_exp.py b/atom/plugin/rtpllm/models/
  
      def prepare_fmha_impl(self, inputs, is_cuda_graph: bool = False):
          tagged = inputs.attention_inputs
-@@ -720,6 +729,9 @@
+@@ -720,6 +731,9 @@
              for desc in layer:
                  if desc.cache_type == KVCacheSpecType.LINEAR:
                      desc.dtype = DataType.TYPE_BF16
@@ -452,7 +470,7 @@ diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/
              for layer_num, layer in layer_maps[0].items():
                  state = caches[f"layer_{layer_num}"].v_cache
                  k_dim, v_dim = state.shape[-2:]
-@@ -738,6 +753,22 @@
+@@ -738,6 +753,24 @@
                  gdn_metadata.ssm_conv_state_len = (
                      int(model.config.linear_conv_kernel_dim) - 1
                  )
@@ -470,12 +488,14 @@ diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/
 +                )
 +            if gdn_metadata is not None and getattr(gdn_metadata, "rtp_flydsl_mtp", False):
 +                gdn_metadata.rtp_flydsl_read_indices = gdn_metadata.spec_state_indices_in_tensor[:, 0].contiguous()
++            from atom.plugin.rtpllm.utils.replay_hybrid import prepare_metadata as prepare_hybrid
++            prepare_hybrid(runtime, gdn_metadata, forward_context.kv_cache_data, resolved_layer_maps[0])
 +            from atom.plugin.rtpllm.utils.replayssm_rtp import prepare_metadata
 +            prepare_metadata(runtime, gdn_metadata)
              cls._configure_gdn_backends(
                  metadata.gdn_metadata,
                  resolved_layer_maps[0],
-@@ -929,6 +960,33 @@
+@@ -929,6 +962,33 @@
                      raw_slots.copy_(candidate_slots)
                  else:
                      raw_slots = candidate_slots
@@ -509,7 +529,7 @@ diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/
              metadata.qsa_metadata = Qwen4ExpQSAMetadata(
                  block_tables=full_blocks,
                  slot_mapping=slots,
-@@ -950,6 +1008,8 @@
+@@ -950,6 +1010,8 @@
                  state_page_size=int(runtime.kv_cache.get_seq_size_per_block("indexer_state")),
                  state_read_pages=state_read_pages,
                  state_candidate_pages=state_candidate_pages,
@@ -518,6 +538,96 @@ diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/
              )
              tagged_inputs = getattr(inputs, "attention_inputs_by_tag", {})
              ple_inputs = tagged_inputs.get("ple_conv_state")
+diff --git a/atom/plugin/rtpllm/utils/replay_hybrid.py b/atom/plugin/rtpllm/utils/replay_hybrid.py
+new file mode 100644
+--- /dev/null
++++ b/atom/plugin/rtpllm/utils/replay_hybrid.py
+@@ -0,0 +1,85 @@
++"""Experimental final-state fast path with replay only for partial acceptance."""
++import os
++from types import MethodType
++import torch
++import triton
++import triton.language as tl
++
++@triton.jit
++def _commit(R,PTR,READ,WRITE,ACCEPT,HV:tl.constexpr,D:tl.constexpr,Q:tl.constexpr,CAP:tl.constexpr,BV:tl.constexpr,STATE_STRIDE:tl.constexpr):
++    n=tl.program_id(0);lh=tl.program_id(1);tile=tl.program_id(2)
++    layer=lh//HV;h=lh%HV
++    count=tl.load(ACCEPT+n);src=tl.load(READ+n);last=tl.load(WRITE+n*Q+Q-1)
++    if (count>0)&(src>=0)&((count<Q)|(src==last)):
++        state=tl.load(PTR+layer).to(tl.pointer_type(tl.float32))
++        vv=tile*BV+tl.arange(0,BV);kk=tl.arange(0,D)
++        value=tl.load(state+src.to(tl.int64)*STATE_STRIDE+h*D*D+vv[:,None]*D+kk[None,:],vv[:,None]<D,0)
++        for t in tl.static_range(Q):
++            base=(((layer*CAP+n)*Q+t)*HV+h)*3*D
++            k=tl.load(R+base+kk);u=tl.load(R+base+D+vv,vv<D,0);decay=tl.load(R+base+2*D)
++            value=tl.where(t<count,value*decay+u[:,None]*k[None,:],value)
++        dst=tl.load(WRITE+n*Q+count-1)
++        tl.store(state+dst.to(tl.int64)*STATE_STRIDE+h*D*D+vv[:,None]*D+kk[None,:],value,(vv[:,None]<D)&(dst>=0))
++
++def enabled(runtime):
++    return os.getenv('ATOM_RTP_REPLAY_HYBRID','0')=='1' and bool(getattr(runtime._rtp_model_config,'atom_qwen4_exp_mtp_target',False))
++
++def prepare_metadata(runtime,metadata,caches,layers):
++    if not enabled(runtime) or metadata is None or not getattr(metadata,'rtp_flydsl_mtp',False):return
++    keys=tuple(sorted(layers));writes=metadata.spec_state_indices_tensor;reads=metadata.rtp_flydsl_read_indices
++    n,q=writes.shape;state=caches[f'layer_{keys[0]}'].v_cache
++    if state.dtype!=torch.float32 or state.shape[-2:]!=(128,128):raise RuntimeError('Hybrid replay supports FP32 128x128 state only')
++    hv=state.shape[1];key=(n,q)
++    if key not in runtime._hybrid_stages:
++        if torch.cuda.is_current_stream_capturing():raise RuntimeError('Hybrid replay buffers not warmed')
++        for layer in keys:
++            st=caches[f'layer_{layer}'].v_cache
++            if st.shape!=state.shape or st.stride()!=state.stride() or st.stride(-2)!=1:raise RuntimeError('Hybrid replay state layout differs')
++        records=torch.empty(len(keys),n,q,hv,3,128,device=state.device,dtype=torch.float32)
++        ptrs=torch.tensor([caches[f'layer_{i}'].v_cache.data_ptr() for i in keys],device=state.device,dtype=torch.int64)
++        runtime._hybrid_stages[key]=(records,ptrs)
++    records,ptrs=runtime._hybrid_stages[key]
++    metadata.rtp_hybrid_records={layer:records[i] for i,layer in enumerate(keys)}
++    runtime._hybrid_active=(records,ptrs,reads,writes,state.stride(0))
++
++def _clear(self):self._hybrid_active=None
++
++def _save(self,key):
++    if self._hybrid_active is None:raise RuntimeError('Missing hybrid capture stage')
++    self._hybrid_graphs[int(key)]=self._hybrid_active
++
++def _activate(self,key):self._hybrid_active=self._hybrid_graphs[int(key)]
++
++def _prepare(self,accept):
++    stage=self._hybrid_active
++    if stage is None or self._hybrid_pending is not None:raise RuntimeError('Invalid hybrid transaction')
++    if accept.ndim!=1 or accept.dtype!=torch.int32 or not 0<accept.numel()<=stage[2].numel() or accept.device!=stage[0].device:raise RuntimeError('Invalid accept vector')
++    self._hybrid_pending=accept;self._hybrid_modified=False
++
++def _finish(self,commit):
++    if not commit:
++        if self._hybrid_modified:raise RuntimeError('Hybrid partial commit requires fail-stop')
++        self._hybrid_pending=None;return
++    accept=self._hybrid_pending
++    if accept is None:raise RuntimeError('Hybrid commit not prepared')
++    records,ptrs,reads,writes,state_stride=self._hybrid_active
++    layers,cap,q,hv,_,d=records.shape
++    self._hybrid_modified=True
++    _commit[(accept.numel(),layers*hv,4)](records,ptrs,reads,writes,accept,hv,d,q,cap,32,state_stride,num_warps=4)
++
++def _finalize(self):
++    if self._hybrid_pending is None:raise RuntimeError('Hybrid finalize without prepare')
++    self._hybrid_pending=None;self._hybrid_modified=False
++
++def _has(self):return self._hybrid_reducer is not None
++
++def _reduce(self,ok):return self._hybrid_reducer.reduce(ok)
++
++def install_runtime(runtime):
++    if not enabled(runtime):return
++    if os.getenv('ATOM_RTP_ENABLE_REPLAYSSM','0')=='1':raise RuntimeError('Select hybrid OR legacy ReplaySSM')
++    from rtp_llm.models_py.modules.qwen4_exp.cpu_target_status import prepare_cpu_target_status
++    runtime._hybrid_reducer=prepare_cpu_target_status(runtime._rtp_model_config,runtime.parallelism_config)
++    if runtime._hybrid_reducer is None:raise RuntimeError('Hybrid requires TP status consensus')
++    runtime._hybrid_stages={};runtime._hybrid_graphs={};runtime._hybrid_active=None;runtime._hybrid_pending=None;runtime._hybrid_modified=False
++    for name,fn in [('has_speculative_target_status_reducer',_has),('reduce_speculative_target_prepare_status',_reduce),('clear_speculative_target_graph_capture',_clear),('save_speculative_target_graph_capture',_save),('activate_speculative_target_graph_replay',_activate),('prepare_speculative_target_commit',_prepare),('finish_speculative_target_commit',_finish),('finalize_speculative_target_commit',_finalize)]:setattr(runtime,name,MethodType(fn,runtime))
 diff --git a/atom/plugin/rtpllm/utils/replayssm_rtp.py b/atom/plugin/rtpllm/utils/replayssm_rtp.py
 new file mode 100644
 --- /dev/null
