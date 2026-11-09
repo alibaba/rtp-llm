@@ -37,9 +37,9 @@ final class RtpMetrics {
     private final LinkedHashMap<Long, Long> recentCacheKeys = new LinkedHashMap<>();
     private final Map<Integer, TokenCounts> windowTokens = new TreeMap<>();
 
-    private long windowStarted, ratesStarted, windowComputeNanos, windowInputNanos;
+    private long windowStarted, windowComputeNanos, windowInputNanos;
     private boolean computing;
-    private double lastFinished, lastErrors, lastCancelled;
+    private boolean schedulingActive;
 
     public RtpMetrics(String role, Supplier<State> state) { this(role, state, System::nanoTime); }
 
@@ -52,7 +52,7 @@ final class RtpMetrics {
         Objects.requireNonNull(state);
         this.clock = Objects.requireNonNull(clock);
         prefill = role.equals("prefill");
-        windowStarted = ratesStarted = clock.getAsLong();
+        windowStarted = clock.getAsLong();
         var physical = new HashMap<>(MetricTags.fromEnvironment(System.getenv()));
         physical.remove("priority"); // Request priority belongs to each TPS bucket, not the process.
         physical.put("dp_rank", "0"); // The current Engine supports exactly one DP worker.
@@ -77,7 +77,9 @@ final class RtpMetrics {
             .labelNames(LABELS).register(registry).labels(identity);
         plannedForward = Gauge.build().name("mock_model_forward_planned_us").help("Planned Forward duration in microseconds.")
             .labelNames(LABELS).register(registry).labels(identity);
-        // Pull one state snapshot per scrape: no cached gauge values or background sampler.
+        for (String name : List.of("rtp_llm_framework_qps", "rtp_llm_framework_error_qps", "rtp_llm_cancel_qps"))
+            events.observe(name, 0);
+        // Operational gauges describe live state. Native scheduler metrics are round observations.
         new Collector() {
             @Override public List<MetricFamilySamples> collect() {
                 var value = Objects.requireNonNull(state.get());
@@ -94,8 +96,6 @@ final class RtpMetrics {
                 var result = new ArrayList<MetricFamilySamples>();
                 result.addAll(List.of(tasks, kv));
                 result.add(gauge("rtp_llm_kv_cache_item_num", "Indexed KV blocks.", role, cacheItems.getAsInt()));
-                result.add(gauge("rtp_llm_wait_stream_size", "Waiting scheduler requests.", role, value.waiting()));
-                result.add(gauge("rtp_llm_running_stream_size", "Running scheduler requests.", role, value.running()));
                 result.add(gauge("rtp_llm_kv_cache_left_seq", "Available Device KV token capacity.", role, value.availableTokens()));
                 for (String name : List.of("total", "free", "available", "used", "active")) {
                     var blocks = new GaugeMetricFamily("rtp_llm_kv_cache_" + name + "_blocks",
@@ -113,19 +113,7 @@ final class RtpMetrics {
                     : 100.0 * (value.totalTokens() - value.availableTokens()) / value.totalTokens());
                 result.add(used);
                 synchronized (observations) {
-                    long now = clock.getAsLong(), elapsed = now - ratesStarted;
-                    collectTps(result, role, now);
-                    if (elapsed > 0) {
-                        double seconds = elapsed / 1_000_000_000.0;
-                        double done = finished.values().stream().mapToDouble(Counter.Child::get).sum();
-                        double errors = finished.get(Outcome.error).get() + finished.get(Outcome.timeout).get();
-                        double cancelled = finished.get(Outcome.cancelled).get();
-                        result.add(gauge("rtp_llm_framework_qps", "Terminal requests per wall second, including failures.", role, (done - lastFinished) / seconds));
-                        result.add(gauge("rtp_llm_framework_error_qps", "Terminal errors and timeouts per wall second.", role, (errors - lastErrors) / seconds));
-                        result.add(gauge("rtp_llm_cancel_qps", "Terminal cancellations per wall second.", role, (cancelled - lastCancelled) / seconds));
-                        lastFinished = done; lastErrors = errors; lastCancelled = cancelled;
-                        ratesStarted = now;
-                    }
+                    collectTps(result, role, clock.getAsLong());
                 }
                 return result;
             }
@@ -142,6 +130,16 @@ final class RtpMetrics {
     public List<Collector.MetricFamilySamples> collect() { return MetricTags.collect(registry, tags); }
 
     public String scrape() { return MetricTags.scrape(registry, tags); }
+
+    void schedulerRound(int waiting, int running, int loading) {
+        boolean active = waiting > 0 || running > 0 || loading > 0;
+        if (active || schedulingActive) {
+            events.observe("rtp_llm_wait_stream_size", waiting);
+            events.observe("rtp_llm_running_stream_size", running);
+            events.observe("rtp_llm_loading_cache_stream_size", loading);
+        }
+        schedulingActive = active;
+    }
 
     void computeStarted() { synchronized (observations) { computing = true; } }
 
@@ -163,6 +161,9 @@ final class RtpMetrics {
             events.observe("rtp_llm_query_batch_size", 1); // Native query batch is beams, not the scheduler batch.
         }
         finished.get(outcome).inc();
+        events.increment("rtp_llm_framework_qps");
+        if (outcome == Outcome.cancelled) events.increment("rtp_llm_cancel_qps");
+        if (outcome == Outcome.error || outcome == Outcome.timeout) events.increment("rtp_llm_framework_error_qps");
     }
 
     void recordPrefillCacheKeys(List<Long> keys, int inputTokens, int blockSize) {

@@ -9,19 +9,13 @@ import org.flexlb.mock.engine.scheduler.RtpMetrics.StepStats;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Checks RTP queue samples and token, time and completion metric accounting.
+ */
 class RtpMetricsTest {
     private static final RtpMetrics.State IDLE = new RtpMetrics.State(0, 0, 0, 0, 100, 100, 100, 0, 1);
-
     private static final RtpMetrics.RequestStats REQUEST =
         new RtpMetrics.RequestStats(20_000, 4_000, 2_000, 0, -1, 10, 3, 2, 4);
-
-    static double sample(String text, String name, String label) {
-        return text.lines().filter(line -> line.startsWith(name + "{") && line.contains(label))
-            .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).findFirst().orElseThrow();
-    }
-    static double mean(String text, String name, String label) {
-        return sample(text, name + "_sum", label) / sample(text, name + "_count", label);
-    }
 
     @Test void exposesZeroCountersAndCurrentStateWithoutResetOnScrape() {
         var state = new AtomicReference<>(IDLE);
@@ -36,6 +30,11 @@ class RtpMetricsTest {
         assertEquals(70, sample(metrics.scrape(), "rtp_llm_kv_tokens", "state=\"available\""));
         state.set(IDLE);
         assertEquals(100, sample(metrics.scrape(), "rtp_llm_kv_tokens", "state=\"available\""));
+    }
+
+    static double sample(String text, String name, String label) {
+        return text.lines().filter(line -> line.startsWith(name + "{") && line.contains(label))
+            .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).findFirst().orElseThrow();
     }
 
     @Test void keepsTokenWeightsDurationAndOutcomesSeparate() {
@@ -61,6 +60,10 @@ class RtpMetricsTest {
         assertFalse(text.contains("engine="));
         for (String outcome : new String[]{"success", "timeout"})
             assertEquals(1, sample(text, "rtp_llm_framework_requests_total", "outcome=\"" + outcome + "\""));
+    }
+
+    static double mean(String text, String name, String label) {
+        return sample(text, name + "_sum", label) / sample(text, name + "_count", label);
     }
 
     @Test void reportsActualReuseAtCompletionWhenEnabled() {
@@ -143,9 +146,11 @@ class RtpMetricsTest {
 
     @Test void nativeQueueAndKvMetricsKeepRealUnitsAndDoNotInventHostAvailability() {
         var metrics = new RtpMetrics("prefill", () -> new RtpMetrics.State(2, 1, 3, 4, 100, 70, 50, 30, 5));
+        metrics.schedulerRound(2, 1, 3);
         var text = metrics.scrape();
-        assertEquals(2, sample(text, "rtp_llm_wait_stream_size", ""));
-        assertEquals(1, sample(text, "rtp_llm_running_stream_size", ""));
+        assertEquals(2, mean(text, "rtp_llm_wait_stream_size", ""));
+        assertEquals(1, mean(text, "rtp_llm_running_stream_size", ""));
+        assertEquals(3, mean(text, "rtp_llm_loading_cache_stream_size", ""));
         assertEquals(70, sample(text, "rtp_llm_kv_cache_left_seq", ""));
         assertEquals(20, sample(text, "rtp_llm_kv_cache_total_blocks", "tier=\"DEVICE\""));
         assertEquals(14, sample(text, "rtp_llm_kv_cache_available_blocks", "tier=\"DEVICE\""));
@@ -173,12 +178,12 @@ class RtpMetricsTest {
         assertEquals(50, sample(text, "rtp_llm_context_wall_tps", ""));
         assertEquals(110, sample(text, "rtp_llm_context_wall_tps_with_cache", ""));
         assertEquals(1_000_000, sample(text, "rtp_llm_wall_tps_report_interval_us", ""));
-        assertEquals(2, sample(text, "rtp_llm_framework_qps", ""));
-        assertEquals(1, sample(text, "rtp_llm_framework_error_qps", ""));
+        assertEquals(2, sample(text, "rtp_llm_framework_qps_total", ""));
+        assertEquals(1, sample(text, "rtp_llm_framework_error_qps_total", ""));
         clock.set(2_000_000_000);
         text = metrics.scrape();
         assertEquals(0, sample(text, "rtp_llm_context_tps", ""));
-        assertEquals(0, sample(text, "rtp_llm_framework_qps", ""));
+        assertEquals(2, sample(text, "rtp_llm_framework_qps_total", ""));
         metrics.stepCompleted(new StepStats(0, 0, 0, 40_000_000, 40_000_000, 10_000_000, 1000, 100, 0, 1, 0, 40_000_000));
         clock.set(3_000_000_000L);
         text = metrics.scrape();
@@ -247,7 +252,7 @@ class RtpMetricsTest {
         metrics.requestFinished(RtpMetrics.Outcome.error, REQUEST, false);
         var text = metrics.scrape();
         assertFalse(text.contains("rtp_llm_context_wall_tps{"));
-        assertEquals(1, sample(text, "rtp_llm_framework_error_qps", ""));
+        assertEquals(1, sample(text, "rtp_llm_framework_error_qps_total", ""));
         clock.set(2_000_000_000L);
         assertFalse(metrics.scrape().contains("rtp_llm_context_tps{"));
         metrics.stepCompleted(new StepStats(1, 0, 100, 3_000_000_000L, 3_000_000_000L,

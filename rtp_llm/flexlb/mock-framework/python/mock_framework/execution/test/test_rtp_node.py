@@ -219,8 +219,8 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                     1 if role == "prefill" else 10
                 )
                 assert f'role="{role}"' in samples[0]
-                assert "rtp_llm_wait_stream_size{" in metrics
-                assert "rtp_llm_running_stream_size{" in metrics
+                assert "rtp_llm_wait_stream_size_count{" in metrics
+                assert "rtp_llm_running_stream_size_count{" in metrics
                 native_blocks = [
                     line
                     for line in metrics.splitlines()

@@ -52,8 +52,9 @@ class VitDownloadTest {
                     assertEquals(3,rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getMmInflightInputs().getValue());
                     assertFalse(hits.containsKey("/queued"));
                     String snapshot=metrics(node);
-                    assertEquals(3,VitTest.sample(snapshot,"py_rtp_vit_preprocess_queue_size"));
-                    assertEquals(0,VitTest.sample(snapshot,"py_rtp_vit_embedding_queue_size"));
+                    assertEquals(3,VitTest.sample(snapshot,"py_rtp_vit_preprocess_queue_size_count"));
+                    assertEquals(6,VitTest.sample(snapshot,"py_rtp_vit_preprocess_queue_size_sum"));
+                    assertFalse(snapshot.contains("py_rtp_vit_embedding_queue_size_count"));
                     assertEquals(Status.Code.RESOURCE_EXHAUSTED,assertThrows(StatusRuntimeException.class,
                         ()->rpc.asyncSubmitEmbedding(input(server,"/overflow"))).getStatus().getCode());
                     releaseSecond.countDown();
@@ -139,7 +140,10 @@ class VitDownloadTest {
                     double download=VitTest.sample(snapshot,"py_rtp_vit_download_rt_sum");
                     double other=VitTest.sample(snapshot,"py_rtp_vit_preprocess_other_rt_sum");
                     assertEquals(download+other,VitTest.sample(snapshot,"py_rtp_vit_preprocess_rt_sum"),1e-9);
-                    assertEquals(0,VitTest.sample(snapshot,"py_rtp_vit_preprocess_queue_size"));
+                    assertEquals(10,VitTest.sample(snapshot,"py_rtp_vit_preprocess_queue_size_count"));
+                    assertEquals(5,VitTest.sample(snapshot,"py_rtp_vit_preprocess_queue_size_sum"));
+                    assertEquals(3,VitTest.sample(snapshot,"py_rtp_vit_embedding_queue_size_count"));
+                    assertEquals(1,VitTest.sample(snapshot,"py_rtp_vit_embedding_queue_size_sum"));
                 } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
             } finally { stalled.countDown();server.stop(0); }
         }

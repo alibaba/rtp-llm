@@ -96,9 +96,9 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
 
     @Override public void close() { closed=true;scheduler.close();preparation.close();cache.close();replies.shutdownNow(); }
 
-    java.util.List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() { return metrics.collect(scheduler,cache,preparation); }
+    java.util.List<io.prometheus.client.Collector.MetricFamilySamples> collectMetrics() { return metrics.collect(scheduler,cache); }
 
-    String metrics() { return metrics.scrape(scheduler,cache,preparation); }
+    String metrics() { return metrics.scrape(scheduler,cache); }
 
     void checkHealthy() { scheduler.checkHealthy(); }
 

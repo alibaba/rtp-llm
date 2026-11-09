@@ -47,18 +47,21 @@ final class VitScheduler implements AutoCloseable {
             throw Status.RESOURCE_EXHAUSTED.withDescription("V waiting queue full").asRuntimeException();
         }
         var work=new Work(image,deadline);
-        waiting.add(work); notifyAll(); return work;
+        waiting.add(work); reportQueueDepth(); notifyAll(); return work;
     }
 
     boolean cancel(Work work) {
-        synchronized(this) { if(!waiting.remove(work)) return false; notifyAll(); }
+        synchronized(this) {
+            if(!waiting.remove(work)) return false;
+            reportQueueDepth(); notifyAll();
+        }
         work.result.completeExceptionally(Status.CANCELLED.withDescription("V ready work cancelled").asRuntimeException());
         return true;
     }
 
     synchronized Map<String,Double> snapshot() {
         checkHealthy();
-        return Map.of("py_rtp_vit_embedding_queue_size",(double)waiting.size(),"mock_vit_running_image_count",(double)running);
+        return Map.of("mock_vit_running_image_count",(double)running);
     }
 
     void checkHealthy() { if(failure!=null) throw failure; if(closed) throw new IllegalStateException("V scheduler closed"); }
@@ -73,7 +76,10 @@ final class VitScheduler implements AutoCloseable {
                     else selected.add(job);
                 }
                 batch=selected;
-                synchronized(this) { running=batch.size(); }
+                synchronized(this) {
+                    running=batch.size();
+                    if (!batch.isEmpty()) reportQueueDepth();
+                }
                 if(batch.isEmpty()) continue;
                 long started=System.nanoTime();
                 for(var job:batch) metrics.events.observe("py_rtp_vit_embedding_queue_wait_rt",(started-job.enqueued)/1e6);
@@ -117,9 +123,14 @@ final class VitScheduler implements AutoCloseable {
             TimeUnit.NANOSECONDS.timedWait(this,until-System.nanoTime());
         if(closed) return null;
         var jobs=new ArrayList<Work>();
-        while(!waiting.isEmpty() && jobs.size()<config.batchSize()) jobs.add(waiting.remove());
+        while(!waiting.isEmpty() && jobs.size()<config.batchSize()) {
+            jobs.add(waiting.remove());
+            reportQueueDepth();
+        }
         running=jobs.size(); return jobs;
     }
+
+    private void reportQueueDepth() { metrics.events.observe("py_rtp_vit_embedding_queue_size", waiting.size()); }
 
     private static void complete(Work work,Throwable error) {
         if(error==null) work.result.complete(work.image); else work.result.completeExceptionally(error);

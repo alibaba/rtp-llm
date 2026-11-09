@@ -810,7 +810,7 @@
         {
           "id": 100218,
           "type": "timeseries",
-          "title": "timeout qps · 待埋点",
+          "title": "timeout qps",
           "gridPos": {
             "x": 12,
             "y": 47,
@@ -824,8 +824,8 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${prefill_group},timeout)(rtp_llm_framework_qps{instance=~\"${prefill_instance}\",role=\"prefill\",timeout=\"true\"})",
-              "legendFormat": "Prefill · timeout={{timeout}} · {{${prefill_group}}}",
+              "expr": "sum by(${prefill_group})(rate(rtp_llm_framework_requests_total{instance=~\"${prefill_instance}\",role=\"prefill\",outcome=\"timeout\"}[$__rate_interval]))",
+              "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -1534,7 +1534,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${prefill_group})(rtp_llm_framework_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "sum by(${prefill_group})(rate(rtp_llm_framework_qps_total{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -2031,7 +2031,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_framework_error_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "avg by(${prefill_group})(rate(rtp_llm_framework_error_qps_total{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -2750,7 +2750,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_running_stream_size{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_running_stream_size_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_running_stream_size_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -3091,7 +3091,7 @@
         {
           "id": 100127,
           "type": "timeseries",
-          "title": "waiting stream size",
+          "title": "waiting / KV loading stream size",
           "gridPos": {
             "x": 12,
             "y": 191,
@@ -3105,8 +3105,17 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_wait_stream_size{instance=~\"${prefill_instance}\",role=\"prefill\"})",
-              "legendFormat": "Prefill · {{${prefill_group}}}",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_wait_stream_size_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_wait_stream_size_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
+              "legendFormat": "Prefill · {{${prefill_group}}} · Waiting",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            },
+            {
+              "refId": "B",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_loading_cache_stream_size_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_loading_cache_stream_size_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
+              "legendFormat": "Prefill · {{${prefill_group}}} · KV loading",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -3150,7 +3159,7 @@
               "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 127。",
+          "description": "每轮选批后的等待数和 KV prepare 异步加载数，按调度轮次加权。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -3460,7 +3469,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "max by(${prefill_group})(rtp_llm_wait_stream_size{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "max by(${prefill_group})((rate(rtp_llm_wait_stream_size_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]) / (rate(rtp_llm_wait_stream_size_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]) > 0)))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -3505,7 +3514,7 @@
               "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10163。",
+          "description": "各实例区间内的调度轮均值取最大。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -8548,7 +8557,7 @@
         {
           "id": 200218,
           "type": "timeseries",
-          "title": "timeout qps · 待埋点",
+          "title": "timeout qps",
           "gridPos": {
             "x": 0,
             "y": 719,
@@ -8562,8 +8571,8 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${decode_group},timeout)(rtp_llm_framework_qps{instance=~\"${decode_instance}\",role=\"decode\",timeout=\"true\"})",
-              "legendFormat": "Decode · timeout={{timeout}} · {{${decode_group}}}",
+              "expr": "sum by(${decode_group})(rate(rtp_llm_framework_requests_total{instance=~\"${decode_instance}\",role=\"decode\",outcome=\"timeout\"}[$__rate_interval]))",
+              "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -8988,7 +8997,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${decode_group})(rtp_llm_framework_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "sum by(${decode_group})(rate(rtp_llm_framework_qps_total{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -9485,7 +9494,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_framework_error_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "avg by(${decode_group})(rate(rtp_llm_framework_error_qps_total{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -10275,7 +10284,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_running_stream_size{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_running_stream_size_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_running_stream_size_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -10545,7 +10554,7 @@
         {
           "id": 200127,
           "type": "timeseries",
-          "title": "waiting stream size",
+          "title": "waiting / KV loading stream size",
           "gridPos": {
             "x": 0,
             "y": 854,
@@ -10559,8 +10568,17 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_wait_stream_size{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · {{${decode_group}}}",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_wait_stream_size_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_wait_stream_size_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
+              "legendFormat": "Decode · {{${decode_group}}} · Waiting",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            },
+            {
+              "refId": "B",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_loading_cache_stream_size_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_loading_cache_stream_size_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
+              "legendFormat": "Decode · {{${decode_group}}} · KV loading",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -10604,7 +10622,7 @@
               "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 127。",
+          "description": "每轮选批后的等待数和 KV prepare 异步加载数，按调度轮次加权。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -10843,7 +10861,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "max by(${decode_group})(rtp_llm_wait_stream_size{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "max by(${decode_group})((rate(rtp_llm_wait_stream_size_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]) / (rate(rtp_llm_wait_stream_size_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]) > 0)))",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -10888,7 +10906,7 @@
               "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10163。",
+          "description": "各实例区间内的调度轮均值取最大。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -15253,7 +15271,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_preprocess_queue_size{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})((rate(py_rtp_vit_preprocess_queue_size_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]) / (rate(py_rtp_vit_preprocess_queue_size_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]) > 0)))",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -15298,7 +15316,7 @@
               "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "准备尚未完成的唯一媒体数，包含排队和执行中的工作。",
+          "description": "准备尚未完成的唯一媒体数，包含排队和执行中的工作。各实例按任务进出采样的区间均值相加。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -15608,7 +15626,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_embedding_queue_size{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})((rate(py_rtp_vit_embedding_queue_size_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]) / (rate(py_rtp_vit_embedding_queue_size_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]) > 0)))",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -15653,7 +15671,7 @@
               "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10354。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
+          "description": "各实例按队列变化采样的区间均值相加。",
           "links": [
             {
               "title": "RTP-LLM 原面板",

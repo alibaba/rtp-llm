@@ -20,6 +20,7 @@ final class VitPreparation implements AutoCloseable {
     private final HttpClient client=HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5))
         .followRedirects(HttpClient.Redirect.ALWAYS).build();
     private final Set<Task> tasks=ConcurrentHashMap.newKeySet();
+    private final java.util.concurrent.atomic.AtomicInteger preparing = new java.util.concurrent.atomic.AtomicInteger();
 
     private volatile boolean closed;
 
@@ -54,7 +55,9 @@ final class VitPreparation implements AutoCloseable {
         RuntimeException rejected=null;
         for(int i=0;i<claims.size();i++) if(claims.get(i).producer()) {
             var task=new Task(claims.get(i),media.get(i),deadline);
-            tasks.add(task); task.claim.onAbandon(task::cancel);
+            tasks.add(task);
+            metrics.events.observe("py_rtp_vit_preprocess_queue_size", preparing.incrementAndGet());
+            task.claim.onAbandon(task::cancel);
             try { workers.execute(task); }
             catch(RejectedExecutionException error) {
                 rejected=Status.UNAVAILABLE.withDescription("V preparation stopped").withCause(error).asRuntimeException();
@@ -67,8 +70,8 @@ final class VitPreparation implements AutoCloseable {
 
     int inflight() { return tasks.size(); }
 
-    int preparing() {
-        return (int)tasks.stream().filter(task->{ synchronized(task) { return !task.finished && !task.prepared; } }).count();
+    private void leavePreparation() {
+        metrics.events.observe("py_rtp_vit_preprocess_queue_size", preparing.decrementAndGet());
     }
 
     /**
@@ -96,7 +99,12 @@ final class VitPreparation implements AutoCloseable {
                 check();
                 metrics.started();
                 var image=source.prepare(media,deadline);
-                synchronized(this) { check(); prepared=true; work=scheduler.submit(image,deadline); }
+                synchronized(this) {
+                    check();
+                    prepared=true;
+                    leavePreparation();
+                    work=scheduler.submit(image,deadline);
+                }
                 result=work.result().toCompletableFuture().get();
             } catch(InterruptedException error) {
                 Thread.currentThread().interrupt(); failure=Status.CANCELLED.withDescription("V preparation interrupted").asRuntimeException();
@@ -117,7 +125,11 @@ final class VitPreparation implements AutoCloseable {
         }
 
         void finish(VitGeometry.Image image,Throwable error) {
-            synchronized(this) { if(finished) return; finished=true; runner=null; }
+            synchronized(this) {
+                if(finished) return;
+                finished=true; runner=null;
+                if(!prepared) leavePreparation();
+            }
             try { source.close(); cache.publish(claim,image,error); }
             finally { tasks.remove(this); } // Admission is released only after publication.
         }
