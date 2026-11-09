@@ -1874,7 +1874,7 @@ TEST_F(GenerateStreamTest, testMultimodalContextPrefillWindows) {
     }
 }
 
-TEST_F(GenerateStreamTest, testMultimodalContextsKeepDiagnosticChunkingValidation) {
+TEST_F(GenerateStreamTest, testMultimodalDiagnosticsRequireUnchunkedPrefill) {
     struct DiagnosticCase {
         const char*            reason;
         ChunkedInputConfigurer configure;
@@ -1909,7 +1909,7 @@ TEST_F(GenerateStreamTest, testMultimodalContextsKeepDiagnosticChunkingValidatio
                         ResourceContext resource;
                         resource.role_type = role;
                         auto stream = std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
-                        const bool rejected = chunk_size > 0 && role != RoleType::DECODE;
+                        const bool rejected = chunk_size > 0 && length > chunk_size && role != RoleType::DECODE;
                         EXPECT_EQ(stream->hasError(), rejected);
                         EXPECT_FALSE(stream->chunkedPrefillEnabled());
                         if (rejected) {
@@ -1941,8 +1941,8 @@ TEST_F(GenerateStreamTest, testBidirectionalMultimodalContextRequiresUnchunkedPr
         resource.role_type = RoleType::PDFUSION;
         auto stream        = std::make_shared<NormalGenerateStream>(input, model, runtime, resource, nullptr);
         EXPECT_FALSE(stream->chunkedPrefillEnabled());
-        EXPECT_TRUE(stream->hasError());
-        if (stream->hasError()) {
+        EXPECT_EQ(stream->hasError(), input_length > 8);
+        if (input_length > 8) {
             EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
             EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: non_causal_attention");
         }

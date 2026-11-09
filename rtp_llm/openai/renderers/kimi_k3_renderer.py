@@ -35,7 +35,6 @@ from rtp_llm.openai.api_datatype import (
     FunctionCall,
     RoleEnum,
     ToolCall,
-    TopLogprob,
     UsageInfo,
     get_tool_choice_function_name,
 )
@@ -49,8 +48,6 @@ from rtp_llm.openai.renderers.custom_renderer import (
     StreamStatus,
     ThinkStatus,
 )
-from rtp_llm.ops import MultimodalInput
-from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.word_util import truncate_response_with_stop_words
 
@@ -443,31 +440,6 @@ class KimiK3Renderer(CustomChatRenderer):
             choice.usage = choice_usage
         return response
 
-    @override
-    async def generate_choice(
-        self,
-        request_id: int,
-        input_ids: List[int],
-        mm_inputs: List[MultimodalInput],
-        generate_config: GenerateConfig,
-        backend_rpc_server_visitor: BackendRPCServerVisitor,
-        request: ChatCompletionRequest,
-        headers: Optional[Dict[str, str]] = None,
-    ) -> AsyncGenerator[StreamResponseObject, None]:
-        thinking = bool(generate_config.in_think_mode)
-        pending_tokens = self._pending_prompt_token_count(self.tokenizer, thinking)
-        async for response in super().generate_choice(
-            request_id,
-            input_ids,
-            mm_inputs,
-            generate_config,
-            backend_rpc_server_visitor,
-            request,
-            headers,
-        ):
-            self._subtract_pending_prompt_tokens(response, pending_tokens)
-            yield response
-
     @staticmethod
     def _split_exclusive_delta(delta: DeltaMessage) -> List[DeltaMessage]:
         """Split channel fields so each serialized delta carries only one."""
@@ -662,9 +634,13 @@ class KimiK3Renderer(CustomChatRenderer):
     ) -> AsyncGenerator[StreamResponseObject, None]:
         """Serialize mixed XTML channels as consecutive OpenAI stream frames."""
 
+        pending_tokens = self._pending_prompt_token_count(
+            self.tokenizer, bool(generate_config.in_think_mode)
+        )
         async for response in super().render_response_stream(
             output_generator, request, generate_config
         ):
+            self._subtract_pending_prompt_tokens(response, pending_tokens)
             # logprobs can require incremental backend output for an HTTP
             # request whose response is still non-streaming. Split only the
             # externally streamed response; the collector needs its usage.
@@ -905,53 +881,6 @@ class KimiK3Renderer(CustomChatRenderer):
             return _K3OutputDelta.from_parsed(delta, parsed)
         return delta
 
-    async def _generate_log_probs(self, status, output):
-        if not isinstance(status, _KimiK3StreamStatus):
-            return await super()._generate_log_probs(status, output)
-        if not status.request.logprobs:
-            return None
-        return self._drain_token_probabilities(status, status.last_token_length)
-
-    def _drain_token_probabilities(self, status, count):
-        if count > len(status.pending_token_probs):
-            raise ValueError("K3 target probabilities do not cover emitted tokens")
-        rows = status.pending_token_probs[:count]
-        del status.pending_token_probs[:count]
-        result = []
-        for token_id, probs in rows:
-            if token_id < 0 or token_id >= probs.numel():
-                raise ValueError("K3 output token is outside target vocabulary")
-            token = self.tokenizer.decode([token_id])
-            selected_prob = probs[token_id].log().item()
-            top_count = min(
-                (
-                    1
-                    if status.request.top_logprobs is None
-                    else status.request.top_logprobs
-                ),
-                int(probs.count_nonzero()),
-            )
-            top_probs, top_ids = probs.topk(top_count)
-            top_logprobs = []
-            for other_prob, other_id in zip(top_probs, top_ids):
-                other_token = self.tokenizer.decode([int(other_id)])
-                top_logprobs.append(
-                    TopLogprob(
-                        token=other_token,
-                        logprob=other_prob.log().item(),
-                        bytes=list(other_token.encode("utf-8", errors="replace")),
-                    )
-                )
-            result.append(
-                ChatCompletionTokenLogprob(
-                    token=token,
-                    logprob=selected_prob,
-                    bytes=list(token.encode("utf-8", errors="replace")),
-                    top_logprobs=top_logprobs,
-                )
-            )
-        return result
-
     @override
     async def _flush_buffer(
         self,
@@ -979,11 +908,7 @@ class KimiK3Renderer(CustomChatRenderer):
             pending_text = truncate_response_with_stop_words(
                 pending_text, stop_words_str, is_streaming
             )
-            pending_probs = (
-                self._drain_token_probabilities(buffer, len(buffer.pending_token_probs))
-                if buffer.request.logprobs
-                else None
-            )
+            pending_probs = await self._generate_log_probs(buffer, buffer.output)
             parsed = buffer.xtml_decoder.decode(pending_text, pending_probs, flush=True)
             items.append(
                 _K3OutputDelta.from_parsed(

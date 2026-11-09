@@ -261,9 +261,6 @@ class KimiK3(BaseModel):
         config.special_tokens.pad_token_id = int(
             outer_config.get("pad_token_id", text_config.get("pad_token_id", 0))
         )
-        config.special_tokens.stop_words_id_list = [
-            [config.special_tokens.eos_token_id]
-        ]
 
     @classmethod
     def _parse_attention_config(

@@ -129,11 +129,9 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                     "chunked prefill incompatible: hidden_state_capture");
         return;
     }
-    // Short multimodal contexts keep the normal prefill path, but a later
-    // scheduler grant can still split them. Diagnostics must pass the same
-    // compatibility checks before any partial grant is possible.
+    // The scheduler grants unchunked multimodal contexts their full token budget.
     const bool short_multimodal_context = multimodalFeaturesLength() != 0 && seqLength() <= chunk_size;
-    if (!input->fake_query && chunk_size > 0
+    if (!input->fake_query && chunk_size > 0 && !short_multimodal_context
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
         // Non-causal attention needs future tokens unavailable in earlier chunks.
         const auto& config = *generateConfig();
@@ -152,9 +150,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                 StreamEvents::Error, ErrorCode::INVALID_PARAMS, "chunked prefill incompatible: " + std::string(reason));
             return;
         }
-        if (!short_multimodal_context) {
-            setChunkSize(static_cast<int>(chunk_size));
-        }
+        setChunkSize(static_cast<int>(chunk_size));
     }
 
     int64_t processor_eos_token_id = special_tokens_.eos_token_id;

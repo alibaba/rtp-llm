@@ -253,11 +253,16 @@ class KimiK3Grammar:
         upstream = None
         if self.upstream_grammar and constraint is not None:
             upstream = copy.deepcopy(constraint.value)
-            upstream_elements = _elements(upstream["format"])
-            first = upstream_elements[0]
-            if first.get("type") == "optional":
-                first = first["content"]
-            has_think = THINK_CLOSE in _boundary_text(first)
+            upstream_format = (
+                upstream.get("format") if isinstance(upstream, dict) else None
+            )
+            if not isinstance(upstream_format, dict):
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    "Kimi K3 structural_tag requires a format object",
+                )
+            upstream_elements = _elements(upstream_format)
+            has_think = THINK_CLOSE in _boundary_text(upstream_elements[0])
             if has_think or reasoning_mode == "disabled":
                 return _adapt_upstream_grammar(upstream)["format"]
 

@@ -171,21 +171,23 @@ class StartupModelLengthTest(unittest.TestCase):
             processes.append(Mock(exitcode=None, is_alive=Mock(return_value=True)))
         return processes, readers
 
-    def test_omitted_length_reaches_warmup_from_loaded_model(self):
-        configs = self._start_single_rank(None, 32768)
-        self.assertEqual(configs.model_args.max_seq_len, 32768)
-        self.assertEqual(start_server._get_startup_real_warmup_max_len(configs), 32768)
+    def test_model_default_length_reaches_warmup_from_loaded_model(self):
+        for length in (None, 0):
+            with self.subTest(length=length):
+                configs = self._start_single_rank(length, 32768)
+                self.assertEqual(configs.model_args.max_seq_len, 32768)
+                self.assertEqual(
+                    start_server._get_startup_real_warmup_max_len(configs), 32768
+                )
 
     def test_explicit_length_is_preserved(self):
         configs = self._start_single_rank(16384, 16384)
         self.assertEqual(start_server._get_startup_real_warmup_max_len(configs), 16384)
 
     def test_invalid_explicit_length_still_fails_warmup(self):
-        for length in (0, -1):
-            with self.subTest(length=length):
-                configs = self._start_single_rank(length, 32768)
-                with self.assertRaises(ValueError):
-                    start_server._get_startup_real_warmup_max_len(configs)
+        configs = self._start_single_rank(-1, 32768)
+        with self.assertRaises(ValueError):
+            start_server._get_startup_real_warmup_max_len(configs)
 
     def test_multi_rank_startup_returns_resolved_length(self):
         processes, readers = self._rank_statuses([32768, 32768])

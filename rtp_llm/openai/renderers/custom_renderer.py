@@ -168,7 +168,12 @@ class StreamStatus:
         )
         # A later frame may complete an ID-only stop that has no matching text
         # prefix. Keep its tokens and probability rows pending before emission.
-        if self.is_streaming and self.finish_reason is None and self.stop_word_ids_list:
+        if (
+            self.is_streaming
+            and not output.finished
+            and self.finish_reason is None
+            and self.stop_word_ids_list
+        ):
             visible_length = len(self.output_ids)
             for stop_ids in self.stop_word_ids_list:
                 for prefix_length in range(

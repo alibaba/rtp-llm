@@ -141,6 +141,13 @@ class KimiK3GrammarTest(unittest.TestCase):
             "format": {"type": "sequence", "elements": [prefix, suffix]},
         }
 
+    def test_legacy_upstream_structural_tag_is_rejected_as_invalid_input(self):
+        with self.assertRaisesRegex(FtRuntimeException, "requires a format object"):
+            self.prepare(
+                structural_tag={"structures": [], "triggers": []},
+                upstream_grammar=True,
+            )
+
     def test_token_upstream_keeps_one_think_region_and_caps_its_budget(self):
         for budget in (0, 1, 8):
             with self.subTest(budget=budget):

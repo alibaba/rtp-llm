@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 import torch
+
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.openai.api_datatype import (
@@ -20,10 +21,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     StreamStatus,
     ThinkStatus,
 )
-from rtp_llm.openai.renderers.kimi_k3_renderer import (
-    KimiK3Renderer,
-    _KimiK3StreamStatus,
-)
+from rtp_llm.openai.renderers.kimi_k3_renderer import KimiK3Renderer
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
 )
@@ -101,38 +99,6 @@ class MtpLogprobsRendererTest(unittest.TestCase):
         self.assertEqual(sync.token, "A")
         self.assertAlmostEqual(sync.logprob, math.log(0.7), places=5)
         self.assertEqual(sync.top_logprobs, [])
-
-        renderer = KimiK3Renderer.__new__(KimiK3Renderer)
-        renderer.tokenizer = _Tokenizer()
-        status = SimpleNamespace(
-            request=self.status.request,
-            pending_token_probs=[(1, output.all_probs.reshape(-1))],
-        )
-        content = renderer._drain_token_probabilities(status, 1)
-        self.assertEqual(content[0].token, "A")
-        self.assertAlmostEqual(content[0].logprob, math.log(0.7), places=5)
-        self.assertEqual(content[0].top_logprobs, [])
-        self.assertEqual(status.pending_token_probs, [])
-
-    def test_k3_keeps_buffered_probabilities_for_xtml_decoding(self):
-        request = ChatCompletionRequest(
-            messages=[ChatMessage(role=RoleEnum.user, content="test")],
-            logprobs=True,
-            top_logprobs=2,
-        )
-        self.status = _KimiK3StreamStatus(request, thinking=False)
-        self._update(_output([1], [[0.1, 0.7, 0.2, 0.0]]))
-        self._update(_output([2], [[0.05, 0.1, 0.85, 0.0]]))
-        self._update(_output([3], [[0.0, 0.0, 0.0, 1.0]]), strip_eos=True)
-        renderer = KimiK3Renderer.__new__(KimiK3Renderer)
-        renderer.tokenizer = _Tokenizer()
-        content = renderer._drain_token_probabilities(
-            self.status, len(self.status.output_ids)
-        )
-        self.assertEqual([item.token for item in content], ["A", "B"])
-        self.assertAlmostEqual(content[0].logprob, math.log(0.7), places=5)
-        self.assertAlmostEqual(content[1].logprob, math.log(0.85), places=5)
-        self.assertEqual(len(self.status.pending_token_probs), 1)
 
     def test_buffered_token_keeps_its_probability_until_emitted(self):
         first = _output([1], [[0.1, 0.7, 0.2, 0.0]])
@@ -217,6 +183,9 @@ class MtpReasoningRendererLogprobsTest(unittest.IsolatedAsyncioTestCase):
 
 class StopSetLogprobsRendererTest(unittest.IsolatedAsyncioTestCase):
     class Tokenizer:
+        def encode(self, text):
+            return [7]
+
         def decode(self, ids):
             return "".join(
                 {1: "A", 2: "B", 3: "C", 4: "D", 5: "E", 6: "F", 9: "<eos>"}[int(i)]
@@ -231,12 +200,22 @@ class StopSetLogprobsRendererTest(unittest.IsolatedAsyncioTestCase):
         )
         self.renderer.add_extra_stop_word_ids([[5, 6]])
 
-    async def _render(self, token_ids, split, stop_ids, stop_strings, streaming=True):
+    async def _render(
+        self,
+        token_ids,
+        split,
+        stop_ids,
+        stop_strings,
+        streaming=True,
+        *,
+        request_stream=None
+    ):
         request = ChatCompletionRequest(
             messages=[ChatMessage(role=RoleEnum.user, content="test")],
-            stream=streaming,
+            stream=streaming if request_stream is None else request_stream,
             logprobs=True,
             top_logprobs=0,
+            enable_thinking=False,
         )
         config = GenerateConfig(
             max_new_tokens=32,
@@ -263,6 +242,7 @@ class StopSetLogprobsRendererTest(unittest.IsolatedAsyncioTestCase):
                 output.aux_info.input_len = 4
                 offset += len(chunk)
                 output.aux_info.output_len = offset
+                output.finished = offset == len(token_ids)
                 yield GenerateOutputs(generate_outputs=[output])
 
         outputs = source()
@@ -335,6 +315,24 @@ class StopSetLogprobsRendererTest(unittest.IsolatedAsyncioTestCase):
             [round(math.exp(item.logprob), 2) for item in probabilities],
             [0.51, 0.52, 0.53, 0.54],
         )
+
+    async def test_terminal_frame_releases_incomplete_stop_id_prefix(self):
+        text, probabilities, _ = await self._render([1, 2, 3], 2, [[2, 3, 4]], [])
+        self.assertEqual(text, "ABC")
+        self.assertEqual([item.token for item in probabilities], list("ABC"))
+
+    async def test_k3_nonstreaming_response_does_not_flush_stop_logprobs(self):
+        self.renderer = KimiK3Renderer(
+            self.Tokenizer(), RendererParams("kimi_k3", 128, 9, []), GenerateEnvConfig()
+        )
+        text, probabilities, reason = await self._render(
+            [1, 2, 3, 4], 2, [[2, 3, 4]], [], request_stream=False
+        )
+        self.assertEqual(text, "A")
+        self.assertEqual([item.token for item in probabilities], ["A"])
+        self.assertAlmostEqual(probabilities[0].logprob, math.log(0.51), places=5)
+        self.assertEqual(probabilities[0].top_logprobs, [])
+        self.assertEqual(reason, FinisheReason.stop)
 
     async def test_effective_stops_are_isolated_between_requests(self):
         await self._render([1, 2, 3, 4, 9], 2, [], [])

@@ -42,6 +42,9 @@ public:
     // Reject inputs longer than the KV cache can hold; mark the stream errored so the caller
     // sees the failure via collectStreamOutput / pollStreamOutput. Mirrors FIFOScheduler.
     bool checkInputLength(const GenerateStreamPtr& stream) {
+        if (!checkNonEmptyInput(stream)) {
+            return false;
+        }
         if (cache_manager_ && stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
             stream->reportError(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                                 "input len " + std::to_string(stream->inputLength())
@@ -118,7 +121,7 @@ public:
     void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) {
         switch (new_state) {
             case StreamState::WAITING:
-                waiting_streams_.push_back(stream);
+                admitted_streams_.push_back(stream);
                 break;
             case StreamState::LOADING_CACHE:
                 loading_cache_streams_.push_back(stream);
@@ -190,43 +193,63 @@ public:
         // Refresh the drain state from the current queue. This batch may drain a mixed-mode tail,
         // but later homogeneous arrivals must go through the normal batch-size gate.
         draining_mixed_modes_ = has_other_mode;
-        for (auto& stream : selected_streams) {
-            stream->reportEvent(StreamEvents::CanRun);
-            // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
-            while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        }
         for (const auto& stream : selected_streams) {
+            stream->reportEvent(StreamEvents::CanRun);
             waiting_streams_.remove(stream);
-            if (stream->getStatus() == StreamState::RUNNING) {
-                running_streams_.push_back(stream);
+        }
+        admitted_streams_.splice(admitted_streams_.end(), selected_streams);
+    }
+
+    void startAdmittedStreams() {
+        for (auto it = admitted_streams_.begin(); it != admitted_streams_.end();) {
+            const auto& stream       = *it;
+            const bool  load_started = stream->hasEvent(StreamEvents::LoadInitiated);
+            auto        state        = stream->moveToNext();
+            // Keep synchronous cache loading, but leave resource retries queued.
+            while (state == StreamState::LOADING_CACHE) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                state = stream->moveToNext();
+            }
+            if (state == StreamState::WAITING && !load_started && stream->hasEvent(StreamEvents::LoadInitiated)) {
+                state = stream->moveToNext();
+            }
+            if (state == StreamState::WAITING) {
+                ++it;
+            } else {
+                addStreamToNewState(stream, state);
+                it = admitted_streams_.erase(it);
             }
         }
     }
 
     void initRunningStreams() {
-        // set kvcache block
-        for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
-            (*it)->setPerfTest(true);
-            // reset start time，to get more accurate avg token time
-            (*it)->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
-            // only set gen_timeline = True for first rank
+        // All synchronous KV loads for this batch have completed.
+        const auto batch_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        for (auto it = running_streams_.begin(); it != running_streams_.end();) {
+            const auto& stream = *it;
+            stream->setPerfTest(true);
+            stream->resetBeginTime(batch_start_us);
             if (dp_rank_ != 0) {
-                (*it)->setGenTimeline(false);
+                stream->setGenTimeline(false);
             }
-            if (scheduler_type_ == SchedulerType::kBatchDecode && !isPrefillOnly(*it)) {
-                (*it)->setIsContextStream(false);
-                // for linear attn, incrKVBlock to clear unused linear block
-                (*it)->moveToNext();
+            if (scheduler_type_ == SchedulerType::kBatchDecode && stream->isContextStream()
+                && !isPrefillOnly(stream)) {
+                stream->setIsContextStream(false);
+                const auto state = stream->moveToNext();
+                if (state != StreamState::RUNNING) {
+                    addStreamToNewState(stream, state);
+                    it = running_streams_.erase(it);
+                    continue;
+                }
             }
+            ++it;
         }
     }
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
         cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+            return waiting_streams_.size() >= batch_size_ || !admitted_streams_.empty() || !running_streams_.empty()
                    || !loading_cache_streams_.empty() || (draining_mixed_modes_ && !waiting_streams_.empty());
         });
 
@@ -239,13 +262,18 @@ public:
             draining_mixed_modes_ = false;
         }
 
-        if (running_streams_.empty()
-            && (waiting_streams_.size() >= batch_size_ || (draining_mixed_modes_ && !waiting_streams_.empty()))) {
-            evaluateWaitingStreams();
+        if (running_streams_.empty()) {
+            if (admitted_streams_.empty()
+                && (waiting_streams_.size() >= batch_size_ || (draining_mixed_modes_ && !waiting_streams_.empty()))) {
+                evaluateWaitingStreams();
+            }
+            startAdmittedStreams();
+            initRunningStreams();
             if (!running_streams_.empty()) {
-                initRunningStreams();
                 RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
                                  running_streams_.size());
+            } else if (!admitted_streams_.empty()) {
+                cond_.wait_for(lock, std::chrono::milliseconds(1));
             }
         }
 
@@ -268,13 +296,15 @@ public:
 
     int64_t onflightStreams() override {
         std::lock_guard<std::mutex> lock(lock_);
-        return waiting_streams_.size() + loading_cache_streams_.size() + running_streams_.size();
+        return waiting_streams_.size() + admitted_streams_.size() + loading_cache_streams_.size()
+               + running_streams_.size();
     }
 
 private:
     std::mutex                   lock_;
     std::condition_variable      cond_;
     std::list<GenerateStreamPtr> waiting_streams_;
+    std::list<GenerateStreamPtr> admitted_streams_;
     std::list<GenerateStreamPtr> loading_cache_streams_;
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;

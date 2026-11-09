@@ -630,6 +630,7 @@ py_binary(
     ] + select({
         # database.py imports these lazily for LOAD_METHOD=fastsafetensors.
         "@//:using_cuda13_x86": [":fastsafetensors", ":fast-safetensors"],
+        "@//:using_cuda13_arm": [":fastsafetensors", ":fast-safetensors"],
         "@//:using_cuda12_9_x86": [":fastsafetensors", ":fast-safetensors"],
         "//conditions:default": [],
     }),

@@ -1233,8 +1233,8 @@ class OpenaiGenerateConfigTest(TestCase):
 
         endpoint = SimpleNamespace(tokenizer=_LegacyTokenizer())
         with self.assertLogs(level="WARNING"):
-            ids = OpenaiEndpoint._tokenize_request_stop_words(endpoint, ["ab"])
-        self.assertEqual(ids, [[97, 98], [32, 97, 98]])
+            ids = OpenaiEndpoint._tokenize_request_stop_words(endpoint, ["ab", " cd"])
+        self.assertEqual(ids, [[97, 98], [32, 99, 100]])
 
 
 class GrammarMultiSequenceConfigTest(TestCase):

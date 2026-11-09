@@ -669,8 +669,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 
         const int64_t block_size       = model_config_.attn_config.tokens_per_block;
         const int64_t row_count =
-            std::min(token_budget, runtime_config.fifo_scheduler_config.max_context_batch_size);
-        RTP_LLM_CHECK_WITH_INFO(row_count > 0, "chunked prefill warmup requires max_context_batch_size > 0");
+            std::clamp<int64_t>(runtime_config.fifo_scheduler_config.max_context_batch_size, 1, token_budget);
         const int64_t row_heavy_tokens = std::min(token_budget / row_count, token_heavy_seq_len);
         const int64_t row_heavy_reuse  = (token_heavy_seq_len - row_heavy_tokens) / block_size * block_size;
         auto          row_heavy_input  = makeFakeInput(static_cast<size_t>(row_heavy_reuse + row_heavy_tokens));

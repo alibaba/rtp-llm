@@ -1236,7 +1236,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     const bool is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
     const auto decode_cp_mapper = cache_manager->cpSlotMapper();
-    const bool decode_page_rr = is_page_level_rr && decode_cp_mapper && decode_cp_mapper->isSharded();
+    const bool decode_page_rr = decode_cp_mapper && decode_cp_mapper->isSharded();
     const int decode_attention_tp = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
     const int decode_attention_rank = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_rank());
     const bool has_linear_groups = hasLinearCacheTransfer();
@@ -1380,6 +1380,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                 CacheGroupType group_type                    = groupType(cache_config, use_hybrid, tag);
                 const auto* linear_spec = dynamic_cast<const LinearKVCacheSpec*>(
                     cache_config.topology().group(tag).spec.get());
+                const bool head_sharded_linear = linear_spec != nullptr && linear_spec->usesHeadShardedTransfer();
                 const auto     load_plan                     = groupLoadPlan(cache_config, use_hybrid, tag, block_num);
                 const auto     cache_keys_per_physical_block = cacheKeysPerPhysicalBlock(
                     cache_config.topology().group(tag).seqSizePerBlock(), cache_config.seq_size_per_block);
@@ -1406,9 +1407,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                     auto cache_key =
                         makeCacheKey(model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
 
-                    const bool             use_kv_key_prefix  = use_mla || use_opaque_kv_store || use_hybrid;
-                    const bool use_whole_kv_block =
-                        linear_spec != nullptr || is_page_level_rr || use_kv_key_prefix;
+                    const bool use_kv_key_prefix  = use_mla || use_opaque_kv_store || use_hybrid;
+                    const bool use_whole_kv_block = head_sharded_linear || is_page_level_rr || use_kv_key_prefix;
                     std::vector<BlockInfo> parts;
                     if (use_whole_kv_block) {
                         parts = cache_manager->convertIndexToBuffer(layer_id, tag, block_id);
@@ -1445,7 +1445,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                             key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                     };
 
-                    if (linear_spec != nullptr && linear_spec->usesHeadShardedTransfer()) {
+                    if (head_sharded_linear) {
                         RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 && parts[0].addr != nullptr,
                                                 "LINEAR state needs one contiguous cache block");
                         const auto segments =
@@ -1532,6 +1532,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                             CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, tag);
                             const auto* linear_spec = dynamic_cast<const LinearKVCacheSpec*>(
                                 mtp_cache_cfg.topology().group(tag).spec.get());
+                            const bool head_sharded_linear =
+                                linear_spec != nullptr && linear_spec->usesHeadShardedTransfer();
                             const auto     load_plan  = groupLoadPlan(mtp_cache_cfg, mtp_use_hybrid, tag, block_num);
                             const auto     cache_keys_per_physical_block =
                                 cacheKeysPerPhysicalBlock(mtp_cache_cfg.topology().group(tag).seqSizePerBlock(),
@@ -1564,7 +1566,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                 const bool mtp_use_kv_key_prefix =
                                     mtp_use_mla || mtp_use_opaque_kv_store || mtp_use_hybrid;
                                 const bool mtp_use_whole_kv_block =
-                                    linear_spec != nullptr || is_page_level_rr || mtp_use_kv_key_prefix;
+                                    head_sharded_linear || is_page_level_rr || mtp_use_kv_key_prefix;
                                 std::vector<BlockInfo> parts;
                                 if (mtp_use_whole_kv_block) {
                                     parts = cache_manager->convertIndexToBuffer(global_layer_id, tag, block_id);
@@ -1605,7 +1607,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                         key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                                 };
 
-                                if (linear_spec != nullptr && linear_spec->usesHeadShardedTransfer()) {
+                                if (head_sharded_linear) {
                                     RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 && parts[0].addr != nullptr,
                                                             "LINEAR state needs one contiguous cache block");
                                     const auto segments =

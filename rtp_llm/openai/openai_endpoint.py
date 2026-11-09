@@ -223,6 +223,7 @@ class OpenaiEndpoint(object):
             variants = [stop_word]
             if stop_word and not stop_word[0].isspace():
                 variants.append(" " + stop_word)
+            bare_ids = []
             for variant in variants:
                 try:
                     token_ids = self.tokenizer.encode(variant, add_special_tokens=False)
@@ -236,8 +237,16 @@ class OpenaiEndpoint(object):
                             type(self.tokenizer).__name__,
                         )
                     token_ids = self.tokenizer.encode(variant)
-                if token_ids:
-                    stop_word_ids.append(list(token_ids))
+                if not token_ids:
+                    continue
+                token_ids = list(token_ids)
+                if variant == stop_word:
+                    bare_ids = token_ids
+                elif bare_ids and token_ids[-len(bare_ids) :] == bare_ids:
+                    # The bare sequence already stops generation and leaves
+                    # any separately encoded leading whitespace visible.
+                    continue
+                stop_word_ids.append(token_ids)
         return stop_word_ids
 
     def _extract_generation_config(

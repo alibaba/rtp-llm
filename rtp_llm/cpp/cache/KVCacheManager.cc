@@ -380,6 +380,9 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_PROFILE_FUNCTION();
     const int64_t malloc_begin_time_us = currentTimeUs();
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
+    if (linear_replay_retirement_) {
+        linear_replay_retirement_->reap();
+    }
 
     const int  seq_size_per_block = config_.seq_size_per_block;
     const bool is_first_malloc    = !malloc_info.batch_kv_cache_resource->curBlocksNum();

@@ -143,6 +143,8 @@ def whl_deps():
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
             "tokenspeed-mla@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/tokenspeed-mla/tokenspeed_mla-0.2.11+8b513a59.cu132-py3-none-any.whl#sha256=d66de94e5072c4e509d9b83b115616ddbc91bc1f50a6fb438deb5dfeecf089c3",
+            "cuda-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_x86_64.whl",
+            "flash-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl",
             "nvidia-cutlass-dsl==4.5.3",
         ],
         "@rtp_llm//:using_cuda13_arm": [
@@ -159,6 +161,8 @@ def whl_deps():
             "tilelang@https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/tilelang-0.1.15%2Bcuda.gita35f8ddf-cp39-abi3-linux_aarch64.whl",
             "apache-tvm-ffi==0.1.12",
             "tokenspeed-mla@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/tokenspeed-mla/tokenspeed_mla-0.2.11+8b513a59.cu132-py3-none-any.whl#sha256=d66de94e5072c4e509d9b83b115616ddbc91bc1f50a6fb438deb5dfeecf089c3",
+            "cuda-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_aarch64.whl",
+            "flash-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl",
             "nvidia-cutlass-dsl==4.5.3",
         ],
         "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],

@@ -157,12 +157,11 @@ int64_t FIFOSchedulerBase::lastScheduleTime() {
 }
 
 bool FIFOSchedulerBase::checkInputLength(const GenerateStreamPtr& stream) {
-    const auto input_length = static_cast<size_t>(stream->inputLength());
-    const auto reserve_step = stream->reserveStep();
-    if (input_length == 0) {
-        stream->reportError(ErrorCode::INVALID_PARAMS, "input token ids must not be empty");
+    if (!checkNonEmptyInput(stream)) {
         return false;
     }
+    const auto input_length = static_cast<size_t>(stream->inputLength());
+    const auto reserve_step = stream->reserveStep();
     if (reserve_step > 0 && !(input_length <= max_seq_len_ && reserve_step <= max_seq_len_ - input_length)) {
         const auto allowed_input_length = reserve_step <= max_seq_len_ ? max_seq_len_ - reserve_step : 0;
         auto       error_info =

@@ -982,12 +982,13 @@ TEST_F(FIFOSchedulerTest, testCheckInputLengthIgnoresBatchSizeFanOut) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    {
-        auto empty = makeStream({}, model_config, runtime_config, resource_context);
-        EXPECT_FALSE(scheduler.enqueue(empty).ok());
+    BatchDecodeScheduler batch_scheduler(runtime_config, cache_manager, nullptr);
+    for (auto* admission : std::vector<SchedulerBase*>{&scheduler, &batch_scheduler}) {
+        auto empty = makeStream({}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+        EXPECT_FALSE(admission->enqueue(empty).ok());
         EXPECT_EQ(empty->statusInfo().code(), ErrorCode::INVALID_PARAMS);
-        auto grouped_empty = makeStream({}, model_config, runtime_config, resource_context);
-        EXPECT_FALSE(scheduler.enqueueGroup({grouped_empty}).first.front());
+        auto grouped_empty = makeStream({}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+        EXPECT_FALSE(admission->enqueueGroup({grouped_empty}).first.front());
         EXPECT_EQ(grouped_empty->statusInfo().code(), ErrorCode::INVALID_PARAMS);
     }
 
@@ -1481,6 +1482,36 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerSchedulesNonzeroBatch) {
     for (const auto& stream : result.value()) {
         EXPECT_FALSE(stream->isContextStream());
     }
+}
+
+TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRetriesAdmittedStreamWithoutReplaySlot) {
+    auto cache_config = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+    cache_config.linear_replay =
+        LinearReplayPlan::create({static_cast<int>(cache_config.topology().groupIdForTag("linear"))},
+                                 1,
+                                 4,
+                                 {1, 1},
+                                 {1, 1},
+                                 false,
+                                 DataType::TYPE_FP16,
+                                 1);
+    auto [cache_manager, resource_context, model_config, runtime_config] = makeBatchDecodeResources(cache_config, 2);
+    resource_context.role_type                                           = RoleType::PDFUSION;
+    ASSERT_TRUE(cache_manager->init());
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+    auto                 first  = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context);
+    auto                 second = makeStream({5, 6, 7, 8}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(enqueueIndividually(scheduler, {first, second}));
+
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, first));
+    EXPECT_EQ(second->getStatus(), StreamState::WAITING);
+    EXPECT_TRUE(second->streamCacheResource().waitingForLinearReplaySlot());
+    EXPECT_EQ(scheduler.onflightStreams(), 2);
+
+    first->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, second));
+    EXPECT_EQ(second->getStatus(), StreamState::RUNNING);
+    EXPECT_NE(second->streamCacheResource().linearReplayLease(), nullptr);
 }
 
 TEST_F(FIFOSchedulerTest, testFIFOAdmissionModeStillIncludesRunningStream) {
@@ -6189,16 +6220,17 @@ TEST_F(FIFOSchedulerTest, testShortMultimodalContextsWaitForFullPrefillGrant) {
     const auto                           cache_config = makeChunkCpGroupCacheConfig(8, false, 4, false);
     ChunkSchedulerTestEnv<FIFOScheduler> env(config, cache_config);
     ASSERT_TRUE(env.init());
-    const auto make_multimodal = [&] {
-        auto query                 = std::make_shared<GenerateInput>();
-        query->input_ids           = torch::ones({12}, torch::kInt32);
-        query->generate_config     = makeTestGenerateConfig();
-        query->multimodal_features = std::vector<torch::Tensor>{torch::zeros({2, 4})};
+    const auto make_multimodal = [&](bool return_logits) {
+        auto query                            = std::make_shared<GenerateInput>();
+        query->input_ids                      = torch::ones({12}, torch::kInt32);
+        query->generate_config                = makeTestGenerateConfig();
+        query->generate_config->return_logits = return_logits;
+        query->multimodal_features            = std::vector<torch::Tensor>{torch::zeros({2, 4})};
         return std::make_shared<NormalGenerateStream>(
             query, env.model_config, env.runtime_config, env.resource_context, nullptr);
     };
-    auto first  = make_multimodal();
-    auto second = make_multimodal();
+    auto first  = make_multimodal(false);
+    auto second = make_multimodal(true);
     ASSERT_FALSE(first->chunkedPrefillEnabled());
     ASSERT_FALSE(second->chunkedPrefillEnabled());
     ASSERT_TRUE(enqueueIndividually(env.scheduler(), {first, second}));

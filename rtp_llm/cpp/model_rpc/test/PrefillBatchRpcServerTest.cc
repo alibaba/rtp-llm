@@ -14,6 +14,7 @@
 #include "opentelemetry/exporters/memory/in_memory_span_data.h"
 #include "opentelemetry/exporters/memory/in_memory_span_exporter_factory.h"
 #include "opentelemetry/sdk/trace/span_data.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -1643,6 +1644,10 @@ TEST_F(PrefillBatchTraceTest, PerRequestCarriersCreateIsolatedLogicalParentsAndP
     ASSERT_TRUE(decode_server.start());
 
     TestPrefillBatchRpcServer server;
+    auto engine = std::make_shared<PartialEnqueueEngine>();
+    engine->resource_context_.cache_manager =
+        std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 8, 64, DataType::TYPE_FP16));
+    server.engine_ = std::move(engine);
     server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
     std::vector<PrefillBatchRpcServer::BatchSlot> slots(2);
     for (size_t i = 0; i < slots.size(); ++i) {

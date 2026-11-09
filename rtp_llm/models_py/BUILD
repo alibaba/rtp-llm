@@ -1,4 +1,6 @@
 load("@arch_config//:arch_select.bzl", "requirement")
+load("@pip_cuda13_arm_torch//:requirements.bzl", cuda13_arm_requirement = "requirement")
+load("@pip_gpu_cuda13_torch//:requirements.bzl", cuda13_x86_requirement = "requirement")
 
 py_library(
     name = "utils",
@@ -46,6 +48,7 @@ flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
 rtp_kernel = ["rtp-kernel"]
 flashattn2 = ["flash_attn"]
 flashattn = flashattn2 + ["flash-attn-3"]
+kda_prefill = ["cuda-linear-attention", "flash-linear-attention"]
 requirement(flashinfer)
 requirement(deep)
 requirement(flashmla)
@@ -143,8 +146,12 @@ py_library(
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
         # cuda13 locks ship flashinfer-python and deep-ep.
-        "@//:using_cuda13_x86": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl"],
-        "@//:using_cuda13_arm": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl"],
+        "@//:using_cuda13_x86": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl"] + [
+            cuda13_x86_requirement(name) for name in kda_prefill
+        ],
+        "@//:using_cuda13_arm": flashinfer + deep + ["//rtp_llm:nvidia-cutlass-dsl"] + [
+            cuda13_arm_requirement(name) for name in kda_prefill
+        ],
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
         "@//:using_rocm": [

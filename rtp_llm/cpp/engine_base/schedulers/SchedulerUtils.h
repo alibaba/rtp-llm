@@ -14,6 +14,14 @@ inline bool isPrefillOnly(const GenerateStreamPtr& stream) {
     return stream->generateConfig()->isPrefillOnly();
 }
 
+inline bool checkNonEmptyInput(const GenerateStreamPtr& stream) {
+    if (stream->inputLength() > 0) {
+        return true;
+    }
+    stream->reportError(ErrorCode::INVALID_PARAMS, "input token ids must not be empty");
+    return false;
+}
+
 template<typename StreamRange>
 bool hasMixedExecutionModes(const StreamRange& streams) {
     bool has_execution_mode = false;
