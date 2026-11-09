@@ -34,6 +34,10 @@ namespace rtp_llm {
 namespace {
 
 constexpr auto kDecodeChannelReadyTimeoutCap = std::chrono::milliseconds(15000);
+// Bound the terminal prefill cache-publication barrier. The common path is
+// already FINISHED with no pending worker; these caps only prevent a stuck
+// scheduler/worker from turning cache publication into a request hang.
+constexpr int64_t kPrefillCachePublicationWaitMs = 100;
 
 bool envValueIsTrue(const char* value) {
     return value != nullptr
@@ -614,6 +618,35 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     }
 }
 
+void PrefillRpcServer::publishPrefillCache(PrefillGenerateContext& prefill_context) {
+    RTP_LLM_PROFILE_FUNCTION();
+    auto stream = prefill_context.getStream();
+    if (!stream || stream->hasError() || !stream->hasEvent(StreamEvents::GenerateDone)) {
+        return;
+    }
+    // A normal prefill is already terminal by the time decode has loaded its
+    // KV. Wait for the scheduler commit and the output worker without
+    // cancelling a successful stream; a timeout leaves the existing deferred
+    // release path intact rather than failing the request.
+    if (!stream->isFinished() && !stream->waitForFinished(kPrefillCachePublicationWaitMs)) {
+        RTP_LLM_LOG_WARNING("request [%ld] prefill cache publication deferred: lifecycle not terminal within %ld ms",
+                            prefill_context.request_id,
+                            kPrefillCachePublicationWaitMs);
+        return;
+    }
+    if (!stream->waitPendingAsyncBookkeeping(kPrefillCachePublicationWaitMs)) {
+        RTP_LLM_LOG_WARNING(
+            "request [%ld] prefill cache publication deferred: pending async bookkeeping not drained within %ld ms",
+            prefill_context.request_id,
+            kPrefillCachePublicationWaitMs);
+        return;
+    }
+    // Idempotent: the deferred-release worker may already have run. Publishing
+    // here makes the completed prefix visible before the P->D response can let
+    // the next session issue its prefix lookup.
+    stream->releaseResource();
+}
+
 void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote generate", prefill_context.request_id);
@@ -815,6 +848,10 @@ grpc::Status PrefillRpcServer::finishStream(PrefillGenerateContext& prefill_cont
     EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
     EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);
     EXECUTE_STAGE_FUNC(remoteLoadCacheEnd, prefill_context);
+    // Decode has loaded KV but cannot return the completed request until
+    // remoteGenerate below. Publish the prefill prefix first so the next
+    // session cannot race the terminal deferred release.
+    publishPrefillCache(prefill_context);
     EXECUTE_STAGE_FUNC(remoteGenerate, prefill_context);
     EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
     prefill_context.stat_info.nextStage();

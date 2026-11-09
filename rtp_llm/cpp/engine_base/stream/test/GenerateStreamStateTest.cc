@@ -152,6 +152,22 @@ TEST_F(GenerateStreamStateTest, testInitialStateIsWaiting) {
     ASSERT_FALSE(stream->getStatus() == StreamState::LOADING_CACHE);
 }
 
+TEST_F(GenerateStreamStateTest, PendingAsyncBookkeepingAndLifecycleWaitsAreBounded) {
+    auto stream = createStream();
+    stream->incPendingAsyncBookkeeping();
+    EXPECT_FALSE(stream->waitPendingAsyncBookkeeping(10));
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_TRUE(stream->waitPendingAsyncBookkeeping(10));
+
+    EXPECT_FALSE(stream->waitForFinished(10));
+    {
+        std::lock_guard<std::mutex> lock(*stream->mutex_);
+        stream->generate_status_->status.store(StreamState::FINISHED);
+        stream->consumer_cv_->notify_all();
+    }
+    EXPECT_TRUE(stream->waitForFinished(10));
+}
+
 TEST_F(GenerateStreamStateTest, testMtpSnapshotSkipsBookkeepingJoinWithinReservedCapacity) {
     auto stream = createStream({1, 2, 3});
     stream->setReserveStep(0);

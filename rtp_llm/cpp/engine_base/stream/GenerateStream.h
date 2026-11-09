@@ -390,6 +390,9 @@ public:
 
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is finished
+    // Bounded, non-cancelling wait for the scheduler's RUNNING -> FINISHED
+    // commit. Unlike finishOrCancel(), timeout does not publish an error.
+    bool waitForFinished(int64_t timeout_ms);
     // Complete a Decode stream owned by the RPC handler, before scheduler enqueue.
     bool finishWithoutGenerate();
     bool isActive() const;  // Returns true if stream is active (no error and not finished)
@@ -663,6 +666,8 @@ public:
     void decPendingAsyncBookkeepingAndMaybeRelease();
     bool hasPendingAsyncBookkeeping() const;
     void waitPendingAsyncBookkeeping();
+    // Returns true if the pending count reached zero before the timeout.
+    bool waitPendingAsyncBookkeeping(int64_t timeout_ms);
     void markDeferredRelease();
     bool isDeferredReleasePending() const;
 

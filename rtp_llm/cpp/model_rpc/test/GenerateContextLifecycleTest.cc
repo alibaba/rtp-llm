@@ -1,7 +1,9 @@
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include <gtest/gtest.h>
 
@@ -11,6 +13,7 @@
 #define private public
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
 #undef private
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 
 namespace rtp_llm::test {
@@ -228,6 +231,52 @@ TEST_F(PrefillContextLifecycleTest, SuccessDoesNotWaitForScheduler) {
     EXPECT_FALSE(stream_->hasError());
     EXPECT_EQ(stream_->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(registry_->getRequestBlockBuffer("2001"), nullptr);
+}
+
+class CachePublicationTestServer: public PrefillRpcServer {
+public:
+    void publish(PrefillGenerateContext& context) {
+        publishPrefillCache(context);
+    }
+};
+
+TEST_F(PrefillContextLifecycleTest, PublishPrefillCacheDrainsTerminalBookkeeping) {
+    auto context = makePrefillContext();
+    stream_->reportEvent(StreamEvents::GenerateDone);
+    stream_->setState(StreamState::FINISHED);
+    stream_->incPendingAsyncBookkeeping();
+    stream_->markDeferredRelease();
+
+    std::atomic<bool> worker_ran{false};
+    std::thread       worker([this, &worker_ran]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        worker_ran.store(true, std::memory_order_release);
+        stream_->decPendingAsyncBookkeepingAndMaybeRelease();
+    });
+    CachePublicationTestServer server;
+    server.publish(*context);
+    // The helper must drain the pending claim before returning; joining after
+    // this check would hide an early return.
+    const bool waited_for_worker = worker_ran.load(std::memory_order_acquire);
+    worker.join();
+
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_TRUE(waited_for_worker);
+    EXPECT_FALSE(stream_->isDeferredReleasePending());
+}
+
+TEST_F(PrefillContextLifecycleTest, PublishPrefillCacheDoesNotWaitForRunningStream) {
+    auto context = makePrefillContext();
+    const auto begin = std::chrono::steady_clock::now();
+    CachePublicationTestServer server;
+    server.publish(*context);
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
+
+    EXPECT_LT(elapsed_ms, 50);
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_EQ(stream_->getStatus(), StreamState::RUNNING);
+    EXPECT_FALSE(stream_->streamCacheResource().isResourceReleased());
 }
 
 TEST_F(PrefillContextLifecycleTest, CancellationKeepsPublicationOpenUntilSchedulerFinishes) {

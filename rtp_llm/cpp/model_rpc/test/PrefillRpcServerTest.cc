@@ -181,6 +181,10 @@ public:
         remoteGenerate(context);
     }
 
+    void publishPrefillCacheForTest(PrefillGenerateContext& context) {
+        publishPrefillCache(context);
+    }
+
     void setContextErrorForTest(PrefillGenerateContext& context, const ErrorInfo& error_info) {
         setContextError(context, error_info);
     }
@@ -299,6 +303,20 @@ TEST_F(PrefillRpcServerTest, GenerateHandoffExplicitlyExcludesSampledTokenOnlyWh
             EXPECT_EQ(handoff.prefill_kv_handoff().computed_kv_end(), 3);
         }
     }
+}
+
+TEST_F(PrefillRpcServerTest, PublishPrefillCacheSkipsStreamWithoutGenerateDone) {
+    GenerateInputPB request;
+    auto            context = makeContext(&request);
+    context->meta           = std::make_shared<RpcServerRuntimeMeta>();
+    auto stream             = makeWaitingStream();
+    context->setStream(stream);
+
+    TestPrefillRpcServer server;
+    server.publishPrefillCacheForTest(*context);
+
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
 }
 
 TEST_F(PrefillRpcServerTest, PrefillCompletionRequiresCapabilityAndSuccessfulLocalFinish) {

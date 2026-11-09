@@ -59,6 +59,7 @@ protected:
     // Shared with the derived batch server (each batch slot reuses these).
     grpc::Status prepareAllocateResource(PrefillGenerateContext& prefill_context);
     grpc::Status finishStream(PrefillGenerateContext& prefill_context);
+    void         publishPrefillCache(PrefillGenerateContext& prefill_context);
     grpc::Status preferPriorityPreemption(PrefillGenerateContext& prefill_context, const grpc::Status& fallback);
     void         setContextError(PrefillGenerateContext& prefill_context, const ErrorInfo& error_info);
     void         setContextError(PrefillGenerateContext& prefill_context,

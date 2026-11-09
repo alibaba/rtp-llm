@@ -275,6 +275,15 @@ void GenerateStream::waitPendingAsyncBookkeeping() {
     async_bookkeeping_->cv.wait(lk, [this] { return async_bookkeeping_->count.load(std::memory_order_acquire) == 0; });
 }
 
+bool GenerateStream::waitPendingAsyncBookkeeping(int64_t timeout_ms) {
+    RTP_LLM_CHECK_WITH_INFO(timeout_ms >= 0, "waitPendingAsyncBookkeeping timeout_ms must be non-negative");
+    std::unique_lock<std::mutex> lk(async_bookkeeping_->mu);
+    return async_bookkeeping_->cv.wait_for(
+        lk,
+        std::chrono::milliseconds(timeout_ms),
+        [this] { return async_bookkeeping_->count.load(std::memory_order_acquire) == 0; });
+}
+
 void GenerateStream::markDeferredRelease() {
     async_bookkeeping_->defer_release.store(true, std::memory_order_release);
 }
@@ -856,6 +865,13 @@ StreamState GenerateStream::getStatus() const {
 
 bool GenerateStream::isFinished() const {
     return getStatus() == StreamState::FINISHED;
+}
+
+bool GenerateStream::waitForFinished(int64_t timeout_ms) {
+    RTP_LLM_CHECK_WITH_INFO(timeout_ms >= 0, "waitForFinished timeout_ms must be non-negative");
+    std::unique_lock<std::mutex> lock(*mutex_);
+    return consumer_cv_->wait_for(
+        lock, std::chrono::milliseconds(timeout_ms), [this] { return getStatus() == StreamState::FINISHED; });
 }
 
 bool GenerateStream::finishWithoutGenerate() {
