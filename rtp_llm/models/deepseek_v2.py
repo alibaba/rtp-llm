@@ -1056,7 +1056,6 @@ class Glm5Mtp(DeepSeekV2):
             max_generate_batch_size=self.max_generate_batch_size,
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.hw_kernel_config,
-            device_resource_config=self.device_resource_config,
         )
 
     @staticmethod

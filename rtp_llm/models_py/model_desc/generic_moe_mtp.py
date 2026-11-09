@@ -45,7 +45,6 @@ class GenericMoeMTPModel(Glm5ModelBase):
         max_generate_batch_size: int,
         fmha_config=None,
         py_hw_kernel_config=None,
-        device_resource_config=None,
     ):
         super().__init__(
             model_config,
@@ -55,7 +54,6 @@ class GenericMoeMTPModel(Glm5ModelBase):
             max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=device_resource_config,
         )
         self.pre_fc_norm_embedding = RMSNorm(
             weights.global_weights[W.multi_tokens_predict_enorm],
@@ -103,14 +101,12 @@ class GenericMoeMTPModel(Glm5ModelBase):
             max_generate_batch_size=self.max_generate_batch_size,
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.py_hw_kernel_config,
-            device_resource_config=self.device_resource_config,
         )
         # Clones using the same KV arena must share its token-to-slot mapping.
         # initialize() rebuilds the working sets if the arena changes.
         clone.device_type = self.device_type
         clone.moe_config = self.moe_config
         clone.max_generate_batch_size = self.max_generate_batch_size
-        clone.device_resource_config = self.device_resource_config
 
         clone.embed_tokens = self.embed_tokens
         clone.pre_fc_norm_embedding = self.pre_fc_norm_embedding
