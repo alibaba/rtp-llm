@@ -10,6 +10,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv41.cp import CPContext
 from rtp_llm.models_py.modules.dsv41.ppu.ced import bounded_plan
+from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import CP8_ROW_PREP_ENV
 from rtp_llm.models_py.modules.dsv41.prefill.ced import permits_ced
 from rtp_llm.models_py.modules.dsv41.prefill.ced import CEDPlan, _MIN_TOKENS
 
@@ -101,6 +102,7 @@ class SharedForwardState:
         self.prefill, self.idle = bool(prefill), bool(idle)
         self.query_prefixes = tuple(map(int, prefixes))
         self.lengths = tuple(map(int, lengths))
+        self._restored_rows = None
         self.original_context = self.context = None
         self.plan = None
         self.compacted = False
@@ -154,10 +156,31 @@ class SharedForwardState:
             p, r, _, valid = self.rows()
             return p, r, valid
         device = context.global_positions.device
-        positions = torch.cat([torch.arange(p, p + n, device=device) for p, n in zip(self.query_prefixes, self.lengths)])
-        requests = torch.repeat_interleave(torch.arange(len(self.lengths), device=device), torch.tensor(self.lengths, device=device))
-        valid = torch.ones(positions.numel(), dtype=torch.bool, device=device)
         selected = context.gather_restore_positions
+        reuse = (
+            selected is None
+            and self.prefill
+            and context.cp_size == 8
+            and context.kv_cache_sharded
+            and os.environ.get(CP8_ROW_PREP_ENV, "1") == "1"
+        )
+        if reuse:
+            key = self.query_prefixes, self.lengths, device
+            if self._restored_rows is not None and self._restored_rows[0] == key:
+                return self._restored_rows[1], self._restored_rows[2], slice(None)
+
+        positions = torch.cat([torch.arange(p, p + n, device=device) for p, n in zip(self.query_prefixes, self.lengths)])
+        requests = torch.repeat_interleave(
+            torch.arange(len(self.lengths), device=device),
+            torch.tensor(self.lengths, device=device),
+            output_size=positions.numel() if reuse else None,
+        )
+        if reuse:
+            # The CP gather already restored every real row, in request order.
+            self._restored_rows = key, positions, requests
+            return positions, requests, slice(None)
+
+        valid = torch.ones(positions.numel(), dtype=torch.bool, device=device)
         if selected is not None:
             valid.zero_()
             valid[selected] = True

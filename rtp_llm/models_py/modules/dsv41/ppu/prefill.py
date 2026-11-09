@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.dsv41.backend import V41QuantizedTensor, V41StepC
 from rtp_llm.models_py.modules.dsv41.ppu import _quant
 from rtp_llm.models_py.modules.dsv41.ppu.attention import COMBINED_WIDTH
 from rtp_llm.models_py.modules.dsv41.ppu.cache import PPUKVCache, PPURequestSlots
+from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache
 from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import compact_prefix
 from rtp_llm.models_py.modules.dsv41.ppu.weight import V41Geometry
 
@@ -351,9 +352,14 @@ def _produce_global(
     """
     ratio = geometry.ratio(layer_id)
     tag = "global_kv_2" if ratio == 2 else "global_kv_1"
+    request_local = (
+        prefill_layout is not None
+        and isinstance(cache, SharedNativeCache)
+        and cache.cp8_row_prep_enabled()
+    )
     ranges = _global_write_ranges(positions, request_ids, append_starts or {}, prefill_layout)
     for rid, start, end, append, rows, state_rows in ranges:
-        handle = slots[rid]
+        handle = None if request_local else slots[rid]
         begin, stop = start // ratio, end // ratio
         if ratio == 1:
             latent = _rms_norm(
@@ -403,31 +409,45 @@ def _produce_global(
         packed_global = ops.encode_kv(global_keys, pool_tag=tag)
         first_write = max(begin, append // ratio)
         write_offset = first_write - begin
-        cache.insert_rows(
-            layer_id,
-            tag,
-            handle.global_slots[layer_id][first_write:stop],
-            packed_global[write_offset:],
-        )
+        write_positions = entry_positions[write_offset:]
+        if handle is None:
+            cache.insert_request_rows(
+                layer_id, tag, rid, write_positions, packed_global[write_offset:]
+            )
+        else:
+            cache.insert_rows(
+                layer_id,
+                tag,
+                handle.global_slots[layer_id][first_write:stop],
+                packed_global[write_offset:],
+            )
         # Indexer K comes from the same latents.
         projected = F.linear(latent, layer.index_wk.weight)
         projected = _rms_norm(projected, layer.index_k_norm, geometry.norm_eps)
         index_keys = _rope_tail(projected, freqs[safe_positions])
         packed_index = ops.encode_kv(index_keys, pool_tag="indexer_kv")
-        cache.insert_rows(
-            layer_id,
-            "indexer_kv",
-            handle.indexer_slots[layer_id][first_write:stop],
-            packed_index[write_offset:],
-        )
+        if handle is None:
+            cache.insert_request_rows(
+                layer_id, "indexer_kv", rid, write_positions, packed_index[write_offset:]
+            )
+        else:
+            cache.insert_rows(
+                layer_id,
+                "indexer_kv",
+                handle.indexer_slots[layer_id][first_write:stop],
+                packed_index[write_offset:],
+            )
         if ratio == 2:
             # CSA states at RAW positions: [values | scores] fp32.
             state_positions = positions[state_rows]
             if not state_positions.numel():
                 continue
             state = torch.cat((values[state_rows], scores[state_rows]), dim=-1).float()
-            state_slots = cache.slots_at_positions(layer_id, "csa_state", rid, state_positions)
-            cache.insert_rows(layer_id, "csa_state", state_slots, state)
+            if handle is None:
+                cache.insert_request_rows(layer_id, "csa_state", rid, state_positions, state)
+            else:
+                state_slots = cache.slots_at_positions(layer_id, "csa_state", rid, state_positions)
+                cache.insert_rows(layer_id, "csa_state", state_slots, state)
 
 
 def _quantized_indexer_query(query: torch.Tensor) -> V41QuantizedTensor:

@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
 
 
 _LOGGER = logging.getLogger(__name__)
+CP8_ROW_PREP_ENV = "RTP_V41_PPU_CP8_PREFILL_ROW_PREP"
 
 
 def _latest_csa_indices(blocks, offsets, positions):
@@ -147,32 +148,46 @@ class SharedNativeCache(NativeCacheBridge):
     def insert_rows(self, layer, tag, slots, rows):
         for rid in slots[:, 0].unique().tolist():
             mask = slots[:, 0] == rid
-            physical_rows = None
-            if tag == "csa_state":
-                positions, values = slots[mask, 1], rows[mask]
-                if getattr(self, "_is_prefill", False):
-                    length = self.lengths[rid]
-                    keep = self._prefill_ring_keep(
-                        self.pools[layer, tag], rid, positions, length - length % 2,
-                    )
-                    positions, values = positions[keep], values[keep]
-                owned = self.owned_positions((layer, tag), positions)
-                positions, values = positions[owned], values[owned]
-                blocks, offsets = self._coordinates((layer, tag), rid, positions)
-                keep = _latest_csa_indices(blocks.cpu().tolist(), offsets.cpu().tolist(), positions.cpu().tolist())
-                selected = torch.tensor(keep, device=positions.device, dtype=torch.long)
-                # Every destination appears once, including aliased page-table
-                # columns and unordered CP rows. Never rely on index_put order.
-                self._copy_rows((layer, tag), rid, positions[selected], values[selected])
-                physical_rows = len(keep)
-            else:
-                self._copy_rows((layer, tag), rid, slots[mask, 1], rows[mask])
-            write = {"layer": layer, "tag": tag, "request": int(rid), "rows": int(mask.sum())}
-            write["owned_rows"] = int(self.owned_positions((layer, tag), slots[mask, 1]).sum())
-            if physical_rows is not None:
-                # Preserve logical producer coverage; report retained writes too.
-                write["physical_rows"] = physical_rows
-            self.writes.append(write)
+            self.insert_request_rows(layer, tag, rid, slots[mask, 1], rows[mask])
+
+    def cp8_row_prep_enabled(self):
+        return (
+            self._is_prefill
+            and self.sharded
+            and self.cp["size"] == 8
+            and os.environ.get(CP8_ROW_PREP_ENV, "1") == "1"
+        )
+
+    def insert_request_rows(self, layer, tag, request, positions, rows):
+        """Write raw positions already grouped by the caller's request."""
+        if not positions.numel():
+            return
+        key = layer, tag
+        owned = self.owned_positions(key, positions)
+        write = {
+            "layer": layer,
+            "tag": tag,
+            "request": int(request),
+            "rows": positions.numel(),
+            "owned_rows": int(owned.sum()),
+        }
+        if tag == "csa_state":
+            if getattr(self, "_is_prefill", False):
+                length = self.lengths[request]
+                owned &= self._prefill_ring_keep(
+                    self.pools[key], request, positions, length - length % 2,
+                )
+            positions, rows = positions[owned], rows[owned]
+            blocks, offsets = self._coordinates(key, request, positions)
+            keep = _latest_csa_indices(
+                blocks.cpu().tolist(), offsets.cpu().tolist(), positions.cpu().tolist()
+            )
+            selected = torch.tensor(keep, device=positions.device, dtype=torch.long)
+            # Deduplicate physical destinations even when table columns alias.
+            positions, rows = positions[selected], rows[selected]
+            write["physical_rows"] = len(keep)
+        self._copy_rows(key, request, positions, rows)
+        self.writes.append(write)
 
     def request_length(self, request):
         return self.lengths[int(request)]
@@ -262,7 +277,7 @@ class SharedNativeCache(NativeCacheBridge):
     def _batched_swa_enabled(self):
         return (
             os.environ.get("RTP_V41_PPU_CP8_BATCHED_SWA", "1") == "1"
-            and self._is_prefill
+            and getattr(self, "_is_prefill", False)
             and self.sharded
             and self.cp["size"] == 8
         )

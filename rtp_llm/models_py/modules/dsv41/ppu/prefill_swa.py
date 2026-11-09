@@ -112,7 +112,7 @@ def gather_tails(pool, placement, prefixes, window):
     coords = torch.tensor(pages, dtype=torch.int64, device=table.device)
     blocks = table[coords[:, 0], coords[:, 1]]
     if bool(((blocks < 0) | (blocks >= pool.tensor.shape[0])).any()):
-        raise ValueError("native CP SWA tail refers to an unallocated physical block")
+        raise ValueError("native CP ring read refers to an unallocated physical block")
     local = pool.tensor.index_select(0, blocks)
     with record_function_range("dsv41.ppu.prefill.swa_tail.batch"):
         gathered = all_gather(local, Group.TP)
