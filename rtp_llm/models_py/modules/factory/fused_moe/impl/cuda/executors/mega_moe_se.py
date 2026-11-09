@@ -85,21 +85,24 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
 
     @classmethod
     def check_conditions(cls, checker: Any, config) -> None:
+        checker.check(config.n_shared_experts > 0)
+        checker.check(not config.has_shared_expert_gate)
+        if getattr(config, "mega_moe_policy", None) is not None:
+            super().check_conditions(checker, config)
+            if config.moe_strategy not in FP8_MEGA_MOE_STRATEGIES:
+                checker.check(_mega_moe_se_available(allow_single_rank=True))
+            return
+        shared_block_size = getattr(config, "shared_fp8_block_size", None)
+        if not checker.check(shared_block_size in _SHARED_RECIPES):
+            return
         Fp8Fp4ExecutorBase.check_conditions(checker, config)
         checker.check(config.ep_size > 1)
         checker.check(config.world_size == config.ep_size)
         checker.check(config.world_rank == config.ep_rank)
-        checker.check(config.n_shared_experts > 0)
-        checker.check(not config.has_shared_expert_gate)
-        if getattr(config, "mega_moe_policy", None) is not None:
-            if getattr(config, "moe_strategy", "mega_moe_se") not in FP8_MEGA_MOE_STRATEGIES:
-                checker.check(_mega_moe_se_available(allow_single_rank=True))
-            return
-        checker.check(config.shared_fp8_block_size in _SHARED_RECIPES)
         # The fused activation/combine rounds differently from the standalone
         # BF16 shared expert, so group-32 needs an explicit decode-only opt-in.
         checker.check(
-            config.shared_fp8_block_size != 32
+            shared_block_size != 32
             or (config.is_decode_role and mega_shared_expert_block32_enabled())
         )
         checker.check(_mega_moe_se_available())
