@@ -1739,10 +1739,11 @@ TEST_P(LocalKVCMCompletionTest, BusinessDeadlineFreezesUntilSdkCompletionThenTha
     ASSERT_TRUE(session.initialize());
     auto* quarantine_metrics = metrics_reporter->getMetricsGroup<RtpLLMRemoteCacheQuarantineMetrics>();
     ASSERT_NE(quarantine_metrics, nullptr);
-    // Consume each transition separately: gauge snapshots aggregate pending samples.
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    for (int period = 0; period < 3; ++period) {
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    }
     const auto ref_count = session.environment.device_pool->refCount(session.environment.block_id);
     ASSERT_TRUE(session.submit(GetParam()));
     ASSERT_EQ(session.frozen_result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
@@ -1758,18 +1759,23 @@ TEST_P(LocalKVCMCompletionTest, BusinessDeadlineFreezesUntilSdkCompletionThenTha
     session.dispatcher->pollFrozenTasks();
     EXPECT_TRUE(session.environment.device_pool->isFrozen(session.environment.block_id));
     EXPECT_EQ(session.environment.device_pool->refCount(session.environment.block_id), ref_count + 1);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
+    // Unchanged quarantine stocks must survive consecutive collection periods.
+    for (int period = 0; period < 3; ++period) {
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
+    }
 
     session.client->release();
     ASSERT_TRUE(session.waitForState(id, TaskCompletion::FINISHED));
     session.dispatcher->pollFrozenTasks();
     EXPECT_FALSE(session.environment.device_pool->isFrozen(session.environment.block_id));
     EXPECT_EQ(session.environment.device_pool->refCount(session.environment.block_id), ref_count);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
-    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    for (int period = 0; period < 3; ++period) {
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
+        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    }
     session.dispatcher->pollFrozenTasks();
     EXPECT_EQ(session.backend->queryLocalKVCMOperations({id}), std::vector<TaskCompletion>{TaskCompletion::UNKNOWN});
 }
@@ -1920,7 +1926,7 @@ TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
-    // Snapshot consumes gauge samples; inspect the unchanged quarantine state only once.
+    // Healthy I/O must leave the reported quarantine stocks unchanged.
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);

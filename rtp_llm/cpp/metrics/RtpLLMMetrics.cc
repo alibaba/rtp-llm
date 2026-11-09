@@ -1207,9 +1207,10 @@ void RtpLLMRemoteCacheSDKMetrics::report(const kmonitor::MetricsTags*          t
 }
 
 bool RtpLLMRemoteCacheQuarantineMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_lease_count_metric, "rtp_llm_remote_cache_quarantined_lease_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_block_count_metric, "rtp_llm_remote_cache_quarantined_block_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_block_ratio_metric, "rtp_llm_remote_cache_quarantined_block_ratio");
+    // Stocks are updated only on transitions; STATUS retains them across collection periods.
+    REGISTER_STATUS_MUTABLE_METRIC(quarantined_lease_count_metric, "rtp_llm_remote_cache_quarantined_lease_count");
+    REGISTER_STATUS_MUTABLE_METRIC(quarantined_block_count_metric, "rtp_llm_remote_cache_quarantined_block_count");
+    REGISTER_STATUS_MUTABLE_METRIC(quarantined_block_ratio_metric, "rtp_llm_remote_cache_quarantined_block_ratio");
     REGISTER_QPS_MUTABLE_METRIC(quarantine_qps_metric, "rtp_llm_remote_cache_quarantine_qps");
     REGISTER_QPS_MUTABLE_METRIC(quarantine_block_qps_metric, "rtp_llm_remote_cache_quarantine_block_qps");
     return true;
