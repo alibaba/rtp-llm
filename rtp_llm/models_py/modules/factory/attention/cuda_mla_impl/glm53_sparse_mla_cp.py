@@ -1439,7 +1439,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         # get pos=0 but never read: q is selected by total_local_ids; k_pe is
         # all-gathered then re-indexed by kv_restore_unpad_indices.
         q_pe = q[:, :, self.nope_head_dim :]
-        if self.fmha_impl.full_rope_pos_ids is not None:
+        if self.rope_impl is not None and self.fmha_impl.full_rope_pos_ids is not None:
             self.rope_impl.forward(
                 q_pe,
                 k_pe,
