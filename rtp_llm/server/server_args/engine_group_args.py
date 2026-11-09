@@ -22,6 +22,14 @@ def init_engine_group_args(parser, runtime_config):
     ##############################################################################################################
     engine_group = parser.add_argument_group("Engine Configuration")
     engine_group.add_argument(
+        "--engine_cpu_affinity",
+        env_name="ENGINE_CPU_AFFINITY",
+        bind_to="engine_cpu_affinity",
+        choices=("off", "auto"),
+        default="off",
+        help="auto 为本机各 rank 的引擎线程分配计算卡 NUMA 近端的不同物理核",
+    )
+    engine_group.add_argument(
         "--warm_up",
         env_name="WARM_UP",
         bind_to=(runtime_config, "warm_up"),

@@ -758,6 +758,8 @@ class PyEnvConfigs:
         self.kv_cache_config: KVCacheConfig = KVCacheConfig()
         self.device_resource_config: DeviceResourceConfig = DeviceResourceConfig()
         self.runtime_config: RuntimeConfig = RuntimeConfig()
+        self.engine_cpu_affinity: str = "off"
+        self.engine_cpu_id: int = -1
         # EngineConfig has been merged into RuntimeConfig and ModelConfig
         # warm_up, warm_up_with_loss, and model_warm_up are in RuntimeConfig
         # max_seq_len is in ModelConfig
