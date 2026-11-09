@@ -144,6 +144,7 @@ struct FMHAConfig {
 
 constexpr double kDefaultDeviceLowWatermarkRatio  = 0.82;
 constexpr double kDefaultDeviceHighWatermarkRatio = 0.90;
+constexpr double kDefaultDeviceFrozenAbortRatio   = 0.30;
 constexpr double kDefaultMemoryLowWatermarkRatio  = 0.90;
 constexpr double kDefaultMemoryHighWatermarkRatio = 0.94;
 constexpr double kDefaultDiskLowWatermarkRatio    = 0.92;
@@ -170,6 +171,7 @@ struct KVCacheConfig {
     // Prefer WorkLoop for supported final layouts; legal legacy layouts fall back at creation.
     bool btc_transfer_engine_async = true;
     // Slots per device in each WorkLoop's private async CRC service.
+    double block_tree_device_frozen_abort_ratio = kDefaultDeviceFrozenAbortRatio;
     int64_t btc_crc_slot_count                           = 8;
     int64_t block_tree_transfer_worker_count             = 1;
     int64_t block_tree_business_queue_max_size           = 10000;

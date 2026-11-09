@@ -22,7 +22,7 @@ static_assert(std::is_same_v<decltype(DeviceBlockPoolConfigHelper::createConfigF
                                  std::declval<const CacheConfig&>(), std::declval<const GroupBase&>())),
                              DeviceBlockPoolConfig>);
 
-std::shared_ptr<DeviceBlockPoolConfig> makeConfig() {
+std::shared_ptr<DeviceBlockPoolConfig> makeConfig(double frozen_abort_ratio = kDefaultDeviceFrozenAbortRatio) {
     constexpr int        kLayerNum       = 4;
     constexpr int        kBlockNum       = 10;
     constexpr size_t     kTokensPerBlock = 1;
@@ -33,6 +33,7 @@ std::shared_ptr<DeviceBlockPoolConfig> makeConfig() {
                                                                                 /*local_head_num_kv=*/1,
                                                                                 /*size_per_head=*/64);
     cache_config.finalizeBlockNums(kBlockNum, rtp_llm::RuntimeConfig{});
+    cache_config.block_tree_device_frozen_abort_ratio = frozen_abort_ratio;
     auto config = std::make_shared<DeviceBlockPoolConfig>(
         DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front()));
     config->pool_name                 = "device";
@@ -84,6 +85,15 @@ CacheConfig makeMtpCacheConfig() {
 }
 
 }  // namespace
+
+TEST(DeviceBlockPoolTest, FrozenAbortRatioSurvivesCacheConfigAndPoolNormalization) {
+    for (const double ratio : {0.0, 0.55, 1.0}) {
+        auto config = makeConfig(ratio);
+        EXPECT_DOUBLE_EQ(config->frozen_block_abort_ratio, ratio);
+        DeviceBlockPool pool(config);
+        EXPECT_DOUBLE_EQ(pool.config().frozen_block_abort_ratio, ratio);
+    }
+}
 
 TEST(DeviceBlockPoolTest, InitKeepsBlockZeroInvalid) {
     auto config                       = makeConfig();
@@ -426,11 +436,8 @@ TEST(DeviceBlockPoolTest, RequestReleaseCannotConsumeConnectorReference) {
     const auto block = pool.malloc().value();
     pool.incRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
 
-    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
     EXPECT_ANY_THROW(pool.decRef(block));
     EXPECT_ANY_THROW(pool.decRef(block, DeviceBlockRefType::PD_CONNECTOR));
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 
     EXPECT_EQ(pool.refCount(block), 1u);
     EXPECT_EQ(pool.referencedBlocksNum(), 0u);

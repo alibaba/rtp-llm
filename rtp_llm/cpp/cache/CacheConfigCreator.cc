@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -362,6 +363,11 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   int                      gen_num_per_cycle) {
     auto config = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache_tail_blocks > 0, "reuse_cache_tail_blocks must be positive");
+    RTP_LLM_CHECK_WITH_INFO(std::isfinite(kv_cache_config.block_tree_device_frozen_abort_ratio)
+                               && kv_cache_config.block_tree_device_frozen_abort_ratio >= 0.0
+                               && kv_cache_config.block_tree_device_frozen_abort_ratio <= 1.0,
+                           "block_tree_device_frozen_abort_ratio must be a finite number in [0, 1]");
+    config.block_tree_device_frozen_abort_ratio = kv_cache_config.block_tree_device_frozen_abort_ratio;
     config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
     auto groups                    = config.topology().groups();
     for (auto& group : groups) {

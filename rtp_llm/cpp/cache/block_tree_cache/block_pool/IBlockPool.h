@@ -40,6 +40,7 @@ struct BlockPoolConfigBase {
     BlockPoolType pool_type{BlockPoolType::DEVICE};
     std::string   pool_name;
     size_t        physical_block_count{0};
+    double        frozen_block_abort_ratio{0.3};
 };
 
 // IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.
@@ -168,6 +169,7 @@ private:
 
 private:
     std::shared_ptr<const BlockPoolConfigBase>                config_;
+    double                                                    effective_frozen_block_abort_ratio_{0.0};
     bool                                                      initialized_{false};
     std::function<void()>                                     capacity_change_callback_;
     std::vector<uint8_t>                                      allocated_;
