@@ -241,6 +241,7 @@ bool DecodeLoadHelper::buildAndStartAsyncRpc(const std::shared_ptr<Result>& resu
                                               uint64_t                       plan_digest,
                                               const std::vector<int>&        active_route_ids) {
     result->request.set_unique_key(unique_key);
+    result->request.set_supports_indexer_layout(true);
     result->request.set_no_transfer(no_transfer);
     result->request.set_plan_digest(plan_digest);
     for (int route_id : active_route_ids) {

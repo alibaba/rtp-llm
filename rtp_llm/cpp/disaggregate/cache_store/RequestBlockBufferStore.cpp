@@ -229,7 +229,8 @@ RequestBlockBufferStore::makeValidBlocks(const std::vector<std::shared_ptr<Block
         for (; slot != end; ++slot) {
             const auto* block = slot->block;
             auto        addr  = std::shared_ptr<void>(region, cursor);
-            staged_blocks.push_back(std::make_shared<BlockBuffer>(block->key, addr, block->len, false, true));
+            staged_blocks.push_back(
+                std::make_shared<BlockBuffer>(block->key, addr, block->len, false, true, block->indexer_layout));
             copy_params.multi_dst.push_back(
                 torch::from_blob(cursor, {static_cast<int64_t>(block->len)}, options.device(torch::kCPU)));
             copy_params.multi_src.push_back(

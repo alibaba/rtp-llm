@@ -103,6 +103,21 @@ struct KVCacheSpec {
 
     KVCacheSpecType type = KVCacheSpecType::MultiHeadAttention;
     TpCacheTransferLayout tp_transfer;
+    IndexerScaleFormat    indexer_scale_format = IndexerScaleFormat::NONE;
+
+    IndexerCacheLayout indexerCacheLayout() const {
+        if (indexer_scale_format == IndexerScaleFormat::NONE)
+            return {};
+        const size_t pages   = seq_size_per_block / kernel_seq_size_per_block;
+        const size_t payload = k_block_payload_bytes() / pages;
+        RTP_LLM_CHECK_WITH_INFO(payload % 132 == 0 && k_block_size_bytes() % pages == 0
+                                    && k_block_size_bytes() / pages <= UINT32_MAX && payload / 132 <= UINT32_MAX,
+                                "invalid indexer page geometry: tag=%s",
+                                tag.c_str());
+        return {indexer_scale_format,
+                static_cast<uint32_t>(payload / 132),
+                static_cast<uint32_t>(k_block_size_bytes() / pages)};
+    }
 
     KVCacheSpec(std::string tag,
                 uint32_t    seq_size_per_block,
@@ -179,6 +194,8 @@ struct KVCacheSpec {
            << ";tp_k_bytes=" << tp_transfer.k_row_bytes << ";tp_v_bytes=" << tp_transfer.v_row_bytes
            << ";tp_history=" << tp_transfer.history_rows << ";tp_key_heads=" << tp_transfer.key_heads
            << ";tp_value_heads=" << tp_transfer.value_heads;
+        if (indexer_scale_format != IndexerScaleFormat::NONE)
+            os << ";indexer_scale_format=" << static_cast<uint32_t>(indexer_scale_format);
         return os.str();
     }
 

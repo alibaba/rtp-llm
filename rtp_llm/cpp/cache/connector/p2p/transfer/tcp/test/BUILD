@@ -69,3 +69,16 @@ cc_test(
     ] + device_impl_target() + torch_deps(),
     tags = ["H20_CU13"],
 )
+
+cc_test(
+    name = "indexer_scale_transfer_test",
+    srcs = ["IndexerScaleTransferTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_task_context",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp/proto:tcp_service_cc_proto",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)

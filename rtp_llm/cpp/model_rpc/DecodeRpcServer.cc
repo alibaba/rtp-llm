@@ -1421,8 +1421,12 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                           block.addr,
                                           block.size_bytes);
                         auto addr = blockOwner(block);
-                        load_layer_cache->addBlock(
-                            key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
+                        load_layer_cache->addBlock(key,
+                                                   addr,
+                                                   static_cast<uint32_t>(block.size_bytes),
+                                                   block.is_cuda,
+                                                   true,
+                                                   block.indexer_layout);
                     };
 
                     if (use_kv_key_prefix) {
@@ -1567,8 +1571,12 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                                       block.addr,
                                                       block.size_bytes);
                                     auto addr = blockOwner(block);
-                                    load_layer_cache->addBlock(
-                                        key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
+                                    load_layer_cache->addBlock(key,
+                                                               addr,
+                                                               static_cast<uint32_t>(block.size_bytes),
+                                                               block.is_cuda,
+                                                               true,
+                                                               block.indexer_layout);
                                 };
 
                                 if (mtp_use_kv_key_prefix) {

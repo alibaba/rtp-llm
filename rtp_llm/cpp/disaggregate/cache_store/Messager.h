@@ -36,8 +36,11 @@ public:
     }
 
 protected:
+    void                  transferWithLayout(const std::shared_ptr<TransferRequest>& request, bool legacy_peer);
     CacheLoadRequest*     makeLoadRequest(const std::shared_ptr<LoadRequest>& request);
-    CacheTransferRequest* makeTransferRequest(const std::shared_ptr<TransferRequest>& request);
+    CacheTransferRequest* makeTransferRequest(const std::shared_ptr<TransferRequest>&    request,
+                                              bool                                       legacy_peer     = false,
+                                              std::vector<std::shared_ptr<BlockBuffer>>* transfer_owners = nullptr);
 
     virtual bool generateBlockInfo(::BlockBufferInfo*                  block_info,
                                    const std::shared_ptr<BlockBuffer>& block_buffer,

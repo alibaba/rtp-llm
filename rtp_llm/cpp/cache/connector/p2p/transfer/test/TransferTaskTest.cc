@@ -3,6 +3,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <thread>
+#include <future>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
@@ -557,3 +558,53 @@ TEST(TransferTaskFirstReadErrorTest, FailureSurvivesCancelUntilPhysicalCompletio
     EXPECT_EQ(task.errorMessage(), "first QP completion error");
 }
 }  // namespace rtp_llm::transfer
+
+namespace rtp_llm {
+TEST_F(TransferTaskTest, NativeCacheWritesRemainParallel) {
+    auto task = makeTask();
+    ASSERT_TRUE(task.startTransfer());
+    ASSERT_TRUE(task.startTransfer());
+    ASSERT_TRUE(task.beginCacheWrite(false, currentTimeMs() + 1000));
+    ASSERT_TRUE(task.beginCacheWrite(false, currentTimeMs() + 1000));
+    task.notifyDone(true);
+    task.endCacheWrite(false);
+    EXPECT_FALSE(task.done());
+    task.notifyDone(true);
+    task.endCacheWrite(false);
+    EXPECT_TRUE(task.success());
+}
+TEST_F(TransferTaskTest, CacheWriteWaitDeadlineRetainsPhysicalOwner) {
+    auto task = makeTask();
+    ASSERT_TRUE(task.startTransfer());
+    ASSERT_TRUE(task.startTransfer());
+    ASSERT_TRUE(task.beginCacheWrite(true, currentTimeMs() + 1000));
+    EXPECT_FALSE(task.beginCacheWrite(false, currentTimeMs() + 20));
+    task.notifyDone(false, TransferErrorCode::TIMEOUT);
+    EXPECT_FALSE(task.done());
+    task.notifyDone(true);
+    task.endCacheWrite(true);
+    EXPECT_TRUE(task.done());
+    EXPECT_FALSE(task.success());
+}
+TEST_F(TransferTaskTest, CancelWakesCacheWriterWithoutReleasingActiveBytes) {
+    auto task = makeTask();
+    ASSERT_TRUE(task.startTransfer());
+    ASSERT_TRUE(task.startTransfer());
+    ASSERT_TRUE(task.beginCacheWrite(false, currentTimeMs() + 1000));
+    std::promise<void> attempting;
+    auto               waiter = std::async(std::launch::async, [&] {
+        attempting.set_value();
+        return task.beginCacheWrite(true, currentTimeMs() + 2000);
+    });
+    attempting.get_future().wait();
+    task.cancel();
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(500)), std::future_status::ready);
+    EXPECT_FALSE(waiter.get());
+    task.notifyDone(false, TransferErrorCode::CANCELLED);
+    EXPECT_FALSE(task.done());
+    task.notifyDone(true);
+    task.endCacheWrite(false);
+    EXPECT_TRUE(task.done());
+    EXPECT_FALSE(task.success());
+}
+}  // namespace rtp_llm

@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <unordered_map>
+#include "rtp_llm/cpp/cache/IndexerCacheScale.h"
 #include <limits>
 
 namespace rtp_llm {
@@ -96,8 +97,10 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
             }
         }
     }
-    const auto& expected = has_batch_callback ? batch_blocks : task_->getBlockInfos();
-    std::vector<CopyTask> copy_tasks;
+    const auto&                         expected = has_batch_callback ? batch_blocks : task_->getBlockInfos();
+    std::vector<CopyTask>               copy_tasks;
+    std::vector<IndexerScaleConversion> conversions;
+    bool                                needs_cache_write_guard = false;
     for (const auto& [cache_key, kbi_ptr] : expected) {
         const auto req_it = request_index.find(cache_key);
         if (!kbi_ptr || kbi_ptr->blocks.empty()) {
@@ -153,6 +156,17 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
                                 + " declared=" + std::to_string(proto_block.len())
                                 + " actual=" + std::to_string(proto_block.content().size()));
             }
+            auto source_layout = indexerSourceLayout(bi, IndexerCacheLayout::fromWire(proto_block));
+            try {
+                validateIndexerScaleTransfer(bi, source_layout);
+            } catch (const std::exception& e) {
+                return fail(TransferErrorCode::BUFFER_MISMATCH, e.what());
+            }
+            needs_cache_write_guard = needs_cache_write_guard || bi.indexer_layout.format != IndexerScaleFormat::NONE;
+            if (source_layout.format != bi.indexer_layout.format) {
+                converting_cache_ = true;
+                conversions.push_back({bi, source_layout});
+            }
             CopyTask task;
             task.device_index = bi.device_index;
             task.is_cuda      = bi.is_cuda;
@@ -173,6 +187,11 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
         RTP_LLM_LOG_WARNING("executeCopy: no blocks to transfer, unique_key: %s", unique_key_.c_str());
         return fail(TransferErrorCode::BUFFER_MISMATCH, "no blocks to transfer");
     }
+    if (needs_cache_write_guard) {
+        cache_write_acquired_ = task_->beginCacheWrite(converting_cache_, static_cast<int64_t>(getDeadlineMs()));
+        if (!cache_write_acquired_)
+            return fail(task_->errorCode(), task_->errorMessage());
+    }
     const bool copy_success = cuda_copy_util.batchCopyToDevice(copy_tasks);
     if (!copy_success) {
         RTP_LLM_LOG_WARNING("P2P TCP H2D copy failed, partition_layer_key=%s stage=cuda_h2d copy_tasks=%zu",
@@ -180,6 +199,11 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
     }
     if (!copy_success)
         return fail(TransferErrorCode::COPY_FAILED, "H2D copy returned false");
+    try {
+        convertIndexerCacheScales(conversions);
+    } catch (const std::exception& e) {
+        return fail(TransferErrorCode::COPY_FAILED, e.what());
+    }
     return true;
 }
 
@@ -223,6 +247,10 @@ void TcpTaskContext::run(bool success, TransferErrorCode error_code, const std::
             task_->notifyBatchDone(batch_keys_, transfer_started_);
         } else {
             task_->notifyDone(success, error_code, error_message, transfer_started_);
+        }
+        if (cache_write_acquired_) {
+            cache_write_acquired_ = false;
+            task_->endCacheWrite(converting_cache_);
         }
         // notifyDone() may override the result (e.g. cancel_requested_ was set during transfer).
         // Read back the authoritative result so sender and receiver see the same outcome.

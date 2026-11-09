@@ -1,9 +1,32 @@
 #include <mutex>
 #include <unordered_map>
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
+#include "rtp_llm/cpp/cache/IndexerCacheScale.h"
+#include <algorithm>
+#include <stdexcept>
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+
+std::shared_ptr<BlockBuffer> legacyIndexerBlock(const std::shared_ptr<BlockBuffer>& block,
+                                                const std::shared_ptr<MemoryUtil>&  memory_util) {
+    if (block->indexer_layout.format != IndexerScaleFormat::UE8M0)
+        return block;
+    const bool rdma = memory_util && memory_util->isRdmaMode();
+    auto       copy =
+        legacyIndexerTransfer(block->blockInfo(), rdma ? std::max<uint64_t>(1, memory_util->minRegistrationSize()) : 1);
+    if (rdma) {
+        if (!memory_util->regUserMr(copy.block.addr, copy.allocation_bytes, copy.block.is_cuda, copy.allocation_bytes))
+            throw std::runtime_error("failed to register legacy indexer transfer copy");
+        copy.owner = std::shared_ptr<void>(copy.block.addr,
+                                           [owner = copy.owner, memory_util, gpu = copy.block.is_cuda](void* ptr) {
+                                               memory_util->deregUserMr(ptr, gpu);
+                                           });
+    }
+    return std::make_shared<BlockBuffer>(
+        block->key, copy.owner, block->len, block->gpu_mem, true, copy.block.indexer_layout);
+}
 
 RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, const std::string& request_key):
     requestid_(requestid), request_key_(request_key) {}
@@ -68,9 +91,13 @@ void RequestBlockBuffer::addBlock(const std::shared_ptr<BlockBuffer>& block) {
     triggerWatchFunc(true, {block});
 }
 
-void RequestBlockBuffer::addBlock(
-    const std::string& key, const std::shared_ptr<void>& addr, uint32_t len, bool gpu_mem, bool adopted) {
-    auto block = std::make_shared<BlockBuffer>(key, addr, len, gpu_mem, adopted);
+void RequestBlockBuffer::addBlock(const std::string&           key,
+                                  const std::shared_ptr<void>& addr,
+                                  uint32_t                     len,
+                                  bool                         gpu_mem,
+                                  bool                         adopted,
+                                  IndexerCacheLayout           layout) {
+    auto block = std::make_shared<BlockBuffer>(key, addr, len, gpu_mem, adopted, layout);
     addBlock(block);
 }
 

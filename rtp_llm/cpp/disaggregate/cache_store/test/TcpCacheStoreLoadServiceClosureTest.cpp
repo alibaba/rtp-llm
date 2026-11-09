@@ -212,3 +212,47 @@ TEST_F(TcpCacheStoreLoadServiceClosureTest, testRun_BlockContentError) {
 }
 
 }  // namespace rtp_llm
+
+namespace rtp_llm {
+TEST_F(TcpCacheStoreLoadServiceClosureTest, IndexerConversionCompletesBeforeReady) {
+    auto buffer         = std::make_shared<std::vector<uint32_t>>(132, 0x5a5a5a5a);
+    auto request_buffer = std::make_shared<RequestBlockBuffer>("indexer-conversion");
+    request_buffer->addBlock("indexer",
+                             std::shared_ptr<void>(buffer, buffer->data()),
+                             528,
+                             false,
+                             true,
+                             {IndexerScaleFormat::UE8M0, 4, 528});
+    std::vector<uint32_t> source(132, 0x5a5a5a5a);
+    for (int i = 128; i < 132; ++i)
+        source[i] = 0x3d000000;  // 1/32 FP32
+    auto* response = new CacheLoadResponse;
+    response->set_error_code(EC_SUCCESS);
+    auto* block = response->add_blocks();
+    block->set_key("indexer");
+    block->set_len(528);
+    block->set_content(source.data(), 528);
+    IndexerCacheLayout{IndexerScaleFormat::FP32, 4, 528}.toWire(block);
+    bool ready    = false;
+    auto callback = [&](bool ok, CacheStoreErrorCode ec) {
+        ready = true;
+        EXPECT_TRUE(ok);
+        EXPECT_EQ(ec, CacheStoreErrorCode::None);
+        for (int i = 0; i < 128; ++i)
+            EXPECT_EQ((*buffer)[i], 0x5a5a5a5a);
+        for (int i = 128; i < 132; ++i)
+            EXPECT_EQ((*buffer)[i], 0x7a7a7a7a);
+    };
+    auto* closure =
+        new TcpCacheStoreLoadServiceClosure(memory_util_,
+                                            request_buffer,
+                                            new arpc::ANetRPCController,
+                                            new CacheLoadRequest,
+                                            response,
+                                            callback,
+                                            std::make_shared<CacheStoreClientLoadMetricsCollector>(nullptr, 1, 1),
+                                            -1);
+    closure->Run();
+    EXPECT_TRUE(ready);
+}
+}  // namespace rtp_llm

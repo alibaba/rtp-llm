@@ -569,3 +569,48 @@ TEST_F(TcpTaskContextTest, Destructor_AfterRunCompleted_NoDoubleRun) {
 }  // namespace tcp
 }  // namespace transfer
 }  // namespace rtp_llm
+
+namespace rtp_llm {
+namespace transfer {
+namespace tcp {
+TEST_F(TcpTaskContextTest, IndexerScaleConversionBeforeCompletion) {
+    alignas(4) uint32_t source[132];
+    alignas(4) uint32_t destination[132] = {};
+    std::fill(source, source + 128, 0x5a5a5a5a);
+    std::fill(source + 128, source + 132, 0x7a7a7a7a);  // UE8M0 scale 1/32
+    auto request = makeSimpleRequest("indexer",
+                                     currentTimeMs() + 5000,
+                                     1,
+                                     sizeof(source),
+                                     std::string(reinterpret_cast<char*>(source), sizeof(source)));
+    IndexerCacheLayout{IndexerScaleFormat::UE8M0, 4, 528}.toWire(request.mutable_blocks(0)->mutable_blocks(0));
+    // Exercise actual proto serialization rather than a process-local descriptor.
+    decltype(request) decoded;
+    ASSERT_TRUE(decoded.ParseFromString(request.SerializeAsString()));
+    BlockInfo target;
+    target.addr           = destination;
+    target.size_bytes     = sizeof(destination);
+    target.indexer_layout = {IndexerScaleFormat::FP32, 4, 528};
+    auto info             = std::make_shared<KeyBlockInfo>();
+    info->blocks.push_back(target);
+    KeyBlockInfoMap blocks;
+    blocks.emplace(1, info);
+    auto                                          task = std::make_shared<TransferTask>(blocks, currentTimeMs() + 5000);
+    ::tcp_transfer::TcpLayerBlockTransferResponse response;
+    MockClosure                                   done;
+    auto                                          context = makeContext(&decoded, &response, &done);
+    context->setTask(task);
+    ASSERT_TRUE(context->startTransfer());
+    CudaCopyUtil copy;
+    ASSERT_TRUE(context->executeCopy(copy));
+    for (int i = 0; i < 128; ++i)
+        EXPECT_EQ(destination[i], source[i]);
+    for (int i = 128; i < 132; ++i)
+        EXPECT_EQ(destination[i], 0x3d000000);
+    context->run(true);
+    EXPECT_EQ(done.run_count(), 1);
+    EXPECT_EQ(response.error_code(), ::tcp_transfer::TCP_TRANSFER_NONE_ERROR);
+}
+}  // namespace tcp
+}  // namespace transfer
+}  // namespace rtp_llm

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <torch/all.h>
+#include "rtp_llm/cpp/cache/BlockInfo.h"
 
 #include <shared_mutex>
 #include <unordered_map>
@@ -13,18 +14,41 @@ namespace rtp_llm {
 // 关联一块内存/显存
 class BlockBuffer {
 public:
-    BlockBuffer(
-        const std::string& key_, const std::shared_ptr<void>& addr_, uint32_t len_, bool gpu_mem_, bool adopted_):
-        key(key_), addr(addr_), len(len_), gpu_mem(gpu_mem_), adopted(adopted_) {}
+    BlockBuffer(const std::string&           key_,
+                const std::shared_ptr<void>& addr_,
+                uint32_t                     len_,
+                bool                         gpu_mem_,
+                bool                         adopted_,
+                IndexerCacheLayout           layout = {}):
+        key(key_), addr(addr_), len(len_), gpu_mem(gpu_mem_), adopted(adopted_), indexer_layout(layout) {}
     BlockBuffer(const BlockBuffer& rhs):
-        key(rhs.key), addr(rhs.addr), len(rhs.len), gpu_mem(rhs.gpu_mem), adopted(rhs.adopted) {}
+        key(rhs.key),
+        addr(rhs.addr),
+        len(rhs.len),
+        gpu_mem(rhs.gpu_mem),
+        adopted(rhs.adopted),
+        indexer_layout(rhs.indexer_layout) {}
+
+    BlockInfo blockInfo() const {
+        BlockInfo result;
+        result.addr           = addr.get();
+        result.size_bytes     = len;
+        result.is_cuda        = gpu_mem;
+        result.indexer_layout = indexer_layout;
+        return result;
+    }
 
     std::string           key;
     std::shared_ptr<void> addr;
     uint32_t              len{0};
     bool                  gpu_mem{true};
     bool                  adopted{true};
+    IndexerCacheLayout    indexer_layout;
 };
+
+class MemoryUtil;
+std::shared_ptr<BlockBuffer> legacyIndexerBlock(const std::shared_ptr<BlockBuffer>& block,
+                                                const std::shared_ptr<MemoryUtil>&  memory_util = nullptr);
 
 //  request 关联的 block buffer
 class RequestBlockBuffer {
@@ -45,7 +69,12 @@ public:
     size_t                                                        getBlocksSize() const;
 
     void addBlock(const std::shared_ptr<BlockBuffer>& block);
-    void addBlock(const std::string& key, const std::shared_ptr<void>& addr, uint32_t len, bool gpu_mem, bool adopted);
+    void addBlock(const std::string&           key,
+                  const std::shared_ptr<void>& addr,
+                  uint32_t                     len,
+                  bool                         gpu_mem,
+                  bool                         adopted,
+                  IndexerCacheLayout           layout = {});
     void addBlocks(const std::vector<std::shared_ptr<BlockBuffer>>& blocks);
 
     bool isValid() const;

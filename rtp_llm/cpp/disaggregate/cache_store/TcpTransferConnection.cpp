@@ -11,6 +11,7 @@ void TcpTransferConnection::read(const std::vector<std::shared_ptr<BlockBuffer>>
                                  TransferConnection::ReadDoneCallback                 callback,
                                  uint32_t                                             timeout_ms) {
     auto request = new BlockReadRequest;
+    request->set_supports_indexer_layout(true);
     for (auto& block : remote_blocks) {
         auto new_block = request->add_blocks();
         new_block->CopyFrom(*block);

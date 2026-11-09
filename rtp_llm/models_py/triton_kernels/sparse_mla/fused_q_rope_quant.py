@@ -380,6 +380,9 @@ def _fused_qk_rope_hadamard_quant_kernel(
     quantized, scale = _quantize_query(data, SCALE_UE8M0, USE_V2_QUANT)
     fp8_base = q_fp8_ptr + tok_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
     tl.store(fp8_base + idx, quantized)
+    if q_scale_ptr.dtype.element_ty == tl.int32:
+        exponent = scale.to(tl.int32, bitcast=True) >> 23
+        scale = exponent * 0x01010101
     tl.store(q_scale_ptr + tok_idx * q_scale_stride0 + head_idx, scale)
 
 
@@ -405,12 +408,14 @@ def fused_qk_rope_quant(
         index_head_dim: Dimension of indexer heads (must be power of 2)
         rope_head_dim: Total rotation dimension (first dims affected by RoPE)
         is_neox_style: True for NeOX-style RoPE, False for GPT-J interleaved
-        scale_fmt: "ue8m0" for power-of-two scales, "none" for float scales.
+        scale_fmt: "none" for float scales, "ue8m0" for FP32 power-of-two
+            scales, "mx_ue8m0" for four packed group-32 exponent bytes.
 
     Returns:
         (q_fp8, q_scale, k_out):
             q_fp8: [num_tokens, index_n_heads, index_head_dim] float8_e4m3fn
-            q_scale: [num_tokens, index_n_heads, 1] float32 (unpacked scales)
+            q_scale: FP32 [num_tokens, index_n_heads, 1], or MX int32
+                [num_tokens, index_n_heads] when scale_fmt="mx_ue8m0".
             k_out: [num_tokens, index_head_dim] bf16 (RoPE + Hadamard applied)
     """
     num_tokens = q.shape[0]
@@ -425,7 +430,7 @@ def fused_qk_rope_quant(
     )
     q_scale = torch.empty(
         (num_tokens, index_n_heads),
-        dtype=torch.float32,
+        dtype=torch.int32 if scale_fmt == "mx_ue8m0" else torch.float32,
         device=q.device,
     )
     k_out = torch.empty(
@@ -462,9 +467,9 @@ def fused_qk_rope_quant(
             index_head_dim,
             is_neox_style,
             log2_head_dim,
-            scale_fmt == "ue8m0",
+            scale_fmt in ("ue8m0", "mx_ue8m0"),
             _use_v2_quant(q),
             num_warps=1,
         )
 
-    return q_fp8, q_scale.unsqueeze(-1), k_out
+    return q_fp8, (q_scale if scale_fmt == "mx_ue8m0" else q_scale.unsqueeze(-1)), k_out

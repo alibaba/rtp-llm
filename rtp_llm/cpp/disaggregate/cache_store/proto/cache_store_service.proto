@@ -34,6 +34,10 @@ message BlockBufferInfo {
     optional RdmaBlockBufferAddrInfo rdma_info = 3; // use only rdma mode
     optional bytes content = 4[ctype = RAW_STRING]; // use only tcp mode
     optional int64 addr = 5; // 使用TCP做Read, 需要指定addr
+    // FP8 indexer page geometry; absent for byte-identical opaque/other caches.
+    optional uint32 indexer_scale_format = 6;
+    optional uint32 indexer_page_tokens = 7;
+    optional uint32 indexer_page_stride = 8;
 }
 
 message CacheLoadRequest {
@@ -81,11 +85,13 @@ message CacheTransferResponse {
 
 message BlockReadRequest {
     repeated BlockBufferInfo blocks = 1;
+    optional bool supports_indexer_layout = 2;
 }
 
 message BlockReadResponse {
     optional KvCacheStoreServiceErrorCode error_code = 1;
     repeated BlockBufferInfo blocks = 2;
+    optional bool supports_indexer_layout = 3;
 }
 
 service KvCacheStoreService {

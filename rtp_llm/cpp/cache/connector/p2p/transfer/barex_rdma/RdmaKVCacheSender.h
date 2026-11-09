@@ -39,8 +39,9 @@ public:
 
 private:
     std::shared_ptr<::rdma_transfer::RdmaLayerBlockTransferRequest>
-    makeTransferRequest(const SendRequest&                                                  request,
-                        const std::shared_ptr<TransferClientMetricsCollector>& collector);
+    makeTransferRequest(const SendRequest&                                     request,
+                        const std::shared_ptr<TransferClientMetricsCollector>& collector,
+                        std::vector<std::shared_ptr<void>>&                    transfer_owners);
 
     bool setBlockBufferInfo(::rdma_transfer::RdmaBlockBufferInfo* block_buffer_info,
                             int64_t cache_key,

@@ -79,6 +79,7 @@ _CONTRACT_TESTS = [
             "SwaDequantLargeStrideTest",
         ] if name == "test_swa_dequant_large_stride" else [],
         gpu_count = 2 if name == "test_topk_v3" else 1,
+        extra_srcs = ["test_compressor_raw_dispatch.py"] if name == "test_indexer_fp8_score" else [],
         tags = ["multi_device"] if name == "test_topk_v3" else [],
         deps = _DSV4_FP8_TEST_DEPS,
     )

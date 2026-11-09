@@ -116,6 +116,7 @@ cc_library(
     srcs = ["RdmaTaskContext.cc"],
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache:indexer_cache_scale",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_metric",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:cuda_copy_util",
@@ -162,6 +163,7 @@ cc_library(
             ":rdma_transfer_service",
             ":transfer_rdma_impl",
             "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+            "//rtp_llm/cpp/cache:indexer_cache_scale",
             ":rdma_interface",
             "//rtp_llm/cpp/cache/connector/p2p/transfer:arpc_dep",
             "//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma/proto:rdma_service_cc_proto",

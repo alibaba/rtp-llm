@@ -2,12 +2,14 @@
 #pragma once
 
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/cache/BlockInfo.h"
 
 namespace rtp_llm {
 
 struct MemoryLayoutConfig {
-    uint32_t layer_num = 0;
-    uint32_t block_num = 0;
+    IndexerCacheLayout indexer_layout;
+    uint32_t           layer_num = 0;
+    uint32_t           block_num = 0;
 
     rtp_llm::DataType dtype = rtp_llm::TYPE_INVALID;
 

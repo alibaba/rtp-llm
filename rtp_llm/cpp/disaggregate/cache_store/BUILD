@@ -52,6 +52,7 @@ cc_library(
     hdrs = interface_includes,
     srcs = interface_sources,
     deps = [
+        "//rtp_llm/cpp/cache:indexer_cache_scale",
         "@havenask//aios/autil:log",
         "@havenask//aios/autil:env_util",
         "//rtp_llm/cpp/utils:core_utils",
@@ -59,6 +60,7 @@ cc_library(
         "//rtp_llm/cpp/utils:time_util",
         # "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/metrics:metrics",
+        "//rtp_llm/cpp/cache:block_info",
     ] + torch_deps(),
     visibility=['//visibility:public'],
     alwayslink = True,
@@ -70,6 +72,7 @@ cc_library(
     hdrs = glob(["*.h"], exclude = interface_includes),
     deps = [
         ":cache_store_interface",
+        "//rtp_llm/cpp/cache:indexer_cache_scale",
         "//rtp_llm/cpp/disaggregate/cache_store/proto:cache_store_service_cc_proto",
         "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",

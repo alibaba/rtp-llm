@@ -28,12 +28,13 @@ public:
                           int64_t                                              request_id,
                           const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
                           int64_t                                              deadline_ms,
-                          std::function<bool()>                                is_cancelled = nullptr,
-                          bool                                                 no_transfer = false,
-                          int64_t                                              request_deadline_ms = 0,
-                          const std::set<int>&                                 active_route_ids = {},
+                          std::function<bool()>                                is_cancelled             = nullptr,
+                          bool                                                 no_transfer              = false,
+                          int64_t                                              request_deadline_ms      = 0,
+                          const std::set<int>&                                 active_route_ids         = {},
                           int64_t                                              communication_timeout_ms = 0,
-                          int                                                  decode_tp_size = 0);
+                          int                                                  decode_tp_size           = 0,
+                          bool                                                 supports_indexer_layout  = false);
 
     /// @brief 与 decode 侧用**同一个 planner 函数**算镜像 plan。
     /// Decode TP width comes from StartLoad. Decode CP is inferred from the local sharding configuration.

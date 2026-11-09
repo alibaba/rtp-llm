@@ -94,6 +94,7 @@ public:
                                                        const ResourceContext& resource_context,
                                                        int                    vocab_size,
                                                        bool                   is_dspark = false);
+    static bool              isMtpStreamAdmitted(const GenerateStreamPtr& stream);
     static bool              mustWaitBeforeStreamPreparation(bool stream_async,
                                                              bool drop_broad_sync,
                                                              bool linear_attention,
@@ -294,9 +295,11 @@ private:
     DataType data_type_;
     size_t   mtp_input_hidden_size_;
     size_t   propose_step_;
+    size_t   verify_step_;
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
-    bool is_dspark_ = false;
+    bool is_dspark_             = false;
+    bool skip_all_fake_prefill_ = false;
     // Dedicated PREFILL workers only seed DSpARK's draft feature KV and must
     // not construct proposal wrappers or require proposal-only Markov weights.
     bool          dspark_prefill_commit_only_ = false;
@@ -312,6 +315,7 @@ private:
     int64_t                                          mtp_indexer_topk_          = 0;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
+    std::unique_ptr<speculative::SpeculativeSampler> dspark_verify_sampler_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
 
     // Keeps async copy source tensors alive across release points.

@@ -222,6 +222,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_types",
+        ":block_info",
     ] + torch_deps(),
 )
 
@@ -429,4 +430,13 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = ["//rtp_llm/cpp/utils:core_utils"],
+)
+
+cc_library(
+    name = "indexer_cache_scale",
+    hdrs = ["IndexerCacheScale.h"],
+    srcs = ["IndexerCacheScale.cc"],
+    copts = copts(),
+    deps = [":block_info"] + torch_deps(),
+    visibility = ["//visibility:public"],
 )

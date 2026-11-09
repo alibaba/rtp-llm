@@ -125,7 +125,10 @@ void RdmaCacheStoreServiceImpl::blockReadImpl(::google::protobuf::RpcController*
                                               const ::BlockReadRequest*          request,
                                               BlockReadResponse*                 response,
                                               ::google::protobuf::Closure*       done) {
-    response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
+    // RDMA uses an explicit empty blockRead only to negotiate indexer layout support.
+    response->set_error_code(request->blocks_size() == 0 && request->supports_indexer_layout() ?
+                                 KvCacheStoreServiceErrorCode::EC_SUCCESS :
+                                 KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
     done->Run();
 }
 

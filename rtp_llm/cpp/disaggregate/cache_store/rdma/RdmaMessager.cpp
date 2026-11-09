@@ -8,6 +8,54 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TimerManager.h"
 
 namespace rtp_llm {
+namespace {
+class IndexerPeerProbe: public google::protobuf::Closure {
+public:
+    BlockReadRequest                request;
+    BlockReadResponse               response;
+    arpc::ANetRPCController         controller;
+    std::function<void(bool, bool)> done;
+    void                            Run() override {
+        std::unique_ptr<IndexerPeerProbe> guard(this);
+        done(!controller.Failed(), response.supports_indexer_layout());
+    }
+};
+}  // namespace
+
+void RdmaMessager::transfer(const std::shared_ptr<TransferRequest>& request) {
+    bool mx = false;
+    for (const auto& [local_key, remote_key] : request->buffer_pairs) {
+        const auto block = request_block_buffer_store_->findUserBuffer(local_key);
+        mx               = mx || (block && block->indexer_layout.format == IndexerScaleFormat::UE8M0);
+    }
+    if (!mx) {
+        Messager::transfer(request);
+        return;
+    }
+    auto channel = tcp_client_->getChannel(request->ip, request->port);
+    if (!channel) {
+        request->callback(false, CacheStoreErrorCode::LoadConnectFailed, request->buffer_pairs);
+        return;
+    }
+    // RemoteLoad is initiated by the source. Query the existing blockRead RPC
+    // before exposing MX addresses to a receiver that may predate the metadata.
+    auto* probe = new IndexerPeerProbe;
+    probe->request.set_supports_indexer_layout(true);
+    probe->controller.SetExpireTime(request->timeout_ms);
+    probe->done = [self = shared_from_this(), request, channel, start = currentTimeMs()](bool ok, bool supported) {
+        const auto elapsed = currentTimeMs() - start;
+        if (!ok || elapsed + 10 >= request->timeout_ms) {
+            request->callback(false, CacheStoreErrorCode::LoadConnectFailed, request->buffer_pairs);
+            return;
+        }
+        auto remaining = std::make_shared<TransferRequest>(*request);
+        remaining->timeout_ms -= elapsed;
+        self->transferWithLayout(remaining, !supported);
+    };
+    KvCacheStoreService_Stub stub((google::protobuf::RpcChannel*)channel.get(),
+                                  google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
+    stub.blockRead(&probe->controller, &probe->request, &probe->response, probe);
+}
 
 bool RdmaMessager::init(MessagerInitParams params) {
     init_params_ = params;
@@ -146,6 +194,7 @@ bool RdmaMessager::generateBlockInfo(BlockBufferInfo*                    block_i
                                      const std::shared_ptr<BlockBuffer>& block,
                                      uint32_t                            partition_count,
                                      uint32_t                            partition_id) {
+    block->indexer_layout.toWire(block_info);
     block_info->set_key(block->key);
     block_info->set_len(block->len / partition_count);  // real len
     block_info->set_addr((int64_t)(block->addr.get()) + block_info->len() * partition_id);

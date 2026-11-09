@@ -531,3 +531,35 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "indexer_cache_scale_test",
+    srcs = ["IndexerCacheScaleTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:indexer_cache_scale",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+)
+
+cc_test(
+    name = "indexer_cache_scale_writer_test",
+    srcs = ["IndexerCacheScaleWriterTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:indexer_cache_scale",
+        "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    exec_properties = select({
+        "//:using_cuda13_x86": {"gpu": "L20_CU13", "gpu_count": "1"},
+        "//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+        "//conditions:default": {},
+    }),
+    target_compatible_with = select({
+        "//:using_cuda13_x86": [],
+        "//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)

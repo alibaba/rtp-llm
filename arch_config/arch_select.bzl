@@ -156,7 +156,9 @@ def whl_deps():
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
             # GLM5 kernels shared by the CUDA13 inference paths.
-            "deep-gemm==2.8.0+6d6aaad.cu132",
+            "deep-gemm==2.8.2+522942a.cu132",
+            "fmha-sm100@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/fmha_sm100-0.1.1-py3-none-any.whl",
+            "quack-kernels==0.4.1",
             "flash-mla==1.0.0+49e2000.cu132",
             "deep-ep==2.1.0+a56d615",
             "fast-hadamard-transform@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl",
@@ -180,8 +182,10 @@ def whl_deps():
         "@rtp_llm//:using_cuda13_arm": [
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
-            # DeepGEMM opt_glm5 + SM12x, CI-built against torch 2.11+cu130.
-            "deep_gemm==2.8.1+057ca59",
+            # Match CUDA13 x86's NVFP4 MegaMoE and sparse Prefill dependencies.
+            "deep_gemm==2.8.2+522942a.cu132",
+            "fmha-sm100@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/fmha_sm100-0.1.1-py3-none-any.whl",
+            "quack-kernels==0.4.1",
             "flash-mla==1.0.0+2e5429f",
             "flash-mla-legacy==1.0.0+92fd68b.rtp1",
             "deep-ep==2.1.0+a56d615",
@@ -194,8 +198,8 @@ def whl_deps():
             "apache-tvm-ffi==0.1.12",
             # FlashAttention wheels remain deferred on CUDA13 ARM.
             "fast-hadamard-transform@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl",
-            "nvidia-cutlass-dsl==4.5.0",
-            "nvidia-cutlass-dsl-libs-base==4.5.0",
+            "nvidia-cutlass-dsl==4.5.3",
+            "nvidia-cutlass-dsl-libs-base==4.5.3",
         ],
         "@rtp_llm//:using_cuda12_9_x86": [
             # torch 2.8.0+cu129: the upstream wheel (http.bzl torch_2.8_py310_cuda

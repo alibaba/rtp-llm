@@ -220,6 +220,8 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createBasicBlockInfo(int layer_id, 
     void* kv_addr      = getBlockPtr(layer_tensor, block_id);
     auto  kv_info      = makeBlockInfo(layer_tensor, kv_addr, static_cast<size_t>(config_.kv_block_stride_bytes));
 
+    kv_info.indexer_layout = config_.indexer_layout;
+
     if (config_.hasScale()) {
         auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
         void* kv_scale_addr      = getBlockPtr(layer_scale_tensor, block_id);

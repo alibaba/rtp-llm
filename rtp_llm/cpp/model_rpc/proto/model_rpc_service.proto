@@ -942,6 +942,7 @@ message P2PConnectorBroadcastTpRequestPB {
     int64 cancel_retention_ms = 14;
     // Per-send transport budget. Zero uses the legacy worker deadline.
     int64 communication_timeout_ms = 15;
+    bool supports_indexer_layout = 16;
 }
 
 // GetPeerInfo: Decode queries the selected Prefill for its TP/CP layout before recv registration.
@@ -997,6 +998,7 @@ message P2PConnectorStartLoadRequestPB {
     int64 handoff_timeout_ms = 8;
     // Decode TP width. The worker list can also include other pipeline stages.
     int32 decode_tp_size = 9;
+    bool supports_indexer_layout = 10;
 }
 
 // Side-channel tensor blob: carries named tensor data between prefill and decode

@@ -58,6 +58,10 @@ public:
     std::vector<std::shared_ptr<::accl::barex::XConnection>> getAllConnections() const;
     std::vector<std::pair<std::string, uint32_t>>            getAllConnectionLocalAddrAndPort() const;
 
+    const std::shared_ptr<MemoryUtil>& memoryUtil() const {
+        return memory_util_;
+    }
+
     void writeBlocks(const std::vector<std::shared_ptr<RdmaConnectionWriteBlock>>& blocks, bool write_op = true);
 
     const std::string& getIp() const {

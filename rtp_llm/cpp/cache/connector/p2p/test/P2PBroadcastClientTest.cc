@@ -105,6 +105,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
         EXPECT_LE(budget_ms, 5000);
         EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().request_deadline_ms(), request_deadline_ms);
         EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().peer_workers_size(), 2);
+        EXPECT_FALSE(servers_[i]->service()->getLastBroadcastTpRequest().supports_indexer_layout());
     }
 }
 
@@ -115,6 +116,7 @@ TEST_F(P2PBroadcastClientTest, BroadcastSendsEachWorkerItsOwnRoutes) {
     auto params        = createParams(1010, "cp-rank-view", deadline_ms, deadline_ms);
     params.routes      = {{createRoute(0, 100, 10)}, {createRoute(1, 101, 11)}};
     params.plan_digest = plan_digest;
+    params.supports_indexer_layout = true;
 
     auto result = client_->broadcast(std::move(params));
     ASSERT_NE(result, nullptr);
@@ -130,6 +132,7 @@ TEST_F(P2PBroadcastClientTest, BroadcastSendsEachWorkerItsOwnRoutes) {
         EXPECT_EQ(request.routes(0).layer_blocks(0).cache_keys(0), 100 + static_cast<int64_t>(rank));
         EXPECT_EQ(request.routes(0).layer_blocks(0).block_ids(0), 10 + static_cast<int32_t>(rank));
         EXPECT_EQ(request.plan_digest(), plan_digest);
+        EXPECT_TRUE(request.supports_indexer_layout());
     }
 }
 

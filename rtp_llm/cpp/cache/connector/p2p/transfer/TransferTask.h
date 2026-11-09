@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <shared_mutex>
@@ -54,6 +55,11 @@ public:
     /// Acquire one physical receive slot. Call completion once for each acquired slot.
     bool startTransfer();
 
+    // Reserve startTransfer() first, so waiters retain the destination lifetime.
+    // Native copies may overlap; conversion owns the complete copy+conversion interval.
+    bool beginCacheWrite(bool converting, int64_t rpc_deadline_ms);
+    void endCacheWrite(bool converting);
+
     // Observe cancellation while waiting for staging, before taking a physical receive slot.
     size_t addCancelCallback(std::function<void()> callback);
     void removeCancelCallback(size_t id);
@@ -74,18 +80,22 @@ private:
 
     KeyBlockInfoMap block_infos_;
     BatchCopiedCallback on_batch_copied_;
-    int64_t         deadline_ms_;
-    int64_t         start_time_us_      = 0;
-    int64_t         total_cost_time_us_ = 0;
+    int64_t             deadline_ms_;
+    int64_t             start_time_us_      = 0;
+    int64_t             total_cost_time_us_ = 0;
 
-    mutable std::shared_mutex mutex_;
-    bool                      done_             = false;
-    size_t                    in_flight_            = 0;
-    bool                      completion_requested_ = false;
-    bool                      cancel_requested_ = false;
-    mutable TransferErrorCode error_code_       = TransferErrorCode::OK;
-    mutable std::string       error_msg_;
-    std::function<void()>     done_callback_;
+    std::condition_variable_any             cache_write_cv_;
+    size_t                                  active_cache_writes_ = 0;
+    size_t                                  waiting_conversions_ = 0;
+    bool                                    converting_cache_    = false;
+    mutable std::shared_mutex               mutex_;
+    bool                                    done_                 = false;
+    size_t                                  in_flight_            = 0;
+    bool                                    completion_requested_ = false;
+    bool                                    cancel_requested_     = false;
+    mutable TransferErrorCode               error_code_           = TransferErrorCode::OK;
+    mutable std::string                     error_msg_;
+    std::function<void()>                   done_callback_;
     std::map<size_t, std::function<void()>> cancel_callbacks_;
     size_t next_cancel_callback_id_{1};
 };

@@ -98,6 +98,7 @@ private:
                                                        size_t                             seq_size_per_block,
                                                        size_t                             kernel_blocks_per_kv_block) {
         MemoryLayoutConfig cfg;
+        cfg.indexer_layout        = spec->indexerCacheLayout();
         cfg.layer_num             = layer_num;
         cfg.block_num             = physical_block_count;
         cfg.kv_block_stride_bytes = kv_block_stride_bytes;

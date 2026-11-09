@@ -39,8 +39,10 @@ using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
 #endif
 
 namespace rtp_llm {
-GreedyOutput     sampleGreedy(const GreedyParams& params);
-torch::Tensor    sampleFromProbs(const torch::Tensor& probabilities);
+GreedyOutput  sampleGreedy(const GreedyParams& params);
+torch::Tensor sampleFromProbs(const torch::Tensor& probabilities);
+#if USING_CUDA
+#endif
 BeamSearchOutput sampleBeamSearch(BeamSearchParams params);
 void             rejectionSampling(const RejectionSamplingParams& params);
 void             mappingDraft2Target(const MappingDraft2TargetParams& params);
@@ -431,8 +433,12 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                               kv_block_stride_bytes,
                               kv_block_transfer_bytes);
             if (use_opaque_key_prefix) {
-                request_blocks->addBlock(
-                    "kv_" + cache_key, kv_block_addr, static_cast<uint32_t>(kv_block_transfer_bytes), kv_gpu_mem, true);
+                request_blocks->addBlock("kv_" + cache_key,
+                                         kv_block_addr,
+                                         static_cast<uint32_t>(kv_block_transfer_bytes),
+                                         kv_gpu_mem,
+                                         true,
+                                         group.spec->indexerCacheLayout());
             } else {
                 RTP_LLM_CHECK_WITH_INFO(kv_block_transfer_bytes % 2 == 0,
                                         "KV transfer bytes must split evenly into K/V");

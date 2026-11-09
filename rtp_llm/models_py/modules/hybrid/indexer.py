@@ -170,7 +170,7 @@ class Indexer(nn.Module):
         return not _is_decode_phase(attention_inputs) and self._prefill_cp_enabled()
 
     def _get_logits_head_gate(
-        self, x: torch.Tensor, q_scale: torch.Tensor
+        self, x: torch.Tensor, q_scale: Optional[torch.Tensor]
     ) -> torch.Tensor:
         # F3: fused (cast + GEMV + 2 elementwise muls) into one Triton kernel.
         # ``self._fuse_logits_head_gate`` is resolved at __init__ from
@@ -187,8 +187,9 @@ class Indexer(nn.Module):
         x = x.float()
         weights = self.weights_proj(x)
         weights = weights.float()
-        weights = weights.unsqueeze(-1) * q_scale * scale
-        return weights
+        if q_scale is None:
+            return (weights.unsqueeze(-1) * scale).to(torch.bfloat16)
+        return weights.unsqueeze(-1) * q_scale * scale
 
     @staticmethod
     def _project_with_fp8(
@@ -241,9 +242,14 @@ class Indexer(nn.Module):
         q, k = self._project_q_k(q_lora, x, x_fp8, x_scale, q_c_fp8, q_c_scale)
 
         q_fp8, q_scale, key = self.indexer_op.fused_rope_quant_qk(
-            q, k, fmha_params.positions_d
+            q, k, fmha_params.positions_d, mx=self.indexer_op._use_mx(q.device)
         )
-        self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)
+        self.indexer_op.quant_k_only(
+            key,
+            kv_cache,
+            fmha_params.slot_mapping,
+            mx=self.indexer_op._use_mx(key.device),
+        )
 
         return q_fp8, q_scale
 
@@ -265,6 +271,7 @@ class Indexer(nn.Module):
             q,
             k,
             cp_params.full_rope_pos_ids,
+            mx=self.indexer_op._use_mx(q.device),
         )
         slot_mapping = (
             cp_params.sharded_slot_mapping
@@ -321,7 +328,9 @@ class Indexer(nn.Module):
         fmha_params: Any,
         attention_inputs: Any,
         cp_params: Optional[Any],
+        mx_weights: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        quant_kwargs = {"mx_weights": mx_weights} if mx_weights is not None else {}
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None
             slot_mapping = (
@@ -335,8 +344,11 @@ class Indexer(nn.Module):
                 kv_cache,
                 slot_mapping,
                 cp_params.kv_restore_unpad_indices,
+                **quant_kwargs,
             )
-        return self.indexer_op.quant_q_k(query, key, kv_cache, fmha_params.slot_mapping)
+        return self.indexer_op.quant_q_k(
+            query, key, kv_cache, fmha_params.slot_mapping, **quant_kwargs
+        )
 
     def _compute_topk(
         self,
@@ -346,10 +358,12 @@ class Indexer(nn.Module):
         fmha_params: Any,
         attention_inputs: Any,
         cp_params: Optional[Any],
+        q_sf: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        score_kwargs = {"q_sf": q_sf} if q_sf is not None else {}
         if _is_decode_phase(attention_inputs):
             return self.indexer_op._get_topk_paged(
-                q_fp8, weights, kv_cache, fmha_params, attention_inputs
+                q_fp8, weights, kv_cache, fmha_params, attention_inputs, **score_kwargs
             )
         if self._prefill_cp_enabled():
             assert cp_params is not None
@@ -379,9 +393,10 @@ class Indexer(nn.Module):
                 total_local_ids_is_identity=bool(
                     getattr(cp_params, "total_local_ids_is_identity", False)
                 ),
+                **score_kwargs,
             )
         return self.indexer_op._get_topk_ragged(
-            q_fp8, weights, kv_cache, fmha_params, attention_inputs
+            q_fp8, weights, kv_cache, fmha_params, attention_inputs, **score_kwargs
         )
 
     def forward(
@@ -400,11 +415,26 @@ class Indexer(nn.Module):
     ) -> torch.Tensor:
         if use_fast_path:
             key = self._get_k_bf16(hidden_states, fmha_params)
-            self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)
+            self.indexer_op.quant_k_only(
+                key,
+                kv_cache,
+                fmha_params.slot_mapping,
+                **(
+                    {"mx": True}
+                    if _DEVICE_TYPE == DeviceType.Cuda
+                    and self.indexer_op._use_mx(key.device)
+                    else {}
+                ),
+            )
             return None
 
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None, "cp_params is required for sparse prefill CP"
+
+        mx = _DEVICE_TYPE == DeviceType.Cuda and self.indexer_op._use_mx(
+            hidden_states.device
+        )
+        raw_weights = self._get_logits_head_gate(hidden_states, None) if mx else None
 
         # Fused Q-RoPE-Hadamard-Quant path: single Triton kernel does
         # RoPE + 128-pt Hadamard + ue8m0 FP8 quant for Q (decode only).
@@ -452,10 +482,24 @@ class Indexer(nn.Module):
                 q_c_scale,
             )
             q_fp8, q_scale = self._quantize_q_k(
-                query, key, kv_cache, fmha_params, attention_inputs, cp_params
+                query,
+                key,
+                kv_cache,
+                fmha_params,
+                attention_inputs,
+                cp_params,
+                raw_weights,
             )
 
-        weights = self._get_logits_head_gate(hidden_states, q_scale)
+        weights = (
+            raw_weights if mx else self._get_logits_head_gate(hidden_states, q_scale)
+        )
         return self._compute_topk(
-            q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params
+            q_fp8,
+            weights,
+            kv_cache,
+            fmha_params,
+            attention_inputs,
+            cp_params,
+            q_sf=q_scale if mx else None,
         )

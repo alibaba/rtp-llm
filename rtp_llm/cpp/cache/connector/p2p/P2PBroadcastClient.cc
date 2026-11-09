@@ -111,6 +111,8 @@ void P2PBroadcastClient::genBroadcastRequest(FunctionRequestPB&                 
                                              std::vector<TransferRoutePB>*       routes_of_worker) {
     auto p2p_request = request.mutable_p2p_request();
 
+    p2p_request->set_supports_indexer_layout(params.supports_indexer_layout);
+
     // 传输端点索引表：route 里的 peer_index 在 worker 侧解析成具体端点。
     for (const auto& [ip, port] : params.peer_workers) {
         auto tp_worker = p2p_request->add_peer_workers();

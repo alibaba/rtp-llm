@@ -94,6 +94,7 @@ public:
         std::vector<std::pair<std::string, uint32_t>> peer_workers;
         RankRoutes                                    routes;
         uint64_t                                      plan_digest{0};
+        bool                                          supports_indexer_layout{false};
     };
 
     std::shared_ptr<Result> broadcast(BroadcastParams params);

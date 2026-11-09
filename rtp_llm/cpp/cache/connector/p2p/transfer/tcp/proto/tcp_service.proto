@@ -23,6 +23,11 @@ enum TcpTransferErrorCodePB {
 message TcpBlockBufferInfo {
     optional uint32 len     = 1;
     optional bytes  content = 2;
+    // FP8 indexer page geometry; absent for byte-identical opaque/other caches.
+    optional uint32 indexer_scale_format = 3;
+    optional uint32 indexer_page_tokens = 4;
+    optional uint32 indexer_page_stride = 5;
+
 }
 
 message TcpCacheKeyBlockBufferInfo {

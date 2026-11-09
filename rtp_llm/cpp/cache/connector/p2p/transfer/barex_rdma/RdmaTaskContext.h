@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/CudaCopyUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
 #include <chrono>
+#include "rtp_llm/cpp/cache/IndexerCacheScale.h"
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -129,9 +130,13 @@ private:
     int64_t start_time_us_ = 0;
     int64_t deadline_ms_ = 0;
 
-    std::shared_ptr<TransferTask> task_;
-    bool                          transfer_started_ = false;
-    std::vector<int64_t> batch_keys_;
+    std::shared_ptr<TransferTask>       task_;
+    bool                                transfer_started_ = false;
+    std::vector<int64_t>                batch_keys_;
+    std::vector<IndexerScaleConversion> indexer_conversions_;
+    bool                                needs_cache_write_guard_ = false;
+    bool                                converting_cache_     = false;
+    bool                                cache_write_acquired_ = false;
 };
 
 }  // namespace barex_rdma

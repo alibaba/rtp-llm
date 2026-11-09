@@ -89,7 +89,9 @@ py_library(
 
 py_library(
     name = "triton_kernels",
-    srcs = ["legacy_fp8_indexer_score.py"],
+    srcs = [
+        "legacy_fp8_indexer_score.py",
+    ],
     deps = [
         ":attention",
         ":autotune_cache",
