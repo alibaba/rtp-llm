@@ -1111,6 +1111,7 @@ class _ForwardBatchState:
     chunk_count: int = 0
     admission_started_ns: int = 0
     native_preparation_ms: float = 0.0
+    submit_timing: dict[int, dict[str, int]] | None = None
     execution_started_ns: int = 0
     execution_step_count: int = 0
     execution_step_ms: float = 0.0
@@ -1295,7 +1296,12 @@ class _NaviSchedScheduler:
                             self._forward_enqueue_sequence
                         )
                         self._forward_enqueue_sequence += 1
+                        submit_timing = state.submit_timing
+                        if submit_timing is not None:
+                            submit_timing[request_id]["native_add_started_ns"] = time.monotonic_ns()
                         self._scheduler.add_request(forwarded)
+                        if submit_timing is not None:
+                            submit_timing[request_id]["native_add_finished_ns"] = time.monotonic_ns()
                         added_request_ids.append(forwarded.request_id)
             except BaseException:
                 self._rollback_failed_admission(state, added_request_ids)
@@ -1551,6 +1557,11 @@ class VLLMEngineObserver:
         max_concurrent_batches: int = 1,
     ):
         self._native_ingress = is_vllm_native_pd_prefill()
+        self._pp_submit_audit_enabled = (
+            self._native_ingress
+            and _read_bool_env("VLLM_NAVI_SCHED_PP_SUBMIT_AUDIT_ENABLED", False)
+            and int(os.environ.get("NAVI_SCHED_PP_SIZE", "1")) > 1
+        )
         _execution_timing_probe.install_gc_timing_audit()
         cache_config = vllm_config.cache_config
         if not cache_config.enable_prefix_caching:
@@ -2762,6 +2773,9 @@ class VLLMEngineObserver:
             arrived_request_ids=set(cancelled_request_ids),
         )
 
+        if self._pp_submit_audit_enabled and state.batch_id % 16 == 0:
+            state.submit_timing = {request_id: {} for request_id in request_ids}
+
         if cancelled_request_ids:
             self._abort_forward_requests(state, set(cancelled_request_ids))
             if state.released:
@@ -2859,7 +2873,12 @@ class VLLMEngineObserver:
         submitted_request_ids = []
         try:
             for request_id, value in processed:
+                submit_timing = state.submit_timing
+                if submit_timing is not None:
+                    submit_timing[request_id]["queue_put_started_ns"] = time.monotonic_ns()
                 engine_core.input_queue.put_nowait((request_type.ADD, value))
+                if submit_timing is not None:
+                    submit_timing[request_id]["queue_put_finished_ns"] = time.monotonic_ns()
                 submitted_request_ids.append(request_id)
         except Exception:
             submitted = set(submitted_request_ids)
@@ -3202,6 +3221,10 @@ class VLLMEngineObserver:
         if state is None:
             self._reject_unowned_request(request)
             return None
+
+        submit_timing = state.submit_timing
+        if submit_timing is not None:
+            submit_timing[request_id]["scheduler_received_ns"] = time.monotonic_ns()
 
         cancelled_before_admission = False
         admitted_state = None
@@ -5504,6 +5527,15 @@ class VLLMEngineObserver:
                         "native_batch_id": state.batch_id,
                         "native_schedule_batch_id": state.schedule_batch_id,
                         **_execution_timing_probe.batch_event_fields(state),
+                        **(
+                            {
+                                "agent_ready_or_python_take_ns": state.admission_started_ns,
+                                "first_batch_execution_perf_ns": state.execution_started_ns,
+                                "submit_timing": state.submit_timing,
+                            }
+                            if state.submit_timing is not None
+                            else {}
+                        ),
                     }
                 )
             return
