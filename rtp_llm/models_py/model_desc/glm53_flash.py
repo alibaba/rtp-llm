@@ -11,6 +11,8 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.glm53_prefill_parallel import (
@@ -56,6 +58,7 @@ from rtp_llm.models_py.modules.glm53_mega_mhc import (
     can_use_mega_mhc,
     fused_post_pre_rms,
 )
+from rtp_llm.models_py.modules.glm53_mhc import fused_post_pre as glm53_fused_post_pre
 from rtp_llm.models_py.modules.hybrid.glm53_mla_attention import MlaAttention
 from rtp_llm.models_py.triton_kernels.causal_conv1d.glm53_causal_conv1d import (
     CausalConv1dMetadata,
@@ -98,7 +101,6 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
-from torch import nn
 
 _CULA_LOGGED_DEVICES: set[int] = set()
 _INPLACE_HC_NORM = os.environ.get("GLM53_INPLACE_HC_NORM", "0") == "1"
@@ -1618,8 +1620,8 @@ class KimiLinearDecoderLayer(nn.Module):
                 )
                 norm_done = True
             else:
-                residual, hidden_states, post, comb = self.attn_hc.fused_post_pre(
-                    hidden_states, residual, post, comb
+                residual, hidden_states, post, comb = glm53_fused_post_pre(
+                    hidden_states, residual, post, comb, self.attn_hc
                 )
         if not norm_done:
             hidden_states = self.input_layernorm(
@@ -1665,8 +1667,8 @@ class KimiLinearDecoderLayer(nn.Module):
             )
             self._wait_pinned_mla_before_moe(fmha_impl)
         else:
-            residual, hidden_states, post, comb = self.ffn_hc.fused_post_pre(
-                hidden_states, residual, post, comb
+            residual, hidden_states, post, comb = glm53_fused_post_pre(
+                hidden_states, residual, post, comb, self.ffn_hc
             )
             self._wait_pinned_mla_before_moe(fmha_impl)
             hidden_states = self.post_attention_layernorm(
