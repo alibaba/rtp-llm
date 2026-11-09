@@ -182,6 +182,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":rocm_bindings_base",
         ":rocm_attn_bindings_base",
+        "//rtp_llm/models_py/bindings/common:common",
     ],
     visibility = ["//visibility:public"],
     alwayslink = 1,

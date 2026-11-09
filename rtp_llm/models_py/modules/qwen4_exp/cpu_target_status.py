@@ -38,10 +38,11 @@ class _GlooTargetStatus:
 
 def prepare_cpu_target_status(config, parallelism):
     role = str(getattr(parallelism, "role_type", "")).rsplit(".", 1)[-1]
+    atom_target = bool(getattr(config, "atom_qwen4_exp_mtp_target", False))
     if not (
         role in ("DECODE", "PDFUSION")
         and not getattr(config, "is_mtp", False)
-        and getattr(config, "enable_qwen4_ple", False)
+        and (getattr(config, "enable_qwen4_ple", False) or atom_target)
         and parallelism.tp_size > 1
     ):
         return None
