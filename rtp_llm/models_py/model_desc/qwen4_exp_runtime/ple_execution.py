@@ -44,6 +44,60 @@ class PLEExecution:
     _physical_blocks_for_pairs = staticmethod(PLECacheViews._physical_blocks_for_pairs)
     _same_metadata = staticmethod(PLECacheViews._same_metadata)
 
+    @staticmethod
+    def _metadata_agrees(lhs, rhs, names) -> bool:
+        """State/context metadata agreement with at most one device readback.
+
+        Each per-name ``torch.equal`` on CUDA tensors is its own D2H scalar
+        readback; serving profiles count six of them (13-44µs each, draining
+        the pipeline) in every ``qwen4.ple.apply`` window. Compare the device
+        pairs into one fused verdict and read it back once; identical fast
+        paths and host pairs stay sync-free. The semantics follow
+        ``same_tensor_metadata`` per name.
+        """
+        verdict = None
+        for name in names:
+            left = getattr(lhs, name, None)
+            right = getattr(rhs, name, None)
+            if left is right:
+                continue
+            if left is None or right is None:
+                return False
+            if not isinstance(left, torch.Tensor) or not isinstance(right, torch.Tensor):
+                if left != right:
+                    return False
+                continue
+            if (
+                left.shape != right.shape
+                or left.dtype != right.dtype
+                or left.device != right.device
+            ):
+                return False
+            if left.stride() == right.stride() and left.data_ptr() == right.data_ptr():
+                continue
+            if left.device.type != "cuda" or right.device.type != "cuda":
+                if not torch.equal(left, right):
+                    return False
+                continue
+            same = (left == right).all()
+            verdict = same if verdict is None else verdict & same
+        return True if verdict is None else bool(verdict.item())
+
+    @staticmethod
+    def _upload_int64(values, device: torch.device) -> torch.Tensor:
+        """Upload a host-built int64 list with pinned staging.
+
+        ``torch.tensor(values, device=cuda)`` performs a synchronous pageable
+        H2D copy; the serving PLE path uploads the terminal-page row list and
+        the prefix mask this way once per step. Stage through pinned host
+        memory and issue a non-blocking upload instead.
+        """
+        if not values:
+            return torch.empty(0, dtype=torch.long, device=device)
+        pinned = device.type == "cuda" and torch.cuda.is_available()
+        host = torch.tensor(values, dtype=torch.long, pin_memory=bool(pinned))
+        return host.to(device=device, non_blocking=True)
+
     def _stage_ple_target_verify(self, **kwargs):
         return self.coordinator._stage_ple_target_verify(**kwargs)
 
@@ -134,7 +188,7 @@ class PLEExecution:
                         pool.device,
                     )
                     cached = pool.index_select(0, blocks)
-                    mask = torch.tensor(prefixes, device=ids.device).gt(0).unsqueeze(1)
+                    mask = self._upload_int64(prefixes, ids.device).gt(0).unsqueeze(1)
                     contexts = torch.where(mask, cached, contexts)
                 if ctx_inputs.is_target_verify:
                     width = lengths[0]
@@ -274,16 +328,17 @@ class PLEExecution:
         if (
             is_target_verify != bool(ctx_inputs.is_target_verify)
             or bool(state_inputs.is_prefill) != bool(ctx_inputs.is_prefill)
-            or any(
-                not self._same_metadata(state_inputs, ctx_inputs, name)
-                for name in (
+            or not self._metadata_agrees(
+                state_inputs,
+                ctx_inputs,
+                (
                     "input_lengths",
                     "prefix_lengths",
                     "sequence_lengths",
                     "cu_seqlens_device",
                     "cu_kv_seqlens_device",
                     "combo_position_ids",
-                )
+                ),
             )
         ):
             raise RuntimeError("qwen4_exp PLE state-region metadata is inconsistent")
@@ -572,10 +627,8 @@ class PLEExecution:
                         .item()
                     )
                 else:
-                    terminal_t = torch.tensor(
-                        terminal_indices,
-                        dtype=torch.long,
-                        device=state_writable.device,
+                    terminal_t = self._upload_int64(
+                        terminal_indices, state_writable.device
                     )
                     terminal_writable = bool(
                         (state_writable[terminal_t] & ctx_writable[terminal_t])
