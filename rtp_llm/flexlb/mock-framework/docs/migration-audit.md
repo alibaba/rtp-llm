@@ -25,7 +25,8 @@ DSV 行为参考 `feature/dsv41-dev-main-202161013@9ca78c35f6`。
 
 ## DSV 链路
 
-- [x] Mock Client → main Master → ViT → P → D 已完成实际请求验证。真实 Frontend/Renderer 保持 main，未整目录移植 feature；真实 Frontend 联调不在此项验证范围内。
+- [x] Mock Client → main Master → ViT → P → D 已完成实际请求验证。
+- [ ] 使用 `MOCK_FRONTEND_DSV41_MEDIA_URLS=true` 的真实 Frontend → Master → Mock V/P/D 在 Whale 联调。Frontend 保留 main 的流式处理，按该开关选择 URL 协议和 row-hash 路由。
 - [x] main 既有协议字段保留，新增 PD 区间与 ViT 负载字段无编号冲突。保留 block_size=23、lookahead=24、group=25、rollback=26、step=27，ViT 负载使用可缺省的 field 28。
 - [x] ViT 网络准备、调度、计算、结果发布、负载状态与健康查询边界保持来源实现，Java ViT 回归及实际多模态请求通过。
 - [x] P/D 缓存 key、复用长度、计算区间及 KV handoff 由共享协议组件实现；原生 C++ 哈希对照、Java Scheduler 和 V/P/D 冷热请求通过。

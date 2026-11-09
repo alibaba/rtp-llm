@@ -2,9 +2,15 @@
 
 import copy
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+
+
+def use_dsv41_media_urls() -> bool:
+    """Use the URL-based V/P protocol for a Frontend serving Mock Engine."""
+    return os.getenv("MOCK_FRONTEND_DSV41_MEDIA_URLS", "").lower() in ("1", "true")
 
 
 @dataclass(frozen=True)

@@ -34,6 +34,7 @@ import requests
 import torch
 from urllib3.exceptions import ProtocolError, ReadTimeoutError
 
+from rtp_llm.config.dsv41_config import use_dsv41_media_urls
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
     ExceptionCategory,
@@ -115,6 +116,7 @@ from rtp_llm.telemetry.tracing import (
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
+    MMUrlType,
     RequestInfo,
 )
 from rtp_llm.utils.util import AtomicCounter
@@ -152,11 +154,15 @@ _DASH_SERVER_ATTRIBUTES = {
 
 def _build_mm_inputs_from_request(
     request: predict_v2_pb2.ModelInferRequest,
+    *,
+    v41_media_urls: bool = False,
 ) -> list:
     """Convert DashSc message parts to the engine's generic multimodal inputs."""
     parts = parse_multimodal_parts_from_request(request)
     if not parts:
         return []
+    if v41_media_urls and any(part.mm_type != MMUrlType.IMAGE for part in parts):
+        raise DashScParameterError("V4.1 payload supports images only")
 
     from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 
@@ -995,6 +1001,7 @@ async def iter_real_model_stream_infer(
     input_ids_tensor: Optional[torch.Tensor] = None,
     v41_inputs=None,
     v41_processor_config=None,
+    v41_url_image_token_id: Optional[int] = None,
     max_seq_len: Optional[int] = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
@@ -1042,6 +1049,13 @@ async def iter_real_model_stream_infer(
     stream: object | None = None
     phase2_stream: object | None = None
     try:
+        if v41_url_image_token_id is not None and input_ids_list.count(
+            v41_url_image_token_id
+        ) != len(mm_inputs or []):
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "image placeholder count does not match the supplied images",
+            )
         if (
             v41_inputs is None
             and v41_processor_config is not None
@@ -1454,6 +1468,13 @@ async def iter_real_model_stream_infer(
             phase2_input_ids = _build_empty_think_phase2_input_ids(
                 input_ids_list, matched_think_bos_ids, list(runtime.empty_tokens)
             )
+            if v41_url_image_token_id is not None and phase2_input_ids.count(
+                v41_url_image_token_id
+            ) != len(mm_inputs or []):
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "phase-2 thinking prefix overlaps an image span",
+                )
             phase2_v41_inputs = None
             if v41_inputs is not None:
                 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
@@ -1715,6 +1736,11 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # (invalid grammars surface as an engine-side error mid-stream).
         self._grammar_validator = grammar_validator
         self._v41_processor_config = v41_processor_config
+        self._v41_url_image_token_id = (
+            v41_processor_config.image_token_id
+            if v41_processor_config is not None and use_dsv41_media_urls()
+            else None
+        )
         self._max_seq_len = max_seq_len
 
     async def _validate_request_grammar(
@@ -1928,7 +1954,11 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     mm_inputs = (
                         []
                         if self._v41_processor_config is not None
-                        else _build_mm_inputs_from_request(request)
+                        and self._v41_url_image_token_id is None
+                        else _build_mm_inputs_from_request(
+                            request,
+                            v41_media_urls=self._v41_url_image_token_id is not None,
+                        )
                     )
                     traceparent_new = _lookup_ds_request_control(
                         parse_ds_header_attributes(request), "traceparent_new"
@@ -2077,7 +2107,12 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     phase2_request_id_factory=self._next_rtp_llm_request_id,
                     access_agg=record,
                     input_ids_tensor=parsed_input_ids.tensor,
-                    v41_processor_config=self._v41_processor_config,
+                    v41_processor_config=(
+                        self._v41_processor_config
+                        if self._v41_url_image_token_id is None
+                        else None
+                    ),
+                    v41_url_image_token_id=self._v41_url_image_token_id,
                     max_seq_len=self._max_seq_len,
                     yield_access_stats=True,
                     mm_inputs=mm_inputs,

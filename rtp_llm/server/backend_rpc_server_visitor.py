@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
 import torch
 
+from rtp_llm.config.dsv41_config import use_dsv41_media_urls
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
@@ -131,6 +132,10 @@ class BackendRPCServerVisitor:
             and getattr(pd_sep_config, "role_type", None) == RoleType.FRONTEND
             and mm_model_config is not None
         )
+        self._dsv41_image_token_id = None
+        if use_dsv41_media_urls() and getattr(model_config, "is_deepseek_v41", False):
+            raw_model_config = model_config.mm_related_params.config["v41_config"]
+            self._dsv41_image_token_id = int(raw_model_config["image_token_id"])
         self.source_ip = str(getattr(server_config, "ip", "") or "")
         assert self.max_seq_len > 0
 
@@ -281,6 +286,8 @@ class BackendRPCServerVisitor:
         """
         input.mm_token_expansion = None
         token_expansion = None
+        image_token_id = getattr(self, "_dsv41_image_token_id", None)
+        cache_spans = []
         token_ids = (
             input.token_ids.tolist()[0]
             if len(input.token_ids.shape) == 2
@@ -289,6 +296,15 @@ class BackendRPCServerVisitor:
         route_args = {}
         selected_vit = None
         prepared = getattr(input, "v41_inputs", None)
+        if (
+            image_token_id is not None
+            and getattr(input, "mm_inputs", None)
+            and not self._mm_cache_routing
+        ):
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "DSV4.1 media URL routing requires a Frontend with remote ViT",
+            )
         if self.remote_vit and prepared is not None and prepared.images:
             timeout_ms = (
                 input.generate_config.ttft_timeout_ms
@@ -387,15 +403,18 @@ class BackendRPCServerVisitor:
                     self.max_seq_len,
                     compact=True,
                     expanded_spans=expanded_spans,
+                    image_token_id=image_token_id,
+                    cache_spans=cache_spans,
                 )
                 if selected_vit is not None and full_length is None:
                     raise ValueError(
                         "ViT did not return complete routing hashes within the sequence limit"
                     )
                 if full_length is not None:
-                    token_expansion = MultimodalTokenExpansion(
-                        token_ids, expanded_spans
-                    )
+                    if image_token_id is None:
+                        token_expansion = MultimodalTokenExpansion(
+                            token_ids, expanded_spans
+                        )
                     route_args["seq_len"] = full_length - input.prefix_length
             except (
                 ValueError,
@@ -413,8 +432,8 @@ class BackendRPCServerVisitor:
                     "Invalid ViT routing metadata, request_id=%s", input.request_id
                 )
                 token_ids = []
-            # Retain only compact int32 ids and segment offsets for the model RPC.
-            # Drop the much larger metadata representation before scheduling.
+                cache_spans.clear()
+            # The URL protocol uses expanded tokens only for routing.
             metadata = None
         # Without ViT metadata, token_ids is only the text prefix before the
         # first media tag. Hashing the original media placeholder or tokens
@@ -427,7 +446,9 @@ class BackendRPCServerVisitor:
             self.seq_size_per_block,
             v41_inputs=input.v41_inputs,
             cache_key_seed=self.cache_key_seed,
+            multimodal_cache_spans=cache_spans or None,
         )
+        cache_spans.clear()
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
         del token_ids, full_block_cache_keys
@@ -445,7 +466,7 @@ class BackendRPCServerVisitor:
             )
             if (
                 selected_vit is not None
-                and token_expansion is not None
+                and "seq_len" in route_args
                 and route_result.error_code == VIT_ROUTE_STALE_CODE
             ):
                 # Expanded length may select a different group; old hashes are
@@ -505,6 +526,8 @@ class BackendRPCServerVisitor:
                     self.max_seq_len,
                     compact=True,
                     expanded_spans=expanded_spans,
+                    image_token_id=image_token_id,
+                    cache_spans=cache_spans,
                 )
                 if full_length is None and metadata is not None:
                     raise FtRuntimeException(
@@ -512,15 +535,22 @@ class BackendRPCServerVisitor:
                         "Incomplete replacement ViT routing hashes",
                     )
                 block_cache_keys = self._route_cache_keys(
-                    get_block_cache_keys(token_ids, self.seq_size_per_block)
+                    get_block_cache_keys(
+                        token_ids,
+                        self.seq_size_per_block,
+                        cache_key_seed=self.cache_key_seed,
+                        multimodal_cache_spans=cache_spans or None,
+                    )
                 )
+                cache_spans.clear()
                 if full_length is None:
                     selected_vit = None
                     route_args.pop("seq_len", None)
                 else:
-                    token_expansion = MultimodalTokenExpansion(
-                        token_ids, expanded_spans
-                    )
+                    if image_token_id is None:
+                        token_expansion = MultimodalTokenExpansion(
+                            token_ids, expanded_spans
+                        )
                     route_args.update(
                         selected_vit=status, seq_len=full_length - input.prefix_length
                     )

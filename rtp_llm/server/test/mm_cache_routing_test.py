@@ -35,6 +35,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.multimodal.multimodal_util import trans_config
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, PDSepConfig, VitSeparation
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.cache_key_routing import get_block_cache_keys
 from rtp_llm.server.master_client import (
     VIT_ROUTE_STALE_CODE,
     FlexlbResponse,
@@ -327,6 +328,30 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [(s.offset, s.length) for s in wire.multimodal_token_layout.spans], [(1, 2)]
         )
+
+    async def test_dsv41_routes_by_row_hash_and_sends_original_image_placeholder(self):
+        self.visitor._dsv41_image_token_id = 99
+        self.visitor.cache_key_seed = 4923373599811257905
+        self.visitor._page_rr_route_cache_keys = True
+        self.visitor._page_rr_cp_size = 2
+
+        self.assertIsNone(await self.visitor.get_master_route_addrs(self.request))
+        route = self.visitor.master_client.get_backend_role_addrs.call_args.kwargs
+        expected_keys = get_block_cache_keys(
+            [1, 99, 99, 2],
+            2,
+            cache_key_seed=self.visitor.cache_key_seed,
+            multimodal_cache_spans=[(1, [-10, 11])],
+        )
+        self.assertEqual(route["cache_key_block_size"], 4)
+        self.assertEqual(route["block_cache_keys"], expected_keys[1::2])
+        self.assertEqual(route["seq_len"], 4)
+        self.assertEqual(route["selected_vit"], self.status)
+        for wire in (route["input_pb"], trans_input(self.request)):
+            self.assertEqual(list(wire.token_ids), [1, 99, 2])
+            self.assertEqual(len(wire.multimodal_inputs), 1)
+            self.assertFalse(wire.HasField("multimodal_token_layout"))
+            self.assertFalse(wire.HasField("v41_inputs"))
 
     async def test_missing_or_invalid_required_hashes_stop_before_prefill_routing(self):
         for data in ({"entries": [{}]},):

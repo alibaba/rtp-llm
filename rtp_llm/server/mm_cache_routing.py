@@ -12,13 +12,27 @@ def multimodal_routing_tokens(
     max_seq_len: int,
     compact: bool = False,
     expanded_spans: Optional[List[Tuple[int, int]]] = None,
+    *,
+    image_token_id: Optional[int] = None,
+    cache_spans: Optional[List[Tuple[int, List[int]]]] = None,
 ) -> Tuple[Sequence[int], Optional[int]]:
     """Expand routing hashes independently of local embedding residency."""
-    from libth_transformer_config import get_multimodal_token_spans
-
     if expanded_spans is not None:
         expanded_spans.clear()
-    spans = get_multimodal_token_spans(token_ids, separators, include_separators)
+    if cache_spans is not None:
+        cache_spans.clear()
+    if image_token_id is None:
+        from libth_transformer_config import get_multimodal_token_spans
+
+        spans = get_multimodal_token_spans(token_ids, separators, include_separators)
+    else:
+        spans = [
+            (i, i + 1) for i, token in enumerate(token_ids) if token == image_token_id
+        ]
+        if len(spans) != len(keys):
+            raise ValueError(
+                "image placeholder count does not match the supplied images"
+            )
     if not spans:
         return [], None
     safe_prefix = token_ids[: spans[0][0]]
@@ -36,6 +50,8 @@ def multimodal_routing_tokens(
         sizes, hashes = entry["split_size"], entry["feature_hashes"]
         if not sizes or any(type(n) is not int or n <= 0 for n in sizes):
             raise ValueError("invalid multimodal segment lengths")
+        if image_token_id is not None and len(sizes) != 1:
+            raise ValueError("expected one ViT segment per image")
         if sum(sizes) != len(hashes) or any(
             type(h) is not int or not -(1 << 31) <= h < (1 << 31) for h in hashes
         ):
@@ -50,7 +66,12 @@ def multimodal_routing_tokens(
             output.extend(token_ids[i] for i in range(cursor, begin))
             if expanded_spans is not None:
                 expanded_spans.append((len(output), size))
-            output.extend(islice(hash_values, size))
+            if image_token_id is None:
+                output.extend(islice(hash_values, size))
+            else:
+                if cache_spans is not None:
+                    cache_spans.append((len(output), hashes))
+                output.extend([image_token_id] * size)
             cursor, segment = end, segment + 1
     if segment != len(spans):
         raise ValueError("multimodal metadata does not match tag count")

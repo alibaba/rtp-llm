@@ -49,6 +49,11 @@ HTTP 为 START_PORT，gRPC 为 START_PORT+1；平台探针访问 HTTP `/health`�
 
 ## 部署接线边界
 
+同一源码构建的真实 Frontend 连接 DSV4.1 Mock P/D/V 时，只在 Frontend 设置
+`MOCK_FRONTEND_DSV41_MEDIA_URLS=true`，并使用远端 ViT（`VIT_SEPARATION=2`）。
+OpenAI Chat 和 DashScope gRPC 保留原始图片占位及媒体描述。Frontend 使用 ViT 返回的长度和
+row hash 计算路由 key，P 再根据 ViT 结果展开原始输入。未设置时走现有真实 Engine 协议。
+
 Mock Engine 启动不读取 checkpoint 或请求 C2 Fuse 挂载。P/D 使用显式的 `MAX_SEQ_LEN`、`IMAGE_TOKEN_ID`（多模态）和 `CACHE_KEY_HASH_SEED`（与真实 Frontend 匹配时）。Seed 使用有符号十进制 int64。部署迁移时将有效参数加入角色配置后再切换镜像。
 
 这些文件提供可构建的镜像和服务入口，不自动修改 Whale 模板、发布角色或注册 VIP。接入目标部署时，使用其现有角色发现、探针、资源和停止宽限设置。Master 仍是独立 JVM，不起本地 ZK 或 Mock 集群管理器。

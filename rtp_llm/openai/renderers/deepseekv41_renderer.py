@@ -5,7 +5,7 @@ import os
 import sys
 import uuid
 
-from rtp_llm.config.dsv41_config import V41Config
+from rtp_llm.config.dsv41_config import V41Config, use_dsv41_media_urls
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
     V41ImageProcessorConfig,
@@ -34,6 +34,7 @@ from rtp_llm.openai.renderers.v41_recipe import (
     resolve_thinking,
 )
 from rtp_llm.openai.renderers.v41_stream import V41StreamParser
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class V41StreamStatus(StreamStatus):
@@ -153,6 +154,21 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
             ) from error
 
     def render_chat(self, request):
+        if use_dsv41_media_urls():
+            prompt, media = self._encode_request(request)
+            token_ids = self.tokenizer.encode(prompt)
+            urls = [image["url"] for image in media["images"]]
+            if token_ids.count(self.image_processor_config.image_token_id) != len(urls):
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    "image placeholder count does not match the supplied images",
+                )
+            return RenderedInputs(
+                input_ids=token_ids,
+                rendered_prompt=prompt,
+                input_urls=urls,
+                input_urls_type=[MMUrlType.IMAGE] * len(urls),
+            )
         prepared = self.prepare_v41_inputs(request)
         return RenderedInputs(
             input_ids=list(prepared.token_ids),
