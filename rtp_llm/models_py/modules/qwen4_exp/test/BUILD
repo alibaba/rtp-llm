@@ -5,6 +5,12 @@ load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 package(default_visibility = ["//visibility:public"])
 
 models_py_test(
+    name = "ple_metadata_sync_test",
+    src = "ple_metadata_sync_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
     name = "ple_page_projection_jit_test",
     src = "ple_page_projection_jit_test.py",
     gpu = "H20_CU13",
