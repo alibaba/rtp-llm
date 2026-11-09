@@ -382,6 +382,14 @@ def warmup_v41_engram_jit(model, *, max_m, device):
         layer for layer, capabilities in zip(layers, lookup_capabilities)
         if capabilities[1]
     ]
+    # External Fabric views prefetch on a side stream with the plain host-row
+    # kernel, so they need the stream but not the prefetch-tuned compilation.
+    async_layers = [
+        layer
+        for layer in layers
+        if not getattr(model, "_is_decode_role", False)
+        and getattr(layer.embed_tokens, "supports_async_prefetch", False)
+    ]
     prefetch_config = None
     prefetch_carveout = None
     from rtp_llm.models_py.modules.dsv41 import _engram_decode_prefetch
@@ -416,7 +424,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
         prefetch_carveout,
     )
     if key in _ENGRAM_WARMED:
-        for layer in prefetch_layers:
+        for layer in async_layers:
             layer.prepare_lookup_prefetch()
         for layer in layers:
             _engram_decode_prefetch.prepare(layer)
@@ -497,7 +505,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
                         ),
                         device=device,
                     )
-    for layer in prefetch_layers:
+    for layer in async_layers:
         layer.prepare_lookup_prefetch()
     for layer in layers:
         _engram_decode_prefetch.prepare(layer)

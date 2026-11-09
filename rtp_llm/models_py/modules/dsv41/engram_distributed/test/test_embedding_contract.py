@@ -486,7 +486,26 @@ class EmbeddingContractTest(unittest.TestCase):
             self.assertEqual(embedding._uva[1].record_stream.call_count, 6)
             embedding._uva[1].record_stream.assert_called_with(stream)
             self.assertFalse(embedding.supports_generic_prefetch)
+            self.assertTrue(embedding.supports_async_prefetch)
             self.assertTrue(embedding.supports_decode_prefetch)
+            self.assert_no_copies(storage)
+
+    def test_external_prefetch_reuses_the_host_row_kernel(self):
+        # Prefill prefetch must not need a pinned host copy: the Fabric views
+        # are already GPU addresses, so the plain host-row kernel runs on the
+        # caller's side stream.
+        result = TORCH.zeros((2, 1, 256), dtype=TORCH.bfloat16)
+        lookup = Mock(return_value=result)
+        with fake_triton(lookup), self.blackwell_embedding() as (
+            embedding,
+            storage,
+            stream,
+        ):
+            indices = FakeTensor((2, 24), dtype=TORCH.int64)
+            self.assertTrue(embedding.supports_async_prefetch)
+            self.assertIs(embedding(indices, "cuda:0", prefetch=True), result)
+            lookup.assert_called_once_with(storage.weight, storage.scales, indices, 148)
+            embedding._uva[1].record_stream.assert_called_with(stream)
             self.assert_no_copies(storage)
 
     def test_explicit_quantized_entry_preserves_tuple_and_lifetime(self):
