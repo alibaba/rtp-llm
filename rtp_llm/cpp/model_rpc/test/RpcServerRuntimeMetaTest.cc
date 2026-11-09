@@ -29,6 +29,89 @@ private:
 
 }  // namespace
 
+TEST(RpcServerRuntimeMetaTest, RunningStatusTracksCacheMatchWithoutCountingExecutionProgress) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 104;
+    input->group_id            = 77;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids           = torch::zeros({1000}, torch::kInt32);
+    auto stream                = std::make_shared<RuntimeMetaTestStream>(input);
+    meta.enqueue(input->request_id, stream);
+
+    auto initial = meta.getEngineScheduleInfo(-1);
+    ASSERT_EQ(initial.running_task_info_list.size(), 1);
+    EXPECT_EQ(initial.running_task_info_list[0].prefix_length, 0);
+
+    // The cache match is discovered after enqueue; later execution has
+    // already advanced the cursor beyond that matched prefix.
+    stream->setInitialReuseLength(950);
+    stream->setReuseLength(999);
+    auto matched = meta.getEngineScheduleInfo(-1);
+    ASSERT_EQ(matched.running_task_info_list.size(), 1);
+    EXPECT_EQ(matched.running_task_info_list[0].prefix_length, 950);
+    EXPECT_EQ(matched.running_task_info_list[0].input_length, 1000);
+    EXPECT_EQ(matched.running_task_info_list[0].batch_id, 77);
+
+    meta.markPriorityPreemptionCanceling(TaskIdentity{input->request_id, input->group_id});
+    stream->setInitialReuseLength(500);
+    auto canceling = meta.getEngineScheduleInfo(-1);
+    ASSERT_EQ(canceling.running_task_info_list.size(), 1);
+    EXPECT_EQ(canceling.running_task_info_list[0].prefix_length, 500);
+    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
+
+    ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
+        input->request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted"));
+    stream->setInitialReuseLength(0);
+    auto canceled = meta.getEngineScheduleInfo(-1);
+    EXPECT_TRUE(canceled.running_task_info_list.empty());
+    ASSERT_EQ(canceled.finished_task_info_list.size(), 1);
+    EXPECT_EQ(canceled.finished_task_info_list[0].prefix_length, 500);
+    EXPECT_EQ(canceled.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
+}
+
+TEST(RpcServerRuntimeMetaTest, FinishTaskRefreshesCacheMatchAndRetainsTerminalSnapshot) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 105;
+    input->group_id            = 78;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids           = torch::zeros({1000}, torch::kInt32);
+    auto stream                = std::make_shared<RuntimeMetaTestStream>(input);
+    meta.enqueue(input->request_id, stream);
+    stream->setInitialReuseLength(950);
+    stream->setReuseLength(999);
+
+    meta.finishTask(input->request_id, /*input_length=*/0, /*prefix_length=*/0, 14, "remote load failed");
+    stream->setInitialReuseLength(0);
+    auto finished = meta.getEngineScheduleInfo(-1);
+    EXPECT_TRUE(finished.running_task_info_list.empty());
+    ASSERT_EQ(finished.finished_task_info_list.size(), 1);
+    EXPECT_EQ(finished.finished_task_info_list[0].prefix_length, 950);
+    EXPECT_EQ(finished.finished_task_info_list[0].input_length, 1000);
+    EXPECT_EQ(finished.finished_task_info_list[0].batch_id, 78);
+    EXPECT_EQ(finished.finished_task_info_list[0].error_code, 14);
+    EXPECT_EQ(finished.finished_task_info_list[0].error_message, "remote load failed");
+}
+
+TEST(RpcServerRuntimeMetaTest, FinishTaskPreservesExplicitLengthOverrides) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 106;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids           = torch::zeros({1000}, torch::kInt32);
+    auto stream                = std::make_shared<RuntimeMetaTestStream>(input);
+    meta.enqueue(input->request_id, stream);
+    stream->setInitialReuseLength(950);
+
+    meta.finishTask(input->request_id, /*input_length=*/1200, /*prefix_length=*/900);
+    auto finished = meta.getEngineScheduleInfo(-1);
+    EXPECT_TRUE(finished.running_task_info_list.empty());
+    ASSERT_EQ(finished.finished_task_info_list.size(), 1);
+    EXPECT_EQ(finished.finished_task_info_list[0].prefix_length, 900);
+    EXPECT_EQ(finished.finished_task_info_list[0].input_length, 1200);
+}
+
 TEST(RpcServerRuntimeMetaTest, EnqueueReadsBatchIdFromStreamInput) {
     RpcServerRuntimeMeta meta;
     auto                 input = std::make_shared<GenerateInput>();

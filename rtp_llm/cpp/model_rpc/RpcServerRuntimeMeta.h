@@ -43,9 +43,12 @@ public:
         EngineScheduleInfo                  info;
         std::unordered_set<int64_t>         emitted_preemption_overlays;
         for (auto& [id, entry] : running_streams_) {
-            auto task_info  = entry.task_info;
-            task_info.phase = derivePhase(entry.stream);
-            auto overlay    = priority_preemption_overlays_.find(id);
+            auto task_info = entry.task_info;
+            // Cache matching can complete after enqueue. Report the initial
+            // cache hit, not the execution cursor advanced by chunked prefill.
+            task_info.prefix_length = entry.stream->initialReuseLength();
+            task_info.phase         = derivePhase(entry.stream);
+            auto overlay            = priority_preemption_overlays_.find(id);
             if (overlay != priority_preemption_overlays_.end()) {
                 task_info.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
                 emitted_preemption_overlays.insert(id);
@@ -105,7 +108,8 @@ public:
                                       /*waiting_time_ms=*/0);
         auto running   = running_streams_.find(request_id);
         if (running != running_streams_.end()) {
-            task_info = running->second.task_info;
+            task_info               = running->second.task_info;
+            task_info.prefix_length = running->second.stream->initialReuseLength();
         } else {
             for (auto it = finished_streams_.rbegin(); it != finished_streams_.rend(); ++it) {
                 if (it->second.request_id == request_id) {
@@ -223,7 +227,8 @@ public:
                                                /*end_time_ms=*/-1};
         auto                                ptr = running_streams_.find(request_id);
         if (ptr != running_streams_.end()) {
-            task_info = ptr->second.task_info;
+            task_info               = ptr->second.task_info;
+            task_info.prefix_length = ptr->second.stream->initialReuseLength();
             if (input_length > 0) {
                 task_info.input_length = input_length;
             }
