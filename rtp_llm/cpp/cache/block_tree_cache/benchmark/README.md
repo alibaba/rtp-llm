@@ -15,6 +15,16 @@ Transfer 支持 `--btc-crc-slot-count`（每个异步 CRC service 在每 GPU 上
 WorkLoop Device copy 的 `actual_copy_strategy=crc`，不把旧策略计时伪装成 CRC kernel 计时。
 Host/Disk 初始数据由真实 CRC store 预填后再测量；主路径与 legacy 结果按实现分别解释。
 
+WorkLoop staging 按 owner 和 load/offload 方向隔离，同方向 FULL/SWA 共用一个池。
+每对 loops 的 N 个槽位按方向各分 N/2；统一 stride 覆盖参与 group 的 CRC storage 与实际 Disk stride，
+按 4096 B 对齐。有效 batch 上限为 `min(M, N/2)`，没有 Device/Disk staging 时为 M。
+`resolved_config` 的 `staging_load_blocks/staging_offload_blocks` 汇总所有 owner，
+`staging_stride_bytes/staging_data_bytes` 报告共享槽位大小及实际数据内存，不再按 FULL/SWA 重复计数。
+Disk executor 使用默认读写线程数；异步队列由 PerRank 按 Q 和有效 batch 上限 B 统一推导：
+读队列为 `Q * min(B, read_threads)`，写队列为 Q，不随 owner 或 backing file 数量增加。
+结果中的 `disk_read_queue_size/disk_write_queue_size` 记录引擎实际采用的容量。
+legacy 继续报告原有类别容量。固定块数合并池时，较小 group 也占一个最大 stride 槽位，比较时须核对实际字节预算。
+
 ## legacy Device/Host copy API priority
 
 仅 legacy 普通 copy 使用 `cuda_3d_batch > cuda_batch > sm > generic`；WorkLoop 不读取此策略配置。
@@ -210,7 +220,7 @@ logical_coordinate = operation_index / direction_count
 working_set_index = permutation(logical_coordinate) % working_set_blocks
 ```
 
-`--transfer-descriptor-batch-size` 控制一次 transfer-engine `submit()` 最多携带多少 descriptor，`0` 表示跟随 concurrency；正式 case 显式设为 8。它与 `--copy-strategy` 不同：前者控制 transfer-engine API 的 descriptor 组批，后者指定 Device↔Host 的底层 copy 路径（`batch` 为 CUDA 1D batch，`cuda-3d-batch` 为 CUDA 3D batch）。当前 Device→Disk 引擎合约仅接受 singleton，runner 在 wave 内并发提交 singleton 以保留 lane concurrency；其余五个方向走真实 descriptor batch。
+`--transfer-descriptor-batch-size` 控制一次 transfer-engine `submit()` 最多携带多少 descriptor，`0` 表示跟随 concurrency；正式 case 显式设为 8。它与 `--copy-strategy` 不同：前者控制 transfer-engine API 的 descriptor 组批，后者指定 Device↔Host 的底层 copy 路径（`batch` 为 CUDA 1D batch，`cuda-3d-batch` 为 CUDA 3D batch）。WorkLoop 和 legacy 的六个方向都走批量提交，wave 与 business 提交均受引擎有效上限约束；legacy 的 Device↔Disk executor 还会按 staging pool 容量进一步切批。
 
 正式结果必须满足：
 

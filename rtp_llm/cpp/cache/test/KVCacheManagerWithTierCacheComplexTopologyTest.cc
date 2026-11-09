@@ -833,8 +833,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
         ASSERT_GT(reuse_count, 0u);
         ASSERT_LE(reuse_count, static_cast<size_t>(logical_blocks));
         expected_load_descriptors += reuse_count;
-        const size_t category = group_set->groupType() == CacheGroupType::FULL ? 0 : 1;
-        const auto&  staging  = engine->load_loops_.front()->staging_[category].pool;
+        const auto& staging = engine->load_loops_.front()->staging_.pool;
         ASSERT_NE(staging, nullptr);
         exceeds_staging_capacity = exceeds_staging_capacity || reuse_count > staging->capacity();
         const size_t reuse_begin = static_cast<size_t>(logical_blocks) - reuse_count;

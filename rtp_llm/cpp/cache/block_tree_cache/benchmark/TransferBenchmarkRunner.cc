@@ -372,26 +372,18 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
     if (!setup.engine->asyncEnabled()) {
         recordLegacyStaging(*setup.engine, writer_, is_swa);
     } else {
-        const auto& load = setup.engine->load_loops_.front();
-        for (size_t category = 0; category < 2; ++category) {
-            const auto& pool = load->staging_[category].pool;
-            if (pool) {
-                const std::string name = category == 0 ? "staging_full_" : "staging_swa_";
-                writer_.addResolvedConfigInt(name + "load_blocks",
-                                             pool->capacity() * setup.engine->transferWorkerCount());
-                writer_.addResolvedConfigInt(name + "offload_blocks",
-                                             setup.engine->offload_loops_.front()->staging_[category].pool->capacity()
-                                                 * setup.engine->transferWorkerCount());
-                writer_.addResolvedConfigInt(name + "stride_bytes", pool->stride_bytes_);
-                writer_.addResolvedConfigInt(category == 0 ? "disk_to_device_full_batch_capacity" :
-                                                             "disk_to_device_swa_batch_capacity",
-                                             std::min(max_descriptors_per_task, pool->capacity()));
-            }
-        }
-        const auto& pool = load->staging_[is_swa ? 1 : 0].pool;
-        if (pool)
+        const auto& pool = setup.engine->load_loops_.front()->staging_.pool;
+        if (pool) {
+            const auto workers        = setup.engine->transferWorkerCount();
+            const auto offload_blocks = setup.engine->offload_loops_.front()->staging_.pool->capacity();
+            writer_.addResolvedConfigInt("staging_load_blocks", pool->capacity() * workers);
+            writer_.addResolvedConfigInt("staging_offload_blocks", offload_blocks * workers);
+            writer_.addResolvedConfigInt("staging_stride_bytes", pool->stride_bytes_);
+            writer_.addResolvedConfigInt("staging_data_bytes",
+                                         (pool->capacity() + offload_blocks) * workers * pool->stride_bytes_);
             writer_.addResolvedConfigInt("disk_to_device_batch_capacity",
                                          std::min(max_descriptors_per_task, pool->capacity()));
+        }
     }
     writer_.addResolvedConfig("requested_copy_strategy", options_.copy_strategy);
     writer_.addResolvedConfigInt("member_group_count", setup.members.size());
@@ -529,12 +521,6 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
         setup.engine->waitForIdle();
     }
 
-    std::unique_ptr<BlockTreeTaskPool> d2disk_submit_pool;
-    if (std::find(options_.transfer_directions.begin(), options_.transfer_directions.end(), "d2disk")
-        != options_.transfer_directions.end()) {
-        d2disk_submit_pool = std::make_unique<BlockTreeTaskPool>(wave_width, wave_width, "benchmark_d2disk_submit");
-        RTP_LLM_CHECK_WITH_INFO(d2disk_submit_pool->start(), "failed to start D2Disk benchmark submit pool");
-    }
     std::unique_ptr<BlockTreeTaskPool> business_pool;
     if (business_mode) {
         business_pool = std::make_unique<BlockTreeTaskPool>(
@@ -581,7 +567,6 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
                                 device_blocks,
                                 host_blocks,
                                 disk_blocks,
-                                d2disk_submit_pool.get(),
                                 business_pool.get(),
                                 wave_width,
                                 descriptor_batch_size,
@@ -858,7 +843,6 @@ TransferBenchmarkRunner::runTransferBatch(const std::shared_ptr<PerRankBlockTran
                                           const MemberDeviceBlocks&                          device_blocks,
                                           const std::vector<BlockIdxType>&                   host_blocks,
                                           const std::vector<BlockIdxType>&                   disk_blocks,
-                                          BlockTreeTaskPool*                                 d2disk_submit_pool,
                                           BlockTreeTaskPool*                                 business_pool,
                                           size_t                                             wave_width,
                                           size_t                                             descriptor_batch_size,
@@ -914,6 +898,7 @@ TransferBenchmarkRunner::runTransferBatch(const std::shared_ptr<PerRankBlockTran
             if (descriptors.empty()) {
                 continue;
             }
+            const size_t direction_batch_size = std::min(descriptor_batch_size, engine->batchLimit());
             if (options_.business_concurrency > 0) {
                 RTP_LLM_CHECK(business_pool != nullptr);
                 const size_t                business_size  = options_.descriptors_per_business;
@@ -929,11 +914,11 @@ TransferBenchmarkRunner::runTransferBatch(const std::shared_ptr<PerRankBlockTran
                             ++local.task_submissions;
                             local.max_descriptors_per_task = business_end - business_begin;
                             std::vector<PendingBatch> business_batches;
-                            business_batches.reserve((business_end - business_begin + descriptor_batch_size - 1)
-                                                     / descriptor_batch_size);
+                            business_batches.reserve((business_end - business_begin + direction_batch_size - 1)
+                                                     / direction_batch_size);
                             const auto prepare_start = Clock::now();
-                            for (size_t begin = business_begin; begin < business_end; begin += descriptor_batch_size) {
-                                const size_t end = std::min(begin + descriptor_batch_size, business_end);
+                            for (size_t begin = business_begin; begin < business_end; begin += direction_batch_size) {
+                                const size_t end = std::min(begin + direction_batch_size, business_end);
                                 ++local.expected_batch_submissions;
                                 ++local.batch_submissions;
                                 local.expected_max_descriptor_batch_size =
@@ -988,10 +973,7 @@ TransferBenchmarkRunner::runTransferBatch(const std::shared_ptr<PerRankBlockTran
                 continue;
             }
 
-            // PerRankBlockTransferEngine batches five directions. Device->Disk
-            // remains a synchronous singleton contract, so preserve its lane
-            // concurrency with parallel singleton submits inside this wave.
-            const size_t submit_batch_size = direction == "d2disk" ? 1 : descriptor_batch_size;
+            const size_t submit_batch_size = direction_batch_size;
             pending.clear();
             stats.expected_batch_submissions += (descriptors.size() + submit_batch_size - 1) / submit_batch_size;
             stats.expected_max_descriptor_batch_size =
@@ -1005,28 +987,15 @@ TransferBenchmarkRunner::runTransferBatch(const std::shared_ptr<PerRankBlockTran
             stats.max_descriptors_per_task =
                 std::max(stats.max_descriptors_per_task, std::min(submit_batch_size, descriptors.size()));
 
-            if (direction == "d2disk") {
-                RTP_LLM_CHECK(d2disk_submit_pool != nullptr);
-                for (size_t index = 0; index < descriptors.size(); ++index) {
-                    RTP_LLM_CHECK(d2disk_submit_pool->submit(BlockTreeTaskClass::BACKGROUND, [&, index] {
-                        pending[index].context = engine->execute(
-                            TransferTask({descriptors[index]}, BlockTreeTaskPool::kDefaultQueueWaitTimeout));
-                    }));
-                }
-                d2disk_submit_pool->waitForIdle();
-                stats.batch_submissions += pending.size();
-                stats.max_descriptor_batch_size = std::max(stats.max_descriptor_batch_size, size_t{1});
-            } else {
-                size_t begin = 0;
-                for (auto& batch : pending) {
-                    const size_t end = begin + batch.descriptor_count;
-                    batch.context    = engine->execute(TransferTask(
-                        std::vector<TransferDescriptor>(descriptors.begin() + begin, descriptors.begin() + end),
-                        BlockTreeTaskPool::kDefaultQueueWaitTimeout));
-                    begin            = end;
-                    ++stats.batch_submissions;
-                    stats.max_descriptor_batch_size = std::max(stats.max_descriptor_batch_size, batch.descriptor_count);
-                }
+            size_t begin = 0;
+            for (auto& batch : pending) {
+                const size_t end = begin + batch.descriptor_count;
+                batch.context    = engine->execute(TransferTask(
+                    std::vector<TransferDescriptor>(descriptors.begin() + begin, descriptors.begin() + end),
+                    BlockTreeTaskPool::kDefaultQueueWaitTimeout));
+                begin            = end;
+                ++stats.batch_submissions;
+                stats.max_descriptor_batch_size = std::max(stats.max_descriptor_batch_size, batch.descriptor_count);
             }
 
             for (auto& batch : pending) {

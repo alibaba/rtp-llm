@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheLayout.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
@@ -29,46 +30,36 @@ std::shared_ptr<TransferAsyncContext> invalidTransferContext(size_t block_count)
         ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request"), block_count);
 }
 
-// One loop pair owns this many blocks, split equally between FULL/SWA and
-// then between directions. Each category keeps its own actual disk stride.
-std::array<TransferWorkLoop::StagingPools, 2>
+// One loop pair owns this many blocks, split equally by direction. Every group
+// with a Device/Disk route shares slots sized for the largest physical access.
+std::array<std::shared_ptr<HostStagingBlockPool>, 2>
 makeAsyncStaging(const std::vector<GroupSetPtr>& groups, size_t block_count, bool enabled) {
-    std::array<TransferWorkLoop::StagingPools, 2> result;
+    std::array<std::shared_ptr<HostStagingBlockPool>, 2> result;
     if (!enabled)
         return result;
-    std::array<size_t, 2> strides{};
+    size_t stride = 0;
     for (const auto& group : groups) {
-        const auto bytes    = group->storageBytes();
-        const auto required = std::max(bytes, group->diskPool() ? group->diskPool()->strideBytes() : size_t{0});
+        if (!group->diskPool() || group->devicePools().empty())
+            continue;
+        const auto required = std::max(group->storageBytes(), group->diskPool()->strideBytes());
         if (required > std::numeric_limits<size_t>::max() - 4095)
             throw std::overflow_error("async disk staging stride overflow");
-        const size_t stride = ((required + 4095) / 4096) * 4096;
-        if (group->diskPool() && !group->devicePools().empty()) {
-            const size_t index = group->groupType() == CacheGroupType::FULL ? 0 : 1;
-            if (group->groupType() != CacheGroupType::FULL && group->groupType() != CacheGroupType::SWA)
-                throw std::invalid_argument("async disk staging requires FULL/SWA");
-            strides[index] = std::max(strides[index], stride);
-        }
+        stride = std::max(stride, ((required + 4095) / 4096) * 4096);
     }
-    if (std::all_of(strides.begin(), strides.end(), [](size_t stride) { return stride == 0; }))
+    if (!stride)
         return result;
-    if (block_count < 4 || block_count % 2)
+    if (block_count < 2 || block_count % 2)
         throw std::invalid_argument("invalid async staging budget");
     const auto count = block_count / 2;
-    for (size_t category = 0; category < strides.size(); ++category) {
-        if (!strides[category])
-            continue;
-        if (count > std::numeric_limits<size_t>::max() / strides[category])
-            throw std::overflow_error("async staging category size overflow");
-        result[0][category] = std::make_shared<HostStagingBlockPool>(count / 2, strides[category]);
-        result[1][category] = std::make_shared<HostStagingBlockPool>(count - count / 2, strides[category]);
-        RTP_LLM_LOG_INFO("async staging: category=%zu stride=%zu load_blocks=%zu offload_blocks=%zu data_bytes=%zu",
-                         category,
-                         strides[category],
-                         count / 2,
-                         count - count / 2,
-                         count * strides[category]);
-    }
+    if (block_count > std::numeric_limits<size_t>::max() / stride)
+        throw std::overflow_error("async disk staging size overflow");
+    result[0] = std::make_shared<HostStagingBlockPool>(count, stride);
+    result[1] = std::make_shared<HostStagingBlockPool>(count, stride);
+    RTP_LLM_LOG_INFO("async staging: stride=%zu load_blocks=%zu offload_blocks=%zu data_bytes=%zu",
+                     stride,
+                     count,
+                     count,
+                     block_count * stride);
     return result;
 }
 
@@ -115,31 +106,46 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     RTP_LLM_CHECK(max_descriptors_per_batch > 0);
     RTP_LLM_CHECK(transfer_worker_count > 0 && transfer_worker_count <= std::numeric_limits<size_t>::max() / 2);
     RTP_LLM_CHECK(btc_crc_slot_count > 0 && btc_crc_slot_count <= std::numeric_limits<size_t>::max() / 2);
-    if (enable_disk_cache_ && std::any_of(group_sets_.begin(), group_sets_.end(), [](const auto& group) {
-            return group && group->diskPool();
-        })) {
-        if (!disk_io_config.valid())
-            throw std::invalid_argument("invalid engine-wide disk I/O budgets");
-        disk_io_executor_ = std::make_unique<DiskIOExecutor>(disk_io_config);
-    }
     const auto fallback_reason = workLoopCompatibility(group_sets_, enable_disk_cache);
     async_                     = btc_transfer_engine_async && fallback_reason.empty();
     RTP_LLM_LOG_INFO("BlockTree transfer: requested_async=%d implementation=%s fallback_reason=%s",
                      btc_transfer_engine_async,
                      async_ ? "workloop" : "legacy",
                      btc_transfer_engine_async && !async_ ? fallback_reason.c_str() : "none");
+    std::array<std::shared_ptr<HostStagingBlockPool>, 2> staging;
     if (async_) {
         RTP_LLM_CHECK(transfer_worker_count <= std::numeric_limits<size_t>::max() / (2 * btc_crc_slot_count));
         if (transfer_queue_max_size < transfer_worker_count
             || transfer_queue_max_size > std::numeric_limits<size_t>::max() / max_descriptors_per_batch)
             throw std::invalid_argument("async transfer requires Q >= worker count and nonoverflowing Q*M");
-        auto staging = makeAsyncStaging(group_sets_, device_disk_staging_block_count, enable_disk_cache);
-        for (const auto& direction : staging) {
-            for (const auto& pool : direction) {
-                if (pool)
-                    max_descriptors_per_batch_ = std::min(max_descriptors_per_batch_, pool->capacity());
-            }
-        }
+        staging                = makeAsyncStaging(group_sets_, device_disk_staging_block_count, enable_disk_cache);
+        const bool has_staging = staging[0] != nullptr;
+        max_descriptors_per_batch_ =
+            asyncTransferBatchLimit(max_descriptors_per_batch_, device_disk_staging_block_count, has_staging);
+    }
+    if (enable_disk_cache_ && std::any_of(group_sets_.begin(), group_sets_.end(), [](const auto& group) {
+            return group && group->diskPool();
+        })) {
+        // Disk reads use LOAD and writes use OFFLOAD. Q covers all owners/files;
+        // each resident batch has at most one disk stage in flight.
+        if (async_
+            && !disk_io_config.setQueueSizesFromBatchCapacity(
+                transfer_queue_max_size, transfer_queue_max_size, max_descriptors_per_batch_))
+            throw std::invalid_argument("async disk I/O queue capacity overflow");
+        if (!disk_io_config.valid())
+            throw std::invalid_argument("invalid engine-wide disk I/O budgets");
+        disk_io_executor_ = std::make_unique<DiskIOExecutor>(disk_io_config);
+        if (async_)
+            RTP_LLM_LOG_INFO("disk I/O queue capacities: read=%zu write=%zu resident_batches_per_direction=%zu "
+                             "batch_limit=%zu read_threads=%zu write_threads=%zu",
+                             disk_io_config.read_queue_size,
+                             disk_io_config.write_queue_size,
+                             transfer_queue_max_size,
+                             max_descriptors_per_batch_,
+                             disk_io_config.read_thread_count,
+                             disk_io_config.write_thread_count);
+    }
+    if (async_) {
         const auto crc_groups = crcTransferGroups(group_sets_, enable_disk_cache);
         const bool needs_crc  = !crc_groups.empty();
         const auto make_crc   = [&]() -> std::unique_ptr<CrcTransferService> {
@@ -157,7 +163,7 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
             load_loops_.push_back(std::make_unique<TransferWorkLoop>(group_sets_,
                                                                      make_crc(),
                                                                      disk_io_executor_.get(),
-                                                                     CrcCopyDirection::LOAD,
+                                                                     TransferDirection::LOAD,
                                                                      max_descriptors_per_batch_,
                                                                      queue_capacity,
                                                                      std::move(staging[0]),
@@ -167,7 +173,7 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
             offload_loops_.push_back(std::make_unique<TransferWorkLoop>(group_sets_,
                                                                         make_crc(),
                                                                         disk_io_executor_.get(),
-                                                                        CrcCopyDirection::STORE,
+                                                                        TransferDirection::OFFLOAD,
                                                                         max_descriptors_per_batch_,
                                                                         queue_capacity,
                                                                         std::move(staging[1]),
@@ -175,6 +181,9 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                                         world_rank,
                                                                         worker));
         }
+        // Warm both disk pools before owners or business producers can submit.
+        if (disk_io_executor_)
+            disk_io_executor_->start();
         for (auto& loop : load_loops_)
             loop->start();
         for (auto& loop : offload_loops_)
@@ -184,7 +193,7 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
             "resident_batch_budget_per_direction=%zu staging_blocks_per_loop_pair=%zu",
             transfer_worker_count,
             btc_crc_slot_count,
-            needs_crc ? 2 * transfer_worker_count * btc_crc_slot_count : 0,
+            needs_crc ? crcTransferWorkspaceCount(transfer_worker_count, btc_crc_slot_count, true) : 0,
             max_descriptors_per_batch_,
             transfer_queue_max_size,
             device_disk_staging_block_count);
@@ -202,7 +211,7 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
 }
 
 PerRankBlockTransferEngine::~PerRankBlockTransferEngine() {
-    drain();
+    shutdown();
 }
 
 void PerRankBlockTransferEngine::stopAdmission() {
@@ -216,13 +225,13 @@ void PerRankBlockTransferEngine::stopAdmission() {
     }
 }
 
-void PerRankBlockTransferEngine::drain() {
+void PerRankBlockTransferEngine::shutdown() {
     stopAdmission();
     if (async_) {
         for (auto& loop : load_loops_)
-            loop->drain();
+            loop->shutdown();
         for (auto& loop : offload_loops_)
-            loop->drain();
+            loop->shutdown();
     } else {
         cancelPendingStagingTransfers();
         legacy_->drain();
@@ -247,18 +256,13 @@ BlockTreeQueueSizes PerRankBlockTransferEngine::queueSizes() const {
     if (async_) {
         BlockTreeQueueSizes sizes;
         for (const auto& loop : load_loops_)
-            sizes.load += loop->queueSize();
+            sizes.load += loop->outstandingBatches();
         for (const auto& loop : offload_loops_)
-            sizes.background += loop->queueSize();
+            // Preserve the historical monitoring field/tag for the offload lane.
+            sizes.background += loop->outstandingBatches();
         return sizes;
     }
     return legacy_->queueSizes();
-}
-
-size_t PerRankBlockTransferEngine::batchLimit(Tier source, Tier target) const noexcept {
-    if (source == Tier::DEVICE && target == Tier::DISK)
-        return 1;
-    return max_descriptors_per_batch_;
 }
 
 std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(TransferTask task) {
@@ -268,7 +272,7 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(Transf
     }
     const Tier source = descriptors.front().source_tier;
     const Tier target = descriptors.front().target_tier;
-    if (async_ && descriptors.size() > batchLimit(source, target))
+    if (async_ && descriptors.size() > batchLimit())
         return invalidTransferContext(descriptors.size());
     std::vector<const GroupSet*> group_sets;
     group_sets.reserve(descriptors.size());
@@ -292,16 +296,14 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(Transf
         return invalidTransferContext(descriptors.size());
     if ((source == Tier::DISK || target == Tier::DISK) && !enable_disk_cache_)
         return invalidTransferContext(descriptors.size());
-    if (source == Tier::DEVICE && target == Tier::DISK && descriptors.size() != 1)
-        return invalidTransferContext(descriptors.size());
-    if (source == Tier::DISK && target == Tier::DEVICE
+    if (((source == Tier::DISK && target == Tier::DEVICE) || (source == Tier::DEVICE && target == Tier::DISK))
         && std::any_of(group_sets.begin(), group_sets.end(), [&](const auto* group) {
                return group->groupType() != group_sets.front()->groupType();
            }))
         return invalidTransferContext(descriptors.size());
     if (async_) {
-        auto&      loops  = target == Tier::DEVICE ? load_loops_ : offload_loops_;
-        auto&      next   = target == Tier::DEVICE ? next_load_ : next_offload_;
+        auto&      loops  = isLoadTransfer(source, target) ? load_loops_ : offload_loops_;
+        auto&      next   = isLoadTransfer(source, target) ? next_load_ : next_offload_;
         const auto worker = loops.size() == 1 ? 0 : next.fetch_add(1, std::memory_order_relaxed) % loops.size();
         return loops[worker]->execute(std::move(task));
     }

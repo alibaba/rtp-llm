@@ -55,7 +55,7 @@ Tree 的逻辑 block 固定覆盖 256 tokens。20 个请求长度桶（tokens）
 | `transfer_device_disk_swa_direct` | swa | direct | auto（c×4） |
 | `transfer_device_disk_swa_buffered` | swa | buffered | 4096 blocks |
 
-方向为 `d2disk,disk2d`。device 仅分配 8 个可复用 lane blocks，disk 分配并寻址完整 working set；每个 wave 先完成全部 write，再提交相同 coordinate 的 read。当前 engine 的 Device→Disk 合约只接受 singleton，runner 通过 case 生命周期内的固定 worker pool 在 wave 内并发提交 8 个 singleton；Disk→Device 则真正提交最多 8 个 descriptor 的 batch，报告按方向展示实际 avg/max batch size。
+方向为 `d2disk,disk2d`。device 仅分配 8 个可复用 lane blocks，disk 分配并寻址完整 working set；每个 wave 先完成全部 write，再提交相同 coordinate 的 read。WorkLoop 和 legacy 的两个方向都提交最多 8 个 descriptor 的 batch，并受引擎有效上限约束；legacy executor 按 staging 容量进一步切批。报告按方向展示 API 提交的实际 avg/max batch size。
 
 ### Host↔Disk（4 个）
 

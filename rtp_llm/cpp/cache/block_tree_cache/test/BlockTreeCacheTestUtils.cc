@@ -712,7 +712,7 @@ bool BlockTreeCacheTestPeer::ScopedQueueRejectionGuard::restore() {
 void BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(const BlockTreeCache& cache) {
     for (;;) {
         cache.task_pool_->waitForIdle();
-        cache.transfer_dispatcher_->drainTransfers();
+        cache.transfer_dispatcher_->waitForTransfers();
         auto& engine = *cache.transfer_dispatcher_->per_rank_engine_;
         engine.waitForIdle();
         cache.task_pool_->waitForIdle();
@@ -769,9 +769,10 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
 
 ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
                                                                        bool perform_successful_transfers,
-                                                                       bool enable_disk_cache):
+                                                                       bool enable_disk_cache,
+                                                                       bool btc_transfer_engine_async):
     PerRankBlockTransferEngine(
-        workLoopTestGroups(groups), enable_disk_cache, {}, 128, 8, 4, 10000, nullptr, 0, 4, true),
+        workLoopTestGroups(groups), enable_disk_cache, {}, 128, 8, 4, 10000, nullptr, 0, 4, btc_transfer_engine_async),
     group_set_results_(groups.size()),
     perform_successful_transfers_(perform_successful_transfers) {}
 
