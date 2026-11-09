@@ -2,19 +2,26 @@
 
 import os
 from functools import partial
-from rtp_llm.utils.model_weight import W
 from typing import Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import (
-    Gate as BaseGate, _GATE_FUSED_OK, _select_routes_with_nonfinite_fallback,
-    fused_sqrtsoftplus_hash_gate,
-)
 from rtp_llm.models_py.kernels.ppu.moe.ppu_gate_padding import (
     stable_sqrtsoftplus_gate as fused_sqrtsoftplus_gate,
 )
+from rtp_llm.models_py.kernels.ppu.runtime import try_fp32_rowwise_linear
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import (
+    _GATE_FUSED_OK,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import (
+    Gate as BaseGate,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import (
+    _select_routes_with_nonfinite_fallback,
+    fused_sqrtsoftplus_hash_gate,
+)
+from rtp_llm.utils.model_weight import W
 
 
 def _use_fused_gate(score_func: str, x_size_0: int, topk: int, *, enabled=None) -> bool:
@@ -33,19 +40,30 @@ def _use_fused_gate(score_func: str, x_size_0: int, topk: int, *, enabled=None) 
 
 
 class Gate(BaseGate):
-    def __init__(self, *args, linear=None, fp32_gemm=None, fused_gate=None, fp32_rowwise=False, **kwargs):
+    def __init__(
+        self,
+        *args,
+        linear=None,
+        fp32_gemm=None,
+        fused_gate=None,
+        fp32_rowwise=False,
+        row_gemv_stream_pool=None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self._bf16_fp32_linear = F.linear if linear is None else linear
         self._fp32_gemm = fp32_gemm
         self._fused_gate = fused_gate
         self._fp32_rowwise = fp32_rowwise
+        self._row_gemv_stream_pool = row_gemv_stream_pool
         if fp32_rowwise and not self._fp32_gemm_enabled():
             raise ValueError("Rowwise PPU gate requires FP32 projection")
 
     def _fp32_gemm_enabled(self) -> bool:
         return (
             os.environ.get("MOE_GATE_FP32", "0") == "1"
-            if self._fp32_gemm is None else self._fp32_gemm
+            if self._fp32_gemm is None
+            else self._fp32_gemm
         )
 
     def can_prepare_gate_payload(
@@ -86,14 +104,24 @@ class Gate(BaseGate):
         effective_route_scale = float(self.route_scale) if include_route_scale else 1.0
         if self._fp32_gemm_enabled():
             if self._fp32_rowwise:
-                scores = torch.cat([F.linear(row[None].float(), self.weight.float()) for row in x])
+                scores = try_fp32_rowwise_linear(
+                    x, self.weight, self._row_gemv_stream_pool, lanes=4
+                )
+                if scores is None:
+                    scores = torch.cat(
+                        [F.linear(row[None].float(), self.weight.float()) for row in x]
+                    )
             else:
-                from rtp_llm.models_py.modules.dsv4.ppu.prefill.request_rows import request_row_lengths
+                from rtp_llm.models_py.modules.dsv4.ppu.prefill.request_rows import (
+                    request_row_lengths,
+                )
 
                 lengths = request_row_lengths(len(x))
                 weight = self.weight.float()
                 if lengths:
-                    scores = torch.cat([F.linear(part.float(), weight) for part in x.split(lengths)])
+                    scores = torch.cat(
+                        [F.linear(part.float(), weight) for part in x.split(lengths)]
+                    )
                 else:
                     scores = F.linear(x.float(), weight)
         else:
@@ -174,8 +202,15 @@ class PpuGate(Gate):
             *args,
             layer_weights=weights,
             linear=partial(platform_provider.run_bf16_fp32_linear, F.linear),
-            fp32_gemm=options.get("DSV4_GATE_FP32", "1" if options.get("DSV4_PPU_EXPERT_PRECISION") == "a8" else "0") == "1",
+            fp32_gemm=options.get(
+                "DSV4_GATE_FP32",
+                "1" if options.get("DSV4_PPU_EXPERT_PRECISION") == "a8" else "0",
+            )
+            == "1",
             fp32_rowwise=getattr(platform_provider, "_gate_rowwise", False),
+            row_gemv_stream_pool=getattr(
+                platform_provider, "_row_gemv_stream_pool", None
+            ),
             fused_gate=options.get("DSV4_GATE_FUSED", "1") != "0",
             **kwargs,
         )
@@ -207,7 +242,9 @@ class PpuGate(Gate):
             and x.is_cuda
             and x.shape[0]
         ):
-            from rtp_llm.models_py.kernels.ppu.moe.ppu_gate_padding import gate_with_padding
+            from rtp_llm.models_py.kernels.ppu.moe.ppu_gate_padding import (
+                gate_with_padding,
+            )
 
             x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
             scores = self._bf16_fp32_linear(x_bf16, self._weight_bf16()).float()

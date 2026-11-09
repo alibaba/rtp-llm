@@ -1,9 +1,14 @@
 """Decode composition with engine-owned DP/EP resources."""
 
-import torch
+import os
 import weakref
 
-from rtp_llm.models_py.modules.dsv4.ppu.manifest import DECODE_EXECUTION_OPTIONS, _check_execution_options
+import torch
+
+from rtp_llm.models_py.modules.dsv4.ppu.manifest import (
+    DECODE_EXECUTION_OPTIONS,
+    _check_execution_options,
+)
 from rtp_llm.models_py.modules.dsv4.ppu.ppu_module_provider import PpuModuleProvider
 
 
@@ -14,7 +19,9 @@ class PpuDecodeProvider(PpuModuleProvider):
     _moe_output_dtype = torch.bfloat16
 
     def build_moe(self, default_factory, *args, **kwargs):
-        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_deepep_fp4 import PpuDeepEPFP4Strategy
+        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_deepep_fp4 import (
+            PpuDeepEPFP4Strategy,
+        )
         from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_ep_moe import PpuEPMoE
 
         if not kwargs.get("is_decode_role"):
@@ -26,7 +33,9 @@ class PpuDecodeProvider(PpuModuleProvider):
             "gemm_tile": self._moe_tile,
         }
         if self._moe_backend == "megamoe":
-            from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import PpuMegaMoEFP4Strategy
+            from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import (
+                PpuMegaMoEFP4Strategy,
+            )
 
             strategy_type = PpuMegaMoEFP4Strategy
             strategy_kwargs["resources"] = self._mega_resources
@@ -37,7 +46,9 @@ class PpuDecodeProvider(PpuModuleProvider):
         if precision == "a8":
             if self._moe_backend != "megamoe":
                 raise ValueError("PPU A8 Decode requires MegaMoE")
-            from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import PpuMegaMoEA8Strategy
+            from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import (
+                PpuMegaMoEA8Strategy,
+            )
 
             strategy_type = PpuMegaMoEA8Strategy
             strategy_kwargs.update(output_dtype=torch.float32, gemm_tile="auto")
@@ -51,7 +62,11 @@ class PpuDecodeProvider(PpuModuleProvider):
 
     def __init__(self, execution_options):
         super().__init__(execution_options)
-        from rtp_llm.models_py.kernels.ppu.runtime import PpuStreamPool
+        from rtp_llm.models_py.kernels.ppu.runtime import (
+            PpuStreamPool,
+            native_row_gemv_enabled,
+            require_ppu_op,
+        )
 
         support = _check_execution_options(
             self.execution_options, DECODE_EXECUTION_OPTIONS
@@ -84,19 +99,40 @@ class PpuDecodeProvider(PpuModuleProvider):
             raise ValueError("DSV4_PPU_MTP_BATCH_INDEXER must be 0 or 1")
         self._mtp_batch_indexer = batch_indexer == "1"
         self._decode_fusions = self._bool("DSV4_PPU_DECODE_FUSIONS", False)
-        self._moe_backend = self.execution_options.get("DSV4_PPU_DECODE_MOE_BACKEND", "deepep")
+        self._moe_backend = self.execution_options.get(
+            "DSV4_PPU_DECODE_MOE_BACKEND", "deepep"
+        )
         if self._moe_backend not in ("deepep", "megamoe"):
             raise ValueError("DSV4_PPU_DECODE_MOE_BACKEND must be deepep or megamoe")
         self._mega_resources = None
         self._mega_module_name = "deep_gemm_mega"
         if self._moe_backend == "megamoe":
-            package = self.execution_options.get("DSV4_PPU_MEGAMOE_PACKAGE", "deep_gemm_mega")
+            package = self.execution_options.get(
+                "DSV4_PPU_MEGAMOE_PACKAGE", "deep_gemm_mega"
+            )
             if package != self._mega_module_name:
                 raise ValueError("DSV4_PPU_MEGAMOE_PACKAGE must be deep_gemm_mega")
-            from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import PpuMegaMoEResources
+            from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import (
+                PpuMegaMoEResources,
+            )
 
             self._mega_resources = PpuMegaMoEResources()
         self.stream_pool = PpuStreamPool()
+        self._row_gemv_stream_pool = (
+            self.stream_pool
+            if self._bool("DSV4_PPU_DECODE_ROW_GEMV_STREAMS", False)
+            else None
+        )
+        if native_row_gemv_enabled():
+            if self._row_gemv_stream_pool is None:
+                raise ValueError(
+                    "Native row GEMV requires DSV4_PPU_DECODE_ROW_GEMV_STREAMS=1"
+                )
+            require_ppu_op("fp32_row_probe", "forward")
+            require_ppu_op("hc_projection_probe", "forward")
+        if os.getenv("DSV4_PPU_HC_PREPARE_Q3", "0") == "1":
+            require_ppu_op("hc_prepare_q3_probe", "prepare")
+            require_ppu_op("hc_prepare_q3_v3_probe", "prepare_rms")
         self._decode_attention_refs = []
 
     def build_fp8_linear(self, default_factory, *args, **kwargs):
@@ -131,12 +167,20 @@ class PpuDecodeProvider(PpuModuleProvider):
             decode_mtp_batch_indexer=self._mtp_batch_indexer,
             **kwargs,
         )
+        if self._row_gemv_stream_pool is not None:
+            device = attention.wq_a.weight.device
+            for lane in range(4):
+                self._row_gemv_stream_pool.get(("rowwise_gemv", lane), device)
         attention._fuse_qkv_quant = self._decode_fusions and not self._bool(
             "DSV4_PPU_DENSE_POW2_SCALE", False
         )
         self._decode_attention_refs.append(weakref.ref(attention))
-        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import PpuFp8Linear
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a import PpuWoAFp8Linear
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a import (
+            PpuWoAFp8Linear,
+        )
+        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import (
+            PpuFp8Linear,
+        )
 
         for linear in (attention.wq_b, attention.wo_a, attention.wo_b):
             if type(linear) in (PpuFp8Linear, PpuWoAFp8Linear):
@@ -149,10 +193,13 @@ class PpuDecodeProvider(PpuModuleProvider):
         return attention
 
     def build_shared_expert_executor(self, **kwargs):
-        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import PpuSharedExpertExecutor
+        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import (
+            PpuSharedExpertExecutor,
+        )
 
         return PpuSharedExpertExecutor(
-            stream_pool=self.stream_pool, start_before_routing=True,
+            stream_pool=self.stream_pool,
+            start_before_routing=True,
         )
 
     def build_hc_unit(self, *args, **kwargs):
@@ -162,12 +209,12 @@ class PpuDecodeProvider(PpuModuleProvider):
             *args,
             options=self.execution_options,
             allow_graph=True,
+            row_gemv_stream_pool=self._row_gemv_stream_pool,
             fuse_prenorm=True,
             fuse_norm=True,
             fuse_moe_sum=self._decode_fusions,
-            fuse_pre_quant=self._decode_fusions and not self._bool(
-                "DSV4_PPU_DENSE_POW2_SCALE", False
-            ),
+            fuse_pre_quant=self._decode_fusions
+            and not self._bool("DSV4_PPU_DENSE_POW2_SCALE", False),
             **kwargs,
         )
 
@@ -182,14 +229,14 @@ class PpuDecodeProvider(PpuModuleProvider):
         head.tp_size, head.tp_rank = tp_size, tp_rank
         return head
 
-
     def build_mtp_input_fusion(self, enorm, hnorm, e_proj, h_proj):
         if not self._decode_fusions:
             return None
-        from rtp_llm.models_py.modules.dsv4.ppu.mtp.ppu_mtp_input import PpuMtpInputFusion
+        from rtp_llm.models_py.modules.dsv4.ppu.mtp.ppu_mtp_input import (
+            PpuMtpInputFusion,
+        )
 
         return PpuMtpInputFusion(enorm, hnorm, e_proj, h_proj)
-
 
     def build_decode_metadata(self, default_factory, *args, **kwargs):
         if not self._mtp_metadata_graph:
@@ -197,8 +244,9 @@ class PpuDecodeProvider(PpuModuleProvider):
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
             DSv4DecodeFmhaImplFP8,
         )
-
-        from rtp_llm.models_py.modules.dsv4.ppu.metadata.ppu_decode_metadata import PpuDecodeMetadataGraph
+        from rtp_llm.models_py.modules.dsv4.ppu.metadata.ppu_decode_metadata import (
+            PpuDecodeMetadataGraph,
+        )
 
         if default_factory is not DSv4DecodeFmhaImplFP8:
             raise ValueError("PPU metadata Graph requires the FP8 Decode factory")

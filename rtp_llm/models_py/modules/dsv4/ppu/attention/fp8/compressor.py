@@ -1,34 +1,18 @@
 """PPU overrides; unchanged behavior is inherited from the shared DSV4 implementation."""
 
 from __future__ import annotations
-from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
-    _CUBLAS_GEMM_BF16_BF16_FP32,
-    _SHARED_COS_SIN_CACHE,
-    _CPStateReadSelection,
-    _select_cp_state_read_tail_blocks,
-    _select_cp_state_read_blocks,
-    _fill_cp_state_read_cache,
-    _CP_STATE_READ_SELECTION_CACHE,
-    _build_cp_full_state_read_cache,
-    _cp_sliced_state_read_needed,
-    CompressorMeta,
-    _cache_cp_state_read_selection,
-    _CompressorPending,
-    _CompressorNorm,
-    _build_prefill_positions,
-    build_prefill_metadata,
-    build_prepare_metadata_args,
-    build_decode_metadata,
-)
+
+import os
 import weakref
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
-import torch
 from functools import partial
+from typing import Any, Dict, Optional, Tuple
+
+import torch
 import torch.nn as nn
+
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-from rtp_llm.ops.compute_ops import rtp_llm_ops
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_INDEXER,
     _CP_ROLE_MAIN,
@@ -49,13 +33,39 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     run_save_partial_states,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
-from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8 as _BaseCompressorFP8
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
+    _CP_STATE_READ_SELECTION_CACHE,
+    _CUBLAS_GEMM_BF16_BF16_FP32,
+    _SHARED_COS_SIN_CACHE,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
+    CompressorFP8 as _BaseCompressorFP8,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
+    CompressorMeta,
+    _build_cp_full_state_read_cache,
+    _build_prefill_positions,
+    _cache_cp_state_read_selection,
+    _CompressorNorm,
+    _CompressorPending,
+    _cp_sliced_state_read_needed,
+    _CPStateReadSelection,
+    _fill_cp_state_read_cache,
+    _select_cp_state_read_blocks,
+    _select_cp_state_read_tail_blocks,
+    build_decode_metadata,
+    build_prefill_metadata,
+    build_prepare_metadata_args,
+)
+from rtp_llm.ops.compute_ops import rtp_llm_ops
+
 
 def _default_bf16_fp32_linear(activation, linear_weight):
     assert (
         _CUBLAS_GEMM_BF16_BF16_FP32 is not None
     ), "cublas_gemm_bf16_bf16_fp32 op is not built"
     return _CUBLAS_GEMM_BF16_BF16_FP32(activation, linear_weight)
+
 
 def _linear_bf16_bf16_fp32(
     x: torch.Tensor, weight: torch.Tensor, *, linear_op=_default_bf16_fp32_linear
@@ -76,6 +86,7 @@ def _linear_bf16_bf16_fp32(
             f"expected=torch.float32/{expected_shape}"
         )
     return out_2d.reshape(*leading_shape, weight.shape[0])
+
 
 class CompressorFP8(_BaseCompressorFP8):
     def __init__(
@@ -104,8 +115,13 @@ class CompressorFP8(_BaseCompressorFP8):
             "stand-alone construction is not supported (use the BF16 path)."
         )
         self._platform_provider = platform_provider
+        self._row_gemv_stream_pool = getattr(
+            platform_provider, "_row_gemv_stream_pool", None
+        )
 
-        self._bf16_fp32_linear = partial(platform_provider.run_bf16_fp32_linear, _default_bf16_fp32_linear)
+        self._bf16_fp32_linear = partial(
+            platform_provider.run_bf16_fp32_linear, _default_bf16_fp32_linear
+        )
         self.dim = dim
         self.head_dim = head_dim
         # Which per-forward workspace CP buffer pair this compressor's gather
@@ -142,11 +158,25 @@ class CompressorFP8(_BaseCompressorFP8):
         self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
         self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
         with torch.no_grad():
+            wkv, wgate = compressor_weights["wkv"], compressor_weights["wgate"]
+            if (
+                os.getenv("ROLE_TYPE") == "DECODE"
+                and head_dim == KV_HEAD_DIM
+                and compress_ratio in (4, 128)
+                and dim == 4096
+                and wkv.shape == wgate.shape == (coff * head_dim, dim)
+                and wkv.dtype == wgate.dtype == torch.bfloat16
+                and wkv.is_cuda
+                and wkv.device == wgate.device
+                and torch.cuda.get_device_name(wkv.device) == "ZW-M890P"
+            ):
+                # Keep both checkpoint parameters as views of one FP32 allocation.
+                wkv, wgate = torch.cat((wkv, wgate), dim=0).float().chunk(2, dim=0)
             self.wkv.weight = nn.Parameter(
-                compressor_weights["wkv"].to(projection_dtype), requires_grad=False
+                wkv.to(projection_dtype), requires_grad=False
             )
             self.wgate.weight = nn.Parameter(
-                compressor_weights["wgate"].to(projection_dtype), requires_grad=False
+                wgate.to(projection_dtype), requires_grad=False
             )
         self.norm = _CompressorNorm(head_dim)
         self.norm.weight = nn.Parameter(
@@ -176,6 +206,21 @@ class CompressorFP8(_BaseCompressorFP8):
         # string suppresses recording.
         self._dbg_prefix: Optional[str] = None
 
+        self._cols4_projection = None
+        if (
+            os.getenv("ROLE_TYPE") == "DECODE"
+            and os.getenv("DSV4_PPU_COMPRESSOR_COLS4", "0") == "1"
+            and self._cp_role == _CP_ROLE_MAIN
+            and head_dim == KV_HEAD_DIM
+            and compress_ratio in (4, 128)
+            and dim == 4096
+            and self.wkv.weight.is_cuda
+            and torch.cuda.get_device_name(self.wkv.weight.device) == "ZW-M890P"
+        ):
+            from rtp_llm.models_py.kernels.ppu.runtime import require_ppu_op
+
+            self._cols4_projection = require_ppu_op("fp32_cols4_probe", "forward_out")
+
     def _project_raw(self, x: torch.Tensor) -> torch.Tensor:
         if self.head_dim == KV_HEAD_DIM:
             # Fusing these GEMMs changes rounding before compressed KV quantization.
@@ -185,16 +230,36 @@ class CompressorFP8(_BaseCompressorFP8):
                 # native token GEMMs before that state crosses a BF16 boundary.
                 flat = x.reshape(-1, x.shape[-1])
                 return torch.cat(
-                    [torch.cat((self.wkv(row), self.wgate(row)), dim=-1)
-                     for row in flat.split(1)], dim=0
+                    [
+                        torch.cat((self.wkv(row), self.wgate(row)), dim=-1)
+                        for row in flat.split(1)
+                    ],
+                    dim=0,
                 ).reshape(*x.shape[:-1], 2 * self.coff * self.head_dim)
             return torch.cat((self.wkv(x), self.wgate(x)), dim=-1)
         return _linear_bf16_bf16_fp32(
             x, self._wkv_wgate_fused, linear_op=self._bf16_fp32_linear
         )
 
+    def _joined_decode_weight(self) -> Optional[torch.Tensor]:
+        wkv, wgate = self.wkv.weight, self.wgate.weight
+        # Weight replacement or device migration may break the shared storage.
+        if (
+            wkv.shape == wgate.shape == (self.coff * self.head_dim, self.dim)
+            and wkv.dtype == wgate.dtype == torch.float32
+            and wkv.device == wgate.device
+            and wkv.is_contiguous()
+            and wgate.is_contiguous()
+            and wkv.untyped_storage().data_ptr() == wgate.untyped_storage().data_ptr()
+            and wgate.storage_offset() == wkv.storage_offset() + wkv.numel()
+        ):
+            return wkv.as_strided((2 * wkv.shape[0], wkv.shape[1]), wkv.stride())
+        return None
+
     def _project_separate_prefill(self, x: torch.Tensor) -> torch.Tensor:
-        from rtp_llm.models_py.modules.dsv4.ppu.prefill.request_rows import request_row_lengths
+        from rtp_llm.models_py.modules.dsv4.ppu.prefill.request_rows import (
+            request_row_lengths,
+        )
 
         lengths = request_row_lengths(len(x)) if x.ndim == 2 else ()
         if not lengths:
@@ -295,7 +360,9 @@ class CompressorFP8(_BaseCompressorFP8):
             provider_launch = getattr(
                 getattr(self, "_platform_provider", None), "run_compress_kv_write", None
             )
-            decode_options = {"is_decode": is_decode} if provider_launch is not None else {}
+            decode_options = (
+                {"is_decode": is_decode} if provider_launch is not None else {}
+            )
             (provider_launch or run_fused_compress_kv_write)(
                 state_cache_for_read,
                 meta.token_to_req,
@@ -572,7 +639,69 @@ class CompressorFP8(_BaseCompressorFP8):
         if T > 1 and self.compress_ratio in (4, 128) and self.head_dim == KV_HEAD_DIM:
             # Each projected token can become history for a later compressed KV entry.
             flat = x.reshape(T, x.shape[-1])
-            fused_out = torch.cat([self._project_raw(row) for row in flat.split(1)], dim=0)
+            if (
+                os.getenv("ROLE_TYPE") == "DECODE"
+                and bsz in (1, 8)
+                and q_len == 3
+                and flat.dtype == torch.bfloat16
+                and flat.shape[-1] == 4096
+                and flat.is_cuda
+                and torch.cuda.get_device_name(device) == "ZW-M890P"
+            ):
+                from rtp_llm.models_py.kernels.ppu.runtime import (
+                    native_row_gemv_enabled,
+                    try_fp32_rowwise_linear,
+                )
+
+                joined = self._joined_decode_weight()
+                if joined is not None:
+                    if (
+                        self._cols4_projection is not None
+                        and native_row_gemv_enabled()
+                        and self._cp_role == _CP_ROLE_MAIN
+                        and T == 24
+                        and self._row_gemv_stream_pool is not None
+                        and flat.is_contiguous()
+                        and joined.is_contiguous()
+                        and joined.shape in ((1024, 4096), (2048, 4096))
+                        and joined.dtype == torch.float32
+                        and joined.device == device
+                        and not torch.backends.cuda.matmul.allow_tf32
+                        and not (
+                            torch.is_grad_enabled()
+                            and (flat.requires_grad or joined.requires_grad)
+                        )
+                        and flat.data_ptr() % 16 == 0
+                        and joined.data_ptr() % 16 == 0
+                    ):
+                        fused_out = torch.empty(
+                            (T, joined.shape[0]), device=device, dtype=torch.float32
+                        )
+                        self._cols4_projection(flat.float(), joined, fused_out)
+                    else:
+                        fused_out = try_fp32_rowwise_linear(
+                            flat,
+                            joined,
+                            self._row_gemv_stream_pool,
+                            lanes=2 if T == 24 else 4,
+                        )
+                    if fused_out is None:
+                        fused_out = torch.cat(
+                            [
+                                nn.functional.linear(row, joined)
+                                for row in flat.float().split(1)
+                            ],
+                            dim=0,
+                        )
+                else:
+                    projected = []
+                    for row in flat.float().split(1):
+                        projected.extend((self.wkv(row), self.wgate(row)))
+                    fused_out = torch.cat(projected, dim=0)
+            else:
+                fused_out = torch.cat(
+                    [self._project_raw(row) for row in flat.split(1)], dim=0
+                )
             fused_out = fused_out.reshape(bsz, q_len, -1)
         else:
             fused_out = self._project_raw(x)

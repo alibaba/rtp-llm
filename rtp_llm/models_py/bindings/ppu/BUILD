@@ -69,6 +69,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/common/kernels:kernels_ep_util",
         "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
         "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
+        "//rtp_llm/models_py/bindings/ppu/kernels:mtp2_precision_kernels",
         ":no_block_copy",
         ":ppu_silu_mul_mxfp4_op",
         ":ppu_rope_kvcache_op",

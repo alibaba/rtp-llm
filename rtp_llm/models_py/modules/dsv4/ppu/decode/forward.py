@@ -1,17 +1,20 @@
 """PPU overrides; unchanged behavior is inherited from the shared DSV4 implementation."""
 
 from __future__ import annotations
+
+from typing import Any, Dict, Optional, Tuple
+
+import torch
+
+from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
+from rtp_llm.models_py.modules.dsv4 import _profiler
+from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.decode.forward import (
     _DSV4_DECODE_POOL_TAGS,
     _dsv4_kernel_tokens_per_block,
     _dsv4_pool_tokens_per_block,
     build_paged_pool_specs,
 )
-from typing import Any, Dict, Optional, Tuple
-import torch
-from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
-from rtp_llm.models_py.modules.dsv4 import _profiler
-from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
@@ -30,6 +33,7 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     group_tags as _kv_cache_group_tags,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
+
 
 def build_metadata_eager(
     v4_args: Any,
@@ -103,7 +107,9 @@ def build_metadata_eager(
             paged_entries_per_block[tag] = int(paged_pool_specs[tag][0])
 
     if fp8_kv_cache:
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.decode_attn_metadata import build_decode_metadata_fp8
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.decode_attn_metadata import (
+            build_decode_metadata_fp8,
+        )
 
         return build_decode_metadata_fp8(
             attention_inputs=attn,
@@ -147,12 +153,33 @@ def build_metadata_eager(
         paged_pool_entries_per_block=paged_entries_per_block or None,
     )
 
+
+def _hc_prepare_q3_target(v4, attn, meta, prepare_hidden_fn):
+    import os
+
+    return (
+        os.environ.get("DSV4_PPU_HC_PREPARE_Q3") == "1"
+        and os.environ.get("ROLE_TYPE") == "DECODE"
+        and os.environ.get("SP_TYPE") == "mtp"
+        and os.environ.get("GEN_NUM_PER_CYCLE") == "2"
+        and os.environ.get("TP_SIZE") == "1"
+        and os.environ.get("DP_SIZE") == "8"
+        and os.environ.get("EP_SIZE") == "8"
+        and prepare_hidden_fn is None
+        and len(v4.layers) == 43
+        and bool(getattr(attn, "is_target_verify", False))
+        and meta.batch_size == 8
+        and meta.q_len_per_req == 3
+    )
+
+
 def forward_layers(
     v4: Any,
     kv_cache: Optional[Any],
     input_ids: torch.Tensor,  # [T_total]
     attn_metadata: Any,  # DSv4DecodeAttnMetadata
     prepare_hidden_fn: Optional[Any] = None,
+    hc_prepare_q3: bool = False,
 ) -> torch.Tensor:
     """qwen3-style decode per-layer loop. Same body shape as the prefill
     helper (:func:`rtp_llm.models_py.modules.dsv4.prefill.forward.forward_layers`)
@@ -194,7 +221,13 @@ def forward_layers(
     layer_forward_range = _profiler.make_layer_forward_range()
     for layer_idx, layer in enumerate(v4.layers):
         with layer_forward_range(layer_idx):
-            h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
+            h = layer.forward_decode(
+                h,
+                attn_metadata,
+                input_ids,
+                kv_cache=kv_cache,
+                hc_prepare_q3=hc_prepare_q3,
+            )
             if layer_idx in capture_ids:
                 v4.capture_aux_hidden(layer_idx, h)
             if _rt_on:
@@ -208,6 +241,9 @@ def forward_layers(
             )
         else:
             _pre_hc_flat = h.flatten(-2).reshape(-1, h.size(-2) * h.size(-1))
+            layout = getattr(attn_metadata, "mtp_commit_layout", None)
+            if layout is not None:
+                _pre_hc_flat = _pre_hc_flat.index_select(0, layout.compact_to_padded)
             v4._write_mtp_hidden_buffer(
                 _pre_hc_flat, is_cuda_graph=attn_metadata.is_cuda_graph
             )
@@ -238,6 +274,7 @@ def forward_layers(
         )
         v4._dbg_step = step + 1
     return h
+
 
 def forward_decode(
     v4: Any,
@@ -323,6 +360,9 @@ def forward_decode(
 
     B = meta.batch_size
     q_len = meta.q_len_per_req
+    layout = getattr(meta, "mtp_commit_layout", None)
+    if layout is not None:
+        input_ids = input_ids.index_select(0, layout.padded_to_compact)
     _rt_on = _rt.ENABLED
     if _rt_on:
         _rt.begin(seqlen=int(input_ids.numel()))
@@ -337,6 +377,7 @@ def forward_decode(
         input_ids,
         meta,
         prepare_hidden_fn=prepare_hidden_fn,
+        hc_prepare_q3=_hc_prepare_q3_target(v4, attn, meta, prepare_hidden_fn),
     )  # [B, q_len, dim]
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
     if _fwd_dbg.enabled():
@@ -373,4 +414,6 @@ def forward_decode(
             extra["start_pos"] = start_pos.detach().cpu()
         _rt.dump(step=v4._dbg_step, extra=extra)
         v4._dbg_step += 1
+    if layout is not None:
+        hidden = hidden.index_select(0, layout.compact_to_padded)
     return PyModelOutputs(hidden)

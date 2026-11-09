@@ -1,5 +1,7 @@
 """TP Prefill experts with official A8 activation and FP4 weight semantics."""
 
+import os
+
 import torch
 from torch import nn
 
@@ -8,7 +10,9 @@ from rtp_llm.models_py.kernels.ppu.moe.ppu_a8_moe import (
     repack_fp4_to_fp8,
     weighted_nopad_a8,
 )
-from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_grouped_fp4 import _derive_inter_local_and_tp
+from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_grouped_fp4 import (
+    _derive_inter_local_and_tp,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -18,6 +22,33 @@ class PpuGroupedA8Strategy(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self._bn128_stage2 = (
+            os.environ.get("DSV4_PREFILL_A8_BN128_STAGE2", "0") == "1"
+            and cfg.tp_size == 8
+            and cfg.ep_size == 1
+        )
+
+    def _grouped_launch_kwargs(self, lhs, rhs):
+        if (
+            self._bn128_stage2
+            and tuple(lhs.shape) in ((98304, 4096), (98304, 2048))
+            and tuple(rhs.shape) == (256, 512, lhs.shape[1])
+        ):
+            from deep_gemm.jit_kernels.gemm_fp8 import get_smem_config
+
+            return {
+                "configs": (
+                    38,
+                    192,
+                    128,
+                    128,
+                    48,
+                    64,
+                    2,
+                    get_smem_config(2, lhs.shape[1], 192, 128, 128),
+                )
+            }
+        return {}
 
     def setup_weights(self, layer_weights):
         keys = (
@@ -40,16 +71,21 @@ class PpuGroupedA8Strategy(nn.Module):
         )
         w13, s13 = repack_fp4_to_fp8(torch.cat((w1, w3), 1), torch.cat((s1, s3), 1))
         import torch.distributed as dist
+
         if dist.get_world_size() != self.cfg.tp_size:
             raise ValueError("A8 output sharding requires the TP WORLD group")
         self.output_dim = self.cfg.dim // self.cfg.tp_size
         self.output_start = dist.get_rank() * self.output_dim
+
         # Preserve the reference's full-K accumulation before BF16 rounding.
         def redistribute(tensor):
-            send = torch.stack(list(tensor.view(torch.uint8).chunk(self.cfg.tp_size, dim=1))).contiguous()
+            send = torch.stack(
+                list(tensor.view(torch.uint8).chunk(self.cfg.tp_size, dim=1))
+            ).contiguous()
             recv = torch.empty_like(send)
             dist.all_to_all_single(recv, send)
             return torch.cat(list(recv.unbind(0)), dim=2).contiguous()
+
         w2 = redistribute(w2)
         s2 = redistribute(s2).view(torch.float8_e8m0fnu)
         w2, s2 = repack_fp4_to_fp8(w2, s2)
@@ -71,9 +107,10 @@ class PpuGroupedA8Strategy(nn.Module):
         from deep_gemm.jit_kernels.m_grouped_gemm_fp8_k32 import (
             m_grouped_gemm_fp8_fp8_bf16_nt_nopad as grouped,
         )
+
         from rtp_llm.models_py.kernels.ppu.moe.ppu_moe_exact_gather import (
-            gather_local_loop_compatible,
             gather_and_combine_local_loop_compatible,
+            gather_local_loop_compatible,
         )
 
         if (
@@ -112,31 +149,57 @@ class PpuGroupedA8Strategy(nn.Module):
         if shared_schedule is not None:
             shared_schedule.before_up()
         grouped(
-            (compact_q, compact_scale), (self._w13, self._s13), gate_up, experts, counts
+            (compact_q, compact_scale),
+            (self._w13, self._s13),
+            gate_up,
+            experts,
+            counts,
+            **self._grouped_launch_kwargs(compact_q, self._w13),
         )
         if shared_schedule is not None:
             shared_schedule.after_up()
         hidden = weighted_nopad_a8(
             gate_up, source, experts, indices, weights, counts, self.cfg.swiglu_limit
         )
-        hidden = (_all_gather_columns(hidden[0], self.cfg.tp_size),
-                  _all_gather_columns(hidden[1].contiguous(), self.cfg.tp_size).t().contiguous().t())
-        down = torch.empty((total, self.output_dim), device=x.device, dtype=torch.bfloat16)
+        hidden = (
+            _all_gather_columns(hidden[0], self.cfg.tp_size),
+            _all_gather_columns(hidden[1].contiguous(), self.cfg.tp_size)
+            .t()
+            .contiguous()
+            .t(),
+        )
+        down = torch.empty(
+            (total, self.output_dim), device=x.device, dtype=torch.bfloat16
+        )
         if shared_schedule is not None:
             shared_schedule.before_down()
-        grouped(hidden, (self._w2, self._s2), down, experts, counts)
+        grouped(
+            hidden,
+            (self._w2, self._s2),
+            down,
+            experts,
+            counts,
+            **self._grouped_launch_kwargs(hidden[0], self._w2),
+        )
         # Router weights have already been applied inside weighted_nopad_a8.
         ones = torch.ones_like(weights)
         if shared is not None:
-            shared = shared[:, self.output_start:self.output_start + self.output_dim].contiguous()
+            shared = shared[
+                :, self.output_start : self.output_start + self.output_dim
+            ].contiguous()
             out = torch.empty_like(shared, dtype=torch.float32)
             gather_and_combine_local_loop_compatible(
                 down, indices, ones, inverse, shared, out, 1.0, keep_fp32=True
             )
         else:
-            out = torch.empty((x.shape[0], self.output_dim), device=x.device, dtype=torch.float32)
+            out = torch.empty(
+                (x.shape[0], self.output_dim), device=x.device, dtype=torch.float32
+            )
             gather_local_loop_compatible(down, indices, ones, inverse, out, fused=True)
-        return _all_gather_columns(out.bfloat16() if shared is not None else out, self.cfg.tp_size)
+        return _all_gather_columns(
+            out.bfloat16() if shared is not None else out, self.cfg.tp_size
+        )
+
 
 @torch.no_grad()
 def _compact_routes_for_tp(topk_ids, num_experts):
@@ -150,9 +213,11 @@ def _compact_routes_for_tp(topk_ids, num_experts):
     sources = torch.where(sorted_valid, order // topk_ids.shape[1], 0)
     experts = torch.where(sorted_valid, sorted_ids, 0).to(torch.int32)
     inverse = torch.empty_like(flat)
-    inverse.scatter_(0, order, torch.where(
-        sorted_valid, torch.arange(flat.numel(), device=flat.device), -1
-    ))
+    inverse.scatter_(
+        0,
+        order,
+        torch.where(sorted_valid, torch.arange(flat.numel(), device=flat.device), -1),
+    )
     counts = torch.zeros(num_experts, device=flat.device, dtype=torch.int32)
     counts.scatter_add_(0, flat.clamp(0, num_experts - 1), valid.to(torch.int32))
     return sources, experts, inverse.view_as(topk_ids), counts
@@ -160,6 +225,7 @@ def _compact_routes_for_tp(topk_ids, num_experts):
 
 def _all_gather_columns(tensor, size):
     import torch.distributed as dist
+
     original_dtype = tensor.dtype
     if original_dtype == torch.float8_e4m3fn:
         tensor = tensor.view(torch.uint8)
