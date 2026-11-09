@@ -5,6 +5,36 @@ load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 package(default_visibility = ["//visibility:public"])
 
 models_py_test(
+    name = "qsa_cu_seqlens_host_test",
+    src = "qsa_cu_seqlens_host_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
+    name = "qsa_draft_tail_vector_test",
+    src = "qsa_draft_tail_vector_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
+    name = "qsa_grid_prep_fusion_test",
+    src = "qsa_grid_prep_fusion_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
+    name = "qsa_qk_projection_fusion_test",
+    src = "qsa_qk_projection_fusion_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
+    name = "qsa_rope_fused_sm90_test",
+    src = "qsa_rope_fused_sm90_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
     name = "ple_metadata_sync_test",
     src = "ple_metadata_sync_test.py",
     gpu = "H20_CU13",
