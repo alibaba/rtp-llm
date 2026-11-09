@@ -43,7 +43,7 @@ else:
 
 SCRIPT = Path(launcher.SCRIPT).with_name("k31_two_host_smoke.py")
 STAGES = ("regular", "long")
-EXPECTED_COUNTS = dict(total=306, formal=268, preparation=38)
+COUNT_KEYS = ("total", "formal", "preparation")
 REQUEST_EVIDENCE = "request-evidence"
 EVIDENCE_NAMES = (
     "control.json",
@@ -154,12 +154,17 @@ def stage_config(base, stage):
 
 
 def stage_configs(base, stages=STAGES):
+    require(stages and len(set(stages)) == len(stages) and set(stages) <= set(STAGES),
+            "select regular and/or long exactly once")
+    stages = tuple(stage for stage in STAGES if stage in stages)
     if base.get("last_n_checkpoints") is not None:
         require(tuple(stages) == ("regular",),
                 "Last-5 uses the existing 304 regular slots; select --stages regular")
-    configs = []
-    for stage in stages:
-        config = stage_config(base, stage)
+    configs = ([stage_config(base, stage) for stage in stages]
+               if base.get("last_n_checkpoints") is not None else [smoke_config(base)])
+    for config in configs:
+        if base.get("last_n_checkpoints") is None:
+            config.update(k31_smoke_stage=stages[0], request_stages=list(stages))
         control = launcher.run_dir(config, "prefill") / "control.json"
         config["request_argv"] = [
             "python3",
@@ -168,8 +173,30 @@ def stage_configs(base, stages=STAGES):
             "--request-control",
             str(control),
         ]
-        configs.append(launcher.validate(config))
+        launcher.validate(config)
     return configs
+
+
+def smoke_config(base):
+    """One P8/D8 lifecycle for the regular and 1M request programs."""
+    config = stage_config(base, "regular")
+    config.pop("k31_smoke_stage")
+    config.update(run_id=base["run_id"], smoke_profile="k31")
+    require(config["decode_dp"] == 2, "smoke requires Decode DP2/TP4")
+    prefill, decode = config["prefill"], config["decode"]
+    prefill["test_block_num"] = 140
+    prefill.setdefault("prefill_token_capacity", 65536)
+    require(prefill["prefill_token_capacity"] == 65536, "smoke retains the regular 64K Prefill forward budget")
+    prefill.setdefault("reuse_cache_tail_blocks", 5)
+    require(prefill["reuse_cache_tail_blocks"] == 5, "smoke uses Prefill Last-5 retention")
+    prefill.setdefault("linear_pool_blocks", 128)
+    decode["test_block_num"] = max(272, decode.get("test_block_num", 0))
+    decode.setdefault("linear_pool_blocks", 192)
+    for role in launcher.ROLES:
+        limit = config[role].setdefault("max_seq_len", LONG_INPUT_TOKENS + 4096)
+        require(limit >= LONG_INPUT_TOKENS + MAX_OUTPUT_TOKENS + MTP_RESERVE_TOKENS,
+                f"{role}: smoke must admit the exact 1M continuation")
+    return config
 
 
 def request_args(config, root):
@@ -201,10 +228,12 @@ def request_args(config, root):
                 "--decode-role-addr",
                 f"{decode['ip']}:{item['port']}:{rpc_ports[item['rank']]}",
             ]
+            if config["k31_smoke_stage"] == "long":
+                break
     return args
 
 
-def run_requests(control):
+def run_requests(control, stage=None):
     config = launcher.validate(read_json(control))
     root = launcher.run_dir(config, "prefill")
     require(
@@ -212,6 +241,23 @@ def run_requests(control):
         "unexpected Prefill control path",
     )
     evidence = root / REQUEST_EVIDENCE
+    if config.get("request_stages"):
+        if stage is None:
+            from rtp_llm.test.smoke.kimi_k3.audit_k31_full_smoke import read_events
+
+            for phase in config["request_stages"]:
+                code = run_requests(control, phase)
+                events = read_events(root / "logs", root / "logs/engine.log")
+                launcher.atomic(evidence / phase / "event-end.json", {
+                    str(rank): dict(count=len(rows), last=rows[-1] if rows else None)
+                    for rank, rows in events.items()
+                })
+                if code:
+                    return code
+            return 0
+        require(stage in config["request_stages"], "unexpected smoke request phase")
+        config = {**config, "k31_smoke_stage": stage}
+        evidence /= stage
     args = request_args(config, root)
     if config["k31_smoke_stage"] == "long":
         if __package__:
@@ -240,7 +286,7 @@ def run_requests(control):
 
     prefill, decode = config["prefill"], config["decode"]
     source = Path(prefill["repo_root"])
-    binary = (source / "bazel-bin/rtp_llm/rtp_llm_server").resolve(strict=True)
+    binary = (source / prefill.get("server", "bazel-bin/rtp_llm/rtp_llm_server")).resolve(strict=True)
     commit = (
         config.get("source_commit")
         or subprocess.check_output(
@@ -473,15 +519,15 @@ def audit_startup(config, output):
     return proof
 
 
-def audit_long_native_route(proof, prefill_logs, decode_logs):
+def audit_long_native_route(proof, prefill_logs, decode_logs, *, start=None, end=None, decode_tp=8):
     if __package__:
         from .audit_k31_full_smoke import read_events
     else:
         from audit_k31_full_smoke import read_events
 
-    prefill = read_events(prefill_logs, prefill_logs / "engine.log")
+    prefill = read_events(prefill_logs, prefill_logs / "engine.log", start=start, end=end)
     decode = read_events(decode_logs, decode_logs / "engine.log")
-    return audit_long_events(proof, prefill, decode)
+    return audit_long_events(proof, prefill, decode, decode_tp=decode_tp)
 
 
 def audit_long_events(proof, prefill, decode, *, decode_tp=8, decode_owner=0):
@@ -555,10 +601,18 @@ def audit_long_events(proof, prefill, decode, *, decode_tp=8, decode_owner=0):
 def audit_stage(config, output):
     summary = read_json(output / "launch" / "summary.json")
     require(
-        summary.get("request_runner_passed") is True,
+        summary.get("request_runner_passed") is True or bool(config.get("request_stages")),
         "request runner did not complete successfully",
     )
     evidence = output / "prefill" / REQUEST_EVIDENCE
+    phase = config["k31_smoke_stage"]
+    start = end = None
+    if config.get("request_stages"):
+        if phase == "long" and "regular" in config["request_stages"]:
+            start = read_json(evidence / "regular/event-end.json")
+        evidence /= phase
+        end = read_json(evidence / "event-end.json")
+    audit_path = output / (f"{phase}-audit.json" if end is not None else "audit.json")
     prefill_logs, decode_logs = (output / role / "logs" for role in launcher.ROLES)
     if config.get('last_n_tier_probe'):
         if __package__:
@@ -601,7 +655,6 @@ def audit_stage(config, output):
         launcher.atomic(output/'audit.json', proof)
         return dict(total=6, formal=2, preparation=4)
     if config["k31_smoke_stage"] == "regular":
-        audit_path = output / "audit.json"
         with (output / "audit.log").open("xb") as log:
             audit = subprocess.run(
                 [
@@ -622,7 +675,8 @@ def audit_stage(config, output):
                     str(decode_logs / "engine.log"),
                     "--decode-tp",
                     str(8 // launcher.decode_dp_size(config)),
-                ] + precision_audit_args(config, output),
+                ] + (["--prefill-event-end", str(evidence / "event-end.json")]
+                     if end is not None else []) + precision_audit_args(config, output),
                 cwd=Path(__file__).resolve().parents[4],
                 stdout=log,
                 stderr=subprocess.STDOUT,
@@ -634,7 +688,7 @@ def audit_stage(config, output):
             and proof.get("native_K31_MTP") is True,
             f"regular smoke audit failed: {proof.get('errors')}",
         )
-        return dict(total=304, **proof["counts"])
+        return proof["request_budget"]
 
     if __package__:
         from .k31_long_prefix_smoke import verify
@@ -646,8 +700,10 @@ def audit_stage(config, output):
         set(proof["cases"]) == {"seed", "continuation"},
         "long smoke must contain exactly two requests",
     )
-    proof["pd_native_route"] = audit_long_native_route(proof, prefill_logs, decode_logs)
-    launcher.atomic(output / "audit.json", proof)
+    proof["pd_native_route"] = audit_long_native_route(
+        proof, prefill_logs, decode_logs, start=start, end=end,
+        decode_tp=8 // launcher.decode_dp_size(config))
+    launcher.atomic(audit_path, proof)
     return dict(total=2, formal=1, preparation=1)
 
 
@@ -693,7 +749,17 @@ def run_stage(config, output, startup_timeout):
             startup = audit_startup(config, output)
             launcher.atomic(output / "startup-proof.json", startup)
             record["checkpoints"] = startup["prefill"]["checkpoints"]
-            record["request_counts"] = audit_stage(config, output)
+            phases = config.get("request_stages", (stage,))
+            record["stages"] = {}
+            for phase in phases:
+                try:
+                    counts = audit_stage({**config, "k31_smoke_stage": phase}, output)
+                    record["stages"][phase] = dict(passed=True, request_counts=counts)
+                except Exception as error:
+                    record["stages"][phase] = dict(passed=False, errors=[f"audit: {type(error).__name__}: {error}"])
+                    record["errors"].extend(record["stages"][phase]["errors"])
+            if "request_stages" not in config and record["stages"][stage]["passed"]:
+                record["request_counts"] = record["stages"][stage]["request_counts"]
             if __package__:
                 from .nvfp4_evidence import audit_projection_precision
             else:
@@ -738,27 +804,29 @@ def run(base, output, startup_timeout, stages=STAGES):
                 'Last-5 calibration and candidate must use the same Prefill chunk capacity')
     output.mkdir(parents=True, exist_ok=False)
     launcher.atomic(output / "config.json", base)
-    stage_counts = {"regular": dict(total=304, formal=267, preparation=37),
-                    "long": dict(total=2, formal=1, preparation=1)}
-    if base.get('last_n_calibration'):
-        stage_counts['regular'] = dict(total=6, formal=2, preparation=4)
-    if base.get('last_n_tier_probe'):
-        stage_counts['regular'] = dict(total=2, formal=1, preparation=1)
-    expected = {key: sum(stage_counts[stage][key] for stage in stages) for key in EXPECTED_COUNTS}
-    result = {"passed": False, "stages": {}, "expected_counts": expected}
+    result = {"passed": False, "stages": {},
+              "server_lifecycles": len(configs)}
     try:
         for config in configs:
             stage = config["k31_smoke_stage"]
             record = run_stage(config, output / stage, startup_timeout)
-            result["stages"][stage] = record
+            if "request_stages" in config:
+                for phase in config["request_stages"]:
+                    result["stages"][phase] = {
+                        **record, **record.get("stages", {}).get(phase, dict(passed=False))}
+                    result["stages"][phase]["passed"] &= record["passed"]
+            else:
+                result["stages"][stage] = record
             if not record["cleanup_complete"]:
                 break
+        # Each phase audit checks its runtime-derived budget, including all
+        # cache-pressure probes; a larger shared pool can require more probes.
         counts = {
             key: sum(
                 record.get("request_counts", {}).get(key, 0)
                 for record in result["stages"].values()
             )
-            for key in expected
+            for key in COUNT_KEYS
         }
         result["request_counts"] = counts
         checkpoints = [
@@ -770,7 +838,6 @@ def run(base, output, startup_timeout, stages=STAGES):
             )
         result["passed"] = (
             len(result["stages"]) == len(stages)
-            and counts == expected
             and "error" not in result
             and all(record["passed"] for record in result["stages"].values())
         )

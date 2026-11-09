@@ -493,12 +493,12 @@ class K31FullRunner(legacy.Runner):
         profile = getattr(self.args, 'decode_batch_profile', 'smoke')
         for stage_index, size in enumerate(decode_batch_sizes(profile)):
             name = f'orthogonal_decode_{stage_index:02d}_batch_{size}'
-            # Allow the whole cohort to overlap after the paced PD handoff.
-            large_single_owner = size >= 63 and owners == 1
+            # Keep early requests decoding while the rest of the cohort joins.
+            large_batch = size >= 63
             cases = [replace(
                 self.record_case(f'{name}_{index:02d}', index % owners,
-                                 words=8 if large_single_owner else 1),
-                max_tokens=160 if large_single_owner else 64,
+                                 words=8 if large_batch else 1),
+                max_tokens=160 if large_batch else 64,
                 require_mtp_draft=True, thinking_disabled=True)
                 for index in range(size)]
             self._required_stage(name, cases, concurrent=size > 1, grouped_pd=size > 1)

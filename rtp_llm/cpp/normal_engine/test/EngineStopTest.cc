@@ -23,6 +23,8 @@ class PeerClosedExecutor: public Executor {
 public:
     PeerClosedExecutor(std::atomic<bool>& running, bool stopping): running_(running), stopping_(stopping) {}
 
+    void drainForShutdown() override {}
+
     absl::Status process(const std::list<GenerateStreamPtr>&, int64_t) override {
         if (stopping_) {
             running_ = false;
@@ -59,6 +61,20 @@ TEST_F(EnginePeerClosedTest, StopAllowsCleanPeerClose) {
 
 TEST_F(EnginePeerClosedTest, RunningEngineRejectsCleanPeerClose) {
     checkPeerClose(false);
+}
+
+TEST_F(EnginePeerClosedTest, FrozenLoopCatchesUpOnlyToTheAgreedRound) {
+    auto engine = createMockEngine({});
+    ASSERT_TRUE(engine->stop().ok());
+    constexpr uint64_t frozen = uint64_t{1} << 63;
+    engine->loop_step_ = frozen | 14;
+    engine->stop_after_step_ = UINT64_MAX;
+    auto next = std::async(std::launch::async, [&] { return engine->claimLoopStep(); });
+    EXPECT_EQ(next.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    engine->stop_after_step_ = 16;
+    EXPECT_TRUE(next.get());
+    EXPECT_TRUE(engine->claimLoopStep());
+    EXPECT_FALSE(engine->claimLoopStep());
 }
 
 class GatedDecodeStream: public NormalGenerateStream {

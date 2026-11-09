@@ -314,12 +314,10 @@ class FullK31SmokeTest(unittest.TestCase):
         pools['full'] = 64
         runner.validate_prefill_capacity()
 
-    def test_default_decode_inventory_uses_short_63_and_both_owners(self):
+    def test_default_decode_inventory_covers_both_owners(self):
         runner = object.__new__(K31FullRunner)
-        runner.args = SimpleNamespace(decode_batch_profile='smoke')
+        runner.args = SimpleNamespace(decode_batch_profile='smoke', namespace='rdma', max_tokens=128)
         runner.decode_role_addrs = ['owner0', 'owner1']
-        runner.record_case = lambda name, owner, **kw: legacy.Case(
-            name, 'question', '.', 'miss', decode_owner_rank=owner)
         stages = []
         runner._required_stage = lambda name, cases, **kw: stages.append((name, cases, kw))
         runner._orthogonal_decode_batches()
@@ -329,7 +327,9 @@ class FullK31SmokeTest(unittest.TestCase):
         self.assertEqual([sum(c.decode_owner_rank == owner for c in cases63)
                           for owner in range(2)], [32, 31])
         self.assertTrue(all(c.require_mtp_draft for _, cases, _ in stages for c in cases))
-        self.assertTrue(all(c.max_tokens == 64 for _, cases, _ in stages for c in cases))
+        self.assertTrue(all(c.max_tokens == 64 for _, cases, _ in stages[:-1] for c in cases))
+        self.assertTrue(all(len(c.expected_json['value'].split()) == 8
+                            and c.max_tokens == 160 for c in cases63))
         self.assertTrue(all(options['grouped_pd'] for _, cases, options in stages[1:]))
         self.assertEqual(runner.max_grouped_prefill_requests(), 63)
         shared = object.__new__(legacy.Runner)

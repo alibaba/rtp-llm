@@ -40,6 +40,24 @@ _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
 _cpu_tp_broadcaster_base_path: Optional[str] = None
+_engine_stop_generation = 0
+
+
+def sync_engine_stop(step: int, drained: bool) -> int:
+    """Agree only at shutdown; never enqueue collectives behind in-flight EP work."""
+    global _engine_stop_generation
+    from torch.distributed.distributed_c10d import _get_default_store
+
+    store = _get_default_store()
+    phase = "drained" if drained else "entered"
+    prefix = f"rtp-engine-stop/{_engine_stop_generation}/{phase}/"
+    keys = [prefix + str(rank) for rank in range(dist.get_world_size())]
+    store.set(keys[dist.get_rank()], str(step))
+    store.wait(keys, timedelta(seconds=60))
+    if drained:
+        _engine_stop_generation += 1
+        return 0
+    return max(int(store.get(key)) for key in keys)
 _rocm_rccl = None
 _symm_mem = None
 _flashinfer_allreduce = None

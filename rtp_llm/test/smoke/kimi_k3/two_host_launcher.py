@@ -616,6 +616,7 @@ def status(config, role):
                 8 if role == "prefill" else 8 // decode_dp_size(config),
                 long_case=(
                     config.get("k31_smoke_stage") == "long"
+                    or "long" in config.get("request_stages", ())
                     or (config.get("k31_smoke_stage") is None
                         and config.get("smoke_profile") == "k31")
                 ),
@@ -771,7 +772,7 @@ def main():
         return controller(args,config)
     if not args.role or os.getuid()==0: parser.error("Role operation requires --role and a non-root user")
     if args.operation=="requests":
-        source=Path(config[args.role]["repo_root"]);binary=(source/"bazel-bin/rtp_llm/rtp_llm_server").resolve(strict=True)
+        source=Path(config[args.role]["repo_root"]);binary=(source/config[args.role].get("server", "bazel-bin/rtp_llm/rtp_llm_server")).resolve(strict=True)
         env=runtime_environment(source,binary);env["CUDA_VISIBLE_DEVICES"]=""
         runfiles=Path(str(binary)+".runfiles")
         torch_site=runfiles/"pip_gpu_cuda13_torch_torch/site-packages"

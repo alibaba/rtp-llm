@@ -1190,6 +1190,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
 }
 
+void MtpExecutor::drainForShutdown() {
+    const auto stream = cuda_graph::graphGetCurrentStream();
+    target_verify_prepare_runner_.sync(stream);
+    draft_prefill_prepare_runner_.sync(stream);
+    spec_logits_verify_async_runner_.sync(stream);
+    spec_sampler_prepare_runner_.sync(stream);
+    spec_bookkeeping_runner_.sync(stream);
+}
+
 void MtpExecutor::collectPrefillMetrics(const StreamGroups&  stream_groups,
                                         MtpMetricsCollector& metrics_collector,
                                         int64_t              schedule_time_us,

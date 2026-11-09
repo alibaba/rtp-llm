@@ -12,6 +12,42 @@ from rtp_llm.models_py.distributed import collective_torch as collective
 
 
 class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
+    def test_shutdown_agrees_on_last_entered_round_without_cuda(self):
+        from datetime import timedelta
+
+        store = MagicMock()
+        store.get.side_effect = lambda key: b"14" if key.endswith("/0") else b"15"
+        with (
+            patch.object(collective, "_engine_stop_generation", 0),
+            patch("torch.distributed.distributed_c10d._get_default_store", return_value=store),
+            patch.object(torch.distributed, "get_rank", return_value=0),
+            patch.object(torch.distributed, "get_world_size", return_value=2),
+            patch.object(torch.cuda, "synchronize") as cuda_sync,
+            patch.object(torch.distributed, "all_reduce") as gpu_reduce,
+        ):
+            self.assertEqual(collective.sync_engine_stop(14, False), 15)
+            keys = [f"rtp-engine-stop/0/entered/{rank}" for rank in range(2)]
+            store.set.assert_called_once_with(keys[0], "14")
+            store.wait.assert_called_once_with(keys, timedelta(seconds=60))
+            collective.sync_engine_stop(0, True)
+            self.assertEqual(collective._engine_stop_generation, 1)
+            collective.sync_engine_stop(14, False)
+            self.assertIn("/1/entered/", store.set.call_args.args[0])
+            cuda_sync.assert_not_called()
+            gpu_reduce.assert_not_called()
+
+    def test_missing_shutdown_peer_is_an_error(self):
+        store = MagicMock()
+        store.wait.side_effect = RuntimeError("peer did not enter shutdown")
+        with (
+            patch("torch.distributed.distributed_c10d._get_default_store", return_value=store),
+            patch.object(torch.distributed, "get_rank", return_value=0),
+            patch.object(torch.distributed, "get_world_size", return_value=2),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "peer did not enter"):
+                collective.sync_engine_stop(14, False)
+            store.get.assert_not_called()
+
     def _registered_callbacks(self, config=None, process_group=None, cpu_tp_group=None):
         if process_group is None:
             process_group = MagicMock()
