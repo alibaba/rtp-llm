@@ -263,6 +263,39 @@ class SharedNativeCache(NativeCacheBridge):
         self, layer, positions, requests, packed, prefixes, *, retain_rows=True, retain_prefix_tail=True
     ):
         """Preserve the SWA rows visible to this forward before ring writes."""
+        if not self.lengths:
+            return
+        batch_swa = (
+            os.environ.get("RTP_V41_PPU_CP8_BATCHED_SWA", "0") == "1"
+            and self._is_prefill
+            and self.sharded
+            and self.cp["size"] == 8
+            and retain_rows
+            and retain_prefix_tail
+            and packed.is_cuda
+        )
+        pool = self.pools[layer, "swa_kv"]
+        if batch_swa:
+            from rtp_llm.models_py.modules.dsv41.ppu.prefill_swa import (
+                gather_tails,
+                write_rows,
+            )
+
+            placement = self.placements[layer, "swa_kv"]
+            old_tails = gather_tails(pool, placement, prefixes, self.geometry.window)
+            logical_rows = sum(tail.shape[0] for tail in old_tails)
+            if logical_rows:
+                self.pool_gathers.append(
+                    {
+                        "layer": layer,
+                        "tag": "swa_kv",
+                        "requests": [
+                            rid for rid, tail in enumerate(old_tails) if tail.numel()
+                        ],
+                        "logical_rows": logical_rows,
+                        "cp_size": placement.size,
+                    }
+                )
         for rid in range(len(self.lengths)):
             key = layer, rid
             chosen = requests == rid
@@ -271,16 +304,18 @@ class SharedNativeCache(NativeCacheBridge):
                 prefix = int(prefixes[rid])
                 if retain_prefix_tail and prefix:
                     old_pos = torch.arange(max(0, prefix - self.geometry.window + 1), prefix, device=self.device)
-                    try:
-                        old = self._copy_rows((layer, "swa_kv"), rid, old_pos)
-                    except ValueError as error:
-                        raise ValueError(f"SWA layer {layer}, request {rid}, prefix {prefix}: {error}") from error
+                    if batch_swa:
+                        old = old_tails[rid]
+                    else:
+                        try:
+                            old = self._copy_rows((layer, "swa_kv"), rid, old_pos)
+                        except ValueError as error:
+                            raise ValueError(f"SWA layer {layer}, request {rid}, prefix {prefix}: {error}") from error
                     fresh_pos_and_tail = torch.cat((old_pos, fresh_pos))
                     fresh_and_tail = torch.cat((old, fresh))
                     self._fresh_swa[key] = (fresh_pos_and_tail, fresh_and_tail)
                 else:
                     self._fresh_swa[key] = (fresh_pos, fresh)
-            pool = self.pools[layer, "swa_kv"]
             # One write per ring slot; retain each allocated block's checkpoint.
             column_end = ((fresh_pos // pool.span + 1) * pool.span).clamp_max(self.lengths[rid])
             keep = fresh_pos >= column_end - pool.entries
@@ -290,6 +325,28 @@ class SharedNativeCache(NativeCacheBridge):
                 keep &= self._prefill_ring_keep(
                     pool, rid, fresh_pos, self.lengths[rid] - self.geometry.window,
                 )
+            if batch_swa:
+                retained = fresh_pos[keep]
+                write_rows(pool, placement, rid, retained, fresh[keep])
+                written = retained.tolist()
+                owned_start = placement.rank * placement.slice_elements
+                owned_end = owned_start + placement.slice_elements
+                width = _WIDTH["swa_kv"]
+                byte_starts = (pos % placement.full_entries * width for pos in written)
+                owned_count = sum(
+                    start < owned_end and start + width > owned_start for start in byte_starts
+                )
+                self.writes.append(
+                    {
+                        "layer": layer,
+                        "tag": pool.framework_tag,
+                        "request": rid,
+                        "rows": len(written),
+                        "absolute_positions": written,
+                        "owned_rows": owned_count,
+                    }
+                )
+                continue
             self._copy_rows((layer, "swa_kv"), rid, fresh_pos[keep], fresh[keep])
             self.writes.append({"layer": layer, "tag": pool.framework_tag, "request": rid,
                                 "rows": int(keep.sum()), "absolute_positions": fresh_pos[keep].tolist(),

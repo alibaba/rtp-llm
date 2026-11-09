@@ -73,6 +73,7 @@ _DSV41_PPU_SHARED_MODULES = [
     "modules/dsv41/ppu/packed_attention.py",
     "modules/dsv41/ppu/packed_prefill.py",
     "modules/dsv41/ppu/prefill_readback.py",
+    "modules/dsv41/ppu/prefill_swa.py",
     "modules/dsv41/ppu/packed_decode.py",
     "modules/dsv41/ppu/fused_ops.py",
     "modules/dsv41/ppu/projection_streams.py",
