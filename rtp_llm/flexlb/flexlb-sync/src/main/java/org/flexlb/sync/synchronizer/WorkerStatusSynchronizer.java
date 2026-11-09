@@ -50,7 +50,6 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_IN
  */
 @Component
 public final class WorkerStatusSynchronizer {
-
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final String modelName;
@@ -62,7 +61,9 @@ public final class WorkerStatusSynchronizer {
     private final WorkerStatusRpcClient workerStatusRpcClient;
     private final CacheAwareService cacheAwareService;
     private final DynamicCacheIntervalService cacheIntervalService;
+
     private final long syncRequestTimeoutMs;
+
     private final AtomicLong syncCount = new AtomicLong();
     private final EnumMap<RoleType, AtomicBoolean> pendingCycles = new EnumMap<>(RoleType.class);
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -116,52 +117,6 @@ public final class WorkerStatusSynchronizer {
         this.scheduler.scheduleAtFixedRate(this::reportExecutorMetrics, 2, 2, TimeUnit.SECONDS);
     }
 
-    private static ThreadPoolExecutor executor(int threads, String name) {
-        return new ThreadPoolExecutor(
-                threads,
-                threads,
-                60L,
-                TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(15_000),
-                new NamedThreadFactory(name),
-                new ThreadPoolExecutor.AbortPolicy());
-    }
-
-    private void reportExecutorMetrics() {
-        try {
-            engineHealthReporter.reportThreadPoolInfo(
-                    ENGINE_BALANCING_THREAD_POOL_INFO,
-                    "engineSyncExecutor",
-                    engineSyncExecutor.getActiveCount(),
-                    engineSyncExecutor.getQueue().size(),
-                    engineSyncExecutor.getCorePoolSize(),
-                    engineSyncExecutor.getPoolSize());
-            engineHealthReporter.reportThreadPoolInfo(
-                    ENGINE_BALANCING_THREAD_POOL_INFO,
-                    "statusCheckExecutor",
-                    statusCheckExecutor.getActiveCount(),
-                    statusCheckExecutor.getQueue().size(),
-                    statusCheckExecutor.getCorePoolSize(),
-                    statusCheckExecutor.getPoolSize());
-            engineHealthReporter.reportThreadPoolInfo(
-                    ENGINE_BALANCING_THREAD_POOL_INFO,
-                    "statusApplicationExecutor",
-                    statusApplicationExecutor.getActiveCount(),
-                    statusApplicationExecutor.getQueue().size(),
-                    statusApplicationExecutor.getCorePoolSize(),
-                    statusApplicationExecutor.getPoolSize());
-            engineHealthReporter.reportThreadPoolInfo(
-                    ENGINE_BALANCING_THREAD_POOL_INFO,
-                    "cacheStatusExecutor",
-                    cacheStatusExecutor.getActiveCount(),
-                    cacheStatusExecutor.getQueue().size(),
-                    cacheStatusExecutor.getCorePoolSize(),
-                    cacheStatusExecutor.getPoolSize());
-        } catch (Throwable failure) {
-            logger.warn("Failed to report worker sync executor metrics", failure);
-        }
-    }
-
     public void syncEngineStatus() {
         if (closed.get()) {
             return;
@@ -194,21 +149,6 @@ public final class WorkerStatusSynchronizer {
         } catch (Exception e) {
             logger.error("sync engine prefill status error", e);
         }
-    }
-
-    public boolean isReady() {
-        return requiredRoles.stream()
-                .allMatch(role -> endpointRegistry.counts(role).published() > 0);
-    }
-
-    @PreDestroy
-    public void destroy() {
-        closed.set(true);
-        scheduler.shutdown();
-        engineSyncExecutor.shutdown();
-        statusCheckExecutor.shutdown();
-        cacheStatusExecutor.shutdown();
-        statusApplicationExecutor.shutdown();
     }
 
     public void syncRole(RoleType roleType, long syncCycleId) {
@@ -294,6 +234,107 @@ public final class WorkerStatusSynchronizer {
         }
     }
 
+    public boolean isReady() {
+        return requiredRoles.stream()
+                .allMatch(role -> endpointRegistry.counts(role).published() > 0);
+    }
+
+    @PreDestroy
+    public void destroy() {
+        closed.set(true);
+        scheduler.shutdown();
+        engineSyncExecutor.shutdown();
+        statusCheckExecutor.shutdown();
+        cacheStatusExecutor.shutdown();
+        statusApplicationExecutor.shutdown();
+    }
+
+    @Scheduled(
+            fixedRateString =
+                    "#{@configService.loadBalanceConfig().workerRegistry.health.cleanupIntervalMs}")
+    public void retireUnavailableWorkers() {
+        List<EndpointRegistry.Retirement> retirements = new ArrayList<>();
+        Throwable failure = null;
+        try {
+            // Close every unavailable routing gate before scheduling cleanup.
+            for (RoleType role : RoleType.values()) {
+                for (var item : endpointRegistry.statusSnapshot(role).entrySet()) {
+                    WorkerStatus status = item.getValue();
+                    var retirement =
+                            endpointRegistry.beginRequestedRetirement(role, item.getKey(), status);
+                    if (retirement != null) {
+                        retirements.add(retirement);
+                    }
+                }
+            }
+        } catch (Throwable detachFailure) {
+            failure = detachFailure;
+        }
+        for (EndpointRegistry.Retirement retirement : retirements) {
+            failure =
+                    Failures.run(
+                            failure, () -> retirement.completeAsync(cacheAwareService, logger));
+            WorkerStatus status = retirement.status();
+            failure =
+                    Failures.run(
+                            failure,
+                            () ->
+                                    logger.warn(
+                                            "Retiring unavailable worker: {}, role: {}, generation={}, trace={}",
+                                            status.getIpPort(),
+                                            status.getRole(),
+                                            status.getGenerationId(),
+                                            status.trace().snapshot().compact()));
+        }
+        Failures.rethrow(failure, "Worker retirement scan failed");
+    }
+
+    private static ThreadPoolExecutor executor(int threads, String name) {
+        return new ThreadPoolExecutor(
+                threads,
+                threads,
+                60L,
+                TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(15_000),
+                new NamedThreadFactory(name),
+                new ThreadPoolExecutor.AbortPolicy());
+    }
+
+    private void reportExecutorMetrics() {
+        try {
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "engineSyncExecutor",
+                    engineSyncExecutor.getActiveCount(),
+                    engineSyncExecutor.getQueue().size(),
+                    engineSyncExecutor.getCorePoolSize(),
+                    engineSyncExecutor.getPoolSize());
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "statusCheckExecutor",
+                    statusCheckExecutor.getActiveCount(),
+                    statusCheckExecutor.getQueue().size(),
+                    statusCheckExecutor.getCorePoolSize(),
+                    statusCheckExecutor.getPoolSize());
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "statusApplicationExecutor",
+                    statusApplicationExecutor.getActiveCount(),
+                    statusApplicationExecutor.getQueue().size(),
+                    statusApplicationExecutor.getCorePoolSize(),
+                    statusApplicationExecutor.getPoolSize());
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "cacheStatusExecutor",
+                    cacheStatusExecutor.getActiveCount(),
+                    cacheStatusExecutor.getQueue().size(),
+                    cacheStatusExecutor.getCorePoolSize(),
+                    cacheStatusExecutor.getPoolSize());
+        } catch (Throwable failure) {
+            logger.warn("Failed to report worker sync executor metrics", failure);
+        }
+    }
+
     private void pollWorker(WorkerStatus workerStatus, long syncCycleId) {
         if (!workerStatus.isAvailableForScheduling()) {
             return;
@@ -346,13 +387,6 @@ public final class WorkerStatusSynchronizer {
                 cacheLease);
     }
 
-    private void reportTelemetry(Runnable action) {
-        Throwable failure = Failures.run(null, action);
-        if (failure != null) {
-            logger.warn("Worker sync telemetry failed for model: {}", modelName, failure);
-        }
-    }
-
     /** Build the factory before acquiring a lease; failed submissions release it here. */
     private void submitPoll(
             ExecutorService executor,
@@ -373,6 +407,13 @@ public final class WorkerStatusSynchronizer {
             if (!handedOff) {
                 lease.close();
             }
+        }
+    }
+
+    private void reportTelemetry(Runnable action) {
+        Throwable failure = Failures.run(null, action);
+        if (failure != null) {
+            logger.warn("Worker sync telemetry failed for model: {}", modelName, failure);
         }
     }
 
@@ -481,45 +522,5 @@ public final class WorkerStatusSynchronizer {
             // real endpoint retirement removes this RETIRING holder.
             return workerStatus;
         }
-    }
-
-    @Scheduled(
-            fixedRateString =
-                    "#{@configService.loadBalanceConfig().workerRegistry.health.cleanupIntervalMs}")
-    public void retireUnavailableWorkers() {
-        List<EndpointRegistry.Retirement> retirements = new ArrayList<>();
-        Throwable failure = null;
-        try {
-            // Close every unavailable routing gate before scheduling cleanup.
-            for (RoleType role : RoleType.values()) {
-                for (var item : endpointRegistry.statusSnapshot(role).entrySet()) {
-                    WorkerStatus status = item.getValue();
-                    var retirement =
-                            endpointRegistry.beginRequestedRetirement(role, item.getKey(), status);
-                    if (retirement != null) {
-                        retirements.add(retirement);
-                    }
-                }
-            }
-        } catch (Throwable detachFailure) {
-            failure = detachFailure;
-        }
-        for (EndpointRegistry.Retirement retirement : retirements) {
-            failure =
-                    Failures.run(
-                            failure, () -> retirement.completeAsync(cacheAwareService, logger));
-            WorkerStatus status = retirement.status();
-            failure =
-                    Failures.run(
-                            failure,
-                            () ->
-                                    logger.warn(
-                                            "Retiring unavailable worker: {}, role: {}, generation={}, trace={}",
-                                            status.getIpPort(),
-                                            status.getRole(),
-                                            status.getGenerationId(),
-                                            status.trace().snapshot().compact()));
-        }
-        Failures.rethrow(failure, "Worker retirement scan failed");
     }
 }

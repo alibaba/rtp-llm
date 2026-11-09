@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
@@ -78,10 +79,9 @@ class RequestAdmissionExpirationRaceTest {
                                 null,
                                 null,
                                 context.snapshot().createdAtMs());
-                try (var admission =
-                                SchedulerTestSupport.claim(
-                                        registry, String.valueOf(requestId), future);
-                        var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
+                var admission =
+                        SchedulerTestSupport.claim(registry, String.valueOf(requestId), future);
+                try (var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
                     assertNotNull(admission);
                     assertEquals(
                             org.flexlb.balance.PlacementResult.Status.SUCCESS,
@@ -91,7 +91,7 @@ class RequestAdmissionExpirationRaceTest {
                                     RequestProtocolTestSupport.publication(() -> true)));
                 }
             }
-            assertTrue(RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry));
+            assertTrue(RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(registry));
             assertSame(
                     cleanupFailure,
                     assertThrows(
@@ -163,8 +163,8 @@ class RequestAdmissionExpirationRaceTest {
                             null,
                             null,
                             context.snapshot().createdAtMs());
-            try (var admission = SchedulerTestSupport.claim(registry, "314", future);
-                    var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
+            var admission = SchedulerTestSupport.claim(registry, "314", future);
+            try (var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertEquals(
                         org.flexlb.balance.PlacementResult.Status.SUCCESS,
@@ -226,7 +226,7 @@ class RequestAdmissionExpirationRaceTest {
         try {
             var context = RequestProtocolTestSupport.context(config, 302L);
             var future = RequestProtocolTestSupport.submitForManualPlacement(registry, context);
-            var requestContext = registry.requests.findActive("302");
+            var requestContext = registry.repository.findActive("302");
             var prefill = mock(PrefillEndpoint.class);
             context.data().setFuture(future);
             var item =
@@ -241,8 +241,8 @@ class RequestAdmissionExpirationRaceTest {
                             requestContext.snapshot().createdAtMs());
             var cleanupFailure = new IllegalStateException("Prefill cleanup failed");
             when(prefill.releaseRequest(item)).thenThrow(cleanupFailure).thenReturn(true);
-            try (var admission = SchedulerTestSupport.claim(registry, "302", future);
-                    var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            var admission = SchedulerTestSupport.claim(registry, "302", future);
+            try (var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertTrue(
                         (RequestProtocolTestSupport.commitRoute(
@@ -281,10 +281,10 @@ class RequestAdmissionExpirationRaceTest {
                     Duration.ofSeconds(2),
                     () ->
                             assertTrue(
-                                    RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(
+                                    RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(
                                             registry)));
         } finally {
-            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
+            if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(registry)) {
                 registry.closeOutstandingAndTerminalize();
             }
             SchedulerTestSupport.timer(
@@ -322,7 +322,8 @@ class RequestAdmissionExpirationRaceTest {
             prefillStatus.setServerIp("127.0.0.1");
             prefillStatus.setGrpcPort(8081);
             var future = RequestProtocolTestSupport.submitForManualPlacement(registry, context);
-            RequestContext requestContext = registry.requests.findActive(String.valueOf(requestId));
+            RequestContext requestContext =
+                    registry.repository.findActive(String.valueOf(requestId));
             context.data().setFuture(future);
             var item =
                     org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(
@@ -335,10 +336,8 @@ class RequestAdmissionExpirationRaceTest {
                             reservation,
                             requestContext.snapshot().createdAtMs());
 
-            try (var admission =
-                            SchedulerTestSupport.claim(
-                                    registry, String.valueOf(requestId), future);
-                    var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            var admission = SchedulerTestSupport.claim(registry, String.valueOf(requestId), future);
+            try (var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertTrue(
                         (RequestProtocolTestSupport.commitRoute(
@@ -383,9 +382,23 @@ class RequestAdmissionExpirationRaceTest {
                         registry, requestContext, requestContext.snapshot().createdAtMs() + 300L);
                 synchronized (requestContext) {
                     assertTrue(
-                            requestContext.snapshot().close().expired()
-                                    || requestContext.snapshot().placement().inactivityExpired(),
-                            "the accepted expiry stays with the logical end or the outstanding admission");
+                            requestContext.snapshot().close().expired(),
+                            "accepted inactivity expiry remains a cleanup requirement");
+                    assertNotNull(requestContext.snapshot().placement());
+                    if (clientCancellation) {
+                        assertNull(requestContext.snapshot().outcome());
+                        assertEquals(
+                                ContextResult.EndKind.FRONTEND,
+                                requestContext.snapshot().pendingEnd().kind());
+                        assertEquals(
+                                CancelReason.CLIENT_CANCELLED,
+                                requestContext.snapshot().cancellation().reason());
+                        assertFalse(future.isDone());
+                    } else {
+                        assertEquals(
+                                RequestState.Phase.FAILED,
+                                requestContext.snapshot().outcome().phase());
+                    }
                 }
                 RequestProtocolTestSupport.applyDecodeStatus(
                         registry, decode, DecodeResources.DecodeRequestStatus.active(reservation));
@@ -418,7 +431,7 @@ class RequestAdmissionExpirationRaceTest {
             verify(decode, times(1)).release(reservation, DecodeResources.ReleaseReason.EXPIRED);
             verify(prefill, times(1)).releaseRequest(item);
         } finally {
-            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
+            if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(registry)) {
                 registry.closeOutstandingAndTerminalize();
                 SchedulerTestSupport.timer(
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry))

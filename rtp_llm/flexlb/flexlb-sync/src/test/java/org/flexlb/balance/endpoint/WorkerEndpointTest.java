@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
@@ -24,8 +24,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks worker identity and status commit boundaries together with Prefill batch accounting and completion feedback.
+ */
 class WorkerEndpointTest {
-
     private WorkerStatus status;
     private PrefillEndpoint endpoint;
 
@@ -68,8 +70,8 @@ class WorkerEndpointTest {
 
     @Test
     void releaseBatch_decreasesCommittedWork() {
-        RouteExecution first = item(100L, 1000);
-        RouteExecution second = item(101L, 500);
+        RouteResult first = item(100L, 1000);
+        RouteResult second = item(101L, 500);
         registerBatch(1L, 500, first);
         registerBatch(2L, 300, second);
 
@@ -79,27 +81,20 @@ class WorkerEndpointTest {
 
     @Test
     void releaseBatch_unknownBatchId_noEffect() {
-        RouteExecution committed = item(100L, 1000);
+        RouteResult committed = item(100L, 1000);
         registerBatch(1L, 500, committed);
-        RouteExecution unknown = item(999L, 1000);
+        RouteResult unknown = item(999L, 1000);
         assertTrue(!endpoint.releaseRequest(unknown));
         assertCommittedWorkNear(500);
     }
 
     @Test
     void releaseBatch_neverGoesNegative() {
-        RouteExecution item = item(100L, 1000);
+        RouteResult item = item(100L, 1000);
         registerBatch(1L, 100, item);
         assertTrue(endpoint.releaseRequest(item));
         assertTrue(!endpoint.releaseRequest(item));
         assertEquals(0, endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow());
-    }
-
-    private void assertCommittedWorkNear(long expectedMs) {
-        long actualMs = endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow();
-        assertTrue(
-                actualMs <= expectedMs && actualMs >= expectedMs - 50,
-                "Expected committed work near " + expectedMs + "ms but got " + actualMs + "ms");
     }
 
     @Test
@@ -163,9 +158,9 @@ class WorkerEndpointTest {
 
     @Test
     void repackBatch_removesFailedRequests() {
-        RouteExecution first = item(100L, 1000);
-        RouteExecution failed = item(101L, 2000);
-        RouteExecution third = item(102L, 3000);
+        RouteResult first = item(100L, 1000);
+        RouteResult failed = item(101L, 2000);
+        RouteResult third = item(102L, 3000);
         registerBatch(5L, 9999, first, failed, third);
         assertTrue(endpoint.releaseRequest(failed));
 
@@ -174,7 +169,7 @@ class WorkerEndpointTest {
 
     @Test
     void repackBatch_allFailed_removesBatch() {
-        RouteExecution item = item(100L, 1000);
+        RouteResult item = item(100L, 1000);
         registerBatch(5L, 500, item);
         assertTrue(endpoint.releaseRequest(item));
 
@@ -326,6 +321,13 @@ class WorkerEndpointTest {
         assertTrue(endpoint.getStatus().pollHealth().reportedAlive());
     }
 
+    private void assertCommittedWorkNear(long expectedMs) {
+        long actualMs = endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow();
+        assertTrue(
+                actualMs <= expectedMs && actualMs >= expectedMs - 50,
+                "Expected committed work near " + expectedMs + "ms but got " + actualMs + "ms");
+    }
+
     private void calibrate(Map<String, TaskInfo> finished, Map<String, TaskInfo> running) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setFinishedTaskInfo(finished);
@@ -333,8 +335,8 @@ class WorkerEndpointTest {
         EndpointTestSupport.applyStatus(endpoint, response).run();
     }
 
-    private void registerBatch(long batchId, long predictedMs, RouteExecution... items) {
-        for (RouteExecution item : items) {
+    private void registerBatch(long batchId, long predictedMs, RouteResult... items) {
+        for (RouteResult item : items) {
             if (!EndpointTestSupport.offer(endpoint, item)) {
                 throw new IllegalStateException("test item could not be offered to endpoint queue");
             }
@@ -346,9 +348,10 @@ class WorkerEndpointTest {
         }
     }
 
-    private RouteExecution item(long requestId, long seqLen) {
-        return SchedulingTestConfig.createRoute(
-                ctx(requestId, seqLen), null, null, null, endpoint, null, null, 0L);
+    private RouteResult item(long requestId, long seqLen) {
+        return org.flexlb.balance.scheduler.RequestExecutionTestSupport.mockProtocolRoute(
+                SchedulingTestConfig.createRoute(
+                        ctx(requestId, seqLen), null, null, null, endpoint, null, null, 0L));
     }
 
     private RequestContext ctx(long requestId, long seqLen) {

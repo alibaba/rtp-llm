@@ -24,15 +24,10 @@ import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Pure victim selection for the selected Decode generation. */
+/**
+ * Pure victim selection for the selected Decode generation.
+ */
 public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPolicy {
-
-    /** A decode plan never mixes Master-local removal with Engine Cancel. */
-    private enum VictimOwnership {
-        MASTER_LOCAL,
-        ENGINE_CANCEL
-    }
-
     // ==================== Decode reserved-only eviction (design doc 11-13) ====================
 
     /**
@@ -144,6 +139,87 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
         return result;
     }
 
+    /** Mutate this private candidate list into the selected ordered prefix. */
+    private static DecodeVictimSet selectVictims(
+            Request request,
+            AdmissionCapacity capacity,
+            ResourceSnapshot ep,
+            CapacityRelease priorRelease,
+            List<DecodeRequestView> candidates,
+            boolean reclaimKv) {
+        if (reclaimKv) candidates.removeIf(victim -> victim.expectedKvTokens() <= 0L);
+        long requiredSlots = deficit(request, capacity, ep, priorRelease).requests();
+        if (!reclaimKv && candidates.size() < requiredSlots)
+            return DecodeVictimSet.fail("insufficient_lower_priority_candidates");
+        candidates.sort(reclaimKv ? DECODE_KV_ORDER : DECODE_SLOT_ORDER);
+        int limit = reclaimKv ? candidates.size() : (int) requiredSlots;
+        long caseWeight =
+                reclaimKv
+                        ? PriorityCostFunction.H_DECODE_KV_FULL
+                        : PriorityCostFunction.H_DECODE_SLOT_FULL;
+        CapacityRelease release = CapacityRelease.NONE;
+        var harm = PriorityHarmProfile.builder();
+        int selected = 0;
+        while (selected < limit) {
+            if (reclaimKv && !deficit(request, capacity, ep, priorRelease.plus(release)).needsKv())
+                break;
+            var victim = candidates.get(selected++);
+            long length = reclaimKv ? PriorityCostFunction.lengthWasteCost(victim.kvTokens()) : 1L;
+            harm.add(
+                    victim.priority(),
+                    BigInteger.valueOf(caseWeight)
+                            .multiply(BigInteger.valueOf(PriorityCostFunction.g(victim.phase())))
+                            .multiply(BigInteger.valueOf(length)));
+            release = release.plus(victim.placementRelease());
+        }
+        if (reclaimKv && deficit(request, capacity, ep, priorRelease.plus(release)).needsKv())
+            return DecodeVictimSet.fail("insufficient_releasable_kv");
+        return new DecodeVictimSet(candidates.subList(0, selected), harm.build(), release, null);
+    }
+
+    private static CapacityDeficit deficit(
+            Request request,
+            AdmissionCapacity capacity,
+            ResourceSnapshot ep,
+            CapacityRelease release) {
+        return capacity.evaluate(
+                ep.routing().placementUsage(),
+                request.getHardKvTokens(),
+                request.getExpectedKvTokens(),
+                release);
+    }
+
+    private static Selection cheaper(Selection first, Selection second) {
+        return first == null
+                ? second
+                : second == null
+                        ? first
+                        : Selection.ORDER.compare(first, second) <= 0 ? first : second;
+    }
+
+    private static Selection proposalIfFits(
+            Request request,
+            AdmissionCapacity capacity,
+            ResourceSnapshot ep,
+            DecodeVictimSet victims,
+            String evictionCase) {
+        if (victims == null
+                || !victims.ok()
+                || !deficit(request, capacity, ep, victims.release()).fits()) return null;
+        String tieBreak =
+                victims.victims().stream()
+                        .map(DecodeRequestView::requestId)
+                        .min(String::compareTo)
+                        .orElse("");
+        return new Selection(
+                ep.routing().address(),
+                victims.victims(),
+                evictionCase,
+                victims.freedKvTokens(),
+                victims.harmProfile(),
+                tieBreak);
+    }
+
     private static DecodeVictimSet combineVictims(
             Request request,
             AdmissionCapacity capacity,
@@ -183,49 +259,6 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
                 null);
     }
 
-    private static Selection proposalIfFits(
-            Request request,
-            AdmissionCapacity capacity,
-            ResourceSnapshot ep,
-            DecodeVictimSet victims,
-            String evictionCase) {
-        if (victims == null
-                || !victims.ok()
-                || !deficit(request, capacity, ep, victims.release()).fits()) return null;
-        String tieBreak =
-                victims.victims().stream()
-                        .map(DecodeRequestView::requestId)
-                        .min(String::compareTo)
-                        .orElse("");
-        return new Selection(
-                ep.routing().address(),
-                victims.victims(),
-                evictionCase,
-                victims.freedKvTokens(),
-                victims.harmProfile(),
-                tieBreak);
-    }
-
-    private static Selection cheaper(Selection first, Selection second) {
-        return first == null
-                ? second
-                : second == null
-                        ? first
-                        : Selection.ORDER.compare(first, second) <= 0 ? first : second;
-    }
-
-    private static CapacityDeficit deficit(
-            Request request,
-            AdmissionCapacity capacity,
-            ResourceSnapshot ep,
-            CapacityRelease release) {
-        return capacity.evaluate(
-                ep.routing().placementUsage(),
-                request.getHardKvTokens(),
-                request.getExpectedKvTokens(),
-                release);
-    }
-
     private static List<DecodeRequestView> candidates(
             ResourceSnapshot ep, int incomingPriority, VictimOwnership ownership) {
         List<DecodeRequestView> candidates = new ArrayList<>();
@@ -243,42 +276,12 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
         return candidates;
     }
 
-    /** Mutate this private candidate list into the selected ordered prefix. */
-    private static DecodeVictimSet selectVictims(
-            Request request,
-            AdmissionCapacity capacity,
-            ResourceSnapshot ep,
-            CapacityRelease priorRelease,
-            List<DecodeRequestView> candidates,
-            boolean reclaimKv) {
-        if (reclaimKv) candidates.removeIf(victim -> victim.expectedKvTokens() <= 0L);
-        long requiredSlots = deficit(request, capacity, ep, priorRelease).requests();
-        if (!reclaimKv && candidates.size() < requiredSlots)
-            return DecodeVictimSet.fail("insufficient_lower_priority_candidates");
-        candidates.sort(reclaimKv ? DECODE_KV_ORDER : DECODE_SLOT_ORDER);
-        int limit = reclaimKv ? candidates.size() : (int) requiredSlots;
-        long caseWeight =
-                reclaimKv
-                        ? PriorityCostFunction.H_DECODE_KV_FULL
-                        : PriorityCostFunction.H_DECODE_SLOT_FULL;
-        CapacityRelease release = CapacityRelease.NONE;
-        var harm = PriorityHarmProfile.builder();
-        int selected = 0;
-        while (selected < limit) {
-            if (reclaimKv && !deficit(request, capacity, ep, priorRelease.plus(release)).needsKv())
-                break;
-            var victim = candidates.get(selected++);
-            long length = reclaimKv ? PriorityCostFunction.lengthWasteCost(victim.kvTokens()) : 1L;
-            harm.add(
-                    victim.priority(),
-                    BigInteger.valueOf(caseWeight)
-                            .multiply(BigInteger.valueOf(PriorityCostFunction.g(victim.phase())))
-                            .multiply(BigInteger.valueOf(length)));
-            release = release.plus(victim.placementRelease());
-        }
-        if (reclaimKv && deficit(request, capacity, ep, priorRelease.plus(release)).needsKv())
-            return DecodeVictimSet.fail("insufficient_releasable_kv");
-        return new DecodeVictimSet(candidates.subList(0, selected), harm.build(), release, null);
+    /**
+     * A decode plan never mixes Master-local removal with Engine Cancel.
+     */
+    private enum VictimOwnership {
+        MASTER_LOCAL,
+        ENGINE_CANCEL
     }
 
     /**
@@ -305,7 +308,9 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
         }
     }
 
-    /** Default policy ranking stays private; custom policies return only their chosen plan. */
+    /**
+     * Default policy ranking stays private; custom policies return only their chosen plan.
+     */
     private record Selection(
             String endpointId,
             List<DecodeRequestView> victims,
@@ -423,7 +428,9 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
             return value == null ? BigInteger.ZERO : value;
         }
 
-        /** Mutable accumulator used only while one immutable plan is built. */
+        /**
+         * Mutable accumulator used only while one immutable plan is built.
+         */
         public static final class Builder {
 
             private final BigInteger[] harmByPriority =
@@ -456,10 +463,11 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
         }
     }
 
-    /** Case, stage and length costs. Scalar priority cost is diagnostic;
-     * {@link PriorityHarmProfile} enforces exact priority ordering. */
+    /**
+     * Case, stage and length costs. Scalar priority cost is diagnostic;
+     * {@link PriorityHarmProfile} enforces exact priority ordering.
+     */
     public static final class PriorityCostFunction {
-
         private static final int MIN_PRIORITY_RANK = 0;
         private static final int MAX_PRIORITY_RANK = 4;
         private static final int PRIORITY_RANK_BASE = 30;
@@ -481,17 +489,17 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
 
         private PriorityCostFunction() {}
 
+        /** Single-value victim cost: 1024^rank. */
+        public static long f(int priority) {
+            return LongMath.pow(COST_RADIX, rank(priority));
+        }
+
         /** Rank 0..4 of a normalized priority (30..70), clamped for safety. */
         public static int rank(int priority) {
             return Math.clamp(
                     (priority - PRIORITY_RANK_BASE) / PRIORITY_POINTS_PER_RANK,
                     MIN_PRIORITY_RANK,
                     MAX_PRIORITY_RANK);
-        }
-
-        /** Single-value victim cost: 1024^rank. */
-        public static long f(int priority) {
-            return LongMath.pow(COST_RADIX, rank(priority));
         }
 
         /**
@@ -507,11 +515,6 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
             };
         }
 
-        /** KV bucket of a reservation: ceil(kvTokens / 1024) (design doc 12.3). */
-        public static long kvBucket(long kvTokens) {
-            return Math.ceilDiv(Math.max(0L, kvTokens), KV_TOKENS_PER_COST_BUCKET);
-        }
-
         /**
          * Length waste factor for KV eviction (design doc 12.5):
          * {@code max(1, sqrt(kvBucket))}, rounded to long — large releases sort
@@ -519,6 +522,11 @@ public final class PriorityDecodePreemptionPolicy implements DecodePreemptionPol
          */
         public static long lengthWasteCost(long kvTokens) {
             return Math.max(1L, Math.round(Math.sqrt((double) kvBucket(kvTokens))));
+        }
+
+        /** KV bucket of a reservation: ceil(kvTokens / 1024) (design doc 12.3). */
+        public static long kvBucket(long kvTokens) {
+            return Math.ceilDiv(Math.max(0L, kvTokens), KV_TOKENS_PER_COST_BUCKET);
         }
     }
 }

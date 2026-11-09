@@ -20,9 +20,11 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.VitCacheSelector;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -32,8 +34,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+/**
+ * Selects and registers the required roles, releasing partial registrations when the combination fails.
+ */
 @Component
 public class RequestRouteSelector {
+    private static final ThreadLocal<DecodeInputs> DECODE_INPUTS =
+            ThreadLocal.withInitial(DecodeInputs::new);
 
     private final PrefillSelectionStrategy prefillSelector;
     private final DecodeSelectionStrategy decodeSelector;
@@ -47,8 +54,10 @@ public class RequestRouteSelector {
     private final EngineHealthReporter healthReporter;
     private final CacheMetricsReporter cacheReporter;
     private final String deliveryMode;
-    private static final ThreadLocal<DecodeInputs> DECODE_INPUTS =
-            ThreadLocal.withInitial(DecodeInputs::new);
+
+    private final boolean direct;
+
+    private final DecodeResources.AdmissionCapacity admissionCapacity;
 
     @Autowired
     public RequestRouteSelector(
@@ -69,6 +78,15 @@ public class RequestRouteSelector {
         this.vitCacheSelector = vitCacheSelector;
         this.healthReporter = Objects.requireNonNull(healthReporter);
         this.cacheReporter = Objects.requireNonNull(cacheReporter);
+        var configuration = configService.loadBalanceConfig();
+        this.direct = configuration.isDirect();
+        var availability = configuration.getRouter().getRoles().getDecode().getAvailability();
+        this.admissionCapacity =
+                new DecodeResources.AdmissionCapacity(
+                        availability.getMaxEngineRequests() == null
+                                ? 0
+                                : availability.getMaxEngineRequests(),
+                        availability.getMaxKvUsagePercent());
         this.deliveryMode = configService.loadBalanceConfig().getDispatcher().typeName();
         this.prefillSelector = Objects.requireNonNull(prefillSelector, "prefillSelector");
         this.decodeSelector = Objects.requireNonNull(decodeSelector, "decodeSelector");
@@ -80,70 +98,7 @@ public class RequestRouteSelector {
 
     public PlacementResult<RouteResult, PlacementKey> select(
             RequestContext context, String policyGroup) {
-        Request request = context == null ? null : context.data().getRequest();
-        SchedulingMetadata metadata =
-                context == null ? null : context.data().getSchedulingMetadata();
-        if (request == null || metadata == null) {
-            Logger.error("request has no scheduling inputs");
-            return PlacementResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
-        }
-        if (StringUtils.isNotBlank(policyGroup)) {
-            Logger.info(
-                    "Group routing policy selected group, requestId: {}, policy: {}, group: {}",
-                    context.data().getRequestId(),
-                    "trafficPolicy",
-                    policyGroup);
-        }
-        var routing = new RouteResult.Builder(context);
-        String group = policyGroup;
-        if (request.getSelectedVit() != null) {
-            ServerStatus vit =
-                    vitCacheSelector == null || !requiredRoles.contains(RoleType.VIT)
-                            ? null
-                            : vitCacheSelector.selectForRoute(context, policyGroup, routing);
-            if (vit == null) {
-                return PlacementResult.rejected(Response.error(StrategyErrorType.VIT_ROUTE_STALE));
-            }
-            group = vit.getGroup();
-        }
-        var requested = context.data().getRequestedRoles();
-        if ((!requested.isEmpty() && !requiredRoles.containsAll(requested))
-                || context.data().getPhase() == org.flexlb.dao.route.RequestPhase.ENCODER
-                        && !requiredRoles.contains(RoleType.ENCODER)) {
-            return PlacementResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
-        }
-        var roles =
-                requested.isEmpty()
-                        ? (context.data().getPhase() == org.flexlb.dao.route.RequestPhase.ENCODER
-                                ? List.of(RoleType.ENCODER)
-                                : requiredRoles)
-                        : requiredRoles.stream().filter(requested::contains).toList();
-        for (RoleType role : roles) {
-            if (role == RoleType.VIT && request.getSelectedVit() != null) {
-                continue;
-            }
-            context.data().beginRoutingAttempt(role);
-            PlacementResult<ServerStatus, PlacementKey> result =
-                    selectRole(request, metadata, role, group, routing);
-            if (result.status() != PlacementResult.Status.SUCCESS) {
-                Logger.debug(
-                        "Failed to select {} worker for request {}",
-                        role.getCode(),
-                        context.data().getRequestId());
-                return switch (result.status()) {
-                    case REJECTED, BLOCKED, ENDPOINT_CHANGED ->
-                            routing.validateEndpoints(result.asFailure());
-                    default ->
-                            throw new IllegalStateException(
-                                    "unexpected selector result: " + result.status());
-                };
-            }
-            ServerStatus selection = result.value();
-            if (StringUtils.isBlank(policyGroup)) {
-                group = selection.getGroup();
-            }
-        }
-        return routing.validateEndpoints(PlacementResult.success(routing.prepare()));
+        return select(context, policyGroup, null, null);
     }
 
     public Response routeVit(RequestContext context) {
@@ -173,6 +128,141 @@ public class RequestRouteSelector {
                 && vitCacheSelector.validate(context, resolvePolicyGroup(context)).isSuccess();
     }
 
+    WorkerEndpoint blockedEndpoint(PlacementKey key) {
+        return key == null || key.endpoint() == null
+                ? null
+                : endpoints.selectEndpoint(key.role(), key.endpoint());
+    }
+
+    PlacementResult<RouteResult, PlacementKey> select(
+            RequestContext context,
+            String policyGroup,
+            DecodeEndpoint reclaimedEndpoint,
+            DecodeResources.RequestReservation reclaimedReservation) {
+        Request request = context == null ? null : context.data().getRequest();
+        SchedulingMetadata metadata =
+                context == null ? null : context.data().getSchedulingMetadata();
+        if (request == null || metadata == null) {
+            if (reclaimedReservation != null)
+                RoleSelection.Decode.release(
+                        reclaimedEndpoint,
+                        reclaimedReservation,
+                        DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+            Logger.error("request has no scheduling inputs");
+            return PlacementResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
+        }
+        if (StringUtils.isNotBlank(policyGroup)) {
+            Logger.info(
+                    "Group routing policy selected group, requestId: {}, policy: {}, group: {}",
+                    context.data().getRequestId(),
+                    "trafficPolicy",
+                    policyGroup);
+        }
+        var selections = new ArrayList<RoleSelection>(4);
+        boolean transferred = false;
+        Throwable selectionFailure = null;
+        try {
+            String group = policyGroup;
+            if (reclaimedReservation != null) {
+                var reclaimed =
+                        addDecode(
+                                selections,
+                                reclaimedEndpoint,
+                                reclaimedReservation,
+                                () -> {
+                                    var view = reclaimedEndpoint.routingView();
+                                    return ServerStatus.forWorker(
+                                            RoleType.DECODE,
+                                            request.getRequestId(),
+                                            view.topology(),
+                                            view.workerStatus().fields());
+                                });
+                if (!reclaimedEndpoint.ownership(reclaimedReservation).owned()
+                        || StringUtils.isNotBlank(policyGroup)
+                                && !policyGroup.equals(reclaimed.group()))
+                    return PlacementResult.retry();
+                group = reclaimed.group();
+            }
+            if (request.getSelectedVit() != null) {
+                RoleSelection vit =
+                        vitCacheSelector == null || !requiredRoles.contains(RoleType.VIT)
+                                ? null
+                                : vitCacheSelector.selectForRoute(context, group);
+                if (vit == null) {
+                    return PlacementResult.rejected(
+                            Response.error(StrategyErrorType.VIT_ROUTE_STALE));
+                }
+                selections.add(vit);
+                group = vit.group();
+            }
+            var requested = context.data().getRequestedRoles();
+            if ((!requested.isEmpty() && !requiredRoles.containsAll(requested))
+                    || context.data().getPhase() == RequestPhase.ENCODER
+                            && !requiredRoles.contains(RoleType.ENCODER)) {
+                return PlacementResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
+            }
+            var roles =
+                    requested.isEmpty()
+                            ? (context.data().getPhase() == RequestPhase.ENCODER
+                                    ? List.of(RoleType.ENCODER)
+                                    : requiredRoles)
+                            : requiredRoles.stream().filter(requested::contains).toList();
+            for (RoleType role : roles) {
+                if (context.data().getFuture() != null && context.data().getFuture().isDone()
+                        || context.snapshot().cancellation() != null)
+                    return PlacementResult.closed();
+                if (role == RoleType.DECODE && reclaimedReservation != null) continue;
+                if (role == RoleType.VIT && request.getSelectedVit() != null) {
+                    continue;
+                }
+                context.data().beginRoutingAttempt(role);
+                int previousSelections = selections.size();
+                PlacementResult<?, PlacementKey> result =
+                        switch (role) {
+                            case PREFILL, PDFUSION ->
+                                    selectPrefill(context, role, group, selections);
+                            case DECODE -> selectDecode(context, group, selections);
+                            case ENCODER -> selectEncoder(context, group, selections);
+                            case VIT -> selectVit(request.getRequestId(), group, selections);
+                            case FRONTEND ->
+                                    throw new IllegalArgumentException(
+                                            "Endpoint selection is not supported for FRONTEND");
+                        };
+                if (result.status() != PlacementResult.Status.SUCCESS) {
+                    Logger.debug(
+                            "Failed to select {} worker for request {}",
+                            role.getCode(),
+                            context.data().getRequestId());
+                    return validateEndpoints(selections, result.asFailure());
+                }
+                com.google.common.base.Preconditions.checkState(
+                        selections.size() == previousSelections + 1
+                                && selections.getLast().role() == role,
+                        "successful strategy must register exactly one %s selection",
+                        role);
+                RoleSelection selection = selections.getLast();
+                if (StringUtils.isBlank(policyGroup)) {
+                    group = selection.group();
+                }
+            }
+            if (context.data().getFuture() != null && context.data().getFuture().isDone()
+                    || context.snapshot().cancellation() != null) return PlacementResult.closed();
+            var execution = new RouteResult(context, selections);
+            var selected = execution.validateEndpoints(PlacementResult.success(execution));
+            transferred = selected.status() == PlacementResult.Status.SUCCESS;
+            return selected;
+        } catch (RuntimeException | Error failure) {
+            selectionFailure = failure;
+            throw failure;
+        } finally {
+            if (!transferred) {
+                var rollbackFailure = Failures.run(null, () -> rollback(selections));
+                if (selectionFailure != null) Failures.append(selectionFailure, rollbackFailure);
+                else Failures.rethrow(rollbackFailure, "selection registration rollback failed");
+            }
+        }
+    }
+
     String resolvePolicyGroup(RequestContext context) {
         if (context == null || context.data().getRequest() == null) {
             return null;
@@ -186,35 +276,16 @@ public class RequestRouteSelector {
                         .orElse(null);
     }
 
-    private PlacementResult<ServerStatus, PlacementKey> selectRole(
-            Request request,
-            SchedulingMetadata metadata,
-            RoleType role,
-            String group,
-            RouteResult.Builder routing) {
-        return switch (role) {
-            case PREFILL, PDFUSION -> selectPrefill(request, metadata, role, group, routing);
-            case DECODE -> selectDecode(request, metadata, group, routing);
-            case ENCODER -> selectEncoder(request, group, routing);
-            case VIT -> selectVit(request.getRequestId(), group, routing);
-            case FRONTEND ->
-                    throw new IllegalArgumentException(
-                            "Endpoint selection is not supported for FRONTEND");
-        };
-    }
-
-    private PlacementResult<ServerStatus, PlacementKey> selectEncoder(
-            Request request, String group, RouteResult.Builder route) {
+    private PlacementResult<?, PlacementKey> selectEncoder(
+            RequestContext context, String group, List<RoleSelection> selections) {
         var directory = endpoints.encoderRoutingSnapshot();
-        var config = route.ctx().data().getConfig();
+        var request = context.data().getRequest();
         var selection =
                 encoderSelector.select(
                         directory,
                         group,
                         request.getEncoderCacheHitLen() != null,
-                        config.isQueue()
-                                ? config.getDispatcher().getMaxInflightPerEncoderWorker()
-                                : Integer.MAX_VALUE);
+                        context.data().getRequestScheduler().encoderRequestLimit());
         if (selection.status() != PlacementResult.Status.SUCCESS) return selection.asFailure();
         var selected = selection.value();
         com.google.common.base.Preconditions.checkArgument(
@@ -223,8 +294,7 @@ public class RequestRouteSelector {
         WorkerEndpoint selectedEndpoint =
                 endpoints.selectEndpoint(RoleType.ENCODER, selected.address());
         if (selectedEndpoint == null || selectedEndpoint != selected)
-            return PlacementResult.endpointChanged(
-                    new PlacementKey(RoleType.ENCODER, group, null), selection);
+            return PlacementResult.retry(Response.error(RoleType.ENCODER.getErrorType()));
         var status = selectedEndpoint.getStatus();
         var assignment =
                 ServerStatus.forWorker(
@@ -232,19 +302,20 @@ public class RequestRouteSelector {
                         request.getRequestId(),
                         status.topologySnapshot(),
                         status.committedEngineObservation());
-        route.add(selectedEndpoint, assignment, 0, 0);
-        return PlacementResult.success(assignment);
+        var role = new RoleSelection.Auxiliary(selectedEndpoint, assignment);
+        selections.add(role);
+        return selection;
     }
 
-    private PlacementResult<ServerStatus, PlacementKey> selectVit(
-            String requestId, String group, RouteResult.Builder route) {
+    private PlacementResult<RoleSelection, PlacementKey> selectVit(
+            String requestId, String group, List<RoleSelection> selections) {
         List<String> choices = endpoints.endpointAddressSnapshot(RoleType.VIT);
         ArrayList<String> remaining = null;
         while (!choices.isEmpty()) {
             int index = vitSelector.selectIndex(choices);
             com.google.common.base.Preconditions.checkArgument(
                     index >= 0 && index < choices.size(), "VIT strategy returned an invalid index");
-            var selected = captureVit(choices.get(index), group, requestId, route);
+            var selected = captureVit(choices.get(index), group, requestId, selections);
             if (selected != null) return selected;
             if (remaining == null) {
                 remaining = new ArrayList<>(choices);
@@ -256,12 +327,11 @@ public class RequestRouteSelector {
         return PlacementResult.blocked(new PlacementKey(RoleType.VIT, group, null));
     }
 
-    private PlacementResult<ServerStatus, PlacementKey> captureVit(
-            String address, String group, String requestId, RouteResult.Builder route) {
+    private PlacementResult<RoleSelection, PlacementKey> captureVit(
+            String address, String group, String requestId, List<RoleSelection> selections) {
         WorkerEndpoint selectedEndpoint = endpoints.selectEndpoint(RoleType.VIT, address);
         if (selectedEndpoint == null) {
-            return PlacementResult.endpointChanged(
-                    new PlacementKey(RoleType.VIT, group, null), PlacementResult.success(address));
+            return PlacementResult.retry(Response.error(RoleType.VIT.getErrorType()));
         }
         var status = selectedEndpoint.getStatus();
         var topology = status.topologySnapshot();
@@ -270,21 +340,27 @@ public class RequestRouteSelector {
         }
         var engine = status.committedEngineObservation();
         ServerStatus result = ServerStatus.forWorker(RoleType.VIT, requestId, topology, engine);
-        return PlacementResult.success(route.add(selectedEndpoint, result, -1L, 0L));
+        var role = new RoleSelection.Auxiliary(selectedEndpoint, result);
+        selections.add(role);
+        return PlacementResult.success(role);
     }
 
-    private PlacementResult<ServerStatus, PlacementKey> selectPrefill(
-            Request request,
-            SchedulingMetadata metadata,
-            RoleType role,
-            String group,
-            RouteResult.Builder route) {
+    private PlacementResult<?, PlacementKey> selectPrefill(
+            RequestContext context, RoleType role, String group, List<RoleSelection> selections) {
+        var request = context.data().getRequest();
+        var metadata = context.data().getSchedulingMetadata();
         var directory = endpoints.prefillRoutingSnapshot(role);
         var result =
-                prefillSelector.select(
-                        request, metadata, role, group, directory, System::currentTimeMillis);
+                prefillSelector.selectAndRegister(
+                        request,
+                        metadata,
+                        role,
+                        group,
+                        directory,
+                        System::currentTimeMillis,
+                        selected -> registerPrefill(context, role, selections, selected));
         if (result.diagnostics() != null) {
-            var data = route.ctx().data();
+            var data = context.data();
             if (result.diagnostics().get("routingDecision")
                     instanceof org.flexlb.dao.pv.RoutingDecision decision) {
                 data.recordRoutingDecision(decision);
@@ -311,31 +387,8 @@ public class RequestRouteSelector {
         var selected = result.value();
         PrefillEndpoint endpoint = selected.input().endpoint();
         reportCacheAffinity(role, endpoint.getIp(), selected.affinityReason());
-        WorkerEndpoint selectedEndpoint = endpoints.selectEndpoint(role, selected.address());
-        if (selectedEndpoint == null
-                || selectedEndpoint != endpoint
-                || selectedEndpoint.getStatus().getGenerationId() != selected.generationId()) {
-            return PlacementResult.endpointChanged(new PlacementKey(role, group, null), result);
-        }
         var status = endpoint.getStatus();
-        ServerStatus assignment =
-                ServerStatus.forWorker(
-                        role,
-                        request.getRequestId(),
-                        status.topologySnapshot(),
-                        status.committedEngineObservation());
-        if (selected.projectedTtftMs() >= 0L) {
-            assignment.setPrefillTime(selected.projectedTtftMs());
-        }
-        DebugInfo debug = new DebugInfo();
-        debug.setHitCacheLen(selected.cacheHitTokens());
-        assignment.setDebugInfo(debug);
-        route.add(
-                selectedEndpoint,
-                assignment,
-                selected.prefillWorkMs(),
-                selected.ownershipVersion());
-        route.ctx().data().recordCacheSelection(role, endpoint.getIp(), selected.cacheHitTokens());
+        context.data().recordCacheSelection(role, endpoint.getIp(), selected.cacheHitTokens());
         reportSelection(role, endpoint.getIp(), request.getSeqLen(), selected);
         if (selected.cacheMatches() != null) {
             try {
@@ -351,7 +404,59 @@ public class RequestRouteSelector {
                 Logger.warn("Cache prediction observation failed", failure);
             }
         }
-        return PlacementResult.success(assignment);
+        return result;
+    }
+
+    private <I extends PrefillSelectionStrategy.CandidateInput>
+            PlacementResult.Registration registerPrefill(
+                    RequestContext context,
+                    RoleType role,
+                    List<RoleSelection> selections,
+                    PrefillSelectionStrategy.Selection<I> selected) {
+        var request = context.data().getRequest();
+        var candidate = endpoints.selectEndpoint(role, selected.address());
+        if (!(candidate instanceof PrefillEndpoint endpoint)
+                || endpoint.getStatus().getGenerationId() != selected.generationId())
+            return PlacementResult.Registration.UNAVAILABLE;
+        var assignment =
+                ServerStatus.forWorker(
+                        role,
+                        request.getRequestId(),
+                        endpoint.getStatus().topologySnapshot(),
+                        endpoint.getStatus().committedEngineObservation());
+        if (selected.projectedTtftMs() >= 0) assignment.setPrefillTime(selected.projectedTtftMs());
+        var debug = new DebugInfo();
+        debug.setHitCacheLen(selected.cacheHitTokens());
+        assignment.setDebugInfo(debug);
+        var data = context.data();
+        data.initializeExecutionOrder(System.currentTimeMillis());
+        var input =
+                new org.flexlb.balance.planner.GroupPlanner.Item(
+                        data.getRequestId(),
+                        data.getPriority(),
+                        data.getWorkerEnqueueSequence(),
+                        data.getFirstWorkerEnqueueTime(),
+                        data.getRequestExpiresAtMs(),
+                        request.getHardKvTokens(),
+                        selected.cacheHitTokens());
+        var registered =
+                endpoint.tryRegisterSelection(
+                        input, selected.projectionInputs(), selected.prefillWorkMs(), !direct);
+        if (registered.status() == PlacementResult.Registration.REGISTERED) {
+            try {
+                selections.add(
+                        new RoleSelection.Prefill(
+                                endpoint,
+                                assignment,
+                                selected.prefillWorkMs(),
+                                registered.record()));
+            } catch (RuntimeException | Error failure) {
+                Failures.append(
+                        failure, Failures.run(null, () -> endpoint.rollback(registered.record())));
+                throw failure;
+            }
+        }
+        return registered.status();
     }
 
     private void reportCacheAffinity(RoleType role, String ip, String reason) {
@@ -389,40 +494,23 @@ public class RequestRouteSelector {
         }
     }
 
-    private PlacementResult<ServerStatus, PlacementKey> selectDecode(
-            Request request, SchedulingMetadata metadata, String group, RouteResult.Builder route) {
+    private PlacementResult<?, PlacementKey> selectDecode(
+            RequestContext context, String group, List<RoleSelection> selections) {
+        var request = context.data().getRequest();
+        var metadata = context.data().getSchedulingMetadata();
         DecodeInputs cached = DECODE_INPUTS.get();
         DecodeInputs inputs = cached.inUse ? new DecodeInputs() : cached;
         inputs.inUse = true;
         try {
             endpoints.decodeRoutingSnapshot(group, inputs.decode);
-            var result =
-                    decodeSelector.select(
-                            request, metadata, group, inputs.readOnly, capacityReader);
-            if (result.status() != PlacementResult.Status.SUCCESS) {
-                return result.asFailure();
-            }
-            var selected = result.value();
-            WorkerEndpoint selectedEndpoint = endpoints.selectDecodeEndpoint(selected);
-            if (selectedEndpoint == null) {
-                return PlacementResult.endpointChanged(
-                        new PlacementKey(RoleType.DECODE, group, null), result);
-            }
-            if (selectedEndpoint.getStatus().getGenerationId() != selected.generationId()) {
-                return PlacementResult.endpointChanged(
-                        new PlacementKey(RoleType.DECODE, group, null), result);
-            }
-            com.google.common.base.Preconditions.checkState(
-                    selectedEndpoint instanceof DecodeEndpoint,
-                    "Decode selection requires a Decode endpoint");
-            ServerStatus assignment =
-                    ServerStatus.forWorker(
-                            RoleType.DECODE,
-                            request.getRequestId(),
-                            selected.topology(),
-                            selected.workerStatus().fields());
-            return PlacementResult.success(
-                    route.add(selectedEndpoint, assignment, -1L, selected.admissionVersion()));
+            return decodeSelector.selectAndRegister(
+                    request,
+                    metadata,
+                    group,
+                    inputs.readOnly,
+                    capacityReader,
+                    this::refreshDecode,
+                    selected -> registerDecode(request, metadata, selections, selected));
         } finally {
             int captured = inputs.decode.size();
             inputs.decode.clear();
@@ -433,11 +521,106 @@ public class RequestRouteSelector {
         }
     }
 
+    private PlacementResult.Registration registerDecode(
+            Request request,
+            SchedulingMetadata metadata,
+            List<RoleSelection> selections,
+            DecodeRoutingView selected) {
+        var candidate = endpoints.selectDecodeEndpoint(selected);
+        if (!(candidate instanceof DecodeEndpoint endpoint))
+            return PlacementResult.Registration.UNAVAILABLE;
+        var acquired =
+                endpoint.tryRegisterSelection(
+                        selected,
+                        request.getRequestId(),
+                        request.getHardKvTokens(),
+                        request.getExpectedKvTokens(),
+                        metadata.priority(),
+                        admissionCapacity);
+        return switch (acquired.status()) {
+            case VERSION_CONFLICT -> PlacementResult.Registration.CONFLICT;
+            case ENDPOINT_RETIRED -> PlacementResult.Registration.UNAVAILABLE;
+            case CAPACITY_FULL, ALREADY_OWNED -> PlacementResult.Registration.BLOCKED;
+            case ACQUIRED -> {
+                addDecode(
+                        selections,
+                        endpoint,
+                        acquired.value(),
+                        () ->
+                                ServerStatus.forWorker(
+                                        RoleType.DECODE,
+                                        request.getRequestId(),
+                                        selected.topology(),
+                                        selected.workerStatus().fields()));
+                yield PlacementResult.Registration.REGISTERED;
+            }
+        };
+    }
+
+    private static RoleSelection.Decode addDecode(
+            List<RoleSelection> selections,
+            DecodeEndpoint endpoint,
+            DecodeResources.RequestReservation registration,
+            java.util.function.Supplier<ServerStatus> metadata) {
+        try {
+            var selected = new RoleSelection.Decode(endpoint, metadata.get(), registration);
+            selections.add(selected);
+            return selected;
+        } catch (RuntimeException | Error failure) {
+            Failures.append(
+                    failure,
+                    Failures.run(
+                            null,
+                            () ->
+                                    RoleSelection.Decode.release(
+                                            endpoint,
+                                            registration,
+                                            DecodeResources.ReleaseReason.LOCAL_ROLLBACK)));
+            throw failure;
+        }
+    }
+
+    private DecodeRoutingView refreshDecode(DecodeRoutingView view) {
+        var endpoint = endpoints.selectDecodeEndpoint(view);
+        return endpoint instanceof DecodeEndpoint decode ? decode.routingView() : null;
+    }
+
     private DecodeResources.AdmissionSummary readDecodeCapacity(DecodeRoutingView view) {
         var selectedEndpoint = endpoints.selectDecodeEndpoint(view);
         return selectedEndpoint == null
                 ? null
                 : ((DecodeEndpoint) selectedEndpoint).admissionSummary();
+    }
+
+    private static <T> PlacementResult<T, PlacementKey> validateEndpoints(
+            List<RoleSelection> selections, PlacementResult<T, PlacementKey> result) {
+        for (var role : selections)
+            if (!role.endpoint().acceptsNewRequests())
+                return PlacementResult.retry(Response.error(role.role().getErrorType()));
+        return result;
+    }
+
+    private static void rollback(List<RoleSelection> selections) {
+        Throwable failure = null;
+        for (var role : selections) {
+            if (role instanceof RoleSelection.Prefill prefill && prefill.registration != null)
+                failure =
+                        Failures.run(
+                                failure,
+                                () ->
+                                        ((PrefillEndpoint) prefill.endpoint())
+                                                .rollback(prefill.registration));
+            else if (role instanceof RoleSelection.Decode decode)
+                failure =
+                        Failures.run(
+                                failure,
+                                () ->
+                                        RoleSelection.Decode.release(
+                                                (DecodeEndpoint) decode.endpoint(),
+                                                decode.registration,
+                                                DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
+        }
+        Failures.rethrow(failure, "selection registration rollback failed");
     }
 
     private static final class DecodeInputs {

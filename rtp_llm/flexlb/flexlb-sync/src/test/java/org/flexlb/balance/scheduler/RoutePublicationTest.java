@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -116,7 +117,7 @@ class RoutePublicationTest {
             assertEquals(30L, f.predictions.get(2L));
             verify(f.evaluator, never()).predictBatchMs(any());
             verify(f.prefill, never())
-                    .reserveBatch(anyLong(), org.mockito.ArgumentMatchers.anyInt());
+                    .batchCapacityAvailable(org.mockito.ArgumentMatchers.anyInt());
             verify(f.runtime.deliveries(), never()).tryReserveDelivery();
             verify(f.runtime.deliveries(), never()).nextBatchId();
             verifyNoInteractions(f.grpc);
@@ -159,7 +160,7 @@ class RoutePublicationTest {
     }
 
     @Test
-    void wholeGroupIsClaimedBeforeFirstPublicationAndPredictionsAccumulateInOrder() {
+    void wholeGroupIsPreparedBeforeOrderedCommitAndPublication() {
         try (var f = new LinearDeliveryFixture(false)) {
             var first = f.item(1, 10);
             var second = f.item(2, 20);
@@ -168,10 +169,21 @@ class RoutePublicationTest {
                             call -> {
                                 RouteDelivered delivered = call.getArgument(0);
                                 Delivery.Member claim = delivered.delivery();
+                                assertEquals(List.of(first, second), f.committedItems);
+                                verify(f.decode)
+                                        .acquireDispatchPermit(
+                                                eq(first.decodeReservation()), any());
+                                verify(f.decode)
+                                        .acquireDispatchPermit(
+                                                eq(second.decodeReservation()), any());
                                 assertEquals(
-                                        List.of(1L, 2L),
+                                        List.of(1L, 2L).subList(0, published.size() + 1),
                                         f.claimIds(),
-                                        "publication must not race the next claim");
+                                        "each prepared member commits immediately before its publication");
+                                assertSame(claim, claim.owner().snapshot().delivery().identity());
+                                assertSame(
+                                        f.permits.get(Long.parseLong(claim.route().requestId())),
+                                        claim.decode());
                                 assertFalse(Thread.holdsLock(claim.route().ctx()));
                                 assertFalse(f.queueLock.isHeldByCurrentThread());
                                 assertFalse(f.prefill.isRetired());
@@ -233,7 +245,7 @@ class RoutePublicationTest {
             assertEquals(CapacityBoundary.Status.UNAVAILABLE, boundary.status());
             assertEquals(CapacityBoundary.Resource.DECODE_ENGINE, boundary.resource());
             assertTrue(f.committedItems.isEmpty());
-            verify(f.owner, never()).prepareDelivery(any(Delivery.Member.class), any(), anyLong());
+            verify(f.owner, never()).commitDelivery(any(Delivery.Member.class), any(), anyLong());
             verify(f.owner, never()).onDeliveryResult(isA(RouteDelivered.class));
         }
     }
@@ -402,7 +414,7 @@ class RoutePublicationTest {
             assertEquals(2, snapshot.queuedCount());
             assertEquals(0, endpoint.routingView().engineCapacityUsed());
             assertEquals(2, snapshot.requests().size());
-            verify(f.owner, never()).prepareDelivery(any(Delivery.Member.class), any(), anyLong());
+            verify(f.owner, never()).commitDelivery(any(Delivery.Member.class), any(), anyLong());
             verify(f.owner, never()).onDeliveryResult(isA(RouteDelivered.class));
             verify(f.prefill, never()).close();
         }

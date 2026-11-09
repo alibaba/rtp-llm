@@ -29,7 +29,6 @@ import java.util.concurrent.CompletableFuture;
  */
 @Component
 public class WorkerStatusRpcClient {
-
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final EngineGrpcClient engineGrpcClient;
@@ -116,6 +115,24 @@ public class WorkerStatusRpcClient {
                 finishedTasks);
     }
 
+    public static CacheStatus convertToCacheStatus(
+            EngineRpcService.CacheStatusPB cacheStatusPB, Set<Long> retainedKeys) {
+        CacheStatus cacheStatus = new CacheStatus();
+        cacheStatus.setAvailableKvCache(cacheStatusPB.getAvailableKvCache());
+        cacheStatus.setTotalKvCache(cacheStatusPB.getTotalKvCache());
+        cacheStatus.setBlockSize(cacheStatusPB.getBlockSize());
+        cacheStatus.setVersion(cacheStatusPB.getVersion());
+
+        Map<Long, Boolean> cacheKeysMap = cacheStatusPB.getCacheKeysMap();
+        // Copy the keySet: protobuf MapField#keySet() returns a VIEW that keeps
+        // the whole WorkerStatusPB message graph reachable until the next sync.
+        Set<Long> cachedKeysSet =
+                retainedKeys != null ? retainedKeys : new HashSet<>(cacheKeysMap.keySet());
+        cacheStatus.setCachedKeys(cachedKeysSet);
+        cacheStatus.setCacheKeySize(cachedKeysSet.size());
+        return cacheStatus;
+    }
+
     private static WorkerStatus.StepMetrics convertStepMetrics(
             EngineRpcService.WorkerStatusPB status) {
         if (!status.hasLastStepMetrics()) {
@@ -139,24 +156,6 @@ public class WorkerStatusRpcClient {
             case KV_CACHE_GROUP_MODE_WITH_MAMBA -> KvCacheGroupMode.WITH_MAMBA;
             default -> KvCacheGroupMode.UNSPECIFIED;
         };
-    }
-
-    public static CacheStatus convertToCacheStatus(
-            EngineRpcService.CacheStatusPB cacheStatusPB, Set<Long> retainedKeys) {
-        CacheStatus cacheStatus = new CacheStatus();
-        cacheStatus.setAvailableKvCache(cacheStatusPB.getAvailableKvCache());
-        cacheStatus.setTotalKvCache(cacheStatusPB.getTotalKvCache());
-        cacheStatus.setBlockSize(cacheStatusPB.getBlockSize());
-        cacheStatus.setVersion(cacheStatusPB.getVersion());
-
-        Map<Long, Boolean> cacheKeysMap = cacheStatusPB.getCacheKeysMap();
-        // Copy the keySet: protobuf MapField#keySet() returns a VIEW that keeps
-        // the whole WorkerStatusPB message graph reachable until the next sync.
-        Set<Long> cachedKeysSet =
-                retainedKeys != null ? retainedKeys : new HashSet<>(cacheKeysMap.keySet());
-        cacheStatus.setCachedKeys(cachedKeysSet);
-        cacheStatus.setCacheKeySize(cachedKeysSet.size());
-        return cacheStatus;
     }
 
     /**

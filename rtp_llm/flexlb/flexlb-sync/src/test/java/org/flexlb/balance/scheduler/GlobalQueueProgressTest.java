@@ -23,7 +23,6 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -50,10 +49,12 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.timeout;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Verifies global queue progress and capacity wake-ups under concurrent placement.
+ */
 class GlobalQueueProgressTest {
 
     @Test
@@ -74,9 +75,7 @@ class GlobalQueueProgressTest {
                     id -> {
                         if (attempts.getAndIncrement() == 0) {
                             f.admissionBlocked.add(id);
-                            RouteExecution route = f.routes.get(id);
-                            when(route.blockedEndpointIfCurrent(any()))
-                                    .thenReturn(mock(PrefillEndpoint.class));
+                            RouteResult route = f.routes.get(id);
                             doAnswer(
                                             invocation -> {
                                                 closes.incrementAndGet();
@@ -176,8 +175,6 @@ class GlobalQueueProgressTest {
                                             .RequestReservation(1L, String.valueOf(id), 1L);
                             when(route.decodeEndpoint()).thenReturn(decode);
                             when(route.decodeReservation()).thenReturn(reservation);
-                            when(route.blockedEndpointIfCurrent(any()))
-                                    .thenReturn(mock(PrefillEndpoint.class));
                             doThrow(failure)
                                     .when(decode)
                                     .release(
@@ -198,6 +195,39 @@ class GlobalQueueProgressTest {
                             any());
             f.submit(998L, "b");
             awaitCondition(() -> f.admitted.contains(998L));
+        }
+    }
+
+    @Test
+    void shutdownBeforePlannerSubmissionStillDrainsTheQueuedRequest() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            var original =
+                    (java.util.concurrent.ExecutorService)
+                            ReflectionTestUtils.getField(f.scheduler, "planners");
+            var stopping = mock(java.util.concurrent.ExecutorService.class);
+            when(stopping.isShutdown()).thenReturn(true);
+            when(stopping.isTerminated()).thenReturn(true);
+            var rejected = new CountDownLatch(1);
+            doAnswer(
+                            call -> {
+                                f.scheduler.stop();
+                                rejected.countDown();
+                                throw new java.util.concurrent.RejectedExecutionException(
+                                        "scheduler stopped");
+                            })
+                    .when(stopping)
+                    .execute(any(Runnable.class));
+            ReflectionTestUtils.setField(f.scheduler, "planners", stopping);
+            original.shutdown();
+
+            f.submit(996L, "b");
+            await(rejected);
+            assertTrue(f.scheduler.awaitStopped(System.nanoTime() + TimeUnit.SECONDS.toNanos(5)));
+            assertEquals(1, RequestProtocolTestSupport.queuedCount(f.scheduler));
+            org.junit.jupiter.api.Assertions.assertNull(SchedulerTestSupport.failure(f.lifecycle));
+            RequestProtocolTestSupport.close(f.scheduler);
+            assertEquals(0, RequestProtocolTestSupport.queuedCount(f.scheduler));
+            verify(f.router, never()).select(eq(f.contexts.get(996L)), nullable(String.class));
         }
     }
 
@@ -251,8 +281,8 @@ class GlobalQueueProgressTest {
                     "Placement failed: diagnostics failed", response.getValue().getErrorMessage());
             assertEquals(List.of(cleanup), List.of(primary.getSuppressed()));
             assertTrue(
-                    finishingThread.get().getName().equals("flexlb-scheduling"),
-                    "planning failures must return to scheduler execution before admission completion");
+                    finishingThread.get().getName().startsWith("flexlb-global-planner-"),
+                    "the selecting task must finish admission cleanup");
 
             verify(RequestProtocolTestSupport.placementScheduler(f.mutations.get(992L)))
                     .completePlacement(
@@ -301,7 +331,7 @@ class GlobalQueueProgressTest {
     }
 
     @Test
-    void completedBacklogDoesNotDelayRefillingAReleasedSlot() throws Exception {
+    void concurrentPublicationDoesNotDelayRefillingAReleasedSlot() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             CountDownLatch firstPlanning = new CountDownLatch(1);
             CountDownLatch finishFirstPlanning = new CountDownLatch(1);
@@ -338,18 +368,34 @@ class GlobalQueueProgressTest {
                 awaitCondition(() -> f.selected.contains(2L));
                 finishFirstPlanning.countDown();
                 await(firstCommitting);
-                awaitCondition(f::hasBufferedPlan);
+                await(secondCommitting);
                 f.submit(3, "d");
                 finishFirst.countDown();
                 await(secondCommitting);
                 assertTrue(
                         thirdPlanning.await(1, TimeUnit.SECONDS),
-                        "R3 must reuse R1's slot before the buffered R2 commit finishes");
+                        "R3 must reuse R1's slot while R2 is still publishing");
             } finally {
                 finishFirstPlanning.countDown();
                 finishFirst.countDown();
                 finishSecond.countDown();
             }
+        }
+    }
+
+    @Test
+    void selectionAndPublicationStayInOneTask() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            AtomicReference<Thread> selectedBy = new AtomicReference<>();
+            AtomicReference<Thread> publishedBy = new AtomicReference<>();
+            f.onSelection = id -> selectedBy.set(Thread.currentThread());
+            f.onAdmission = id -> publishedBy.set(Thread.currentThread());
+            f.submit(812L, "b");
+            awaitCondition(() -> f.admitted.contains(812L));
+            assertEquals(
+                    selectedBy.get(),
+                    publishedBy.get(),
+                    "selected resources must be published before the selecting task returns");
         }
     }
 
@@ -575,15 +621,9 @@ class GlobalQueueProgressTest {
             f.onAdmission =
                     id -> {
                         var route = f.routes.get(id);
-                        when(route.blockedEndpointIfCurrent(any())).thenReturn(decode);
                         when(route.decodeEndpoint()).thenReturn(decode);
-                        when(decode.markQueued(any()))
-                                .thenReturn(
-                                        org.flexlb.balance.endpoint.DecodeResources.ResourceChange
-                                                .of(
-                                                        org.flexlb.balance.endpoint.DecodeResources
-                                                                .MutationStatus.APPLIED,
-                                                        false));
+                        when(decode.ownership(any()))
+                                .thenReturn(DecodeResources.Ownership.WITHDRAWABLE);
                         when(route.requestId()).thenReturn(String.valueOf(id));
                         if (attempts.computeIfAbsent(id, ignored -> new AtomicInteger())
                                         .incrementAndGet()
@@ -637,7 +677,7 @@ class GlobalQueueProgressTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void preemptionCompletionCommitsOnDecisionThreadAndClosesExactlyOnce(boolean immediate)
+    void preemptionCompletionResumesOnPlannerAndClosesExactlyOnce(boolean immediate)
             throws Exception {
         try (Fixture f = new Fixture(RoleType.DECODE, true)) {
             long id = 1101L;
@@ -680,7 +720,7 @@ class GlobalQueueProgressTest {
                 }
                 awaitCondition(() -> f.admitted.contains(id));
                 assertTrue(selector.get().getName().startsWith("flexlb-global-planner-"));
-                assertTrue(commit.get().getName().equals("flexlb-scheduling"));
+                assertTrue(commit.get().getName().startsWith("flexlb-global-planner-"));
                 assertFalse(selector.get().isVirtual());
                 assertTrue(selector.get().isDaemon());
                 assertEquals(List.of(id), f.admissionOrder);
@@ -693,7 +733,8 @@ class GlobalQueueProgressTest {
                                 org.mockito.ArgumentMatchers.eq(
                                         ContextResult.PublicationResult.PUBLISHED),
                                 org.mockito.ArgumentMatchers.isNull());
-                verify(decode, times(1)).markQueued(eq(reservation));
+                verify(f.router)
+                        .select(eq(f.contexts.get(id)), eq("a"), eq(decode), eq(reservation));
                 verify(decode, never()).release(any(), any());
             } finally {
                 reply.complete(result);
@@ -739,9 +780,7 @@ class GlobalQueueProgressTest {
                                 response.capture());
                 assertFalse(response.getValue().isSuccess());
 
-                verify(
-                                RequestProtocolTestSupport.placementScheduler(f.mutations.get(id)),
-                                timeout(1000).times(1))
+                verify(RequestProtocolTestSupport.placementScheduler(f.mutations.get(id)), never())
                         .completePlacement(
                                 org.mockito.ArgumentMatchers.same(f.mutations.get(id)),
                                 org.mockito.ArgumentMatchers.eq(
@@ -749,7 +788,7 @@ class GlobalQueueProgressTest {
                                 org.mockito.ArgumentMatchers.isNull());
                 assertFalse(f.admitted.contains(id));
                 awaitCondition(() -> !f.hasPendingPreemptions());
-                verify(decode, never()).markQueued(any());
+                verify(decode, never()).ownership(any());
                 verify(decode, never()).release(any(), any());
                 f.submit(1103L, "b");
                 awaitCondition(() -> f.admitted.contains(1103L));
@@ -809,7 +848,7 @@ class GlobalQueueProgressTest {
                                 org.mockito.ArgumentMatchers.eq(
                                         ContextResult.PublicationResult.PUBLISHED),
                                 org.mockito.ArgumentMatchers.isNull());
-                verify(decode, never()).markQueued(any());
+                verify(decode, never()).ownership(any());
                 assertFalse(f.admitted.contains(id));
                 if (closer != null) {
                     closer.join(2_000);
@@ -845,13 +884,13 @@ class GlobalQueueProgressTest {
     void stalePublicationBlockerReplansImmediatelyWithFreshSelection(boolean priority)
             throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL, priority)) {
-            var old = new AtomicReference<RouteExecution>();
+            var old = new AtomicReference<RouteResult>();
             var attempts = new AtomicInteger();
             f.onAdmission =
                     id -> {
                         if (attempts.getAndIncrement() == 0) {
                             old.set(f.routes.get(id));
-                            f.admissionBlocked.add(id);
+                            f.stalePublications.add(id);
                         } else {
                             f.admissionBlocked.remove(id);
                         }
@@ -896,56 +935,36 @@ class GlobalQueueProgressTest {
         }
     }
 
+    /**
+     * Controls placement and preemption outcomes while the real global planner owns queue progress and task slots.
+     */
     private static final class Fixture implements AutoCloseable {
-
         private final FlexlbConfig config = twoPlannerConfig();
-
         private final PlacementAvailability availability = new PlacementAvailability();
-
         private final AtomicInteger aSlots = new AtomicInteger();
-
-        private final Map<Long, RouteExecution> routes = new ConcurrentHashMap<>();
-
+        private final Map<Long, RouteResult> routes = new ConcurrentHashMap<>();
         private final Map<Long, PlacementOperation> mutations = new ConcurrentHashMap<>();
-
         private final Map<Long, String> groups = new ConcurrentHashMap<>();
-
         private final Map<Long, RequestContext> contexts = new ConcurrentHashMap<>();
-
         private final Map<Long, CompletableFuture<Response>> requests = new ConcurrentHashMap<>();
-
         private final Set<Long> selected = ConcurrentHashMap.newKeySet();
-
         private final Set<Long> admitted = ConcurrentHashMap.newKeySet();
-
         private final List<Long> admissionOrder = new CopyOnWriteArrayList<>();
-
         private final Set<Long> admissionBlocked = ConcurrentHashMap.newKeySet();
-
+        private final Set<Long> stalePublications = ConcurrentHashMap.newKeySet();
+        private final Map<PlacementKey, org.flexlb.balance.endpoint.WorkerEndpoint> blockers =
+                new ConcurrentHashMap<>();
         private final Set<Long> decodeBlocked = ConcurrentHashMap.newKeySet();
 
         private volatile LongConsumer onAdmission = ignored -> {};
-
         private volatile LongConsumer onSelection = ignored -> {};
 
         private final AbstractRequestScheduler scheduler;
-
         private final AbstractRequestScheduler lifecycle;
-
         private final RoleType role;
-
         private final RequestRouteSelector router = mock(RequestRouteSelector.class);
-
         private final DecodePreemption eviction =
                 org.flexlb.balance.eviction.DecodePreemptionTestSupport.mock();
-
-        private static FlexlbConfig twoPlannerConfig() {
-            FlexlbConfig config = spy(SchedulingTestConfig.batchConfig());
-            var runtime = spy(config.getInternalRuntime());
-            when(runtime.getQueuePlannerThreads()).thenReturn(2);
-            when(config.getInternalRuntime()).thenReturn(runtime);
-            return config;
-        }
 
         private Fixture(RoleType role) {
             this(role, false);
@@ -1002,22 +1021,27 @@ class GlobalQueueProgressTest {
                             });
             org.mockito.Mockito.doAnswer(
                             commit -> {
-                                RouteExecution selectedRoute = commit.getArgument(0);
+                                RouteResult selectedRoute = commit.getArgument(0);
                                 RequestContext context = selectedRoute.ctx();
                                 long id = Long.parseLong(context.data().getRequestId());
-                                onAdmission.accept(id);
+                                if (!preempt || role != RoleType.DECODE) onAdmission.accept(id);
+                                if (stalePublications.remove(id)) return PlacementResult.retry();
                                 if (admissionBlocked.contains(id)) {
                                     return PlacementResult.blocked(
                                             PlacementKey.exact(role, "a", "a:8000"));
                                 }
                                 admissionOrder.add(id);
                                 admitted.add(id);
-                                RouteExecution item =
-                                        RequestProtocolTestSupport.mockSelectedRoute();
                                 ServerStatus status = new ServerStatus();
-                                status.setRole(role);
-                                when(item.prefill()).thenReturn(status);
-                                when(item.prefillEndpoint()).thenReturn(a.endpoint());
+                                status.setRole(RoleType.PREFILL);
+                                status.setRequestId(context.data().getRequestId());
+                                status.setSuccess(true);
+                                RouteResult item =
+                                        RequestProtocolTestSupport.mockSelectedRoute(
+                                                context,
+                                                List.of(
+                                                        SelectionTestSupport.metadata(
+                                                                a.endpoint(), status, 0L)));
                                 return RequestProtocolTestSupport.published(selectedRoute, item);
                             })
                     .when(RequestProtocolTestSupport.publication(lifecycle))
@@ -1038,11 +1062,37 @@ class GlobalQueueProgressTest {
                                             new PlacementKey(
                                                     RoleType.DECODE, groups.get(id), null));
                                 }
-                                RouteExecution route =
-                                        RequestProtocolTestSupport.mockSelectedRoute();
+                                RouteResult route =
+                                        RequestProtocolTestSupport.mockSelectedRoute(context);
                                 when(route.ctx()).thenReturn(context);
                                 routes.put(id, route);
-                                return PlacementResult.success(route.result());
+                                if (preempt && role == RoleType.DECODE) {
+                                    onAdmission.accept(id);
+                                    if (admissionBlocked.contains(id)) {
+                                        var blocker = PlacementKey.exact(role, "a", "a:8000");
+                                        if (route.decodeEndpoint() != null)
+                                            blockers.put(blocker, route.decodeEndpoint());
+                                        return PlacementResult.blocked(blocker);
+                                    }
+                                }
+                                return PlacementResult.success(route);
+                            });
+            when(router.blockedEndpoint(any()))
+                    .thenAnswer(call -> blockers.get(call.getArgument(0)));
+            when(router.select(any(), nullable(String.class), any(), any()))
+                    .thenAnswer(
+                            call -> {
+                                RequestContext context = call.getArgument(0);
+                                long id = Long.parseLong(context.data().getRequestId());
+                                RouteResult route =
+                                        RequestProtocolTestSupport.mockSelectedRoute(context);
+                                when(route.ctx()).thenReturn(context);
+                                when(route.requestId()).thenReturn(String.valueOf(id));
+                                when(route.decodeEndpoint()).thenReturn(call.getArgument(2));
+                                when(route.decodeReservation()).thenReturn(call.getArgument(3));
+                                routes.put(id, route);
+                                onAdmission.accept(id);
+                                return PlacementResult.success(route);
                             });
             scheduler =
                     RequestProtocolTestSupport.injectPlacementDependencies(
@@ -1054,6 +1104,19 @@ class GlobalQueueProgressTest {
                             availability);
         }
 
+        public void close() {
+            requests.values().forEach(future -> future.complete(new Response()));
+            RequestProtocolTestSupport.close(scheduler);
+        }
+
+        private static FlexlbConfig twoPlannerConfig() {
+            FlexlbConfig config = spy(SchedulingTestConfig.batchConfig());
+            var runtime = spy(config.getInternalRuntime());
+            when(runtime.getQueuePlannerThreads()).thenReturn(2);
+            when(config.getInternalRuntime()).thenReturn(runtime);
+            return config;
+        }
+
         private DecodeEndpoint blockDecodePreemption(long requestId) {
             DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
             AtomicInteger attempts = new AtomicInteger();
@@ -1062,16 +1125,10 @@ class GlobalQueueProgressTest {
                         if (id != requestId) {
                             return;
                         }
-                        RouteExecution route = routes.get(id);
-                        when(route.blockedEndpointIfCurrent(any())).thenReturn(decode);
+                        RouteResult route = routes.get(id);
                         when(route.decodeEndpoint()).thenReturn(decode);
-                        when(decode.markQueued(any()))
-                                .thenReturn(
-                                        org.flexlb.balance.endpoint.DecodeResources.ResourceChange
-                                                .of(
-                                                        org.flexlb.balance.endpoint.DecodeResources
-                                                                .MutationStatus.APPLIED,
-                                                        false));
+                        when(decode.ownership(any()))
+                                .thenReturn(DecodeResources.Ownership.WITHDRAWABLE);
                         when(route.requestId()).thenReturn(String.valueOf(id));
                         if (attempts.getAndIncrement() == 0) {
                             admissionBlocked.add(id);
@@ -1102,35 +1159,17 @@ class GlobalQueueProgressTest {
             var queueLock = (ReentrantLock) ReflectionTestUtils.getField(scheduler, "lock");
             queueLock.lock();
             try {
-                return !((Set<?>) ReflectionTestUtils.getField(scheduler, "pendingPreemptions"))
+                return !((java.util.Map<?, ?>)
+                                ReflectionTestUtils.getField(scheduler, "pendingPreemptions"))
                         .isEmpty();
             } finally {
                 queueLock.unlock();
             }
         }
 
-        private boolean hasBufferedPlan() {
-            // Observe the handoff under its lock to make the regression independent
-            // of thread timing, without adding a hook to production code.
-            Object queue = scheduler;
-            var lock = (ReentrantLock) ReflectionTestUtils.getField(queue, "lock");
-            lock.lock();
-            try {
-                var completed = (Queue<?>) ReflectionTestUtils.getField(queue, "completedPlans");
-                return !completed.isEmpty();
-            } finally {
-                lock.unlock();
-            }
-        }
-
         private void release(String group) {
             PlacementAvailabilityTestSupport.changed(
                     availability, PlacementKey.exact(role, group, group + ":8000"));
-        }
-
-        public void close() {
-            requests.values().forEach(future -> future.complete(new Response()));
-            RequestProtocolTestSupport.close(scheduler);
         }
 
         private static PrefillRoutingEntry endpoint(String group) {

@@ -25,9 +25,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Contract tests for the canonical route-projection value boundary. */
+/**
+ * Contract tests for the canonical route-projection value boundary.
+ */
 class RequestTimeEstimationTest {
-
     @Test
     void frozenWorkCanBeReadConcurrentlyWithoutAnExtraCaptureObject() throws Exception {
         var requests = new java.util.ArrayList<WorkSnapshot.RequestWork>();
@@ -568,42 +569,6 @@ class RequestTimeEstimationTest {
                                 100L));
     }
 
-    private static ProjectionQueueSnapshot fixedWindow(
-            GroupPlanner.Constraints constraints, List<GroupPlanner.Item> active) {
-        return new ProjectionQueueSnapshot(
-                100L,
-                true,
-                org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
-                Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
-                constraints,
-                active,
-                null);
-    }
-
-    private static org.flexlb.config.DispatcherConfig.Type projection(boolean batch) {
-        return batch ? org.flexlb.config.DispatcherConfig.Type.BATCH : routeProjection();
-    }
-
-    private static PrefillTimePredictor.Evaluator failingBatchEvaluator(String failure) {
-        return new PrefillTimePredictor.Evaluator() {
-            @Override
-            public long estimateMs(long totalTokens, long hitTokens) {
-                return 20L;
-            }
-
-            @Override
-            public double predictBatchMs(PrefillBatchFeatures features) {
-                return switch (failure) {
-                    case "exception" -> throw new IllegalStateException("predictor unavailable");
-                    case "nan" -> Double.NaN;
-                    case "negative" -> -1.0d;
-                    case "infinity" -> Double.POSITIVE_INFINITY;
-                    default -> throw new AssertionError(failure);
-                };
-            }
-        };
-    }
-
     @Test
     void sortedQueueInsertionKeepsEqualItemsAheadAndSkipsExpiredItems() {
         var items = new java.util.ArrayList<GroupPlanner.Item>();
@@ -791,6 +756,46 @@ class RequestTimeEstimationTest {
                 "a projection-owned evaluator cannot change mid-call");
     }
 
+    private static ProjectionQueueSnapshot fixedWindow(
+            GroupPlanner.Constraints constraints, List<GroupPlanner.Item> active) {
+        return new ProjectionQueueSnapshot(
+                100L,
+                true,
+                org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
+                Comparator.comparingLong(GroupPlanner.Item::enqueueSeq),
+                constraints,
+                active,
+                null);
+    }
+
+    private static org.flexlb.config.DispatcherConfig.Type projection(boolean batch) {
+        return batch ? org.flexlb.config.DispatcherConfig.Type.BATCH : routeProjection();
+    }
+
+    private static org.flexlb.config.DispatcherConfig.Type routeProjection() {
+        return org.flexlb.config.DispatcherConfig.Type.NON_BATCH;
+    }
+
+    private static PrefillTimePredictor.Evaluator failingBatchEvaluator(String failure) {
+        return new PrefillTimePredictor.Evaluator() {
+            @Override
+            public long estimateMs(long totalTokens, long hitTokens) {
+                return 20L;
+            }
+
+            @Override
+            public double predictBatchMs(PrefillBatchFeatures features) {
+                return switch (failure) {
+                    case "exception" -> throw new IllegalStateException("predictor unavailable");
+                    case "nan" -> Double.NaN;
+                    case "negative" -> -1.0d;
+                    case "infinity" -> Double.POSITIVE_INFINITY;
+                    default -> throw new AssertionError(failure);
+                };
+            }
+        };
+    }
+
     private static RequestTimeEstimation.Inputs inputs(
             long capturedAtMs, PrefillTimePredictor.Evaluator evaluator) {
         return new RequestTimeEstimation.Inputs(
@@ -818,10 +823,6 @@ class RequestTimeEstimationTest {
 
     private static Probe probe() {
         return new Probe(99L, 50, 13L, Long.MAX_VALUE, 20L, 0L, 0L);
-    }
-
-    private static org.flexlb.config.DispatcherConfig.Type routeProjection() {
-        return org.flexlb.config.DispatcherConfig.Type.NON_BATCH;
     }
 
     private static final class CountingEvaluator implements PrefillTimePredictor.Evaluator {

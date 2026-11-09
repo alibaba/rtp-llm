@@ -22,7 +22,9 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-/** Delivery timing contracts exercised through the complete projection entry point. */
+/**
+ * Delivery timing contracts exercised through the complete projection entry point.
+ */
 class RouteDeliveryProjectionTest {
 
     @ParameterizedTest
@@ -214,16 +216,16 @@ class RouteDeliveryProjectionTest {
                         probeIndex + 1, 0, 1000, Long.MAX_VALUE, tokens[probeIndex], 0, 0));
     }
 
+    /**
+     * Counts full and incremental prediction work and injects token-specific failures to verify projection stops at the required prefix.
+     */
     private static class CountingEvaluator implements PrefillTimePredictor.Evaluator {
         private final Map<Long, Integer> calls = new HashMap<>();
         private final Map<Long, Long> durations = new HashMap<>();
+
         private long failingTokens = -1;
         private int fullCalls, lastBatchSize, sessions, appends;
         private double batchPerItem = 100;
-
-        int calls(long tokens) {
-            return calls.getOrDefault(tokens, 0);
-        }
 
         public long estimateMs(long tokens, long hit) {
             calls.merge(tokens, 1, Integer::sum);
@@ -246,6 +248,10 @@ class RouteDeliveryProjectionTest {
                 appends++;
                 return ++count[0] * batchPerItem;
             };
+        }
+
+        int calls(long tokens) {
+            return calls.getOrDefault(tokens, 0);
         }
 
         private void validate(long tokens) {

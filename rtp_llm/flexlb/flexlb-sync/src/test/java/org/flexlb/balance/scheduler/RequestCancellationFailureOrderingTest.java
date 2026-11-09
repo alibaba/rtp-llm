@@ -50,13 +50,15 @@ class RequestCancellationFailureOrderingTest {
     @ValueSource(booleans = {false, true})
     void deliveryFailureOnlyBypassesPlacementWithoutAnEarlierCancellation(boolean cancelFirst) {
         var context = new RequestContext(mock(FlexlbConfig.class));
-        context.register("9501", 1000L, 100_000L, 10_000L);
+        context.register(
+                "9501",
+                1000L,
+                100_000L,
+                10_000L,
+                org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
         var scope = RequestCleanupPassTest.requireValue(context.beginPlacement(null));
         var route = RequestCleanupPassTest.route(context, 9501L);
-        org.junit.jupiter.api.Assertions.assertTrue(
-                context.bindPlacement(scope, route, PublicationResult.PREPARED));
-        org.junit.jupiter.api.Assertions.assertTrue(
-                context.bindPlacement(scope, route, PublicationResult.PUBLISHED));
+        org.junit.jupiter.api.Assertions.assertTrue(context.publishRoute(scope, route));
         if (cancelFirst) {
             cancel(context);
         }
@@ -200,7 +202,8 @@ class RequestCancellationFailureOrderingTest {
                 .when(completions)
                 .register();
         try {
-            try (var admission = SchedulerTestSupport.claim(owner, "9503", future)) {
+            var admission = SchedulerTestSupport.claim(owner, "9503", future);
+            {
                 assertNotNull(admission);
                 try {
                     assertEquals(
@@ -232,7 +235,12 @@ class RequestCancellationFailureOrderingTest {
                                     null,
                                     inactivity.atMs() + TimeUnit.HOURS.toMillis(1L)));
                     assertTrue(context.snapshot().close().expired());
-                    assertTrue(context.snapshot().placement().inactivityExpired());
+                    assertNotNull(context.snapshot().placement());
+                    assertEquals(EndKind.FRONTEND, context.snapshot().pendingEnd().kind());
+                    assertEquals(
+                            CancelReason.CLIENT_CANCELLED,
+                            context.snapshot().cancellation().reason());
+                    assertNull(context.snapshot().outcome());
                     assertEquals(0, publications.get());
                     assertFalse(future.isDone());
                 } finally {
@@ -240,7 +248,8 @@ class RequestCancellationFailureOrderingTest {
                 }
             }
             assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
-            RequestProtocolTestSupport.awaitCondition(() -> owner.requests.liveRequestCount() == 0);
+            RequestProtocolTestSupport.awaitCondition(
+                    () -> owner.repository.liveRequestCount() == 0);
             assertEquals(Phase.CLOSED, context.snapshot().phase());
             assertEquals(RequestState.Phase.CANCELLED, context.snapshot().outcome().phase());
             assertEquals(CancelReason.CLIENT_CANCELLED, context.snapshot().cancellation().reason());

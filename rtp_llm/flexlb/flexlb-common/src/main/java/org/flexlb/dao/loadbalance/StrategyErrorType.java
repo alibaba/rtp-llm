@@ -3,7 +3,7 @@ package org.flexlb.dao.loadbalance;
 import lombok.Getter;
 
 /**
- * Pairs strategy error codes with their scheduling rejection reasons and default messages.
+ * Maps scheduling and worker failures to response codes and retry eligibility.
  */
 @Getter
 public enum StrategyErrorType {
@@ -43,6 +43,8 @@ public enum StrategyErrorType {
     SCHEDULER_PLAN_CONFLICT(8515, false),
     // Returned only before scheduler admission; the same request may run on another node.
     NOT_MASTER(8517, false),
+    // Rejected before registration: retry on another scheduler, not the stopping node.
+    SCHEDULER_UNAVAILABLE(8518, true),
     // Auto-TPM victim terminal: an already-admitted request was cancelled by
     // a strictly higher-priority admission attempt.
     PRIORITY_PREEMPTED(8429, false),

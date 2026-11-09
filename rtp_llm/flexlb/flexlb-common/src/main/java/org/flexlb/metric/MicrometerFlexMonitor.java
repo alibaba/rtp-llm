@@ -36,7 +36,6 @@ import java.util.concurrent.TimeUnit;
  */
 @Slf4j
 public class MicrometerFlexMonitor implements FlexMonitor {
-
     private static final String METRIC_PREFIX = "flexlb.";
 
     /**
@@ -45,21 +44,6 @@ public class MicrometerFlexMonitor implements FlexMonitor {
      * {@code flexlb.monitor.metric-whitelist} property.
      */
     private static volatile Set<String> ALLOWED_METRICS = null;
-
-    /**
-     * Sets the allowlist of metric names (without the {@code flexlb.} prefix).
-     * Pass {@code null} to disable filtering (allow all metrics).
-     */
-    public static void setAllowedMetrics(Set<String> metrics) {
-        ALLOWED_METRICS = metrics;
-        try {
-            log.info(
-                    "MicrometerFlexMonitor allowlist set: {} metrics",
-                    metrics == null ? "unlimited" : metrics.size());
-        } catch (Throwable failure) {
-            SafeFlexMonitor.logFailure("allowlist", failure);
-        }
-    }
 
     private final MeterRegistry meterRegistry;
     private final ConcurrentHashMap<String, FlexMetricType> metricTypes = new ConcurrentHashMap<>();
@@ -77,6 +61,21 @@ public class MicrometerFlexMonitor implements FlexMonitor {
      */
     public MicrometerFlexMonitor(MeterRegistry meterRegistry) {
         this.meterRegistry = meterRegistry;
+    }
+
+    /**
+     * Sets the allowlist of metric names (without the {@code flexlb.} prefix).
+     * Pass {@code null} to disable filtering (allow all metrics).
+     */
+    public static void setAllowedMetrics(Set<String> metrics) {
+        ALLOWED_METRICS = metrics;
+        try {
+            log.info(
+                    "MicrometerFlexMonitor allowlist set: {} metrics",
+                    metrics == null ? "unlimited" : metrics.size());
+        } catch (Throwable failure) {
+            SafeFlexMonitor.logFailure("allowlist", failure);
+        }
     }
 
     @Override
@@ -191,10 +190,37 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         }
     }
 
-    private Tags resolveTags(FlexMetricTags metricsTags) {
-        return (metricsTags == null || metricsTags.isEmpty())
-                ? Tags.empty()
-                : tagsCache.computeIfAbsent(metricsTags, this::toMicrometerTags);
+    @Override
+    public void removeGauge(String metricName, FlexMetricTags metricsTags) {
+        try {
+            var key = new MetricKey(metricName, metricsTags);
+            synchronized (gaugeSources) {
+                GaugeEntry entry = gaugeCache.remove(key);
+                if (entry == null) {
+                    return;
+                }
+                GaugeSources sources = entry.sources;
+                sources.remove(entry);
+                if (key.metricsTags() != null) {
+                    tagsCache.remove(key.metricsTags());
+                }
+                if (sources.entries == null) {
+                    // Retain an empty group if backend removal fails, so a later report can reuse
+                    // it.
+                    meterRegistry.remove(sources.meter);
+                    gaugeSources.remove(sources.meter);
+                }
+            }
+        } catch (Throwable failure) {
+            SafeFlexMonitor.logFailure(metricName, failure);
+        }
+    }
+
+    @Override
+    public String toString() {
+        return "MicrometerFlexMonitor{meterRegistry="
+                + (meterRegistry == null ? "disabled" : meterRegistry.getClass().getSimpleName())
+                + "}";
     }
 
     private Counter counter(MetricKey key) {
@@ -204,6 +230,12 @@ public class MicrometerFlexMonitor implements FlexMonitor {
                         Counter.builder(METRIC_PREFIX + key.name())
                                 .tags(resolveTags(key.metricsTags()))
                                 .register(meterRegistry));
+    }
+
+    private Tags resolveTags(FlexMetricTags metricsTags) {
+        return (metricsTags == null || metricsTags.isEmpty())
+                ? Tags.empty()
+                : tagsCache.computeIfAbsent(metricsTags, this::toMicrometerTags);
     }
 
     private Timer timer(MetricKey key) {
@@ -246,32 +278,6 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         }
     }
 
-    @Override
-    public void removeGauge(String metricName, FlexMetricTags metricsTags) {
-        try {
-            var key = new MetricKey(metricName, metricsTags);
-            synchronized (gaugeSources) {
-                GaugeEntry entry = gaugeCache.remove(key);
-                if (entry == null) {
-                    return;
-                }
-                GaugeSources sources = entry.sources;
-                sources.remove(entry);
-                if (key.metricsTags() != null) {
-                    tagsCache.remove(key.metricsTags());
-                }
-                if (sources.entries == null) {
-                    // Retain an empty group if backend removal fails, so a later report can reuse
-                    // it.
-                    meterRegistry.remove(sources.meter);
-                    gaugeSources.remove(sources.meter);
-                }
-            }
-        } catch (Throwable failure) {
-            SafeFlexMonitor.logFailure(metricName, failure);
-        }
-    }
-
     /**
      * Convert FlexMetricTags to micrometer Tags.
      *
@@ -306,6 +312,9 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         }
     }
 
+    /**
+     * Publishes immutable gauge membership snapshots for readers while serializing source changes.
+     */
     private static final class GaugeSources {
         private Gauge meter;
         // Null, one entry, or an immutable array of two or more entries.
@@ -348,12 +357,5 @@ public class MicrometerFlexMonitor implements FlexMonitor {
             }
             return total;
         }
-    }
-
-    @Override
-    public String toString() {
-        return "MicrometerFlexMonitor{meterRegistry="
-                + (meterRegistry == null ? "disabled" : meterRegistry.getClass().getSimpleName())
-                + "}";
     }
 }

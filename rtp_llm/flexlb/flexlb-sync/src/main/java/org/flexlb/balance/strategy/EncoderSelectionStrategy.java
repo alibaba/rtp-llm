@@ -10,6 +10,12 @@ import java.util.List;
  */
 @FunctionalInterface
 public interface EncoderSelectionStrategy {
+    PlacementResult<Candidate, PlacementKey> select(
+            List<? extends Candidate> candidates, String group, boolean weighted, int requestLimit);
+
+    /**
+     * Exposes the Encoder availability and load inputs needed to select a worker.
+     */
     interface Candidate {
         String address();
 
@@ -21,7 +27,4 @@ public interface EncoderSelectionStrategy {
 
         long uncachedTokens();
     }
-
-    PlacementResult<Candidate, PlacementKey> select(
-            List<? extends Candidate> candidates, String group, boolean weighted, int requestLimit);
 }

@@ -103,11 +103,9 @@ import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
  */
 @Component
 public class EngineHealthReporter {
-
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final FlexMonitor monitor;
-
     private final EndpointStats endpointStats;
 
     @Autowired
@@ -317,39 +315,6 @@ public class EngineHealthReporter {
                 variance);
     }
 
-    @Scheduled(fixedRate = 2000)
-    private void reportEngineMetric() {
-        String modelName = "engine_service";
-        FlexMetricTags tags = FlexMetricTags.of("model", modelName);
-        monitor.report(ENGINE_WORKER_NUMBER, tags, endpointStats.discoveredCount());
-        monitor.report(
-                ENGINE_PREFILL_WORKER_NUMBER,
-                tags,
-                endpointStats.counts(RoleType.PREFILL).discovered());
-        monitor.report(
-                ENGINE_DECODE_WORKER_NUMBER,
-                tags,
-                endpointStats.counts(RoleType.DECODE).discovered());
-        monitor.report(
-                ENGINE_ENCODER_WORKER_NUMBER,
-                tags,
-                endpointStats.counts(RoleType.ENCODER).discovered());
-    }
-
-    @Scheduled(fixedRate = 2000)
-    private void reportWorkerBlockSizes() {
-        for (RoleType role : RoleType.values()) {
-            reportWorkerBlockSize(role);
-        }
-    }
-
-    private void reportWorkerBlockSize(RoleType role) {
-        long blockSize = endpointStats.blockSize(role);
-        if (blockSize > 0) {
-            monitor.report(CACHE_BLOCK_SIZE, FlexMetricTags.of("role", role.name()), blockSize);
-        }
-    }
-
     public void reportRawServiceDiscoveryHostCount(String model, RoleType role, int count) {
         monitor.report(
                 ENGINE_SERVICE_DISCOVERY_RAW_HOST_COUNT,
@@ -395,14 +360,6 @@ public class EngineHealthReporter {
         FlexMetricTags metricTags = statusCheckFailureTags(errorEnum, engineIp, role);
         monitor.report(ENGINE_STATUS_CHECK_FAIL, metricTags, 1.0);
         monitor.report(ENGINE_STATUS_CHECK_FAIL_TOTAL, metricTags, 1.0);
-    }
-
-    private static FlexMetricTags statusCheckFailureTags(
-            BalanceStatusEnum errorEnum, String engineIp, RoleType role) {
-        return FlexMetricTags.of(
-                "code", String.valueOf(errorEnum.getCode()),
-                "engineIp", engineIp == null ? "" : engineIp,
-                "role", role == null ? "" : role.getCode());
     }
 
     public void reportCacheStatusCheckerFail(BalanceStatusEnum errorEnum, RoleType role) {
@@ -467,36 +424,6 @@ public class EngineHealthReporter {
             long cacheKeySize = cacheStatus.getCacheKeySize();
             reportWorkerMetric(CACHE_KEY_SIZE, workerStatus, cacheKeySize);
         }
-    }
-
-    /**
-     * WorkerStatus is the common capacity source for both regular engines and
-     * KVCM deployments.  KVCM does not poll GetCacheStatus, so cache capacity
-     * telemetry must be emitted from the WorkerStatus path rather than the
-     * optional cache-status checker.
-     */
-    private void reportKvCacheCapacity(WorkerStatus worker, WorkerStatus.EngineObservation status) {
-        long totalKvCacheTokens = status.totalKvCacheTokens();
-        if (totalKvCacheTokens <= 0) {
-            return;
-        }
-        long availableKvCacheTokens = Math.max(0, status.availableKvCacheTokens());
-        long usedKvCacheTokens = Math.max(0, totalKvCacheTokens - availableKvCacheTokens);
-        reportWorkerMetric(CACHE_USED_KV_CACHE_TOKENS, worker, usedKvCacheTokens);
-        reportWorkerMetric(CACHE_AVAILABLE_KV_CACHE_TOKENS, worker, availableKvCacheTokens);
-        reportWorkerMetric(CACHE_TOTAL_KV_CACHE_TOKENS, worker, totalKvCacheTokens);
-        reportWorkerMetric(
-                CACHE_USED_KV_CACHE_RATIO,
-                worker,
-                (usedKvCacheTokens * 100.0) / totalKvCacheTokens);
-    }
-
-    private void reportWorkerMetric(String metric, WorkerStatus worker, double value) {
-        monitor.report(
-                metric,
-                FlexMetricTags.of(
-                        "engineIp", valueOrEmpty(worker.getIp()), "role", worker.getRole().name()),
-                value);
     }
 
     public void reportEncoderStatus(
@@ -606,26 +533,6 @@ public class EngineHealthReporter {
                 FORWARD_TO_MASTER_RESULT, FlexMetricTags.of("type", type, "code", code), 1.0);
     }
 
-    public enum Event {
-        HEALTH_CHECK_OFFLINE,
-        ZK_NODE_OFFLINE,
-        SHUTDOWN_COMPLETE,
-        ZK_NODE_ONLINE,
-        WARMER_COMPLETE,
-        ONLINE_COMPLETE
-    }
-
-    public void reportDuration(Event event, long durationMs) {
-        monitor.report(
-                GRACEFUL_LIFECYCLE_EVENT,
-                FlexMetricTags.of(
-                        "type",
-                        event.name().toLowerCase(Locale.ROOT),
-                        "duration_ms",
-                        String.valueOf(durationMs)),
-                1);
-    }
-
     public void reportProcessOk() {
         monitor.report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of("type", "process_ok"), 1);
     }
@@ -686,21 +593,15 @@ public class EngineHealthReporter {
                 task.waitingEnteredTimeMs());
     }
 
-    private static FlexMetricTags lifecycleTags(String engineIp, String role, String group) {
-        return FlexMetricTags.of(
-                "engineIp", engineIp == null ? "" : engineIp,
-                "role", role == null ? "" : role,
-                "group", group == null ? "" : group);
-    }
-
-    private long reportDuration(
-            String metric, FlexMetricTags tags, long endTimeMs, long startTimeMs) {
-        if (endTimeMs <= 0L || startTimeMs <= 0L) {
-            return -1L;
-        }
-        long durationMs = Math.max(0L, endTimeMs - startTimeMs);
-        monitor.report(metric, tags, durationMs);
-        return durationMs;
+    public void reportDuration(Event event, long durationMs) {
+        monitor.report(
+                GRACEFUL_LIFECYCLE_EVENT,
+                FlexMetricTags.of(
+                        "type",
+                        event.name().toLowerCase(Locale.ROOT),
+                        "duration_ms",
+                        String.valueOf(durationMs)),
+                1);
     }
 
     public void reportWorkerStepMetrics(WorkerStatus worker, WorkerStatus.StepMetrics step) {
@@ -797,15 +698,112 @@ public class EngineHealthReporter {
         }
     }
 
-    private static String valueOrEmpty(String value) {
-        return value == null ? "" : value;
-    }
-
     public void reportRequestPayload(
             boolean success, long inputTokens, long blockSize, Long messageBytes) {
         var tags = FlexMetricTags.of("success", String.valueOf(success));
         if (inputTokens >= 0) monitor.report(REQUEST_SEQ_LEN, tags, inputTokens);
         if (blockSize >= 0) monitor.report(REQUEST_BLOCK_SIZE, tags, blockSize);
         if (messageBytes != null) monitor.report(REQUEST_MESSAGE_BYTES, tags, messageBytes);
+    }
+
+    @Scheduled(fixedRate = 2000)
+    private void reportEngineMetric() {
+        String modelName = "engine_service";
+        FlexMetricTags tags = FlexMetricTags.of("model", modelName);
+        monitor.report(ENGINE_WORKER_NUMBER, tags, endpointStats.discoveredCount());
+        monitor.report(
+                ENGINE_PREFILL_WORKER_NUMBER,
+                tags,
+                endpointStats.counts(RoleType.PREFILL).discovered());
+        monitor.report(
+                ENGINE_DECODE_WORKER_NUMBER,
+                tags,
+                endpointStats.counts(RoleType.DECODE).discovered());
+        monitor.report(
+                ENGINE_ENCODER_WORKER_NUMBER,
+                tags,
+                endpointStats.counts(RoleType.ENCODER).discovered());
+    }
+
+    @Scheduled(fixedRate = 2000)
+    private void reportWorkerBlockSizes() {
+        for (RoleType role : RoleType.values()) {
+            reportWorkerBlockSize(role);
+        }
+    }
+
+    private void reportWorkerBlockSize(RoleType role) {
+        long blockSize = endpointStats.blockSize(role);
+        if (blockSize > 0) {
+            monitor.report(CACHE_BLOCK_SIZE, FlexMetricTags.of("role", role.name()), blockSize);
+        }
+    }
+
+    private static FlexMetricTags statusCheckFailureTags(
+            BalanceStatusEnum errorEnum, String engineIp, RoleType role) {
+        return FlexMetricTags.of(
+                "code", String.valueOf(errorEnum.getCode()),
+                "engineIp", engineIp == null ? "" : engineIp,
+                "role", role == null ? "" : role.getCode());
+    }
+
+    /**
+     * WorkerStatus is the common capacity source for both regular engines and
+     * KVCM deployments.  KVCM does not poll GetCacheStatus, so cache capacity
+     * telemetry must be emitted from the WorkerStatus path rather than the
+     * optional cache-status checker.
+     */
+    private void reportKvCacheCapacity(WorkerStatus worker, WorkerStatus.EngineObservation status) {
+        long totalKvCacheTokens = status.totalKvCacheTokens();
+        if (totalKvCacheTokens <= 0) {
+            return;
+        }
+        long availableKvCacheTokens = Math.max(0, status.availableKvCacheTokens());
+        long usedKvCacheTokens = Math.max(0, totalKvCacheTokens - availableKvCacheTokens);
+        reportWorkerMetric(CACHE_USED_KV_CACHE_TOKENS, worker, usedKvCacheTokens);
+        reportWorkerMetric(CACHE_AVAILABLE_KV_CACHE_TOKENS, worker, availableKvCacheTokens);
+        reportWorkerMetric(CACHE_TOTAL_KV_CACHE_TOKENS, worker, totalKvCacheTokens);
+        reportWorkerMetric(
+                CACHE_USED_KV_CACHE_RATIO,
+                worker,
+                (usedKvCacheTokens * 100.0) / totalKvCacheTokens);
+    }
+
+    private void reportWorkerMetric(String metric, WorkerStatus worker, double value) {
+        monitor.report(
+                metric,
+                FlexMetricTags.of(
+                        "engineIp", valueOrEmpty(worker.getIp()), "role", worker.getRole().name()),
+                value);
+    }
+
+    private static String valueOrEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static FlexMetricTags lifecycleTags(String engineIp, String role, String group) {
+        return FlexMetricTags.of(
+                "engineIp", engineIp == null ? "" : engineIp,
+                "role", role == null ? "" : role,
+                "group", group == null ? "" : group);
+    }
+
+    private long reportDuration(
+            String metric, FlexMetricTags tags, long endTimeMs, long startTimeMs) {
+        if (endTimeMs <= 0L || startTimeMs <= 0L) {
+            return -1L;
+        }
+        long durationMs = Math.max(0L, endTimeMs - startTimeMs);
+        monitor.report(metric, tags, durationMs);
+        return durationMs;
+    }
+
+    public enum Event {
+        HEALTH_CHECK_OFFLINE,
+        ZK_NODE_OFFLINE,
+        SHUTDOWN_COMPLETE,
+        ZK_NODE_ONLINE,
+        WARMER_COMPLETE,
+        ONLINE_COMPLETE
     }
 }

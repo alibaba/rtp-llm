@@ -27,6 +27,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks scheduled cleanup detaches unavailable workers before cache cleanup and finishes earlier retirements if a later one fails.
+ */
 class WorkerRetirementCleanerTest {
 
     @Test
@@ -86,7 +89,10 @@ class WorkerRetirementCleanerTest {
 
     @Test
     void detachesEveryUnavailableWorkerBeforeCacheCleanup() throws Exception {
-        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(mock(ConfigService.class));
+        EndpointRegistry registry =
+                RunnerTestSupport.endpointRegistry(
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig()));
         CacheAwareService cache = mock(CacheAwareService.class);
         WorkerStatus first = status("127.0.0.1", 8080);
         WorkerStatus second = status("127.0.0.2", 8080);

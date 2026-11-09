@@ -39,11 +39,11 @@ public final class ContextResult {
      * Failure of one exact route; cleanup must finish before scheduling another route.
      */
     public record RouteFailure(
-            RouteExecution route,
+            RouteResult route,
             RouteFailureReason reason,
             org.flexlb.balance.endpoint.WorkerEndpoint failedEndpoint,
             String detail) {
-        public RouteFailure(RouteExecution route, RouteFailureReason reason, String detail) {
+        public RouteFailure(RouteResult route, RouteFailureReason reason, String detail) {
             this(
                     route,
                     reason,
@@ -53,24 +53,21 @@ public final class ContextResult {
                     detail);
         }
 
-        public RoleType failedRole() {
-            return failedEndpoint == null ? null : failedEndpoint.getStatus().getRole();
-        }
-
         public RouteFailure {
             java.util.Objects.requireNonNull(route, "route");
             java.util.Objects.requireNonNull(reason, "reason");
             detail = detail == null ? "Route admission failed" : detail;
         }
+
+        public RoleType failedRole() {
+            return failedEndpoint == null ? null : failedEndpoint.getStatus().getRole();
+        }
     }
 
     public enum PublicationResult {
-        PREPARED,
         RESTORED,
         PUBLISHED,
-        NOT_PUBLISHED,
         WITHDRAWN,
-        ROLLBACK_COMPLETED,
         FAILED
     }
 
@@ -125,8 +122,11 @@ public final class ContextResult {
         }
     }
 
+    /**
+     * Carries an ending cause and the resource completion evidence for one exact route.
+     */
     public record EndEvidence(
-            @lombok.With(lombok.AccessLevel.PACKAGE) RouteExecution route,
+            @lombok.With(lombok.AccessLevel.PACKAGE) RouteResult route,
             EndKind kind,
             RoleType role,
             boolean success,
@@ -135,12 +135,7 @@ public final class ContextResult {
             String detail,
             boolean prefillSettled,
             boolean decodeSettled) {
-        public static EndEvidence failure(
-                RouteExecution route, EndKind kind, StrategyErrorType errorType, String detail) {
-            return new EndEvidence(route, kind, null, false, 0L, errorType, detail, false, false);
-        }
-
-        public static EndEvidence publicationFailure(RouteExecution route, Response response) {
+        public static EndEvidence publicationFailure(RouteResult route, Response response) {
             var error = StrategyErrorType.DISPATCH_FAILED;
             if (response != null) {
                 for (var candidate : StrategyErrorType.values()) {
@@ -159,6 +154,11 @@ public final class ContextResult {
                             : response.getErrorMessage());
         }
 
+        public static EndEvidence failure(
+                RouteResult route, EndKind kind, StrategyErrorType errorType, String detail) {
+            return new EndEvidence(route, kind, null, false, 0L, errorType, detail, false, false);
+        }
+
         public static EndEvidence withdrawnFailure(String detail) {
             return new EndEvidence(
                     null,
@@ -173,7 +173,7 @@ public final class ContextResult {
         }
 
         public static EndEvidence externalFailure(
-                RouteExecution route, Response response, Throwable error) {
+                RouteResult route, Response response, Throwable error) {
             String detail =
                     error != null
                             ? "external future failure: " + error.getMessage()
@@ -183,7 +183,7 @@ public final class ContextResult {
             return failure(route, EndKind.FRONTEND, StrategyErrorType.DISPATCH_FAILED, detail);
         }
 
-        public static EndEvidence deliveryFailure(RouteExecution route, DeliveryEvidence evidence) {
+        public static EndEvidence deliveryFailure(RouteResult route, DeliveryEvidence evidence) {
             String detail;
             if (evidence instanceof PreparationFailure failed) {
                 detail = failed.detail();
@@ -201,8 +201,11 @@ public final class ContextResult {
         }
     }
 
+    /**
+     * Associates a Worker report with its exact route and resource reservation before updating request facts.
+     */
     public record WorkerRequestEvent(
-            RouteExecution route,
+            RouteResult route,
             DecodeResources.RequestReservation reservation,
             RoleType role,
             WorkerRequestEventType type,
@@ -243,7 +246,7 @@ public final class ContextResult {
      * An exact Endpoint retirement retained while admission finishes or rolls back.
      */
     public record EndpointRetirement(
-            RouteExecution route,
+            RouteResult route,
             DecodeResources.RequestReservation reservation,
             RoleType role,
             org.flexlb.balance.endpoint.WorkerEndpoint endpoint,
@@ -269,21 +272,7 @@ public final class ContextResult {
             boolean frontend,
             long nowMs,
             StrategyErrorType errorType,
-            String detail) {
-        public static Cancellation frontend(long nowMs, String exhaustionCause) {
-            return new Cancellation(
-                    0L,
-                    CancelReason.CLIENT_CANCELLED,
-                    true,
-                    nowMs,
-                    exhaustionCause == null
-                            ? StrategyErrorType.REQUEST_CANCELLED
-                            : StrategyErrorType.RESOURCE_EXHAUSTED,
-                    exhaustionCause == null
-                            ? CancelReason.CLIENT_CANCELLED.getMessage()
-                            : exhaustionCause);
-        }
-    }
+            String detail) {}
 
     public record CancellationFacts(
             CancelReason reason, StrategyErrorType errorType, String detail) {}
@@ -294,15 +283,6 @@ public final class ContextResult {
             boolean decodeSettled,
             boolean releaseAttempt,
             EndEvidence terminal) {}
-
-    /**
-     * notificationsDone includes successful removal/update of deadline registrations.
-     */
-    public record CloseProgress(
-            boolean notificationsAttempted,
-            boolean prefillSettled,
-            boolean decodeSettled,
-            boolean notificationsDone) {}
 
     public record ResponseCandidate(RequestContext owner, ResponseKind kind, long nowMs) {}
 
@@ -335,15 +315,8 @@ public final class ContextResult {
             implements DeliveryEvidence {}
 
     public record PreparationFailure(
-            Delivery.Member delivery, RouteExecution route, String detail, long nowMs)
+            Delivery.Member delivery, RouteResult route, String detail, long nowMs)
             implements DeliveryEvidence {}
-
-    public record PlacementFacts(
-            PlacementOperation operation,
-            @lombok.With(lombok.AccessLevel.PACKAGE) boolean completing,
-            @lombok.With(lombok.AccessLevel.PACKAGE) boolean published,
-            @lombok.With(lombok.AccessLevel.PACKAGE) EndpointRetirement pendingRetirement,
-            @lombok.With(lombok.AccessLevel.PACKAGE) boolean inactivityExpired) {}
 
     public record EngineFacts(
             boolean prefillObserved,
@@ -433,22 +406,6 @@ public final class ContextResult {
             boolean prefillProof,
             boolean decodeProof,
             long startedAtMs) {
-        static boolean releasable(DeliveryFacts delivery) {
-            if (delivery == null) {
-                return true;
-            }
-            if (delivery.send() == SendState.NOT_STARTED || delivery.send() == SendState.SENDING) {
-                return false;
-            }
-            if (delivery.identity().kind() == Delivery.SendMode.ROUTE_DECISION
-                    || delivery.send() == SendState.NOT_SENT) {
-                return true;
-            }
-            return delivery.abandonment() == null
-                    ? delivery.executionFinished()
-                    : delivery.prefillProof() && delivery.decodeProof();
-        }
-
         public RequestContext owner() {
             return identity.owner();
         }
@@ -535,6 +492,26 @@ public final class ContextResult {
                     startedAtMs);
         }
 
+        DeliveryFacts abandon(SendState next, CancelReason reason) {
+            return recordResult(next, reason, prefillProof, decodeProof);
+        }
+
+        static boolean releasable(DeliveryFacts delivery) {
+            if (delivery == null) {
+                return true;
+            }
+            if (delivery.send() == SendState.NOT_STARTED || delivery.send() == SendState.SENDING) {
+                return false;
+            }
+            if (delivery.identity().kind() == Delivery.SendMode.ROUTE_DECISION
+                    || delivery.send() == SendState.NOT_SENT) {
+                return true;
+            }
+            return delivery.abandonment() == null
+                    ? delivery.executionFinished()
+                    : delivery.prefillProof() && delivery.decodeProof();
+        }
+
         DeliveryFacts mergeReleaseProof(
                 boolean finished, boolean prefillSettled, boolean decodeSettled) {
             if ((!finished || executionFinished)
@@ -551,10 +528,6 @@ public final class ContextResult {
                     startedAtMs);
         }
 
-        DeliveryFacts abandon(SendState next, CancelReason reason) {
-            return recordResult(next, reason, prefillProof, decodeProof);
-        }
-
         DeliveryFacts recordEnd(CancelReason abandoned, boolean completed) {
             return new DeliveryFacts(
                     identity,
@@ -568,13 +541,15 @@ public final class ContextResult {
         }
     }
 
+    /**
+     * Records cancellation and restoration progress for one preemption attempt.
+     */
     public record PreemptionFacts(
             PreemptionRegistration identity,
             PreemptionCancelPhase phase,
             boolean cancelAcknowledged,
             @lombok.With(lombok.AccessLevel.PACKAGE) boolean finished,
             @lombok.With(lombok.AccessLevel.PACKAGE) EndEvidence pendingTerminal,
-            @lombok.With(lombok.AccessLevel.PACKAGE) boolean confirmationPending,
             @lombok.With(lombok.AccessLevel.PACKAGE) boolean restorationObserved) {
 
         PreemptionFacts recordReport(
@@ -585,17 +560,24 @@ public final class ContextResult {
                     cancelAcknowledged || next == PreemptionCancelPhase.CANCEL_REQUESTED,
                     finished || ledgerCommitted && terminal != null,
                     terminal,
-                    confirmationPending,
                     restorationObserved);
         }
     }
 
+    /**
+     * Records resource release and notification progress required before request archival.
+     */
     public record CloseFacts(
             boolean prefillSettled,
             boolean decodeSettled,
             boolean notificationsDone,
             @lombok.With(lombok.AccessLevel.PACKAGE) boolean expired,
             boolean notificationsAttempted) {
+        CloseFacts mergeSettlement(boolean prefillSettled, boolean decodeSettled) {
+            return withSettlement(
+                    this.prefillSettled || prefillSettled, this.decodeSettled || decodeSettled);
+        }
+
         CloseFacts withSettlement(boolean prefillSettled, boolean decodeSettled) {
             return new CloseFacts(
                     prefillSettled,
@@ -605,11 +587,6 @@ public final class ContextResult {
                     notificationsAttempted);
         }
 
-        CloseFacts mergeSettlement(boolean prefillSettled, boolean decodeSettled) {
-            return withSettlement(
-                    this.prefillSettled || prefillSettled, this.decodeSettled || decodeSettled);
-        }
-
         CloseFacts beginEnding(EndEvidence evidence, boolean prefillCompleted) {
             return new CloseFacts(
                     prefillSettled || evidence.prefillSettled() || prefillCompleted,
@@ -617,17 +594,6 @@ public final class ContextResult {
                     false,
                     expired || evidence.kind() == EndKind.INACTIVITY,
                     notificationsAttempted);
-        }
-
-        CloseFacts recordProgress(CloseProgress progress, boolean preemptionFinished) {
-            boolean notified =
-                    notificationsDone || progress.notificationsDone() && preemptionFinished;
-            return new CloseFacts(
-                    prefillSettled || progress.prefillSettled(),
-                    decodeSettled || progress.decodeSettled(),
-                    notified,
-                    expired,
-                    notificationsAttempted || progress.notificationsAttempted());
         }
 
         CloseFacts retainEnd(EndEvidence evidence) {
@@ -646,8 +612,8 @@ public final class ContextResult {
     public record Snapshot(
             Identity key,
             long createdAtMs,
-            RouteExecution route,
-            PlacementFacts placement,
+            RouteResult route,
+            PlacementOperation placement,
             DeliveryFacts delivery,
             EngineFacts engine,
             PreemptionFacts preemption,
@@ -681,6 +647,12 @@ public final class ContextResult {
                             || delivery.send() == SendState.UNKNOWN && engine.decodeAccepted());
         }
 
+        public Phase phase() {
+            return terminalRecord != null
+                    ? Phase.CLOSED
+                    : outcome != null ? Phase.ENDING : Phase.OPEN;
+        }
+
         public boolean preparedDelivery() {
             if (outcome != null
                     || route == null
@@ -691,17 +663,7 @@ public final class ContextResult {
                     || pendingEnd != null) {
                 return false;
             }
-            return placement == null
-                    || placement.published()
-                            && placement.operation().withdrawingRoute() == null
-                            && placement.pendingRetirement() == null
-                            && !placement.inactivityExpired();
-        }
-
-        public Phase phase() {
-            return terminalRecord != null
-                    ? Phase.CLOSED
-                    : outcome != null ? Phase.ENDING : Phase.OPEN;
+            return placement == null || placement.withdrawingRoute() == null;
         }
     }
 }

@@ -8,14 +8,13 @@ import static com.google.common.base.Preconditions.checkArgument;
  * Decode release is established separately by the endpoint ledger.
  */
 public record VictimResolution(String requestId, Outcome outcome) {
+    public VictimResolution {
+        java.util.Objects.requireNonNull(outcome, "outcome");
+        checkArgument(requestId != null && !requestId.isBlank(), "requestId is required");
+    }
 
     public enum Outcome {
         REQUEST_END,
         DELIVERY_RESUMED
-    }
-
-    public VictimResolution {
-        java.util.Objects.requireNonNull(outcome, "outcome");
-        checkArgument(requestId != null && !requestId.isBlank(), "requestId is required");
     }
 }

@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.OrderedPrefillRequestQueue;
 import org.flexlb.balance.endpoint.PrefillRequestQueue;
 import org.flexlb.balance.eviction.DecodePreemption;
@@ -28,7 +29,9 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.context.annotation.Primary;
 
-/** Assembles the scheduler, Prefill delivery, and Decode preemption from startup config. */
+/**
+ * Assembles the scheduler, Prefill delivery, and Decode preemption from startup config.
+ */
 @org.springframework.scheduling.annotation.EnableScheduling
 @Configuration(proxyBeanMethods = false)
 public class PlacementConfiguration {
@@ -46,14 +49,14 @@ public class PlacementConfiguration {
     }
 
     @Lazy
-    @Bean(destroyMethod = "")
+    @Bean(destroyMethod = "close")
     @Primary
     public ScheduledTaskTimer taskTimer() {
         return new ScheduledTaskTimer();
     }
 
     @Lazy
-    @Bean(destroyMethod = "")
+    @Bean(destroyMethod = "close")
     public ScheduledTaskTimer deadlineTaskTimer() {
         return new ScheduledTaskTimer(1, "request-scheduler-expiration-");
     }
@@ -162,7 +165,7 @@ public class PlacementConfiguration {
                 availability.getMaxKvUsagePercent());
     }
 
-    @Bean(destroyMethod = "")
+    @Bean(initMethod = "start", destroyMethod = "")
     @ConditionalOnMissingBean(RequestScheduler.class)
     public AbstractRequestScheduler requestScheduler(
             @Lazy RequestRouteSelector router,
@@ -177,7 +180,8 @@ public class PlacementConfiguration {
             TheoryCacheHitReporter cacheTrace,
             ConfigService configService,
             GroupPlanner grouping,
-            @Lazy PlacementQueue queue) {
+            @Lazy PlacementQueue queue,
+            EndpointRegistry endpoints) {
         FlexlbConfig config = configService.loadBalanceConfig();
         if (config.isQueue()) {
             return new QueuedRequestScheduler(
@@ -193,7 +197,8 @@ public class PlacementConfiguration {
                     cacheTrace,
                     availability,
                     queue,
-                    grouping);
+                    grouping,
+                    endpoints);
         }
         return new DirectRequestScheduler(
                 router,
@@ -203,6 +208,7 @@ public class PlacementConfiguration {
                 dispatcher,
                 responseCompletions,
                 deliveryReporter,
-                cacheTrace);
+                cacheTrace,
+                endpoints);
     }
 }

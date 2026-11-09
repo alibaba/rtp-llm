@@ -32,6 +32,9 @@ import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks submission ownership, input validation, and tracing and reporting observations across scheduler modes.
+ */
 class RequestLifecycleSubmissionTest {
     @BeforeEach
     void configureTrace() {
@@ -125,7 +128,8 @@ class RequestLifecycleSubmissionTest {
                             null,
                             System.currentTimeMillis());
             Delivery.Member claim;
-            try (var admission = SchedulerTestSupport.claim(owner, "702", pending)) {
+            var admission = SchedulerTestSupport.claim(owner, "702", pending);
+            {
                 assertEquals(
                         PlacementResult.Status.SUCCESS,
                         RequestProtocolTestSupport.commitRoute(
@@ -193,7 +197,7 @@ class RequestLifecycleSubmissionTest {
                             .submit(context)
                             .join()
                             .getCode());
-            assertFalse(owner.requests.retainsIdentity("701"));
+            assertFalse(owner.repository.retainsIdentity("701"));
         } finally {
             SchedulerTestSupport.shutdown(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));

@@ -17,8 +17,12 @@ import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * <p>One poll lease starts a status RPC for an exact discovered generation. The response is
+ * validated and its heartbeat evidence is recorded before status application is handed to the
+ * callback executor. Stale generations cannot publish new endpoint state.
+ */
 public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
-
     public GrpcWorkerStatusRunner(
             String modelName,
             WorkerStatus workerStatus,
@@ -60,6 +64,16 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
                         requestTimeoutMs,
                         roleType)
                 .whenComplete((response, failure) -> onRpcCompletion(response, failure, startTime));
+    }
+
+    @Override
+    protected void reportRpcFailure(boolean timeout) {
+        engineHealthReporter.reportStatusCheckerFail(
+                timeout
+                        ? BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT
+                        : BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
+                workerStatus.getMetricIpPort(),
+                roleType);
     }
 
     private void onRpcCompletion(
@@ -191,13 +205,6 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
         }
     }
 
-    private record StatusApplication(
-            WorkerEndpoint endpoint,
-            WorkerEndpoint.StatusChange change,
-            boolean newStatus,
-            boolean newFinished,
-            WorkerStatus.StepMetrics previousStep) {}
-
     /** Validate the frame once and commit one exact generation; external effects are returned as data. */
     private StatusApplication applyStatusLocked(WorkerStatus.StatusObservation observation) {
         Long version = observation.statusVersion();
@@ -251,34 +258,6 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
                 previousStep);
     }
 
-    private void observeCacheFeedback(WorkerStatus.StatusObservation observation) {
-        try {
-            for (var result :
-                    cacheAwareService.observeCacheHitFeedback(workerStatus, observation)) {
-                result.whenComplete(
-                        (comparison, error) -> {
-                            if (error != null || comparison == null) {
-                                logger.warn("Cache comparison failed at {}", ipPort, error);
-                                return;
-                            }
-                            try {
-                                org.slf4j.LoggerFactory.getLogger("pvLogger")
-                                        .info(
-                                                org.flexlb.util.JsonUtils.toStringOrEmpty(
-                                                        comparison));
-                                engineHealthReporter.reportCacheHitComparisonMetrics(
-                                        workerStatus, comparison);
-                            } catch (RuntimeException failure) {
-                                logger.warn(
-                                        "Cache comparison telemetry failed at {}", ipPort, failure);
-                            }
-                        });
-            }
-        } catch (RuntimeException failure) {
-            logger.warn("Cache feedback observation failed at {}", ipPort, failure);
-        }
-    }
-
     private void reportSuccessfulStatus(
             WorkerStatus.StatusObservation observation, long startTime, StatusApplication applied) {
         var endpoint = applied.endpoint();
@@ -326,6 +305,34 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
         }
     }
 
+    private void observeCacheFeedback(WorkerStatus.StatusObservation observation) {
+        try {
+            for (var result :
+                    cacheAwareService.observeCacheHitFeedback(workerStatus, observation)) {
+                result.whenComplete(
+                        (comparison, error) -> {
+                            if (error != null || comparison == null) {
+                                logger.warn("Cache comparison failed at {}", ipPort, error);
+                                return;
+                            }
+                            try {
+                                org.slf4j.LoggerFactory.getLogger("pvLogger")
+                                        .info(
+                                                org.flexlb.util.JsonUtils.toStringOrEmpty(
+                                                        comparison));
+                                engineHealthReporter.reportCacheHitComparisonMetrics(
+                                        workerStatus, comparison);
+                            } catch (RuntimeException failure) {
+                                logger.warn(
+                                        "Cache comparison telemetry failed at {}", ipPort, failure);
+                            }
+                        });
+            }
+        } catch (RuntimeException failure) {
+            logger.warn("Cache feedback observation failed at {}", ipPort, failure);
+        }
+    }
+
     private void logWorkerStatusUpdate(long startTime) {
         if (!logger.isDebugEnabled()) {
             return;
@@ -357,13 +364,10 @@ public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
                 TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - startTime);
     }
 
-    @Override
-    protected void reportRpcFailure(boolean timeout) {
-        engineHealthReporter.reportStatusCheckerFail(
-                timeout
-                        ? BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT
-                        : BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
-                workerStatus.getMetricIpPort(),
-                roleType);
-    }
+    private record StatusApplication(
+            WorkerEndpoint endpoint,
+            WorkerEndpoint.StatusChange change,
+            boolean newStatus,
+            boolean newFinished,
+            WorkerStatus.StepMetrics previousStep) {}
 }

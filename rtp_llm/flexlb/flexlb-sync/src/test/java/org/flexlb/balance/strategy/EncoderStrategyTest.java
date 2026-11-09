@@ -16,15 +16,6 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 class EncoderStrategyTest {
     private final EncoderSelectionStrategy strategy = new EncoderStrategy();
 
-    private record Candidate(
-            String address, String group, boolean available, long requestCount, long uncachedTokens)
-            implements EncoderSelectionStrategy.Candidate {}
-
-    private static Candidate candidate(
-            String address, boolean available, long requests, long tokens) {
-        return new Candidate(address, "group", available, requests, tokens);
-    }
-
     @Test
     void selectsLeastConcurrentWorkerWithoutUsingAvailableKvCache() {
         var busy = candidate("busy", true, 4, 0);
@@ -100,4 +91,13 @@ class EncoderStrategyTest {
                 PlacementResult.Status.BLOCKED,
                 strategy.select(List.of(other), "group", false, 10).status());
     }
+
+    private static Candidate candidate(
+            String address, boolean available, long requests, long tokens) {
+        return new Candidate(address, "group", available, requests, tokens);
+    }
+
+    private record Candidate(
+            String address, String group, boolean available, long requestCount, long uncachedTokens)
+            implements EncoderSelectionStrategy.Candidate {}
 }

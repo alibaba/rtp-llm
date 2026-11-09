@@ -14,24 +14,38 @@ import org.springframework.asm.Type;
 import java.io.IOException;
 import java.lang.reflect.Modifier;
 import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Protect the migrated consumer boundaries, without constraining unrelated endpoint APIs. */
+/**
+ * Protect the migrated consumer boundaries, without constraining unrelated endpoint APIs.
+ */
 class SchedulerArchitectureTest {
     @Test
-    void lifecycleDoesNotCommitDeliveryResources() throws IOException {
+    void schedulerAloneCommitsDeliveryResources() throws IOException {
+        var permitType =
+                Type.getInternalName(
+                        org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermit.class);
+        for (Class<?> sender : new Class<?>[] {DeliveryDispatcher.class, Delivery.class}) {
+            inspectCalls(
+                    sender,
+                    (owner, name) ->
+                            assertFalse(
+                                    owner.equals(permitType) && name.equals("dispatch"),
+                                    "Delivery sends committed work; Scheduler validates and commits resources"));
+        }
+        var schedulerCommits = new AtomicBoolean();
         inspectCalls(
                 AbstractRequestScheduler.class,
-                (owner, name) ->
-                        assertFalse(
-                                owner.equals(
-                                                Type.getInternalName(
-                                                        org.flexlb.balance.endpoint.DecodeEndpoint
-                                                                .EngineDispatchPermit.class))
-                                        && name.equals("dispatch"),
-                                "Dispatcher owns resource commits; Lifecycle owns request eligibility and settlement"));
+                (owner, name) -> {
+                    if (owner.equals(permitType) && name.equals("dispatch"))
+                        schedulerCommits.set(true);
+                });
+        assertTrue(
+                schedulerCommits.get(),
+                "Scheduler must commit Decode dispatch with request eligibility under one lock");
     }
 
     @Test
@@ -148,12 +162,9 @@ class SchedulerArchitectureTest {
     }
 
     @Test
-    void requestLifecycleDoesNotOwnTheTransportTimer() {
-        for (var field : AbstractRequestScheduler.class.getDeclaredFields()) {
-            assertFalse(
-                    TaskTimer.class.isAssignableFrom(field.getType()),
-                    "transport timeout facilities belong to Dispatcher, not request settlement");
-        }
+    void schedulerDoesNotOwnExternalTimerPools() throws IOException {
+        assertNoImplementationDependency(AbstractRequestScheduler.class, TaskTimer.class);
+        assertNoImplementationDependency(AbstractRequestScheduler.class, ScheduledTaskTimer.class);
     }
 
     @Test
@@ -180,7 +191,7 @@ class SchedulerArchitectureTest {
                         org.flexlb.balance.endpoint.EndpointRegistry.class,
                         org.flexlb.balance.endpoint.PrefillEndpoint.class,
                         org.flexlb.balance.endpoint.WorkerEndpoint.class,
-                        RouteExecution.class,
+                        RouteResult.class,
                         org.flexlb.service.monitor.EngineHealthReporter.class,
                         org.flexlb.cache.telemetry.CacheMetricsReporter.class
                     }) {
@@ -212,7 +223,7 @@ class SchedulerArchitectureTest {
             for (Class<?> dependency :
                     new Class<?>[] {
                         RequestContext.class,
-                        RouteExecution.class,
+                        RouteResult.class,
                         org.flexlb.balance.endpoint.PrefillEndpoint.class
                     }) {
                 assertNoImplementationDependency(reporter, dependency);
@@ -264,6 +275,7 @@ class SchedulerArchitectureTest {
                         "stop",
                         "awaitStopped",
                         "blockedRequestCount",
+                        "queuedRequestCount",
                         "close"),
                 Arrays.stream(RequestScheduler.class.getDeclaredMethods())
                         .filter(method -> !method.isSynthetic())
@@ -343,12 +355,12 @@ class SchedulerArchitectureTest {
     @Test
     void routeConstructionCannotInitializeRequestQueueOrder() throws IOException {
         inspectCalls(
-                RouteExecution.class,
+                RouteResult.class,
                 (owner, name) ->
                         assertFalse(
                                 owner.equals(Type.getInternalName(RequestContext.class))
                                         && name.equals("initializeExecutionOrder"),
-                                "RouteExecution must not assign request FIFO identity"));
+                                "RouteResult must not assign request FIFO identity"));
     }
 
     @Test
@@ -357,7 +369,6 @@ class SchedulerArchitectureTest {
                 new Class<?>[] {
                     OrderedRequestQueue.class,
                     org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.class,
-                    DeliveryExecution.class,
                     org.flexlb.engine.grpc.EngineGrpcClient.CancelReply.class,
                     org.flexlb.balance.eviction.DefaultDecodePreemption.class,
                     org.flexlb.balance.planner.BuiltinGroupPlanner.class
@@ -417,6 +428,26 @@ class SchedulerArchitectureTest {
                                 owner.equals(forbiddenName)
                                         || owner.startsWith(forbiddenName + "$"),
                                 consumer.getSimpleName() + " references " + owner + "." + name));
+    }
+
+    private static void assertNoDependency(Class<?> consumer, Class<?> forbidden) {
+        for (var field : consumer.getDeclaredFields()) {
+            assertFalse(field.getType() == forbidden, field.toString());
+        }
+        for (var constructor : consumer.getDeclaredConstructors()) {
+            assertFalse(
+                    Arrays.asList(constructor.getParameterTypes()).contains(forbidden),
+                    constructor.toString());
+        }
+        for (var method : consumer.getDeclaredMethods()) {
+            assertFalse(method.getReturnType() == forbidden, method.toString());
+            assertFalse(
+                    Arrays.asList(method.getParameterTypes()).contains(forbidden),
+                    method.toString());
+        }
+        for (Class<?> nested : consumer.getDeclaredClasses()) {
+            assertNoDependency(nested, forbidden);
+        }
     }
 
     /** Include method bodies and method-reference handles, which reflection cannot inspect. */
@@ -482,26 +513,6 @@ class SchedulerArchitectureTest {
         }
         for (Class<?> nested : consumer.getDeclaredClasses()) {
             inspectCalls(nested, check);
-        }
-    }
-
-    private static void assertNoDependency(Class<?> consumer, Class<?> forbidden) {
-        for (var field : consumer.getDeclaredFields()) {
-            assertFalse(field.getType() == forbidden, field.toString());
-        }
-        for (var constructor : consumer.getDeclaredConstructors()) {
-            assertFalse(
-                    Arrays.asList(constructor.getParameterTypes()).contains(forbidden),
-                    constructor.toString());
-        }
-        for (var method : consumer.getDeclaredMethods()) {
-            assertFalse(method.getReturnType() == forbidden, method.toString());
-            assertFalse(
-                    Arrays.asList(method.getParameterTypes()).contains(forbidden),
-                    method.toString());
-        }
-        for (Class<?> nested : consumer.getDeclaredClasses()) {
-            assertNoDependency(nested, forbidden);
         }
     }
 }

@@ -20,12 +20,15 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+/**
+ * Checks that completion observers share exact results without acquiring authority to cancel or complete them.
+ */
 class OperationCompletionTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void deliveryCompletionIsRetainedBeforeAndAfterSubscription(boolean completeFirst)
             throws Exception {
-        var member = new Delivery.Member(mock(RouteExecution.class), null);
+        var member = new Delivery.Member(mock(RouteResult.class), null);
         if (completeFirst) member.complete();
         var observed = member.completion().toCompletableFuture();
         assertEquals(completeFirst, observed.isDone());
@@ -37,7 +40,7 @@ class OperationCompletionTest {
 
     @Test
     void observersCannotCompleteOrCancelCanonicalDelivery() throws Exception {
-        var member = new Delivery.Member(mock(RouteExecution.class), null);
+        var member = new Delivery.Member(mock(RouteResult.class), null);
         var forged = member.completion().toCompletableFuture();
         assertTrue(forged.complete(null));
         assertFalse(member.completion().toCompletableFuture().isDone());

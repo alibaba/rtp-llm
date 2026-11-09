@@ -12,13 +12,15 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.netty.HttpNettyChannelContext;
 
 /**
- * @author lushirong
+ * Dispatches Netty read, error and channel-lifecycle events to callbacks stored on each channel.
+ * Callback failures are logged at the handler boundary.
  */
 @SuppressWarnings({"rawtypes", "unchecked"})
 @ChannelHandler.Sharable
 @Slf4j
 public class HttpNettyClientHandler extends SimpleChannelInboundHandler<HttpObject> {
     public static final String CHANNEL_CONTEXT_ATTR_NAME = "nettyCtx";
+
     private final Bootstrap bootstrap;
 
     public HttpNettyClientHandler(Bootstrap bootstrap) {
@@ -34,11 +36,6 @@ public class HttpNettyClientHandler extends SimpleChannelInboundHandler<HttpObje
      */
     public ChannelFuture connect(String host, int port) {
         return bootstrap.connect(host, port);
-    }
-
-    public HttpNettyChannelContext getNettyChannelContext(Channel channel) {
-        return (HttpNettyChannelContext)
-                channel.attr(AttributeKey.valueOf(CHANNEL_CONTEXT_ATTR_NAME)).get();
     }
 
     public void setNettyChannelContext(Channel channel, HttpNettyChannelContext nettyCtx) {
@@ -60,17 +57,9 @@ public class HttpNettyClientHandler extends SimpleChannelInboundHandler<HttpObje
         }
     }
 
-    @Override
-    protected void channelRead0(ChannelHandlerContext channelHandlerContext, HttpObject obj) {
-        try {
-            HttpNettyChannelContext nettyCtx =
-                    getNettyChannelContext(channelHandlerContext.channel());
-            if (nettyCtx != null && nettyCtx.getReadCallback() != null) {
-                nettyCtx.getReadCallback().accept(nettyCtx, obj);
-            }
-        } catch (Throwable t) {
-            log.error("channelRead0 exceptionCaught", t);
-        }
+    public HttpNettyChannelContext getNettyChannelContext(Channel channel) {
+        return (HttpNettyChannelContext)
+                channel.attr(AttributeKey.valueOf(CHANNEL_CONTEXT_ATTR_NAME)).get();
     }
 
     @Override
@@ -83,6 +72,19 @@ public class HttpNettyClientHandler extends SimpleChannelInboundHandler<HttpObje
             }
         } catch (Throwable t) {
             log.error("exceptionCaught: ", t);
+        }
+    }
+
+    @Override
+    protected void channelRead0(ChannelHandlerContext channelHandlerContext, HttpObject obj) {
+        try {
+            HttpNettyChannelContext nettyCtx =
+                    getNettyChannelContext(channelHandlerContext.channel());
+            if (nettyCtx != null && nettyCtx.getReadCallback() != null) {
+                nettyCtx.getReadCallback().accept(nettyCtx, obj);
+            }
+        } catch (Throwable t) {
+            log.error("channelRead0 exceptionCaught", t);
         }
     }
 }

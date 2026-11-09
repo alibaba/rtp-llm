@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.ContextResult;
 import org.flexlb.balance.scheduler.PlacementAvailability;
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.balance.strategy.EncoderSelectionStrategy;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.util.Failures;
@@ -18,12 +18,8 @@ import java.util.Map;
  */
 public final class EncoderEndpoint extends WorkerEndpoint
         implements EncoderSelectionStrategy.Candidate {
-    private record Tracked(RouteExecution route, boolean observed, long uncachedTokens) {}
-
-    public record RequestStatus(
-            RouteExecution route, ContextResult.WorkerRequestEventType kind, long errorCode) {}
-
     private Map<String, Tracked> requests = new HashMap<>();
+
     private final PlacementAvailability availability;
 
     public EncoderEndpoint(WorkerStatus status, PlacementAvailability availability) {
@@ -56,15 +52,6 @@ public final class EncoderEndpoint extends WorkerEndpoint
         }
     }
 
-    private long requestCountLocked() {
-        var engine = getStatus().committedEngineObservation();
-        long pending = 0;
-        for (var request : requests.values()) if (!request.observed()) pending++;
-        return Math.max(0, engine.runningQueryLen())
-                + Math.max(0, engine.waitingQueryLen())
-                + pending;
-    }
-
     @Override
     public long uncachedTokens() {
         Map<String, WorkerStatus.TaskObservation> active;
@@ -90,7 +77,7 @@ public final class EncoderEndpoint extends WorkerEndpoint
         return total;
     }
 
-    public boolean commit(RouteExecution route, int requestLimit) {
+    public boolean commit(RouteResult route, int requestLimit) {
         var request = route.ctx().data().getRequest();
         long hit =
                 request.getEncoderCacheHitLen() == null
@@ -109,7 +96,7 @@ public final class EncoderEndpoint extends WorkerEndpoint
         }
     }
 
-    public void release(RouteExecution route) {
+    public void release(RouteResult route) {
         boolean removed = false;
         stateLock().lock();
         try {
@@ -147,6 +134,61 @@ public final class EncoderEndpoint extends WorkerEndpoint
             WorkerStatus status, WorkerStatus.StatusObservation observation) {
         super.applyStatusHeartbeat(status, observation);
         return collectStatus(observation, false);
+    }
+
+    @Override
+    public void publishStatus(StatusChange change) {
+        if (change instanceof StatusChange.None) return;
+        var observed = (StatusChange.Encoder) change;
+        Throwable failure = null;
+        for (var request : observed.requests())
+            failure = Failures.run(failure, () -> publish(request));
+        failure = Failures.run(failure, () -> availability.changed(this));
+        Failures.rethrow(failure, "Encoder status publication failed");
+    }
+
+    @Override
+    protected void closeEndpoint() {
+        Map<String, Tracked> retired;
+        stateLock().lock();
+        try {
+            var result = requests;
+            requests = new HashMap<>();
+            retired = result;
+        } finally {
+            stateLock().unlock();
+        }
+        Throwable failure = null;
+        for (var request : retired.values()) {
+            var route = request.route();
+            failure =
+                    Failures.run(
+                            failure,
+                            () ->
+                                    route.ctx()
+                                            .data()
+                                            .getRequestScheduler()
+                                            .onEndpointRetired(
+                                                    route.ctx(),
+                                                    new ContextResult.EndpointRetirement(
+                                                            route,
+                                                            null,
+                                                            org.flexlb.dao.route.RoleType.ENCODER,
+                                                            this,
+                                                            "Encoder endpoint retired: " + ipPort(),
+                                                            System.currentTimeMillis())));
+        }
+        failure = Failures.run(failure, () -> availability.changed(this));
+        Failures.rethrow(failure, "Encoder retirement publication failed");
+    }
+
+    private long requestCountLocked() {
+        var engine = getStatus().committedEngineObservation();
+        long pending = 0;
+        for (var request : requests.values()) if (!request.observed()) pending++;
+        return Math.max(0, engine.runningQueryLen())
+                + Math.max(0, engine.waitingQueryLen())
+                + pending;
     }
 
     private StatusChange collectStatus(
@@ -195,17 +237,6 @@ public final class EncoderEndpoint extends WorkerEndpoint
         }
     }
 
-    @Override
-    public void publishStatus(StatusChange change) {
-        if (change instanceof StatusChange.None) return;
-        var observed = (StatusChange.Encoder) change;
-        Throwable failure = null;
-        for (var request : observed.requests())
-            failure = Failures.run(failure, () -> publish(request));
-        failure = Failures.run(failure, () -> availability.changed(this));
-        Failures.rethrow(failure, "Encoder status publication failed");
-    }
-
     private void publish(RequestStatus status) {
         var route = status.route();
         route.ctx()
@@ -223,38 +254,8 @@ public final class EncoderEndpoint extends WorkerEndpoint
                                 System.currentTimeMillis()));
     }
 
-    @Override
-    protected void closeEndpoint() {
-        Map<String, Tracked> retired;
-        stateLock().lock();
-        try {
-            var result = requests;
-            requests = new HashMap<>();
-            retired = result;
-        } finally {
-            stateLock().unlock();
-        }
-        Throwable failure = null;
-        for (var request : retired.values()) {
-            var route = request.route();
-            failure =
-                    Failures.run(
-                            failure,
-                            () ->
-                                    route.ctx()
-                                            .data()
-                                            .getRequestScheduler()
-                                            .onEndpointRetired(
-                                                    route.ctx(),
-                                                    new ContextResult.EndpointRetirement(
-                                                            route,
-                                                            null,
-                                                            org.flexlb.dao.route.RoleType.ENCODER,
-                                                            this,
-                                                            "Encoder endpoint retired: " + ipPort(),
-                                                            System.currentTimeMillis())));
-        }
-        failure = Failures.run(failure, () -> availability.changed(this));
-        Failures.rethrow(failure, "Encoder retirement publication failed");
-    }
+    private record Tracked(RouteResult route, boolean observed, long uncachedTokens) {}
+
+    public record RequestStatus(
+            RouteResult route, ContextResult.WorkerRequestEventType kind, long errorCode) {}
 }

@@ -59,7 +59,7 @@ class RequestPreemptionRegressionTest {
     private RequestContext context;
     private DecodeEndpoint decode;
     private PrefillEndpoint prefill;
-    private RouteExecution route;
+    private RouteResult route;
     private Delivery.Member delivery;
     private CompletableFuture<Response> response;
     private long statusVersion;
@@ -104,15 +104,20 @@ class RequestPreemptionRegressionTest {
                 EndpointTestSupport.decode(
                         WorkerStatus.createDiscovered(
                                 RoleType.DECODE, null, "127.0.0.1", 8081, 8091, null),
-                        scheduler.requests);
+                        scheduler.repository);
         reportDecode(null, false);
         DecodeResources.RequestReservation reservation;
         {
             var selectedEndpoint = decode;
 
             reservation =
-                    decode.tryReserveQueuedRequest(
-                                    String.valueOf(REQUEST_ID), KV_TOKENS, KV_TOKENS, 50, CAPACITY)
+                    decode.tryRegisterSelection(
+                                    decode.routingView(),
+                                    String.valueOf(REQUEST_ID),
+                                    KV_TOKENS,
+                                    KV_TOKENS,
+                                    50,
+                                    CAPACITY)
                             .value();
         }
         assertNotNull(reservation);
@@ -132,8 +137,8 @@ class RequestPreemptionRegressionTest {
                         decode,
                         reservation,
                         System.currentTimeMillis());
-        try (var admission = RequestProtocolTestSupport.beginAdmission(scheduler, context);
-                var finished = RequestProtocolTestSupport.finishOnExit(admission)) {
+        var admission = RequestProtocolTestSupport.beginAdmission(scheduler, context);
+        try (var finished = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
                     org.flexlb.balance.PlacementResult.Status.SUCCESS,
@@ -143,13 +148,13 @@ class RequestPreemptionRegressionTest {
         var permit = decode.acquireDispatchPermit(reservation, CAPACITY).value();
         assertNotNull(permit);
         delivery =
-                DeliveryDispatcher.commitDelivery(
-                        scheduler,
+                scheduler.commitDelivery(
                         new org.flexlb.balance.scheduler.Delivery.Member(route, permit),
                         Delivery.SendMode.BATCH_ENQUEUE,
                         BATCH_ID);
         assertNotNull(delivery);
-        assertTrue(scheduler.tryStartSend(delivery));
+        assertEquals(
+                ContextResult.SendState.SENDING, delivery.owner().snapshot().delivery().send());
     }
 
     @AfterEach
@@ -220,7 +225,7 @@ class RequestPreemptionRegressionTest {
                 },
                 () ->
                         assertTrue(
-                                scheduler.requests.isCurrent(context),
+                                scheduler.repository.isCurrent(context),
                                 "unproven remote ownership stays registered"),
                 () ->
                         assertTrue(

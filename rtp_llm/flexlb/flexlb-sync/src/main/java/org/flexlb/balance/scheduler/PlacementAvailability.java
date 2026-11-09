@@ -16,28 +16,12 @@ import static com.google.common.base.Preconditions.checkState;
 /**
  * Versioned, O(1) notification edge for logical placement capacity.
  *
- * <p>It never owns or iterates requests. Exact-endpoint changes also advance
- * their group and role-wide keys, while exact waiters consume only the exact
- * edge. This prevents one worker's release from waking requests parked on
- * every worker in the same group.</p>
+ * <p>It never owns or iterates requests. A worker change advances its group and role versions.
+ * Listeners receive the exact worker for route invalidation; waiting requests retry selection
+ * across the allowed group instead of retaining a worker-specific capacity promise.</p>
  */
 @Component
 public final class PlacementAvailability {
-
-    @FunctionalInterface
-    public interface Listener {
-        void onAvailabilityChanged(PlacementKey key);
-
-        default void onEndpointChanged(WorkerEndpoint endpoint) {
-            var status = endpoint.getStatus();
-            onAvailabilityChanged(
-                    PlacementKey.exact(
-                            status.getRole(),
-                            status.topologySnapshot().group(),
-                            endpoint.ipPort()));
-        }
-    }
-
     private final AtomicLong sequence = new AtomicLong();
     private final AtomicLong forgottenThrough = new AtomicLong();
     private final ConcurrentMap<PlacementKey, Long> lastChanged = new ConcurrentHashMap<>();
@@ -54,11 +38,14 @@ public final class PlacementAvailability {
         }
     }
 
-    /** Publish one worker's edge without retaining history from a retired generation. */
+    /**
+     * Publish one worker's edge without retaining history from a retired generation.
+     */
     public void changed(WorkerStatus worker, String address) {
         changed(
                 PlacementKey.exact(worker.getRole(), worker.topologySnapshot().group(), address),
-                worker);
+                worker,
+                null);
     }
 
     public void changed(WorkerEndpoint endpoint) {
@@ -75,38 +62,39 @@ public final class PlacementAvailability {
      * Shared group history can also be discarded: older plans retry using the floor,
      * and active members publish subsequent edges normally. No waiters are broadcast.
      */
-    public void clearRetired(WorkerStatus worker, String address) {
+    public void clearRetired(WorkerStatus worker) {
         checkState(!worker.isActiveGeneration(), "Cannot clear an active worker generation");
         discardHistory(
-                PlacementKey.exact(worker.getRole(), worker.topologySnapshot().group(), address),
+                new PlacementKey(worker.getRole(), worker.topologySnapshot().group(), null),
                 sequence.incrementAndGet());
     }
 
-    private void changed(PlacementKey key, WorkerStatus worker) {
-        changed(key, worker, null);
+    long sequence() {
+        return sequence.get();
+    }
+
+    long lastChangedSequence(PlacementKey key) {
+        long version = lastChanged.getOrDefault(key.waitingDomain(), 0L);
+        return Math.max(version, forgottenThrough.get());
     }
 
     private void changed(PlacementKey key, WorkerStatus worker, WorkerEndpoint endpoint) {
         Objects.requireNonNull(key, "key");
         long next = sequence.incrementAndGet();
-        if (worker != null && !worker.isActiveGeneration()) {
+        if (!worker.isActiveGeneration()) {
             forgottenThrough.accumulateAndGet(next, Math::max);
         } else {
             // An older publisher may finish after retirement and replacement publication.
-            lastChanged.merge(key.capacityDomain(), next, Math::max);
-            if (key.endpoint() != null) {
-                lastChanged.merge(new PlacementKey(key.role(), key.group(), null), next, Math::max);
-            }
+            lastChanged.merge(key.waitingDomain(), next, Math::max);
             if (key.group() != null) {
                 lastChanged.merge(PlacementKey.anyGroup(key.role()), next, Math::max);
             }
-            if (worker != null && !worker.isActiveGeneration()) {
+            if (!worker.isActiveGeneration()) {
                 discardHistory(key, next);
             }
         }
-        // One physical capacity edge produces one callback. The exact key is
-        // sufficient for group/role waiters through their relevance match and
-        // avoids three global-lock acquisitions for every endpoint release.
+        // Preserve one callback per physical change, including the worker identity needed
+        // to invalidate existing routes. Wait queues use only the role and group.
         for (Listener listener : listeners) {
             try {
                 if (endpoint == null) listener.onAvailabilityChanged(key);
@@ -121,20 +109,20 @@ public final class PlacementAvailability {
         // Publish the floor before deletion so a plan cannot mistake a removed edge for no change.
         forgottenThrough.accumulateAndGet(through, Math::max);
         lastChanged.computeIfPresent(
-                key.capacityDomain(), (ignored, version) -> version <= through ? null : version);
-        if (key.group() != null) {
-            lastChanged.computeIfPresent(
-                    new PlacementKey(key.role(), key.group(), null),
-                    (ignored, version) -> version <= through ? null : version);
+                key.waitingDomain(), (ignored, version) -> version <= through ? null : version);
+    }
+
+    @FunctionalInterface
+    public interface Listener {
+        default void onEndpointChanged(WorkerEndpoint endpoint) {
+            var status = endpoint.getStatus();
+            onAvailabilityChanged(
+                    PlacementKey.exact(
+                            status.getRole(),
+                            status.topologySnapshot().group(),
+                            endpoint.ipPort()));
         }
-    }
 
-    long sequence() {
-        return sequence.get();
-    }
-
-    long lastChangedSequence(PlacementKey key) {
-        long version = lastChanged.getOrDefault(key.capacityDomain(), 0L);
-        return Math.max(version, forgottenThrough.get());
+        void onAvailabilityChanged(PlacementKey key);
     }
 }

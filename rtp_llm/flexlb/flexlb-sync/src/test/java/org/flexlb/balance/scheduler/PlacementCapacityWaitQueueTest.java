@@ -11,13 +11,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks ordered retries and lost-wakeup prevention across capacity domains without binding requests to a Worker.
+ */
 class PlacementCapacityWaitQueueTest {
+    private static final PlacementKey A = PlacementKey.exact(RoleType.PREFILL, "g", "a:8000");
+    private static final PlacementKey B = PlacementKey.exact(RoleType.PREFILL, "other", "b:8000");
+
     private final PlacementAvailability availability = new PlacementAvailability();
     private final PlacementCapacityWaitQueue queue =
             new PlacementCapacityWaitQueue(new OrderedRequestQueue(true).order(), availability);
+
     private long sequence;
-    private static final PlacementKey A = PlacementKey.exact(RoleType.PREFILL, "g", "a:8000");
-    private static final PlacementKey B = PlacementKey.exact(RoleType.PREFILL, "g", "b:8000");
 
     @Test
     void oneCapacityEdgeDoesNotReplayAnEntireBacklog() {
@@ -138,7 +143,7 @@ class PlacementCapacityWaitQueueTest {
     }
 
     @Test
-    void exactReleaseMatchesRoleAndAddressAndAlsoWakesGroupAndWildcard() {
+    void workerReleaseWakesItsGroupAndRoleWithoutWakingOtherGroupsOrRoles() {
         var exact = entry(50);
         var other = entry(50);
         var group = entry(50);
@@ -150,17 +155,20 @@ class PlacementCapacityWaitQueueTest {
         queue.park(wildcard, PlacementKey.anyGroup(RoleType.PREFILL), 0);
         queue.park(decode, PlacementKey.exact(RoleType.DECODE, "g", "a:8000"), 0);
         queue.capacityChanged(A);
-        assertEquals(List.of(exact, group, wildcard), drain(10));
+        assertEquals(List.of(exact, wildcard), drain(10));
+        assertTrue(queue.isWaiting(group), "one retry per group is active at a time");
+        queue.remove(exact);
+        assertEquals(List.of(group), drain(10));
         assertTrue(queue.isWaiting(other));
         assertTrue(queue.isWaiting(decode));
     }
 
     @Test
-    void groupEventDoesNotWakeExactEndpointWaiters() {
+    void sameGroupEventWakesRequestsRegardlessOfOriginalEndpoint() {
         var exact = entry(50);
         queue.park(exact, A, 0);
-        queue.capacityChanged(new PlacementKey(RoleType.PREFILL, "g", null));
-        assertTrue(drain(10).isEmpty());
+        queue.capacityChanged(PlacementKey.exact(RoleType.PREFILL, "g", "different:8000"));
+        assertEquals(List.of(exact), drain(10));
     }
 
     @Test
@@ -203,15 +211,15 @@ class PlacementCapacityWaitQueueTest {
     }
 
     @Test
-    void topologyReplacementWakesExactWaitEvenAfterGroupChange() {
+    void movedWorkerDoesNotWakeItsFormerGroup() {
         var first = entry(50);
         queue.park(first, A, 0);
         PlacementKey replacement = PlacementKey.exact(A.role(), "new-group", A.endpoint());
         queue.capacityChanged(replacement);
-        assertEquals(List.of(first), drain(1));
+        assertTrue(drain(1).isEmpty());
         long snapshot = availability.sequence();
         PlacementAvailabilityTestSupport.changed(availability, replacement);
-        assertFalse(queue.park(first, A, snapshot));
+        assertTrue(queue.park(first, A, snapshot));
     }
 
     @Test
@@ -247,7 +255,6 @@ class PlacementCapacityWaitQueueTest {
             String scope, String eventKind, boolean beforePark, boolean matches) {
         PlacementKey blocker =
                 switch (scope) {
-                    case "EXACT" -> A;
                     case "GROUP" -> new PlacementKey(RoleType.PREFILL, "g", null);
                     case "ROLE" -> PlacementKey.anyGroup(RoleType.PREFILL);
                     default -> throw new AssertionError(scope);
@@ -255,7 +262,7 @@ class PlacementCapacityWaitQueueTest {
         PlacementKey event =
                 switch (eventKind) {
                     case "SAME" -> A;
-                    case "OTHER_ADDRESS" -> B;
+                    case "OTHER_ADDRESS" -> PlacementKey.exact(RoleType.PREFILL, "g", "b:8000");
                     case "MOVED_GROUP" ->
                             PlacementKey.exact(RoleType.PREFILL, "other", A.endpoint());
                     case "GROUP_ONLY" -> new PlacementKey(RoleType.PREFILL, "g", null);
@@ -288,7 +295,7 @@ class PlacementCapacityWaitQueueTest {
 
     static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments>
             capacityEventCases() {
-        return java.util.stream.Stream.of("EXACT", "GROUP", "ROLE")
+        return java.util.stream.Stream.of("GROUP", "ROLE")
                 .flatMap(
                         scope ->
                                 java.util.stream.Stream.of(
@@ -305,13 +312,6 @@ class PlacementCapacityWaitQueueTest {
                                                                         before -> {
                                                                             boolean matches =
                                                                                     switch (scope) {
-                                                                                        case "EXACT" ->
-                                                                                                event
-                                                                                                                .equals(
-                                                                                                                        "SAME")
-                                                                                                        || event
-                                                                                                                .equals(
-                                                                                                                        "MOVED_GROUP");
                                                                                         case "GROUP" ->
                                                                                                 event
                                                                                                                 .equals(

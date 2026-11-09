@@ -4,10 +4,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 
-/** Best-effort boundary for monitoring backends. */
+/**
+ * Best-effort boundary for monitoring backends.
+ */
 @Slf4j
 public final class SafeFlexMonitor implements FlexMonitor {
-
     private final FlexMonitor delegate;
     private final FlexMonitor observations;
 
@@ -43,6 +44,15 @@ public final class SafeFlexMonitor implements FlexMonitor {
             T source,
             java.util.function.ToDoubleFunction<T> value) {
         run(name, () -> observations.observe(name, type, source, value));
+    }
+
+    /** Isolate direct metric registration during component initialization. */
+    public static void run(String name, Runnable metricOperation) {
+        try {
+            metricOperation.run();
+        } catch (Throwable failure) {
+            logFailure(name, failure);
+        }
     }
 
     @Override
@@ -114,15 +124,6 @@ public final class SafeFlexMonitor implements FlexMonitor {
             delegate.close();
         } catch (Throwable failure) {
             logFailure("close", failure);
-        }
-    }
-
-    /** Isolate direct metric registration during component initialization. */
-    public static void run(String name, Runnable metricOperation) {
-        try {
-            metricOperation.run();
-        } catch (Throwable failure) {
-            logFailure(name, failure);
         }
     }
 

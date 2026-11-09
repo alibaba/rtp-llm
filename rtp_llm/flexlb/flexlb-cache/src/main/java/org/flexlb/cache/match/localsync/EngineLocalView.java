@@ -23,7 +23,6 @@ import java.util.concurrent.RejectedExecutionException;
 @Slf4j
 @Component
 public class EngineLocalView {
-
     /**
      * Core storage structure: EngineIpPort -> Set<Long>
      */
@@ -40,26 +39,6 @@ public class EngineLocalView {
      * Dynamic sync interval manager
      */
     @Autowired private DynamicCacheIntervalService dynamicIntervalManager;
-
-    private ForkJoinPool diffPool() {
-        if (closed) {
-            throw new IllegalStateException("Engine local view is closed");
-        }
-        ForkJoinPool pool = customPool;
-        if (pool != null) {
-            return pool;
-        }
-        synchronized (this) {
-            if (closed) {
-                throw new IllegalStateException("Engine local view is closed");
-            }
-            if (customPool == null) {
-                customPool =
-                        new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), 8));
-            }
-            return customPool;
-        }
-    }
 
     @PreDestroy
     public synchronized void shutdown() {
@@ -131,6 +110,21 @@ public class EngineLocalView {
     }
 
     /**
+     * Get all cache block IDs of an engine. The returned set is borrowed;
+     * callers hold the generation's cacheMutationLock while iterating it.
+     *
+     * @param engineIPort Engine IP
+     * @return Cache block ID set
+     */
+    public Set<Long> getEngineCacheBlocks(String engineIPort) {
+        if (engineIPort == null) {
+            return Collections.emptySet();
+        }
+        Set<Long> engineCache = engineViews.get(engineIPort);
+        return engineCache == null ? Collections.emptySet() : engineCache;
+    }
+
+    /**
      * Add or update engine cache block
      *
      * @param engineIPort     Engine IP
@@ -195,21 +189,6 @@ public class EngineLocalView {
     }
 
     /**
-     * Get all cache block IDs of an engine. The returned set is borrowed;
-     * callers hold the generation's cacheMutationLock while iterating it.
-     *
-     * @param engineIPort Engine IP
-     * @return Cache block ID set
-     */
-    public Set<Long> getEngineCacheBlocks(String engineIPort) {
-        if (engineIPort == null) {
-            return Collections.emptySet();
-        }
-        Set<Long> engineCache = engineViews.get(engineIPort);
-        return engineCache == null ? Collections.emptySet() : engineCache;
-    }
-
-    /**
      * Clear all data
      */
     public void clear() {
@@ -239,5 +218,25 @@ public class EngineLocalView {
      */
     public Set<String> getAllEngineIpPorts() {
         return engineViews.keySet();
+    }
+
+    private ForkJoinPool diffPool() {
+        if (closed) {
+            throw new IllegalStateException("Engine local view is closed");
+        }
+        ForkJoinPool pool = customPool;
+        if (pool != null) {
+            return pool;
+        }
+        synchronized (this) {
+            if (closed) {
+                throw new IllegalStateException("Engine local view is closed");
+            }
+            if (customPool == null) {
+                customPool =
+                        new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), 8));
+            }
+            return customPool;
+        }
     }
 }

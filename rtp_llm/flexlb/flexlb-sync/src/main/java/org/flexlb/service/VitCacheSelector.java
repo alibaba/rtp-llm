@@ -3,7 +3,7 @@ package org.flexlb.service;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RouteResult;
+import org.flexlb.balance.scheduler.RoleSelection;
 import org.flexlb.balance.strategy.VitSelectionStrategy;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -18,33 +18,42 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
-/** Selects cache-affine ViT endpoints and owns temporary cold-key placements. */
+/**
+ * Selects cache-affine ViT endpoints and owns temporary cold-key placements.
+ */
 @Component
 public class VitCacheSelector {
     private final VitSelectionStrategy strategy;
     private final VitCacheDirectory directory;
     private final EndpointRegistry workers;
 
-    private record MatchScore(int hashHits, int embeddingHits, int gpuHits, int pendingHits)
-            implements Comparable<MatchScore> {
-        @Override
-        public int compareTo(MatchScore other) {
-            int result = Integer.compare(hashHits, other.hashHits);
-            if (result == 0) {
-                result = Integer.compare(embeddingHits, other.embeddingHits);
-            }
-            if (result == 0) {
-                result = Integer.compare(gpuHits, other.gpuHits);
-            }
-            return result == 0 ? Integer.compare(pendingHits, other.pendingHits) : result;
-        }
-    }
-
     public VitCacheSelector(
             VitCacheDirectory directory, EndpointRegistry workers, VitSelectionStrategy strategy) {
         this.strategy = Objects.requireNonNull(strategy);
         this.directory = directory;
         this.workers = workers;
+    }
+
+    /**
+     * Return the validated VIT selection without mutating the caller's route.
+     */
+    public synchronized RoleSelection.Auxiliary selectForRoute(RequestContext ctx, String group) {
+        ServerStatus result =
+                ctx.data().getRequest().getSelectedVit() == null
+                        ? select(ctx, group)
+                        : validate(ctx, group);
+        if (!result.isSuccess()) {
+            return null;
+        }
+        WorkerEndpoint selectedEndpoint =
+                workers.selectEndpoint(RoleType.VIT, result.getLogicalIpPort());
+        if (selectedEndpoint == null) {
+            return null;
+        }
+        if (selectedEndpoint.getStatus().getGenerationId() != result.getWorkerGeneration()) {
+            return null;
+        }
+        return new RoleSelection.Auxiliary(selectedEndpoint, result);
     }
 
     public synchronized ServerStatus select(RequestContext ctx, String group) {
@@ -115,29 +124,6 @@ public class VitCacheSelector {
         return status(worker, ctx.data().getRequestId());
     }
 
-    /**
-     * Adds the current VIT Endpoint and its routing metadata to the route.
-     */
-    public synchronized ServerStatus selectForRoute(
-            RequestContext ctx, String group, RouteResult.Builder route) {
-        ServerStatus result =
-                ctx.data().getRequest().getSelectedVit() == null
-                        ? select(ctx, group)
-                        : validate(ctx, group);
-        if (!result.isSuccess()) {
-            return null;
-        }
-        WorkerEndpoint selectedEndpoint =
-                workers.selectEndpoint(RoleType.VIT, result.getLogicalIpPort());
-        if (selectedEndpoint == null) {
-            return null;
-        }
-        if (selectedEndpoint.getStatus().getGenerationId() != result.getWorkerGeneration()) {
-            return null;
-        }
-        return route.add(selectedEndpoint, result, -1L, 0L);
-    }
-
     private static ServerStatus errorStatus(StrategyErrorType error) {
         ServerStatus status = new ServerStatus();
         status.setCode(error.getErrorCode());
@@ -159,5 +145,20 @@ public class VitCacheSelector {
         status.setRequestId(requestId);
         status.setSuccess(true);
         return status;
+    }
+
+    private record MatchScore(int hashHits, int embeddingHits, int gpuHits, int pendingHits)
+            implements Comparable<MatchScore> {
+        @Override
+        public int compareTo(MatchScore other) {
+            int result = Integer.compare(hashHits, other.hashHits);
+            if (result == 0) {
+                result = Integer.compare(embeddingHits, other.embeddingHits);
+            }
+            if (result == 0) {
+                result = Integer.compare(gpuHits, other.gpuHits);
+            }
+            return result == 0 ? Integer.compare(pendingHits, other.pendingHits) : result;
+        }
     }
 }

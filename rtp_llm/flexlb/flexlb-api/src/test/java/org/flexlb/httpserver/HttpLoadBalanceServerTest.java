@@ -22,8 +22,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks HTTP status views and response contracts for scheduler queues, blocked requests and cache
- * versions.
+ * Checks that HTTP status endpoints expose the scheduler and worker state supplied by their owners.
  */
 class HttpLoadBalanceServerTest {
 
@@ -76,7 +75,8 @@ class HttpLoadBalanceServerTest {
         }
         when(configService.loadBalanceConfig()).thenReturn(config);
         when(consistency.getMasterHostIpPort()).thenReturn("127.0.0.1:7001");
-        when(requests.pendingDeliveryRequestCount()).thenReturn(7);
+        var scheduler = mock(org.flexlb.balance.scheduler.RequestScheduler.class);
+        when(scheduler.queuedRequestCount()).thenReturn(7);
         when(synchronizer.isReady()).thenReturn(true);
 
         HttpLoadBalanceServer server =
@@ -87,6 +87,7 @@ class HttpLoadBalanceServerTest {
                         endpointRegistry,
                         synchronizer,
                         new ServerScheduleLatencyRecorder());
+        server.configureScheduling(scheduler);
         WebTestClient client =
                 WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
 
@@ -108,7 +109,7 @@ class HttpLoadBalanceServerTest {
                 .jsonPath("$.ready")
                 .isEqualTo(true);
 
-        verify(requests).pendingDeliveryRequestCount();
+        verify(scheduler).queuedRequestCount();
     }
 
     @Test

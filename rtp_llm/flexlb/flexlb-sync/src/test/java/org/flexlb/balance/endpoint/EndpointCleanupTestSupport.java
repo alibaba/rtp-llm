@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.enums.TaskPhase;
@@ -20,7 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Real endpoint ledgers for scheduler-directory cleanup tests across package boundaries. */
+/**
+ * Real endpoint ledgers for scheduler-directory cleanup tests across package boundaries.
+ */
 public final class EndpointCleanupTestSupport {
     private EndpointCleanupTestSupport() {}
 
@@ -36,8 +38,12 @@ public final class EndpointCleanupTestSupport {
         EndpointTestSupport.applyStatus(endpoint, response).run();
     }
 
+    /**
+     * Creates committed Prefill requests with a controlled clock so cleanup tests can expire and retain exact ledger entries.
+     */
     public static final class PrefillLedger {
         private final boolean batch;
+
         private final AtomicLong clock = new AtomicLong(100);
         private final ReentrantLock lock = new ReentrantLock();
         private final PrefillEndpoint state =
@@ -56,10 +62,8 @@ public final class EndpointCleanupTestSupport {
             this.batch = batch;
         }
 
-        public record Owner(RouteExecution item, Runnable rollback, long batchId) {}
-
         public Owner commit(long requestId, long batchId, long predictedMs) {
-            RouteExecution item = mock(RouteExecution.class);
+            RouteResult item = mock(RouteResult.class);
             when(item.requestId()).thenReturn(String.valueOf(requestId));
             when(item.seqLen()).thenReturn(100L);
             if (batch) {
@@ -72,9 +76,10 @@ public final class EndpointCleanupTestSupport {
                                             state, item));
                         });
                 {
-                    var reservation = state.reserveBatch(batchId, 1).value();
-                    try (var preparationReservation =
-                            EndpointTestSupport.preparation(reservation)) {
+                    var reservation =
+                            new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(
+                                    batchId, 1);
+                    {
                         assertNotNull(
                                 reservation,
                                 "the expired batch must release its sole capacity slot");
@@ -85,12 +90,15 @@ public final class EndpointCleanupTestSupport {
 
                             assertNotNull(handoff);
                         }
-                        return new Owner(item, () -> state.rollback(reservation), batchId);
+                        return new Owner(item, () -> state.releaseRequest(item), batchId);
                     }
                 }
             }
             {
-                var reservation = state.reserveUnqueuedRoute(item, predictedMs, 1).value();
+                var reservation =
+                        org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                        state, item, predictedMs, 1)
+                                .value();
                 try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                     assertNotNull(
                             reservation,
@@ -98,7 +106,7 @@ public final class EndpointCleanupTestSupport {
                     {
                         var handoff =
                                 org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                        state, item, reservation);
+                                        state, item);
 
                         assertNotNull(handoff);
                     }
@@ -154,5 +162,7 @@ public final class EndpointCleanupTestSupport {
             assertEquals(0L, state.committedSnapshot().totalRemainingWorkMs().orElseThrow());
             assertTrue(state.batchCapacityAvailable(1));
         }
+
+        public record Owner(RouteResult item, Runnable rollback, long batchId) {}
     }
 }

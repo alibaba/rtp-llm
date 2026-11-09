@@ -65,7 +65,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * </ol>
  */
 class DecodeKvAllocationSemanticsTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final int SPB = 1024;
@@ -76,10 +75,10 @@ class DecodeKvAllocationSemanticsTest {
                     "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
     private MockControlServer controlServer;
+
     private int nextPortOffset;
 
     @BeforeEach
@@ -440,6 +439,19 @@ class DecodeKvAllocationSemanticsTest {
         return service;
     }
 
+    private void startControlServer() {
+        if (controlServer == null) {
+            try {
+                controlServer =
+                        new MockControlServer(
+                                services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
+                controlServer.start();
+            } catch (IOException e) {
+                throw new IllegalStateException("control server failed to start", e);
+            }
+        }
+    }
+
     private JavaMockEngineCluster.FastRpcService newDecodeService(
             MockPerformanceModel model, int blocks) {
         int port = BASE_PORT + nextPortOffset++;
@@ -462,22 +474,8 @@ class DecodeKvAllocationSemanticsTest {
         return service;
     }
 
-    private void startControlServer() {
-        if (controlServer == null) {
-            try {
-                controlServer =
-                        new MockControlServer(
-                                services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
-                controlServer.start();
-            } catch (IOException e) {
-                throw new IllegalStateException("control server failed to start", e);
-            }
-        }
-    }
-
-    private int controlPort() {
-        assertNotNull(controlServer, "control server must be running");
-        return MockEngineTestSupport.controlPort(controlServer);
+    private long heldBlocks(int port) throws IOException, InterruptedException {
+        return perEngineMetrics().get("mock_engine_held_blocks").getOrDefault(port, -1L);
     }
 
     private Map<String, Map<Integer, Long>> perEngineMetrics()
@@ -493,7 +491,8 @@ class DecodeKvAllocationSemanticsTest {
         return result;
     }
 
-    private long heldBlocks(int port) throws IOException, InterruptedException {
-        return perEngineMetrics().get("mock_engine_held_blocks").getOrDefault(port, -1L);
+    private int controlPort() {
+        assertNotNull(controlServer, "control server must be running");
+        return MockEngineTestSupport.controlPort(controlServer);
     }
 }

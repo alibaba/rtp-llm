@@ -1,160 +1,157 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 
-import java.util.List;
 import java.util.Objects;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 
 /**
- * Frozen facts for one selected role. Endpoint resources remain live; their selection-time
- * version and requested work belong to the role that uses them, never to a resource ledger.
+ * One selected role and its exact registration. Metadata is frozen; the Endpoint owns live capacity.
+ * The same registration is retained from selection through queueing and delivery.
  */
 public abstract sealed class RoleSelection {
     private final WorkerEndpoint endpoint;
-    private final RoleType role;
-    private final WorkerStatus.TopologySnapshot topology;
-    private final long dpRank;
-    private final long workerGeneration;
-    private final long prefillTime;
-    private final DebugInfo debugInfo;
-    private final List<String> preemptRequestIds;
+    private final ServerStatus status;
 
     private RoleSelection(WorkerEndpoint endpoint, ServerStatus status) {
         this.endpoint = Objects.requireNonNull(endpoint, "endpoint");
-        role = status.getRole();
-        topology =
-                new WorkerStatus.TopologySnapshot(
-                        status.getGroup(),
-                        status.getServerIp(),
-                        status.getHttpPort(),
-                        status.getGrpcPort(),
-                        null,
-                        null,
-                        status.getRoutingEngineIndex(),
-                        status.getRoutingMultiEngineNum());
-        dpRank = status.getDpRank();
-        workerGeneration = status.getWorkerGeneration();
-        prefillTime = status.getPrefillTime();
-        debugInfo = DebugInfo.copyOf(status.getDebugInfo());
-        preemptRequestIds = List.copyOf(status.getPreemptRequestIds());
-    }
-
-    static RoleSelection capture(
-            WorkerEndpoint endpoint, ServerStatus status, long workMs, long version) {
-        checkArgument(version >= 0L, "placementVersion must be non-negative");
-        return switch (status.getRole()) {
-            case PREFILL, PDFUSION -> {
-                checkArgument(endpoint instanceof PrefillEndpoint, "Prefill endpoint required");
-                checkArgument(workMs >= 0L, "Prefill work must be non-negative");
-                yield new Prefill(endpoint, status, workMs, version);
-            }
-            case DECODE -> {
-                checkArgument(endpoint instanceof DecodeEndpoint, "Decode endpoint required");
-                yield new Decode(endpoint, status, version);
-            }
-            case ENCODER -> {
-                checkArgument(endpoint instanceof EncoderEndpoint, "Encoder endpoint required");
-                yield new Auxiliary(endpoint, status);
-            }
-            case VIT -> new Auxiliary(endpoint, status);
-            case FRONTEND -> throw new IllegalArgumentException("unsupported Worker role");
-        };
+        checkArgument(status.isSuccess(), "route requires successful Worker metadata");
+        checkArgument(
+                status.getRole() != null && status.getRole() != RoleType.FRONTEND,
+                "unsupported Worker role");
+        this.status = ServerStatus.copyOf(status);
     }
 
     public final WorkerEndpoint endpoint() {
         return endpoint;
     }
 
-    public final RoleType role() {
-        return role;
-    }
-
     public final long dpRank() {
-        return dpRank;
+        return status.getDpRank();
     }
 
     public final long hitCacheTokens() {
-        return debugInfo == null ? 0L : debugInfo.getHitCacheLen();
+        return status.getDebugInfo() == null ? 0L : status.getDebugInfo().getHitCacheLen();
     }
 
     public final PlacementKey placementKey() {
-        return PlacementKey.exact(
-                role,
-                topology.group(),
-                new org.flexlb.dao.master.WorkerIdentity(
-                                topology.ip(), topology.port(), topology.engineIndex())
-                        .getLogicalIpPort());
+        return PlacementKey.exact(role(), group(), status.getLogicalIpPort());
+    }
+
+    public final RoleType role() {
+        return status.getRole();
+    }
+
+    public final String group() {
+        return status.getGroup();
     }
 
     /**
      * Builds a fresh protocol projection; callers cannot mutate the selected facts.
      */
     public final ServerStatus toServerStatus(String requestId) {
-        var status = new ServerStatus();
-        status.setSuccess(true);
-        status.setRequestId(requestId);
-        status.setRole(role);
-        status.setGroup(topology.group());
-        status.setServerIp(topology.ip());
-        status.setHttpPort(topology.port());
-        status.setGrpcPort(topology.grpcPort());
-        status.setSelectedEngineIndex(topology.engineIndex(), topology.multiEngineNum());
-        status.setDpRank(dpRank);
-        status.setWorkerGeneration(workerGeneration);
-        status.setPrefillTime(prefillTime);
-        status.setDebugInfo(DebugInfo.copyOf(debugInfo));
-        status.setPreemptRequestIds(preemptRequestIds);
-        return status;
+        var response = ServerStatus.copyOf(status);
+        response.setRequestId(requestId);
+        return response;
     }
 
+    final String ip() {
+        return status.getServerIp();
+    }
+
+    final int httpPort() {
+        return status.getHttpPort();
+    }
+
+    final int grpcPort() {
+        return status.getGrpcPort();
+    }
+
+    String requestId() {
+        return status.getRequestId();
+    }
+
+    /**
+     * Retains the selected Prefill endpoint, predicted work and exact resource registration.
+     */
     public static final class Prefill extends RoleSelection {
         private final long workMs;
-        private final long resourceVersion;
+        final PrefillEndpoint.RequestRecord registration;
 
-        private Prefill(
-                WorkerEndpoint endpoint, ServerStatus status, long workMs, long resourceVersion) {
+        Prefill(
+                PrefillEndpoint endpoint,
+                ServerStatus status,
+                long workMs,
+                PrefillEndpoint.RequestRecord registration) {
             super(endpoint, status);
+            checkArgument(status.getRole().supportsPrefill(), "Prefill role required");
+            checkArgument(workMs >= 0L, "Prefill work must be non-negative");
             this.workMs = workMs;
-            this.resourceVersion = resourceVersion;
+            this.registration = registration;
         }
 
         public long workMs() {
             return workMs;
         }
-
-        public long resourceVersion() {
-            return resourceVersion;
-        }
     }
 
+    /**
+     * Retains the selected Decode endpoint and validates and releases its exact registration.
+     */
     public static final class Decode extends RoleSelection {
-        private final long resourceVersion;
+        final org.flexlb.balance.endpoint.DecodeResources.RequestReservation registration;
 
-        private Decode(WorkerEndpoint endpoint, ServerStatus status, long resourceVersion) {
+        Decode(
+                DecodeEndpoint endpoint,
+                ServerStatus status,
+                org.flexlb.balance.endpoint.DecodeResources.RequestReservation registration) {
             super(endpoint, status);
-            this.resourceVersion = resourceVersion;
+            checkArgument(status.getRole() == RoleType.DECODE, "Decode role required");
+            checkArgument(
+                    registration == null || Objects.equals(registration.requestId(), requestId()),
+                    "Decode reservation belongs to another request");
+            this.registration = registration;
         }
 
-        public long resourceVersion() {
-            return resourceVersion;
+        static boolean release(
+                DecodeEndpoint endpoint,
+                DecodeResources.RequestReservation reservation,
+                DecodeResources.ReleaseReason reason) {
+            if (endpoint == null || reservation == null) return true;
+            var released = endpoint.release(reservation, reason).status();
+            boolean complete =
+                    released == DecodeResources.ReservationReleaseResult.RELEASED
+                            || released == DecodeResources.ReservationReleaseResult.STALE;
+            checkState(
+                    complete
+                            || reason != DecodeResources.ReleaseReason.LOCAL_ROLLBACK
+                                    && reason
+                                            != DecodeResources.ReleaseReason.UNSENT_ROUTE_ROLLBACK,
+                    "route rollback retained Decode resources: %s",
+                    released);
+            return complete;
         }
     }
 
     /**
-     * Encoder and VIT currently need no selection-time resource estimates.
+     * Encoder and VIT select an endpoint without registering P/D capacity.
      */
     public static final class Auxiliary extends RoleSelection {
-        private Auxiliary(WorkerEndpoint endpoint, ServerStatus status) {
+        public Auxiliary(WorkerEndpoint endpoint, ServerStatus status) {
             super(endpoint, status);
+            checkArgument(
+                    status.getRole() == RoleType.VIT
+                            || status.getRole() == RoleType.ENCODER
+                                    && endpoint instanceof EncoderEndpoint,
+                    "Encoder or VIT role required");
         }
     }
 }

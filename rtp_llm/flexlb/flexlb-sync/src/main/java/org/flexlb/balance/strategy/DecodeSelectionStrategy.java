@@ -7,17 +7,26 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 
 import java.util.List;
+import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
-/** Returns the complete selection or failure; reading capacity does not reserve it. */
+/**
+ * Ranks Decode candidates and coordinates registration of the selected request impact.
+ */
 @FunctionalInterface
 public interface DecodeSelectionStrategy {
-    /** Candidates are borrowed and read-only; implementations must not retain them. */
-    PlacementResult<DecodeResources.DecodeRoutingView, PlacementKey> select(
+    /**
+     * Rank candidates and register the winner. Refresh only conflicting candidates before retrying.
+     * SUCCESS guarantees that the registration callback returned REGISTERED.
+     */
+    PlacementResult<DecodeResources.DecodeRoutingView, PlacementKey> selectAndRegister(
             Request request,
             SchedulingMetadata metadata,
             String group,
             List<DecodeResources.DecodeRoutingView> candidates,
-            CapacityReader capacity);
+            CapacityReader capacity,
+            UnaryOperator<DecodeResources.DecodeRoutingView> refresh,
+            Function<DecodeResources.DecodeRoutingView, PlacementResult.Registration> register);
 
     @FunctionalInterface
     interface CapacityReader {

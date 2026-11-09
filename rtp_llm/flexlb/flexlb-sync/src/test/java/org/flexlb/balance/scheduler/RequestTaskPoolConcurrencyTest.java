@@ -18,7 +18,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Uses the real task pool and its serial cleanup queue, including concurrent shutdown. */
+/**
+ * Uses the real task pool and its serial cleanup queue, including concurrent shutdown.
+ */
 @Timeout(20)
 class RequestTaskPoolConcurrencyTest {
     @RepeatedTest(20)
@@ -54,7 +56,7 @@ class RequestTaskPoolConcurrencyTest {
         Future<?> closing = null;
         try {
             try (var work = pool.registerRequestWork(context)) {
-                work.submitClose(effect, false);
+                work.submitClose(effect, false, null);
             }
             assertTrue(firstEntered.await(5, TimeUnit.SECONDS));
             var start = new CyclicBarrier(8);
@@ -67,7 +69,7 @@ class RequestTaskPoolConcurrencyTest {
                                     for (int i = 0; i < 50; i++) {
                                         published.incrementAndGet();
                                         try (var work = pool.registerRequestWork(context)) {
-                                            work.submitClose(effect, false);
+                                            work.submitClose(effect, false, null);
                                         }
                                     }
                                     return null;
@@ -170,6 +172,124 @@ class RequestTaskPoolConcurrencyTest {
             } finally {
                 driver.shutdownNow();
                 assertTrue(driver.awaitTermination(5, TimeUnit.SECONDS));
+            }
+        }
+    }
+
+    @org.junit.jupiter.api.Test
+    void shutdownWaitsForRejectedResponseHandoffAndItsAcceptedContinuation() throws Exception {
+        var pool = new RequestTaskPool();
+        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 7105L);
+        var dispatchEntered = new CountDownLatch(1);
+        var rejectDispatch = new CountDownLatch(1);
+        var rejectionEntered = new CountDownLatch(1);
+        var continueRejection = new CountDownLatch(1);
+        var childEntered = new CountDownLatch(1);
+        var finishChild = new CountDownLatch(1);
+        var firstSubmission = new java.util.concurrent.atomic.AtomicBoolean(true);
+        var rejections = new AtomicInteger();
+        var responses = new AtomicInteger();
+        var childDone = new AtomicInteger();
+        var failure = new java.util.concurrent.RejectedExecutionException("dispatch rejected");
+        var dispatch = org.mockito.Mockito.mock(java.util.concurrent.ExecutorService.class);
+        var workers = Executors.newFixedThreadPool(3, Thread.ofPlatform().daemon().factory());
+        org.mockito.Mockito.doAnswer(
+                        call -> {
+                            var task = call.getArgument(0, Runnable.class);
+                            if (firstSubmission.getAndSet(false)) {
+                                dispatchEntered.countDown();
+                                await(rejectDispatch);
+                                throw failure;
+                            }
+                            // Leave pending starts behind the blocked handoff. Once rejection
+                            // callbacks begin, their independent continuation can run.
+                            if (rejectionEntered.getCount() == 0) workers.execute(task);
+                            return null;
+                        })
+                .when(dispatch)
+                .execute(org.mockito.ArgumentMatchers.any());
+        org.mockito.Mockito.when(dispatch.isTerminated()).thenReturn(true);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                pool, "requestWorkers", dispatch);
+        var first = pool.registerRequestWork(context);
+        Future<?> closing = null;
+        try {
+            var submission =
+                    workers.submit(
+                            () ->
+                                    org.junit.jupiter.api.Assertions.assertSame(
+                                            failure,
+                                            org.junit.jupiter.api.Assertions.assertThrows(
+                                                    java.util.concurrent.RejectedExecutionException
+                                                            .class,
+                                                    () ->
+                                                            first.submitClose(
+                                                                    responses::incrementAndGet,
+                                                                    false,
+                                                                    cause ->
+                                                                            rejections
+                                                                                    .incrementAndGet()))));
+            assertTrue(dispatchEntered.await(5, TimeUnit.SECONDS));
+            first.close();
+            try (var pending = pool.registerRequestWork(context)) {
+                pending.submitCloseResponse(
+                        responses::incrementAndGet,
+                        false,
+                        cause -> {
+                            org.junit.jupiter.api.Assertions.assertSame(failure, cause);
+                            rejections.incrementAndGet();
+                            rejectionEntered.countDown();
+                            await(continueRejection);
+                            pool.execute(
+                                    context,
+                                    () -> {
+                                        childEntered.countDown();
+                                        await(finishChild);
+                                        childDone.incrementAndGet();
+                                    });
+                        });
+            }
+            closing = workers.submit(pool::close);
+            long limit = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (true) {
+                var probe = pool.tryRegisterRequestWork(context);
+                if (probe == null) break;
+                probe.close();
+                assertTrue(System.nanoTime() < limit, "shutdown did not close admission");
+                Thread.yield();
+            }
+            rejectDispatch.countDown();
+            assertTrue(rejectionEntered.await(5, TimeUnit.SECONDS));
+            assertEquals(2, rejections.get());
+            var pendingShutdown = closing;
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    java.util.concurrent.TimeoutException.class,
+                    () -> pendingShutdown.get(100, TimeUnit.MILLISECONDS),
+                    "rejection cleanup still owns the last counted task");
+            continueRejection.countDown();
+            assertTrue(childEntered.await(5, TimeUnit.SECONDS));
+            submission.get(5, TimeUnit.SECONDS);
+            assertFalse(closing.isDone(), "the accepted rejection continuation must also drain");
+            finishChild.countDown();
+            closing.get(5, TimeUnit.SECONDS);
+            assertEquals(0, responses.get());
+            assertEquals(1, childDone.get());
+            org.junit.jupiter.api.Assertions.assertSame(
+                    failure,
+                    org.junit.jupiter.api.Assertions.assertThrows(
+                            java.util.concurrent.RejectedExecutionException.class,
+                            pool::throwIfFailed));
+        } finally {
+            rejectDispatch.countDown();
+            continueRejection.countDown();
+            finishChild.countDown();
+            first.close();
+            if (closing == null) closing = workers.submit(pool::close);
+            try {
+                closing.get(5, TimeUnit.SECONDS);
+            } finally {
+                workers.shutdownNow();
+                assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
             }
         }
     }

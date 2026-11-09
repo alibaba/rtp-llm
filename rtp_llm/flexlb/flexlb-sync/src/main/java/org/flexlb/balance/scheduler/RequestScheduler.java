@@ -32,6 +32,13 @@ public interface RequestScheduler extends AutoCloseable {
     }
 
     /**
+     * Number of queued requests not yet handed to delivery; immediate schedulers report zero.
+     */
+    default int queuedRequestCount() {
+        return 0;
+    }
+
+    /**
      * Number of requests waiting for placement capacity or preemption availability.
      */
     default int blockedRequestCount() {

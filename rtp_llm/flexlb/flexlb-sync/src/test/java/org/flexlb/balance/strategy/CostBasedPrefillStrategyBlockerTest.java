@@ -34,6 +34,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks candidate discovery preserves scoped fleet order and includes full workers in Prefill ranking.
+ */
 class CostBasedPrefillStrategyBlockerTest {
 
     @ParameterizedTest
@@ -135,16 +138,7 @@ class CostBasedPrefillStrategyBlockerTest {
 
             // Ranking models all scoped workers, including full workers; no selected Worker is
             // published by this fixture.
-            assertEquals(
-                    registered == 0
-                            ? org.flexlb.balance.PlacementResult.Status.BLOCKED
-                            : org.flexlb.balance.PlacementResult.Status.ENDPOINT_CHANGED,
-                    result.status());
-            if (registered > 0) {
-                assertEquals(
-                        org.flexlb.balance.PlacementResult.Status.SUCCESS,
-                        result.selection().status());
-            }
+            assertEquals(org.flexlb.balance.PlacementResult.Status.BLOCKED, result.status());
             assertEquals(registered, projectedWorkers.get());
             assertEquals(entries, frozen);
             verify(directory).prefillRoutingSnapshot(role);

@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -18,12 +18,14 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks queue implementations preserve exact request identity and stable snapshots during validation, replacement and removal.
+ */
 class PrefillRequestQueueContractTest {
     @Test
     void queueBusinessOperationsValidateAndRemoveExactMembersWithoutCallerLock() {
@@ -149,10 +151,14 @@ class PrefillRequestQueueContractTest {
     void rejectedInsertionDoesNotPublishOrRetainAReservation() {
         var queue = mock(PrefillRequestQueue.class);
         when(queue.enabled()).thenReturn(true);
+        when(queue.capture())
+                .thenReturn(
+                        new PrefillRequestQueue.Snapshot(
+                                List.of(),
+                                Comparator.comparing(PrefillRequestQueue.QueueItem::requestId)));
         var endpoint = EndpointTestSupport.prefillEndpoint(new ReentrantLock(), queue, () -> 100L);
         var rejected = route(1, 1);
         assertNull(org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(endpoint, rejected));
-        verify(rejected, never()).attachPrefillReservation(any());
         assertEquals(0L, endpoint.admissionSummary(0, 0).occupiedRequests());
         assertFalse(endpoint.releaseRequest(rejected));
 
@@ -197,8 +203,8 @@ class PrefillRequestQueueContractTest {
                 "queue decisions never settle requests");
     }
 
-    private static RouteExecution route(long id, long sequence) {
-        var route = mock(RouteExecution.class);
+    private static RouteResult route(long id, long sequence) {
+        var route = mock(RouteResult.class);
         when(route.requestId()).thenReturn(String.valueOf(id));
         when(route.enqueueSeq()).thenReturn(sequence);
         when(route.expiresAtMs()).thenReturn(Long.MAX_VALUE);
@@ -209,8 +215,9 @@ class PrefillRequestQueueContractTest {
      * Deliberately uses different storage from OrderedPrefillRequestQueue.
      */
     private static final class ListQueue implements PrefillRequestQueue {
-        private final List<RouteExecution> items = new ArrayList<>();
+        private final List<RouteResult> items = new ArrayList<>();
         private final Comparator<org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem> order;
+
         private long version;
 
         ListQueue(Comparator<org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem> order) {
@@ -225,7 +232,7 @@ class PrefillRequestQueueContractTest {
             return version;
         }
 
-        public boolean add(RouteExecution route) {
+        public boolean add(RouteResult route) {
             if (contains(route)) return false;
             items.add(route);
             items.sort(order);
@@ -233,7 +240,11 @@ class PrefillRequestQueueContractTest {
             return true;
         }
 
-        public boolean remove(RouteExecution route) {
+        public boolean contains(RouteResult route) {
+            return items.stream().anyMatch(item -> item == route);
+        }
+
+        public boolean remove(RouteResult route) {
             for (int i = 0; i < items.size(); i++) {
                 if (items.get(i) == route) {
                     items.remove(i);
@@ -244,11 +255,7 @@ class PrefillRequestQueueContractTest {
             return false;
         }
 
-        public boolean contains(RouteExecution route) {
-            return items.stream().anyMatch(item -> item == route);
-        }
-
-        public RouteExecution peek() {
+        public RouteResult peek() {
             return items.isEmpty() ? null : items.getFirst();
         }
 
@@ -271,7 +278,7 @@ class PrefillRequestQueueContractTest {
             }
         }
 
-        public Iterator<RouteExecution> iterator() {
+        public Iterator<RouteResult> iterator() {
             return List.copyOf(items).iterator();
         }
 

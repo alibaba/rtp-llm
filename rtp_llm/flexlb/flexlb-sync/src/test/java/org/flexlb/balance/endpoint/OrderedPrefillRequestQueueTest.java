@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -23,6 +23,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks queue ordering, exact item identity and immutable captures while additions and removals change the live queue.
+ */
 class OrderedPrefillRequestQueueTest {
     private static final Comparator<org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem>
             ORDER =
@@ -75,7 +78,7 @@ class OrderedPrefillRequestQueueTest {
     @Test
     void additionsAndRemovalsMatchReferenceOrderAndPreserveOldCaptures() {
         var index = OrderedPrefillRequestQueue.ordered(16, ORDER);
-        var expected = new ArrayList<RouteExecution>();
+        var expected = new ArrayList<RouteResult>();
         var random = new Random(36);
         for (int step = 0; step < 400; step++) {
             long oldVersion = index.version();
@@ -137,7 +140,7 @@ class OrderedPrefillRequestQueueTest {
         assertTrue(index.add(first));
         assertTrue(index.add(second));
         assertFalse(index.remove(item(1, 50)));
-        var ordered = new ArrayList<RouteExecution>();
+        var ordered = new ArrayList<RouteResult>();
         index.forEach(ordered::add);
         assertEquals(List.of(first, second), ordered);
         var captured = index.capture();
@@ -210,8 +213,8 @@ class OrderedPrefillRequestQueueTest {
         return capture.items().size();
     }
 
-    private static RouteExecution item(long id, int priority) {
-        var request = mock(RouteExecution.class);
+    private static RouteResult item(long id, int priority) {
+        var request = mock(RouteResult.class);
         when(request.requestId()).thenReturn(String.valueOf(id));
         when(request.enqueueSeq()).thenReturn(id);
         when(request.priority()).thenReturn(priority);

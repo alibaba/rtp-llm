@@ -6,8 +6,6 @@ import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.FormulaPredictor;
-import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
@@ -38,7 +36,6 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.anyLong;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -95,8 +92,9 @@ class RejectedDeliveryWithdrawalRaceTest {
         when(prefill.acceptsNewRequests()).thenReturn(true);
         when(prefill.getIp()).thenReturn("127.0.0.1");
         when(prefill.getGrpcPort()).thenReturn(8090);
-        when(prefill.reserveBatch(anyLong(), anyInt()))
-                .thenAnswer(call -> ledger.reserveBatch(call.getArgument(0), call.getArgument(1)));
+        when(prefill.getHttpPort()).thenReturn(8080);
+        when(prefill.batchCapacityAvailable(anyInt()))
+                .thenAnswer(call -> ledger.prefill.batchCapacityAvailable(call.getArgument(0)));
         when(prefill.releaseRequest(any()))
                 .thenAnswer(
                         call ->
@@ -104,15 +102,7 @@ class RejectedDeliveryWithdrawalRaceTest {
                                         ledger.prefill, call.getArgument(0)));
         when(prefill.commitDelivery(any()))
                 .thenAnswer(call -> ledger.prefill.commitDelivery(call.getArgument(0)));
-        doAnswer(
-                        call -> {
-                            var released =
-                                    ledger.prefill.rollback(
-                                            call.getArgument(0, PrefillEndpoint.BatchRecord.class));
-                            return released;
-                        })
-                .when(prefill)
-                .rollback(any(org.flexlb.balance.endpoint.PrefillEndpoint.BatchRecord.class));
+
         DecodeEndpoint decode =
                 EndpointTestSupport.decode(
                         WorkerStatus.createDiscovered(
@@ -148,28 +138,14 @@ class RejectedDeliveryWithdrawalRaceTest {
         {
             var selectedEndpoint = decode;
 
-            handle =
-                    EndpointTestSupport.reserveUnqueuedDecode(
-                            decode, selectedEndpoint, 1L, 1L, 2L, 50);
+            handle = EndpointTestSupport.registerDecode(decode, 1L, 1L, 2L, 50);
         }
         assertNotNull(handle);
         DeliverySettlementTestSupport.queueDecode(decode, handle);
-        var status = new ServerStatus();
-        status.setRole(RoleType.PREFILL);
-        status.setServerIp("127.0.0.1");
-        status.setHttpPort(8080);
-        status.setGrpcPort(8090);
         context.data().setFuture(future);
         var item =
-                SchedulingTestConfig.createRoute(
-                        context,
-                        new Response(),
-                        status,
-                        null,
-                        prefill,
-                        decode,
-                        handle,
-                        System.currentTimeMillis());
+                RequestExecutionTestSupport.registerPrefillRoute(
+                        context, prefill, decode, handle, 0L, System.currentTimeMillis());
         RequestProtocolTestSupport.bind(
                 owner, new RequestProtocolTestSupport.Registered(item, future));
         ledger.enqueue(item);
@@ -247,7 +223,7 @@ class RejectedDeliveryWithdrawalRaceTest {
                                                     && failure.route() == item
                                                     && failure.detail()
                                                             .contains(rejection.getMessage())));
-            verify(owner, never()).prepareDelivery(any(Delivery.Member.class), any(), anyLong());
+            verify(owner, never()).commitDelivery(any(Delivery.Member.class), any(), anyLong());
             verifyNoInteractions(grpc);
         } finally {
             ReflectionTestUtils.setField(

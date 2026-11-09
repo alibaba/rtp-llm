@@ -36,10 +36,12 @@ import static org.flexlb.constant.MetricConstant.NETTY_MEMORY_SAMPLE_TIMESTAMP_M
 public class NettyMemoryReporter {
     private static final Logger logger = LoggerFactory.getLogger(NettyMemoryReporter.class);
     private static final FlexMetricTags NO_TAGS = FlexMetricTags.of();
+
     private final NettyMemoryReporterConfig settings;
     private final FlexMonitor monitor;
     private final LongSupplier nanoTime;
     private final List<AllocatorSample> allocators = new ArrayList<>(2);
+
     private ScheduledExecutorService sampler;
     private BufferPoolMXBean directPool;
     private Long lastCaptureNanos;
@@ -110,6 +112,13 @@ public class NettyMemoryReporter {
         }
     }
 
+    @PreDestroy
+    public void close() {
+        if (sampler != null) {
+            sampler.shutdownNow();
+        }
+    }
+
     void discoverAllocators() {
         // EngineGrpcClient explicitly uses this pool. Default HTTP channels may share it.
         registerAllocator("netty_default", PooledByteBufAllocator.DEFAULT);
@@ -150,16 +159,6 @@ public class NettyMemoryReporter {
         allocators.add(new AllocatorSample(name, allocator));
     }
 
-    private void sampleSafely() {
-        try {
-            sample();
-        } catch (OutOfMemoryError ignored) {
-            // Do not allocate diagnostics while the process cannot allocate.
-        } catch (RuntimeException failure) {
-            logger.warn("event=netty_memory_sample_failed type={}", failure.getClass().getName());
-        }
-    }
-
     void sample() {
         if (!settings.isEnabled()) {
             return;
@@ -178,6 +177,16 @@ public class NettyMemoryReporter {
         // A stale timestamp distinguishes old cached values from a fresh allocator scan.
         monitor.report(NETTY_MEMORY_SAMPLE_TIMESTAMP_MS, NO_TAGS, System.currentTimeMillis());
         captureIfNeeded(totalReserved, durationMs);
+    }
+
+    private void sampleSafely() {
+        try {
+            sample();
+        } catch (OutOfMemoryError ignored) {
+            // Do not allocate diagnostics while the process cannot allocate.
+        } catch (RuntimeException failure) {
+            logger.warn("event=netty_memory_sample_failed type={}", failure.getClass().getName());
+        }
     }
 
     private void captureIfNeeded(long totalReserved, double durationMs) {
@@ -205,13 +214,6 @@ public class NettyMemoryReporter {
                     durationMs);
         }
         lastCaptureNanos = nanoTime.getAsLong();
-    }
-
-    @PreDestroy
-    public void close() {
-        if (sampler != null) {
-            sampler.shutdownNow();
-        }
     }
 
     private static final class AllocatorSample {

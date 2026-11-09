@@ -2,17 +2,13 @@ package org.flexlb.httpserver;
 
 import org.flexlb.config.FlexlbConfig;
 
-/** Independent receiving count limits and logical body-byte budgets, not physical Direct accounting. */
+/**
+ * Independent receiving count limits and logical body-byte budgets, not physical Direct accounting.
+ */
 final class GrpcReceivingBudget {
     private static final long MAX_CONTROL_BUDGET_BYTES = 128L << 20;
 
-    record Limits(
-            int scheduleCalls,
-            int controlCalls,
-            long timeoutMs,
-            long budgetBytes,
-            long scheduleBudgetBytes,
-            long controlBudgetBytes) {}
+    private GrpcReceivingBudget() {}
 
     static Limits resolve(FlexlbConfig.GrpcServerConfig config, long maxDirectBytes) {
         if (maxDirectBytes <= 0)
@@ -50,5 +46,11 @@ final class GrpcReceivingBudget {
                 controlBytes);
     }
 
-    private GrpcReceivingBudget() {}
+    record Limits(
+            int scheduleCalls,
+            int controlCalls,
+            long timeoutMs,
+            long budgetBytes,
+            long scheduleBudgetBytes,
+            long controlBudgetBytes) {}
 }

@@ -14,16 +14,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.regex.Pattern;
 
-/** Source budgets, including private methods, overloads and explicitly written constructors. */
+/**
+ * Source budgets, including private methods, overloads and explicitly written constructors.
+ */
 public final class DeliveryBudget {
-    private static final class Counts {
-        int methods;
-        long longest;
-        String method;
-        long effectiveLines, functionLines;
-        int parameters, nesting;
-    }
-
     public static void main(String[] args) throws Exception {
         if (args.length == 0) {
             throw new IllegalArgumentException("Pass delivery source files; Java 21 is required");
@@ -190,5 +184,13 @@ public final class DeliveryBudget {
             }
         }.scan(body, 0);
         return maximum[0];
+    }
+
+    private static final class Counts {
+        int methods;
+        long longest;
+        String method;
+        long effectiveLines, functionLines;
+        int parameters, nesting;
     }
 }

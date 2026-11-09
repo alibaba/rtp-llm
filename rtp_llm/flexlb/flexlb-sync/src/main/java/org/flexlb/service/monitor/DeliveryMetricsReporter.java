@@ -51,13 +51,32 @@ import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
 
-/** Queue, delivery, prediction and resource metrics for both delivery modes. */
+/**
+ * Queue, delivery, prediction and resource metrics for both delivery modes.
+ */
 @Slf4j
 @Component
 public class DeliveryMetricsReporter {
+    private static final String[] FIXED_WINDOW_DISPATCH_REASONS = {
+        "batch_full", "fixed_window_timeout", "predicted_execution_cap"
+    };
+
+    /** role tag value for scheduler-ledger series (vs PREFILL/DECODE endpoint ledgers). */
+    public static final String SCHEDULER_ROLE = "SCHEDULER";
+
+    /** engineIp tag value for scheduler-ledger series (no real engine behind them). */
+    public static final String SCHEDULER_ENGINE_IP = "scheduler";
+
     @Autowired private ObjectProvider<RequestRepository> requestSources;
     @Autowired private ObjectProvider<EndpointStats> endpointSources;
     @Autowired private ObjectProvider<RequestSchedulerReporter> requestReporters;
+
+    private final FlexMonitor monitor;
+
+    @Autowired
+    public DeliveryMetricsReporter(FlexMonitor monitor) {
+        this.monitor = SafeFlexMonitor.wrap(monitor);
+    }
 
     @Scheduled(fixedRateString = "${report.interval.ms:2000}")
     public void report() {
@@ -87,6 +106,20 @@ public class DeliveryMetricsReporter {
                                 address, endpoint.resourceSnapshot()));
     }
 
+    // ==================== Inflight metrics ====================
+
+    /** Scheduler size retains role=PREFILL; oldest age uses the distinct SCHEDULER ledger role. */
+    public void reportSchedulerInflight(int size, long oldestAgeMs) {
+        monitor.report(
+                SCHEDULER_INFLIGHT_SIZE,
+                FlexMetricTags.of("role", RoleType.PREFILL.name(), "engineIp", SCHEDULER_ENGINE_IP),
+                size);
+        monitor.report(
+                INFLIGHT_MAX_AGE_MS,
+                FlexMetricTags.ofEngine(SCHEDULER_ENGINE_IP, "role", SCHEDULER_ROLE),
+                oldestAgeMs);
+    }
+
     public void reportPrefill(EndpointStats.Prefill endpoint) {
         String ip = endpoint.getIp();
         reportBatcherQueueSize(RoleType.PREFILL.name(), ip, endpoint.queueDepth());
@@ -104,6 +137,51 @@ public class DeliveryMetricsReporter {
                 ip, stats.batchCount(), stats.locallyOwnedRequests(), stats.maxObservedAgeMs());
     }
 
+    /**
+     * Report per-worker batcher queue size via {@code app.flexlb.batcher.queue.size}.
+     * <p>Independent metric name to avoid tag schema conflict with {@code routing.queue.length}
+     * (which uses type=batchQueue tag). Uses the same role + engineIp tag pattern as other
+     * per-worker metrics.
+     */
+    public void reportBatcherQueueSize(String role, String engineIp, int depth) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, "role", role);
+        monitor.report(BATCHER_QUEUE_SIZE, tags, depth);
+    }
+
+    // ==================== Queue metrics ====================
+
+    /**
+     * Report per-worker batcher queue depth bucketed by normalized Auto-TPM
+     * priority via {@code routing.queue.length} (type=batchQueue series).
+     * <p>Tagged by the raw 1-100 priority value, "0" for legacy items without
+     * a budget — same convention as {@link #reportBatchWaitTimeMs} adding the
+     * priority dimension to {@code routing.queue.wait.time.ms}. Only priorities
+     * present in the queue are reported (no zero-fill), mirroring the
+     * wait-time-by-priority empty-bucket behavior.
+     */
+    public void reportBatcherQueueDepthByPriority(
+            String role, String engineIp, int priority, int depth) {
+        FlexMetricTags tags =
+                FlexMetricTags.ofEngine(
+                        engineIp,
+                        "type",
+                        "batchQueue",
+                        "role",
+                        role,
+                        "priority",
+                        String.valueOf(priority));
+        monitor.report(ROUTING_QUEUE_LENGTH, tags, depth);
+    }
+
+    /** Report one Prefill ownership snapshot using the existing per-worker series. */
+    public void reportPrefillInflight(
+            String engineIp, int batchCount, int locallyOwnedRequests, long maxObservedAgeMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, "role", RoleType.PREFILL.name());
+        monitor.report(INFLIGHT_BATCH_COUNT, tags, batchCount);
+        monitor.report(INFLIGHT_REQUEST_COUNT, tags, locallyOwnedRequests);
+        monitor.report(INFLIGHT_MAX_AGE_MS, tags, maxObservedAgeMs);
+    }
+
     public void reportDecode(EndpointStats.Decode endpoint) {
         var stats = endpoint.stats();
         reportDecodeInflight(
@@ -115,48 +193,20 @@ public class DeliveryMetricsReporter {
                 stats.oldestAgeMs());
     }
 
-    private static <T> void reportEndpoints(
-            String role,
-            Supplier<Map<String, T>> snapshot,
-            Consumer<T> batchMetrics,
-            BiConsumer<String, T> admissionMetrics) {
-        Map<String, T> endpoints;
-        try {
-            endpoints = snapshot.get();
-        } catch (RuntimeException failure) {
-            warnIsolated("Failed to snapshot " + role + " endpoints for metrics", failure);
-            return;
-        }
-        for (Map.Entry<String, T> entry : endpoints.entrySet()) {
-            try {
-                batchMetrics.accept(entry.getValue());
-            } catch (RuntimeException failure) {
-                warnIsolated(
-                        "Failed to report "
-                                + role
-                                + " endpoint metrics: endpoint="
-                                + entry.getKey(),
-                        failure);
-            }
-            try {
-                admissionMetrics.accept(entry.getKey(), entry.getValue());
-            } catch (RuntimeException failure) {
-                warnIsolated(
-                        "Failed to report "
-                                + role
-                                + " admission metrics: endpoint="
-                                + entry.getKey(),
-                        failure);
-            }
-        }
-    }
-
-    private static void warnIsolated(String message, RuntimeException failure) {
-        try {
-            Logger.warn(message, failure);
-        } catch (Throwable ignored) {
-            // Telemetry must never couple otherwise independent metric leaves.
-        }
+    /** Report one Decode snapshot, keeping expected KV separate from non-reclaimable hard KV. */
+    public void reportDecodeInflight(
+            String engineIp,
+            int inflight,
+            int totalLoad,
+            long expectedKv,
+            long hardKv,
+            long oldestAgeMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, "role", RoleType.DECODE.name());
+        monitor.report(INFLIGHT_REQUEST_COUNT, tags, inflight);
+        monitor.report(DECODE_TOTAL_LOAD, tags, totalLoad);
+        monitor.report(DECODE_INFLIGHT_KV_RESERVED_TOKENS, tags, expectedKv);
+        monitor.report(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, tags, hardKv);
+        monitor.report(INFLIGHT_MAX_AGE_MS, tags, oldestAgeMs);
     }
 
     public void registerExecutor(ExecutorStats stats) {
@@ -177,23 +227,6 @@ public class DeliveryMetricsReporter {
                 FlexMetricType.COUNTER,
                 stats,
                 ExecutorStats::completedTasks);
-    }
-
-    private static final String[] FIXED_WINDOW_DISPATCH_REASONS = {
-        "batch_full", "fixed_window_timeout", "predicted_execution_cap"
-    };
-
-    /** role tag value for scheduler-ledger series (vs PREFILL/DECODE endpoint ledgers). */
-    public static final String SCHEDULER_ROLE = "SCHEDULER";
-
-    /** engineIp tag value for scheduler-ledger series (no real engine behind them). */
-    public static final String SCHEDULER_ENGINE_IP = "scheduler";
-
-    private final FlexMonitor monitor;
-
-    @Autowired
-    public DeliveryMetricsReporter(FlexMonitor monitor) {
-        this.monitor = SafeFlexMonitor.wrap(monitor);
     }
 
     @PostConstruct
@@ -271,40 +304,14 @@ public class DeliveryMetricsReporter {
         }
     }
 
-    // ==================== Queue metrics ====================
+    // ==================== Dispatch reason metrics ====================
 
     /**
-     * Report per-worker batcher queue depth bucketed by normalized Auto-TPM
-     * priority via {@code routing.queue.length} (type=batchQueue series).
-     * <p>Tagged by the raw 1-100 priority value, "0" for legacy items without
-     * a budget — same convention as {@link #reportBatchWaitTimeMs} adding the
-     * priority dimension to {@code routing.queue.wait.time.ms}. Only priorities
-     * present in the queue are reported (no zero-fill), mirroring the
-     * wait-time-by-priority empty-bucket behavior.
+     * Report batch dispatch reason via {@code engine.balancing.master.dispatch.reason}.
      */
-    public void reportBatcherQueueDepthByPriority(
-            String role, String engineIp, int priority, int depth) {
-        FlexMetricTags tags =
-                FlexMetricTags.ofEngine(
-                        engineIp,
-                        "type",
-                        "batchQueue",
-                        "role",
-                        role,
-                        "priority",
-                        String.valueOf(priority));
-        monitor.report(ROUTING_QUEUE_LENGTH, tags, depth);
-    }
-
-    /**
-     * Report per-worker batcher queue size via {@code app.flexlb.batcher.queue.size}.
-     * <p>Independent metric name to avoid tag schema conflict with {@code routing.queue.length}
-     * (which uses type=batchQueue tag). Uses the same role + engineIp tag pattern as other
-     * per-worker metrics.
-     */
-    public void reportBatcherQueueSize(String role, String engineIp, int depth) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, "role", role);
-        monitor.report(BATCHER_QUEUE_SIZE, tags, depth);
+    public void reportDispatchReason(String role, String engineIp, String reason) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, "role", role, "reason", reason);
+        monitor.report(ENGINE_BALANCING_MASTER_DISPATCH_REASON, tags, 1.0);
     }
 
     /**
@@ -317,39 +324,6 @@ public class DeliveryMetricsReporter {
                 FlexMetricTags.ofEngine(
                         engineIp, "role", role, "priority", String.valueOf(priority));
         monitor.report(ROUTING_QUEUE_WAIT_TIME_MS, tags, waitMs);
-    }
-
-    // ==================== Dispatch reason metrics ====================
-
-    /**
-     * Report batch dispatch reason via {@code engine.balancing.master.dispatch.reason}.
-     */
-    public void reportDispatchReason(String role, String engineIp, String reason) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, "role", role, "reason", reason);
-        monitor.report(ENGINE_BALANCING_MASTER_DISPATCH_REASON, tags, 1.0);
-    }
-
-    // ==================== Inflight metrics ====================
-
-    /** Scheduler size retains role=PREFILL; oldest age uses the distinct SCHEDULER ledger role. */
-    public void reportSchedulerInflight(int size, long oldestAgeMs) {
-        monitor.report(
-                SCHEDULER_INFLIGHT_SIZE,
-                FlexMetricTags.of("role", RoleType.PREFILL.name(), "engineIp", SCHEDULER_ENGINE_IP),
-                size);
-        monitor.report(
-                INFLIGHT_MAX_AGE_MS,
-                FlexMetricTags.ofEngine(SCHEDULER_ENGINE_IP, "role", SCHEDULER_ROLE),
-                oldestAgeMs);
-    }
-
-    /** Report one Prefill ownership snapshot using the existing per-worker series. */
-    public void reportPrefillInflight(
-            String engineIp, int batchCount, int locallyOwnedRequests, long maxObservedAgeMs) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, "role", RoleType.PREFILL.name());
-        monitor.report(INFLIGHT_BATCH_COUNT, tags, batchCount);
-        monitor.report(INFLIGHT_REQUEST_COUNT, tags, locallyOwnedRequests);
-        monitor.report(INFLIGHT_MAX_AGE_MS, tags, maxObservedAgeMs);
     }
 
     /**
@@ -370,40 +344,12 @@ public class DeliveryMetricsReporter {
         monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
     }
 
-    /** Report one Decode snapshot, keeping expected KV separate from non-reclaimable hard KV. */
-    public void reportDecodeInflight(
-            String engineIp,
-            int inflight,
-            int totalLoad,
-            long expectedKv,
-            long hardKv,
-            long oldestAgeMs) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, "role", RoleType.DECODE.name());
-        monitor.report(INFLIGHT_REQUEST_COUNT, tags, inflight);
-        monitor.report(DECODE_TOTAL_LOAD, tags, totalLoad);
-        monitor.report(DECODE_INFLIGHT_KV_RESERVED_TOKENS, tags, expectedKv);
-        monitor.report(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, tags, hardKv);
-        monitor.report(INFLIGHT_MAX_AGE_MS, tags, oldestAgeMs);
-    }
-
     /** Completion observers are independent: a failed metric must not suppress the next one. */
     public void reportBatchCompletion(String engineIp, long predictedMs, long actualMs) {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, "role", RoleType.PREFILL.name());
         monitor.report(BATCH_PREDICTED_TIME_MS, tags, predictedMs);
         monitor.report(BATCH_ACTUAL_TIME_MS, tags, actualMs);
         monitor.report(BATCH_PREDICT_GAP_MS, tags, actualMs - predictedMs);
-    }
-
-    public enum Latency {
-        DISPATCH_ACK(DISPATCH_ACK_TIME_MS),
-        ROUTE_SUBMIT(ROUTE_SUBMIT_TIME_MS),
-        ACK_TO_RESPONSE(ACK_TO_RESPONSE_TIME_MS);
-
-        private final String metric;
-
-        Latency(String metric) {
-            this.metric = metric;
-        }
     }
 
     /** Report an existing schedule-path latency series with its role and engine tags. */
@@ -423,6 +369,65 @@ public class DeliveryMetricsReporter {
                         FlexMetricTags.ofEngine(engineIp, "role", role, "reason", reason);
                 monitor.prepare(ENGINE_BALANCING_MASTER_DISPATCH_REASON, reasonTags);
             }
+        }
+    }
+
+    private static <T> void reportEndpoints(
+            String role,
+            Supplier<Map<String, T>> snapshot,
+            Consumer<T> batchMetrics,
+            BiConsumer<String, T> admissionMetrics) {
+        Map<String, T> endpoints;
+        try {
+            endpoints = snapshot.get();
+        } catch (RuntimeException failure) {
+            warnIsolated("Failed to snapshot " + role + " endpoints for metrics", failure);
+            return;
+        }
+        for (Map.Entry<String, T> entry : endpoints.entrySet()) {
+            try {
+                batchMetrics.accept(entry.getValue());
+            } catch (RuntimeException failure) {
+                warnIsolated(
+                        "Failed to report "
+                                + role
+                                + " endpoint metrics: endpoint="
+                                + entry.getKey(),
+                        failure);
+            }
+            try {
+                admissionMetrics.accept(entry.getKey(), entry.getValue());
+            } catch (RuntimeException failure) {
+                warnIsolated(
+                        "Failed to report "
+                                + role
+                                + " admission metrics: endpoint="
+                                + entry.getKey(),
+                        failure);
+            }
+        }
+    }
+
+    private static void warnIsolated(String message, RuntimeException failure) {
+        try {
+            Logger.warn(message, failure);
+        } catch (Throwable ignored) {
+            // Telemetry must never couple otherwise independent metric leaves.
+        }
+    }
+
+    /**
+     * Maps delivery timing observations to their exported metric names.
+     */
+    public enum Latency {
+        DISPATCH_ACK(DISPATCH_ACK_TIME_MS),
+        ROUTE_SUBMIT(ROUTE_SUBMIT_TIME_MS),
+        ACK_TO_RESPONSE(ACK_TO_RESPONSE_TIME_MS);
+
+        private final String metric;
+
+        Latency(String metric) {
+            this.metric = metric;
         }
     }
 }

@@ -40,6 +40,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks failed timer installation remains retryable without allowing older revisions or already consumed callbacks to replace current deadlines.
+ */
 class ExpirationTimerInstallationRecoveryTest {
     @ParameterizedTest
     @EnumSource(ExpirationTimer.Kind.class)
@@ -222,6 +225,9 @@ class ExpirationTimerInstallationRecoveryTest {
         }
     }
 
+    /**
+     * Combines a registered request, controlled clock and replaceable timer scheduling to inject installation failures and inspect exact deadline tokens.
+     */
     private static final class Fixture implements AutoCloseable {
         final RequestContext context;
         final AbstractRequestScheduler owner = mock(AbstractRequestScheduler.class);
@@ -255,16 +261,16 @@ class ExpirationTimerInstallationRecoveryTest {
                             clock::get);
         }
 
-        Object handle(ExpirationTimer.Kind kind) {
-            var slots = (Map<?, ?>) ReflectionTestUtils.getField(timer, "slots");
-            var handles = (Object[]) ReflectionTestUtils.getField(slots.get(context), "handles");
-            return handles[kind.ordinal()];
-        }
-
         @Override
         public void close() {
             timer.close();
             executor.shutdownNow();
+        }
+
+        Object handle(ExpirationTimer.Kind kind) {
+            var slots = (Map<?, ?>) ReflectionTestUtils.getField(timer, "slots");
+            var handles = (Object[]) ReflectionTestUtils.getField(slots.get(context), "handles");
+            return handles[kind.ordinal()];
         }
     }
 }

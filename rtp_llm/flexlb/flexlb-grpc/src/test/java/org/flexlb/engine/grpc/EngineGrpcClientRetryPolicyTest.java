@@ -17,7 +17,6 @@ import static org.mockito.Mockito.when;
  * Checks engine RPC retry policy and applicable transport statuses.
  */
 class EngineGrpcClientRetryPolicyTest {
-
     @ParameterizedTest
     @EnumSource(
             value = GrpcFailure.Kind.class,
@@ -102,26 +101,6 @@ class EngineGrpcClientRetryPolicyTest {
                         trace));
     }
 
-    private static GrpcCallTrace peerEofTrace() {
-        GrpcCallTrace trace = mock(GrpcCallTrace.class);
-        when(trace.snapshot())
-                .thenReturn(
-                        new GrpcCallTrace.Snapshot(
-                                GrpcCallTrace.Stage.WAITING_RESPONSE,
-                                "PEER_EOF",
-                                GrpcFailure.Kind.UNEXPECTED_EOF,
-                                1,
-                                -1,
-                                0,
-                                1,
-                                -1,
-                                -1,
-                                10,
-                                11,
-                                9));
-        return trace;
-    }
-
     @Test
     void enqueueBatchDoesNotRetryAmbiguousBrokenConnection() {
         assertFalse(
@@ -150,5 +129,25 @@ class EngineGrpcClientRetryPolicyTest {
         assertFalse(
                 EngineGrpcClient.retriesBrokenConnections(
                         EngineGrpcClient.ServiceType.ENGINE_CANCEL));
+    }
+
+    private static GrpcCallTrace peerEofTrace() {
+        GrpcCallTrace trace = mock(GrpcCallTrace.class);
+        when(trace.snapshot())
+                .thenReturn(
+                        new GrpcCallTrace.Snapshot(
+                                GrpcCallTrace.Stage.WAITING_RESPONSE,
+                                "PEER_EOF",
+                                GrpcFailure.Kind.UNEXPECTED_EOF,
+                                1,
+                                -1,
+                                0,
+                                1,
+                                -1,
+                                -1,
+                                10,
+                                11,
+                                9));
+        return trace;
     }
 }

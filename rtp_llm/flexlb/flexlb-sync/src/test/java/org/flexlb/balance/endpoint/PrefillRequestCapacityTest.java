@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
@@ -33,7 +33,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks shared Prefill request limits across waiting, prepared and committed work.
+ * Checks Prefill capacity combines local requests with reported engine work without double counting.
+ * Concurrent admission and exact release must preserve the configured limits.
  */
 class PrefillRequestCapacityTest {
     private final ReentrantLock lock = new ReentrantLock();
@@ -49,7 +50,7 @@ class PrefillRequestCapacityTest {
 
     @Test
     void duplicateDirectAdmissionDoesNotReplaceOrReleaseTheOriginalOwner() {
-        RouteExecution route = item(1);
+        RouteResult route = item(1);
         var original = reserve(route, 1L).value();
         assertNotNull(original);
         try {
@@ -68,7 +69,7 @@ class PrefillRequestCapacityTest {
 
     @Test
     void queuedOwnersDoNotConsumeImmediateDeliveryCapacity() {
-        RouteExecution queued = item(1), immediate = item(2), another = item(3);
+        RouteResult queued = item(1), immediate = item(2), another = item(3);
         assertTrue(enqueue(queued, 2L));
         var first = reserve(immediate, 2L).value();
         assertNotNull(first);
@@ -92,7 +93,7 @@ class PrefillRequestCapacityTest {
 
     @Test
     void workerDetailsDeduplicateLocalRequestsAndForeignRequestIds() {
-        RouteExecution local = item(1);
+        RouteResult local = item(1);
         var registration = reserve(local, 4L).value();
         var localObservation = observed(1);
         var foreign = observed(2);
@@ -149,11 +150,11 @@ class PrefillRequestCapacityTest {
 
     @Test
     void batchRequestCountDoesNotLimitWaitingAndBatchPermitWaitsForLastMember() {
-        RouteExecution first = item(1), second = item(2);
+        RouteResult first = item(1), second = item(2);
         assertTrue(enqueue(first, 0L));
         assertTrue(enqueue(second, 0L));
         var generation = new EndpointRetirementTestSupport(() -> {});
-        var reservation = state.reserveBatch(10L, 1).value();
+        var reservation = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(10L, 1);
         {
             var handoff =
                     EndpointTestSupport.commitBatch(state, reservation, List.of(first, second), 0L);
@@ -170,7 +171,7 @@ class PrefillRequestCapacityTest {
 
     @Test
     void staleOwnerCannotReleaseAReusedRequestId() {
-        RouteExecution previous = item(1);
+        RouteResult previous = item(1);
         var old = reserve(previous, 1L).value();
         EndpointTestSupport.rollback(old);
         var current = reserve(item(1), 1L).value();
@@ -196,7 +197,7 @@ class PrefillRequestCapacityTest {
 
     @Test
     void progressReadersDoNotWaitForTheOwnershipLock() throws Exception {
-        RouteExecution queued = item(1);
+        RouteResult queued = item(1);
         assertTrue(enqueue(queued, 2L));
         try (var reader = Executors.newSingleThreadExecutor()) {
             runWithStateLock(
@@ -243,7 +244,7 @@ class PrefillRequestCapacityTest {
             List<Future<CapacityBoundary.Attempt<PrefillEndpoint.RequestRecord>>> attempts =
                     new ArrayList<>();
             for (int i = 0; i < contenders; i++) {
-                RouteExecution request = item(i + 1);
+                RouteResult request = item(i + 1);
                 attempts.add(
                         executor.submit(
                                 () -> {
@@ -314,7 +315,7 @@ class PrefillRequestCapacityTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void failedReplacementInsertionKeepsVictimsAndCapacityForRetry(boolean fatal) {
-        RouteExecution first = item(1), second = item(2), incoming = item(3);
+        RouteResult first = item(1), second = item(2), incoming = item(3);
         when(first.priority()).thenReturn(20);
         when(second.priority()).thenReturn(20);
         when(incoming.priority()).thenReturn(80);
@@ -378,7 +379,7 @@ class PrefillRequestCapacityTest {
 
     @Test
     void admissionSummaryKeepsOneRevisionAndReflectsReleaseAndUnknownEngineWork() {
-        RouteExecution lower = item(1), same = item(2), higher = item(3);
+        RouteResult lower = item(1), same = item(2), higher = item(3);
         when(lower.priority()).thenReturn(10);
         when(same.priority()).thenReturn(50);
         when(higher.priority()).thenReturn(90);
@@ -424,17 +425,17 @@ class PrefillRequestCapacityTest {
     }
 
     private CapacityBoundary.Attempt<PrefillEndpoint.RequestRecord> reserve(
-            RouteExecution item, long limit) {
-        return state.reserveUnqueuedRoute(item, 0L, limit);
+            RouteResult item, long limit) {
+        return org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                state, item, 0L, limit);
     }
 
     private org.flexlb.balance.scheduler.Delivery commit(
-            RouteExecution item, PrefillEndpoint.RequestRecord registration) {
-        return org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                state, item, registration);
+            RouteResult item, PrefillEndpoint.RequestRecord registration) {
+        return org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(state, item);
     }
 
-    private boolean enqueue(RouteExecution item, long limit) {
+    private boolean enqueue(RouteResult item, long limit) {
         return withStateLock(
                 lock,
                 () -> {
@@ -477,8 +478,8 @@ class PrefillRequestCapacityTest {
                 null);
     }
 
-    private static RouteExecution item(long id) {
-        RouteExecution item = mock(RouteExecution.class);
+    private static RouteResult item(long id) {
+        RouteResult item = mock(RouteResult.class);
         when(item.requestId()).thenReturn(String.valueOf(id));
         return item;
     }

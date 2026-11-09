@@ -53,8 +53,11 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Exercises victim cancellation and resource release across deadlines, stale callbacks and worker replacement.
+ * A cancellation receipt alone cannot authorize reuse of a victim's Decode resources.
+ */
 class DecodePreemptionProtocolTest {
-
     private SchedulerTestServices runtime;
 
     @BeforeEach
@@ -81,14 +84,6 @@ class DecodePreemptionProtocolTest {
                             .isTerminated(),
                     "the runtime owns every preemption deadline thread");
         }
-    }
-
-    private static org.flexlb.dao.loadbalance.Request incoming() {
-        return org.flexlb.dao.loadbalance.Request.builder()
-                .requestId("20")
-                .seqLen(64L)
-                .maxNewTokens(0)
-                .build();
     }
 
     @ParameterizedTest
@@ -1288,23 +1283,6 @@ class DecodePreemptionProtocolTest {
         }
     }
 
-    private CompletableFuture<DecodePreemption.PreemptionResult> preempt(
-            DefaultDecodePreemption acquirer, DefaultDecodePreemption.PreemptionCommand command) {
-        var context =
-                mock(
-                        org.flexlb.balance.scheduler.RequestContext.class,
-                        org.mockito.Mockito.RETURNS_DEEP_STUBS);
-        when(context.data().getRequestScheduler()).thenReturn(mock(AbstractRequestScheduler.class));
-        return acquirer.preempt(context, command);
-    }
-
-    private org.flexlb.balance.scheduler.DeliveryDispatcher dispatcher(EngineGrpcClient client) {
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                runtime.dispatcher, "grpcClient", client);
-        return (org.flexlb.balance.scheduler.DeliveryDispatcher)
-                org.springframework.test.util.ReflectionTestUtils.getField(runtime, "dispatcher");
-    }
-
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void returnedClaimMustMatchTheExactVictimReservation(boolean differentGeneration)
@@ -1365,89 +1343,6 @@ class DecodePreemptionProtocolTest {
                 .onPreemption(
                         stale,
                         new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
-    }
-
-    private Fixture fixture() {
-        AbstractRequestScheduler requests = mock(AbstractRequestScheduler.class);
-        org.flexlb.balance.scheduler.SchedulerTestServices.bind(requests, runtime);
-        when(requests.onPreemption(any(), any()))
-                .thenAnswer(
-                        call ->
-                                call.getArgument(1) == null
-                                        || call.getArgument(
-                                                                1,
-                                                                AbstractRequestScheduler
-                                                                        .PreemptionEvent.class)
-                                                        .phase()
-                                                != PreemptionCancelPhase.CANCEL_UNKNOWN);
-        DecodeEndpoint endpoint =
-                org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
-        WorkerStatus status = mock(WorkerStatus.class);
-        when(endpoint.getStatus()).thenReturn(status);
-        when(status.getGenerationId()).thenReturn(9L);
-        when(endpoint.beginPreemption(
-                        anyLong(),
-                        anyList(),
-                        org.mockito.ArgumentMatchers.anyString(),
-                        anyLong(),
-                        anyLong(),
-                        anyInt(),
-                        any(DecodeResources.AdmissionCapacity.class)))
-                .thenReturn(DecodeResources.PreemptionBeginResult.SUCCESS);
-        when(endpoint.updatePreemption(anyLong(), any(DecodeResources.PreemptionUpdate.class)))
-                .thenReturn(
-                        org.flexlb.balance.endpoint.DecodeResources.ResourceChange.of(
-                                org.flexlb.balance.endpoint.DecodeResources.MutationStatus.APPLIED,
-                                false));
-        when(endpoint.commitPreemption(anyLong()))
-                .thenReturn(new DecodeResources.RequestReservation(9L, String.valueOf(20L), 100L));
-        return new Fixture(requests, endpoint);
-    }
-
-    private record Fixture(AbstractRequestScheduler requests, DecodeEndpoint endpoint) {}
-
-    private PreemptionRegistration claim(
-            AbstractRequestScheduler owner,
-            long requestId,
-            CompletableFuture<VictimResolution> terminal) {
-        var context =
-                mock(
-                        org.flexlb.balance.scheduler.RequestContext.class,
-                        org.mockito.Mockito.RETURNS_DEEP_STUBS);
-        when(context.data().getRequestId()).thenReturn(String.valueOf(requestId));
-        when(context.snapshot().delivery()).thenReturn(null);
-        when(context.snapshot().cancellation()).thenReturn(null);
-        when(context.data().getRequestScheduler()).thenReturn(owner);
-        var reservation =
-                new DecodeResources.RequestReservation(
-                        9L, String.valueOf(requestId), requestId == 11L ? 101L : 102L);
-        var claim =
-                new PreemptionRegistration(
-                        context, 1L, reservation, new CancelTarget("10.0.0.1", 9090));
-        terminal.whenComplete(
-                (result, failure) -> {
-                    if (failure == null) {
-                        claim.complete(result);
-                    }
-                });
-        return claim;
-    }
-
-    private static AbstractRequestScheduler.PreemptionEvent phaseEvent(
-            PreemptionCancelPhase phase) {
-        return new AbstractRequestScheduler.PreemptionEvent(phase, false, null, null, null);
-    }
-
-    private static DecodeRequestView victim(long requestId, long reservationToken) {
-        return new DecodeRequestView(
-                String.valueOf(requestId),
-                30,
-                64L,
-                64L,
-                DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
-                true,
-                reservationToken,
-                false);
     }
 
     @Test
@@ -1943,4 +1838,112 @@ class DecodePreemptionProtocolTest {
         org.mockito.Mockito.clearInvocations(runtime);
         return new java.lang.ref.WeakReference<>(admissionOpen);
     }
+
+    private Fixture fixture() {
+        AbstractRequestScheduler requests = mock(AbstractRequestScheduler.class);
+        org.flexlb.balance.scheduler.SchedulerTestServices.bind(requests, runtime);
+        when(requests.onPreemption(any(), any()))
+                .thenAnswer(
+                        call ->
+                                call.getArgument(1) == null
+                                        || call.getArgument(
+                                                                1,
+                                                                AbstractRequestScheduler
+                                                                        .PreemptionEvent.class)
+                                                        .phase()
+                                                != PreemptionCancelPhase.CANCEL_UNKNOWN);
+        DecodeEndpoint endpoint =
+                org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
+        WorkerStatus status = mock(WorkerStatus.class);
+        when(endpoint.getStatus()).thenReturn(status);
+        when(status.getGenerationId()).thenReturn(9L);
+        when(endpoint.beginPreemption(
+                        anyLong(),
+                        anyList(),
+                        org.mockito.ArgumentMatchers.anyString(),
+                        anyLong(),
+                        anyLong(),
+                        anyInt(),
+                        any(DecodeResources.AdmissionCapacity.class)))
+                .thenReturn(DecodeResources.PreemptionBeginResult.SUCCESS);
+        when(endpoint.updatePreemption(anyLong(), any(DecodeResources.PreemptionUpdate.class)))
+                .thenReturn(
+                        org.flexlb.balance.endpoint.DecodeResources.ResourceChange.of(
+                                org.flexlb.balance.endpoint.DecodeResources.MutationStatus.APPLIED,
+                                false));
+        when(endpoint.commitPreemption(anyLong()))
+                .thenReturn(new DecodeResources.RequestReservation(9L, String.valueOf(20L), 100L));
+        return new Fixture(requests, endpoint);
+    }
+
+    private PreemptionRegistration claim(
+            AbstractRequestScheduler owner,
+            long requestId,
+            CompletableFuture<VictimResolution> terminal) {
+        var context =
+                mock(
+                        org.flexlb.balance.scheduler.RequestContext.class,
+                        org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        when(context.data().getRequestId()).thenReturn(String.valueOf(requestId));
+        when(context.snapshot().delivery()).thenReturn(null);
+        when(context.snapshot().cancellation()).thenReturn(null);
+        when(context.data().getRequestScheduler()).thenReturn(owner);
+        var reservation =
+                new DecodeResources.RequestReservation(
+                        9L, String.valueOf(requestId), requestId == 11L ? 101L : 102L);
+        var claim =
+                new PreemptionRegistration(
+                        context, 1L, reservation, new CancelTarget("10.0.0.1", 9090));
+        terminal.whenComplete(
+                (result, failure) -> {
+                    if (failure == null) {
+                        claim.complete(result);
+                    }
+                });
+        return claim;
+    }
+
+    private org.flexlb.balance.scheduler.DeliveryDispatcher dispatcher(EngineGrpcClient client) {
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                runtime.dispatcher, "grpcClient", client);
+        return (org.flexlb.balance.scheduler.DeliveryDispatcher)
+                org.springframework.test.util.ReflectionTestUtils.getField(runtime, "dispatcher");
+    }
+
+    private static DecodeRequestView victim(long requestId, long reservationToken) {
+        return new DecodeRequestView(
+                String.valueOf(requestId),
+                30,
+                64L,
+                64L,
+                DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                true,
+                reservationToken,
+                false);
+    }
+
+    private CompletableFuture<DecodePreemption.PreemptionResult> preempt(
+            DefaultDecodePreemption acquirer, DefaultDecodePreemption.PreemptionCommand command) {
+        var context =
+                mock(
+                        org.flexlb.balance.scheduler.RequestContext.class,
+                        org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        when(context.data().getRequestScheduler()).thenReturn(mock(AbstractRequestScheduler.class));
+        return acquirer.preempt(context, command);
+    }
+
+    private static org.flexlb.dao.loadbalance.Request incoming() {
+        return org.flexlb.dao.loadbalance.Request.builder()
+                .requestId("20")
+                .seqLen(64L)
+                .maxNewTokens(0)
+                .build();
+    }
+
+    private static AbstractRequestScheduler.PreemptionEvent phaseEvent(
+            PreemptionCancelPhase phase) {
+        return new AbstractRequestScheduler.PreemptionEvent(phase, false, null, null, null);
+    }
+
+    private record Fixture(AbstractRequestScheduler requests, DecodeEndpoint endpoint) {}
 }

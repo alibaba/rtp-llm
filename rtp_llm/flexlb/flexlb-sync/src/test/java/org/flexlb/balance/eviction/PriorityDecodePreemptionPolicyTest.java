@@ -46,6 +46,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @DisplayName("PriorityDecodePreemptionPolicy.planDecode recompute contracts")
 class PriorityDecodePreemptionPolicyTest {
+    private static final long H_SLOT = 4L;
+    private static final long H_KV = 8L;
 
     @Test
     void negativeHarmPropagatesDiagnosticFormattingFailure() {
@@ -99,13 +101,86 @@ class PriorityDecodePreemptionPolicyTest {
                 "scalar saturation must not decide exact priority ordering");
     }
 
-    private static final long H_SLOT = 4L;
-    private static final long H_KV = 8L;
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void victimStagePolicyGatesEngineVictimsOnly(boolean engineOwnedAllowed) {
+        var engine = endpoint(1_000L, 1_000L, 1, 1, List.of(accepted(1L, 10, 100L)));
+        var enginePolicy = new PreemptionConfig();
+        enginePolicy.setAllowedVictimStages(
+                engineOwnedAllowed
+                        ? EnumSet.of(VictimStage.DECODE_ENGINE_OWNED)
+                        : EnumSet.noneOf(VictimStage.class));
+        var proposal =
+                planDecode(
+                        Request.builder().requestId("99").seqLen(0L).maxNewTokens(0).build(),
+                        70,
+                        engine.capacity(),
+                        engine.snapshot(),
+                        enginePolicy,
+                        new HashMap<>());
+        if (engineOwnedAllowed) {
+            assertEquals(List.of(1L), victimIds(proposal));
+        } else {
+            assertNull(proposal);
+        }
+        var local =
+                new DecodeRequestView(
+                        String.valueOf(2L),
+                        10,
+                        100L,
+                        100L,
+                        DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED,
+                        true,
+                        1L,
+                        false);
+        var policy = new PreemptionConfig();
+        policy.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_RESERVED));
+        var localEndpoint = endpoint(1_000L, 1_000L, 1, 1, List.of(local));
+        var localProposal =
+                planDecode(
+                        Request.builder().requestId("99").seqLen(0L).maxNewTokens(0).build(),
+                        70,
+                        localEndpoint.capacity(),
+                        localEndpoint.snapshot(),
+                        policy,
+                        new HashMap<>());
+        assertNotNull(localProposal);
+        assertEquals(List.of(2L), victimIds(localProposal));
+    }
 
-    private static org.flexlb.config.PreemptionConfig engineOwned() {
-        PreemptionConfig p = new PreemptionConfig();
-        p.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_ENGINE_OWNED));
-        return p;
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void combinedDeficitSelectsBothDimensionsWithoutRepeatingVictims(boolean kvFirst) {
+        List<DecodeRequestView> candidates =
+                kvFirst
+                        ? List.of(
+                                accepted(1L, 30, 2_000L),
+                                accepted(2L, 30, 100L),
+                                accepted(3L, 30, 100L),
+                                accepted(4L, 30, 100L),
+                                accepted(5L, 30, 2_000L))
+                        : List.of(
+                                accepted(1L, 30, 100L),
+                                accepted(2L, 30, 100L),
+                                accepted(3L, 30, 2_000L));
+        EndpointFixture ep =
+                endpoint(0L, 10_000L, kvFirst ? 102 : 3, kvFirst ? 100 : 2, candidates);
+        long demand = kvFirst ? 4_000L : 1_200L;
+        DecodeEvictionProposal proposal = plan(70, demand, ep, new HashMap<>());
+
+        assertEquals(DecodeEvictionProposal.CASE_SLOT_AND_KV, proposal.evictionCase());
+        assertEquals(kvFirst ? List.of(1L, 5L, 2L) : List.of(1L, 2L, 3L), victimIds(proposal));
+        long cost = kvFirst ? 320L : 256L;
+        assertEquals(cost, proposal.diagnosticCost());
+        DecodeResources.CapacityRelease release = DecodeResources.CapacityRelease.NONE;
+        for (DecodeRequestView victim : proposal.victims()) {
+            release = release.plus(victim.placementRelease());
+        }
+        assertEquals(kvFirst ? 4_100L : 2_200L, proposal.freedKvTokens());
+        assertTrue(
+                ep.capacity()
+                        .evaluate(ep.snapshot().routing().placementUsage(), demand, demand, release)
+                        .fits());
     }
 
     private static DecodeRequestView accepted(long id, int priority, long kvTokens) {
@@ -164,9 +239,16 @@ class PriorityDecodePreemptionPolicyTest {
                 new DecodeResources.ResourceSnapshot(routing, requests, 0, 0));
     }
 
-    private record EndpointFixture(
-            DecodeResources.AdmissionCapacity capacity,
-            DecodeResources.ResourceSnapshot snapshot) {}
+    private static DecodeEvictionProposal plan(
+            int priority, long hardKvTokens, EndpointFixture ep, Map<String, String> failures) {
+        return planDecode(
+                Request.builder().requestId("99").seqLen(hardKvTokens).maxNewTokens(0).build(),
+                priority,
+                ep.capacity(),
+                ep.snapshot(),
+                engineOwned(),
+                failures);
+    }
 
     private static DecodeEvictionProposal planDecode(
             Request request,
@@ -180,102 +262,19 @@ class PriorityDecodePreemptionPolicyTest {
                 .proposal();
     }
 
-    private static DecodeEvictionProposal plan(
-            int priority, long hardKvTokens, EndpointFixture ep, Map<String, String> failures) {
-        return planDecode(
-                Request.builder().requestId("99").seqLen(hardKvTokens).maxNewTokens(0).build(),
-                priority,
-                ep.capacity(),
-                ep.snapshot(),
-                engineOwned(),
-                failures);
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void victimStagePolicyGatesEngineVictimsOnly(boolean engineOwnedAllowed) {
-        var engine = endpoint(1_000L, 1_000L, 1, 1, List.of(accepted(1L, 10, 100L)));
-        var enginePolicy = new PreemptionConfig();
-        enginePolicy.setAllowedVictimStages(
-                engineOwnedAllowed
-                        ? EnumSet.of(VictimStage.DECODE_ENGINE_OWNED)
-                        : EnumSet.noneOf(VictimStage.class));
-        var proposal =
-                planDecode(
-                        Request.builder().requestId("99").seqLen(0L).maxNewTokens(0).build(),
-                        70,
-                        engine.capacity(),
-                        engine.snapshot(),
-                        enginePolicy,
-                        new HashMap<>());
-        if (engineOwnedAllowed) {
-            assertEquals(List.of(1L), victimIds(proposal));
-        } else {
-            assertNull(proposal);
-        }
-        var local =
-                new DecodeRequestView(
-                        String.valueOf(2L),
-                        10,
-                        100L,
-                        100L,
-                        DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED,
-                        true,
-                        1L,
-                        false);
-        var policy = new PreemptionConfig();
-        policy.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_RESERVED));
-        var localEndpoint = endpoint(1_000L, 1_000L, 1, 1, List.of(local));
-        var localProposal =
-                planDecode(
-                        Request.builder().requestId("99").seqLen(0L).maxNewTokens(0).build(),
-                        70,
-                        localEndpoint.capacity(),
-                        localEndpoint.snapshot(),
-                        policy,
-                        new HashMap<>());
-        assertNotNull(localProposal);
-        assertEquals(List.of(2L), victimIds(localProposal));
+    private static org.flexlb.config.PreemptionConfig engineOwned() {
+        PreemptionConfig p = new PreemptionConfig();
+        p.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_ENGINE_OWNED));
+        return p;
     }
 
     private static List<Long> victimIds(DecodeEvictionProposal p) {
         return p.victims().stream().map(view -> Long.parseLong(view.requestId())).toList();
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void combinedDeficitSelectsBothDimensionsWithoutRepeatingVictims(boolean kvFirst) {
-        List<DecodeRequestView> candidates =
-                kvFirst
-                        ? List.of(
-                                accepted(1L, 30, 2_000L),
-                                accepted(2L, 30, 100L),
-                                accepted(3L, 30, 100L),
-                                accepted(4L, 30, 100L),
-                                accepted(5L, 30, 2_000L))
-                        : List.of(
-                                accepted(1L, 30, 100L),
-                                accepted(2L, 30, 100L),
-                                accepted(3L, 30, 2_000L));
-        EndpointFixture ep =
-                endpoint(0L, 10_000L, kvFirst ? 102 : 3, kvFirst ? 100 : 2, candidates);
-        long demand = kvFirst ? 4_000L : 1_200L;
-        DecodeEvictionProposal proposal = plan(70, demand, ep, new HashMap<>());
-
-        assertEquals(DecodeEvictionProposal.CASE_SLOT_AND_KV, proposal.evictionCase());
-        assertEquals(kvFirst ? List.of(1L, 5L, 2L) : List.of(1L, 2L, 3L), victimIds(proposal));
-        long cost = kvFirst ? 320L : 256L;
-        assertEquals(cost, proposal.diagnosticCost());
-        DecodeResources.CapacityRelease release = DecodeResources.CapacityRelease.NONE;
-        for (DecodeRequestView victim : proposal.victims()) {
-            release = release.plus(victim.placementRelease());
-        }
-        assertEquals(kvFirst ? 4_100L : 2_200L, proposal.freedKvTokens());
-        assertTrue(
-                ep.capacity()
-                        .evaluate(ep.snapshot().routing().placementUsage(), demand, demand, release)
-                        .fits());
-    }
+    private record EndpointFixture(
+            DecodeResources.AdmissionCapacity capacity,
+            DecodeResources.ResourceSnapshot snapshot) {}
 
     // ─── No deficit ─────────────────────────────────────────────────────
 

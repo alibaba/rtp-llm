@@ -22,6 +22,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks gRPC executor state metrics and rejection accounting across saturation and shutdown.
+ */
 @Timeout(10)
 class FlexlbGrpcExecutorMetricsTest {
     @Test
@@ -65,6 +68,9 @@ class FlexlbGrpcExecutorMetricsTest {
         }
     }
 
+    /**
+     * Controls busy and queued executor work and captures the corresponding metric samples.
+     */
     private static final class Fixture implements AutoCloseable {
         final SimpleMeterRegistry registry = new SimpleMeterRegistry();
         final CountDownLatch release = new CountDownLatch(1);
@@ -84,6 +90,14 @@ class FlexlbGrpcExecutorMetricsTest {
                             1, 1, 1, TimeUnit.MINUTES, new LinkedBlockingQueue<>(1), handler);
             ReflectionTestUtils.setField(server, "grpcExecutor", executor);
             reporter.registerServerExecutor(server, 1, handler.getCallerRunsCount()::get);
+        }
+
+        @Override
+        public void close() throws InterruptedException {
+            release.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS));
+            registry.close();
         }
 
         void saturate() throws InterruptedException {
@@ -113,14 +127,6 @@ class FlexlbGrpcExecutorMetricsTest {
 
         void assertCounter(String name, double value) {
             assertEquals(value, registry.get("flexlb." + name).functionCounter().count(), name);
-        }
-
-        @Override
-        public void close() throws InterruptedException {
-            release.countDown();
-            executor.shutdownNow();
-            assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS));
-            registry.close();
         }
     }
 }

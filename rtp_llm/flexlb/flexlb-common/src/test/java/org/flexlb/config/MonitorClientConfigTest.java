@@ -20,6 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+/**
+ * Checks monitor registry selection and configuration.
+ */
 class MonitorClientConfigTest {
 
     @ParameterizedTest
@@ -97,25 +100,17 @@ class MonitorClientConfigTest {
         }
     }
 
+    /**
+     * Injects metric failures while recording initialization and close, so the protective wrapper can be checked without hiding backend lifecycle calls.
+     */
     static class BrokenMonitor implements FlexMonitor {
         private final boolean error;
+
         boolean initialized;
         boolean closed;
 
         BrokenMonitor(boolean error) {
             this.error = error;
-        }
-
-        @PostConstruct
-        void init() {
-            initialized = true;
-        }
-
-        private void fail() {
-            if (error) {
-                throw new AssertionError("monitor failed");
-            }
-            throw new IllegalStateException("monitor failed");
         }
 
         public void register(String name, FlexMetricType type) {
@@ -145,6 +140,18 @@ class MonitorClientConfigTest {
         public void close() {
             closed = true;
             fail();
+        }
+
+        @PostConstruct
+        void init() {
+            initialized = true;
+        }
+
+        private void fail() {
+            if (error) {
+                throw new AssertionError("monitor failed");
+            }
+            throw new IllegalStateException("monitor failed");
         }
     }
 }

@@ -12,10 +12,12 @@ import java.util.Map;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
+/**
+ * Builds frontend scheduling results with consistent error details and selected worker metadata.
+ */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class Response {
-
     @JsonProperty("server_status")
     private List<ServerStatus> serverStatus;
 
@@ -50,6 +52,15 @@ public class Response {
     @JsonProperty("admission_reject_reason")
     private AdmissionRejectReason admissionRejectReason = AdmissionRejectReason.UNSPECIFIED;
 
+    /** Build a successful delivery response without mutating the original route response. */
+    public static Response buildSuccessResponse(Response routeResponse, boolean enqueuedByMaster) {
+        Response success = copyOf(java.util.Objects.requireNonNull(routeResponse, "routeResponse"));
+        success.success = true;
+        success.code = 200;
+        success.enqueuedByMaster = enqueuedByMaster;
+        return success;
+    }
+
     /** Deep-copy all response data, preserving null collections and entries. */
     public static Response copyOf(Response source) {
         if (source == null) {
@@ -78,15 +89,6 @@ public class Response {
         copy.ready = source.ready;
         copy.admissionRejectReason = source.admissionRejectReason;
         return copy;
-    }
-
-    /** Build a successful delivery response without mutating the original route response. */
-    public static Response buildSuccessResponse(Response routeResponse, boolean enqueuedByMaster) {
-        Response success = copyOf(java.util.Objects.requireNonNull(routeResponse, "routeResponse"));
-        success.success = true;
-        success.code = 200;
-        success.enqueuedByMaster = enqueuedByMaster;
-        return success;
     }
 
     public static Response buildErrorResponse(StrategyErrorType errorType, String message) {

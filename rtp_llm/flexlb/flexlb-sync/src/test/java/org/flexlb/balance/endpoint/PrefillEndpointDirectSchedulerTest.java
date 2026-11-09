@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 /**
- * Checks Prefill endpoint construction with the direct scheduler.
+ * Checks direct Prefill admission enforces a shared limit atomically and returns capacity after rollback.
  */
 class PrefillEndpointDirectSchedulerTest {
 
@@ -54,7 +54,8 @@ class PrefillEndpointDirectSchedulerTest {
                                     {
                                         var selectedEndpoint = endpoint;
 
-                                        return endpoint.reserveUnqueuedRoute(item(requestId), 10L);
+                                        return org.flexlb.balance.scheduler.SelectionTestSupport
+                                                .registerPrefill(endpoint, item(requestId), 10L);
                                     }
                                 }));
             }
@@ -74,7 +75,9 @@ class PrefillEndpointDirectSchedulerTest {
             {
                 var selectedEndpoint = endpoint;
 
-                var full = endpoint.reserveUnqueuedRoute(item(100L), 10L);
+                var full =
+                        org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                endpoint, item(100L), 10L);
                 assertEquals(
                         CapacityBoundary.Resource.PREFILL_REQUEST,
                         full.boundary().resource(),
@@ -85,7 +88,9 @@ class PrefillEndpointDirectSchedulerTest {
             {
                 var selectedEndpoint = endpoint;
 
-                var result = endpoint.reserveUnqueuedRoute(item(65L), 10L);
+                var result =
+                        org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                endpoint, item(65L), 10L);
                 assertTrue(result.accepted());
                 endpoint.rollback(result.value());
                 endpoint.rollback(result.value());
@@ -120,8 +125,8 @@ class PrefillEndpointDirectSchedulerTest {
         endpoint.close();
     }
 
-    private static org.flexlb.balance.scheduler.RouteExecution item(long requestId) {
-        var item = mock(org.flexlb.balance.scheduler.RouteExecution.class);
+    private static org.flexlb.balance.scheduler.RouteResult item(long requestId) {
+        var item = mock(org.flexlb.balance.scheduler.RouteResult.class);
         org.mockito.Mockito.when(item.requestId()).thenReturn(String.valueOf(requestId));
         org.mockito.Mockito.when(item.seqLen()).thenReturn(128L);
         return item;

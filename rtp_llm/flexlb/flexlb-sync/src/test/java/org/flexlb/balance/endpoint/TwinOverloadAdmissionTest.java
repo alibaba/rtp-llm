@@ -1,8 +1,7 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -117,42 +116,24 @@ class TwinOverloadAdmissionTest {
     }
 
     @Test
-    void localBatchRecordMustBlockAnotherUntilReleased() {
+    void committedBatchBlocksAnotherUntilReleased() {
         FlexlbConfig config = config(1);
         PrefillEndpoint endpoint = prefill(config);
-        RouteExecution first = item(endpoint, config, 1L);
-        RouteExecution staged = item(endpoint, config, 2L);
+        RouteResult first = item(endpoint, config, 1L), staged = item(endpoint, config, 2L);
         assertTrue(EndpointTestSupport.offer(endpoint, first));
         assertTrue(EndpointTestSupport.offer(endpoint, staged));
-        CapacityBoundary.Attempt<PrefillEndpoint.BatchRecord> acquired =
-                endpoint.reserveBatch(70L, 1);
-        assertTrue(acquired.accepted());
-        {
-            PrefillEndpoint.BatchRecord ignored = acquired.value();
-            try (var preparationIgnored = EndpointTestSupport.preparation(ignored)) {
-                assertEquals(2, endpoint.progress().queueDepth());
-                CapacityBoundary.Attempt<PrefillEndpoint.BatchRecord> blocked =
-                        endpoint.reserveBatch(71L, 1);
-                {
-                    PrefillEndpoint.BatchRecord unexpected = blocked.value();
-                    try (var preparationUnexpected = EndpointTestSupport.preparation(unexpected)) {
-                        assertEquals(
-                                CapacityBoundary.Resource.PREFILL_BATCH,
-                                blocked.boundary().resource(),
-                                "a locally reserved batch must occupy the only slot at final admission");
-                    }
-                }
-            }
-        }
-        assertEquals(2, endpoint.progress().queueDepth());
-        CapacityBoundary.Attempt<PrefillEndpoint.BatchRecord> resumed =
-                endpoint.reserveBatch(71L, 1);
-        {
-            PrefillEndpoint.BatchRecord ignored = resumed.value();
-            try (var preparationIgnored = EndpointTestSupport.preparation(ignored)) {
-                assertTrue(resumed.accepted());
-            }
-        }
+        var firstInput = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(70L, 1);
+        var nextInput = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(71L, 1);
+        assertTrue(endpoint.batchCapacityAvailable(1));
+        org.junit.jupiter.api.Assertions.assertNotNull(
+                EndpointTestSupport.commitBatch(endpoint, firstInput, List.of(first), 10));
+        org.junit.jupiter.api.Assertions.assertNull(
+                EndpointTestSupport.commitBatch(endpoint, nextInput, List.of(staged), 10));
+        assertTrue(endpoint.releaseRequest(first));
+        org.junit.jupiter.api.Assertions.assertNotNull(
+                EndpointTestSupport.commitBatch(endpoint, nextInput, List.of(staged), 10));
+        assertTrue(endpoint.releaseRequest(staged));
+        assertTrue(endpoint.batchCapacityAvailable(1));
     }
 
     @Test
@@ -188,7 +169,8 @@ class TwinOverloadAdmissionTest {
 
                 assertNotNull(selectedEndpoint);
                 assertNotNull(
-                        endpoint.tryReserveQueuedRequest(String.valueOf(id), 128L, 256L, 50, null)
+                        org.flexlb.balance.scheduler.SelectionTestSupport.registerQueuedDecode(
+                                        endpoint, String.valueOf(id), 128L, 256L, 50)
                                 .value());
             }
         }
@@ -258,28 +240,19 @@ class TwinOverloadAdmissionTest {
 
     private static void commitBatch(
             PrefillEndpoint endpoint, FlexlbConfig config, long batchId, long firstRequestId) {
-        List<RouteExecution> items = new ArrayList<>();
+        List<RouteResult> items = new ArrayList<>();
         for (long id = firstRequestId; id < firstRequestId + 8; id++) {
-            RouteExecution item = item(endpoint, config, id);
+            RouteResult item = item(endpoint, config, id);
             assertTrue(EndpointTestSupport.offer(endpoint, item));
             items.add(item);
         }
         int limit = config.getDispatcher().getMaxInflightPerPrefillWorker();
-        CapacityBoundary.Attempt<PrefillEndpoint.BatchRecord> acquisition =
-                endpoint.reserveBatch(batchId, limit);
-        assertTrue(acquisition.accepted());
-        PrefillEndpoint state = (PrefillEndpoint) endpoint;
-        {
-            PrefillEndpoint.BatchRecord reservation = acquisition.value();
-            try (var preparationReservation = EndpointTestSupport.preparation(reservation);
-                    org.flexlb.balance.scheduler.Delivery ignored =
-                            EndpointTestSupport.commitBatch(state, reservation, items, 300_000L)) {
-                // Releasing the handoff closes only the selected Worker, not engine work.
-            }
-        }
+        var input = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(batchId, limit);
+        org.junit.jupiter.api.Assertions.assertNotNull(
+                EndpointTestSupport.commitBatch(endpoint, input, items, 300_000L));
     }
 
-    private static RouteExecution item(PrefillEndpoint endpoint, FlexlbConfig config, long id) {
+    private static RouteResult item(PrefillEndpoint endpoint, FlexlbConfig config, long id) {
         Request request = Request.builder().requestId(String.valueOf(id)).seqLen(128L).build();
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);
@@ -288,8 +261,16 @@ class TwinOverloadAdmissionTest {
         selected.setServerIp("127.0.0.1");
         selected.setHttpPort(8080);
         selected.setGrpcPort(8090);
-        return SchedulingTestConfig.createRoute(
-                context, null, selected, null, endpoint, null, null, System.currentTimeMillis());
+        return org.flexlb.balance.scheduler.RequestExecutionTestSupport.mockProtocolRoute(
+                SchedulingTestConfig.createRoute(
+                        context,
+                        null,
+                        selected,
+                        null,
+                        endpoint,
+                        null,
+                        null,
+                        System.currentTimeMillis()));
     }
 
     private static Map<String, TaskInfo> tasks(

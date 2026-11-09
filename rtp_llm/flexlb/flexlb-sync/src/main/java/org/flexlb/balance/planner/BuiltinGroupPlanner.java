@@ -25,6 +25,14 @@ public enum BuiltinGroupPlanner implements GroupPlanner {
     SINGLE,
     FIXED_WINDOW;
 
+    /** Allocation hint only; {@link Constraints#maxRequests()} is authoritative. */
+    private static final int INITIAL_SELECTION_CAPACITY = 32;
+
+    private static final int MAX_CACHED_SELECTION_SIZE = 4096;
+
+    private static final ThreadLocal<ArrayList<?>> SELECTIONS =
+            ThreadLocal.withInitial(() -> new ArrayList<>(INITIAL_SELECTION_CAPACITY));
+
     public static BuiltinGroupPlanner from(FlexlbConfig config) {
         return config.isQueue()
                         && config.decisionPolicy().getType()
@@ -32,13 +40,6 @@ public enum BuiltinGroupPlanner implements GroupPlanner {
                 ? FIXED_WINDOW
                 : SINGLE;
     }
-
-    /** Allocation hint only; {@link Constraints#maxRequests()} is authoritative. */
-    private static final int INITIAL_SELECTION_CAPACITY = 32;
-
-    private static final int MAX_CACHED_SELECTION_SIZE = 4096;
-    private static final ThreadLocal<ArrayList<?>> SELECTIONS =
-            ThreadLocal.withInitial(() -> new ArrayList<>(INITIAL_SELECTION_CAPACITY));
 
     @SuppressWarnings(
             "unchecked") // The thread-local list is empty at acquisition and cleared before return.
@@ -77,6 +78,50 @@ public enum BuiltinGroupPlanner implements GroupPlanner {
                 picked.clear();
             }
         }
+    }
+
+    /** Shared by live selection and the projection's single-member calculation. */
+    public void validateConstraints(Constraints constraints) {
+        checkArgument(
+                this != SINGLE
+                        || constraints.maxRequests() == 1
+                                && constraints.collectionWindowMs() == 0L
+                                && constraints.predictedExecutionBudgetMs() == 0L,
+                "SINGLE requires one member and no collection or prediction budget");
+    }
+
+    /** Return the dispatch reason at this clock, or null while the selected group must wait. */
+    public String dispatchReason(Selection<?> selection, Constraints constraints, long nowMs) {
+        if (selection.items().isEmpty()) {
+            return null;
+        }
+        if (this == SINGLE) {
+            return "single_request";
+        }
+        if (selection.predictionBoundaryTriggered()) {
+            return PREDICTED_EXECUTION_CAP;
+        }
+        if (selection.items().size() >= constraints.maxRequests()) {
+            return BATCH_FULL;
+        }
+        if (GroupPlanner.windowElapsed(
+                selection.windowOpenedAtMs(), nowMs, constraints.collectionWindowMs())) {
+            return FIXED_WINDOW_TIMEOUT;
+        }
+        checkArgument(
+                GroupPlanner.collectionDeadlineMs(
+                                selection.windowOpenedAtMs(), constraints.collectionWindowMs())
+                        >= 0L,
+                "collection deadline must be non-negative");
+        return null;
+    }
+
+    /** Next policy wakeup for a group whose dispatchReason is null; empty groups have no timer. */
+    public long nextCheckAtMs(Selection<?> selection, Constraints constraints) {
+        return selection.items().isEmpty()
+                ? Long.MAX_VALUE
+                : GroupPlanner.collectionDeadlineMs(
+                        selection.windowOpenedAtMs(), constraints.collectionWindowMs());
     }
 
     /** Packs one group; the caller owns and clears the borrowed prefix. */
@@ -154,49 +199,5 @@ public enum BuiltinGroupPlanner implements GroupPlanner {
             case 2 -> List.of(picked.get(0), picked.get(1));
             default -> picked;
         };
-    }
-
-    /** Return the dispatch reason at this clock, or null while the selected group must wait. */
-    public String dispatchReason(Selection<?> selection, Constraints constraints, long nowMs) {
-        if (selection.items().isEmpty()) {
-            return null;
-        }
-        if (this == SINGLE) {
-            return "single_request";
-        }
-        if (selection.predictionBoundaryTriggered()) {
-            return PREDICTED_EXECUTION_CAP;
-        }
-        if (selection.items().size() >= constraints.maxRequests()) {
-            return BATCH_FULL;
-        }
-        if (GroupPlanner.windowElapsed(
-                selection.windowOpenedAtMs(), nowMs, constraints.collectionWindowMs())) {
-            return FIXED_WINDOW_TIMEOUT;
-        }
-        checkArgument(
-                GroupPlanner.collectionDeadlineMs(
-                                selection.windowOpenedAtMs(), constraints.collectionWindowMs())
-                        >= 0L,
-                "collection deadline must be non-negative");
-        return null;
-    }
-
-    /** Shared by live selection and the projection's single-member calculation. */
-    public void validateConstraints(Constraints constraints) {
-        checkArgument(
-                this != SINGLE
-                        || constraints.maxRequests() == 1
-                                && constraints.collectionWindowMs() == 0L
-                                && constraints.predictedExecutionBudgetMs() == 0L,
-                "SINGLE requires one member and no collection or prediction budget");
-    }
-
-    /** Next policy wakeup for a group whose dispatchReason is null; empty groups have no timer. */
-    public long nextCheckAtMs(Selection<?> selection, Constraints constraints) {
-        return selection.items().isEmpty()
-                ? Long.MAX_VALUE
-                : GroupPlanner.collectionDeadlineMs(
-                        selection.windowOpenedAtMs(), constraints.collectionWindowMs());
     }
 }

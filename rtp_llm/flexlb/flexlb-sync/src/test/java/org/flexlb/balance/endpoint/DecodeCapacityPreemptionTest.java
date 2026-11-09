@@ -28,7 +28,7 @@ class DecodeCapacityPreemptionTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void outputBudgetRejectionProducesAPlanAndCommitRechecksCurrentUsage(boolean usageChanged) {
-        DecodeEndpoint endpoint = endpoint(400L);
+        DecodeEndpoint endpoint = endpoint(500L);
         DecodeResources.AdmissionCapacity policy = new DecodeResources.AdmissionCapacity(0L, 90L);
         long hardKvTokens = 100L;
         long expectedKvTokens = 250L;
@@ -37,7 +37,8 @@ class DecodeCapacityPreemptionTest {
             var selectedEndpoint = endpoint;
 
             victim =
-                    endpoint.tryReserveQueuedRequest(String.valueOf(1L), 100L, 200L, 30, null)
+                    org.flexlb.balance.scheduler.SelectionTestSupport.registerQueuedDecode(
+                                    endpoint, String.valueOf(1L), 100L, 200L, 30)
                             .value();
             assertEquals(
                     DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
@@ -47,10 +48,15 @@ class DecodeCapacityPreemptionTest {
                             .dispatch()
                             .status());
             var reservation =
-                    endpoint.tryReserveQueuedRequest(
-                                    String.valueOf(9L), hardKvTokens, expectedKvTokens, 70, null)
+                    org.flexlb.balance.scheduler.SelectionTestSupport.registerQueuedDecode(
+                                    endpoint,
+                                    String.valueOf(9L),
+                                    hardKvTokens,
+                                    expectedKvTokens,
+                                    70)
                             .value();
             assertNotNull(reservation);
+            updateCapacity(endpoint, 400L);
             assertEquals(
                     DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
                     endpoint.acquireDispatchPermit(reservation, policy).status());
@@ -108,11 +114,17 @@ class DecodeCapacityPreemptionTest {
             var selectedEndpoint = endpoint;
 
             victim =
-                    endpoint.tryReserveQueuedRequest(String.valueOf(1L), 100L, 200L, 30, null)
+                    org.flexlb.balance.scheduler.SelectionTestSupport.registerQueuedDecode(
+                                    endpoint, String.valueOf(1L), 100L, 200L, 30)
                             .value();
             assertNull(
-                    endpoint.tryReserveQueuedRequest(
-                                    String.valueOf(9L), hardKvTokens, expectedKvTokens, 70, policy)
+                    endpoint.tryRegisterSelection(
+                                    endpoint.routingView(),
+                                    String.valueOf(9L),
+                                    hardKvTokens,
+                                    expectedKvTokens,
+                                    70,
+                                    policy)
                             .value());
         }
         // The same queued reservation remains soft for ordinary Engine dispatch.
@@ -149,7 +161,8 @@ class DecodeCapacityPreemptionTest {
             var selectedEndpoint = endpoint;
 
             victim =
-                    endpoint.tryReserveQueuedRequest(String.valueOf(1L), 0L, 900L, 30, null)
+                    org.flexlb.balance.scheduler.SelectionTestSupport.registerQueuedDecode(
+                                    endpoint, String.valueOf(1L), 0L, 900L, 30)
                             .value();
         }
         DecodeEvictionProposal proposal =

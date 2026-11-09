@@ -21,7 +21,9 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Test fixtures at the Worker client boundary, backed by the mock engine's control endpoints. */
+/**
+ * Test fixtures at the Worker client boundary, backed by the mock engine's control endpoints.
+ */
 final class MockEngineClients {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Duration HTTP_TIMEOUT = Duration.ofMillis(500);
@@ -50,6 +52,22 @@ final class MockEngineClients {
                             }
                             return cancel(services.get(call.<Integer>getArgument(1)), request);
                         });
+    }
+
+    static EngineGrpcClient overHttp(String controlUrl) {
+        var client = mock(EngineGrpcClient.class);
+        var http = HttpClient.newBuilder().connectTimeout(HTTP_TIMEOUT).build();
+        var uri = URI.create(controlUrl.replaceAll("/+$", "") + "/cancel_request");
+        when(client.cancelAsync(any(), anyInt(), any(), anyLong()))
+                .thenAnswer(
+                        call ->
+                                cancelOverHttp(
+                                        http,
+                                        uri,
+                                        call.getArgument(0),
+                                        call.getArgument(1),
+                                        call.getArgument(2)));
+        return client;
     }
 
     private static CompletableFuture<CancelReply> cancel(
@@ -100,22 +118,6 @@ final class MockEngineClients {
         } catch (RuntimeException failure) {
             return CompletableFuture.failedFuture(failure);
         }
-    }
-
-    static EngineGrpcClient overHttp(String controlUrl) {
-        var client = mock(EngineGrpcClient.class);
-        var http = HttpClient.newBuilder().connectTimeout(HTTP_TIMEOUT).build();
-        var uri = URI.create(controlUrl.replaceAll("/+$", "") + "/cancel_request");
-        when(client.cancelAsync(any(), anyInt(), any(), anyLong()))
-                .thenAnswer(
-                        call ->
-                                cancelOverHttp(
-                                        http,
-                                        uri,
-                                        call.getArgument(0),
-                                        call.getArgument(1),
-                                        call.getArgument(2)));
-        return client;
     }
 
     private static CompletableFuture<CancelReply> cancelOverHttp(

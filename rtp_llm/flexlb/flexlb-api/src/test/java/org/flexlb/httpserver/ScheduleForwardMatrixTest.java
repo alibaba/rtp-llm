@@ -65,7 +65,6 @@ import static org.mockito.Mockito.when;
  * requests may route locally; ambiguous delivery is terminal.</p>
  */
 class ScheduleForwardMatrixTest {
-
     /**
      * The follower's declared IP. 127.0.0.5, not 127.0.0.1: the dead master
      * below reuses 127.0.0.1 for its instant TCP RST, and the SELF_TARGET
@@ -90,14 +89,15 @@ class ScheduleForwardMatrixTest {
 
     // ---- shared mocks for the schedule() matrix ----
     private AbstractRequestScheduler requestScheduler;
+
     private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
+
     private MasterStatusService consistency;
     private EngineHealthReporter engineHealthReporter;
     private FlexlbGrpcForwarder grpcForwarder;
     private FlexlbServiceImpl service;
     private ch.qos.logback.classic.Logger pvLogger;
     private ListAppender<ILoggingEvent> pvAppender;
-
     // ---- resources for the real-forwarder guard matrix ----
     private EventLoopGroup channelEventLoop;
     private ExecutorService channelExecutor;
@@ -415,27 +415,6 @@ class ScheduleForwardMatrixTest {
         }
     }
 
-    // ------------------------------------------------------------------
-    // fixtures and helpers
-    // ------------------------------------------------------------------
-
-    /** Real forwarder bound to a mocked consistency view; auto-closed. */
-    private final class RealForwarderFixture implements AutoCloseable {
-        final FlexlbGrpcForwarder forwarder;
-        final EngineHealthReporter engineHealthReporter;
-
-        private RealForwarderFixture(
-                EngineHealthReporter engineHealthReporter, FlexlbGrpcForwarder forwarder) {
-            this.engineHealthReporter = engineHealthReporter;
-            this.forwarder = forwarder;
-        }
-
-        @Override
-        public void close() {
-            forwarder.shutdown();
-        }
-    }
-
     private RealForwarderFixture newRealForwarderFixture(String masterHostIpPort) {
         MasterStatusService consistencyView = mock(MasterStatusService.class);
         when(consistencyView.isNeedConsistency()).thenReturn(true);
@@ -477,6 +456,13 @@ class ScheduleForwardMatrixTest {
                 .thenReturn(CompletableFuture.completedFuture(response));
     }
 
+    private void assertSuccessfulResponse(
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
+        FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = capturedResponse(observer);
+        assertTrue(response.getSuccess());
+        assertEquals(200, response.getCode());
+    }
+
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB capturedResponse(
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
         org.mockito.ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
@@ -487,17 +473,33 @@ class ScheduleForwardMatrixTest {
         return captor.getValue();
     }
 
-    private void assertSuccessfulResponse(
-            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
-        FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = capturedResponse(observer);
-        assertTrue(response.getSuccess());
-        assertEquals(200, response.getCode());
-    }
-
     private void assertSinglePvContains(String expected) {
         assertEquals(1, pvAppender.list.size());
         assertTrue(
                 pvAppender.list.get(0).getFormattedMessage().contains(expected),
                 pvAppender.list.get(0).getFormattedMessage());
+    }
+
+    // ------------------------------------------------------------------
+    // fixtures and helpers
+    // ------------------------------------------------------------------
+
+    /**
+     * Real forwarder bound to a mocked consistency view; auto-closed.
+     */
+    private final class RealForwarderFixture implements AutoCloseable {
+        final FlexlbGrpcForwarder forwarder;
+        final EngineHealthReporter engineHealthReporter;
+
+        private RealForwarderFixture(
+                EngineHealthReporter engineHealthReporter, FlexlbGrpcForwarder forwarder) {
+            this.engineHealthReporter = engineHealthReporter;
+            this.forwarder = forwarder;
+        }
+
+        @Override
+        public void close() {
+            forwarder.shutdown();
+        }
     }
 }

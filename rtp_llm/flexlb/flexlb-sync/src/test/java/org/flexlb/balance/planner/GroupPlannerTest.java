@@ -23,8 +23,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @DisplayName("GroupPlanner pure domain and algorithm")
 class GroupPlannerTest {
-
     private static final long BIG = 1_000_000L;
+
+    /** Each candidate group is predicted at exactly 100ms per member. */
+    private static final GroupPlanner.PrefixPrediction<Item> HUNDRED_PER_MEMBER =
+            (added, items) -> 100.0 * items.size();
 
     @Test
     void policyWakeupMatchesReadinessAndSaturatesWithoutOverflow() {
@@ -65,30 +68,6 @@ class GroupPlannerTest {
                             BuiltinGroupPlanner.SINGLE.select(
                                     List.of(item(1, 10, 0)), invalid, null));
         }
-    }
-
-    /** Each candidate group is predicted at exactly 100ms per member. */
-    private static final GroupPlanner.PrefixPrediction<Item> HUNDRED_PER_MEMBER =
-            (added, items) -> 100.0 * items.size();
-
-    private static Item item(long id, long seqLen, long enqueuedAtMs) {
-        return new Item(
-                String.valueOf(id), /* priority */
-                0, /* enqueueSeq */
-                id,
-                enqueuedAtMs, /* expiresAtMs */
-                BIG,
-                seqLen, /* hitCache */
-                0L);
-    }
-
-    private static Selection<Item> selectedShape(long... lengths) {
-        var items =
-                java.util.stream.LongStream.of(lengths)
-                        .mapToObj(length -> item(length, length, 0L))
-                        .toList();
-        return BuiltinGroupPlanner.FIXED_WINDOW.select(
-                items, new Constraints(lengths.length, BIG, BIG, 0L, 0L), null);
     }
 
     @Test
@@ -266,6 +245,26 @@ class GroupPlannerTest {
                 future.get(10, java.util.concurrent.TimeUnit.SECONDS);
             }
         }
+    }
+
+    private static Selection<Item> selectedShape(long... lengths) {
+        var items =
+                java.util.stream.LongStream.of(lengths)
+                        .mapToObj(length -> item(length, length, 0L))
+                        .toList();
+        return BuiltinGroupPlanner.FIXED_WINDOW.select(
+                items, new Constraints(lengths.length, BIG, BIG, 0L, 0L), null);
+    }
+
+    private static Item item(long id, long seqLen, long enqueuedAtMs) {
+        return new Item(
+                String.valueOf(id), /* priority */
+                0, /* enqueueSeq */
+                id,
+                enqueuedAtMs, /* expiresAtMs */
+                BIG,
+                seqLen, /* hitCache */
+                0L);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

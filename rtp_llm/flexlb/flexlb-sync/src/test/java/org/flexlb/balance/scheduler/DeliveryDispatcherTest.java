@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -54,8 +55,10 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Tests payload construction, final submission filtering and RPC completion with mocked request owners.
+ */
 class DeliveryDispatcherTest {
-
     private ConfigService configService;
     private EngineGrpcClient grpcClient;
     private FlexlbConfig config;
@@ -121,132 +124,6 @@ class DeliveryDispatcherTest {
         assertDispatchedTraceContexts(false, true);
     }
 
-    private void assertDispatchedTraceContexts(boolean enabled, boolean validScheduleContext)
-            throws Exception {
-        org.flexlb.telemetry.FlexlbTrace.configure(
-                enabled ? io.opentelemetry.api.OpenTelemetry.noop() : null, "");
-        PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution first = createRequestRoute(501L, 500, 200, prefillEp);
-        RouteExecution second = createRequestRoute(502L, 500, 200, prefillEp);
-        first.ctx()
-                .data()
-                .setGenerateInputPb(
-                        generateInputWithTraceContext(
-                                        501L,
-                                        "00-11111111111111111111111111111111-1111111111111111-01",
-                                        "vendor=one")
-                                .toBuilder()
-                                .setUnknownFields(
-                                        com.google.protobuf.UnknownFieldSet.newBuilder()
-                                                .addField(
-                                                        999,
-                                                        com.google.protobuf.UnknownFieldSet.Field
-                                                                .newBuilder()
-                                                                .addVarint(123)
-                                                                .build())
-                                                .build())
-                                .build()
-                                .toByteString());
-        second.ctx()
-                .data()
-                .setGenerateInputPb(
-                        generateInputWithTraceContext(
-                                        502L,
-                                        "00-22222222222222222222222222222222-2222222222222222-01",
-                                        "vendor=two")
-                                .toByteString());
-        if (validScheduleContext) {
-            first.ctx()
-                    .data()
-                    .setTraceContext(
-                            scheduleContext(
-                                    "11111111111111111111111111111111",
-                                    "aaaaaaaaaaaaaaaa",
-                                    "schedule"));
-            second.ctx()
-                    .data()
-                    .setTraceContext(
-                            scheduleContext(
-                                    "22222222222222222222222222222222", "bbbbbbbbbbbbbbbb", ""));
-        } else {
-            first.ctx().data().setTraceContext(io.opentelemetry.context.Context.root());
-            second.ctx().data().setTraceContext(null);
-        }
-
-        List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
-        when(grpcClient.batchEnqueueAsync(
-                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
-                .thenAnswer(
-                        inv -> {
-                            sent.add(inv.getArgument(2));
-                            return CompletableFuture.completedFuture(
-                                    ackResponse(92L, List.of(501L, 502L)));
-                        });
-
-        submit(List.of(first, second), 92L, 100, "trace_context", callback);
-
-        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
-        assertEquals(1, sent.size());
-        List<EngineRpcService.EnqueueBatchExternalInputPB> requests =
-                sent.getFirst().getDpSlots(0).getRequestsList();
-        assertEquals(2, requests.size());
-        EngineRpcService.GenerateInputPB firstSent =
-                requests.stream()
-                        .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
-                        .filter(input -> input.getRequestId() == 501L)
-                        .findFirst()
-                        .orElseThrow();
-        EngineRpcService.GenerateInputPB secondSent =
-                requests.stream()
-                        .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
-                        .filter(input -> input.getRequestId() == 502L)
-                        .findFirst()
-                        .orElseThrow();
-        assertEquals(
-                first.ctx().data().getGenerateInput().toBuilder().getUnknownFields(),
-                firstSent.getUnknownFields());
-        boolean replaced = enabled && validScheduleContext;
-        assertEquals(
-                "00-11111111111111111111111111111111-"
-                        + (replaced ? "aaaaaaaaaaaaaaaa" : "1111111111111111")
-                        + "-01",
-                firstSent.getRequestInfo().getTraceContext().getTraceparent());
-        assertEquals(
-                replaced ? "vendor=schedule" : "vendor=one",
-                firstSent.getRequestInfo().getTraceContext().getTracestate());
-        assertEquals(
-                "00-22222222222222222222222222222222-"
-                        + (replaced ? "bbbbbbbbbbbbbbbb" : "2222222222222222")
-                        + "-01",
-                secondSent.getRequestInfo().getTraceContext().getTraceparent());
-        assertEquals(
-                replaced ? "" : "vendor=two",
-                secondSent.getRequestInfo().getTraceContext().getTracestate());
-        assertEquals(
-                "vendor=one",
-                first.ctx().data().getGenerateInput().toBuilder()
-                        .getRequestInfo()
-                        .getTraceContext()
-                        .getTracestate(),
-                "dispatch must not mutate the queued payload");
-    }
-
-    private static io.opentelemetry.context.Context scheduleContext(
-            String traceId, String spanId, String vendor) {
-        var state = io.opentelemetry.api.trace.TraceState.builder();
-        if (!vendor.isEmpty()) {
-            state.put("vendor", vendor);
-        }
-        return io.opentelemetry.context.Context.root()
-                .with(
-                        io.opentelemetry.api.trace.Span.wrap(
-                                io.opentelemetry.api.trace.SpanContext.create(
-                                        traceId,
-                                        spanId,
-                                        io.opentelemetry.api.trace.TraceFlags.getSampled(),
-                                        state.build())));
-    }
-
     @Test
     void oldDescriptorRoundTripPreservesNestedTraceContextUnknownField() throws Exception {
         EngineRpcService.GenerateInputPB payload =
@@ -273,121 +150,10 @@ class DeliveryDispatcherTest {
                 reparsed.getRequestInfo().getTraceContext());
     }
 
-    private static EngineRpcService.GenerateInputPB generateInputWithTraceContext(
-            long requestId, String traceparent, String tracestate) {
-        return EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
-                .setRequestInfo(
-                        EngineRpcService.RequestInfoPB.newBuilder()
-                                .setTraceContext(
-                                        EngineRpcService.TraceContextPB.newBuilder()
-                                                .setTraceparent(traceparent)
-                                                .setTracestate(tracestate)
-                                                .build())
-                                .build())
-                .build();
-    }
-
-    private static Descriptors.Descriptor legacyGenerateInputDescriptor() throws Exception {
-        DescriptorProtos.DescriptorProto requestInfo =
-                DescriptorProtos.DescriptorProto.newBuilder()
-                        .setName("RequestInfoPB")
-                        .addField(
-                                optionalField(
-                                        "frontend_ip",
-                                        1,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
-                                        null))
-                        .addField(
-                                optionalField(
-                                        "dash_ip",
-                                        2,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
-                                        null))
-                        .addField(
-                                optionalField(
-                                        "trace_id",
-                                        3,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
-                                        null))
-                        .addField(
-                                optionalField(
-                                        "request_id",
-                                        4,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
-                                        null))
-                        .addField(
-                                optionalField(
-                                        "source_role",
-                                        5,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
-                                        null))
-                        .build();
-        DescriptorProtos.DescriptorProto generateConfig =
-                DescriptorProtos.DescriptorProto.newBuilder().setName("GenerateConfigPB").build();
-        DescriptorProtos.DescriptorProto generateInput =
-                DescriptorProtos.DescriptorProto.newBuilder()
-                        .setName("GenerateInputPB")
-                        .addField(
-                                optionalField(
-                                        "request_id",
-                                        1,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64,
-                                        null))
-                        .addField(
-                                optionalField(
-                                        "generate_config",
-                                        4,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_MESSAGE,
-                                        ".legacy_trace.GenerateConfigPB"))
-                        .addField(
-                                optionalField(
-                                        "request_info",
-                                        9,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_MESSAGE,
-                                        ".legacy_trace.RequestInfoPB"))
-                        .addField(
-                                optionalField(
-                                        "priority",
-                                        10,
-                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT32,
-                                        null))
-                        .build();
-        DescriptorProtos.FileDescriptorProto file =
-                DescriptorProtos.FileDescriptorProto.newBuilder()
-                        .setName("legacy_trace_generate_input.proto")
-                        .setPackage("legacy_trace")
-                        .setSyntax("proto3")
-                        .addMessageType(requestInfo)
-                        .addMessageType(generateConfig)
-                        .addMessageType(generateInput)
-                        .build();
-        return Descriptors.FileDescriptor.buildFrom(file, new Descriptors.FileDescriptor[0])
-                .findMessageTypeByName("GenerateInputPB");
-    }
-
-    private static DescriptorProtos.FieldDescriptorProto optionalField(
-            String name,
-            int number,
-            DescriptorProtos.FieldDescriptorProto.Type type,
-            String typeName) {
-        DescriptorProtos.FieldDescriptorProto.Builder builder =
-                DescriptorProtos.FieldDescriptorProto.newBuilder()
-                        .setName(name)
-                        .setNumber(number)
-                        .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL)
-                        .setType(type);
-        if (typeName != null) {
-            builder.setTypeName(typeName);
-        }
-        return builder.build();
-    }
-
     @Test
     void dispatchSendsItemsToGrpcAndReceivesAck() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(1L, 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response = ackResponse(1L, List.of(1L));
         when(grpcClient.batchEnqueueAsync(
@@ -411,7 +177,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchPassesConfiguredFetchAttachTimeoutToEngine() throws Exception {
         config.getDispatcher().setFetchAttachTimeoutMs(1500);
-        RouteExecution item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
+        RouteResult item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
         when(grpcClient.batchEnqueueAsync(
                         anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(ackResponse(1L, List.of(1L))));
@@ -428,8 +194,8 @@ class DeliveryDispatcherTest {
     @Test
     void batchAttributesAndValidatedResponseTimePrecedeEveryItemCallback() throws Exception {
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RouteExecution first = createRequestRoute(601L, 20, 0, endpoint);
-        RouteExecution second = createRequestRoute(602L, 20, 0, endpoint);
+        RouteResult first = createRequestRoute(601L, 20, 0, endpoint);
+        RouteResult second = createRequestRoute(602L, 20, 0, endpoint);
         var firstSpan = mock(io.opentelemetry.api.trace.Span.class);
         var secondSpan = mock(io.opentelemetry.api.trace.Span.class);
         when(firstSpan.storeInContext(any(io.opentelemetry.context.Context.class)))
@@ -478,7 +244,7 @@ class DeliveryDispatcherTest {
 
     @Test
     void malformedAckDoesNotPublishValidatedResponseTime() throws Exception {
-        RouteExecution item = createRequestRoute(603L, 20, 0, createPrefillEndpoint());
+        RouteResult item = createRequestRoute(603L, 20, 0, createPrefillEndpoint());
         var span = mock(io.opentelemetry.api.trace.Span.class);
         when(span.storeInContext(any(io.opentelemetry.context.Context.class))).thenCallRealMethod();
         item.ctx().data().setTraceContext(io.opentelemetry.context.Context.root().with(span));
@@ -498,8 +264,8 @@ class DeliveryDispatcherTest {
     @ValueSource(booleans = {false, true})
     void asynchronousTimeoutKeepsEveryMemberUncertain(boolean grpcDeadline) throws Exception {
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RouteExecution first = createRequestRoute(611L, 20, 0, endpoint);
-        RouteExecution second = createRequestRoute(612L, 20, 0, endpoint);
+        RouteResult first = createRequestRoute(611L, 20, 0, endpoint);
+        RouteResult second = createRequestRoute(612L, 20, 0, endpoint);
         var rpc = new CompletableFuture<EngineRpcService.EnqueueBatchResponsePB>();
         CountDownLatch invoked = new CountDownLatch(1);
         when(grpcClient.batchEnqueueAsync(
@@ -509,8 +275,7 @@ class DeliveryDispatcherTest {
                             invoked.countDown();
                             return rpc;
                         });
-        var results =
-                new CopyOnWriteArrayList<java.util.Map.Entry<RouteExecution, Delivery.Result>>();
+        var results = new CopyOnWriteArrayList<java.util.Map.Entry<RouteResult, Delivery.Result>>();
         submit(
                 List.of(first, second),
                 95L,
@@ -541,7 +306,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchHandlesGrpcError() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(1L, 500, 200, prefillEp);
 
         when(grpcClient.batchEnqueueAsync(
                         anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
@@ -562,7 +327,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchHandlesNullGrpcResponse() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(1L, 500, 200, prefillEp);
 
         when(grpcClient.batchEnqueueAsync(
                         anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
@@ -577,7 +342,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchHandlesNullGrpcFutureAsUncertain() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(1L, 500, 200, prefillEp);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any())).thenReturn(null);
 
         submit(List.of(item), 1L, 100, "test", callback);
@@ -590,7 +355,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchRejectsAckWithDifferentBatchId() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(8L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(8L, 500, 200, prefillEp);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenReturn(
                         CompletableFuture.completedFuture(
@@ -653,16 +418,16 @@ class DeliveryDispatcherTest {
     @Test
     void unexpectedPreSendFailureIsDefiniteAndIsolatesCallbacks() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution first = createRequestRoute(1L, 500, 200, prefillEp);
-        RouteExecution second = createRequestRoute(2L, 500, 200, prefillEp);
+        RouteResult first = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult second = createRequestRoute(2L, 500, 200, prefillEp);
         when(prefillEp.getIp())
                 .thenThrow(new IllegalStateException("endpoint unavailable before send"));
         CountDownLatch attempted = new CountDownLatch(2);
         var failures = new java.util.concurrent.ConcurrentHashMap<Long, Integer>();
         AtomicInteger uncertain = new AtomicInteger();
-        BiConsumer<RouteExecution, Delivery.Result> throwingCallback =
+        BiConsumer<RouteResult, Delivery.Result> throwingCallback =
                 (exactItem, completion) -> {
-                    RouteExecution item = assertInstanceOf(RouteExecution.class, exactItem);
+                    RouteResult item = assertInstanceOf(RouteResult.class, exactItem);
                     if (completion.status() == Delivery.Result.Status.NOT_SENT) {
                         failures.merge(Long.parseLong(item.requestId()), 1, Integer::sum);
                         attempted.countDown();
@@ -686,16 +451,16 @@ class DeliveryDispatcherTest {
     @Test
     void synchronousRpcInvocationFailureIsUncertainAndIsolatesCallbacks() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution first = createRequestRoute(1L, 500, 200, prefillEp);
-        RouteExecution second = createRequestRoute(2L, 500, 200, prefillEp);
+        RouteResult first = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult second = createRequestRoute(2L, 500, 200, prefillEp);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenThrow(new IllegalStateException("client threw after invocation began"));
         CountDownLatch attempted = new CountDownLatch(2);
         AtomicInteger failures = new AtomicInteger();
         var uncertain = new java.util.concurrent.ConcurrentHashMap<Long, Integer>();
-        BiConsumer<RouteExecution, Delivery.Result> throwingCallback =
+        BiConsumer<RouteResult, Delivery.Result> throwingCallback =
                 (exactItem, completion) -> {
-                    RouteExecution item = assertInstanceOf(RouteExecution.class, exactItem);
+                    RouteResult item = assertInstanceOf(RouteResult.class, exactItem);
                     if (completion.status() == Delivery.Result.Status.NOT_SENT) {
                         failures.incrementAndGet();
                     } else if (completion.status() == Delivery.Result.Status.UNCERTAIN) {
@@ -720,7 +485,7 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(1L, 500, 200, prefillEp);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture =
                 new CompletableFuture<>();
         CountDownLatch invoked = new CountDownLatch(1);
@@ -763,7 +528,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchHandlesResponseWithErrors() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(1L, 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
@@ -842,7 +607,7 @@ class DeliveryDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response.build()));
         var results = new CopyOnWriteArrayList<Delivery.Result>();
-        var identities = new CopyOnWriteArrayList<RouteExecution>();
+        var identities = new CopyOnWriteArrayList<RouteResult>();
         CountDownLatch observed = new CountDownLatch(2);
         submit(
                 List.of(first, second),
@@ -879,7 +644,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchHandlesMissingAck() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(1L, 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
@@ -899,8 +664,8 @@ class DeliveryDispatcherTest {
     void responseCallbackFailureIsIsolatedAndNeverReclassifiesOtherItemsAsUncertain()
             throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution succeeded = createRequestRoute(11L, 500, 200, prefillEp);
-        RouteExecution rejected = createRequestRoute(12L, 500, 200, prefillEp);
+        RouteResult succeeded = createRequestRoute(11L, 500, 200, prefillEp);
+        RouteResult rejected = createRequestRoute(12L, 500, 200, prefillEp);
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(91L)
@@ -925,7 +690,7 @@ class DeliveryDispatcherTest {
         AtomicInteger successes = new AtomicInteger();
         AtomicInteger failures = new AtomicInteger();
         AtomicInteger uncertain = new AtomicInteger();
-        BiConsumer<RouteExecution, Delivery.Result> throwingCallback =
+        BiConsumer<RouteResult, Delivery.Result> throwingCallback =
                 (exactItem, completion) -> {
                     if (completion.status() == Delivery.Result.Status.DELIVERED) {
                         successes.incrementAndGet();
@@ -960,7 +725,7 @@ class DeliveryDispatcherTest {
                             return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
                         });
 
-        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(1L, 500, 200, prefillEp);
         DeliveryPermit permit = reservePermit();
 
         runtime.deliveries().stopDeliveryAdmission();
@@ -1035,12 +800,12 @@ class DeliveryDispatcherTest {
                                 runtime.deliveries(), "completionExecutor");
         executor.shutdown();
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RouteExecution first = createRequestRoute(1L, 500, 200, endpoint);
-        RouteExecution second = createRequestRoute(2L, 500, 200, endpoint);
+        RouteResult first = createRequestRoute(1L, 500, 200, endpoint);
+        RouteResult second = createRequestRoute(2L, 500, 200, endpoint);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenReturn(CompletableFuture.completedFuture(ackResponse(91L, List.of(1L, 2L))));
         var results = new CopyOnWriteArrayList<Delivery.Result>();
-        var identities = new CopyOnWriteArrayList<RouteExecution>();
+        var identities = new CopyOnWriteArrayList<RouteResult>();
         CountDownLatch observed = new CountDownLatch(2);
         submit(
                 List.of(first, second),
@@ -1121,8 +886,8 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 1, null);
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RouteExecution firstItem = createRequestRoute(1L, 500, 200, endpoint);
-        RouteExecution secondItem = createRequestRoute(2L, 500, 200, endpoint);
+        RouteResult firstItem = createRequestRoute(1L, 500, 200, endpoint);
+        RouteResult secondItem = createRequestRoute(2L, 500, 200, endpoint);
         DeliveryPermit running = reservePermit();
         DeliveryPermit queued = reservePermit();
         CapacityBoundary.Attempt<?> rejected = runtime.deliveries().tryReserveDelivery();
@@ -1146,7 +911,7 @@ class DeliveryDispatcherTest {
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void replacementAfterPreparationIsUsedAtSendTime(boolean malformed) throws Exception {
-        RouteExecution item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
+        RouteResult item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
         item.ctx().data().prepareGenerateInput();
         item.ctx()
                 .data()
@@ -1167,7 +932,7 @@ class DeliveryDispatcherTest {
 
     @Test
     void invalidFinalBatchFailsBeforeRpcOnTheDeliveryThread() throws Exception {
-        RouteExecution item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
+        RouteResult item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
         CompletableFuture<Void> checked = new CompletableFuture<>();
         reservePermit()
                 .submit(
@@ -1206,7 +971,7 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(1L, 500, 200, endpoint);
+        RouteResult item = createRequestRoute(1L, 500, 200, endpoint);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture =
                 new CompletableFuture<>();
         CountDownLatch rpcInvoked = new CountDownLatch(1);
@@ -1229,7 +994,7 @@ class DeliveryDispatcherTest {
                                 capacityChanged.countDown();
                             }
                         });
-        List<RouteExecution> exactItems = List.of(item);
+        List<RouteResult> exactItems = List.of(item);
         submit(reservation, exactItems, 1L, 100, "dispatch_handoff_capacity", callback);
         assertTrue(rpcInvoked.await(5, TimeUnit.SECONDS));
 
@@ -1276,7 +1041,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchUsesAdmissionPriorityEvenIfOriginalRequestChanges() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp, 60);
+        RouteResult item = createRequestRoute(1L, 500, 200, prefillEp, 60);
         item.ctx()
                 .data()
                 .setRequest(item.ctx().data().getRequest().toBuilder().rawPriority(7).build());
@@ -1299,7 +1064,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchLeavesPriorityUnsetForNoPriorityRequests() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(1L, 500, 200, prefillEp);
         // default Request priority is the no-priority sentinel (0)
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
@@ -1320,7 +1085,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchDualWritesCompatibleRoleAddress() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(1L, 500, 200, prefillEp);
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
@@ -1345,10 +1110,13 @@ class DeliveryDispatcherTest {
     void dispatchPreservesPerRequestRolesAcrossMissingDecodeAndDpRanks(boolean multipleRanks)
             throws Exception {
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        var items = new java.util.ArrayList<RouteExecution>();
+        var items = new java.util.ArrayList<RouteResult>();
         for (int index = 0; index < 6; index++) {
-            RouteExecution original = createRequestRoute(index + 1L, 500L, 200L, endpoint);
-            ServerStatus prefill = original.prefill();
+            ServerStatus prefill = new ServerStatus();
+            prefill.setRole(RoleType.PREFILL);
+            prefill.setServerIp("127.0.0.1");
+            prefill.setHttpPort(8080);
+            prefill.setGrpcPort(8090);
             prefill.setDpRank(multipleRanks && index % 2 != 0 ? 1L : 2L);
             if (index == 4) {
                 prefill.setServerIp("10.0.1.2");
@@ -1363,11 +1131,7 @@ class DeliveryDispatcherTest {
                 decode.setHttpPort(index >= 3 ? 8101 : 8100);
                 decode.setGrpcPort(index >= 4 ? 8201 : 8200);
             }
-            var projected = org.mockito.Mockito.spy(original);
-            org.mockito.Mockito.doReturn(prefill).when(projected).prefill();
-            org.mockito.Mockito.doReturn(decode).when(projected).decode();
-            org.mockito.Mockito.doReturn(prefill.getDpRank()).when(projected).prefillDpRank();
-            items.add(projected);
+            items.add(createRequestRoute(index + 1L, 500L, 200L, endpoint, 0, prefill, decode));
         }
         CompletableFuture<EngineRpcService.EnqueueBatchRequestPB> sent = new CompletableFuture<>();
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
@@ -1392,7 +1156,10 @@ class DeliveryDispatcherTest {
         for (var slot : batch.getDpSlotsList()) {
             assertEquals(
                     items.stream()
-                            .filter(item -> item.prefill().getDpRank() == slot.getDpRank())
+                            .filter(
+                                    item ->
+                                            item.role(RoleType.PREFILL).dpRank()
+                                                    == slot.getDpRank())
                             .map(route -> Long.parseLong(route.requestId()))
                             .toList(),
                     slot.getRequestsList().stream()
@@ -1403,209 +1170,28 @@ class DeliveryDispatcherTest {
             }
         }
         assertEquals(items.size(), inputs.size());
-        for (RouteExecution item : items) {
+        for (RouteResult item : items) {
             var roles =
                     inputs.get(Long.parseLong(item.requestId()))
                             .getGenerateConfig()
                             .getRoleAddrsList();
-            assertEquals(item.decode() == null ? 1 : 2, roles.size());
+            assertEquals(item.role(RoleType.DECODE) == null ? 1 : 2, roles.size());
             assertEquals(RoleType.PREFILL, RoleTypeProtoConverter.fromRoleAddr(roles.getFirst()));
-            assertEquals(item.prefill().getServerIp(), roles.getFirst().getIp());
-            assertEquals(item.prefill().getHttpPort(), roles.getFirst().getHttpPort());
-            assertEquals(item.prefill().getGrpcPort(), roles.getFirst().getGrpcPort());
-            if (item.decode() != null) {
+            assertEquals(item.role(RoleType.PREFILL).ip(), roles.getFirst().getIp());
+            assertEquals(item.role(RoleType.PREFILL).httpPort(), roles.getFirst().getHttpPort());
+            assertEquals(item.role(RoleType.PREFILL).grpcPort(), roles.getFirst().getGrpcPort());
+            if (item.role(RoleType.DECODE) != null) {
                 var decode = roles.get(1);
                 assertEquals(RoleType.DECODE, RoleTypeProtoConverter.fromRoleAddr(decode));
-                assertEquals(item.decode().getServerIp(), decode.getIp());
-                assertEquals(item.decode().getHttpPort(), decode.getHttpPort());
-                assertEquals(item.decode().getGrpcPort(), decode.getGrpcPort());
+                assertEquals(item.role(RoleType.DECODE).ip(), decode.getIp());
+                assertEquals(item.role(RoleType.DECODE).httpPort(), decode.getHttpPort());
+                assertEquals(item.role(RoleType.DECODE).grpcPort(), decode.getGrpcPort());
             }
         }
         org.junit.jupiter.api.Assertions.assertSame(
                 inputs.get(1L).getGenerateConfig().getRoleAddrs(1),
                 inputs.get(3L).getGenerateConfig().getRoleAddrs(1),
                 "a missing Decode address must neither leak a stale address nor discard the reusable proto");
-    }
-
-    private static EngineRpcService.GenerateInputPB sentInput(
-            EngineRpcService.EnqueueBatchRequestPB request) {
-        return request.getDpSlotsList().getFirst().getRequestsList().getFirst().getInput();
-    }
-
-    // ---- helpers ----
-
-    private DeliveryPermit reservePermit() {
-        CapacityBoundary.Attempt<?> accepted = runtime.deliveries().tryReserveDelivery();
-        assertTrue(accepted.accepted());
-        return assertInstanceOf(DeliveryPermit.class, accepted.value());
-    }
-
-    private CapacityBoundary unavailableBoundary() {
-        CapacityBoundary.Attempt<?> rejected = runtime.deliveries().tryReserveDelivery();
-        assertFalse(rejected.accepted());
-        assertEquals(CapacityBoundary.Status.UNAVAILABLE, rejected.boundary().status());
-        return rejected.boundary();
-    }
-
-    private DeliveryDispatcher createDispatcher(
-            int threads, int queueCapacity, SimpleMeterRegistry meters) {
-        return createDispatcher(
-                threads,
-                queueCapacity,
-                meters,
-                configService
-                        .loadBalanceConfig()
-                        .getInternalRuntime()
-                        .getBatchDispatchMaxInflightBytes());
-    }
-
-    private DeliveryDispatcher createDispatcher(
-            int threads, int queueCapacity, SimpleMeterRegistry meters, long byteBudget) {
-        var snapshot = org.mockito.Mockito.spy(configService.loadBalanceConfig());
-        var sizing = org.mockito.Mockito.spy(snapshot.getInternalRuntime());
-        org.mockito.Mockito.doReturn(threads).when(sizing).getBatchDispatchThreads();
-        org.mockito.Mockito.doReturn(queueCapacity).when(sizing).getBatchDispatchQueueCapacity();
-        org.mockito.Mockito.doReturn(byteBudget).when(sizing).getBatchDispatchMaxInflightBytes();
-        org.mockito.Mockito.doReturn(sizing).when(snapshot).getInternalRuntime();
-        var service = mock(ConfigService.class);
-        when(service.loadBalanceConfig()).thenReturn(snapshot);
-        var delivery =
-                new DeliveryDispatcher(
-                        grpcClient,
-                        configService,
-                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null),
-                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                        new org.flexlb.balance.scheduler.PlacementConfiguration()
-                                .decodeAdmissionCapacity(configService),
-                        org.mockito.Mockito.mock(
-                                org.flexlb.balance.scheduler.DeliveryExecution.class));
-        runtime =
-                new SchedulerTestServices(
-                        new RequestRepository(),
-                        mock(org.flexlb.balance.endpoint.EndpointRegistry.class),
-                        mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
-                        mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
-                        delivery,
-                        service,
-                        mock(EngineGrpcClient.class));
-        if (meters != null) {
-            var reporter =
-                    new org.flexlb.service.monitor.DeliveryMetricsReporter(
-                            new org.flexlb.metric.MicrometerFlexMonitor(meters));
-            reporter.registerExecutor(runtime.deliveries());
-        }
-        return delivery;
-    }
-
-    private void submit(
-            List<RouteExecution> items,
-            long batchId,
-            long prediction,
-            String reason,
-            BiConsumer<RouteExecution, Delivery.Result> observer) {
-        submit(reservePermit(), items, batchId, prediction, reason, observer);
-    }
-
-    private void submit(
-            DeliveryPermit permit,
-            List<RouteExecution> items,
-            long batchId,
-            long prediction,
-            String reason,
-            BiConsumer<RouteExecution, Delivery.Result> observer) {
-        for (var item : items) {
-            var requestScheduler = item.ctx().data().getRequestScheduler();
-            org.flexlb.balance.scheduler.SchedulerTestServices.bind(requestScheduler, runtime);
-            Delivery.Member claim = item.ctx().snapshot().delivery().identity();
-            if (claim.route() != item) {
-                claim = DeliveryTestSupport.member(item, claim.kind(), batchId);
-                when(item.ctx().data().getRequestScheduler().tryStartSend(claim)).thenReturn(true);
-            }
-            when(item.ctx()
-                            .data()
-                            .getRequestScheduler()
-                            .prepareDelivery(
-                                    org.mockito.ArgumentMatchers.argThat(
-                                            member -> member != null && member.route() == item),
-                                    org.mockito.ArgumentMatchers.eq(
-                                            Delivery.SendMode.BATCH_ENQUEUE),
-                                    anyLong()))
-                    .thenReturn(
-                            new ContextResult.DeliveryFacts(
-                                    claim,
-                                    ContextResult.SendState.NOT_STARTED,
-                                    false,
-                                    null,
-                                    false,
-                                    false,
-                                    true,
-                                    System.currentTimeMillis()));
-            org.mockito.Mockito.doAnswer(
-                            call -> {
-                                observer.accept(
-                                        item, ((TransportResult) call.getArgument(0)).result());
-                                return null;
-                            })
-                    .when(requestScheduler)
-                    .onDeliveryResult(org.mockito.ArgumentMatchers.isA(TransportResult.class));
-            org.mockito.Mockito.doAnswer(
-                            call -> {
-                                var failed = (PreparationFailure) call.getArgument(0);
-                                observer.accept(
-                                        item,
-                                        Delivery.Result.notSent(
-                                                new IllegalStateException(failed.detail())));
-                                return null;
-                            })
-                    .when(requestScheduler)
-                    .onDeliveryResult(
-                            argThat(
-                                    (ContextResult.DeliveryEvidence e) ->
-                                            e instanceof PreparationFailure failed
-                                                    && failed.route() == item));
-        }
-        Delivery batch;
-        try {
-            batch =
-                    DeliveryTestSupport.committed(
-                            batchId,
-                            items.stream().map(item -> new Delivery.Member(item, null)).toList(),
-                            new org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot(
-                                    0L, List.of(), List.of(), 0L),
-                            prediction,
-                            DeliveryTestSupport.EVALUATOR,
-                            reason,
-                            0,
-                            null,
-                            permit);
-        } catch (RuntimeException failure) {
-            permit.close();
-            throw failure;
-        }
-        dispatcher.deliverBatch(batch);
-    }
-
-    private static void awaitAvailable(
-            java.util.function.BooleanSupplier availability, Object capacityMonitor)
-            throws InterruptedException {
-        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        synchronized (capacityMonitor) {
-            while (!availability.getAsBoolean()) {
-                long remainingNanos = deadlineNanos - System.nanoTime();
-                if (remainingNanos <= 0) {
-                    throw new AssertionError("dispatcher capacity did not become available");
-                }
-                TimeUnit.NANOSECONDS.timedWait(capacityMonitor, remainingNanos);
-            }
-        }
-    }
-
-    private PrefillEndpoint createPrefillEndpoint() {
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
-        when(endpoint.getHttpPort()).thenReturn(8080);
-        when(endpoint.getGrpcPort()).thenReturn(8090);
-        return endpoint;
     }
 
     @ParameterizedTest
@@ -1661,12 +1247,9 @@ class DeliveryDispatcherTest {
         var endpoint = createPrefillEndpoint();
         var cancelled = createRequestRoute(701L, 20L, 0L, endpoint);
         var admitted = createRequestRoute(702L, 20L, 0L, endpoint);
-        when(cancelled
-                        .ctx()
-                        .data()
-                        .getRequestScheduler()
-                        .tryStartSend(cancelled.ctx().snapshot().delivery().identity()))
-                .thenReturn(false);
+        doReturn(null)
+                .when(cancelled.ctx().data().getRequestScheduler())
+                .commitDelivery(any(Delivery.Member.class), any(), anyLong());
         var admittedSpan = mock(io.opentelemetry.api.trace.Span.class);
         var cancelledSpan = mock(io.opentelemetry.api.trace.Span.class);
         when(admittedSpan.storeInContext(any(io.opentelemetry.context.Context.class)))
@@ -1689,7 +1272,7 @@ class DeliveryDispatcherTest {
                                     ackResponse(71L, List.of(702L)));
                         });
         var results = new java.util.concurrent.ConcurrentHashMap<Long, Delivery.Result.Status>();
-        var completed = new CountDownLatch(2);
+        var completed = new CountDownLatch(1);
         submit(
                 List.of(cancelled, admitted),
                 71L,
@@ -1707,7 +1290,8 @@ class DeliveryDispatcherTest {
                         .map(request -> request.getInput().getRequestId())
                         .toList());
         assertTrue(completed.await(2, TimeUnit.SECONDS));
-        assertEquals(Delivery.Result.Status.NOT_SENT, results.get(701L));
+        assertFalse(results.containsKey(701L));
+        assertNull(cancelled.ctx().snapshot().delivery());
         assertEquals(Delivery.Result.Status.DELIVERED, results.get(702L));
         verify(admittedSpan).setAttribute(org.flexlb.telemetry.FlexlbTrace.BATCH_SIZE, 1L);
         verify(cancelledSpan, org.mockito.Mockito.never())
@@ -1729,12 +1313,11 @@ class DeliveryDispatcherTest {
         var acceptedIds = new java.util.ArrayList<Long>();
         for (int index = 0; index < items.size(); index++) {
             boolean accepted = (refusedMask & (1 << index)) == 0;
-            when(items.get(index)
-                            .ctx()
-                            .data()
-                            .getRequestScheduler()
-                            .tryStartSend(items.get(index).ctx().snapshot().delivery().identity()))
-                    .thenReturn(accepted);
+            if (!accepted) {
+                doReturn(null)
+                        .when(items.get(index).ctx().data().getRequestScheduler())
+                        .commitDelivery(any(Delivery.Member.class), any(), anyLong());
+            }
             if (accepted) {
                 acceptedIds.add(Long.parseLong(items.get(index).requestId()));
             }
@@ -1747,7 +1330,7 @@ class DeliveryDispatcherTest {
                             return CompletableFuture.completedFuture(ackResponse(73L, acceptedIds));
                         });
         var results = new java.util.concurrent.ConcurrentHashMap<Long, Delivery.Result.Status>();
-        var completed = new CountDownLatch(items.size());
+        var completed = new CountDownLatch(acceptedIds.size());
         submit(
                 items,
                 73L,
@@ -1761,14 +1344,21 @@ class DeliveryDispatcherTest {
                     completed.countDown();
                 });
         assertTrue(completed.await(2, TimeUnit.SECONDS));
+        runtime.deliveries().awaitDeliveries();
         for (int index = 0; index < items.size(); index++) {
-            var expected =
-                    (refusedMask & (1 << index)) == 0
-                            ? Delivery.Result.Status.DELIVERED
-                            : Delivery.Result.Status.NOT_SENT;
-            assertEquals(expected, results.get(Long.parseLong(items.get(index).requestId())));
+            if ((refusedMask & (1 << index)) == 0) {
+                assertEquals(
+                        Delivery.Result.Status.DELIVERED,
+                        results.get(Long.parseLong(items.get(index).requestId())));
+            } else {
+                assertFalse(results.containsKey(Long.parseLong(items.get(index).requestId())));
+                assertNull(items.get(index).ctx().snapshot().delivery());
+            }
             verify(items.get(index).ctx().data().getRequestScheduler())
-                    .tryStartSend(items.get(index).ctx().snapshot().delivery().identity());
+                    .commitDelivery(
+                            any(Delivery.Member.class),
+                            org.mockito.ArgumentMatchers.eq(Delivery.SendMode.BATCH_ENQUEUE),
+                            org.mockito.ArgumentMatchers.eq(73L));
         }
         if (acceptedIds.isEmpty()) {
             verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any());
@@ -1785,11 +1375,9 @@ class DeliveryDispatcherTest {
     @Test
     void sendBoundarySkipsRpcWhenEveryMemberWasCancelled() throws Exception {
         var item = createRequestRoute(703L, 20L, 0L, createPrefillEndpoint());
-        when(item.ctx()
-                        .data()
-                        .getRequestScheduler()
-                        .tryStartSend(item.ctx().snapshot().delivery().identity()))
-                .thenReturn(false);
+        doReturn(null)
+                .when(item.ctx().data().getRequestScheduler())
+                .commitDelivery(any(Delivery.Member.class), any(), anyLong());
         var completed = new CompletableFuture<Delivery.Result>();
         submit(
                 List.of(item),
@@ -1797,115 +1385,11 @@ class DeliveryDispatcherTest {
                 10L,
                 "cancelled",
                 (ignored, result) -> completed.complete(result));
-        assertEquals(Delivery.Result.Status.NOT_SENT, completed.get(2, TimeUnit.SECONDS).status());
+        runtime.deliveries().awaitDeliveries();
+        assertFalse(completed.isDone());
+        assertNull(item.ctx().snapshot().delivery());
         org.mockito.Mockito.verify(grpcClient, org.mockito.Mockito.never())
                 .batchEnqueueAsync(anyString(), anyInt(), any());
-    }
-
-    private RouteExecution createRequestRoute(
-            long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
-        return createRequestRoute(requestId, seqLen, hitCacheLen, prefillEp, 0);
-    }
-
-    private RouteExecution createRequestRoute(
-            long requestId,
-            long seqLen,
-            long hitCacheLen,
-            PrefillEndpoint prefillEp,
-            int priority) {
-        Request request =
-                Request.builder()
-                        .requestId(String.valueOf(requestId))
-                        .seqLen(seqLen)
-                        .rawPriority(priority)
-                        .build();
-
-        RequestContext ctx = new RequestContext(config);
-        ctx.data().setRequest(request);
-
-        // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)
-        EngineRpcService.GenerateInputPB input =
-                EngineRpcService.GenerateInputPB.newBuilder()
-                        .setRequestId(requestId)
-                        .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
-                        .build();
-        ctx.data().setGenerateInputPb(input.toByteString());
-
-        ServerStatus prefill = new ServerStatus();
-        prefill.setRole(RoleType.PREFILL);
-        prefill.setServerIp("127.0.0.1");
-        prefill.setHttpPort(8080);
-        prefill.setGrpcPort(8090);
-        prefill.setDpRank(0L);
-        DebugInfo debugInfo = new DebugInfo();
-        debugInfo.setHitCacheLen(hitCacheLen);
-        prefill.setDebugInfo(debugInfo);
-
-        ctx.data().setFuture(new CompletableFuture<>());
-        SchedulerTestSupport.bindOwner(ctx, mock(AbstractRequestScheduler.class));
-        long now = System.currentTimeMillis();
-        ctx.register(String.valueOf(requestId), now, Long.MAX_VALUE, 60_000L);
-        var route =
-                SchedulingTestConfig.createRoute(
-                        ctx, null, prefill, null, prefillEp, null, null, now);
-        var placement = (PlacementOperation) ctx.beginPlacement(null);
-        ctx.bindPlacement(placement, route, PublicationResult.PREPARED);
-        ctx.bindPlacement(placement, route, PublicationResult.PUBLISHED);
-        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
-                ctx,
-                observedRequest ->
-                        observedRequest.completePlacement(
-                                placement, PublicationResult.PUBLISHED, now));
-        var delivery =
-                (ContextResult.DeliveryFacts)
-                        ctx.prepareDelivery(
-                                new org.flexlb.balance.scheduler.Delivery.Member(route, null),
-                                Delivery.SendMode.BATCH_ENQUEUE,
-                                requestId,
-                                now);
-        ctx.publishDelivery(delivery);
-        when(ctx.data().getRequestScheduler().tryStartSend(delivery.identity())).thenReturn(true);
-        return route;
-    }
-
-    private EngineRpcService.EnqueueBatchResponsePB ackResponse(
-            long batchId, List<Long> successIds) {
-        EngineRpcService.EnqueueBatchResponsePB.Builder builder =
-                EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(batchId);
-        for (long id : successIds) {
-            builder.addSuccesses(
-                    EngineRpcService.EnqueueBatchSuccessPB.newBuilder().setRequestId(id).build());
-        }
-        return builder.build();
-    }
-
-    // ---- Test callback ----
-
-    private static class TestCallback implements BiConsumer<RouteExecution, Delivery.Result> {
-        final AtomicInteger successCount = new AtomicInteger(0);
-        final AtomicInteger failureCount = new AtomicInteger(0);
-        final AtomicInteger uncertainCount = new AtomicInteger(0);
-        final CountDownLatch successLatch = new CountDownLatch(1);
-        final CountDownLatch failureLatch = new CountDownLatch(1);
-        final CountDownLatch uncertainLatch = new CountDownLatch(1);
-        volatile Throwable lastError;
-
-        @Override
-        public void accept(RouteExecution exactItem, Delivery.Result completion) {
-            if (completion.status() == Delivery.Result.Status.DELIVERED) {
-                successCount.incrementAndGet();
-                successLatch.countDown();
-            } else if (completion.status() == Delivery.Result.Status.NOT_SENT
-                    || completion.status() == Delivery.Result.Status.PREFILL_REJECTED) {
-                lastError = completion.cause();
-                failureCount.incrementAndGet();
-                failureLatch.countDown();
-            } else if (completion.status() == Delivery.Result.Status.UNCERTAIN) {
-                lastError = completion.cause();
-                uncertainCount.incrementAndGet();
-                uncertainLatch.countDown();
-            }
-        }
     }
 
     @Test
@@ -2017,7 +1501,7 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         // Exhaust the single admission permit with one in-flight batch.
-        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(1L, 500, 200, prefillEp);
         DeliveryPermit permit = reservePermit();
         assertDoesNotThrow(() -> submit(permit, List.of(item), 1L, 100, "inflight_hold", callback));
 
@@ -2046,7 +1530,7 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(1L, 500, 200, prefillEp);
         // Force a deterministic pre-send build failure: null generateInput
         // bytes path is hard to force; use an oversize payload instead by
         // mocking the config to throw in requireBatchDispatcher — simplest
@@ -2054,7 +1538,7 @@ class DeliveryDispatcherTest {
         when(configService.loadBalanceConfig())
                 .thenThrow(new IllegalStateException("config unavailable before send"));
         CountDownLatch failed = new CountDownLatch(1);
-        BiConsumer<RouteExecution, Delivery.Result> failureCallback =
+        BiConsumer<RouteResult, Delivery.Result> failureCallback =
                 (exactItem, completion) -> {
                     if (completion.status() == Delivery.Result.Status.NOT_SENT) {
                         failed.countDown();
@@ -2147,13 +1631,13 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(7L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(7L, 500, 200, prefillEp);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> pending =
                 new CompletableFuture<>();
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenAnswer(invocation -> pending);
         CountDownLatch uncertain = new CountDownLatch(1);
-        BiConsumer<RouteExecution, Delivery.Result> uncertainCallback =
+        BiConsumer<RouteResult, Delivery.Result> uncertainCallback =
                 (exactItem, completion) -> {
                     if (completion.status() == Delivery.Result.Status.UNCERTAIN) {
                         uncertain.countDown();
@@ -2207,9 +1691,9 @@ class DeliveryDispatcherTest {
         // must be rejected pre-serialization.
         dispatcher = createDispatcher(1, 0, null, 64L);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteResult item = createRequestRoute(1L, 500, 200, prefillEp);
         CountDownLatch failed = new CountDownLatch(1);
-        BiConsumer<RouteExecution, Delivery.Result> failureCallback =
+        BiConsumer<RouteResult, Delivery.Result> failureCallback =
                 (exactItem, completion) -> {
                     if (completion.status() == Delivery.Result.Status.NOT_SENT) {
                         failed.countDown();
@@ -2233,6 +1717,506 @@ class DeliveryDispatcherTest {
         assertTrue(
                 dispatcherIsTerminatedWithin(5),
                 "shutdown must complete after a byte-budget rejection");
+    }
+
+    private void assertDispatchedTraceContexts(boolean enabled, boolean validScheduleContext)
+            throws Exception {
+        org.flexlb.telemetry.FlexlbTrace.configure(
+                enabled ? io.opentelemetry.api.OpenTelemetry.noop() : null, "");
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        RouteResult first = createRequestRoute(501L, 500, 200, prefillEp);
+        RouteResult second = createRequestRoute(502L, 500, 200, prefillEp);
+        first.ctx()
+                .data()
+                .setGenerateInputPb(
+                        generateInputWithTraceContext(
+                                        501L,
+                                        "00-11111111111111111111111111111111-1111111111111111-01",
+                                        "vendor=one")
+                                .toBuilder()
+                                .setUnknownFields(
+                                        com.google.protobuf.UnknownFieldSet.newBuilder()
+                                                .addField(
+                                                        999,
+                                                        com.google.protobuf.UnknownFieldSet.Field
+                                                                .newBuilder()
+                                                                .addVarint(123)
+                                                                .build())
+                                                .build())
+                                .build()
+                                .toByteString());
+        second.ctx()
+                .data()
+                .setGenerateInputPb(
+                        generateInputWithTraceContext(
+                                        502L,
+                                        "00-22222222222222222222222222222222-2222222222222222-01",
+                                        "vendor=two")
+                                .toByteString());
+        if (validScheduleContext) {
+            first.ctx()
+                    .data()
+                    .setTraceContext(
+                            scheduleContext(
+                                    "11111111111111111111111111111111",
+                                    "aaaaaaaaaaaaaaaa",
+                                    "schedule"));
+            second.ctx()
+                    .data()
+                    .setTraceContext(
+                            scheduleContext(
+                                    "22222222222222222222222222222222", "bbbbbbbbbbbbbbbb", ""));
+        } else {
+            first.ctx().data().setTraceContext(io.opentelemetry.context.Context.root());
+            second.ctx().data().setTraceContext(null);
+        }
+
+        List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
+        when(grpcClient.batchEnqueueAsync(
+                        anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
+                .thenAnswer(
+                        inv -> {
+                            sent.add(inv.getArgument(2));
+                            return CompletableFuture.completedFuture(
+                                    ackResponse(92L, List.of(501L, 502L)));
+                        });
+
+        submit(List.of(first, second), 92L, 100, "trace_context", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(1, sent.size());
+        List<EngineRpcService.EnqueueBatchExternalInputPB> requests =
+                sent.getFirst().getDpSlots(0).getRequestsList();
+        assertEquals(2, requests.size());
+        EngineRpcService.GenerateInputPB firstSent =
+                requests.stream()
+                        .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
+                        .filter(input -> input.getRequestId() == 501L)
+                        .findFirst()
+                        .orElseThrow();
+        EngineRpcService.GenerateInputPB secondSent =
+                requests.stream()
+                        .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
+                        .filter(input -> input.getRequestId() == 502L)
+                        .findFirst()
+                        .orElseThrow();
+        assertEquals(
+                first.ctx().data().getGenerateInput().toBuilder().getUnknownFields(),
+                firstSent.getUnknownFields());
+        boolean replaced = enabled && validScheduleContext;
+        assertEquals(
+                "00-11111111111111111111111111111111-"
+                        + (replaced ? "aaaaaaaaaaaaaaaa" : "1111111111111111")
+                        + "-01",
+                firstSent.getRequestInfo().getTraceContext().getTraceparent());
+        assertEquals(
+                replaced ? "vendor=schedule" : "vendor=one",
+                firstSent.getRequestInfo().getTraceContext().getTracestate());
+        assertEquals(
+                "00-22222222222222222222222222222222-"
+                        + (replaced ? "bbbbbbbbbbbbbbbb" : "2222222222222222")
+                        + "-01",
+                secondSent.getRequestInfo().getTraceContext().getTraceparent());
+        assertEquals(
+                replaced ? "" : "vendor=two",
+                secondSent.getRequestInfo().getTraceContext().getTracestate());
+        assertEquals(
+                "vendor=one",
+                first.ctx().data().getGenerateInput().toBuilder()
+                        .getRequestInfo()
+                        .getTraceContext()
+                        .getTracestate(),
+                "dispatch must not mutate the queued payload");
+    }
+
+    private PrefillEndpoint createPrefillEndpoint() {
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        when(endpoint.getHttpPort()).thenReturn(8080);
+        when(endpoint.getGrpcPort()).thenReturn(8090);
+        return endpoint;
+    }
+
+    private RouteResult createRequestRoute(
+            long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
+        return createRequestRoute(requestId, seqLen, hitCacheLen, prefillEp, 0);
+    }
+
+    private RouteResult createRequestRoute(
+            long requestId,
+            long seqLen,
+            long hitCacheLen,
+            PrefillEndpoint prefillEp,
+            int priority) {
+        return createRequestRoute(requestId, seqLen, hitCacheLen, prefillEp, priority, null, null);
+    }
+
+    private RouteResult createRequestRoute(
+            long requestId,
+            long seqLen,
+            long hitCacheLen,
+            PrefillEndpoint prefillEp,
+            int priority,
+            ServerStatus selectedPrefill,
+            ServerStatus selectedDecode) {
+        Request request =
+                Request.builder()
+                        .requestId(String.valueOf(requestId))
+                        .seqLen(seqLen)
+                        .rawPriority(priority)
+                        .build();
+
+        RequestContext ctx = new RequestContext(config);
+        ctx.data().setRequest(request);
+
+        // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)
+        EngineRpcService.GenerateInputPB input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
+                        .build();
+        ctx.data().setGenerateInputPb(input.toByteString());
+
+        ServerStatus prefill = selectedPrefill;
+        if (prefill == null) {
+            prefill = new ServerStatus();
+            prefill.setRole(RoleType.PREFILL);
+            prefill.setServerIp("127.0.0.1");
+            prefill.setHttpPort(8080);
+            prefill.setGrpcPort(8090);
+            prefill.setDpRank(0L);
+        }
+        DebugInfo debugInfo = new DebugInfo();
+        debugInfo.setHitCacheLen(hitCacheLen);
+        prefill.setDebugInfo(debugInfo);
+
+        ctx.data().setFuture(new CompletableFuture<>());
+        SchedulerTestSupport.bindOwner(ctx, mock(AbstractRequestScheduler.class));
+        long now = System.currentTimeMillis();
+        ctx.register(
+                String.valueOf(requestId),
+                now,
+                Long.MAX_VALUE,
+                60_000L,
+                org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
+        var route =
+                SchedulingTestConfig.createRoute(
+                        ctx,
+                        null,
+                        prefill,
+                        selectedDecode,
+                        prefillEp,
+                        selectedDecode == null
+                                ? null
+                                : mock(org.flexlb.balance.endpoint.DecodeEndpoint.class),
+                        null,
+                        now);
+        var placement = (PlacementOperation) ctx.beginPlacement(null);
+        ctx.publishRoute(placement, route);
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                ctx,
+                observedRequest ->
+                        observedRequest.completePlacement(
+                                placement, PublicationResult.PUBLISHED, now));
+        org.mockito.Mockito.doAnswer(
+                        call -> {
+                            var member = call.getArgument(0, Delivery.Member.class);
+                            synchronized (ctx) {
+                                member.initialize(call.getArgument(1), call.getArgument(2));
+                                ctx.recordDeliveryStarted(member, System.currentTimeMillis());
+                            }
+                            return member;
+                        })
+                .when(ctx.data().getRequestScheduler())
+                .commitDelivery(any(Delivery.Member.class), any(), anyLong());
+        return route;
+    }
+
+    private static EngineRpcService.GenerateInputPB generateInputWithTraceContext(
+            long requestId, String traceparent, String tracestate) {
+        return EngineRpcService.GenerateInputPB.newBuilder()
+                .setRequestId(requestId)
+                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
+                .setRequestInfo(
+                        EngineRpcService.RequestInfoPB.newBuilder()
+                                .setTraceContext(
+                                        EngineRpcService.TraceContextPB.newBuilder()
+                                                .setTraceparent(traceparent)
+                                                .setTracestate(tracestate)
+                                                .build())
+                                .build())
+                .build();
+    }
+
+    private static io.opentelemetry.context.Context scheduleContext(
+            String traceId, String spanId, String vendor) {
+        var state = io.opentelemetry.api.trace.TraceState.builder();
+        if (!vendor.isEmpty()) {
+            state.put("vendor", vendor);
+        }
+        return io.opentelemetry.context.Context.root()
+                .with(
+                        io.opentelemetry.api.trace.Span.wrap(
+                                io.opentelemetry.api.trace.SpanContext.create(
+                                        traceId,
+                                        spanId,
+                                        io.opentelemetry.api.trace.TraceFlags.getSampled(),
+                                        state.build())));
+    }
+
+    private EngineRpcService.EnqueueBatchResponsePB ackResponse(
+            long batchId, List<Long> successIds) {
+        EngineRpcService.EnqueueBatchResponsePB.Builder builder =
+                EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(batchId);
+        for (long id : successIds) {
+            builder.addSuccesses(
+                    EngineRpcService.EnqueueBatchSuccessPB.newBuilder().setRequestId(id).build());
+        }
+        return builder.build();
+    }
+
+    private void submit(
+            List<RouteResult> items,
+            long batchId,
+            long prediction,
+            String reason,
+            BiConsumer<RouteResult, Delivery.Result> observer) {
+        submit(reservePermit(), items, batchId, prediction, reason, observer);
+    }
+
+    private void submit(
+            DeliveryPermit permit,
+            List<RouteResult> items,
+            long batchId,
+            long prediction,
+            String reason,
+            BiConsumer<RouteResult, Delivery.Result> observer) {
+        for (var item : items) {
+            var requestScheduler = item.ctx().data().getRequestScheduler();
+            org.flexlb.balance.scheduler.SchedulerTestServices.bind(requestScheduler, runtime);
+            org.mockito.Mockito.doAnswer(
+                            call -> {
+                                observer.accept(
+                                        item, ((TransportResult) call.getArgument(0)).result());
+                                return null;
+                            })
+                    .when(requestScheduler)
+                    .onDeliveryResult(org.mockito.ArgumentMatchers.isA(TransportResult.class));
+            org.mockito.Mockito.doAnswer(
+                            call -> {
+                                var failed = (PreparationFailure) call.getArgument(0);
+                                observer.accept(
+                                        item,
+                                        Delivery.Result.notSent(
+                                                new IllegalStateException(failed.detail())));
+                                return null;
+                            })
+                    .when(requestScheduler)
+                    .onDeliveryResult(
+                            argThat(
+                                    (ContextResult.DeliveryEvidence e) ->
+                                            e instanceof PreparationFailure failed
+                                                    && failed.route() == item));
+        }
+        Delivery batch;
+        try {
+            batch =
+                    DeliveryTestSupport.committed(
+                            batchId,
+                            items.stream().map(item -> new Delivery.Member(item, null)).toList(),
+                            new org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot(
+                                    0L, List.of(), List.of(), 0L),
+                            prediction,
+                            DeliveryTestSupport.EVALUATOR,
+                            reason,
+                            0,
+                            null,
+                            permit);
+        } catch (RuntimeException failure) {
+            permit.close();
+            throw failure;
+        }
+        dispatcher.deliverBatch(batch);
+    }
+
+    // ---- helpers ----
+
+    private DeliveryPermit reservePermit() {
+        CapacityBoundary.Attempt<?> accepted = runtime.deliveries().tryReserveDelivery();
+        assertTrue(accepted.accepted());
+        return assertInstanceOf(DeliveryPermit.class, accepted.value());
+    }
+
+    private static Descriptors.Descriptor legacyGenerateInputDescriptor() throws Exception {
+        DescriptorProtos.DescriptorProto requestInfo =
+                DescriptorProtos.DescriptorProto.newBuilder()
+                        .setName("RequestInfoPB")
+                        .addField(
+                                optionalField(
+                                        "frontend_ip",
+                                        1,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "dash_ip",
+                                        2,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "trace_id",
+                                        3,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "request_id",
+                                        4,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "source_role",
+                                        5,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING,
+                                        null))
+                        .build();
+        DescriptorProtos.DescriptorProto generateConfig =
+                DescriptorProtos.DescriptorProto.newBuilder().setName("GenerateConfigPB").build();
+        DescriptorProtos.DescriptorProto generateInput =
+                DescriptorProtos.DescriptorProto.newBuilder()
+                        .setName("GenerateInputPB")
+                        .addField(
+                                optionalField(
+                                        "request_id",
+                                        1,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64,
+                                        null))
+                        .addField(
+                                optionalField(
+                                        "generate_config",
+                                        4,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_MESSAGE,
+                                        ".legacy_trace.GenerateConfigPB"))
+                        .addField(
+                                optionalField(
+                                        "request_info",
+                                        9,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_MESSAGE,
+                                        ".legacy_trace.RequestInfoPB"))
+                        .addField(
+                                optionalField(
+                                        "priority",
+                                        10,
+                                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT32,
+                                        null))
+                        .build();
+        DescriptorProtos.FileDescriptorProto file =
+                DescriptorProtos.FileDescriptorProto.newBuilder()
+                        .setName("legacy_trace_generate_input.proto")
+                        .setPackage("legacy_trace")
+                        .setSyntax("proto3")
+                        .addMessageType(requestInfo)
+                        .addMessageType(generateConfig)
+                        .addMessageType(generateInput)
+                        .build();
+        return Descriptors.FileDescriptor.buildFrom(file, new Descriptors.FileDescriptor[0])
+                .findMessageTypeByName("GenerateInputPB");
+    }
+
+    private static DescriptorProtos.FieldDescriptorProto optionalField(
+            String name,
+            int number,
+            DescriptorProtos.FieldDescriptorProto.Type type,
+            String typeName) {
+        DescriptorProtos.FieldDescriptorProto.Builder builder =
+                DescriptorProtos.FieldDescriptorProto.newBuilder()
+                        .setName(name)
+                        .setNumber(number)
+                        .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL)
+                        .setType(type);
+        if (typeName != null) {
+            builder.setTypeName(typeName);
+        }
+        return builder.build();
+    }
+
+    private static EngineRpcService.GenerateInputPB sentInput(
+            EngineRpcService.EnqueueBatchRequestPB request) {
+        return request.getDpSlotsList().getFirst().getRequestsList().getFirst().getInput();
+    }
+
+    private CapacityBoundary unavailableBoundary() {
+        CapacityBoundary.Attempt<?> rejected = runtime.deliveries().tryReserveDelivery();
+        assertFalse(rejected.accepted());
+        assertEquals(CapacityBoundary.Status.UNAVAILABLE, rejected.boundary().status());
+        return rejected.boundary();
+    }
+
+    private DeliveryDispatcher createDispatcher(
+            int threads, int queueCapacity, SimpleMeterRegistry meters) {
+        return createDispatcher(
+                threads,
+                queueCapacity,
+                meters,
+                configService
+                        .loadBalanceConfig()
+                        .getInternalRuntime()
+                        .getBatchDispatchMaxInflightBytes());
+    }
+
+    private DeliveryDispatcher createDispatcher(
+            int threads, int queueCapacity, SimpleMeterRegistry meters, long byteBudget) {
+        var snapshot = org.mockito.Mockito.spy(configService.loadBalanceConfig());
+        var sizing = org.mockito.Mockito.spy(snapshot.getInternalRuntime());
+        org.mockito.Mockito.doReturn(threads).when(sizing).getBatchDispatchThreads();
+        org.mockito.Mockito.doReturn(queueCapacity).when(sizing).getBatchDispatchQueueCapacity();
+        org.mockito.Mockito.doReturn(byteBudget).when(sizing).getBatchDispatchMaxInflightBytes();
+        org.mockito.Mockito.doReturn(sizing).when(snapshot).getInternalRuntime();
+        var service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(snapshot);
+        var delivery =
+                new DeliveryDispatcher(
+                        grpcClient,
+                        configService,
+                        new org.flexlb.service.monitor.DeliveryMetricsReporter(null),
+                        org.mockito.Mockito.mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                .decodeAdmissionCapacity(configService),
+                        org.mockito.Mockito.mock(
+                                org.flexlb.balance.scheduler.DeliveryExecution.class));
+        runtime =
+                new SchedulerTestServices(
+                        new RequestRepository(),
+                        mock(org.flexlb.balance.endpoint.EndpointRegistry.class),
+                        mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
+                        mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
+                        delivery,
+                        service,
+                        mock(EngineGrpcClient.class));
+        if (meters != null) {
+            var reporter =
+                    new org.flexlb.service.monitor.DeliveryMetricsReporter(
+                            new org.flexlb.metric.MicrometerFlexMonitor(meters));
+            reporter.registerExecutor(runtime.deliveries());
+        }
+        return delivery;
+    }
+
+    private static void awaitAvailable(
+            java.util.function.BooleanSupplier availability, Object capacityMonitor)
+            throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        synchronized (capacityMonitor) {
+            while (!availability.getAsBoolean()) {
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    throw new AssertionError("dispatcher capacity did not become available");
+                }
+                TimeUnit.NANOSECONDS.timedWait(capacityMonitor, remainingNanos);
+            }
+        }
     }
 
     /**
@@ -2260,5 +2244,37 @@ class DeliveryDispatcherTest {
         return dispatchExecutor.isShutdown()
                 && dispatchExecutor.getQueue().isEmpty()
                 && dispatchExecutor.getActiveCount() == 0;
+    }
+
+    // ---- Test callback ----
+
+    /**
+     * Records transport outcomes and signals waiting assertions without changing request state.
+     */
+    private static class TestCallback implements BiConsumer<RouteResult, Delivery.Result> {
+        final AtomicInteger successCount = new AtomicInteger(0);
+        final AtomicInteger failureCount = new AtomicInteger(0);
+        final AtomicInteger uncertainCount = new AtomicInteger(0);
+        final CountDownLatch successLatch = new CountDownLatch(1);
+        final CountDownLatch failureLatch = new CountDownLatch(1);
+        final CountDownLatch uncertainLatch = new CountDownLatch(1);
+        volatile Throwable lastError;
+
+        @Override
+        public void accept(RouteResult exactItem, Delivery.Result completion) {
+            if (completion.status() == Delivery.Result.Status.DELIVERED) {
+                successCount.incrementAndGet();
+                successLatch.countDown();
+            } else if (completion.status() == Delivery.Result.Status.NOT_SENT
+                    || completion.status() == Delivery.Result.Status.PREFILL_REJECTED) {
+                lastError = completion.cause();
+                failureCount.incrementAndGet();
+                failureLatch.countDown();
+            } else if (completion.status() == Delivery.Result.Status.UNCERTAIN) {
+                lastError = completion.cause();
+                uncertainCount.incrementAndGet();
+                uncertainLatch.countDown();
+            }
+        }
     }
 }

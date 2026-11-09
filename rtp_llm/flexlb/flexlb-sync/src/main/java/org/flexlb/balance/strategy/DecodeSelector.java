@@ -24,40 +24,18 @@ import java.util.Objects;
 
 import static com.google.common.base.Preconditions.checkState;
 
+/**
+ * Ranks Decode candidates by availability and cost, refreshing admission information when registration conflicts.
+ */
 public class DecodeSelector implements DecodeSelectionStrategy {
-
     private static final int MAX_CACHED_WORKERS = 4096;
-
-    private enum Availability {
-        READY,
-        BUSY,
-        IMPOSSIBLE
-    } // Ordered from most to least preferred.
 
     private static final ThreadLocal<Scratch> SCRATCH = ThreadLocal.withInitial(Scratch::new);
 
-    private static final class Scratch {
-        private String[] addresses = new String[0];
-        private int[] candidates = new int[0];
-        private boolean inUse;
-
-        private void prepare(int size) {
-            if (candidates.length < size) {
-                addresses = new String[size];
-                candidates = new int[size];
-            }
-        }
-
-        private void clear(int size) {
-            Arrays.fill(addresses, 0, Math.min(size, addresses.length), null);
-            inUse = false;
-        }
-    }
-
     private final EndpointRoundRobin rotation = new EndpointRoundRobin();
-
     private final AdmissionCapacity capacity;
     private final DecodeCostFormula costFormula;
+
     private final boolean direct;
 
     public DecodeSelector(ConfigService configService, AdmissionCapacity capacity) {
@@ -69,12 +47,14 @@ public class DecodeSelector implements DecodeSelectionStrategy {
     }
 
     @Override
-    public PlacementResult<DecodeRoutingView, PlacementKey> select(
+    public PlacementResult<DecodeRoutingView, PlacementKey> selectAndRegister(
             Request request,
             SchedulingMetadata metadata,
             String group,
             List<DecodeRoutingView> snapshots,
-            CapacityReader reader) {
+            CapacityReader reader,
+            java.util.function.UnaryOperator<DecodeRoutingView> refresh,
+            java.util.function.Function<DecodeRoutingView, PlacementResult.Registration> register) {
         if (snapshots.isEmpty()) {
             return PlacementResult.blocked(new PlacementKey(RoleType.DECODE, group, null));
         }
@@ -83,7 +63,32 @@ public class DecodeSelector implements DecodeSelectionStrategy {
         scratch.inUse = true;
         try {
             scratch.prepare(snapshots.size());
-            return selectCandidates(request, metadata, group, snapshots, reader, scratch);
+            for (var snapshot : snapshots) scratch.views.add(snapshot);
+            for (int i = 0; i < snapshots.size(); i++) scratch.costs[i] = cost(snapshots.get(i));
+            for (int attempt = 0; attempt < 8; attempt++) {
+                var result =
+                        selectCandidates(request, metadata, group, scratch.views, reader, scratch);
+                if (result.status() != PlacementResult.Status.SUCCESS) return result;
+                var selected = result.value();
+                var registration = register.apply(selected);
+                if (registration == PlacementResult.Registration.REGISTERED) return result;
+                if (registration == PlacementResult.Registration.BLOCKED)
+                    return PlacementResult.blocked(
+                            PlacementKey.exact(
+                                    RoleType.DECODE,
+                                    selected.topology().group(),
+                                    selected.address()),
+                            Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
+                            java.util.Map.of("decodeCandidate", selected));
+                int index = scratch.views.indexOf(selected);
+                var current =
+                        registration == PlacementResult.Registration.UNAVAILABLE
+                                ? null
+                                : refresh.apply(selected);
+                scratch.views.set(index, current);
+                scratch.costs[index] = current == null ? Double.POSITIVE_INFINITY : cost(current);
+            }
+            return PlacementResult.retry();
         } finally {
             scratch.clear(snapshots.size());
             if (scratch == cached && scratch.addresses.length > MAX_CACHED_WORKERS) {
@@ -104,6 +109,7 @@ public class DecodeSelector implements DecodeSelectionStrategy {
         int candidateCount = 0;
         for (int index = 0; index < snapshots.size(); index++) {
             DecodeRoutingView view = snapshots.get(index);
+            if (view == null) continue;
             scratch.addresses[index] = view.address();
             Availability available = availability(request, view);
             if (available.ordinal() < preferred.ordinal()) {
@@ -114,11 +120,14 @@ public class DecodeSelector implements DecodeSelectionStrategy {
                 candidates[candidateCount++] = index;
             }
         }
+        if (candidateCount == 0)
+            return PlacementResult.blocked(new PlacementKey(RoleType.DECODE, group, null));
         if (preferred == Availability.IMPOSSIBLE) {
             return PlacementResult.rejected(
                     oversizedRequestFailure(
                             request.getExpectedKvTokens(),
                             snapshots.stream()
+                                    .filter(Objects::nonNull)
                                     .mapToLong(view -> capacity.kvBudget(view.totalKv()))
                                     .max()
                                     .orElse(0L)));
@@ -126,7 +135,7 @@ public class DecodeSelector implements DecodeSelectionStrategy {
         if (preferred == Availability.BUSY && direct) {
             return classifyCapacityFailure(request, metadata, group, snapshots, reader);
         }
-        int winners = selectLowestCost(snapshots, scratch.candidates, candidateCount);
+        int winners = selectLowestCost(scratch, candidateCount);
         int selected =
                 rotation.next(
                         RoleType.DECODE, group, scratch.addresses, scratch.candidates, winners);
@@ -134,36 +143,30 @@ public class DecodeSelector implements DecodeSelectionStrategy {
         return PlacementResult.success(snapshots.get(selected));
     }
 
-    /** Evaluate only the selected capacity class; preserve ties for round-robin selection. */
-    private int selectLowestCost(
-            List<DecodeRoutingView> snapshots, int[] candidates, int candidateCount) {
-        double minimumCost = Double.POSITIVE_INFINITY;
-        int winners = 0;
-        var evaluator = costFormula.evaluator();
-        for (int index = 0; index < candidateCount; index++) {
-            DecodeRoutingView view = snapshots.get(candidates[index]);
-            double cost =
-                    evaluator.evaluate(
-                            view.totalLoad(),
-                            capacity.maxEngineRequests(),
-                            view.realKvUsed(),
-                            view.totalKv());
-            if (!Double.isFinite(cost)) {
-                continue;
-            }
-            if (cost < minimumCost) {
-                minimumCost = cost;
-                winners = 0;
-            }
-            if (cost == minimumCost) {
-                candidates[winners++] = candidates[index];
-            }
+    private Availability availability(Request request, DecodeRoutingView view) {
+        if (view.totalKv() > 0L
+                && request.getExpectedKvTokens() > capacity.kvBudget(view.totalKv())) {
+            return Availability.IMPOSSIBLE;
         }
-        checkState(
-                winners > 0,
-                "Decode cost formula produced no finite score: %s",
-                costFormula.expression());
-        return winners;
+        var usage = view.placementUsage();
+        return capacity.evaluate(
+                                usage,
+                                request.getHardKvTokens(),
+                                request.getExpectedKvTokens(),
+                                CapacityRelease.NONE)
+                        .fits()
+                ? Availability.READY
+                : Availability.BUSY;
+    }
+
+    private static Response oversizedRequestFailure(long required, long maximum) {
+        return Response.error(
+                StrategyErrorType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                "Decode prompt plus output demand="
+                        + required
+                        + " exceeds every worker KV admission budget; maximum="
+                        + maximum);
     }
 
     private PlacementResult<DecodeRoutingView, PlacementKey> classifyCapacityFailure(
@@ -176,6 +179,7 @@ public class DecodeSelector implements DecodeSelectionStrategy {
         boolean uniformFailure = true;
         List<Map<String, Object>> evidence = new ArrayList<>();
         for (DecodeRoutingView view : views) {
+            if (view == null) continue;
             Response workerFailure;
             var snapshot = reader.read(view);
             if (snapshot == null) {
@@ -227,7 +231,7 @@ public class DecodeSelector implements DecodeSelectionStrategy {
             SchedulingMetadata metadata,
             DecodeResources.AdmissionSummary snapshot) {
         var routing = snapshot.routing();
-        var usage = direct ? routing.dispatchUsage() : routing.placementUsage();
+        var usage = routing.placementUsage();
         if (usage.totalKvTokens() > 0
                 && request.getExpectedKvTokens() > capacity.kvBudget(usage.totalKvTokens())) {
             return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
@@ -236,10 +240,7 @@ public class DecodeSelector implements DecodeSelectionStrategy {
         CapacityRelease higher = CapacityRelease.NONE;
         CapacityRelease same = CapacityRelease.NONE;
         for (int priority = 1; priority <= PriorityNormalizer.MAX_PRIORITY; priority++) {
-            CapacityRelease occupied =
-                    direct
-                            ? snapshot.engineOccupancy(priority)
-                            : snapshot.placementOccupancy(priority);
+            CapacityRelease occupied = snapshot.placementOccupancy(priority);
             if (occupied == CapacityRelease.NONE) {
                 continue;
             }
@@ -283,29 +284,65 @@ public class DecodeSelector implements DecodeSelectionStrategy {
                         : AdmissionRejectReason.SAME_PRIORITY_AHEAD);
     }
 
-    private Availability availability(Request request, DecodeRoutingView view) {
-        if (view.totalKv() > 0L
-                && request.getExpectedKvTokens() > capacity.kvBudget(view.totalKv())) {
-            return Availability.IMPOSSIBLE;
+    private int selectLowestCost(Scratch scratch, int candidateCount) {
+        var candidates = scratch.candidates;
+        double minimumCost = Double.POSITIVE_INFINITY;
+        int winners = 0;
+        for (int index = 0; index < candidateCount; index++) {
+            double cost = scratch.costs[candidates[index]];
+            if (!Double.isFinite(cost)) continue;
+            if (cost < minimumCost) {
+                minimumCost = cost;
+                winners = 0;
+            }
+            if (cost == minimumCost) candidates[winners++] = candidates[index];
         }
-        var usage = direct ? view.dispatchUsage() : view.placementUsage();
-        return capacity.evaluate(
-                                usage,
-                                request.getHardKvTokens(),
-                                request.getExpectedKvTokens(),
-                                CapacityRelease.NONE)
-                        .fits()
-                ? Availability.READY
-                : Availability.BUSY;
+        checkState(
+                winners > 0,
+                "Decode cost formula produced no finite score: %s",
+                costFormula.expression());
+        return winners;
     }
 
-    private static Response oversizedRequestFailure(long required, long maximum) {
-        return Response.error(
-                StrategyErrorType.RESOURCE_EXHAUSTED,
-                AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                "Decode prompt plus output demand="
-                        + required
-                        + " exceeds every worker KV admission budget; maximum="
-                        + maximum);
+    /** Evaluate only the selected capacity class; preserve ties for round-robin selection. */
+    private double cost(DecodeRoutingView view) {
+        return costFormula
+                .evaluator()
+                .evaluate(
+                        view.totalLoad(),
+                        capacity.maxEngineRequests(),
+                        view.realKvUsed(),
+                        view.totalKv());
+    }
+
+    private enum Availability {
+        READY,
+        BUSY,
+        IMPOSSIBLE
+    } // Ordered from most to least preferred.
+
+    /**
+     * Reuses candidate arrays within one thread and guards against reentrant selection sharing the same buffers.
+     */
+    private static final class Scratch {
+        private String[] addresses = new String[0];
+        private int[] candidates = new int[0];
+        private double[] costs = new double[0];
+        private final java.util.ArrayList<DecodeRoutingView> views = new java.util.ArrayList<>();
+        private boolean inUse;
+
+        private void prepare(int size) {
+            if (candidates.length < size) {
+                addresses = new String[size];
+                candidates = new int[size];
+                costs = new double[size];
+            }
+        }
+
+        private void clear(int size) {
+            Arrays.fill(addresses, 0, Math.min(size, addresses.length), null);
+            views.clear();
+            inUse = false;
+        }
     }
 }

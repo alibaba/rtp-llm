@@ -56,12 +56,17 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Verifies scheduling RPC responses, master forwarding and cancellation with controlled asynchronous collaborators.
+ */
 class FlexlbServiceImplTest {
-
     private final java.util.concurrent.ScheduledExecutorService deadlineTimer =
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+
     private AbstractRequestScheduler requestScheduler;
+
     private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
+
     private MasterStatusService masterStatusService;
     private EngineHealthReporter engineHealthReporter;
     private FlexlbGrpcForwarder grpcForwarder;
@@ -94,20 +99,6 @@ class FlexlbServiceImplTest {
         pvAppender = new ListAppender<>();
         pvAppender.start();
         pvLogger.addAppender(pvAppender);
-    }
-
-    private void createService() {
-        service =
-                FlexlbServiceTestSupport.create(
-                        requestScheduler,
-                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestState),
-                        masterStatusService,
-                        engineHealthReporter,
-                        grpcForwarder,
-                        configService,
-                        deliveryMetricsReporter,
-                        serverLatencyRecorder,
-                        requestSchedulerReporter);
     }
 
     @AfterEach
@@ -1299,12 +1290,6 @@ class FlexlbServiceImplTest {
         verify(requestScheduler, never()).submit(any());
     }
 
-    private static FlexlbScheduleProtocol.FlexlbScheduleResponsePB nodeRejected() {
-        return FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
-                .setCode(StrategyErrorType.NOT_MASTER.getErrorCode())
-                .build();
-    }
-
     @Test
     void testSchedule_exceptionHandling() {
         // Given: route throws exception
@@ -1486,190 +1471,6 @@ class FlexlbServiceImplTest {
         verifyTraceAtResponse(false, false, false, true);
     }
 
-    private void verifyTraceAtResponse(
-            boolean forwarded, boolean fusion, boolean success, boolean missingAck) {
-        RecordingExporter exporter = new RecordingExporter();
-        try (var provider =
-                io.opentelemetry.sdk.trace.SdkTracerProvider.builder()
-                        .addSpanProcessor(
-                                io.opentelemetry.sdk.trace.export.SimpleSpanProcessor.create(
-                                        exporter))
-                        .build()) {
-            var span =
-                    provider.get("test")
-                            .spanBuilder("schedule")
-                            .setSpanKind(io.opentelemetry.api.trace.SpanKind.SERVER)
-                            .startSpan();
-            var traceContext = io.opentelemetry.context.Context.root().with(span);
-            CompletableFuture<Response> local = new CompletableFuture<>();
-            when(requestScheduler.submit(any()))
-                    .thenAnswer(
-                            inv -> {
-                                RequestContext ctx = inv.getArgument(0);
-                                long now = System.nanoTime();
-                                org.springframework.test.util.ReflectionTestUtils.setField(
-                                        ctx.data(), "serviceStartNanos", now - 40_000_000L);
-                                ctx.data().setRouteSubmittedNanos(now - 30_000_000L);
-                                ctx.data().setBatchDispatchedNanos(now - 10_000_000L);
-                                if (!missingAck) {
-                                    org.springframework.test.util.ReflectionTestUtils.setField(
-                                            ctx.data(), "ackAtNanos", now - 1_000_000L);
-                                }
-                                return local;
-                            });
-            var wire =
-                    FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
-                            .setSuccess(success)
-                            .setCode(success ? 200 : 500)
-                            .setEnqueuedByMaster(true)
-                            .addServerStatus(
-                                    FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
-                                            .setRole(fusion ? "PDFUSION" : "PREFILL")
-                                            .setServerIp("10.0.0.10")
-                                            .setHttpPort(8000));
-            if (!fusion) {
-                wire.addServerStatus(
-                        FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
-                                .setRole("DECODE")
-                                .setServerIp("10.0.0.20")
-                                .setHttpPort(9000));
-            }
-            CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult> remote =
-                    new CompletableFuture<>();
-            when(masterStatusService.isNeedConsistency()).thenReturn(forwarded);
-            when(masterStatusService.isMaster()).thenReturn(false);
-            when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(remote);
-            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
-                    new StreamObserver<>() {
-                        public void onNext(FlexlbScheduleProtocol.FlexlbScheduleResponsePB value) {
-                            org.flexlb.telemetry.FlexlbTrace.finishWithGrpcStatus(
-                                    span, "OK", 0, true);
-                        }
-
-                        public void onError(Throwable error) {
-                            throw new AssertionError(error);
-                        }
-
-                        public void onCompleted() {}
-                    };
-            Context.current()
-                    .withValue(
-                            org.flexlb.interceptor.GrpcTraceInterceptor.OTEL_CONTEXT_KEY,
-                            traceContext)
-                    .run(
-                            () ->
-                                    service.schedule(
-                                            FlexlbScheduleProtocol.FlexlbScheduleRequestPB
-                                                    .newBuilder()
-                                                    .setRequestId(991L)
-                                                    .build(),
-                                            observer));
-            CompletableFuture.runAsync(
-                            () -> {
-                                if (forwarded) {
-                                    verify(requestScheduler, never()).submit(any());
-                                    remote.complete(
-                                            FlexlbGrpcForwarder.MasterForwardResult.forwarded(
-                                                    wire.build(), "10.0.0.2:7001"));
-                                } else {
-                                    Response response = new Response();
-                                    response.setSuccess(success);
-                                    response.setCode(success ? 200 : 500);
-                                    response.setEnqueuedByMaster(true);
-                                    response.setServerStatus(
-                                            wire.getServerStatusList().stream()
-                                                    .map(
-                                                            server -> {
-                                                                var status =
-                                                                        new org.flexlb.dao
-                                                                                .loadbalance
-                                                                                .ServerStatus();
-                                                                status.setRole(
-                                                                        org.flexlb.dao.route
-                                                                                .RoleType
-                                                                                .fromString(
-                                                                                        server
-                                                                                                .getRole()));
-                                                                status.setServerIp(
-                                                                        server.getServerIp());
-                                                                status.setHttpPort(
-                                                                        server.getHttpPort());
-                                                                return status;
-                                                            })
-                                                    .toList());
-                                    local.complete(response);
-                                }
-                            })
-                    .join();
-            assertEquals(1, exporter.spans.size());
-            var data = exporter.spans.getFirst();
-            assertEquals(
-                    success
-                            ? io.opentelemetry.api.trace.StatusCode.OK
-                            : io.opentelemetry.api.trace.StatusCode.ERROR,
-                    data.getStatus().getStatusCode());
-            assertEquals(
-                    success ? "10.0.0.10:8000" : null,
-                    data.getAttributes()
-                            .get(
-                                    io.opentelemetry.api.common.AttributeKey.stringKey(
-                                            "rtp_llm.prefill_address")));
-            assertEquals(
-                    success && !fusion ? "10.0.0.20:9000" : null,
-                    data.getAttributes()
-                            .get(
-                                    io.opentelemetry.api.common.AttributeKey.stringKey(
-                                            "rtp_llm.decode_address")));
-            assertEquals(
-                    forwarded ? null : 20L,
-                    data.getAttributes()
-                            .get(
-                                    io.opentelemetry.api.common.AttributeKey.longKey(
-                                            "rtp_llm.batch_wait_ms")));
-            assertEquals(
-                    forwarded ? null : 10L,
-                    data.getAttributes()
-                            .get(
-                                    io.opentelemetry.api.common.AttributeKey.longKey(
-                                            "rtp_llm.route_submit_ms")));
-            if (forwarded || missingAck) {
-                org.junit.jupiter.api.Assertions.assertNull(
-                        data.getAttributes()
-                                .get(
-                                        io.opentelemetry.api.common.AttributeKey.longKey(
-                                                "rtp_llm.ack_to_response_ms")));
-            }
-            org.junit.jupiter.api.Assertions.assertNull(
-                    data.getAttributes()
-                            .get(
-                                    io.opentelemetry.api.common.AttributeKey.longKey(
-                                            "rtp_llm.enqueue_batch_ms")));
-        }
-    }
-
-    private static final class RecordingExporter
-            implements io.opentelemetry.sdk.trace.export.SpanExporter {
-        private final java.util.List<io.opentelemetry.sdk.trace.data.SpanData> spans =
-                new java.util.ArrayList<>();
-
-        @Override
-        public io.opentelemetry.sdk.common.CompletableResultCode export(
-                java.util.Collection<io.opentelemetry.sdk.trace.data.SpanData> batch) {
-            spans.addAll(batch);
-            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
-        }
-
-        @Override
-        public io.opentelemetry.sdk.common.CompletableResultCode flush() {
-            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
-        }
-
-        @Override
-        public io.opentelemetry.sdk.common.CompletableResultCode shutdown() {
-            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
-        }
-    }
-
     @Test
     void testSchedule_observerFailureStillWritesPvRecord() {
         when(masterStatusService.isNeedConsistency()).thenReturn(false);
@@ -1709,7 +1510,7 @@ class FlexlbServiceImplTest {
 
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-    void contextStoresGenerateInputOnlyForBatchDelivery(boolean batch) {
+    void contextPreservesInputForDispatcherValidation(boolean batch) {
         var config = configService.loadBalanceConfig();
         config.getDispatcher()
                 .setType(
@@ -1729,14 +1530,10 @@ class FlexlbServiceImplTest {
         var retained =
                 org.springframework.test.util.ReflectionTestUtils.getField(
                         context.data(), "generateInput");
-        if (batch) {
-            org.junit.jupiter.api.Assertions.assertNotNull(retained);
-            assertFalse(
-                    ((java.util.concurrent.FutureTask<?>) retained).isDone(),
-                    "payload decoding belongs to delivery");
-        } else {
-            org.junit.jupiter.api.Assertions.assertNull(retained);
-        }
+        org.junit.jupiter.api.Assertions.assertNotNull(retained);
+        assertFalse(
+                ((java.util.concurrent.FutureTask<?>) retained).isDone(),
+                "payload decoding belongs to delivery");
     }
 
     @Test
@@ -1909,10 +1706,217 @@ class FlexlbServiceImplTest {
         assertFalse(captor.getValue().getFound());
     }
 
+    private void createService() {
+        service =
+                FlexlbServiceTestSupport.create(
+                        requestScheduler,
+                        org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requestState),
+                        masterStatusService,
+                        engineHealthReporter,
+                        grpcForwarder,
+                        configService,
+                        deliveryMetricsReporter,
+                        serverLatencyRecorder,
+                        requestSchedulerReporter);
+    }
+
+    private static FlexlbScheduleProtocol.FlexlbScheduleResponsePB nodeRejected() {
+        return FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                .setCode(StrategyErrorType.NOT_MASTER.getErrorCode())
+                .build();
+    }
+
+    private void verifyTraceAtResponse(
+            boolean forwarded, boolean fusion, boolean success, boolean missingAck) {
+        RecordingExporter exporter = new RecordingExporter();
+        try (var provider =
+                io.opentelemetry.sdk.trace.SdkTracerProvider.builder()
+                        .addSpanProcessor(
+                                io.opentelemetry.sdk.trace.export.SimpleSpanProcessor.create(
+                                        exporter))
+                        .build()) {
+            var span =
+                    provider.get("test")
+                            .spanBuilder("schedule")
+                            .setSpanKind(io.opentelemetry.api.trace.SpanKind.SERVER)
+                            .startSpan();
+            var traceContext = io.opentelemetry.context.Context.root().with(span);
+            CompletableFuture<Response> local = new CompletableFuture<>();
+            when(requestScheduler.submit(any()))
+                    .thenAnswer(
+                            inv -> {
+                                RequestContext ctx = inv.getArgument(0);
+                                long now = System.nanoTime();
+                                org.springframework.test.util.ReflectionTestUtils.setField(
+                                        ctx.data(), "serviceStartNanos", now - 40_000_000L);
+                                ctx.data().setRouteSubmittedNanos(now - 30_000_000L);
+                                ctx.data().setBatchDispatchedNanos(now - 10_000_000L);
+                                if (!missingAck) {
+                                    org.springframework.test.util.ReflectionTestUtils.setField(
+                                            ctx.data(), "ackAtNanos", now - 1_000_000L);
+                                }
+                                return local;
+                            });
+            var wire =
+                    FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                            .setSuccess(success)
+                            .setCode(success ? 200 : 500)
+                            .setEnqueuedByMaster(true)
+                            .addServerStatus(
+                                    FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
+                                            .setRole(fusion ? "PDFUSION" : "PREFILL")
+                                            .setServerIp("10.0.0.10")
+                                            .setHttpPort(8000));
+            if (!fusion) {
+                wire.addServerStatus(
+                        FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
+                                .setRole("DECODE")
+                                .setServerIp("10.0.0.20")
+                                .setHttpPort(9000));
+            }
+            CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult> remote =
+                    new CompletableFuture<>();
+            when(masterStatusService.isNeedConsistency()).thenReturn(forwarded);
+            when(masterStatusService.isMaster()).thenReturn(false);
+            when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(remote);
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                    new StreamObserver<>() {
+                        public void onNext(FlexlbScheduleProtocol.FlexlbScheduleResponsePB value) {
+                            org.flexlb.telemetry.FlexlbTrace.finishWithGrpcStatus(
+                                    span, "OK", 0, true);
+                        }
+
+                        public void onError(Throwable error) {
+                            throw new AssertionError(error);
+                        }
+
+                        public void onCompleted() {}
+                    };
+            Context.current()
+                    .withValue(
+                            org.flexlb.interceptor.GrpcTraceInterceptor.OTEL_CONTEXT_KEY,
+                            traceContext)
+                    .run(
+                            () ->
+                                    service.schedule(
+                                            FlexlbScheduleProtocol.FlexlbScheduleRequestPB
+                                                    .newBuilder()
+                                                    .setRequestId(991L)
+                                                    .build(),
+                                            observer));
+            CompletableFuture.runAsync(
+                            () -> {
+                                if (forwarded) {
+                                    verify(requestScheduler, never()).submit(any());
+                                    remote.complete(
+                                            FlexlbGrpcForwarder.MasterForwardResult.forwarded(
+                                                    wire.build(), "10.0.0.2:7001"));
+                                } else {
+                                    Response response = new Response();
+                                    response.setSuccess(success);
+                                    response.setCode(success ? 200 : 500);
+                                    response.setEnqueuedByMaster(true);
+                                    response.setServerStatus(
+                                            wire.getServerStatusList().stream()
+                                                    .map(
+                                                            server -> {
+                                                                var status =
+                                                                        new org.flexlb.dao
+                                                                                .loadbalance
+                                                                                .ServerStatus();
+                                                                status.setRole(
+                                                                        org.flexlb.dao.route
+                                                                                .RoleType
+                                                                                .fromString(
+                                                                                        server
+                                                                                                .getRole()));
+                                                                status.setServerIp(
+                                                                        server.getServerIp());
+                                                                status.setHttpPort(
+                                                                        server.getHttpPort());
+                                                                return status;
+                                                            })
+                                                    .toList());
+                                    local.complete(response);
+                                }
+                            })
+                    .join();
+            assertEquals(1, exporter.spans.size());
+            var data = exporter.spans.getFirst();
+            assertEquals(
+                    success
+                            ? io.opentelemetry.api.trace.StatusCode.OK
+                            : io.opentelemetry.api.trace.StatusCode.ERROR,
+                    data.getStatus().getStatusCode());
+            assertEquals(
+                    success ? "10.0.0.10:8000" : null,
+                    data.getAttributes()
+                            .get(
+                                    io.opentelemetry.api.common.AttributeKey.stringKey(
+                                            "rtp_llm.prefill_address")));
+            assertEquals(
+                    success && !fusion ? "10.0.0.20:9000" : null,
+                    data.getAttributes()
+                            .get(
+                                    io.opentelemetry.api.common.AttributeKey.stringKey(
+                                            "rtp_llm.decode_address")));
+            assertEquals(
+                    forwarded ? null : 20L,
+                    data.getAttributes()
+                            .get(
+                                    io.opentelemetry.api.common.AttributeKey.longKey(
+                                            "rtp_llm.batch_wait_ms")));
+            assertEquals(
+                    forwarded ? null : 10L,
+                    data.getAttributes()
+                            .get(
+                                    io.opentelemetry.api.common.AttributeKey.longKey(
+                                            "rtp_llm.route_submit_ms")));
+            if (forwarded || missingAck) {
+                org.junit.jupiter.api.Assertions.assertNull(
+                        data.getAttributes()
+                                .get(
+                                        io.opentelemetry.api.common.AttributeKey.longKey(
+                                                "rtp_llm.ack_to_response_ms")));
+            }
+            org.junit.jupiter.api.Assertions.assertNull(
+                    data.getAttributes()
+                            .get(
+                                    io.opentelemetry.api.common.AttributeKey.longKey(
+                                            "rtp_llm.enqueue_batch_ms")));
+        }
+    }
+
     private void assertPvContains(String expected) {
         assertEquals(1, pvAppender.list.size());
         assertTrue(
                 pvAppender.list.get(0).getFormattedMessage().contains(expected),
                 pvAppender.list.get(0).getFormattedMessage());
+    }
+
+    /**
+     * Collects exported spans so RPC tests can inspect tracing results without an external collector.
+     */
+    private static final class RecordingExporter
+            implements io.opentelemetry.sdk.trace.export.SpanExporter {
+        private final java.util.List<io.opentelemetry.sdk.trace.data.SpanData> spans =
+                new java.util.ArrayList<>();
+
+        @Override
+        public io.opentelemetry.sdk.common.CompletableResultCode export(
+                java.util.Collection<io.opentelemetry.sdk.trace.data.SpanData> batch) {
+            spans.addAll(batch);
+            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
+        }
+
+        @Override
+        public io.opentelemetry.sdk.common.CompletableResultCode flush() {
+            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
+        }
+
+        @Override
+        public io.opentelemetry.sdk.common.CompletableResultCode shutdown() {
+            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
+        }
     }
 }

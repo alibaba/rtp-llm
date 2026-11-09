@@ -4,7 +4,7 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor.InvalidPrefillPredictionException;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.config.DispatcherConfig;
 
 import java.util.Arrays;
@@ -19,22 +19,30 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.LongMath.saturatedAdd;
 
-/** Frozen-work cost through the incoming request; collection waits are not predicted. */
+/**
+ * Frozen-work cost through the incoming request; collection waits are not predicted.
+ */
 public final class RequestTimeEstimation {
-
     private static final ThreadLocal<RequestTimeEstimation> ESTIMATORS =
             ThreadLocal.withInitial(RequestTimeEstimation::new);
-
     private static final String INVALID_PREDICTION_DETAIL = "PREDICTOR_RETURNED_INVALID_VALUE";
+
+    public static final long UNKNOWN = -1L;
+
     private final Prediction predictions = new Prediction();
     private final ProjectedQueue ordered = new ProjectedQueue();
+
     private GroupPlanner.Item incoming;
+
     private boolean inUse;
+
     private String requestId;
+
     private int priority;
     private long enqueuedAtMs;
     private long expiresAtMs;
     private long seqLen;
+
     private GroupPlanner.Constraints rankingConstraints;
 
     private RequestTimeEstimation() {}
@@ -82,13 +90,40 @@ public final class RequestTimeEstimation {
         inUse = true;
         try {
             project(inputs, planningAtMs);
-            applyAdmissionPolicy(inputs.queue());
+            applyAdmissionPolicy(
+                    inputs.queue(), Math.max(inputs.queue().capturedAtMs(), planningAtMs));
             return predictions;
         } finally {
             predictions.evaluator = null;
             predictions.batchPrediction = null;
             inUse = false;
         }
+    }
+
+    /** One incremental predictor for one live queue selection. */
+    public static GroupPlanner.PrefixPrediction<RouteResult> newGroupPredictor(
+            DispatcherConfig.Type mode, PrefillTimePredictor.Evaluator evaluator) {
+        if (mode == DispatcherConfig.Type.BATCH) {
+            var prediction = evaluator.newBatchPrediction();
+            return (added, items) ->
+                    PrefillTimePredictor.requireValidDecisionGroupMs(
+                            prediction.append(added.seqLen(), added.hitCache()));
+        }
+        return new GroupPlanner.PrefixPrediction<>() {
+            private double totalMs;
+
+            @Override
+            public double append(RouteResult added, List<RouteResult> items) {
+                try {
+                    totalMs +=
+                            PrefillTimePredictor.predictSingleRequestMs(
+                                    evaluator, added.seqLen(), added.hitCache());
+                } catch (PrefillTimePredictor.InvalidPrefillPredictionException failure) {
+                    throw failure.atMember(items.size() - 1);
+                }
+                return PrefillTimePredictor.requireValidDecisionGroupMs(totalMs);
+            }
+        };
     }
 
     /**
@@ -115,6 +150,24 @@ public final class RequestTimeEstimation {
         } catch (PredictionFailure predictionFailure) {
             return unavailable(predictionFailure.detail("PREDICTION_FAILED"));
         }
+    }
+
+    private CandidateView unavailable(String detail) {
+        return candidate(State.UNAVAILABLE, UNKNOWN, 0L, InitialHeadDisposition.NONE, detail);
+    }
+
+    private CandidateView candidate(
+            State state,
+            long projectedTtftMs,
+            long incomingPrefillMs,
+            InitialHeadDisposition headDisposition,
+            String detail) {
+        predictions.state = state;
+        predictions.projectedTtftMsValue = projectedTtftMs;
+        predictions.incomingPrefillMs = incomingPrefillMs;
+        predictions.headDisposition = headDisposition;
+        predictions.detail = detail;
+        return predictions;
     }
 
     private CandidateView projectWithPredictions(
@@ -170,6 +223,11 @@ public final class RequestTimeEstimation {
             rankingConstraints = cached;
         }
         return cached;
+    }
+
+    private CandidateView blocked(
+            long incomingPrefillMs, InitialHeadDisposition initialHeadDisposition, String detail) {
+        return candidate(State.BLOCKED, UNKNOWN, incomingPrefillMs, initialHeadDisposition, detail);
     }
 
     private CandidateView projectSingleton(
@@ -260,6 +318,46 @@ public final class RequestTimeEstimation {
         }
     }
 
+    /**
+     * Combine the captured capacity wait with the projection without changing its ranking cost.
+     */
+    private void applyAdmissionPolicy(ProjectionQueueSnapshot queue, long projectionAtMs) {
+        var candidate = predictions;
+        candidate.admissionState = candidate.state;
+        candidate.admissionDetail = candidate.detail;
+        var observation = queue.admissionBlock();
+        if (!queue.queueScheduling()
+                || observation == null
+                || observation.semantics() == null
+                || (candidate.state != State.MODELED && !candidate.engineWorkUnmodeled())) {
+            return;
+        }
+        var semantics = observation.semantics();
+        if (!candidate.engineWorkUnmodeled()) {
+            // Selected requests participate in prediction before joining the dispatch queue.
+            // Compare the blocked dispatch head itself, which may no longer be first here.
+            var blockedHead =
+                    queue.activeItems().stream()
+                            .filter(
+                                    item ->
+                                            java.util.Objects.equals(
+                                                            item.requestId(),
+                                                            observation.requestId())
+                                                    && item.enqueueSeq()
+                                                            == observation.enqueueSeq())
+                            .findFirst()
+                            .orElseThrow();
+            if (expiredAt(blockedHead, projectionAtMs)) return;
+            if (queue.ordering().compare(incoming, blockedHead) < 0) {
+                candidate.admissionState = semantics.afterProbe();
+                candidate.admissionDetail = semantics.afterProbeDetail();
+                return;
+            }
+        }
+        candidate.admissionState = State.BLOCKED;
+        candidate.admissionDetail = semantics.blockedDetail();
+    }
+
     private static boolean expiredAt(GroupPlanner.Item item, long nowMs) {
         return item.expiresAtMs() <= 0L || nowMs >= item.expiresAtMs();
     }
@@ -273,6 +371,7 @@ public final class RequestTimeEstimation {
             implements Iterable<GroupPlanner.Item>, Iterator<GroupPlanner.Item> {
         private List<GroupPlanner.Item> active;
         private GroupPlanner.Item probe;
+
         private int probeIndex;
         private long nowMs;
         private int headIndex;
@@ -281,6 +380,38 @@ public final class RequestTimeEstimation {
         private int probePosition;
         private int index;
         private int visited;
+
+        /** The planner consumes one cursor at a time; no iterator escapes this projection. */
+        @Override
+        public Iterator<GroupPlanner.Item> iterator() {
+            probePosition = Integer.MAX_VALUE;
+            index = headIndex;
+            visited = 0;
+            return this;
+        }
+
+        @Override
+        public GroupPlanner.Item next() {
+            if (!hasNext()) {
+                throw new NoSuchElementException();
+            }
+            if (index == probeIndex) {
+                probePosition = visited;
+            }
+            visited++;
+            GroupPlanner.Item item = itemAt(index++);
+            return item;
+        }
+
+        @Override
+        public boolean hasNext() {
+            while (index <= active.size()
+                    && index != probeIndex
+                    && expiredAt(itemAt(index), nowMs)) {
+                index++;
+            }
+            return index <= active.size();
+        }
 
         private boolean reset(
                 List<GroupPlanner.Item> active,
@@ -335,38 +466,6 @@ public final class RequestTimeEstimation {
                     : active.get(position < probeIndex ? position : position - 1);
         }
 
-        /** The planner consumes one cursor at a time; no iterator escapes this projection. */
-        @Override
-        public Iterator<GroupPlanner.Item> iterator() {
-            probePosition = Integer.MAX_VALUE;
-            index = headIndex;
-            visited = 0;
-            return this;
-        }
-
-        @Override
-        public boolean hasNext() {
-            while (index <= active.size()
-                    && index != probeIndex
-                    && expiredAt(itemAt(index), nowMs)) {
-                index++;
-            }
-            return index <= active.size();
-        }
-
-        @Override
-        public GroupPlanner.Item next() {
-            if (!hasNext()) {
-                throw new NoSuchElementException();
-            }
-            if (index == probeIndex) {
-                probePosition = visited;
-            }
-            visited++;
-            GroupPlanner.Item item = itemAt(index++);
-            return item;
-        }
-
         private void removePlannedPrefix(int count) {
             checkState(count <= probePosition, "cannot consume the projected probe");
             // Every member occupies one virtual position, including a rejected probe.
@@ -378,29 +477,6 @@ public final class RequestTimeEstimation {
                 headIndex++;
             }
         }
-    }
-
-    private CandidateView unavailable(String detail) {
-        return candidate(State.UNAVAILABLE, UNKNOWN, 0L, InitialHeadDisposition.NONE, detail);
-    }
-
-    private CandidateView blocked(
-            long incomingPrefillMs, InitialHeadDisposition initialHeadDisposition, String detail) {
-        return candidate(State.BLOCKED, UNKNOWN, incomingPrefillMs, initialHeadDisposition, detail);
-    }
-
-    private CandidateView candidate(
-            State state,
-            long projectedTtftMs,
-            long incomingPrefillMs,
-            InitialHeadDisposition headDisposition,
-            String detail) {
-        predictions.state = state;
-        predictions.projectedTtftMsValue = projectedTtftMs;
-        predictions.incomingPrefillMs = incomingPrefillMs;
-        predictions.headDisposition = headDisposition;
-        predictions.detail = detail;
-        return predictions;
     }
 
     /**
@@ -417,24 +493,21 @@ public final class RequestTimeEstimation {
 
     /** Read-only projection result. Invocation-scoped views must not be retained. */
     public interface CandidateView {
-        State state();
-
         default State admissionState() {
             return state();
         }
+
+        State state();
 
         default String admissionDetail() {
             return detail();
         }
 
-        /** Known execution cost through this request; excludes future collection waits. */
-        long projectedTtftMsValue();
+        String detail();
 
         long incomingPrefillMs();
 
         InitialHeadDisposition initialHeadDisposition();
-
-        String detail();
 
         long cacheHitTokens();
 
@@ -447,9 +520,10 @@ public final class RequestTimeEstimation {
         default boolean selectable() {
             return state() == State.MODELED && projectedTtftMsValue() != UNKNOWN;
         }
-    }
 
-    public static final long UNKNOWN = -1L;
+        /** Known execution cost through this request; excludes future collection waits. */
+        long projectedTtftMsValue();
+    }
 
     public enum InitialHeadDisposition {
         NONE,
@@ -484,77 +558,45 @@ public final class RequestTimeEstimation {
     }
 
     /**
-     * Combine the captured capacity wait with the projection without changing its ranking cost.
-     */
-    private void applyAdmissionPolicy(ProjectionQueueSnapshot queue) {
-        var candidate = predictions;
-        candidate.admissionState = candidate.state;
-        candidate.admissionDetail = candidate.detail;
-        var observation = queue.admissionBlock();
-        if (!queue.queueScheduling()
-                || observation == null
-                || observation.semantics() == null
-                || (candidate.state != State.MODELED && !candidate.engineWorkUnmodeled())) {
-            return;
-        }
-        var semantics = observation.semantics();
-        if (!candidate.engineWorkUnmodeled()) {
-            switch (candidate.initialHeadDisposition()) {
-                case TERMINAL_PRUNED -> {
-                    return;
-                }
-                case NONE ->
-                        throw new IllegalStateException(
-                                "admission-blocked ACTIVE head was not projected");
-                case BEFORE_PROBE -> {}
-                case AFTER_PROBE -> {
-                    candidate.admissionState = semantics.afterProbe();
-                    candidate.admissionDetail = semantics.afterProbeDetail();
-                    return;
-                }
-            }
-        }
-        candidate.admissionState = State.BLOCKED;
-        candidate.admissionDetail = semantics.blockedDetail();
-    }
-
-    /** One incremental predictor for one live queue selection. */
-    public static GroupPlanner.PrefixPrediction<RouteExecution> newGroupPredictor(
-            DispatcherConfig.Type mode, PrefillTimePredictor.Evaluator evaluator) {
-        if (mode == DispatcherConfig.Type.BATCH) {
-            var prediction = evaluator.newBatchPrediction();
-            return (added, items) ->
-                    PrefillTimePredictor.requireValidDecisionGroupMs(
-                            prediction.append(added.seqLen(), added.hitCache()));
-        }
-        return new GroupPlanner.PrefixPrediction<>() {
-            private double totalMs;
-
-            @Override
-            public double append(RouteExecution added, List<RouteExecution> items) {
-                try {
-                    totalMs +=
-                            PrefillTimePredictor.predictSingleRequestMs(
-                                    evaluator, added.seqLen(), added.hitCache());
-                } catch (PrefillTimePredictor.InvalidPrefillPredictionException failure) {
-                    throw failure.atMember(items.size() - 1);
-                }
-                return PrefillTimePredictor.requireValidDecisionGroupMs(totalMs);
-            }
-        };
-    }
-
-    /**
      * The sole boundary between projection math and an external predictor.
      * Predictor failures remain distinguishable from invalid returned values,
      * while every numeric output is validated before it reaches scheduling.
      */
     private static final class Prediction
             implements GroupPlanner.PrefixPrediction<GroupPlanner.Item>, CandidateView {
-
         private State state;
         private State admissionState;
         private String admissionDetail;
+
+        private long projectedTtftMsValue;
+        private long incomingPrefillMs;
+
+        private InitialHeadDisposition headDisposition;
+        private String detail;
+
+        private long hitCache;
+        private long routingCacheMatchTokens;
+
+        private PrefillTimePredictor.Evaluator evaluator;
+
+        private boolean batch;
+
+        private PrefillTimePredictor.BatchPrediction batchPrediction;
+        private String probeId;
+
+        private boolean probeReached;
+        private double batchMs;
+        private long totalMs;
+        private long previousMs;
+        private int computedSize;
+
+        // Equal immutable models and request shapes share both singleton predictions across calls.
+        private Object cachedSnapshot;
+
+        private long cachedSeqLen = -1L;
+        private long cachedHitCache = -1L;
+        private long cachedSingleMs = -1L;
+        private long cachedBatchMs = -1L;
 
         @Override
         public State admissionState() {
@@ -565,13 +607,6 @@ public final class RequestTimeEstimation {
         public String admissionDetail() {
             return admissionDetail;
         }
-
-        private long projectedTtftMsValue;
-        private long incomingPrefillMs;
-        private InitialHeadDisposition headDisposition;
-        private String detail;
-        private long hitCache;
-        private long routingCacheMatchTokens;
 
         @Override
         public State state() {
@@ -608,58 +643,26 @@ public final class RequestTimeEstimation {
             return routingCacheMatchTokens;
         }
 
-        private PrefillTimePredictor.Evaluator evaluator;
-        private boolean batch;
-        private PrefillTimePredictor.BatchPrediction batchPrediction;
-        private String probeId;
-        private boolean probeReached;
-        private double batchMs;
-        private long totalMs;
-        private long previousMs;
-        private int computedSize;
-        // Equal immutable models and request shapes share both singleton predictions across calls.
-        private Object cachedSnapshot;
-        private long cachedSeqLen = -1L;
-        private long cachedHitCache = -1L;
-        private long cachedSingleMs = -1L;
-        private long cachedBatchMs = -1L;
-
-        private long singletonMs(long seqLen, long hitCache, boolean batch) {
-            Object snapshot = evaluator.snapshotIdentity();
-            boolean sameInput =
-                    cachedSnapshot == snapshot
-                            && cachedSeqLen == seqLen
-                            && cachedHitCache == hitCache;
-            long cached = batch ? cachedBatchMs : cachedSingleMs;
-            if (sameInput && cached >= 0L) {
-                return cached;
-            }
-            try {
-                long predicted =
-                        batch
-                                ? PrefillTimePredictor.predictCommittedBatchMs(
-                                        evaluator,
-                                        new PrefillBatchFeatures(
-                                                List.of(
-                                                        new PrefillBatchFeatures.Item(
-                                                                seqLen, hitCache))))
-                                : PrefillTimePredictor.predictSingleRequestMs(
-                                        evaluator, seqLen, hitCache);
-                if (!sameInput) {
-                    cachedSnapshot = snapshot;
-                    cachedSeqLen = seqLen;
-                    cachedHitCache = hitCache;
-                    cachedSingleMs = cachedBatchMs = -1L;
-                }
+        @Override
+        public double append(GroupPlanner.Item added, List<GroupPlanner.Item> prefix) {
+            if (!probeReached) {
                 if (batch) {
-                    cachedBatchMs = predicted;
+                    try {
+                        batchMs =
+                                PrefillTimePredictor.requireValidDecisionGroupMs(
+                                        batchPrediction.append(added.seqLen(), added.hitCache()));
+                    } catch (RuntimeException failure) {
+                        throw new PredictionFailure(failure);
+                    }
                 } else {
-                    cachedSingleMs = predicted;
+                    long itemMs = singletonMs(added.seqLen(), added.hitCache(), false);
+                    previousMs = totalMs;
+                    totalMs = saturatedAdd(totalMs, itemMs);
                 }
-                return predicted;
-            } catch (RuntimeException predictionFailure) {
-                throw new PredictionFailure(predictionFailure);
+                computedSize++;
+                probeReached = java.util.Objects.equals(added.requestId(), probeId);
             }
+            return batch ? batchMs : totalMs;
         }
 
         private long completionMs(
@@ -707,6 +710,44 @@ public final class RequestTimeEstimation {
             }
         }
 
+        private long singletonMs(long seqLen, long hitCache, boolean batch) {
+            Object snapshot = evaluator.snapshotIdentity();
+            boolean sameInput =
+                    cachedSnapshot == snapshot
+                            && cachedSeqLen == seqLen
+                            && cachedHitCache == hitCache;
+            long cached = batch ? cachedBatchMs : cachedSingleMs;
+            if (sameInput && cached >= 0L) {
+                return cached;
+            }
+            try {
+                long predicted =
+                        batch
+                                ? PrefillTimePredictor.predictCommittedBatchMs(
+                                        evaluator,
+                                        new PrefillBatchFeatures(
+                                                List.of(
+                                                        new PrefillBatchFeatures.Item(
+                                                                seqLen, hitCache))))
+                                : PrefillTimePredictor.predictSingleRequestMs(
+                                        evaluator, seqLen, hitCache);
+                if (!sameInput) {
+                    cachedSnapshot = snapshot;
+                    cachedSeqLen = seqLen;
+                    cachedHitCache = hitCache;
+                    cachedSingleMs = cachedBatchMs = -1L;
+                }
+                if (batch) {
+                    cachedBatchMs = predicted;
+                } else {
+                    cachedSingleMs = predicted;
+                }
+                return predicted;
+            } catch (RuntimeException predictionFailure) {
+                throw new PredictionFailure(predictionFailure);
+            }
+        }
+
         private void startGroup(String probeId) {
             this.probeId = probeId;
             probeReached = false;
@@ -718,28 +759,6 @@ public final class RequestTimeEstimation {
             } catch (RuntimeException failure) {
                 throw new PredictionFailure(failure);
             }
-        }
-
-        @Override
-        public double append(GroupPlanner.Item added, List<GroupPlanner.Item> prefix) {
-            if (!probeReached) {
-                if (batch) {
-                    try {
-                        batchMs =
-                                PrefillTimePredictor.requireValidDecisionGroupMs(
-                                        batchPrediction.append(added.seqLen(), added.hitCache()));
-                    } catch (RuntimeException failure) {
-                        throw new PredictionFailure(failure);
-                    }
-                } else {
-                    long itemMs = singletonMs(added.seqLen(), added.hitCache(), false);
-                    previousMs = totalMs;
-                    totalMs = saturatedAdd(totalMs, itemMs);
-                }
-                computedSize++;
-                probeReached = java.util.Objects.equals(added.requestId(), probeId);
-            }
-            return batch ? batchMs : totalMs;
         }
     }
 
@@ -763,12 +782,17 @@ public final class RequestTimeEstimation {
      */
     public static final class WorkSnapshot {
         private static final long[] EMPTY_LONGS = new long[0];
+
         private final long capturedAtMs;
+
         private List<RequestWork> requests;
         private List<BatchWork> batches;
+
         private long knownNonRunningWorkMs;
+
         private long[] runningWorkMs = EMPTY_LONGS;
         private String[] requestIds = new String[0];
+
         private boolean unknownWork;
         private volatile boolean calculated;
 
@@ -785,6 +809,15 @@ public final class RequestTimeEstimation {
             unknownWork = unknownRequestCount > 0L;
         }
 
+        public long capturedAtMs() {
+            return capturedAtMs;
+        }
+
+        public boolean containsRequest(String requestId) {
+            calculate();
+            return Arrays.binarySearch(requestIds, requestId) >= 0;
+        }
+
         public WorkSnapshot calculate() {
             if (!calculated) {
                 synchronized (this) {
@@ -797,6 +830,37 @@ public final class RequestTimeEstimation {
                 }
             }
             return this;
+        }
+
+        /**
+         * Complete committed duration, absent when any work unit lacks a duration.
+         */
+        public OptionalLong totalRemainingWorkMs() {
+            return totalRemainingWorkMsAt(capturedAtMs);
+        }
+
+        /** Complete preceding work at a later clock; only observed running work consumes time. */
+        public OptionalLong totalRemainingWorkMsAt(long observedAtMs) {
+            return hasUnknownWork()
+                    ? OptionalLong.empty()
+                    : OptionalLong.of(knownRemainingWorkMsAt(observedAtMs));
+        }
+
+        public boolean hasUnknownWork() {
+            calculate();
+            return unknownWork;
+        }
+
+        /** Known work rebased to a later planning clock without copying the snapshot. */
+        public long knownRemainingWorkMsAt(long planningAtMs) {
+            calculate();
+            long elapsedMs = planningAtMs <= capturedAtMs ? 0L : planningAtMs - capturedAtMs;
+            long total = knownNonRunningWorkMs;
+            for (long runningMs : runningWorkMs) {
+                long remaining = elapsedMs >= runningMs ? 0L : runningMs - elapsedMs;
+                total = saturatedAdd(total, remaining);
+            }
+            return total;
         }
 
         private void calculateWork() {
@@ -829,6 +893,10 @@ public final class RequestTimeEstimation {
             indexRequests();
         }
 
+        private static long saturatedAdd(long left, long right) {
+            return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
+        }
+
         private void indexRequests() {
             int runningIndex = 0;
             int requestIdIndex = 0;
@@ -847,10 +915,6 @@ public final class RequestTimeEstimation {
                 }
             }
             Arrays.sort(requestIds);
-        }
-
-        public long capturedAtMs() {
-            return capturedAtMs;
         }
 
         /** Lifecycle phase visible to a projection. Only ENGINE_RUNNING consumes time. */
@@ -879,46 +943,6 @@ public final class RequestTimeEstimation {
                         "remaining batch work must be non-negative");
             }
         }
-
-        public boolean hasUnknownWork() {
-            calculate();
-            return unknownWork;
-        }
-
-        public boolean containsRequest(String requestId) {
-            calculate();
-            return Arrays.binarySearch(requestIds, requestId) >= 0;
-        }
-
-        /**
-         * Complete committed duration, absent when any work unit lacks a duration.
-         */
-        public OptionalLong totalRemainingWorkMs() {
-            return totalRemainingWorkMsAt(capturedAtMs);
-        }
-
-        /** Complete preceding work at a later clock; only observed running work consumes time. */
-        public OptionalLong totalRemainingWorkMsAt(long observedAtMs) {
-            return hasUnknownWork()
-                    ? OptionalLong.empty()
-                    : OptionalLong.of(knownRemainingWorkMsAt(observedAtMs));
-        }
-
-        /** Known work rebased to a later planning clock without copying the snapshot. */
-        public long knownRemainingWorkMsAt(long planningAtMs) {
-            calculate();
-            long elapsedMs = planningAtMs <= capturedAtMs ? 0L : planningAtMs - capturedAtMs;
-            long total = knownNonRunningWorkMs;
-            for (long runningMs : runningWorkMs) {
-                long remaining = elapsedMs >= runningMs ? 0L : runningMs - elapsedMs;
-                total = saturatedAdd(total, remaining);
-            }
-            return total;
-        }
-
-        private static long saturatedAdd(long left, long right) {
-            return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
-        }
     }
 
     /**
@@ -944,11 +968,16 @@ public final class RequestTimeEstimation {
             activeItems = List.copyOf(activeItems);
             if (admissionBlock != null) {
                 checkArgument(!activeItems.isEmpty(), "admission block requires an ACTIVE head");
-                GroupPlanner.Item head = activeItems.getFirst();
                 checkArgument(
-                        java.util.Objects.equals(head.requestId(), admissionBlock.requestId())
-                                && head.enqueueSeq() == admissionBlock.enqueueSeq(),
-                        "admission block must identify the exact ACTIVE head");
+                        activeItems.stream()
+                                .anyMatch(
+                                        item ->
+                                                java.util.Objects.equals(
+                                                                item.requestId(),
+                                                                admissionBlock.requestId())
+                                                        && item.enqueueSeq()
+                                                                == admissionBlock.enqueueSeq()),
+                        "admission block must identify a captured dispatch queue item");
             }
         }
 

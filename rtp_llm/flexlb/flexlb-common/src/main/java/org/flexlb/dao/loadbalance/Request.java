@@ -12,6 +12,10 @@ import lombok.extern.jackson.Jacksonized;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Carries normalized scheduling input, including roles, token data, cache metadata and request
+ * limits.
+ */
 @Getter
 @Builder(toBuilder = true)
 @Jacksonized
@@ -127,14 +131,14 @@ public final class Request {
     }
 
     @JsonIgnore
-    public long getHardKvTokens() {
-        return Math.max(0L, seqLen);
-    }
-
-    @JsonIgnore
     public long getExpectedKvTokens() {
         long prompt = getHardKvTokens();
         long output = Math.max(0L, maxNewTokens);
         return prompt > Long.MAX_VALUE - output ? Long.MAX_VALUE : prompt + output;
+    }
+
+    @JsonIgnore
+    public long getHardKvTokens() {
+        return Math.max(0L, seqLen);
     }
 }

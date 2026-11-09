@@ -11,7 +11,6 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -45,8 +44,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyInt;
-import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -76,7 +73,7 @@ class RequestInflightRecoveryTest {
                 assertFalse(f.route.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
             }
             f.drain();
-            assertTrue(f.owner.requests.isCurrent(f.context));
+            assertTrue(f.owner.repository.isCurrent(f.context));
             assertFalse(f.claim.completion().toCompletableFuture().isDone());
 
             f.prefillTerminal(rejectedBeforeTerminal ? 42L : 0L);
@@ -100,7 +97,7 @@ class RequestInflightRecoveryTest {
                                     "Delivery remains unsettled even though both Engine stages have ended"),
                     () ->
                             assertFalse(
-                                    f.owner.requests.isCurrent(f.context),
+                                    f.owner.repository.isCurrent(f.context),
                                     "An ended request must leave the active repository"));
         }
     }
@@ -135,12 +132,12 @@ class RequestInflightRecoveryTest {
 
             assertEquals(
                     0,
-                    f.decode.evictExpiredRequests(-1L, f.owner.requests::retainsIdentity),
+                    f.decode.evictExpiredRequests(-1L, f.owner.repository::retainsIdentity),
                     "A live exact request identity protects its uncertain reservation");
             RequestProtocolTestSupport.expireInactiveRequest(f.owner, f.context, Long.MAX_VALUE);
             f.drain();
             assertEquals(1L, f.decode.routingView().totalLoad());
-            assertTrue(f.owner.requests.isCurrent(f.context));
+            assertTrue(f.owner.repository.isCurrent(f.context));
             f.assertNextDecodeReservationRejected();
         }
     }
@@ -182,7 +179,7 @@ class RequestInflightRecoveryTest {
             assertFalse(
                     f.route.ctx().data().getFuture().isDone(),
                     "UNKNOWN transport cannot complete the request");
-            assertTrue(f.owner.requests.isCurrent(f.context));
+            assertTrue(f.owner.repository.isCurrent(f.context));
             f.assertNextDecodeReservationRejected();
 
             f.prefillTerminal(0L);
@@ -205,7 +202,7 @@ class RequestInflightRecoveryTest {
             assertTrue(
                     duplicate.isDone(), "a retry of the active logical request must be rejected");
             assertFalse(duplicate.join().isSuccess());
-            assertTrue(f.owner.requests.isCurrent(f.context));
+            assertTrue(f.owner.repository.isCurrent(f.context));
             f.assertNextDecodeReservationRejected();
 
             f.prefillTerminal(0L);
@@ -223,9 +220,16 @@ class RequestInflightRecoveryTest {
             {
                 var selectedEndpoint = f.decode;
 
+                // Both selections fit before the engine concurrency policy falls to one.
                 occupyingD1 =
                         f.decode
-                                .tryReserveQueuedRequest(String.valueOf(201L), 16L, 32L, 50, null)
+                                .tryRegisterSelection(
+                                        f.decode.routingView(),
+                                        String.valueOf(201L),
+                                        16L,
+                                        32L,
+                                        50,
+                                        new DecodeResources.AdmissionCapacity(2L, 90L))
                                 .value();
             }
             assertNotNull(occupyingD1);
@@ -242,8 +246,13 @@ class RequestInflightRecoveryTest {
                     var selectedEndpoint = d2;
 
                     reservedD2 =
-                            d2.tryReserveQueuedRequest(
-                                            String.valueOf(302L), 16L, 32L, 50, f.capacity)
+                            d2.tryRegisterSelection(
+                                            d2.routingView(),
+                                            String.valueOf(302L),
+                                            16L,
+                                            32L,
+                                            50,
+                                            f.capacity)
                                     .value();
                 }
                 assertNotNull(reservedD2);
@@ -308,8 +317,13 @@ class RequestInflightRecoveryTest {
                     var selectedEndpoint = d2;
 
                     assertNull(
-                            d2.tryReserveQueuedRequest(
-                                            String.valueOf(303L), 16L, 32L, 50, f.capacity)
+                            d2.tryRegisterSelection(
+                                            d2.routingView(),
+                                            String.valueOf(303L),
+                                            16L,
+                                            32L,
+                                            50,
+                                            f.capacity)
                                     .value(),
                             "New C cannot reserve D2 while queued B holds its sole placement slot");
                 }
@@ -318,317 +332,6 @@ class RequestInflightRecoveryTest {
                         .release(occupyingD1, DecodeResources.ReleaseReason.REMOTE_CLEANUP)
                         .status();
             }
-        }
-    }
-
-    private static final class Fixture implements AutoCloseable {
-        static final long REQUEST_ID = 101L;
-        static final long BATCH_ID = 51L;
-        final AbstractRequestScheduler owner;
-        final FlexlbConfig config;
-        final EndpointRegistry endpoints;
-        final PrefillEndpoint prefill;
-        final DecodeEndpoint decode;
-        final PrefillEndpoint prefillState;
-        final DecodeResources.AdmissionCapacity capacity =
-                new DecodeResources.AdmissionCapacity(1L, 90L);
-        final DecodeResources.RequestReservation reservation;
-        final RequestContext context;
-        final RouteExecution route;
-        Delivery.Member claim;
-        long prefillVersion = 1L;
-        long decodeVersion = 1L;
-
-        Fixture() {
-            config = SchedulingTestConfig.batchConfig();
-            SchedulingTestConfig.useBatchDispatcher(config);
-            var service = mock(ConfigService.class);
-            when(service.loadBalanceConfig()).thenReturn(config);
-            var reporter = mock(DeliveryMetricsReporter.class);
-            owner =
-                    SchedulerTestSupport.create(
-                            service,
-                            reporter,
-                            mock(RequestSchedulerReporter.class),
-                            mock(TheoryCacheHitReporter.class));
-            endpoints =
-                    new EndpointRegistry(
-                            service,
-                            owner.requests,
-                            reporter,
-                            DeliveryTestSupport.route(reporter),
-                            new PlacementAvailability(),
-                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                    service.loadBalanceConfig()),
-                            order ->
-                                    org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
-                                            16, order));
-            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
-                    "endpoints",
-                    endpoints);
-            when(SchedulerTestSupport.engineClient(owner)
-                            .cancelAsync(any(), anyInt(), any(), anyLong()))
-                    .thenReturn(
-                            CompletableFuture.completedFuture(
-                                    EngineGrpcClient.CancelReply.NOT_FOUND));
-            prefill = (PrefillEndpoint) publish(RoleType.PREFILL, "127.0.0.1");
-            decode = (DecodeEndpoint) publish(RoleType.DECODE, "127.0.0.2");
-            {
-                var selectedEndpoint = decode;
-
-                reservation =
-                        decode.tryReserveQueuedRequest(
-                                        String.valueOf(REQUEST_ID), 16L, 32L, 50, capacity)
-                                .value();
-            }
-            assertNotNull(reservation);
-            context = RequestProtocolTestSupport.context(config, REQUEST_ID);
-            var future = RequestProtocolTestSupport.submitForManualPlacement(owner, context);
-            context.data().setFuture(future);
-            route =
-                    SchedulingTestConfig.createRoute(
-                            context,
-                            new Response(),
-                            null,
-                            null,
-                            prefill,
-                            decode,
-                            reservation,
-                            System.currentTimeMillis());
-            prefillState = (PrefillEndpoint) prefill;
-            runWithStateLock(
-                    org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(prefillState),
-                    () -> {
-                        ReflectionTestUtils.invokeMethod(
-                                prefillState,
-                                "enableQueueLocked",
-                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
-                                        16,
-                                        Comparator.comparing(
-                                                org.flexlb.balance.endpoint.PrefillRequestQueue
-                                                                .QueueItem
-                                                        ::requestId)));
-                    });
-            try (var admission =
-                            SchedulerTestSupport.claim(owner, String.valueOf(REQUEST_ID), future);
-                    var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
-                assertNotNull(admission);
-                assertEquals(
-                        PlacementResult.Status.SUCCESS,
-                        RequestProtocolTestSupport.commitRoute(
-                                owner,
-                                route,
-                                RequestProtocolTestSupport.publication(
-                                        () -> {
-                                            return withStateLock(
-                                                    org.flexlb.balance.endpoint.EndpointTestSupport
-                                                            .stateLock(prefillState),
-                                                    () -> {
-                                                        return org.flexlb.balance.endpoint
-                                                                        .EndpointTestSupport
-                                                                        .enqueue(
-                                                                                prefillState, route)
-                                                                == route;
-                                                    });
-                                        })));
-            }
-        }
-
-        WorkerEndpoint publish(RoleType role, String ip) {
-            var worker = WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test");
-            worker.lock.lock();
-            try {
-                return endpoints.publishPreparedEndpoint(
-                        worker.getLogicalIpPort(),
-                        worker,
-                        worker.prepareNewStatus(
-                                WorkerStatusTestSupport.freezeStatusResponse(
-                                        worker, status(role, 1L, Map.of()))));
-            } finally {
-                worker.lock.unlock();
-            }
-        }
-
-        RouteExecution enqueue(
-                long requestId, DecodeEndpoint endpoint, DecodeResources.RequestReservation held) {
-            var requestContext = RequestProtocolTestSupport.context(config, requestId);
-            var future = RequestProtocolTestSupport.submitForManualPlacement(owner, requestContext);
-            requestContext.data().setFuture(future);
-            var item =
-                    SchedulingTestConfig.createRoute(
-                            requestContext,
-                            new Response(),
-                            null,
-                            null,
-                            prefill,
-                            endpoint,
-                            held,
-                            System.currentTimeMillis());
-            try (var admission =
-                            SchedulerTestSupport.claim(owner, String.valueOf(requestId), future);
-                    var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
-                assertNotNull(admission);
-                assertEquals(
-                        PlacementResult.Status.SUCCESS,
-                        RequestProtocolTestSupport.commitRoute(
-                                owner,
-                                item,
-                                RequestProtocolTestSupport.publication(
-                                        () -> {
-                                            return withStateLock(
-                                                    org.flexlb.balance.endpoint.EndpointTestSupport
-                                                            .stateLock(prefillState),
-                                                    () -> {
-                                                        return org.flexlb.balance.endpoint
-                                                                        .EndpointTestSupport
-                                                                        .enqueue(prefillState, item)
-                                                                == item;
-                                                    });
-                                        })));
-            }
-            return item;
-        }
-
-        void send(Delivery.Result result) {
-            var acquisition = decode.acquireDispatchPermit(reservation, capacity);
-            assertEquals(
-                    DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
-                    acquisition.status());
-            assertEquals(
-                    DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
-                    acquisition.value().dispatch().status());
-            var batch = prefill.reserveBatch(BATCH_ID, 1).value();
-            assertNotNull(batch);
-            var handoff =
-                    withStateLock(
-                            org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(prefillState),
-                            () -> {
-                                return prefillState.commitDelivery(
-                                        org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
-                                                List.of(route),
-                                                batch,
-                                                new long[] {30_000L},
-                                                null,
-                                                System.currentTimeMillis()));
-                            });
-            assertNotNull(handoff);
-            {
-                claim =
-                        RequestProtocolTestSupport.claimBatchWithoutPrediction(
-                                owner, route, BATCH_ID, () -> true);
-                assertNotNull(claim);
-                assertTrue(owner.tryStartSend(claim));
-                owner.onDeliveryResult(
-                        new ContextResult.Prediction(
-                                claim,
-                                org.flexlb.balance.prediction.PrefillTimePredictor
-                                        .predictedVisibilityDeadlineMs(
-                                                new WorkSnapshot(
-                                                        System.currentTimeMillis(),
-                                                        List.of(),
-                                                        List.of(),
-                                                        0L),
-                                                30_000L,
-                                                claim.owner()
-                                                        .data()
-                                                        .getConfig()
-                                                        .getRequestLifecycle()
-                                                        .getDecision()
-                                                        .getLifetime(),
-                                                System.currentTimeMillis()),
-                                System.currentTimeMillis()));
-                owner.onDeliveryResult(
-                        new ContextResult.TransportResult(
-                                claim, result, System.currentTimeMillis()));
-            }
-        }
-
-        void prefillTerminal(long errorCode) {
-            apply(
-                    prefill,
-                    status(RoleType.PREFILL, ++prefillVersion, Map.of("101", terminal(errorCode))));
-        }
-
-        void decodeTerminal() {
-            apply(decode, status(RoleType.DECODE, ++decodeVersion, Map.of("101", terminal(0L))));
-        }
-
-        void emptyFull(WorkerEndpoint endpoint) {
-            var role = endpoint == prefill ? RoleType.PREFILL : RoleType.DECODE;
-            apply(
-                    endpoint,
-                    status(
-                            role,
-                            endpoint == prefill ? ++prefillVersion : ++decodeVersion,
-                            Map.of()));
-        }
-
-        TaskInfo terminal(long errorCode) {
-            var task = new TaskInfo();
-            task.setRequestId(String.valueOf(REQUEST_ID));
-            task.setBatchId(BATCH_ID);
-            task.setInputLength(16L);
-            task.setPhase(TaskPhase.RUNNING);
-            task.setErrorCode(errorCode);
-            return task;
-        }
-
-        void drain() {
-            SchedulerTestSupport.awaitRequestWork(
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
-        }
-
-        void assertNextDecodeReservationRejected() {
-            {
-                var selectedEndpoint = decode;
-
-                assertNull(
-                        decode.tryReserveQueuedRequest(String.valueOf(102L), 16L, 32L, 50, capacity)
-                                .value(),
-                        "The retained shadow fills the one-request Decode placement limit");
-            }
-        }
-
-        void assertNextDecodeReservationAccepted() {
-            {
-                var selectedEndpoint = decode;
-
-                var next =
-                        decode.tryReserveQueuedRequest(String.valueOf(102L), 16L, 32L, 50, capacity)
-                                .value();
-                assertNotNull(next, "Released capacity must admit the next request");
-                decode.release(next, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
-            }
-        }
-
-        void assertReleased() {
-            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
-            assertEquals(0L, decode.routingView().totalLoad());
-            assertFalse(decode.ownership(reservation).owned());
-            assertTrue(prefillState.batchCapacityAvailable(1));
-            assertTrue(claim.completion().toCompletableFuture().isDone());
-            assertFalse(owner.requests.isCurrent(context));
-            assertNextDecodeReservationAccepted();
-        }
-
-        @Override
-        public void close() {
-            SchedulerTestServices.scheduler(owner).stop();
-            // Inject strong proof only AFTER each test's assertions. This prevents an unrelated
-            // shutdown timeout from hiding the missing terminal-settlement assertion.
-            if (claim != null && !claim.completion().toCompletableFuture().isDone()) {
-                owner.onDeliveryResult(
-                        new ContextResult.CleanupAcknowledgement(
-                                claim,
-                                ContextResult.CancelEvidenceKind.CLEANED,
-                                System.currentTimeMillis()));
-            }
-            drain();
-            endpoints.close();
-            drain();
-            SchedulerTestSupport.shutdown(
-                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
         }
     }
 
@@ -662,5 +365,330 @@ class RequestInflightRecoveryTest {
             worker.lock.unlock();
         }
         endpoint.publishStatus(projection);
+    }
+
+    /**
+     * Tracks a real P/D registration through controlled transport failures and exact Worker terminal reports.
+     */
+    private static final class Fixture implements AutoCloseable {
+        static final long REQUEST_ID = 101L;
+        static final long BATCH_ID = 51L;
+
+        final AbstractRequestScheduler owner;
+        final FlexlbConfig config;
+        final EndpointRegistry endpoints;
+        final PrefillEndpoint prefill;
+        final DecodeEndpoint decode;
+        final PrefillEndpoint prefillState;
+        final DecodeResources.AdmissionCapacity capacity =
+                new DecodeResources.AdmissionCapacity(1L, 90L);
+        final DecodeResources.RequestReservation reservation;
+        final RequestContext context;
+        final RouteResult route;
+
+        Delivery.Member claim;
+
+        long prefillVersion = 1L;
+        long decodeVersion = 1L;
+
+        Fixture() {
+            config = SchedulingTestConfig.batchConfig();
+            SchedulingTestConfig.useBatchDispatcher(config);
+            var service = mock(ConfigService.class);
+            when(service.loadBalanceConfig()).thenReturn(config);
+            var reporter = mock(DeliveryMetricsReporter.class);
+            owner =
+                    SchedulerTestSupport.create(
+                            service,
+                            reporter,
+                            mock(RequestSchedulerReporter.class),
+                            mock(TheoryCacheHitReporter.class));
+            endpoints =
+                    new EndpointRegistry(
+                            service,
+                            owner.repository,
+                            reporter,
+                            DeliveryTestSupport.route(reporter),
+                            new PlacementAvailability(),
+                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                    service.loadBalanceConfig()),
+                            order ->
+                                    org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
+                                            16, order));
+            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
+                    "endpoints",
+                    endpoints);
+            when(SchedulerTestSupport.engineClient(owner)
+                            .cancelAsync(any(), anyInt(), any(), anyLong()))
+                    .thenReturn(
+                            CompletableFuture.completedFuture(
+                                    EngineGrpcClient.CancelReply.NOT_FOUND));
+            prefill = (PrefillEndpoint) publish(RoleType.PREFILL, "127.0.0.1");
+            decode = (DecodeEndpoint) publish(RoleType.DECODE, "127.0.0.2");
+            {
+                var selectedEndpoint = decode;
+
+                reservation =
+                        decode.tryRegisterSelection(
+                                        decode.routingView(),
+                                        String.valueOf(REQUEST_ID),
+                                        16L,
+                                        32L,
+                                        50,
+                                        capacity)
+                                .value();
+            }
+            assertNotNull(reservation);
+            context = RequestProtocolTestSupport.context(config, REQUEST_ID);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(owner, context);
+            context.data().setFuture(future);
+            route =
+                    RequestExecutionTestSupport.registerPrefillRoute(
+                            context, prefill, decode, reservation, 0L, System.currentTimeMillis());
+            prefillState = (PrefillEndpoint) prefill;
+            runWithStateLock(
+                    org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(prefillState),
+                    () -> {
+                        ReflectionTestUtils.invokeMethod(
+                                prefillState,
+                                "enableQueueLocked",
+                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
+                                        16,
+                                        Comparator.comparing(
+                                                org.flexlb.balance.endpoint.PrefillRequestQueue
+                                                                .QueueItem
+                                                        ::requestId)));
+                    });
+            var admission = SchedulerTestSupport.claim(owner, String.valueOf(REQUEST_ID), future);
+            try (var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
+                assertNotNull(admission);
+                assertEquals(
+                        PlacementResult.Status.SUCCESS,
+                        RequestProtocolTestSupport.commitRoute(
+                                owner,
+                                route,
+                                RequestProtocolTestSupport.publication(
+                                        () -> {
+                                            return withStateLock(
+                                                    org.flexlb.balance.endpoint.EndpointTestSupport
+                                                            .stateLock(prefillState),
+                                                    () -> {
+                                                        return org.flexlb.balance.endpoint
+                                                                        .EndpointTestSupport
+                                                                        .enqueue(
+                                                                                prefillState, route)
+                                                                == route;
+                                                    });
+                                        })));
+            }
+        }
+
+        @Override
+        public void close() {
+            SchedulerTestServices.scheduler(owner).stop();
+            // Inject strong proof only AFTER each test's assertions. This prevents an unrelated
+            // shutdown timeout from hiding the missing terminal-settlement assertion.
+            if (claim != null && !claim.completion().toCompletableFuture().isDone()) {
+                owner.onDeliveryResult(
+                        new ContextResult.CleanupAcknowledgement(
+                                claim,
+                                ContextResult.CancelEvidenceKind.CLEANED,
+                                System.currentTimeMillis()));
+            }
+            drain();
+            endpoints.close();
+            drain();
+            SchedulerTestSupport.shutdown(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
+        }
+
+        WorkerEndpoint publish(RoleType role, String ip) {
+            var worker = WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test");
+            worker.lock.lock();
+            try {
+                return endpoints.publishPreparedEndpoint(
+                        worker.getLogicalIpPort(),
+                        worker,
+                        worker.prepareNewStatus(
+                                WorkerStatusTestSupport.freezeStatusResponse(
+                                        worker, status(role, 1L, Map.of()))));
+            } finally {
+                worker.lock.unlock();
+            }
+        }
+
+        RouteResult enqueue(
+                long requestId, DecodeEndpoint endpoint, DecodeResources.RequestReservation held) {
+            var requestContext = RequestProtocolTestSupport.context(config, requestId);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(owner, requestContext);
+            requestContext.data().setFuture(future);
+            var item =
+                    RequestExecutionTestSupport.registerPrefillRoute(
+                            requestContext,
+                            prefill,
+                            endpoint,
+                            held,
+                            0L,
+                            System.currentTimeMillis());
+            var admission = SchedulerTestSupport.claim(owner, String.valueOf(requestId), future);
+            try (var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
+                assertNotNull(admission);
+                assertEquals(
+                        PlacementResult.Status.SUCCESS,
+                        RequestProtocolTestSupport.commitRoute(
+                                owner,
+                                item,
+                                RequestProtocolTestSupport.publication(
+                                        () -> {
+                                            return withStateLock(
+                                                    org.flexlb.balance.endpoint.EndpointTestSupport
+                                                            .stateLock(prefillState),
+                                                    () -> {
+                                                        return org.flexlb.balance.endpoint
+                                                                        .EndpointTestSupport
+                                                                        .enqueue(prefillState, item)
+                                                                == item;
+                                                    });
+                                        })));
+            }
+            return item;
+        }
+
+        void send(Delivery.Result result) {
+            var acquisition = decode.acquireDispatchPermit(reservation, capacity);
+            assertEquals(
+                    DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
+                    acquisition.status());
+            assertEquals(
+                    DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
+                    acquisition.value().dispatch().status());
+            var batch =
+                    new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(BATCH_ID, 1);
+            assertNotNull(batch);
+            var handoff =
+                    withStateLock(
+                            org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(prefillState),
+                            () -> {
+                                return prefillState.commitDelivery(
+                                        org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
+                                                List.of(route),
+                                                batch,
+                                                new long[] {30_000L},
+                                                null,
+                                                System.currentTimeMillis()));
+                            });
+            assertNotNull(handoff);
+            {
+                claim =
+                        RequestProtocolTestSupport.claimBatchWithoutPrediction(
+                                owner, route, BATCH_ID, () -> true);
+                assertNotNull(claim);
+                assertEquals(
+                        ContextResult.SendState.SENDING, route.ctx().snapshot().delivery().send());
+                owner.onDeliveryResult(
+                        new ContextResult.Prediction(
+                                claim,
+                                org.flexlb.balance.prediction.PrefillTimePredictor
+                                        .predictedVisibilityDeadlineMs(
+                                                new WorkSnapshot(
+                                                        System.currentTimeMillis(),
+                                                        List.of(),
+                                                        List.of(),
+                                                        0L),
+                                                30_000L,
+                                                claim.owner()
+                                                        .data()
+                                                        .getConfig()
+                                                        .getRequestLifecycle()
+                                                        .getDecision()
+                                                        .getLifetime(),
+                                                System.currentTimeMillis()),
+                                System.currentTimeMillis()));
+                owner.onDeliveryResult(
+                        new ContextResult.TransportResult(
+                                claim, result, System.currentTimeMillis()));
+            }
+        }
+
+        void prefillTerminal(long errorCode) {
+            apply(
+                    prefill,
+                    status(RoleType.PREFILL, ++prefillVersion, Map.of("101", terminal(errorCode))));
+        }
+
+        TaskInfo terminal(long errorCode) {
+            var task = new TaskInfo();
+            task.setRequestId(String.valueOf(REQUEST_ID));
+            task.setBatchId(BATCH_ID);
+            task.setInputLength(16L);
+            task.setPhase(TaskPhase.RUNNING);
+            task.setErrorCode(errorCode);
+            return task;
+        }
+
+        void decodeTerminal() {
+            apply(decode, status(RoleType.DECODE, ++decodeVersion, Map.of("101", terminal(0L))));
+        }
+
+        void emptyFull(WorkerEndpoint endpoint) {
+            var role = endpoint == prefill ? RoleType.PREFILL : RoleType.DECODE;
+            apply(
+                    endpoint,
+                    status(
+                            role,
+                            endpoint == prefill ? ++prefillVersion : ++decodeVersion,
+                            Map.of()));
+        }
+
+        void drain() {
+            SchedulerTestSupport.awaitRequestWork(
+                    org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
+        }
+
+        void assertNextDecodeReservationRejected() {
+            {
+                var selectedEndpoint = decode;
+
+                assertNull(
+                        decode.tryRegisterSelection(
+                                        decode.routingView(),
+                                        String.valueOf(102L),
+                                        16L,
+                                        32L,
+                                        50,
+                                        capacity)
+                                .value(),
+                        "The retained shadow fills the one-request Decode placement limit");
+            }
+        }
+
+        void assertReleased() {
+            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(0L, decode.routingView().totalLoad());
+            assertFalse(decode.ownership(reservation).owned());
+            assertTrue(prefillState.batchCapacityAvailable(1));
+            assertTrue(claim.completion().toCompletableFuture().isDone());
+            assertFalse(owner.repository.isCurrent(context));
+            assertNextDecodeReservationAccepted();
+        }
+
+        void assertNextDecodeReservationAccepted() {
+            {
+                var selectedEndpoint = decode;
+
+                var next =
+                        decode.tryRegisterSelection(
+                                        decode.routingView(),
+                                        String.valueOf(102L),
+                                        16L,
+                                        32L,
+                                        50,
+                                        capacity)
+                                .value();
+                assertNotNull(next, "Released capacity must admit the next request");
+                decode.release(next, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
+            }
+        }
     }
 }

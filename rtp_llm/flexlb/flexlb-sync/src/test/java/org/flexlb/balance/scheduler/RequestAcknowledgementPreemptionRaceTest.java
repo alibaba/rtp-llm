@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.Response;
@@ -11,6 +12,8 @@ import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -19,12 +22,75 @@ import java.util.concurrent.TimeUnit;
 import static org.flexlb.balance.scheduler.ContextResult.ResponseKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks that acknowledgement and preemption reconciliation preserve delivery identity in either arrival order.
+ */
 class RequestAcknowledgementPreemptionRaceTest {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void deliveredRouteCanResumeAfterNotFoundWithoutAConfirmationProbe(boolean deliveredFirst) {
+        var fixture = RequestDeliveryClaimStateTest.fixture(Delivery.SendMode.BATCH_ENQUEUE, false);
+        var context = fixture.context();
+        assertEquals(ContextResult.SendState.SENDING, context.snapshot().delivery().send());
+        var preemption =
+                context.beginPreemption(
+                        fixture.reservation(), 4L, new CancelTarget("127.0.0.1", 8090));
+        assertNotNull(preemption);
+        assertTrue(
+                context.completePreemption(
+                        preemption,
+                        new ContextResult.PreemptionReport(
+                                PreemptionCancelPhase.CANCEL_IN_FLIGHT, false, false, false, null),
+                        1003L));
+        if (deliveredFirst) {
+            context.recordDeliveryResult(
+                    new ContextResult.TransportResult(
+                            fixture.delivery(), Delivery.Result.delivered(), 1004L));
+        }
+        assertTrue(
+                context.completePreemption(
+                        preemption,
+                        new ContextResult.PreemptionReport(
+                                PreemptionCancelPhase.NOT_FOUND_STALE, false, false, false, null),
+                        1005L));
+        if (!deliveredFirst) {
+            assertFalse(
+                    context.canReconcilePreemption(preemption),
+                    "NOT_FOUND alone does not prove that delivery can resume");
+            context.recordDeliveryResult(
+                    new ContextResult.TransportResult(
+                            fixture.delivery(), Delivery.Result.delivered(), 1006L));
+        }
+
+        assertTrue(context.snapshot().canConfirmDelivery());
+        assertFalse(context.snapshot().delivery().acknowledged());
+        assertTrue(
+                context.canReconcilePreemption(preemption),
+                "delivery facts and NOT_FOUND suffice before any confirmation attempt");
+        var beforeConfirmation = context.snapshot();
+        assertFalse(context.confirmDelivery(1007L), "Decode restoration must precede ACK");
+        assertSame(
+                beforeConfirmation,
+                context.snapshot(),
+                "a rejected confirmation must not create state needed for restoration");
+
+        assertTrue(
+                context.completePreemption(
+                        preemption,
+                        new ContextResult.PreemptionReport(null, true, false, false, null),
+                        1008L));
+        assertNull(context.snapshot().preemption());
+        assertTrue(context.confirmDelivery(1009L));
+        assertTrue(context.snapshot().delivery().acknowledged());
+    }
+
     @Test
     void laterPreemptionCannotDiscardAlreadyConfirmedAcknowledgementTask() throws Exception {
         var config = SchedulingTestConfig.newConfig();
@@ -74,13 +140,12 @@ class RequestAcknowledgementPreemptionRaceTest {
                         owner, route, RequestProtocolTestSupport.publication(() -> true)));
         AbstractRequestScheduler.finishPlacement(admission);
         var delivery =
-                DeliveryDispatcher.commitDelivery(
-                        owner,
+                owner.commitDelivery(
                         new org.flexlb.balance.scheduler.Delivery.Member(
                                 route, RequestProtocolTestSupport.handoff(() -> true)),
                         Delivery.SendMode.BATCH_ENQUEUE,
                         7L);
-        assertTrue(owner.tryStartSend(delivery));
+        assertEquals(ContextResult.SendState.SENDING, context.snapshot().delivery().send());
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         SchedulerTestSupport.responsePublication(publisher)

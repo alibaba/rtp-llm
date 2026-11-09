@@ -37,7 +37,6 @@ import static org.mockito.Mockito.when;
  * Contracts for the scheduler runtime callbacks behind RequestRepository.
  */
 class RequestOrchestratorsTest {
-
     @Test
     void shutdownContinuesAfterFailureAndKeepsTheFirstCause() {
         var requests = mock(RequestRepository.class);
@@ -54,7 +53,7 @@ class RequestOrchestratorsTest {
                                 dispatcher,
                                 configuration(),
                                 mock(EngineGrpcClient.class)));
-        var owner = mock(AbstractRequestScheduler.class);
+        var owner = org.mockito.Mockito.spy(runtime.scheduling());
         runtime.registerScheduler(owner);
         var first = new IllegalStateException("placement close failed");
         var second = new IllegalStateException("dispatcher failed");
@@ -89,7 +88,7 @@ class RequestOrchestratorsTest {
                                 dispatcher,
                                 configuration(),
                                 mock(EngineGrpcClient.class)));
-        var owner = mock(AbstractRequestScheduler.class);
+        var owner = org.mockito.Mockito.spy(runtime.scheduling());
         runtime.registerScheduler(owner);
         var executions = org.mockito.Mockito.spy(runtime.deliveries());
         org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
@@ -105,7 +104,6 @@ class RequestOrchestratorsTest {
                         endpoints);
         order.verify(requests).closeRegistration();
         order.verify(owner).close();
-        order.verify(SchedulerTestServices.lifecycle(owner)).stopAdmissionsAndAwaitCompletion();
         order.verify(executions).awaitDeliveries();
         order.verify(endpoints).close();
         SchedulerTestSupport.shutdown(runtime);
@@ -142,7 +140,7 @@ class RequestOrchestratorsTest {
         var failure =
                 assertThrows(
                         IllegalStateException.class, () -> SchedulerTestSupport.shutdown(runtime));
-        assertEquals("Unsettled requests at shutdown: 1", failure.getMessage());
+        assertEquals("unsettled requests at shutdown: 1", failure.getMessage());
     }
 
     @Test
@@ -265,18 +263,6 @@ class RequestOrchestratorsTest {
                         org.mockito.ArgumentMatchers.eq("d1"), org.mockito.ArgumentMatchers.any());
     }
 
-    private static SchedulerTestServices runtime(
-            RequestRepository requests, EndpointRegistry endpoints) {
-        return new SchedulerTestServices(
-                requests,
-                endpoints,
-                mock(DeliveryMetricsReporter.class),
-                mock(RequestSchedulerReporter.class),
-                org.mockito.Mockito.mock(DeliveryDispatcher.class),
-                configuration(),
-                org.mockito.Mockito.mock(EngineGrpcClient.class));
-    }
-
     @Test
     void failedPrefillSnapshotDoesNotSuppressDecodeMetrics() {
         RequestRepository requests = mock(RequestRepository.class);
@@ -305,12 +291,6 @@ class RequestOrchestratorsTest {
         verify(admission)
                 .reportDecodePreemption(
                         org.mockito.ArgumentMatchers.eq("d1"), org.mockito.ArgumentMatchers.any());
-    }
-
-    private static ConfigService configuration() {
-        ConfigService service = mock(ConfigService.class);
-        when(service.loadBalanceConfig()).thenReturn(SchedulingTestConfig.newConfig());
-        return service;
     }
 
     @Test
@@ -414,6 +394,24 @@ class RequestOrchestratorsTest {
         org.mockito.Mockito.verifyNoInteractions(service, endpoints);
         org.mockito.Mockito.verify(requests, org.mockito.Mockito.never())
                 .expireTerminalRecords(anyLong());
+    }
+
+    private static SchedulerTestServices runtime(
+            RequestRepository requests, EndpointRegistry endpoints) {
+        return new SchedulerTestServices(
+                requests,
+                endpoints,
+                mock(DeliveryMetricsReporter.class),
+                mock(RequestSchedulerReporter.class),
+                org.mockito.Mockito.mock(DeliveryDispatcher.class),
+                configuration(),
+                org.mockito.Mockito.mock(EngineGrpcClient.class));
+    }
+
+    private static ConfigService configuration() {
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(SchedulingTestConfig.newConfig());
+        return service;
     }
 
     private static SchedulerTestServices maintenanceRuntime(

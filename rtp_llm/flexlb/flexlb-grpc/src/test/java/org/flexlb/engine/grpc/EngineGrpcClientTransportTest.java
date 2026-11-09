@@ -42,9 +42,12 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
-/** Exercises transport observations through the production NIO channel builder. */
+/**
+ * Exercises transport observations through the production NIO channel builder.
+ */
 class EngineGrpcClientTransportTest {
     private static final String LOOPBACK = "127.0.0.1";
+
     private final ThreadPoolExecutor executor =
             new ThreadPoolExecutor(1, 1, 1, TimeUnit.MINUTES, new LinkedBlockingQueue<>());
     private final NioEventLoopGroup eventLoopGroup = new NioEventLoopGroup(1);
@@ -59,6 +62,7 @@ class EngineGrpcClientTransportTest {
                     5000,
                     org.mockito.Mockito.mock(org.flexlb.config.CacheMatchConfiguration.class));
     private final CountDownLatch releaseCallbacks = new CountDownLatch(1);
+
     private Server server;
 
     @AfterEach
@@ -291,6 +295,18 @@ class EngineGrpcClientTransportTest {
                         .start();
     }
 
+    private static void succeed(StreamObserver<EngineRpcService.WorkerStatusPB> observer) {
+        observer.onNext(response());
+        observer.onCompleted();
+    }
+
+    private static EngineRpcService.WorkerStatusPB response() {
+        return EngineRpcService.WorkerStatusPB.newBuilder()
+                .setAlive(true)
+                .setStatusVersion(1L)
+                .build();
+    }
+
     private GrpcCallTrace.Snapshot captureDelivery(boolean retry) {
         var trace = ArgumentCaptor.forClass(GrpcCallTrace.Snapshot.class);
         verify(reporter).reportDeliveryDelay(eq("worker"), eq(retry), trace.capture());
@@ -318,18 +334,6 @@ class EngineGrpcClientTransportTest {
 
     private static EngineRpcService.StatusVersionPB request() {
         return EngineRpcService.StatusVersionPB.getDefaultInstance();
-    }
-
-    private static EngineRpcService.WorkerStatusPB response() {
-        return EngineRpcService.WorkerStatusPB.newBuilder()
-                .setAlive(true)
-                .setStatusVersion(1L)
-                .build();
-    }
-
-    private static void succeed(StreamObserver<EngineRpcService.WorkerStatusPB> observer) {
-        observer.onNext(response());
-        observer.onCompleted();
     }
 
     private static void await(CountDownLatch latch) {

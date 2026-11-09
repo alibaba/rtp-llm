@@ -44,7 +44,6 @@ import java.util.concurrent.TimeUnit;
  * <p>Uses JDK built-in {@link HttpServer} — no additional Maven dependencies.
  */
 final class MockControlServer {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /** Default bound for the graceful /remove_engine drain (in-flight work must
@@ -118,93 +117,6 @@ final class MockControlServer {
         httpServer.stop(0);
     }
 
-    // ────────────────── Dual addressing (Python compat) ──────────────────
-
-    /** Carries an HTTP error status + message back to the handler wrapper. */
-    private static final class ApiException extends Exception {
-        final int status;
-        final Map<String, Object> response;
-
-        ApiException(int status, String message) {
-            super(message);
-            this.status = status;
-            this.response = Map.of("error", message);
-        }
-
-        ApiException(int status, String message, Map<String, Object> response) {
-            super(message);
-            this.status = status;
-            this.response = response;
-        }
-    }
-
-    @FunctionalInterface
-    private interface ServicePostAction {
-        Map<String, Object> apply(JsonNode body, JavaMockEngineCluster.FastRpcService service)
-                throws Exception;
-    }
-
-    /**
-     * Python-compatible dual addressing: resolve the target engine by name
-     * ({@code "engine"} field, e.g. "prefill-0" — the same naming scheme as
-     * the cluster) or by gRPC port ({@code "port"} field, the
-     * original Java scheme). Errors if neither is present or the engine is
-     * unknown.
-     */
-    private JavaMockEngineCluster.FastRpcService resolveService(JsonNode body) throws ApiException {
-        JsonNode engineNode = body.path("engine");
-        if (engineNode.isTextual() && !engineNode.asText().isEmpty()) {
-            String engineName = engineNode.asText();
-            for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                if (engineName.equals(service.getEngineName())) {
-                    return service;
-                }
-            }
-            throw new ApiException(404, "engine '" + engineName + "' not found");
-        }
-        if (body.has("port")) {
-            int port = body.path("port").asInt();
-            JavaMockEngineCluster.FastRpcService service = services.get(port);
-            if (service == null) {
-                throw new ApiException(404, "engine not found for port " + port);
-            }
-            return service;
-        }
-        throw new ApiException(400, "request must contain 'engine' or 'port'");
-    }
-
-    private void handleServicePost(HttpExchange exchange, ServicePostAction action)
-            throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
-            sendJson(exchange, 200, action.apply(body, service));
-        } catch (ApiException apiFailure) {
-            sendJson(exchange, apiFailure.status, apiFailure.response);
-        } catch (Exception failure) {
-            // Always answer malformed JSON and unexpected handler failures;
-            // if a response was already committed there is nothing left to do.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(failure)));
-            } catch (IOException ignored) {
-                // Response already committed.
-            }
-        }
-    }
-
-    private static Map<String, Object> successResponse(
-            JavaMockEngineCluster.FastRpcService service) {
-        Map<String, Object> response = new LinkedHashMap<>();
-        response.put("status", "ok");
-        response.put("engine", service.getEngineName());
-        response.put("port", service.getGrpcPort());
-        return response;
-    }
-
     // ────────────────── Endpoint handlers ──────────────────
 
     private void handleSnapshot(HttpExchange exchange) throws IOException {
@@ -223,6 +135,28 @@ final class MockControlServer {
         response.put("ts_epoch_ms", System.currentTimeMillis());
         response.put("engines", engines);
         sendJson(exchange, 200, response);
+    }
+
+    // ────────────────── Utility methods ──────────────────
+
+    private static void sendJson(HttpExchange exchange, int status, Object body)
+            throws IOException {
+        String json = MAPPER.writeValueAsString(body);
+        byte[] bytes = json.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "application/json");
+        exchange.sendResponseHeaders(status, bytes.length);
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+        }
+    }
+
+    /** Services sorted by gRPC port for deterministic output (Python lists engines in creation order). */
+    private List<JavaMockEngineCluster.FastRpcService> orderedServices() {
+        List<JavaMockEngineCluster.FastRpcService> ordered = new ArrayList<>(services.values());
+        ordered.sort(
+                java.util.Comparator.comparingInt(
+                        JavaMockEngineCluster.FastRpcService::getGrpcPort));
+        return ordered;
     }
 
     private void handleInject(HttpExchange exchange) throws IOException {
@@ -351,6 +285,58 @@ final class MockControlServer {
                 });
     }
 
+    private void handleServicePost(HttpExchange exchange, ServicePostAction action)
+            throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
+            return;
+        }
+        try {
+            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
+            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+            sendJson(exchange, 200, action.apply(body, service));
+        } catch (ApiException apiFailure) {
+            sendJson(exchange, apiFailure.status, apiFailure.response);
+        } catch (Exception failure) {
+            // Always answer malformed JSON and unexpected handler failures;
+            // if a response was already committed there is nothing left to do.
+            try {
+                sendJson(exchange, 500, Map.of("error", String.valueOf(failure)));
+            } catch (IOException ignored) {
+                // Response already committed.
+            }
+        }
+    }
+
+    /**
+     * Python-compatible dual addressing: resolve the target engine by name
+     * ({@code "engine"} field, e.g. "prefill-0" — the same naming scheme as
+     * the cluster) or by gRPC port ({@code "port"} field, the
+     * original Java scheme). Errors if neither is present or the engine is
+     * unknown.
+     */
+    private JavaMockEngineCluster.FastRpcService resolveService(JsonNode body) throws ApiException {
+        JsonNode engineNode = body.path("engine");
+        if (engineNode.isTextual() && !engineNode.asText().isEmpty()) {
+            String engineName = engineNode.asText();
+            for (JavaMockEngineCluster.FastRpcService service : services.values()) {
+                if (engineName.equals(service.getEngineName())) {
+                    return service;
+                }
+            }
+            throw new ApiException(404, "engine '" + engineName + "' not found");
+        }
+        if (body.has("port")) {
+            int port = body.path("port").asInt();
+            JavaMockEngineCluster.FastRpcService service = services.get(port);
+            if (service == null) {
+                throw new ApiException(404, "engine not found for port " + port);
+            }
+            return service;
+        }
+        throw new ApiException(400, "request must contain 'engine' or 'port'");
+    }
+
     /** Read a JSON array of integers into a Long list (status_suppress_rids). */
     private static List<Long> readLongList(JsonNode node) {
         List<Long> values = new ArrayList<>();
@@ -358,6 +344,15 @@ final class MockControlServer {
             node.forEach(item -> values.add(item.asLong()));
         }
         return values;
+    }
+
+    private static Map<String, Object> successResponse(
+            JavaMockEngineCluster.FastRpcService service) {
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "ok");
+        response.put("engine", service.getEngineName());
+        response.put("port", service.getGrpcPort());
+        return response;
     }
 
     private void handleClearInject(HttpExchange exchange) throws IOException {
@@ -517,6 +512,26 @@ final class MockControlServer {
                     response.put("cache_version", service.getCacheVersion());
                     return response;
                 });
+    }
+
+    /**
+     * Strict block-key parsing (same policy as parseRequestId): Jackson's
+     * {@code asLong()} coerces non-numeric values to 0, silently turning a
+     * caller schema bug into an eviction of key 0. Accept integral numbers
+     * and integral decimal strings only; everything else is a 400.
+     */
+    private static long parseBlockKey(JsonNode node) throws ApiException {
+        if (node.isIntegralNumber() && node.canConvertToLong()) {
+            return node.asLong();
+        }
+        if (node.isTextual()) {
+            try {
+                return Long.parseLong(node.asText().trim());
+            } catch (NumberFormatException ignored) {
+                // fall through to the 400 below
+            }
+        }
+        throw new ApiException(400, "'keys' entries must be integers, got: " + node);
     }
 
     private void handleStopEngine(HttpExchange exchange) throws IOException {
@@ -708,26 +723,6 @@ final class MockControlServer {
     }
 
     /**
-     * Strict block-key parsing (same policy as parseRequestId): Jackson's
-     * {@code asLong()} coerces non-numeric values to 0, silently turning a
-     * caller schema bug into an eviction of key 0. Accept integral numbers
-     * and integral decimal strings only; everything else is a 400.
-     */
-    private static long parseBlockKey(JsonNode node) throws ApiException {
-        if (node.isIntegralNumber() && node.canConvertToLong()) {
-            return node.asLong();
-        }
-        if (node.isTextual()) {
-            try {
-                return Long.parseLong(node.asText().trim());
-            } catch (NumberFormatException ignored) {
-                // fall through to the 400 below
-            }
-        }
-        throw new ApiException(400, "'keys' entries must be integers, got: " + node);
-    }
-
-    /**
      * POST /add_engine {"role": "prefill"|"decode", "port": <grpcPort, optional>} —
      * create and start a NEW engine (dynamic scale-out). Port is auto-allocated
      * (current max + 1) when omitted; an explicit port already in use is a 409.
@@ -851,6 +846,20 @@ final class MockControlServer {
         }
     }
 
+    /** Dual-addressed lookup of an outcome this control plane already detached. */
+    private DynamicEngineManager.RemovedEngine detachedRemoval(JsonNode body) {
+        if (engineManager == null) {
+            return null;
+        }
+        if (body.has("port")) {
+            return engineManager.detachedRemovalByPort(body.path("port").asInt());
+        }
+        JsonNode engineNode = body.path("engine");
+        return engineNode.isTextual()
+                ? engineManager.detachedRemovalByEngine(engineNode.asText())
+                : null;
+    }
+
     /** One body for the caller that drove a teardown and for one that joined it. */
     private static Map<String, Object> removalResponse(DynamicEngineManager.RemovedEngine removed) {
         Map<String, Object> response = new LinkedHashMap<>();
@@ -864,20 +873,6 @@ final class MockControlServer {
         response.put("drained", removed.drained());
         response.put("drain_ms", removed.drainMs());
         return response;
-    }
-
-    /** Dual-addressed lookup of an outcome this control plane already detached. */
-    private DynamicEngineManager.RemovedEngine detachedRemoval(JsonNode body) {
-        if (engineManager == null) {
-            return null;
-        }
-        if (body.has("port")) {
-            return engineManager.detachedRemovalByPort(body.path("port").asInt());
-        }
-        JsonNode engineNode = body.path("engine");
-        return engineNode.isTextual()
-                ? engineManager.detachedRemovalByEngine(engineNode.asText())
-                : null;
     }
 
     private void handleMetrics(HttpExchange exchange) throws IOException {
@@ -909,15 +904,6 @@ final class MockControlServer {
         }
 
         sendText(exchange, 200, sb.toString());
-    }
-
-    /** Services sorted by gRPC port for deterministic output (Python lists engines in creation order). */
-    private List<JavaMockEngineCluster.FastRpcService> orderedServices() {
-        List<JavaMockEngineCluster.FastRpcService> ordered = new ArrayList<>(services.values());
-        ordered.sort(
-                java.util.Comparator.comparingInt(
-                        JavaMockEngineCluster.FastRpcService::getGrpcPort));
-        return ordered;
     }
 
     // ────────────────── Metrics builders ──────────────────
@@ -1144,6 +1130,14 @@ final class MockControlServer {
         }
     }
 
+    private static String escapeLabel(String value) {
+        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    private static double asDouble(Object value) {
+        return value instanceof Number ? ((Number) value).doubleValue() : 0.0;
+    }
+
     /**
      * Default mode: series aggregated per role with a single {@code role} label,
      * mirroring the legacy Python generate_aggregated_prometheus_metrics
@@ -1281,6 +1275,18 @@ final class MockControlServer {
         }
     }
 
+    private static long sumLong(List<Map<String, Object>> group, String key) {
+        long sum = 0;
+        for (Map<String, Object> e : group) {
+            sum += asLong(e.get(key));
+        }
+        return sum;
+    }
+
+    private static long asLong(Object value) {
+        return value instanceof Number ? ((Number) value).longValue() : 0L;
+    }
+
     private static void appendLatencyAggregates(
             StringBuilder sb, String label, List<Map<String, Object>> group, String kind) {
         long totalCount = sumLong(group, kind + "_ms_count");
@@ -1301,39 +1307,6 @@ final class MockControlServer {
         sb.append(String.format("mock_engine_%s_ms_count{%s} %d%n", kind, label, totalCount));
     }
 
-    private static long sumLong(List<Map<String, Object>> group, String key) {
-        long sum = 0;
-        for (Map<String, Object> e : group) {
-            sum += asLong(e.get(key));
-        }
-        return sum;
-    }
-
-    private static long asLong(Object value) {
-        return value instanceof Number ? ((Number) value).longValue() : 0L;
-    }
-
-    private static double asDouble(Object value) {
-        return value instanceof Number ? ((Number) value).doubleValue() : 0.0;
-    }
-
-    private static String escapeLabel(String value) {
-        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
-    }
-
-    // ────────────────── Utility methods ──────────────────
-
-    private static void sendJson(HttpExchange exchange, int status, Object body)
-            throws IOException {
-        String json = MAPPER.writeValueAsString(body);
-        byte[] bytes = json.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().set("Content-Type", "application/json");
-        exchange.sendResponseHeaders(status, bytes.length);
-        try (OutputStream os = exchange.getResponseBody()) {
-            os.write(bytes);
-        }
-    }
-
     private static void sendText(HttpExchange exchange, int status, String text)
             throws IOException {
         byte[] bytes = text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
@@ -1343,5 +1316,36 @@ final class MockControlServer {
         try (OutputStream os = exchange.getResponseBody()) {
             os.write(bytes);
         }
+    }
+
+    // ────────────────── Dual addressing (Python compat) ──────────────────
+
+    /**
+     * Carries an HTTP error status + message back to the handler wrapper.
+     */
+    private static final class ApiException extends Exception {
+        final int status;
+        final Map<String, Object> response;
+
+        ApiException(int status, String message) {
+            super(message);
+            this.status = status;
+            this.response = Map.of("error", message);
+        }
+
+        ApiException(int status, String message, Map<String, Object> response) {
+            super(message);
+            this.status = status;
+            this.response = response;
+        }
+    }
+
+    /**
+     * Applies one validated control operation to the resolved mock engine.
+     */
+    @FunctionalInterface
+    private interface ServicePostAction {
+        Map<String, Object> apply(JsonNode body, JavaMockEngineCluster.FastRpcService service)
+                throws Exception;
     }
 }

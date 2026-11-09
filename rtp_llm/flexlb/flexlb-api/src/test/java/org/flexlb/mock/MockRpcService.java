@@ -29,17 +29,28 @@ import java.util.function.Consumer;
  * for assertion without additional synchronization.
  */
 public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
-
     private static final Logger log = LoggerFactory.getLogger(MockRpcService.class);
-
-    private record FinishedTask(long version, EngineRpcService.TaskInfoPB task) {}
 
     // The fixture has no decoder execution or KV allocation. Fencing under this
     // lock prevents delayed Enqueue handlers from creating any later acceptance.
     private final java.util.Map<Long, EngineRpcService.RequestCancelReasonPB> fences =
             new java.util.HashMap<>();
     private final List<FinishedTask> finishedTasks = new ArrayList<>();
+
     private volatile Consumer<EngineRpcService.EnqueueBatchRequestPB> acceptedBatchListener;
+
+    // ==================== Call records (thread-safe, for assertions) ====================
+
+    /** All EnqueueBatch requests received, in arrival order. */
+    final CopyOnWriteArrayList<EngineRpcService.EnqueueBatchRequestPB> enqueuedRequests =
+            new CopyOnWriteArrayList<>();
+
+    /** Counter for GetWorkerStatus calls. */
+    final AtomicLong workerStatusCallCount = new AtomicLong(0);
+
+    // ==================== Behavior (volatile, hot-swappable) ====================
+
+    private volatile MockWorkerBehavior behavior = MockWorkerBehavior.builder().build();
 
     /** Optional execution bridge for tests that exercise repeated delivery and status polling. */
     public void onAcceptedBatch(Consumer<EngineRpcService.EnqueueBatchRequestPB> listener) {
@@ -67,19 +78,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
             }
         }
     }
-
-    // ==================== Call records (thread-safe, for assertions) ====================
-
-    /** All EnqueueBatch requests received, in arrival order. */
-    final CopyOnWriteArrayList<EngineRpcService.EnqueueBatchRequestPB> enqueuedRequests =
-            new CopyOnWriteArrayList<>();
-
-    /** Counter for GetWorkerStatus calls. */
-    final AtomicLong workerStatusCallCount = new AtomicLong(0);
-
-    // ==================== Behavior (volatile, hot-swappable) ====================
-
-    private volatile MockWorkerBehavior behavior = MockWorkerBehavior.builder().build();
 
     /**
      * Update behavior at runtime.  Thread-safe — the next RPC will see the new config.
@@ -266,4 +264,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
                 EngineRpcService.CheckHealthResponsePB.newBuilder().setHealth("ok").build());
         responseObserver.onCompleted();
     }
+
+    private record FinishedTask(long version, EngineRpcService.TaskInfoPB task) {}
 }

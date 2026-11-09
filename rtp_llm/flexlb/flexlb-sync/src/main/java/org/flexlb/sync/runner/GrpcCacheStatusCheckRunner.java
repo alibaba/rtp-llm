@@ -15,9 +15,14 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * <p>One cache poll lease fetches metadata for its captured worker generation. The callback checks
+ * identity before updating local metadata and acknowledging progress; failed updates must remain
+ * retryable rather than acknowledging an unapplied payload.
+ */
 public class GrpcCacheStatusCheckRunner extends AbstractStatusRunner {
-
     private final DynamicCacheIntervalService cacheIntervalService;
+
     private final boolean debug;
 
     public GrpcCacheStatusCheckRunner(
@@ -64,6 +69,15 @@ public class GrpcCacheStatusCheckRunner extends AbstractStatusRunner {
                         requestTimeoutMs,
                         roleType),
                 startTime);
+    }
+
+    @Override
+    protected void reportRpcFailure(boolean timeout) {
+        engineHealthReporter.reportCacheStatusCheckerFail(
+                workerStatus,
+                timeout
+                        ? BalanceStatusEnum.CACHE_GRPC_TIMEOUT
+                        : BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
     }
 
     /** The callback owns the exact poll lease, including response and executor failure. */
@@ -204,22 +218,6 @@ public class GrpcCacheStatusCheckRunner extends AbstractStatusRunner {
         return true;
     }
 
-    private void logCacheStatusUpdate(CacheStatus cacheStatus, long startTime) {
-
-        logger.debug(
-                "gRPC Cache Status - {}, role:{}, block_size:{}, version:{}, cacheKeySize:{},"
-                        + " available_kv_cache:{}, total_kv_cache:{}, cost:{}, syncIntervalMs:{}",
-                ipPort,
-                roleType.name(),
-                cacheStatus.getBlockSize(),
-                cacheStatus.getVersion(),
-                cacheStatus.getCacheKeySize(),
-                cacheStatus.getAvailableKvCache(),
-                cacheStatus.getTotalKvCache(),
-                (TimeUnit.NANOSECONDS.toMicros(System.nanoTime())) - startTime,
-                cacheIntervalService.getCurrentIntervalMs());
-    }
-
     private boolean updateLocalKvCache() {
         try {
             pollLease.trace().record(Stage.CACHE_INDEX_UPDATE_BEGIN);
@@ -249,6 +247,22 @@ public class GrpcCacheStatusCheckRunner extends AbstractStatusRunner {
         return false;
     }
 
+    private void logCacheStatusUpdate(CacheStatus cacheStatus, long startTime) {
+
+        logger.debug(
+                "gRPC Cache Status - {}, role:{}, block_size:{}, version:{}, cacheKeySize:{},"
+                        + " available_kv_cache:{}, total_kv_cache:{}, cost:{}, syncIntervalMs:{}",
+                ipPort,
+                roleType.name(),
+                cacheStatus.getBlockSize(),
+                cacheStatus.getVersion(),
+                cacheStatus.getCacheKeySize(),
+                cacheStatus.getAvailableKvCache(),
+                cacheStatus.getTotalKvCache(),
+                (TimeUnit.NANOSECONDS.toMicros(System.nanoTime())) - startTime,
+                cacheIntervalService.getCurrentIntervalMs());
+    }
+
     private void log(String msg, Throwable failure) {
         logger.debug(
                 "[gRPC-Cache][{}][{}][{}][{}][{}μs]: {}",
@@ -259,15 +273,6 @@ public class GrpcCacheStatusCheckRunner extends AbstractStatusRunner {
                 (TimeUnit.NANOSECONDS.toMicros(System.nanoTime())) - createTimeUs,
                 msg,
                 failure);
-    }
-
-    @Override
-    protected void reportRpcFailure(boolean timeout) {
-        engineHealthReporter.reportCacheStatusCheckerFail(
-                workerStatus,
-                timeout
-                        ? BalanceStatusEnum.CACHE_GRPC_TIMEOUT
-                        : BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
     }
 
     private long getCurrentCacheVersion() {

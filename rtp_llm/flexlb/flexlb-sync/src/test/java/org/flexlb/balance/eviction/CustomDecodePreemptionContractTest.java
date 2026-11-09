@@ -64,9 +64,6 @@ class CustomDecodePreemptionContractTest {
                     }
 
                     @Override
-                    public void stopAdmission() {}
-
-                    @Override
                     public boolean awaitIdle(long deadlineNanos) {
                         return true;
                     }
@@ -75,6 +72,9 @@ class CustomDecodePreemptionContractTest {
                     public void close() {
                         stopAdmission();
                     }
+
+                    @Override
+                    public void stopAdmission() {}
                 };
         DecodePreemptionPolicy policy =
                 (request, priority, capacity, snapshot, settings, reasons) ->

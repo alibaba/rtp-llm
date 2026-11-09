@@ -26,7 +26,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks cache polling updates, retry after index failure and stale-generation rejection.
+ * Checks cache polling updates capacity and indexes only for the current worker generation and retries failed index updates.
  */
 class GrpcCacheStatusCheckRunnerTest {
 
@@ -175,7 +175,9 @@ class GrpcCacheStatusCheckRunnerTest {
     void staleGenerationCallbackCannotPublishAddressCache() {
         String ipPort = "127.0.0.1:8080@0";
         WorkerStatus oldStatus = workerStatus();
-        var config = Mockito.mock(org.flexlb.config.ConfigService.class);
+        var config =
+                org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry directory = RunnerTestSupport.endpointRegistry(config);
         WorkerStatus replacement = workerStatus();
         directory.currentOrDiscover(RoleType.PREFILL, ipPort, () -> replacement);
@@ -233,7 +235,9 @@ class GrpcCacheStatusCheckRunnerTest {
     }
 
     private static EndpointRegistry directory(WorkerStatus status) {
-        var config = Mockito.mock(org.flexlb.config.ConfigService.class);
+        var config =
+                org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
         EndpointRegistry directory = RunnerTestSupport.endpointRegistry(config);
         directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
         return directory;

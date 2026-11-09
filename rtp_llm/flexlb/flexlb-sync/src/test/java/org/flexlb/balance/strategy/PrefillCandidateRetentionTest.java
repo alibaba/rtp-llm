@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
@@ -27,6 +28,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks selection releases captured workers on success and failure, including reentrant selection on the same thread.
+ */
 class PrefillCandidateRetentionTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
@@ -54,13 +58,14 @@ class PrefillCandidateRetentionTest {
             org.junit.jupiter.api.Assertions.assertThrows(
                     IllegalStateException.class,
                     () ->
-                            policy.select(
+                            policy.selectAndRegister(
                                     Request.builder().requestId("9").seqLen(100L).build(),
                                     SchedulingMetadata.explicit(50, Long.MAX_VALUE),
                                     RoleType.PREFILL,
                                     "g",
                                     List.of(first, second),
-                                    () -> 1000L));
+                                    () -> 1000L,
+                                    ignored -> PlacementResult.Registration.REGISTERED));
             var retained = (PrefillCandidateSet) scratch.get();
             assertTrue(
                     java.util.Arrays.stream(retained.capturedSources)
@@ -143,15 +148,14 @@ class PrefillCandidateRetentionTest {
         doAnswer(
                         invocation -> {
                             if (reentered.compareAndSet(false, true)) {
-                                {
-                                    var selected =
-                                            StrategyTestSupport.select(
-                                                            strategy,
-                                                            nested,
-                                                            metadata,
-                                                            RoleType.PREFILL,
-                                                            null)
-                                                    .value();
+                                try (var selected =
+                                        StrategyTestSupport.select(
+                                                        strategy,
+                                                        nested,
+                                                        metadata,
+                                                        RoleType.PREFILL,
+                                                        null)
+                                                .value()) {
                                     assertNotNull(selected);
                                 }
                             }
@@ -161,11 +165,9 @@ class PrefillCandidateRetentionTest {
                 .reportSelectionCache(
                         eq(RoleType.PREFILL), anyLong(), anyLong(), anyLong(), anyLong());
         try {
-            {
-                var selected =
-                        StrategyTestSupport.select(
-                                        strategy, outer, metadata, RoleType.PREFILL, null)
-                                .value();
+            try (var selected =
+                    StrategyTestSupport.select(strategy, outer, metadata, RoleType.PREFILL, null)
+                            .value()) {
                 assertNotNull(selected);
             }
             verify(metrics).reportSelectionCache(RoleType.PREFILL, 1000L, 100L, 100L, 100L);
@@ -207,16 +209,15 @@ class PrefillCandidateRetentionTest {
                         .blockCacheKeys(List.of())
                         .build();
         try {
-            {
-                var selected =
-                        StrategyTestSupport.select(
-                                        strategy,
-                                        request,
-                                        SchedulingMetadata.explicit(
-                                                50, System.currentTimeMillis() + 60_000L),
-                                        RoleType.PREFILL,
-                                        null)
-                                .value();
+            try (var selected =
+                    StrategyTestSupport.select(
+                                    strategy,
+                                    request,
+                                    SchedulingMetadata.explicit(
+                                            50, System.currentTimeMillis() + 60_000L),
+                                    RoleType.PREFILL,
+                                    null)
+                            .value()) {
                 assertNotNull(selected);
             }
             return new WeakReference<>(endpoint);

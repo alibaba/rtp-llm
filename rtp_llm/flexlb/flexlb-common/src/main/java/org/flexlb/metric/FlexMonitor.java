@@ -12,7 +12,6 @@ import org.flexlb.enums.FlexPriorityType;
  * @author saichen.sm
  */
 public interface FlexMonitor extends AutoCloseable {
-
     /**
      * Read a live gauge or cumulative counter at collection time. Spring assembly binds
      * these sources to MeterRegistry independently of the business reporting backend.
@@ -53,23 +52,6 @@ public interface FlexMonitor extends AutoCloseable {
     void register(String metricName, FlexMetricType metricType, int statisticsType);
 
     /**
-     * Report monitoring data
-     *
-     * @param metricName Metric name
-     * @param value      Metric value
-     */
-    void report(String metricName, double value);
-
-    /**
-     * Report monitoring data
-     *
-     * @param metricName  Metric name
-     * @param metricsTags Tags object
-     * @param value       Metric value
-     */
-    void report(String metricName, FlexMetricTags metricsTags, double value);
-
-    /**
      * Prepare a tagged metric before it enters a hot reporting path.
      * Implementations that do not require registration may keep the default no-op.
      *
@@ -87,6 +69,23 @@ public interface FlexMonitor extends AutoCloseable {
     default void removeGauge(String metricName, FlexMetricTags metricsTags) {
         report(metricName, metricsTags, 0.0);
     }
+
+    /**
+     * Report monitoring data
+     *
+     * @param metricName Metric name
+     * @param value      Metric value
+     */
+    void report(String metricName, double value);
+
+    /**
+     * Report monitoring data
+     *
+     * @param metricName  Metric name
+     * @param metricsTags Tags object
+     * @param value       Metric value
+     */
+    void report(String metricName, FlexMetricTags metricsTags, double value);
 
     @Override
     default void close() {

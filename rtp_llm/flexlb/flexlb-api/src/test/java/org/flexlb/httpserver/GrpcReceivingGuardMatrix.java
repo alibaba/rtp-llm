@@ -35,111 +35,10 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * Exercises receiving limits, deadlines and control RPCs against real Netty transport under blocked request execution.
+ */
 public class GrpcReceivingGuardMatrix {
-    static void ck(boolean b, String m) {
-        GrpcReceivingGuardRepro.check(b, m);
-    }
-
-    static void waitFor(java.util.function.BooleanSupplier p, String m) throws Exception {
-        GrpcReceivingGuardRepro.until(p, m);
-    }
-
-    static final class Raw implements AutoCloseable {
-        Socket socket;
-        DataOutputStream out;
-
-        Raw(int port, String timeout) throws Exception {
-            socket = new Socket("127.0.0.1", port);
-            out = new DataOutputStream(socket.getOutputStream());
-            out.write("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
-            frame(4, 0, new byte[0]);
-            var h = Unpooled.buffer();
-            var headers =
-                    new DefaultHttp2Headers()
-                            .method("POST")
-                            .scheme("http")
-                            .authority("localhost")
-                            .path("/receiving.Test/Call")
-                            .set("content-type", "application/grpc")
-                            .set("te", "trailers");
-            if (timeout != null) headers.set("grpc-timeout", timeout);
-            new DefaultHttp2HeadersEncoder().encodeHeaders(1, headers, h);
-            byte[] b = new byte[h.readableBytes()];
-            h.readBytes(b);
-            h.release();
-            frame(1, 4, b);
-            out.flush();
-        }
-
-        void frame(int type, int flags, byte[] b) throws Exception {
-            GrpcReceivingGuardRepro.frame(out, type, flags, type == 4 ? 0 : 1, b);
-        }
-
-        void message(byte[] b, boolean end) throws Exception {
-            var ba = new ByteArrayOutputStream();
-            var d = new DataOutputStream(ba);
-            d.writeByte(0);
-            d.writeInt(b.length);
-            d.write(b);
-            byte[] wire = ba.toByteArray();
-            for (int i = 0; i < wire.length; i += 16384)
-                frame(
-                        0,
-                        end && i + 16384 >= wire.length ? 1 : 0,
-                        Arrays.copyOfRange(wire, i, Math.min(wire.length, i + 16384)));
-            out.flush();
-        }
-
-        void end() throws Exception {
-            frame(0, 1, new byte[0]);
-            out.flush();
-        }
-
-        void reset() throws Exception {
-            frame(3, 0, new byte[] {0, 0, 0, 8});
-            out.flush();
-        }
-
-        public void close() throws Exception {
-            socket.close();
-        }
-    }
-
-    static MethodDescriptor<byte[], byte[]> method(String name) {
-        return GrpcReceivingGuardRepro.METHOD.toBuilder()
-                .setFullMethodName("receiving.Test/" + name)
-                .setRequestMarshaller(
-                        new GrpcReceivingGuardRepro.Bytes() {
-                            @Override
-                            public byte[] parse(InputStream s) {
-                                byte[] b = super.parse(s);
-                                if (b.length > 0 && b[0] == (byte) 255)
-                                    throw new IllegalArgumentException("parse failure");
-                                if (b.length > 0 && b[0] == (byte) 254)
-                                    throw new AssertionError("parse Error");
-                                return b;
-                            }
-                        })
-                .build();
-    }
-
-    static CompletableFuture<Status> full(ManagedChannel ch, MethodDescriptor<byte[], byte[]> m) {
-        var done = new CompletableFuture<Status>();
-        var c = ch.newCall(m, CallOptions.DEFAULT);
-        c.start(
-                new ClientCall.Listener<>() {
-                    @Override
-                    public void onClose(Status s, Metadata t) {
-                        done.complete(s);
-                    }
-                },
-                new Metadata());
-        c.request(1);
-        c.sendMessage(new byte[1]);
-        c.halfClose();
-        return done;
-    }
-
     public static void main(String[] args) throws Exception {
         var pool = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
         var control = Executors.newSingleThreadExecutor();
@@ -325,6 +224,113 @@ public class GrpcReceivingGuardMatrix {
             pool.shutdownNow();
             control.shutdownNow();
             pool.awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    static void ck(boolean b, String m) {
+        GrpcReceivingGuardRepro.check(b, m);
+    }
+
+    static void waitFor(java.util.function.BooleanSupplier p, String m) throws Exception {
+        GrpcReceivingGuardRepro.until(p, m);
+    }
+
+    static MethodDescriptor<byte[], byte[]> method(String name) {
+        return GrpcReceivingGuardRepro.METHOD.toBuilder()
+                .setFullMethodName("receiving.Test/" + name)
+                .setRequestMarshaller(
+                        new GrpcReceivingGuardRepro.Bytes() {
+                            @Override
+                            public byte[] parse(InputStream s) {
+                                byte[] b = super.parse(s);
+                                if (b.length > 0 && b[0] == (byte) 255)
+                                    throw new IllegalArgumentException("parse failure");
+                                if (b.length > 0 && b[0] == (byte) 254)
+                                    throw new AssertionError("parse Error");
+                                return b;
+                            }
+                        })
+                .build();
+    }
+
+    static CompletableFuture<Status> full(ManagedChannel ch, MethodDescriptor<byte[], byte[]> m) {
+        var done = new CompletableFuture<Status>();
+        var c = ch.newCall(m, CallOptions.DEFAULT);
+        c.start(
+                new ClientCall.Listener<>() {
+                    @Override
+                    public void onClose(Status s, Metadata t) {
+                        done.complete(s);
+                    }
+                },
+                new Metadata());
+        c.request(1);
+        c.sendMessage(new byte[1]);
+        c.halfClose();
+        return done;
+    }
+
+    /**
+     * Sends HTTP/2 headers and partial gRPC messages to control how much of a request reaches the server.
+     */
+    static final class Raw implements AutoCloseable {
+        Socket socket;
+        DataOutputStream out;
+
+        Raw(int port, String timeout) throws Exception {
+            socket = new Socket("127.0.0.1", port);
+            out = new DataOutputStream(socket.getOutputStream());
+            out.write("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+            frame(4, 0, new byte[0]);
+            var h = Unpooled.buffer();
+            var headers =
+                    new DefaultHttp2Headers()
+                            .method("POST")
+                            .scheme("http")
+                            .authority("localhost")
+                            .path("/receiving.Test/Call")
+                            .set("content-type", "application/grpc")
+                            .set("te", "trailers");
+            if (timeout != null) headers.set("grpc-timeout", timeout);
+            new DefaultHttp2HeadersEncoder().encodeHeaders(1, headers, h);
+            byte[] b = new byte[h.readableBytes()];
+            h.readBytes(b);
+            h.release();
+            frame(1, 4, b);
+            out.flush();
+        }
+
+        public void close() throws Exception {
+            socket.close();
+        }
+
+        void message(byte[] b, boolean end) throws Exception {
+            var ba = new ByteArrayOutputStream();
+            var d = new DataOutputStream(ba);
+            d.writeByte(0);
+            d.writeInt(b.length);
+            d.write(b);
+            byte[] wire = ba.toByteArray();
+            for (int i = 0; i < wire.length; i += 16384)
+                frame(
+                        0,
+                        end && i + 16384 >= wire.length ? 1 : 0,
+                        Arrays.copyOfRange(wire, i, Math.min(wire.length, i + 16384)));
+            out.flush();
+        }
+
+        void frame(int type, int flags, byte[] b) throws Exception {
+            GrpcReceivingGuardRepro.frame(out, type, flags, type == 4 ? 0 : 1, b);
+        }
+
+        void end() throws Exception {
+            frame(0, 1, new byte[0]);
+            out.flush();
+        }
+
+        void reset() throws Exception {
+            frame(3, 0, new byte[] {0, 0, 0, 8});
+            out.flush();
         }
     }
 }

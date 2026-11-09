@@ -9,15 +9,16 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks exact-attempt completion and ensures competing finishers cannot both claim placement cleanup.
+ */
 class PlacementOperationTest {
     @Test
     void competingCompletionsClaimCleanupOnceAndKeepPlacementVisible() throws Exception {
@@ -43,20 +44,18 @@ class PlacementOperationTest {
             for (var task : pending) task.get(5, TimeUnit.SECONDS);
         }
         assertEquals(1, cleanupCount.get());
-        assertSame(operation, context.snapshot().placement().operation());
-        assertTrue(context.snapshot().placement().completing());
+        assertSame(operation, context.snapshot().placement());
+        assertFalse(context.beginPlacementCompletion(operation), "cleanup is already claimed");
         assertNull(context.beginPlacement(null), "cleanup must block a replacement placement");
         context.completePlacement(operation, ContextResult.PublicationResult.PUBLISHED, 1L);
         assertNull(context.snapshot().placement());
         assertFalse(context.beginPlacementCompletion(operation));
-        assertDoesNotThrow(operation::close);
     }
 
     @Test
     void equalValuesAndOldOperationsCannotCompleteTheCurrentAttempt() {
         var context = context();
         var first = context.beginPlacement(null);
-        assertThrows(IllegalStateException.class, first::close);
         var equalValue = new PlacementOperation(context, null);
         assertEquals(first, equalValue);
         assertFalse(context.beginPlacementCompletion(equalValue));
@@ -66,15 +65,19 @@ class PlacementOperationTest {
         assertNotNull(replacement);
         assertFalse(context.beginPlacementCompletion(first));
         assertNull(context.completePlacement(first, ContextResult.PublicationResult.FAILED, 2L));
-        assertSame(replacement, context.snapshot().placement().operation());
-        assertDoesNotThrow(first::close);
+        assertSame(replacement, context.snapshot().placement());
         assertTrue(context.beginPlacementCompletion(replacement));
         context.completePlacement(replacement, ContextResult.PublicationResult.PUBLISHED, 3L);
     }
 
     private static RequestContext context() {
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 4401L);
-        context.register("4401", System.currentTimeMillis(), Long.MAX_VALUE, 60_000L);
+        context.register(
+                "4401",
+                System.currentTimeMillis(),
+                Long.MAX_VALUE,
+                60_000L,
+                org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
         return context;
     }
 }

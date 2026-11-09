@@ -2,19 +2,28 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.dao.route.RoleType;
 
-/** Read-only node counts for monitoring. */
+/**
+ * Read-only node counts for monitoring.
+ */
 public interface EndpointStats {
-    record Counts(int discovered, int published) {}
-
     int discoveredCount();
 
     Counts counts(RoleType role);
 
     long blockSize(RoleType role);
 
+    java.util.Map<String, Prefill> prefillStats();
+
+    java.util.Map<String, Decode> decodeStats();
+
+    record Counts(int discovered, int published) {}
+
     record DecodeCounts(
             int inflight, int totalLoad, long expectedKv, long hardKv, long oldestAgeMs) {}
 
+    /**
+     * Freezes Prefill request and batch changes together with scheduling and capacity notifications.
+     */
     interface Prefill {
         String getIp();
 
@@ -25,6 +34,9 @@ public interface EndpointStats {
         org.flexlb.balance.endpoint.EndpointStats.PrefillCounts stats();
     }
 
+    /**
+     * Freezes Decode request changes and the placement and dispatch capacity notification flags.
+     */
     interface Decode {
         String getIp();
 
@@ -32,10 +44,6 @@ public interface EndpointStats {
 
         DecodeResources.ResourceSnapshot resourceSnapshot();
     }
-
-    java.util.Map<String, Prefill> prefillStats();
-
-    java.util.Map<String, Decode> decodeStats();
 
     public record PrefillCounts(
             int locallyOwnedRequests,
@@ -52,7 +60,9 @@ public interface EndpointStats {
         }
     }
 
-    /** Diagnostic counters captured from one queue ownership revision. */
+    /**
+     * Diagnostic counters captured from one queue ownership revision.
+     */
     public record QueueCounts(
             long version, int[] byPriority, long outstandingRequests, int batchSlots) {}
 }

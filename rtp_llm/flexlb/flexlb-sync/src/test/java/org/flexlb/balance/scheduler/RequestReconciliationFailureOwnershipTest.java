@@ -26,8 +26,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyInt;
-import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -81,13 +79,13 @@ class RequestReconciliationFailureOwnershipTest {
                         owner, route, RequestProtocolTestSupport.publication(() -> true)));
         AbstractRequestScheduler.finishPlacement(admission);
         var delivery =
-                DeliveryDispatcher.commitDelivery(
-                        owner,
+                owner.commitDelivery(
                         new org.flexlb.balance.scheduler.Delivery.Member(
                                 route, RequestProtocolTestSupport.handoff(() -> true)),
                         Delivery.SendMode.BATCH_ENQUEUE,
                         7L);
-        assertTrue(owner.tryStartSend(delivery));
+        assertEquals(
+                ContextResult.SendState.SENDING, delivery.owner().snapshot().delivery().send());
         RequestProtocolTestSupport.transport(
                 owner,
                 delivery,
@@ -151,7 +149,7 @@ class RequestReconciliationFailureOwnershipTest {
                             .getFuture()
                             .get(5L, java.util.concurrent.TimeUnit.SECONDS)
                             .isSuccess());
-            assertEquals(0L, owner.requests.liveRequestCount());
+            assertEquals(0L, owner.repository.liveRequestCount());
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));
             assertEquals(

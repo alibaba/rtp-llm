@@ -41,7 +41,6 @@ class DecodeRequestExpirationTest {
     @Test
     void expireUnobservedShadowReleasesAllAccountingAndBlocksStaleStatus() {
         DecodeResources.RequestReservation reservation = reserve(1L, 500, 700, 0);
-        markQueued(1L);
 
         assertEquals(
                 ReservationReleaseResult.RELEASED,
@@ -66,7 +65,7 @@ class DecodeRequestExpirationTest {
     @Test
     void expirationReleasesDispatchPermitAndMakesLateReleaseHarmless() {
         DecodeResources.RequestReservation reservation = reserve(1L, 500, 700, 0);
-        markQueued(1L);
+
         org.flexlb.balance.endpoint.DecodeResources.Acquisition<
                         org.flexlb.balance.endpoint.DecodeResources
                                 .EngineDispatchPermitAcquireStatus,
@@ -89,7 +88,7 @@ class DecodeRequestExpirationTest {
     @Test
     void sentButUnobservedRequestExpiresWithoutAnyEngineReply() {
         DecodeResources.RequestReservation reservation = reserve(1L, 500, 700, 0);
-        markQueued(1L);
+
         org.flexlb.balance.endpoint.DecodeResources.Acquisition<
                         org.flexlb.balance.endpoint.DecodeResources
                                 .EngineDispatchPermitAcquireStatus,
@@ -281,19 +280,10 @@ class DecodeRequestExpirationTest {
 
             assertTrue(selectedEndpoint != null);
             DecodeResources.RequestReservation reservation =
-                    EndpointTestSupport.reserveUnqueuedDecode(
-                            endpoint, selectedEndpoint, requestId, hardKv, expectedKv, priority);
+                    EndpointTestSupport.registerDecode(
+                            endpoint, requestId, hardKv, expectedKv, priority);
             reservations.put(requestId, reservation);
             return reservation;
-        }
-    }
-
-    private void markQueued(long requestId) {
-        {
-            WorkerEndpoint selectedEndpoint = endpoint;
-
-            assertTrue(selectedEndpoint != null);
-            assertTrue(endpoint.markQueued(reservations.get(requestId)).status().applied());
         }
     }
 

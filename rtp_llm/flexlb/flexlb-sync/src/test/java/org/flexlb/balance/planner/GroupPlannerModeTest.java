@@ -16,12 +16,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks single-request and fixed-window planning select the right prefix and readiness deadline without unnecessary prediction.
+ */
 class GroupPlannerModeTest {
     private static final long UNLIMITED = Long.MAX_VALUE;
-
-    private static Item item(long id, long enqueuedAt, long tokens) {
-        return new Item(String.valueOf(id), 50, id, enqueuedAt, UNLIMITED, tokens, 0L);
-    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -165,5 +164,9 @@ class GroupPlannerModeTest {
                 () ->
                         BuiltinGroupPlanner.FIXED_WINDOW.dispatchReason(
                                 invalidDeadline, constraints, -200));
+    }
+
+    private static Item item(long id, long enqueuedAt, long tokens) {
+        return new Item(String.valueOf(id), 50, id, enqueuedAt, UNLIMITED, tokens, 0L);
     }
 }

@@ -35,38 +35,37 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks discovery creates and replaces worker generations and submits status polling safely.
+ * Malformed addresses and rejected tasks must not strand poll leases or other workers.
+ */
 @ExtendWith(MockitoExtension.class)
 class EngineSyncRunnerTest {
-
     private final String modelName = "test-model";
 
     private EndpointRegistry endpointRegistry;
-
     @Mock private WorkerAddressService workerAddressService;
-
     @Mock private ExecutorService statusCheckExecutor;
-
     @Mock private EngineHealthReporter engineHealthReporter;
-
     @Mock private WorkerStatusRpcClient workerStatusRpcClient;
 
     private final RoleType roleType = RoleType.PREFILL;
 
     @Mock private CacheAwareService localKvCacheAwareManager;
-
     @Mock private DynamicCacheIntervalService cacheIntervalService;
 
     private final long syncRequestTimeoutMs = 5000L;
-
     private final long syncCount = 0L;
-
     private final long syncEngineStatusInterval = 20L;
 
     private Runnable engineSyncRunner;
 
     @BeforeEach
     void setUp() {
-        endpointRegistry = RunnerTestSupport.endpointRegistry(Mockito.mock(ConfigService.class));
+        endpointRegistry =
+                RunnerTestSupport.endpointRegistry(
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig()));
         engineSyncRunner =
                 org.flexlb.sync.synchronizer.WorkerSyncTestSupport.runner(
                         modelName,
@@ -321,7 +320,11 @@ class EngineSyncRunnerTest {
     @Test
     void should_not_publish_running_load_variance_from_one_observation() {
         EndpointRegistry registry =
-                Mockito.spy(RunnerTestSupport.endpointRegistry(Mockito.mock(ConfigService.class)));
+                Mockito.spy(
+                        RunnerTestSupport.endpointRegistry(
+                                org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                        org.flexlb.balance.scheduler.SchedulingTestConfig
+                                                .newConfig())));
         WorkerEndpoint firstEndpoint = Mockito.mock(WorkerEndpoint.class);
         WorkerEndpoint secondEndpoint = Mockito.mock(WorkerEndpoint.class);
         WorkerStatus first = varianceStatus("127.0.0.1", 61001, 10.0);
@@ -356,7 +359,11 @@ class EngineSyncRunnerTest {
     @Test
     void should_publish_running_load_variance_from_two_observations() {
         EndpointRegistry registry =
-                Mockito.spy(RunnerTestSupport.endpointRegistry(Mockito.mock(ConfigService.class)));
+                Mockito.spy(
+                        RunnerTestSupport.endpointRegistry(
+                                org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                        org.flexlb.balance.scheduler.SchedulingTestConfig
+                                                .newConfig())));
         WorkerEndpoint firstEndpoint = Mockito.mock(WorkerEndpoint.class);
         WorkerEndpoint secondEndpoint = Mockito.mock(WorkerEndpoint.class);
         WorkerStatus first = varianceStatus("127.0.0.1", 61001, 10.0);
@@ -472,6 +479,10 @@ class EngineSyncRunnerTest {
         }
     }
 
+    private static void discover(EndpointRegistry directory, WorkerStatus status) {
+        directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
+    }
+
     private static WorkerStatus varianceStatus(String ip, int port, double stepLatencyMs) {
         WorkerStatus status =
                 RunnerTestSupport.discovered(RoleType.PREFILL, "", ip, port, port + 1, "");
@@ -481,9 +492,5 @@ class EngineSyncRunnerTest {
         assertNotNull(status.tryBeginStatusPoll());
         assertNotNull(status.tryBeginCachePoll());
         return status;
-    }
-
-    private static void discover(EndpointRegistry directory, WorkerStatus status) {
-        directory.currentOrDiscover(status.getRole(), status.getLogicalIpPort(), () -> status);
     }
 }

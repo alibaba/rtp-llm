@@ -12,85 +12,28 @@ import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.LongSupplier;
 
-/** Owns scheduled handles. Context owns only immutable desired deadline tokens. */
+/**
+ * Semantic owner of request deadlines and lifecycle-retention maintenance.
+ *
+ * <p>The timer never keeps a request map. Exact request generations remain in
+ * the request registry; a slot stores the opaque registration returned
+ * by this class.
+ *
+ * <p>Maintenance removes settled terminal records before sweeping endpoint orphans.
+ * A request's inactivity deadline bounds local ownership independently of
+ * Engine cancellation acknowledgements or terminal status delivery.
+ */
 public final class ExpirationTimer implements AutoCloseable {
-    public enum Kind {
-        REQUEST,
-        VISIBILITY,
-        INACTIVITY
-    }
-
     private static final Kind[] KINDS = Kind.values();
-
-    public record Token(RequestContext owner, Kind kind, long version, long atMs) {
-        public Token {
-            Objects.requireNonNull(owner);
-            Objects.requireNonNull(kind);
-            if (version <= 0L || atMs <= 0L) {
-                throw new IllegalArgumentException("invalid deadline identity");
-            }
-        }
-    }
-
-    public record Plan(long revision, Token request, Token visibility, Token inactivity) {
-        /** Keep unchanged tokens exact, and keep the earlier activity recheck already scheduled. */
-        Plan schedule(RequestContext owner, long requestAt, long visibilityAt, long inactivityAt) {
-            if (inactivity != null && inactivityAt > 0L && inactivity.atMs() <= inactivityAt) {
-                inactivityAt = inactivity.atMs();
-            }
-            long next = revision + 1L;
-            var requestToken = token(owner, request, Kind.REQUEST, next, requestAt);
-            var visibilityToken = token(owner, visibility, Kind.VISIBILITY, next, visibilityAt);
-            var inactivityToken = token(owner, inactivity, Kind.INACTIVITY, next, inactivityAt);
-            return requestToken == request
-                            && visibilityToken == visibility
-                            && inactivityToken == inactivity
-                    ? this
-                    : new Plan(next, requestToken, visibilityToken, inactivityToken);
-        }
-
-        private static Token token(
-                RequestContext owner, Token previous, Kind kind, long revision, long atMs) {
-            if (atMs <= 0L) return null;
-            return previous != null && previous.atMs() == atMs
-                    ? previous
-                    : new Token(owner, kind, revision, atMs);
-        }
-
-        Plan without(Kind kind) {
-            return new Plan(
-                    revision + 1L,
-                    kind == Kind.REQUEST ? null : request,
-                    kind == Kind.VISIBILITY ? null : visibility,
-                    kind == Kind.INACTIVITY ? null : inactivity);
-        }
-
-        Token token(Kind kind) {
-            return switch (kind) {
-                case REQUEST -> request;
-                case VISIBILITY -> visibility;
-                case INACTIVITY -> inactivity;
-            };
-        }
-    }
-
-    private record Slot(long revision, Handle[] handles) {
-        boolean hasFailedInstallation() {
-            for (Handle handle : handles) {
-                if (handle != null && handle.installationFailed) {
-                    return true;
-                }
-            }
-            return false;
-        }
-    }
 
     private final RequestRepository requests;
     private final LongSupplier clock;
     private final TaskTimer timer;
     private final ConcurrentMap<RequestContext, Slot> slots = new ConcurrentHashMap<>();
     private final Object registrationMonitor = new Object();
+
     private volatile CompletableFuture<Throwable> closing;
+
     private int registrations;
 
     ExpirationTimer(RequestRepository requests, TaskTimer timer) {
@@ -103,16 +46,37 @@ public final class ExpirationTimer implements AutoCloseable {
         this.clock = Objects.requireNonNull(clock);
     }
 
-    boolean needsUpdate(RequestContext context, Plan plan) {
-        Slot observed = slots.get(context);
-        if (closing != null && requests.isClosed()) {
-            return observed != null;
+    @Override
+    public void close() {
+        CompletableFuture<Throwable> completion;
+        boolean owner;
+        synchronized (registrationMonitor) {
+            owner = closing == null;
+            if (owner) {
+                closing = new CompletableFuture<>();
+            }
+            completion = closing;
         }
-        return requests.isCurrent(context)
-                && (observed == null
-                        || plan.revision() > observed.revision()
-                        || plan.revision() == observed.revision()
-                                && observed.hasFailedInstallation());
+        if (!owner) {
+            Failures.rethrow(completion.join(), "expiration timer failed");
+            return;
+        }
+        boolean interrupted = false;
+        Throwable failure = null;
+        try {
+            interrupted = awaitRegistrations();
+            for (RequestContext context : List.copyOf(slots.keySet())) {
+                failure = Failures.run(failure, () -> remove(context));
+            }
+        } catch (Throwable problem) {
+            failure = Failures.append(failure, problem);
+        } finally {
+            completion.complete(failure);
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        Failures.rethrow(failure, "expiration timer failed");
     }
 
     /** Effect order may differ from fact order; only the greatest accepted revision installs handles. */
@@ -147,6 +111,36 @@ public final class ExpirationTimer implements AutoCloseable {
                 endRegistration();
             }
         }
+    }
+
+    boolean needsUpdate(RequestContext context, Plan plan) {
+        Slot observed = slots.get(context);
+        if (closing != null && requests.isClosed()) {
+            return observed != null;
+        }
+        return requests.isCurrent(context)
+                && (observed == null
+                        || plan.revision() > observed.revision()
+                        || plan.revision() == observed.revision()
+                                && observed.hasFailedInstallation());
+    }
+
+    /** Archive drops infrastructure ownership after the terminal record's atomic directory commit. */
+    void remove(RequestContext context) {
+        Slot removed = slots.get(context);
+        Throwable failure = null;
+        if (removed != null) {
+            for (Kind kind : List.of(Kind.INACTIVITY, Kind.REQUEST, Kind.VISIBILITY)) {
+                Handle handle = removed.handles()[kind.ordinal()];
+                if (handle != null) {
+                    failure = Failures.run(failure, handle::cancel);
+                }
+            }
+        }
+        if (failure == null && removed != null) {
+            slots.remove(context, removed);
+        }
+        Failures.rethrow(failure, "deadline removal failed");
     }
 
     /** Replace only the exact deadline handles; scheduling and cancellation stay outside compute. */
@@ -198,24 +192,6 @@ public final class ExpirationTimer implements AutoCloseable {
         }
     }
 
-    /** Archive drops infrastructure ownership after the terminal record's atomic directory commit. */
-    void remove(RequestContext context) {
-        Slot removed = slots.get(context);
-        Throwable failure = null;
-        if (removed != null) {
-            for (Kind kind : List.of(Kind.INACTIVITY, Kind.REQUEST, Kind.VISIBILITY)) {
-                Handle handle = removed.handles()[kind.ordinal()];
-                if (handle != null) {
-                    failure = Failures.run(failure, handle::cancel);
-                }
-            }
-        }
-        if (failure == null && removed != null) {
-            slots.remove(context, removed);
-        }
-        Failures.rethrow(failure, "deadline removal failed");
-    }
-
     private long delayUntil(long atMs) {
         long nowMs = clock.getAsLong();
         if (atMs <= nowMs) {
@@ -246,39 +222,6 @@ public final class ExpirationTimer implements AutoCloseable {
         }
     }
 
-    @Override
-    public void close() {
-        CompletableFuture<Throwable> completion;
-        boolean owner;
-        synchronized (registrationMonitor) {
-            owner = closing == null;
-            if (owner) {
-                closing = new CompletableFuture<>();
-            }
-            completion = closing;
-        }
-        if (!owner) {
-            Failures.rethrow(completion.join(), "expiration timer failed");
-            return;
-        }
-        boolean interrupted = false;
-        Throwable failure = null;
-        try {
-            interrupted = awaitRegistrations();
-            for (RequestContext context : List.copyOf(slots.keySet())) {
-                failure = Failures.run(failure, () -> remove(context));
-            }
-        } catch (Throwable problem) {
-            failure = Failures.append(failure, problem);
-        } finally {
-            completion.complete(failure);
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        }
-        Failures.rethrow(failure, "expiration timer failed");
-    }
-
     private boolean awaitRegistrations() {
         boolean interrupted = false;
         synchronized (registrationMonitor) {
@@ -293,10 +236,94 @@ public final class ExpirationTimer implements AutoCloseable {
         return interrupted;
     }
 
+    public enum Kind {
+        REQUEST,
+        VISIBILITY,
+        INACTIVITY
+    }
+
+    /**
+     * Identifies one request deadline by kind, version and absolute firing time.
+     */
+    public record Token(RequestContext owner, Kind kind, long version, long atMs) {
+        public Token {
+            Objects.requireNonNull(owner);
+            Objects.requireNonNull(kind);
+            if (version <= 0L || atMs <= 0L) {
+                throw new IllegalArgumentException("invalid deadline identity");
+            }
+        }
+    }
+
+    /**
+     * Retains exact unchanged deadline tokens while revising deadlines that need rescheduling.
+     */
+    public record Plan(long revision, Token request, Token visibility, Token inactivity) {
+        /** Keep unchanged tokens exact, and keep the earlier activity recheck already scheduled. */
+        Plan schedule(RequestContext owner, long requestAt, long visibilityAt, long inactivityAt) {
+            if (inactivity != null && inactivityAt > 0L && inactivity.atMs() <= inactivityAt) {
+                inactivityAt = inactivity.atMs();
+            }
+            long next = revision + 1L;
+            var requestToken = token(owner, request, Kind.REQUEST, next, requestAt);
+            var visibilityToken = token(owner, visibility, Kind.VISIBILITY, next, visibilityAt);
+            var inactivityToken = token(owner, inactivity, Kind.INACTIVITY, next, inactivityAt);
+            return requestToken == request
+                            && visibilityToken == visibility
+                            && inactivityToken == inactivity
+                    ? this
+                    : new Plan(next, requestToken, visibilityToken, inactivityToken);
+        }
+
+        Token token(Kind kind) {
+            return switch (kind) {
+                case REQUEST -> request;
+                case VISIBILITY -> visibility;
+                case INACTIVITY -> inactivity;
+            };
+        }
+
+        Plan without(Kind kind) {
+            return new Plan(
+                    revision + 1L,
+                    kind == Kind.REQUEST ? null : request,
+                    kind == Kind.VISIBILITY ? null : visibility,
+                    kind == Kind.INACTIVITY ? null : inactivity);
+        }
+
+        private static Token token(
+                RequestContext owner, Token previous, Kind kind, long revision, long atMs) {
+            if (atMs <= 0L) return null;
+            return previous != null && previous.atMs() == atMs
+                    ? previous
+                    : new Token(owner, kind, revision, atMs);
+        }
+    }
+
+    /**
+     * Groups the timer handles installed for one deadline plan revision.
+     */
+    private record Slot(long revision, Handle[] handles) {
+        boolean hasFailedInstallation() {
+            for (Handle handle : handles) {
+                if (handle != null && handle.installationFailed) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Coordinates timer installation, firing and cancellation so one deadline is delivered at most once.
+     */
     private final class Handle {
         private final Token token;
+
         private volatile boolean installationFailed;
+
         private Future<?> scheduled;
+
         private boolean fired;
         private boolean claimed;
         private boolean canceled;
@@ -317,20 +344,6 @@ public final class ExpirationTimer implements AutoCloseable {
             if (deliver) deliver();
         }
 
-        private void fire() {
-            boolean deliver;
-            synchronized (this) {
-                fired = true;
-                deliver = scheduled != null && !canceled && !claimed;
-                if (deliver) {
-                    claimed = true;
-                }
-            }
-            if (deliver) {
-                deliver();
-            }
-        }
-
         private void deliver() {
             synchronized (registrationMonitor) {
                 if (closing != null) return;
@@ -342,6 +355,20 @@ public final class ExpirationTimer implements AutoCloseable {
                 }
             } finally {
                 endRegistration();
+            }
+        }
+
+        private void fire() {
+            boolean deliver;
+            synchronized (this) {
+                fired = true;
+                deliver = scheduled != null && !canceled && !claimed;
+                if (deliver) {
+                    claimed = true;
+                }
+            }
+            if (deliver) {
+                deliver();
             }
         }
 

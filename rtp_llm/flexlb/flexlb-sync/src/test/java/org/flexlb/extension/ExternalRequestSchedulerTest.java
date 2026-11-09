@@ -2,6 +2,7 @@ package org.flexlb.extension;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
@@ -22,13 +23,16 @@ import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.balance.scheduler.RequestTaskPool;
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor;
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RoleSelection;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.balance.scheduler.ScheduledTaskTimer;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.balance.scheduler.SelectionTestSupport;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
@@ -57,7 +61,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** An extension in another package uses the same execution and settlement as built-in timing. */
+/**
+ * An extension in another package uses the same execution and settlement as built-in timing.
+ */
 class ExternalRequestSchedulerTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -73,8 +79,7 @@ class ExternalRequestSchedulerTest {
             assertFalse(firstResponse.isDone());
             assertFalse(secondResponse.isDone());
             var selected = fixture.endpoint.captureQueue(2).items();
-            assertEquals(
-                    List.of(first, second), selected.stream().map(RouteExecution::ctx).toList());
+            assertEquals(List.of(first, second), selected.stream().map(RouteResult::ctx).toList());
             assertNull(
                     fixture.dispatcher.submit(
                             new Delivery(
@@ -136,6 +141,9 @@ class ExternalRequestSchedulerTest {
         }
     }
 
+    /**
+     * Queues requests until the test explicitly schedules them, then uses shared placement publication and cleanup.
+     */
     private static final class ManualScheduler extends AbstractRequestScheduler {
         private final PlacementQueue queue = new OrderedRequestQueue(false);
         private final RequestRouteSelector selector;
@@ -150,15 +158,14 @@ class ExternalRequestSchedulerTest {
                 DeliveryMetricsReporter reporter,
                 TheoryCacheHitReporter trace,
                 RequestRouteSelector selector,
-                QueueExecutionSettings queued) {
-            super(requests, tasks, expiration, dispatcher, responses, reporter, trace);
+                QueueExecutionSettings queued,
+                EndpointRegistry endpoints) {
+            super(requests, tasks, expiration, dispatcher, responses, reporter, trace, endpoints);
             this.selector = selector;
             this.queued = queued;
         }
 
         public void start() {}
-
-        public void stop() {}
 
         public boolean awaitStopped(long deadlineNanos) {
             return true;
@@ -167,6 +174,8 @@ class ExternalRequestSchedulerTest {
         public void close() {
             stop();
         }
+
+        public void stop() {}
 
         public void onEndpointChanged(WorkerEndpoint endpoint) {}
 
@@ -185,9 +194,7 @@ class ExternalRequestSchedulerTest {
                 var admission = claimPlacement(context);
                 if (admission == null) continue;
                 try {
-                    var selection =
-                            prepareSelectedRoute(
-                                    context, selector.select(context, entry.routingGroup()));
+                    var selection = selector.select(context, entry.routingGroup());
                     assertEquals(PlacementResult.Status.SUCCESS, selection.status());
                     if (queued != null) {
                         {
@@ -215,8 +222,18 @@ class ExternalRequestSchedulerTest {
                 }
             }
         }
+
+        @Override
+        protected StrategyErrorType schedulingTimeoutError() {
+            return queued != null
+                    ? StrategyErrorType.RESOURCE_EXHAUSTED
+                    : StrategyErrorType.BATCH_SLO_EXPIRED;
+        }
     }
 
+    /**
+     * Wires the manual scheduler to real endpoints and shared delivery services, then drains all accepted work during cleanup.
+     */
     private static final class Fixture implements AutoCloseable {
         final org.flexlb.config.FlexlbConfig config = SchedulingTestConfig.newConfig();
         final PlacementConfiguration assembly = new PlacementConfiguration();
@@ -232,6 +249,7 @@ class ExternalRequestSchedulerTest {
         final ManualScheduler scheduler;
         final DeliveryDispatcher dispatcher;
         final DeliveryExecution deliveries;
+        final EndpointRegistry endpoints = mock(EndpointRegistry.class);
 
         Fixture() {
             this(false);
@@ -252,6 +270,11 @@ class ExternalRequestSchedulerTest {
             var service = SchedulingTestConfig.configService(config);
             var reporter = mock(DeliveryMetricsReporter.class);
             var client = mock(EngineGrpcClient.class);
+            when(client.cancelAsync(anyString(), anyInt(), any(), org.mockito.Mockito.anyLong()))
+                    .thenAnswer(
+                            call ->
+                                    CompletableFuture.completedFuture(
+                                            EngineGrpcClient.CancelReply.REQUEST_CLEANED));
             when(client.batchEnqueueAsync(anyString(), anyInt(), any()))
                     .thenAnswer(
                             call -> {
@@ -294,7 +317,8 @@ class ExternalRequestSchedulerTest {
                             batch
                                     ? QueueExecutionSettings.capture(
                                             config, BuiltinGroupPlanner.from(config))
-                                    : null);
+                                    : null,
+                            endpoints);
             endpoint =
                     EndpointTestSupport.realPrefill(
                             WorkerStatus.createDiscovered(
@@ -324,32 +348,51 @@ class ExternalRequestSchedulerTest {
                     .thenAnswer(
                             call -> {
                                 RequestContext context = call.getArgument(0);
-                                return SchedulingTestConfig.selectRoute(
-                                        context,
-                                        route -> {
-                                            var metadata = new ServerStatus();
-                                            metadata.setSuccess(true);
-                                            metadata.setRequestId(context.data().getRequestId());
-                                            metadata.setRole(endpoint.getStatus().getRole());
-                                            metadata.setServerIp(endpoint.getIp());
-                                            metadata.setHttpPort(endpoint.getHttpPort());
-                                            metadata.setGrpcPort(endpoint.getGrpcPort());
-                                            route.add(endpoint, metadata, 1L, 0L);
-                                            if (decode != null) {
-                                                var decodeMetadata = ServerStatus.copyOf(metadata);
-                                                decodeMetadata.setRole(RoleType.DECODE);
-                                                decodeMetadata.setServerIp(decode.getIp());
-                                                decodeMetadata.setHttpPort(decode.getHttpPort());
-                                                decodeMetadata.setGrpcPort(decode.getGrpcPort());
-                                                route.add(
-                                                        decode,
-                                                        decodeMetadata,
-                                                        0L,
-                                                        decode.placementVersion());
-                                            }
-                                            return PlacementResult.success(route);
-                                        });
+                                var selectedRoles = new java.util.ArrayList<RoleSelection>();
+
+                                var metadata = new ServerStatus();
+                                metadata.setSuccess(true);
+                                metadata.setRequestId(context.data().getRequestId());
+                                metadata.setRole(endpoint.getStatus().getRole());
+                                metadata.setServerIp(endpoint.getIp());
+                                metadata.setHttpPort(endpoint.getHttpPort());
+                                metadata.setGrpcPort(endpoint.getGrpcPort());
+                                selectedRoles.add(
+                                        SelectionTestSupport.metadata(endpoint, metadata, 1L));
+                                if (decode != null) {
+                                    var decodeMetadata = ServerStatus.copyOf(metadata);
+                                    decodeMetadata.setRole(RoleType.DECODE);
+                                    decodeMetadata.setServerIp(decode.getIp());
+                                    decodeMetadata.setHttpPort(decode.getHttpPort());
+                                    decodeMetadata.setGrpcPort(decode.getGrpcPort());
+                                    selectedRoles.add(
+                                            SelectionTestSupport.metadata(
+                                                    decode, decodeMetadata, 0L));
+                                }
+
+                                return org.flexlb.balance.scheduler.SchedulerTestServices
+                                        .registerSelection(context, selectedRoles);
                             });
+        }
+
+        public void close() {
+            org.mockito.Mockito.doAnswer(
+                            invocation -> {
+                                endpoint.close();
+                                EndpointTestSupport.awaitRetirement(endpoint);
+                                if (decode != null) {
+                                    decode.close();
+                                    EndpointTestSupport.awaitRetirement(decode);
+                                }
+                                return null;
+                            })
+                    .when(endpoints)
+                    .close();
+            Throwable failure =
+                    org.flexlb.util.Failures.run(null, () -> scheduler.shutdown(System.nanoTime()));
+            failure = org.flexlb.util.Failures.run(failure, deadlineTimer::close);
+            failure = org.flexlb.util.Failures.run(failure, timer::close);
+            org.flexlb.util.Failures.rethrow(failure, "extension fixture failed to close");
         }
 
         RequestContext request(long id) {
@@ -369,26 +412,6 @@ class ExternalRequestSchedulerTest {
                     .setSchedulingMetadata(
                             SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000L));
             return context;
-        }
-
-        public void close() {
-            scheduler.close();
-            requests.closeRegistration();
-            scheduler.stopAdmissionsAndAwaitCompletion();
-            scheduler.closeOutstandingAndTerminalize();
-            deliveries.awaitDeliveries();
-            tasks.awaitIdle();
-            expiration.close();
-            deadlineTimer.close();
-            tasks.close();
-            responses.close();
-            timer.close();
-            endpoint.close();
-            EndpointTestSupport.awaitRetirement(endpoint);
-            if (decode != null) {
-                decode.close();
-                EndpointTestSupport.awaitRetirement(decode);
-            }
         }
     }
 }

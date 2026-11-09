@@ -4,14 +4,10 @@ import org.flexlb.dao.route.RoleType;
 
 import java.util.concurrent.ConcurrentHashMap;
 
-/** Continues an address ring within each routing group, even as eligibility changes. */
+/**
+ * Continues an address ring within each routing group, even as eligibility changes.
+ */
 final class EndpointRoundRobin {
-    private record Scope(RoleType role, String group) {}
-
-    private static final class Cursor {
-        private String lastSelectedAddress;
-    }
-
     private final ConcurrentHashMap<Scope, Cursor> cursors = new ConcurrentHashMap<>();
 
     /**
@@ -41,5 +37,11 @@ final class EndpointRoundRobin {
             cursor.lastSelectedAddress = addresses[selected];
             return selected;
         }
+    }
+
+    private record Scope(RoleType role, String group) {}
+
+    private static final class Cursor {
+        private String lastSelectedAddress;
     }
 }

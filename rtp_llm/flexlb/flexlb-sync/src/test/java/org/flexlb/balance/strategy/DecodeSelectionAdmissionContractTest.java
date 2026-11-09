@@ -62,23 +62,14 @@ class DecodeSelectionAdmissionContractTest {
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
                                 null);
                 assertEquals(PlacementResult.Status.SUCCESS, result.status());
-                {
-                    Selection selected = result.value();
+                try (Selection selected = result.value()) {
                     assertEquals(
                             FREE_IP,
                             selected.decode().getServerIp(),
                             "free placement capacity must win over a queued endpoint with only dispatch capacity");
-                    fixture.assertSelectionHasNoReservation(requestId, queuedUsage, freeUsage);
                     WorkerEndpoint selectedEndpoint = StrategyTestSupport.decodeEndpoint(selected);
                     DecodeEndpoint endpoint = (DecodeEndpoint) selectedEndpoint;
-                    DecodeResources.RequestReservation reservation =
-                            endpoint.tryReserveQueuedRequest(
-                                            String.valueOf(request.getRequestId()),
-                                            request.getHardKvTokens(),
-                                            request.getExpectedKvTokens(),
-                                            70,
-                                            fixture.limits)
-                                    .value();
+                    var reservation = EndpointTestSupport.decodeReservation(endpoint, requestId);
                     assertNotNull(
                             reservation, "the selected endpoint must pass the same placement gate");
                     try {
@@ -106,7 +97,7 @@ class DecodeSelectionAdmissionContractTest {
 
     @ParameterizedTest(name = "{0}: {1}")
     @MethodSource("dispatchAdmissionCases")
-    void selectionDoesNotReserveAndUsesTheModesCapacityScope(
+    void selectionRegistersUnsentCapacityInEverySchedulerMode(
             Policy policy, CapacityDimension dimension) {
         try (Fixture fixture = new Fixture(policy, dimension)) {
             fixture.assertPlacementAndDispatchDisagree();
@@ -122,17 +113,23 @@ class DecodeSelectionAdmissionContractTest {
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
                                 null);
                 assertEquals(PlacementResult.Status.SUCCESS, result.status());
-                {
-                    Selection selected = result.value();
+                try (Selection selected = result.value()) {
                     selectedCounts.merge(selected.decode().getServerIp(), 1, Integer::sum);
-                    fixture.assertSelectionHasNoReservation(requestId, queuedUsage, freeUsage);
+                    assertTrue(
+                            EndpointTestSupport.isQueued(
+                                    fixture.free.resourceSnapshot(), String.valueOf(requestId)));
+                    assertEquals(
+                            freeUsage.occupiedRequests() + 1,
+                            fixture.free.routingView().placementUsage().occupiedRequests());
                 }
             }
 
+            assertEquals(queuedUsage, fixture.queued.routingView().placementUsage());
+            assertEquals(freeUsage, fixture.free.routingView().placementUsage());
             assertEquals(
-                    policy == Policy.DIRECT ? Map.of(QUEUED_IP, 3, FREE_IP, 3) : Map.of(FREE_IP, 6),
+                    Map.of(FREE_IP, 6),
                     selectedCounts,
-                    "QUEUE includes queued reservations; DIRECT retains dispatch admission");
+                    "every scheduler counts selections which have not been sent");
         }
     }
 
@@ -166,7 +163,7 @@ class DecodeSelectionAdmissionContractTest {
     }
 
     /**
-     * Builds Decode selection scenarios and checks that selection itself creates no reservation.
+     * Builds a full and a free Decode endpoint to compare placement capacity with dispatch capacity under each scheduling policy.
      */
     private static final class Fixture implements AutoCloseable {
         private final FlexlbConfig config = StrategyTestSupport.config();
@@ -216,10 +213,12 @@ class DecodeSelectionAdmissionContractTest {
 
                 assertNotNull(selectedEndpoint);
                 assertNotNull(
-                        queued.tryReserveQueuedRequest(String.valueOf(1L), 0L, expectedKv, 50, null)
+                        org.flexlb.balance.scheduler.SelectionTestSupport.registerQueuedDecode(
+                                        queued, String.valueOf(1L), 0L, expectedKv, 50)
                                 .value());
                 assertNotNull(
-                        queued.tryReserveQueuedRequest(String.valueOf(2L), 0L, expectedKv, 50, null)
+                        org.flexlb.balance.scheduler.SelectionTestSupport.registerQueuedDecode(
+                                        queued, String.valueOf(2L), 0L, expectedKv, 50)
                                 .value());
             }
         }

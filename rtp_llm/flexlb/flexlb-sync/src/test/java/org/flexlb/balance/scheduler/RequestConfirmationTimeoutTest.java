@@ -9,7 +9,6 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
-import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -111,8 +110,13 @@ class RequestConfirmationTimeoutTest {
                 var selectedEndpoint = decode;
 
                 reservation =
-                        decode.tryReserveQueuedRequest(
-                                        String.valueOf(REQUEST_ID), 16L, 32L, 50, capacity)
+                        decode.tryRegisterSelection(
+                                        decode.routingView(),
+                                        String.valueOf(REQUEST_ID),
+                                        16L,
+                                        32L,
+                                        50,
+                                        capacity)
                                 .value();
                 assertNotNull(reservation);
                 var acquired = decode.acquireDispatchPermit(reservation, capacity);
@@ -126,31 +130,27 @@ class RequestConfirmationTimeoutTest {
             var context = RequestProtocolTestSupport.context(config, REQUEST_ID);
             var future = RequestProtocolTestSupport.submitForManualPlacement(requests, context);
             RequestContext requestContext =
-                    requests.requests.findActive(String.valueOf(REQUEST_ID));
+                    requests.repository.findActive(String.valueOf(REQUEST_ID));
             ServerStatus prefillMetadata = new ServerStatus();
             prefillMetadata.setRole(RoleType.PREFILL);
             prefillMetadata.setServerIp("127.0.0.1");
             prefillMetadata.setGrpcPort(8081);
             context.data().setFuture(future);
-            RouteExecution item =
-                    SchedulingTestConfig.createRoute(
+            RouteResult item =
+                    RequestExecutionTestSupport.registerPrefillRoute(
                             context,
-                            new Response(),
-                            prefillMetadata,
-                            null,
                             prefill,
                             decode,
                             reservation,
+                            30_000L,
                             requestContext.snapshot().createdAtMs());
             AtomicReference<PrefillEndpoint.RequestRecord> routeReservation =
                     new AtomicReference<>();
             {
                 var selectedEndpoint = prefill;
-                try (var mutation =
-                                SchedulerTestSupport.claim(
-                                        requests, String.valueOf(REQUEST_ID), future);
-                        var admissionCompletion1 =
-                                RequestProtocolTestSupport.finishOnExit(mutation)) {
+                var mutation =
+                        SchedulerTestSupport.claim(requests, String.valueOf(REQUEST_ID), future);
+                try (var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(mutation)) {
                     assertNotNull(mutation);
                     assertNotNull(selectedEndpoint);
                     assertTrue(
@@ -159,11 +159,8 @@ class RequestConfirmationTimeoutTest {
                                             item,
                                             RequestProtocolTestSupport.publication(
                                                     () -> {
-                                                        var reserved =
-                                                                prefill.reserveUnqueuedRoute(
-                                                                        item, 30_000L);
-                                                        assertTrue(reserved.accepted());
-                                                        routeReservation.set(reserved.value());
+                                                        routeReservation.set(
+                                                                item.prefillReservation());
                                                         return true;
                                                     }))
                                     == org.flexlb.balance.PlacementResult.Status.SUCCESS));
@@ -176,8 +173,7 @@ class RequestConfirmationTimeoutTest {
                             {
                                 var handoff =
                                         org.flexlb.balance.endpoint.EndpointTestSupport
-                                                .commitDirect(
-                                                        prefill, item, routeReservation.get());
+                                                .commitDirect(prefill, item);
 
                                 return true;
                             }
@@ -215,7 +211,9 @@ class RequestConfirmationTimeoutTest {
                         .thenReturn(
                                 java.util.concurrent.CompletableFuture.completedFuture(
                                         EngineGrpcClient.CancelReply.REQUEST_CLEANED));
-                assertTrue(claim.route().ctx().data().getRequestScheduler().tryStartSend(claim));
+                assertEquals(
+                        ContextResult.SendState.SENDING,
+                        claim.owner().snapshot().delivery().send());
                 requests.onDeliveryResult(
                         new ContextResult.TransportResult(
                                 claim,
@@ -260,7 +258,13 @@ class RequestConfirmationTimeoutTest {
                 var selectedEndpoint = decode;
 
                 var next =
-                        decode.tryReserveQueuedRequest(String.valueOf(102L), 16L, 32L, 50, capacity)
+                        decode.tryRegisterSelection(
+                                        decode.routingView(),
+                                        String.valueOf(102L),
+                                        16L,
+                                        32L,
+                                        50,
+                                        capacity)
                                 .value();
                 assertNotNull(next);
                 var acquired = decode.acquireDispatchPermit(next, capacity);

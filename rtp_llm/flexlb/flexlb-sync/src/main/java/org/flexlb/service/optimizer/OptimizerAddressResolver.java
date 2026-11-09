@@ -28,18 +28,20 @@ import java.util.concurrent.TimeUnit;
  */
 @Slf4j
 public class OptimizerAddressResolver {
-
     private final ServiceDiscovery serviceDiscovery;
     private final String address;
     private final Endpoint endpoint;
+
     private final int port;
     private final long pollIntervalMs;
+
     private final ScheduledExecutorService refreshScheduler =
             Executors.newSingleThreadScheduledExecutor(
                     new NamedThreadFactory("optimizer-discovery-refresh"));
 
     private boolean started;
     private volatile boolean shutdown;
+
     private volatile List<String> resolvedAddresses = Collections.emptyList();
 
     public OptimizerAddressResolver(
@@ -91,6 +93,15 @@ public class OptimizerAddressResolver {
                 resolvedAddresses.size());
     }
 
+    public List<String> getAddresses() {
+        return resolvedAddresses;
+    }
+
+    public synchronized void shutdown() {
+        shutdown = true;
+        refreshScheduler.shutdownNow();
+    }
+
     private void refreshSafely() {
         if (shutdown) {
             return;
@@ -139,15 +150,6 @@ public class OptimizerAddressResolver {
                     address,
                     addresses.size());
         }
-    }
-
-    public List<String> getAddresses() {
-        return resolvedAddresses;
-    }
-
-    public synchronized void shutdown() {
-        shutdown = true;
-        refreshScheduler.shutdownNow();
     }
 
     private boolean isDynamicDiscovery() {

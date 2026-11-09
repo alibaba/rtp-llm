@@ -37,9 +37,6 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyInt;
-import static org.mockito.Mockito.anyLong;
-import static org.mockito.Mockito.argThat;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -50,11 +47,6 @@ import static org.mockito.Mockito.when;
  */
 @Timeout(15)
 class DeliverySettlementSignalContractTest {
-    private enum Side {
-        PREFILL,
-        DECODE
-    }
-
     @ParameterizedTest
     @EnumSource(Side.class)
     void asyncBatchSignalAndCleanupDedupWaitForBothPhysicalReleases(Side side) throws Exception {
@@ -63,7 +55,7 @@ class DeliverySettlementSignalContractTest {
             assertTrue(fixture.releaseEntered.await(2, TimeUnit.SECONDS));
             assertTrue(fixture.pendingWork() > 0, "the blocked release must retain its work owner");
             assertEquals(ContextResult.Phase.ENDING, fixture.context.snapshot().phase());
-            assertTrue(fixture.scheduler.requests.isCurrent(fixture.context));
+            assertTrue(fixture.scheduler.repository.isCurrent(fixture.context));
             assertEquals(1, fixture.decode.routingView().totalLoad());
             assertEquals(
                     side == Side.PREFILL ? 1L : 0L,
@@ -98,7 +90,7 @@ class DeliverySettlementSignalContractTest {
             assertFalse(close.decodeSettled());
             assertEquals(0L, fixture.prefill.admissionSummary(0, 0L).occupiedRequests());
             assertEquals(1, fixture.decode.routingView().totalLoad());
-            assertTrue(fixture.scheduler.requests.isCurrent(fixture.context));
+            assertTrue(fixture.scheduler.repository.isCurrent(fixture.context));
             assertFalse(fixture.settled.isDone(), "failed release is still an obligation");
             assertEquals(
                     DeliveryDispatcher.StopResult.REMOTE_CLEANED,
@@ -122,16 +114,25 @@ class DeliverySettlementSignalContractTest {
         }
     }
 
+    private enum Side {
+        PREFILL,
+        DECODE
+    }
+
+    /**
+     * Gates endpoint releases around a real scheduler to observe when settlement signals become visible.
+     */
     private static final class Fixture implements AutoCloseable {
         private static final long ID = 981_001L;
         private static final long BATCH = 981L;
+
         final AbstractRequestScheduler scheduler;
         final SchedulerTestServices runtime;
         final DeliveryDispatcher dispatcher;
         final PrefillEndpoint prefill;
         final DecodeEndpoint decode;
         final RequestContext context;
-        final RouteExecution route;
+        final RouteResult route;
         final Delivery.Member claim;
         final EngineGrpcClient channel = mock(EngineGrpcClient.class);
         final CompletableFuture<EngineGrpcClient.CancelReply> proof = new CompletableFuture<>();
@@ -143,7 +144,9 @@ class DeliverySettlementSignalContractTest {
         final AtomicBoolean failRelease;
         final IllegalStateException releaseFailure =
                 new IllegalStateException("real Decode release paused by failure");
+
         final boolean expectsFailure;
+
         CompletableFuture<DeliveryDispatcher.StopResult> session;
 
         Fixture(Side side, boolean persistentFailure) {
@@ -184,7 +187,7 @@ class DeliverySettlementSignalContractTest {
                             EndpointTestSupport.decode(
                                     WorkerStatus.createDiscovered(
                                             RoleType.DECODE, null, "127.0.0.2", 8080, 8081, null),
-                                    scheduler.requests));
+                                    scheduler.repository));
             var status = new WorkerStatusResponse();
             status.setRole(RoleType.DECODE);
             status.setStatusVersion(1L);
@@ -212,25 +215,24 @@ class DeliverySettlementSignalContractTest {
                 var selectedEndpoint = decode;
 
                 reservation =
-                        decode.tryReserveQueuedRequest(String.valueOf(ID), 10L, 10L, 50, null)
+                        decode.tryRegisterSelection(
+                                        decode.routingView(),
+                                        String.valueOf(ID),
+                                        10L,
+                                        10L,
+                                        50,
+                                        SchedulingTestConfig.capacity(config))
                                 .value();
             }
             assertNotNull(reservation);
             context = RequestProtocolTestSupport.context(config, ID);
             var future = RequestProtocolTestSupport.submitForManualPlacement(scheduler, context);
             route =
-                    SchedulingTestConfig.createRoute(
-                            context,
-                            null,
-                            null,
-                            null,
-                            prefill,
-                            decode,
-                            reservation,
-                            System.currentTimeMillis());
+                    RequestExecutionTestSupport.registerPrefillRoute(
+                            context, prefill, decode, reservation, 0L, System.currentTimeMillis());
             var state = prefill;
-            try (var admission =
-                    SchedulerTestSupport.claim(scheduler, String.valueOf(ID), future)) {
+            var admission = SchedulerTestSupport.claim(scheduler, String.valueOf(ID), future);
+            {
                 assertNotNull(admission);
                 assertEquals(
                         org.flexlb.balance.PlacementResult.Status.SUCCESS,
@@ -244,8 +246,7 @@ class DeliverySettlementSignalContractTest {
                                                         == route)));
                 AbstractRequestScheduler.finishPlacement(admission);
             }
-            var prepared = prefill.reserveBatch(BATCH, 2);
-            assertTrue(prepared.accepted());
+            var prepared = new DeliveryTestSupport.BatchInput(BATCH, 2);
             var committed =
                     withStateLock(
                             org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(state),
@@ -253,7 +254,7 @@ class DeliverySettlementSignalContractTest {
                                     prefill.commitDelivery(
                                             org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
                                                     List.of(route),
-                                                    prepared.value(),
+                                                    prepared,
                                                     new long[] {100L},
                                                     null,
                                                     System.currentTimeMillis())));
@@ -264,14 +265,14 @@ class DeliverySettlementSignalContractTest {
             assertEquals(
                     DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, dispatch.status());
             claim =
-                    DeliveryDispatcher.commitDelivery(
-                            scheduler,
+                    scheduler.commitDelivery(
                             new org.flexlb.balance.scheduler.Delivery.Member(
                                     route, dispatch.value()),
                             Delivery.SendMode.BATCH_ENQUEUE,
                             BATCH);
             assertNotNull(claim);
-            assertTrue(scheduler.tryStartSend(claim));
+            assertEquals(
+                    ContextResult.SendState.SENDING, claim.owner().snapshot().delivery().send());
             dispatch.value().release();
             committed.close();
             settled = claim.completion().toCompletableFuture();
@@ -294,17 +295,25 @@ class DeliverySettlementSignalContractTest {
             }
         }
 
-        private void awaitRelease() throws InterruptedException {
-            assertFalse(Thread.holdsLock(context));
-            org.junit.jupiter.api.Assertions.assertFalse(
-                    org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(prefill)
-                            .isHeldByCurrentThread());
-            releaseAttempts.incrementAndGet();
-            releaseEntered.countDown();
-            if (failRelease.get()) {
-                throw releaseFailure;
+        @Override
+        public void close() {
+            failRelease.set(false);
+            allowRelease.countDown();
+            if (context.snapshot().phase() == ContextResult.Phase.ENDING) {
+                scheduler.scheduleClose(context);
             }
-            assertTrue(allowRelease.await(5, TimeUnit.SECONDS));
+            try {
+                if (expectsFailure) {
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> SchedulerTestSupport.shutdown(runtime));
+                } else {
+                    SchedulerTestSupport.shutdown(runtime);
+                }
+            } finally {
+                prefill.close();
+                decode.close();
+            }
         }
 
         void cancelWithRemoteProof() {
@@ -322,10 +331,6 @@ class DeliverySettlementSignalContractTest {
 
         CompletableFuture<DeliveryDispatcher.StopResult> cleanupSession() {
             return dispatcher.stop(claim);
-        }
-
-        Map<?, ?> cleanupRegistry() {
-            return (Map<?, ?>) ReflectionTestUtils.getField(dispatcher, "sessions");
         }
 
         long pendingWork() {
@@ -346,30 +351,26 @@ class DeliverySettlementSignalContractTest {
             assertTrue(context.snapshot().close().prefillSettled());
             assertTrue(context.snapshot().close().decodeSettled());
             assertEquals(ContextResult.Phase.CLOSED, context.snapshot().phase());
-            assertEquals(0, scheduler.requests.liveRequestCount());
+            assertEquals(0, scheduler.repository.liveRequestCount());
             assertTrue(cleanupRegistry().isEmpty());
             assertFalse(route.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         }
 
-        @Override
-        public void close() {
-            failRelease.set(false);
-            allowRelease.countDown();
-            if (context.snapshot().phase() == ContextResult.Phase.ENDING) {
-                scheduler.scheduleClose(context);
+        Map<?, ?> cleanupRegistry() {
+            return (Map<?, ?>) ReflectionTestUtils.getField(dispatcher, "sessions");
+        }
+
+        private void awaitRelease() throws InterruptedException {
+            assertFalse(Thread.holdsLock(context));
+            org.junit.jupiter.api.Assertions.assertFalse(
+                    org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(prefill)
+                            .isHeldByCurrentThread());
+            releaseAttempts.incrementAndGet();
+            releaseEntered.countDown();
+            if (failRelease.get()) {
+                throw releaseFailure;
             }
-            try {
-                if (expectsFailure) {
-                    assertThrows(
-                            IllegalStateException.class,
-                            () -> SchedulerTestSupport.shutdown(runtime));
-                } else {
-                    SchedulerTestSupport.shutdown(runtime);
-                }
-            } finally {
-                prefill.close();
-                decode.close();
-            }
+            assertTrue(allowRelease.await(5, TimeUnit.SECONDS));
         }
     }
 }

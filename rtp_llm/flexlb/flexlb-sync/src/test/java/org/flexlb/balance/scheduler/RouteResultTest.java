@@ -14,6 +14,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Checks that role results remain immutable when inputs, exported responses, or endpoint state later change.
+ */
 class RouteResultTest {
     @Test
     void frozenSelectionSurvivesInputResponseAndEndpointChanges() {
@@ -29,7 +32,7 @@ class RouteResultTest {
                         new RequestRepository(),
                         org.mockito.Mockito.mock(
                                 org.flexlb.service.monitor.DeliveryMetricsReporter.class));
-        var builder = new RouteResult.Builder(context);
+        var roles = new java.util.ArrayList<RoleSelection>();
         try {
             var metadata =
                     ServerStatus.forWorker(
@@ -40,17 +43,14 @@ class RouteResultTest {
             var debug = new DebugInfo();
             debug.setHitCacheLen(7);
             metadata.setDebugInfo(debug);
-            builder.add(endpoint, metadata, 13, 17);
-            var result = builder.prepare();
-            assertThrows(IllegalStateException.class, builder::prepare);
+            roles.add(new RoleSelection.Prefill(endpoint, metadata, 13, null));
+            var result = new RouteResult(context, roles);
             assertThrows(
-                    IllegalStateException.class, () -> builder.add(endpoint, metadata, 13, 17));
-
-            var rejected = new RouteResult.Builder(context);
-            rejected.add(endpoint, metadata, 13, 17);
-            assertThrows(
-                    IllegalStateException.class, () -> rejected.add(endpoint, metadata, 13, 17));
-            assertThrows(IllegalStateException.class, rejected::prepare);
+                    IllegalStateException.class,
+                    () ->
+                            new RouteResult(
+                                    context,
+                                    java.util.List.of(roles.getFirst(), roles.getFirst())));
             metadata.setGroup("changed");
             debug.setHitCacheLen(99);
             result.successResponse(false)
@@ -64,19 +64,19 @@ class RouteResultTest {
                     assertInstanceOf(RoleSelection.Prefill.class, result.role(RoleType.PREFILL));
             assertSame(endpoint, prefill.endpoint());
             assertEquals(13, prefill.workMs());
-            assertEquals(17, prefill.resourceVersion());
             assertEquals(7, prefill.hitCacheTokens());
             assertEquals(
                     "original",
                     result.successResponse(true).getServerStatus().getFirst().getGroup());
             assertThrows(UnsupportedOperationException.class, () -> result.roles().clear());
 
-            var first = new RouteExecution(context, result);
-            var second = new RouteExecution(context, result);
-            assertNotSame(first, second);
-            assertSame(first.result(), second.result());
-            assertNull(first.decodeReservation());
-            assertNull(second.prefillReservation());
+            var another = new RouteResult(context, result.roles());
+            assertNotSame(result, another);
+            assertSame(context, result.ctx());
+            assertSame(context, another.ctx());
+            assertSame(result.role(RoleType.PREFILL), another.role(RoleType.PREFILL));
+            assertNull(result.decodeReservation());
+            assertNull(another.prefillReservation());
         } finally {
             endpoint.close();
             EndpointTestSupport.awaitRetirement(endpoint);

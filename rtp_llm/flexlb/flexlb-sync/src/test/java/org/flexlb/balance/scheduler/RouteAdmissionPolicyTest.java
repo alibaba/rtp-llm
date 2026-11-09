@@ -28,6 +28,37 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 class RouteAdmissionPolicyTest {
 
     @Test
+    void selectedRequestAheadOfDispatchHeadDoesNotMoveItsAdmissionBlock() {
+        var selected = item(2L, 90, 2L, 30L);
+        var dispatchHead = item(1L, 50, 1L, 100L);
+        var snapshot =
+                queue(
+                        true,
+                        true,
+                        constraints(1, 0L),
+                        List.of(selected, dispatchHead),
+                        block(dispatchHead, semantics(RequestTimeEstimation.State.UNAVAILABLE)));
+        var ahead =
+                project(
+                        snapshot,
+                        noCommittedWork(),
+                        TOKEN_EVALUATOR,
+                        probe(99L, 70, 20L, 0L),
+                        ROUTE);
+        assertEquals(RequestTimeEstimation.State.UNAVAILABLE, ahead.state());
+        assertEquals("AFTER_PROBE_CAPACITY_UNKNOWN", ahead.detail());
+        var behind =
+                project(
+                        snapshot,
+                        noCommittedWork(),
+                        TOKEN_EVALUATOR,
+                        probe(99L, 40, 20L, 0L),
+                        ROUTE);
+        assertEquals(RequestTimeEstimation.State.BLOCKED, behind.state());
+        assertEquals("HEAD_CAPACITY_BLOCKED", behind.detail());
+    }
+
+    @Test
     void oneProjectionPreservesRankingAndRefreshesAdmissionForEachWorker() {
         var head = item(1L, 50, 1L, 100L);
         var estimator = RequestTimeEstimation.current();

@@ -22,7 +22,9 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.concurrent.RejectedExecutionException;
 
-/** Classifies actual causes for diagnostics and retry. RPC failure alone does not establish worker health. */
+/**
+ * Classifies actual causes for diagnostics and retry. RPC failure alone does not establish worker health.
+ */
 public final class GrpcFailure {
     // Stronger local evidence wins over transport wrappers.
     // This order is independent of both the cause-chain order and Kind's declaration order.
@@ -48,64 +50,6 @@ public final class GrpcFailure {
                     Kind.IO_FAILURE);
 
     private GrpcFailure() {}
-
-    public enum Kind {
-        LOCAL_MEMORY_EXHAUSTED,
-        LOCAL_EXECUTOR_REJECTED,
-        LOCAL_BIND_FAILED,
-        CONNECT_TIMEOUT,
-        CONNECT_REFUSED,
-        CONNECT_FAILED,
-        NO_ROUTE,
-        CONNECTION_RESET,
-        BROKEN_PIPE,
-        IO_INTERRUPTED,
-        ASYNC_CHANNEL_CLOSED,
-        CHANNEL_CLOSED,
-        UNEXPECTED_EOF,
-        IO_TIMEOUT,
-        SOCKET_FAILURE,
-        PROTOBUF_FAILURE,
-        IO_FAILURE,
-        HTTP2_FAILURE,
-        DEADLINE_EXCEEDED,
-        CANCELLED,
-        RPC_FAILURE
-    }
-
-    public record Analysis(Kind kind, Status.Code grpcCode, Throwable rootCause) {
-        public boolean confirmedLocalFailure() {
-            return kind == Kind.LOCAL_MEMORY_EXHAUSTED
-                    || kind == Kind.LOCAL_EXECUTOR_REJECTED
-                    || kind == Kind.LOCAL_BIND_FAILED;
-        }
-
-        /** Caller also enforces operation idempotency and the single retry limit. */
-        public boolean retryableTransportFailure() {
-            // Cancellation/deadline remains terminal even when cancellation exposes a closed
-            // transport.
-            if (grpcCode == Status.Code.CANCELLED || grpcCode == Status.Code.DEADLINE_EXCEEDED) {
-                return false;
-            }
-            return switch (kind) {
-                case CONNECT_TIMEOUT,
-                        CONNECT_REFUSED,
-                        CONNECT_FAILED,
-                        NO_ROUTE,
-                        CONNECTION_RESET,
-                        BROKEN_PIPE,
-                        IO_INTERRUPTED,
-                        ASYNC_CHANNEL_CLOSED,
-                        CHANNEL_CLOSED,
-                        UNEXPECTED_EOF,
-                        IO_TIMEOUT,
-                        SOCKET_FAILURE,
-                        HTTP2_FAILURE ->
-                        true;
-                default -> false;
-            };
-        }
-    }
 
     public static Kind classify(Throwable failure) {
         return analyze(failure).kind();
@@ -146,6 +90,10 @@ public final class GrpcFailure {
             }
         }
         return new Analysis(resolveKind(observedKinds, code), code, root);
+    }
+
+    public static boolean isRetryableTransportFailure(Throwable failure) {
+        return analyze(failure).retryableTransportFailure();
     }
 
     private static Kind classifyCause(Throwable cause) {
@@ -207,7 +155,64 @@ public final class GrpcFailure {
         };
     }
 
-    public static boolean isRetryableTransportFailure(Throwable failure) {
-        return analyze(failure).retryableTransportFailure();
+    public enum Kind {
+        LOCAL_MEMORY_EXHAUSTED,
+        LOCAL_EXECUTOR_REJECTED,
+        LOCAL_BIND_FAILED,
+        CONNECT_TIMEOUT,
+        CONNECT_REFUSED,
+        CONNECT_FAILED,
+        NO_ROUTE,
+        CONNECTION_RESET,
+        BROKEN_PIPE,
+        IO_INTERRUPTED,
+        ASYNC_CHANNEL_CLOSED,
+        CHANNEL_CLOSED,
+        UNEXPECTED_EOF,
+        IO_TIMEOUT,
+        SOCKET_FAILURE,
+        PROTOBUF_FAILURE,
+        IO_FAILURE,
+        HTTP2_FAILURE,
+        DEADLINE_EXCEEDED,
+        CANCELLED,
+        RPC_FAILURE
+    }
+
+    /**
+     * Classifies a gRPC failure and exposes transport retry eligibility to the caller.
+     */
+    public record Analysis(Kind kind, Status.Code grpcCode, Throwable rootCause) {
+        public boolean confirmedLocalFailure() {
+            return kind == Kind.LOCAL_MEMORY_EXHAUSTED
+                    || kind == Kind.LOCAL_EXECUTOR_REJECTED
+                    || kind == Kind.LOCAL_BIND_FAILED;
+        }
+
+        /** Caller also enforces operation idempotency and the single retry limit. */
+        public boolean retryableTransportFailure() {
+            // Cancellation/deadline remains terminal even when cancellation exposes a closed
+            // transport.
+            if (grpcCode == Status.Code.CANCELLED || grpcCode == Status.Code.DEADLINE_EXCEEDED) {
+                return false;
+            }
+            return switch (kind) {
+                case CONNECT_TIMEOUT,
+                        CONNECT_REFUSED,
+                        CONNECT_FAILED,
+                        NO_ROUTE,
+                        CONNECTION_RESET,
+                        BROKEN_PIPE,
+                        IO_INTERRUPTED,
+                        ASYNC_CHANNEL_CLOSED,
+                        CHANNEL_CLOSED,
+                        UNEXPECTED_EOF,
+                        IO_TIMEOUT,
+                        SOCKET_FAILURE,
+                        HTTP2_FAILURE ->
+                        true;
+                default -> false;
+            };
+        }
     }
 }

@@ -30,9 +30,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Canonical frozen-snapshot route timeline and candidate contract. */
+/**
+ * Canonical frozen-snapshot route timeline and candidate contract.
+ */
 class RequestTimeEstimationTest {
-
     @Test
     void collectionWindowDoesNotChangeKnownWorkOrNonlinearBatchCost() {
         var evaluator =
@@ -950,17 +951,6 @@ class RequestTimeEstimationTest {
                 items -> items.stream().mapToLong(PrefillBatchFeatures.Item::seqLen).sum());
     }
 
-    private static PrefillTimePredictor.Evaluator suffixFailingBatchEvaluator() {
-        return evaluator(
-                (tokens, hits) -> tokens,
-                items ->
-                        items.stream().anyMatch(item -> item.seqLen() == 999L)
-                                ? Double.NaN
-                                : items.stream()
-                                        .mapToLong(PrefillBatchFeatures.Item::seqLen)
-                                        .sum());
-    }
-
     private static PrefillTimePredictor.Evaluator evaluator(
             SinglePrediction single, BatchPrediction batch) {
         return new PrefillTimePredictor.Evaluator() {
@@ -974,6 +964,17 @@ class RequestTimeEstimationTest {
                 return batch.predict(features.items());
             }
         };
+    }
+
+    private static PrefillTimePredictor.Evaluator suffixFailingBatchEvaluator() {
+        return evaluator(
+                (tokens, hits) -> tokens,
+                items ->
+                        items.stream().anyMatch(item -> item.seqLen() == 999L)
+                                ? Double.NaN
+                                : items.stream()
+                                        .mapToLong(PrefillBatchFeatures.Item::seqLen)
+                                        .sum());
     }
 
     @FunctionalInterface

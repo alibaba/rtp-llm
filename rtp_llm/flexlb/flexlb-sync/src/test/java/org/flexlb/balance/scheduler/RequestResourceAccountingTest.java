@@ -67,8 +67,7 @@ class RequestResourceAccountingTest {
                 assertThrows(
                         IllegalArgumentException.class,
                         () ->
-                                DeliveryDispatcher.commitDelivery(
-                                        owner.requests,
+                                owner.requests.commitDelivery(
                                         new org.flexlb.balance.scheduler.Delivery.Member(
                                                 owner.item, permit),
                                         Delivery.SendMode.BATCH_ENQUEUE,
@@ -140,7 +139,8 @@ class RequestResourceAccountingTest {
                 case EXPIRE -> f.expire();
                 case SHUTDOWN -> {
                     assertTrue(
-                            RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(f.requests));
+                            RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(
+                                    f.requests));
                     f.requests.closeOutstandingAndTerminalize();
                 }
             }
@@ -259,8 +259,7 @@ class RequestResourceAccountingTest {
                     acquisition.status());
             try (var member = new Delivery.Member(f.item, acquisition.value())) {
                 var claim =
-                        DeliveryDispatcher.commitDelivery(
-                                f.requests,
+                        f.requests.commitDelivery(
                                 new org.flexlb.balance.scheduler.Delivery.Member(
                                         f.item, member.decode()),
                                 Delivery.SendMode.ROUTE_DECISION,
@@ -289,6 +288,9 @@ class RequestResourceAccountingTest {
             } finally {
                 f.prefillHandoff.close();
             }
+            assertTrue(
+                    f.item.ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess(),
+                    "publish the scheduling response before injecting the later worker failure");
             f.decodeStatus(Map.of("101", task(ID)), Map.of(), TOTAL_KV - HARD_KV);
             TaskInfo failed = task(ID);
             failed.setErrorCode(500L);
@@ -520,12 +522,13 @@ class RequestResourceAccountingTest {
 
                             replacementRef.set(
                                     f.decode
-                                            .tryReserveQueuedRequest(
+                                            .tryRegisterSelection(
+                                                    f.decode.routingView(),
                                                     String.valueOf(ID),
                                                     HARD_KV * 2,
                                                     EXPECTED_KV * 2,
                                                     50,
-                                                    null)
+                                                    f.capacity)
                                             .value());
                         }
                         return replacementRef.get() != null;
@@ -568,6 +571,50 @@ class RequestResourceAccountingTest {
         }
     }
 
+    private static TaskInfo task(long id) {
+        var task = new TaskInfo();
+        task.setRequestId(String.valueOf(id));
+        task.setInputLength(HARD_KV);
+        task.setPhase(TaskPhase.RUNNING);
+        return task;
+    }
+
+    private static WorkerStatusResponse status(
+            RoleType role,
+            long version,
+            Map<String, TaskInfo> running,
+            Map<String, TaskInfo> finished,
+            long freeKv) {
+        var response = new WorkerStatusResponse();
+        response.setRole(role);
+        response.setAlive(true);
+        response.setStatusVersion(version);
+        response.setLatestFinishedVersion(finished.isEmpty() ? 0L : version);
+        response.setRunningTaskInfo(running);
+        response.setRunningQueryLen((long) running.size());
+        response.setFinishedTaskInfo(finished);
+        response.setTotalKvCacheTokens(TOTAL_KV);
+        response.setAvailableKvCacheTokens(freeKv);
+        return response;
+    }
+
+    private static void applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
+        var worker = endpoint.getStatus();
+        org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange projection;
+        worker.lock.lock();
+        try {
+            projection =
+                    endpoint.applyPreparedStatus(
+                            worker,
+                            worker.prepareNewStatus(
+                                    WorkerStatusTestSupport.freezeStatusResponse(
+                                            worker, response)));
+        } finally {
+            worker.lock.unlock();
+        }
+        endpoint.publishStatus(projection);
+    }
+
     private enum LocalEnd {
         CANCEL,
         FUTURE_CANCEL,
@@ -575,19 +622,24 @@ class RequestResourceAccountingTest {
         SHUTDOWN
     }
 
+    /**
+     * Assembles exact P/D registrations and handoff permits to compare accounting before and after lifecycle events.
+     */
     private static final class Fixture implements AutoCloseable {
         final AbstractRequestScheduler requests;
         final SchedulerTestServices runtime;
         final PrefillEndpoint prefill;
         final DecodeEndpoint decode;
-        final RouteExecution item;
+        final RouteResult item;
         final DecodeResources.RequestReservation reservation;
         final PrefillEndpoint.RequestRecord routeReservation;
         final org.flexlb.balance.scheduler.Delivery prefillHandoff;
         final PlacementOperation admission;
         final DecodeResources.AdmissionCapacity capacity =
                 new DecodeResources.AdmissionCapacity(1, 90);
+
         long version = 1;
+
         final java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply> cleanup =
                 new java.util.concurrent.CompletableFuture<>();
 
@@ -663,8 +715,13 @@ class RequestResourceAccountingTest {
                 var selectedEndpoint = decode;
 
                 reservation =
-                        decode.tryReserveQueuedRequest(
-                                        String.valueOf(ID), HARD_KV, EXPECTED_KV, 50, null)
+                        decode.tryRegisterSelection(
+                                        decode.routingView(),
+                                        String.valueOf(ID),
+                                        HARD_KV,
+                                        EXPECTED_KV,
+                                        50,
+                                        capacity)
                                 .value();
             }
             assertNotNull(reservation);
@@ -672,14 +729,12 @@ class RequestResourceAccountingTest {
             var future = RequestProtocolTestSupport.submitForManualPlacement(requests, context);
             context.data().setFuture(future);
             item =
-                    SchedulingTestConfig.createRoute(
+                    RequestExecutionTestSupport.registerPrefillRoute(
                             context,
-                            new Response(),
-                            null,
-                            null,
                             prefill,
                             decode,
                             reservation,
+                            30_000L,
                             System.currentTimeMillis());
             var held = new AtomicReference<PrefillEndpoint.RequestRecord>();
             admission = SchedulerTestSupport.claim(requests, String.valueOf(ID), future);
@@ -693,22 +748,29 @@ class RequestResourceAccountingTest {
                                         item,
                                         RequestProtocolTestSupport.publication(
                                                 () -> {
-                                                    var result =
-                                                            prefill.reserveUnqueuedRoute(
-                                                                    item, 30_000);
-                                                    assertTrue(result.accepted());
-                                                    held.set(result.value());
+                                                    held.set(item.prefillReservation());
                                                     return true;
                                                 }))
                                 == org.flexlb.balance.PlacementResult.Status.SUCCESS));
             }
             routeReservation = held.get();
             prefillHandoff =
-                    org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                            prefill, item, routeReservation);
+                    org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(prefill, item);
             assertNotNull(prefillHandoff);
             if (!keepAdmissionOpen) {
                 AbstractRequestScheduler.finishPlacement(admission);
+            }
+        }
+
+        @Override
+        public void close() {
+            try {
+                AbstractRequestScheduler.finishPlacement(admission);
+                prefillHandoff.close();
+                prefill.rollback(routeReservation);
+                SchedulerTestSupport.shutdown(runtime);
+            } finally {
+                decode.close();
             }
         }
 
@@ -720,27 +782,20 @@ class RequestResourceAccountingTest {
             var member = new Delivery.Member(item, acquisition.value());
             try {
                 var claim =
-                        DeliveryDispatcher.commitDelivery(
-                                requests,
+                        requests.commitDelivery(
                                 new org.flexlb.balance.scheduler.Delivery.Member(
                                         item, member.decode()),
                                 Delivery.SendMode.BATCH_ENQUEUE,
                                 1L);
                 assertNotNull(claim);
-                assertTrue(claim.route().ctx().data().getRequestScheduler().tryStartSend(claim));
+                assertEquals(
+                        ContextResult.SendState.SENDING,
+                        claim.owner().snapshot().delivery().send());
                 return claim;
             } finally {
                 member.close();
                 prefillHandoff.close();
             }
-        }
-
-        void assertReserved() {
-            assertEquals(1, SchedulerTestSupport.repository(requests).liveRequestCount());
-            assertEquals(1, prefill.stats().locallyOwnedRequests());
-            assertEquals(HARD_KV, decode.routingView().inflightHardKv());
-            assertEquals(
-                    EXPECTED_KV, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
         }
 
         void assertHandedOff() {
@@ -754,6 +809,50 @@ class RequestResourceAccountingTest {
                                     EXPECTED_KV,
                                     CapacityRelease.NONE)
                             .fits());
+        }
+
+        void assertReserved() {
+            assertEquals(1, SchedulerTestSupport.repository(requests).liveRequestCount());
+            assertEquals(1, prefill.stats().locallyOwnedRequests());
+            assertEquals(HARD_KV, decode.routingView().inflightHardKv());
+            assertEquals(
+                    EXPECTED_KV, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
+        }
+
+        void assertCapacityReusable() {
+            {
+                var selectedEndpoint = decode;
+
+                var next =
+                        decode.tryRegisterSelection(
+                                        decode.routingView(),
+                                        String.valueOf(999L),
+                                        HARD_KV,
+                                        EXPECTED_KV,
+                                        50,
+                                        capacity)
+                                .value();
+                assertNotNull(next);
+                var permit = decode.acquireDispatchPermit(next, capacity);
+                assertEquals(
+                        DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
+                        permit.status());
+                assertTrue(permit.value().release());
+                decode.release(next, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
+            }
+            // A second exact request must be able to use the sole Prefill slot too.
+            var nextContext =
+                    RequestProtocolTestSupport.context(item.ctx().data().getConfig(), 999L);
+            nextContext.data().setFuture(new CompletableFuture<>());
+            var next =
+                    RequestExecutionTestSupport.registerPrefillRoute(
+                            nextContext, prefill, null, null, 1L, System.currentTimeMillis());
+            {
+                var selectedEndpoint = prefill;
+
+                prefill.rollback(next.prefillReservation());
+            }
+            assertEmpty();
         }
 
         void assertEmpty() {
@@ -783,46 +882,6 @@ class RequestResourceAccountingTest {
             assertTrue(view.confirmedCount() == 0);
         }
 
-        void assertCapacityReusable() {
-            {
-                var selectedEndpoint = decode;
-
-                var next =
-                        decode.tryReserveQueuedRequest(
-                                        String.valueOf(999L), HARD_KV, EXPECTED_KV, 50, null)
-                                .value();
-                assertNotNull(next);
-                var permit = decode.acquireDispatchPermit(next, capacity);
-                assertEquals(
-                        DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
-                        permit.status());
-                assertTrue(permit.value().release());
-                decode.release(next, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
-            }
-            // A second exact request must be able to use the sole Prefill slot too.
-            var nextContext =
-                    RequestProtocolTestSupport.context(item.ctx().data().getConfig(), 999L);
-            nextContext.data().setFuture(new CompletableFuture<>());
-            var next =
-                    SchedulingTestConfig.createRoute(
-                            nextContext,
-                            new Response(),
-                            null,
-                            null,
-                            prefill,
-                            null,
-                            null,
-                            System.currentTimeMillis());
-            {
-                var selectedEndpoint = prefill;
-
-                var result = prefill.reserveUnqueuedRoute(next, 1);
-                assertTrue(result.accepted());
-                prefill.rollback(result.value());
-            }
-            assertEmpty();
-        }
-
         void proveCleanup() throws Exception {
             cleanup.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             item.ctx()
@@ -839,7 +898,7 @@ class RequestResourceAccountingTest {
         void expire() {
             RequestProtocolTestSupport.expireInactiveRequest(
                     requests,
-                    requests.requests.findActive(String.valueOf(ID)),
+                    requests.repository.findActive(String.valueOf(ID)),
                     System.currentTimeMillis() + TTL + 1);
         }
 
@@ -847,61 +906,5 @@ class RequestResourceAccountingTest {
                 Map<String, TaskInfo> running, Map<String, TaskInfo> finished, long freeKv) {
             applyStatus(decode, status(RoleType.DECODE, version++, running, finished, freeKv));
         }
-
-        @Override
-        public void close() {
-            try {
-                AbstractRequestScheduler.finishPlacement(admission);
-                prefillHandoff.close();
-                prefill.rollback(routeReservation);
-                SchedulerTestSupport.shutdown(runtime);
-            } finally {
-                decode.close();
-            }
-        }
-    }
-
-    private static TaskInfo task(long id) {
-        var task = new TaskInfo();
-        task.setRequestId(String.valueOf(id));
-        task.setInputLength(HARD_KV);
-        task.setPhase(TaskPhase.RUNNING);
-        return task;
-    }
-
-    private static WorkerStatusResponse status(
-            RoleType role,
-            long version,
-            Map<String, TaskInfo> running,
-            Map<String, TaskInfo> finished,
-            long freeKv) {
-        var response = new WorkerStatusResponse();
-        response.setRole(role);
-        response.setAlive(true);
-        response.setStatusVersion(version);
-        response.setLatestFinishedVersion(finished.isEmpty() ? 0L : version);
-        response.setRunningTaskInfo(running);
-        response.setRunningQueryLen((long) running.size());
-        response.setFinishedTaskInfo(finished);
-        response.setTotalKvCacheTokens(TOTAL_KV);
-        response.setAvailableKvCacheTokens(freeKv);
-        return response;
-    }
-
-    private static void applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
-        var worker = endpoint.getStatus();
-        org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange projection;
-        worker.lock.lock();
-        try {
-            projection =
-                    endpoint.applyPreparedStatus(
-                            worker,
-                            worker.prepareNewStatus(
-                                    WorkerStatusTestSupport.freezeStatusResponse(
-                                            worker, response)));
-        } finally {
-            worker.lock.unlock();
-        }
-        endpoint.publishStatus(projection);
     }
 }

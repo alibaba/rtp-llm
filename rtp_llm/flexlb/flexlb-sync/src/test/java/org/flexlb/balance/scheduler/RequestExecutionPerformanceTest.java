@@ -27,7 +27,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
-/** Route-time queue capture regression on the final Prefill runtime boundary. */
+/**
+ * Route-time queue capture regression on the final Prefill runtime boundary.
+ */
 @Tag("performance-regression")
 class RequestExecutionPerformanceTest {
 
@@ -42,8 +44,7 @@ class RequestExecutionPerformanceTest {
                         .findVirtual(
                                 PrefillQueueScheduler.class,
                                 "recordQueueWait",
-                                MethodType.methodType(
-                                        void.class, RouteExecution.class, String.class));
+                                MethodType.methodType(void.class, RouteResult.class, String.class));
         var allocationBean =
                 ManagementFactory.getThreadMXBean() instanceof com.sun.management.ThreadMXBean bean
                                 && bean.isThreadAllocatedMemorySupported()
@@ -60,8 +61,7 @@ class RequestExecutionPerformanceTest {
         for (int depth : new int[] {128, 512, 4096}) {
             PrefillQueueScheduler runtime = runtimeWithDepth(depth);
             try {
-                RouteExecution head =
-                        RequestExecutionTestSupport.capture(runtime).items().getFirst();
+                RouteResult head = RequestExecutionTestSupport.capture(runtime).items().getFirst();
                 for (int i = 0; i < operations; i++) {
                     capture.invokeExact(runtime, head, "Prefill capacity exhausted");
                 }
@@ -124,10 +124,8 @@ class RequestExecutionPerformanceTest {
                                             PrefillQueueScheduler.class,
                                             "recordQueueWait",
                                             MethodType.methodType(
-                                                    void.class,
-                                                    RouteExecution.class,
-                                                    String.class));
-                    RouteExecution head =
+                                                    void.class, RouteResult.class, String.class));
+                    RouteResult head =
                             RequestExecutionTestSupport.capture(runtime).items().getFirst();
                     capture.invokeExact(runtime, head, "Prefill capacity exhausted");
                     assertEquals(depth, runtime.getLatestQueueWaitSnapshot().get("queueDepth"));
@@ -313,7 +311,7 @@ class RequestExecutionPerformanceTest {
                 !org.mockito.Mockito.mockingDetails(runtime).isMock(),
                 "allocation benchmark must measure the real queue runner");
         long now = System.currentTimeMillis();
-        List<RouteExecution> items = new ArrayList<>(depth);
+        List<RouteResult> items = new ArrayList<>(depth);
         for (int index = 0; index < depth; index++) {
             items.add(
                     item(
@@ -324,13 +322,17 @@ class RequestExecutionPerformanceTest {
                             now - depth + index,
                             256L + (index % 32)));
         }
-        for (RouteExecution item : items) {
+        for (RouteResult item : items) {
             SchedulerTestSupport.bindOwner(item.ctx(), scheduler);
             var context = item.ctx();
-            context.register(item.requestId(), now, Long.MAX_VALUE, 60_000L);
+            context.register(
+                    item.requestId(),
+                    now,
+                    Long.MAX_VALUE,
+                    60_000L,
+                    org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
             var placement = (PlacementOperation) context.beginPlacement(null);
-            context.bindPlacement(placement, item, ContextResult.PublicationResult.PREPARED);
-            context.bindPlacement(placement, item, ContextResult.PublicationResult.PUBLISHED);
+            context.publishRoute(placement, item);
             org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                     context,
                     observedRequest ->
@@ -347,7 +349,7 @@ class RequestExecutionPerformanceTest {
         return runtime;
     }
 
-    private static RouteExecution item(
+    private static RouteResult item(
             FlexlbConfig config,
             PrefillEndpoint endpoint,
             long requestId,
@@ -364,7 +366,29 @@ class RequestExecutionPerformanceTest {
         context.data().setRequest(request);
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         context.data().setFuture(new CompletableFuture<Response>());
-        return SchedulingTestConfig.createRoute(
-                context, null, null, null, endpoint, null, null, enqueuedAtMs);
+        context.data().initializeExecutionOrder(enqueuedAtMs, requestId);
+        var input =
+                new org.flexlb.balance.planner.GroupPlanner.Item(
+                        context.data().getRequestId(),
+                        priority,
+                        requestId,
+                        enqueuedAtMs,
+                        Long.MAX_VALUE,
+                        seqLen,
+                        0L);
+        var registration =
+                endpoint.tryRegisterSelection(
+                        input, endpoint.captureRouteProjectionInputs(), 0L, true);
+        assertEquals(
+                org.flexlb.balance.PlacementResult.Registration.REGISTERED, registration.status());
+        var metadata =
+                org.flexlb.dao.loadbalance.ServerStatus.forWorker(
+                        RoleType.PREFILL,
+                        context.data().getRequestId(),
+                        endpoint.getStatus().topologySnapshot(),
+                        endpoint.getStatus().committedEngineObservation());
+        return new RouteResult(
+                context,
+                List.of(new RoleSelection.Prefill(endpoint, metadata, 0L, registration.record())));
     }
 }

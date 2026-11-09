@@ -22,10 +22,11 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Local domain-to-host discovery from a configured mapping or a reloadable JSON file. */
+/**
+ * File-backed discovery fixture for dynamic worker topology tests.
+ */
 @Slf4j
 public final class LocalServiceDiscovery implements ServiceDiscovery {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /** Rate limit for the repeated fallback debug log (per instance). */
@@ -57,13 +58,21 @@ public final class LocalServiceDiscovery implements ServiceDiscovery {
     }
 
     @Override
-    public List<WorkerHost> getHosts(Endpoint endpoint) {
-        return getHosts(endpoint.getAddress());
+    public void listen(Endpoint endpoint, ServiceHostListener listener) {
+        listen(endpoint.getAddress(), listener);
     }
 
     @Override
-    public void listen(Endpoint endpoint, ServiceHostListener listener) {
-        listen(endpoint.getAddress(), listener);
+    public void listen(String address, ServiceHostListener listener) {
+        // Notify the listener once with the current view.
+        if (listener != null) {
+            listener.onHostsChanged(getHosts(address));
+        }
+    }
+
+    @Override
+    public List<WorkerHost> getHosts(Endpoint endpoint) {
+        return getHosts(endpoint.getAddress());
     }
 
     @Override
@@ -83,14 +92,6 @@ public final class LocalServiceDiscovery implements ServiceDiscovery {
             }
         }
         return lastGoodSnapshot.getOrDefault(address, List.of());
-    }
-
-    @Override
-    public void listen(String address, ServiceHostListener listener) {
-        // Notify the listener once with the current view.
-        if (listener != null) {
-            listener.onHostsChanged(getHosts(address));
-        }
     }
 
     @Override

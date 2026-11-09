@@ -22,6 +22,9 @@ import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
+/**
+ * Checks that only evidence for the current delivery can consume predictions or advance confirmation and settlement.
+ */
 class RequestDeliveryEventTest {
     @Test
     void staleGenerationCannotConsumeTheCurrentRoutesPrediction() {
@@ -81,7 +84,7 @@ class RequestDeliveryEventTest {
                                 observedRequest.recordDeliveryResult(
                                         new Prediction(fixture.delivery(), 3000L, 1002L)));
         assertEquals(UpdateKind.APPLIED, prediction.kind());
-        assertEquals(SendState.NOT_STARTED, prediction.after().delivery().send());
+        assertEquals(SendState.SENDING, prediction.after().delivery().send());
         assertFalse(prediction.after().deliveryReleasable());
         assertFalse(prediction.after().delivery().acknowledged());
         assertNotNull(prediction.after().deadlines().visibility());

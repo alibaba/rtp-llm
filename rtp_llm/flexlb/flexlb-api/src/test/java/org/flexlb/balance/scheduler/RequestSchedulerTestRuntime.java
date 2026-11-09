@@ -1,9 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DefaultDecodePreemption;
 import org.flexlb.balance.eviction.PriorityDecodePreemptionPolicy;
@@ -36,7 +34,6 @@ import java.util.concurrent.CompletableFuture;
  * package-private lifecycle owners without reopening production constructors.
  */
 public final class RequestSchedulerTestRuntime implements AutoCloseable {
-
     private final RequestRepository requests = new RequestRepository();
     private final PlacementAvailability placementAvailability = new PlacementAvailability();
     private final EndpointRegistry registry;
@@ -188,7 +185,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     }
 
     /** Return the exact item currently owned by a fixture request context. */
-    public RouteExecution activeRoute(long requestId) {
+    public RouteResult activeRoute(long requestId) {
         RequestContext requestContext = requests.findActive(String.valueOf(requestId));
         if (requestContext == null) {
             return null;
@@ -267,36 +264,26 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     "queue admission requires a successful route response");
         }
 
-        RouteResult.Builder route = new RouteResult.Builder(context);
-        try {
-            for (ServerStatus status : response.getServerStatus()) {
-                if (status == null) {
-                    continue;
-                }
-                String address = status.getLogicalIpPort();
-                var selectedEndpoint = registry.selectEndpoint(status.getRole(), address);
-                if (selectedEndpoint == null) {
-                    throw new IllegalStateException(
-                            "fixture route references an unpublished endpoint: " + address);
-                }
-                long version =
-                        selectedEndpoint instanceof PrefillEndpoint prefill
-                                ? prefill.progress().ownershipVersion()
-                                : selectedEndpoint instanceof DecodeEndpoint decode
-                                        ? decode.placementVersion()
-                                        : 0L;
-                route.add(
-                        selectedEndpoint,
-                        status,
-                        status.getRole().supportsPrefill()
-                                ? Math.max(0L, status.getPrefillTime())
-                                : -1L,
-                        version);
+        var roles = new java.util.ArrayList<RoleSelection>();
+        for (ServerStatus status : response.getServerStatus()) {
+            if (status == null) {
+                continue;
             }
-            return PlacementResult.success(route.prepare());
-        } catch (RuntimeException | Error failure) {
-            throw failure;
+            String address = status.getLogicalIpPort();
+            var selectedEndpoint = registry.selectEndpoint(status.getRole(), address);
+            if (selectedEndpoint == null) {
+                throw new IllegalStateException(
+                        "fixture route references an unpublished endpoint: " + address);
+            }
+            roles.add(
+                    SelectionTestSupport.metadata(
+                            selectedEndpoint,
+                            status,
+                            status.getRole().supportsPrefill()
+                                    ? Math.max(0L, status.getPrefillTime())
+                                    : -1L));
         }
+        return SchedulerTestServices.registerSelection(context, roles);
     }
 
     @Override
@@ -304,6 +291,15 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         runtime.shutdown(ShutdownMode.IMMEDIATE, Duration.ZERO);
     }
 
+    private static ModelMetaConfig emptyModelMeta() {
+        ModelMetaConfig meta = org.mockito.Mockito.mock(ModelMetaConfig.class);
+        org.mockito.Mockito.when(meta.requiredRoles()).thenReturn(List.of());
+        return meta;
+    }
+
+    /**
+     * Binds one router after the runtime is assembled, then delegates selection and blocked-endpoint queries.
+     */
     private static final class BindingRouter extends RequestRouteSelector {
         private RequestRouteSelector delegate;
 
@@ -330,6 +326,26 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     emptyModelMeta());
         }
 
+        @Override
+        public PlacementResult<RouteResult, PlacementKey> select(
+                RequestContext context, String policyGroup) {
+            return requireBound().select(context, policyGroup);
+        }
+
+        @Override
+        WorkerEndpoint blockedEndpoint(PlacementKey key) {
+            return requireBound().blockedEndpoint(key);
+        }
+
+        @Override
+        PlacementResult<RouteResult, PlacementKey> select(
+                RequestContext context,
+                String group,
+                org.flexlb.balance.endpoint.DecodeEndpoint endpoint,
+                org.flexlb.balance.endpoint.DecodeResources.RequestReservation reservation) {
+            return requireBound().select(context, group, endpoint, reservation);
+        }
+
         private synchronized void bind(RequestRouteSelector exactRouter) {
             Objects.requireNonNull(exactRouter, "exactRouter");
             if (delegate != null) {
@@ -338,23 +354,11 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             delegate = exactRouter;
         }
 
-        @Override
-        public PlacementResult<RouteResult, PlacementKey> select(
-                RequestContext context, String policyGroup) {
-            return requireBound().select(context, policyGroup);
-        }
-
         private synchronized RequestRouteSelector requireBound() {
             if (delegate == null) {
                 throw new IllegalStateException("test router is not bound");
             }
             return delegate;
         }
-    }
-
-    private static ModelMetaConfig emptyModelMeta() {
-        ModelMetaConfig meta = org.mockito.Mockito.mock(ModelMetaConfig.class);
-        org.mockito.Mockito.when(meta.requiredRoles()).thenReturn(List.of());
-        return meta;
     }
 }

@@ -8,7 +8,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static org.flexlb.balance.scheduler.ContextResult.CloseProgress;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
@@ -18,11 +17,15 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Verifies that terminal facts cannot archive a request before notifications and physical resource release complete.
+ */
 class RequestCleanupArchiveRaceTest {
     @RepeatedTest(16)
     @Timeout(15)
     void terminalFactsRequireBothNotificationAndPhysicalReleaseProof() throws Exception {
         var context = RequestCleanupPassTest.openContext(7501L);
+        var route = context.snapshot().route();
         RequestCleanupPassTest.ended(
                 context.beginClose(
                         new EndEvidence(
@@ -47,8 +50,7 @@ class RequestCleanupArchiveRaceTest {
                                 ready.countDown();
                                 assertTrue(start.await(5, TimeUnit.SECONDS));
                                 synchronized (context) {
-                                    context.completeClose(
-                                            RequestCleanupPassTest.released(true, true), 1002L);
+                                    context.recordResourcesReleased(route, true, true, 1002L);
                                     return context.snapshot();
                                 }
                             });
@@ -58,8 +60,7 @@ class RequestCleanupArchiveRaceTest {
                                 ready.countDown();
                                 assertTrue(start.await(5, TimeUnit.SECONDS));
                                 synchronized (context) {
-                                    context.completeClose(
-                                            new CloseProgress(true, false, false, true), 1002L);
+                                    context.recordCloseNotifications(true, true, 1002L);
                                     return context.snapshot();
                                 }
                             });
@@ -75,7 +76,7 @@ class RequestCleanupArchiveRaceTest {
             assertEquals(Phase.CLOSED, current.phase());
             assertNull(current.route());
             assertNull(context.releaseReason());
-            context.completeClose(RequestCleanupPassTest.released(true, true), 1003L);
+            context.recordResourcesReleased(route, true, true, 1003L);
             assertSame(current, context.snapshot());
         } finally {
             start.countDown();

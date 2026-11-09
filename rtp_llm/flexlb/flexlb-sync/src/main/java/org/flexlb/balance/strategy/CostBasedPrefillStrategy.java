@@ -20,9 +20,12 @@ import java.util.function.LongSupplier;
 
 import static com.google.common.math.LongMath.saturatedAdd;
 
+/**
+ * Ranks Prefill candidates using predicted cost and cache affinity, then registers the selected candidate.
+ */
 public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
-
     private static final int MAX_CACHED_WORKERS = 4096;
+
     private static final ThreadLocal<PrefillCandidateSet> CANDIDATES =
             ThreadLocal.withInitial(PrefillCandidateSet::new);
 
@@ -31,7 +34,9 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
 
     private final boolean priorityOrdering;
     private final boolean queueScheduling;
+
     private final Long cacheAffinityExtraTtftMs;
+
     private final double cacheAffinityMinHitRate;
     private final double remoteDiscount;
 
@@ -50,13 +55,14 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
     }
 
     @Override
-    public <I extends CandidateInput> PlacementResult<Selection<I>, PlacementKey> select(
+    public <I extends CandidateInput> PlacementResult<Selection<I>, PlacementKey> selectAndRegister(
             Request request,
             SchedulingMetadata metadata,
             RoleType roleType,
             String group,
             List<I> inputs,
-            LongSupplier clock) {
+            LongSupplier clock,
+            java.util.function.Function<Selection<I>, PlacementResult.Registration> register) {
         PrefillCandidateSet cached = CANDIDATES.get();
         PrefillCandidateSet candidates = cached.inUse ? new PrefillCandidateSet() : cached;
         candidates.inUse = true;
@@ -94,18 +100,68 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                         rejections,
                         cacheMatches);
             }
-            int selected =
-                    selectBestCandidate(
+            for (int attempt = 0; attempt < 8; attempt++) {
+                int selected =
+                        selectBestCandidate(
+                                candidates,
+                                candidates.minimumTtftRank,
+                                roleType,
+                                group,
+                                request.getSeqLen());
+                PlacementResult<Selection<I>, PlacementKey> result =
+                        selected < 0
+                                ? PlacementResult.blocked(new PlacementKey(roleType, group, null))
+                                : selection(candidates, selected, roleType, metadata, cacheMatches);
+                if (result.status() != PlacementResult.Status.SUCCESS)
+                    return observe(
+                            result,
                             candidates,
-                            candidates.minimumTtftRank,
+                            selected,
                             roleType,
                             group,
-                            request.getSeqLen());
-            PlacementResult<Selection<I>, PlacementKey> result =
-                    selected < 0
-                            ? PlacementResult.blocked(new PlacementKey(roleType, group, null))
-                            : selection(candidates, selected, roleType, metadata, cacheMatches);
-            return observe(result, candidates, selected, roleType, group, rejections, cacheMatches);
+                            rejections,
+                            cacheMatches);
+                var registered = register.apply(result.value());
+                if (registered == PlacementResult.Registration.REGISTERED)
+                    return observe(
+                            result,
+                            candidates,
+                            selected,
+                            roleType,
+                            group,
+                            rejections,
+                            cacheMatches);
+                if (registered == PlacementResult.Registration.BLOCKED)
+                    return observe(
+                            PlacementResult.blocked(
+                                    PlacementKey.exact(
+                                            roleType,
+                                            result.value().input().group(),
+                                            result.value().address()),
+                                    Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
+                                    null),
+                            candidates,
+                            selected,
+                            roleType,
+                            group,
+                            rejections,
+                            cacheMatches);
+                var input = candidates.capturedSources[selected];
+                long hit = candidates.cacheHitTokens[selected];
+                long routingHit = candidates.routingCacheMatchTokens[selected];
+                candidates.remove(selected);
+                if (registered == PlacementResult.Registration.CONFLICT)
+                    evaluateCandidate(
+                            request,
+                            metadata,
+                            rejections,
+                            candidates,
+                            clock.getAsLong(),
+                            input,
+                            hit,
+                            routingHit);
+            }
+            return PlacementResult.retry();
         } finally {
             candidates.clear();
             candidates.inUse = false;
@@ -113,6 +169,32 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                 CANDIDATES.remove();
             }
         }
+    }
+
+    /** Select from candidates that already passed the common hard filters. */
+    int selectBestCandidate(
+            PrefillCandidateSet survivors,
+            long minProjectedTtftMs,
+            RoleType roleType,
+            String group,
+            long seqLen) {
+        if (survivors.size == 0) {
+            return -1;
+        }
+
+        String previousReason = survivors.affinityReason;
+        boolean affinity = cacheAffinityExtraTtftMs != null && survivors.hasKnownTtft;
+        int leader = affinity ? findCacheLeader(survivors, minProjectedTtftMs, seqLen) : -1;
+        int selected =
+                selectTiedCandidate(
+                        survivors,
+                        leader < 0 ? minProjectedTtftMs : survivors.ttftRank(leader),
+                        leader < 0 ? Long.MIN_VALUE : survivors.cacheHitTokens[leader],
+                        roleType,
+                        group);
+        if (selected < 0) survivors.affinityReason = previousReason;
+        else if (affinity) logAffinity(survivors, selected, minProjectedTtftMs, roleType, group);
+        return selected;
     }
 
     private <I extends CandidateInput> PlacementResult<Selection<I>, PlacementKey> selection(
@@ -165,7 +247,39 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                         candidates.affinityReason,
                         candidates.registeredCount,
                         winner,
-                        cacheMatches));
+                        cacheMatches,
+                        candidates.inputs[selected]));
+    }
+
+    private static AdmissionRejectReason classifyWorkerCapacity(AdmissionSummary summary) {
+        long residual = Math.max(0L, summary.requestsToRelease() - summary.lowerPriorityRequests());
+        long protectedRequests = summary.higherPriorityRequests() + summary.samePriorityRequests();
+        if (residual > protectedRequests && summary.unknownPriorityRequests() > 0L) {
+            return AdmissionRejectReason.UNSPECIFIED;
+        }
+        if (residual > 0L && protectedRequests >= residual) {
+            return summary.higherPriorityRequests() > 0L
+                    ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
+                    : AdmissionRejectReason.SAME_PRIORITY_AHEAD;
+        }
+        return AdmissionRejectReason.RESOURCE_EXHAUSTED;
+    }
+
+    private static <I extends CandidateInput>
+            PlacementResult<Selection<I>, PlacementKey> blockedWithDiagnostics(
+                    Response failure, PlacementKey key, int workerCount, Map<String, ?> details) {
+        return PlacementResult.blocked(
+                key,
+                failure,
+                Map.of(
+                        "role",
+                        key.role().name(),
+                        "workers",
+                        workerCount,
+                        "observedAtMs",
+                        System.currentTimeMillis(),
+                        "details",
+                        Map.copyOf(details)));
     }
 
     private static <I extends CandidateInput> PlacementResult<Selection<I>, PlacementKey> observe(
@@ -203,12 +317,7 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                         null));
         if (cacheMatches != null) details.put("cacheQuery", cacheMatches);
         return new PlacementResult<>(
-                result.status(),
-                result.value(),
-                result.failure(),
-                result.blocker(),
-                details,
-                result.selection());
+                result.status(), result.value(), result.failure(), result.blocker(), details);
     }
 
     private static org.flexlb.dao.pv.RoutingDecision.Candidate snapshotCandidate(
@@ -228,63 +337,6 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                 null,
                 ttft < 0 ? "UNMODELED_ENGINE_WORK" : "MODELED",
                 candidates.ownershipVersions[index]);
-    }
-
-    private static AdmissionRejectReason classifyWorkerCapacity(AdmissionSummary summary) {
-        long residual = Math.max(0L, summary.requestsToRelease() - summary.lowerPriorityRequests());
-        long protectedRequests = summary.higherPriorityRequests() + summary.samePriorityRequests();
-        if (residual > protectedRequests && summary.unknownPriorityRequests() > 0L) {
-            return AdmissionRejectReason.UNSPECIFIED;
-        }
-        if (residual > 0L && protectedRequests >= residual) {
-            return summary.higherPriorityRequests() > 0L
-                    ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
-                    : AdmissionRejectReason.SAME_PRIORITY_AHEAD;
-        }
-        return AdmissionRejectReason.RESOURCE_EXHAUSTED;
-    }
-
-    private static <I extends CandidateInput>
-            PlacementResult<Selection<I>, PlacementKey> blockedWithDiagnostics(
-                    Response failure, PlacementKey key, int workerCount, Map<String, ?> details) {
-        return PlacementResult.blocked(
-                key,
-                failure,
-                Map.of(
-                        "role",
-                        key.role().name(),
-                        "workers",
-                        workerCount,
-                        "observedAtMs",
-                        System.currentTimeMillis(),
-                        "details",
-                        Map.copyOf(details)));
-    }
-
-    /** Select from candidates that already passed the common hard filters. */
-    int selectBestCandidate(
-            PrefillCandidateSet survivors,
-            long minProjectedTtftMs,
-            RoleType roleType,
-            String group,
-            long seqLen) {
-        if (survivors.size == 0) {
-            return -1;
-        }
-
-        String previousReason = survivors.affinityReason;
-        boolean affinity = cacheAffinityExtraTtftMs != null && survivors.hasKnownTtft;
-        int leader = affinity ? findCacheLeader(survivors, minProjectedTtftMs, seqLen) : -1;
-        int selected =
-                selectTiedCandidate(
-                        survivors,
-                        leader < 0 ? minProjectedTtftMs : survivors.ttftRank(leader),
-                        leader < 0 ? Long.MIN_VALUE : survivors.cacheHitTokens[leader],
-                        roleType,
-                        group);
-        if (selected < 0) survivors.affinityReason = previousReason;
-        else if (affinity) logAffinity(survivors, selected, minProjectedTtftMs, roleType, group);
-        return selected;
     }
 
     /** Cache affinity may spend only the configured time above the fastest eligible candidate. */
@@ -398,37 +450,15 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                     routingCacheMatchTokens >= seqLen
                             ? Math.max(0L, seqLen - blockSize)
                             : routingCacheMatchTokens;
-            RequestTimeEstimation.Inputs projectionInputs = input.projectionInputs();
-            RequestTimeEstimation.CandidateView projection =
-                    estimator.projectCandidate(
-                            projectionInputs,
-                            request.getRequestId(),
-                            metadata.priority(),
-                            planningAtMs,
-                            // ExpirationTimer drives request deadlines through the owning
-                            // scheduler.
-                            // Selection scores endpoint work only; an expiry race
-                            // must not be reported as a capacity blocker.
-                            Long.MAX_VALUE,
-                            seqLen,
-                            cacheHit,
-                            routingCacheMatchTokens,
-                            planningAtMs);
-            if (!projection.selectable() && !projection.engineWorkUnmodeled()) {
-                rejections.merge(
-                        "PROJECTION_" + projection.state().name() + "_" + projection.detail(),
-                        1,
-                        Integer::sum);
-                continue;
-            }
-
-            candidates.addCandidate(
-                    endpointAddress, input, projection, projectionInputs.ownershipVersion());
-            if (projection.admissionState() == RequestTimeEstimation.State.BLOCKED
-                    || projection.admissionState() == RequestTimeEstimation.State.UNAVAILABLE) {
-                candidates.admissionBlocks[candidates.size - 1] = projection.admissionDetail();
-            }
-            logProjection(endpointAddress, cacheHit, projection);
+            evaluateCandidate(
+                    request,
+                    metadata,
+                    rejections,
+                    candidates,
+                    planningAtMs,
+                    input,
+                    cacheHit,
+                    routingCacheMatchTokens);
         }
     }
 
@@ -440,6 +470,52 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
         if (request.getBlockSize() > 0) return request.getBlockSize();
         if (request.getCacheKeyBlockSize() > 0) return request.getCacheKeyBlockSize();
         return Math.max(0, input.cacheBlockSize());
+    }
+
+    private void evaluateCandidate(
+            Request request,
+            SchedulingMetadata metadata,
+            Map<String, Integer> rejections,
+            PrefillCandidateSet candidates,
+            long planningAtMs,
+            CandidateInput input,
+            long cacheHit,
+            long routingCacheMatchTokens) {
+        var estimator = RequestTimeEstimation.current();
+        long seqLen = request.getSeqLen();
+        String endpointAddress = input.address();
+        RequestTimeEstimation.Inputs projectionInputs = input.projectionInputs();
+        RequestTimeEstimation.CandidateView projection =
+                estimator.projectCandidate(
+                        projectionInputs,
+                        request.getRequestId(),
+                        metadata.priority(),
+                        planningAtMs,
+                        // ExpirationTimer drives request deadlines through the owning
+                        // scheduler.
+                        // Selection scores endpoint work only; an expiry race
+                        // must not be reported as a capacity blocker.
+                        Long.MAX_VALUE,
+                        seqLen,
+                        cacheHit,
+                        routingCacheMatchTokens,
+                        planningAtMs);
+        if (!projection.selectable() && !projection.engineWorkUnmodeled()) {
+            rejections.merge(
+                    "PROJECTION_" + projection.state().name() + "_" + projection.detail(),
+                    1,
+                    Integer::sum);
+            return;
+        }
+
+        candidates.addCandidate(
+                endpointAddress, input, projection, projectionInputs.ownershipVersion());
+        candidates.inputs[candidates.size - 1] = projectionInputs;
+        if (projection.admissionState() == RequestTimeEstimation.State.BLOCKED
+                || projection.admissionState() == RequestTimeEstimation.State.UNAVAILABLE) {
+            candidates.admissionBlocks[candidates.size - 1] = projection.admissionDetail();
+        }
+        logProjection(endpointAddress, cacheHit, projection);
     }
 
     private void logProjection(

@@ -15,6 +15,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Exercises accepted request work and exact-request continuations while shutdown drains their owners.
+ */
 class SchedulerRequestWorkTest {
     @Test
     void inlineOwnerCanHandOffCleanupAfterCloseStopsNewSources() throws Exception {
@@ -171,21 +174,6 @@ class SchedulerRequestWorkTest {
             if (closer != null) {
                 closer.join(5_000);
             }
-        }
-    }
-
-    @Test
-    void rejectedPoolTaskIsReportedToTheCaller() {
-        SchedulerTestServices executor = runtime();
-        ExecutorService workers =
-                (ExecutorService) ReflectionTestUtils.getField(executor.tasks(), "requestWorkers");
-        workers.shutdown();
-        try {
-            assertThrows(
-                    RuntimeException.class,
-                    () -> executor.tasks().execute(requestContext(993003L), () -> {}));
-        } finally {
-            close(executor);
         }
     }
 

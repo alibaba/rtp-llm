@@ -11,11 +11,12 @@ import javax.annotation.PreDestroy;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/** Local node and elected master status exposed to routing and administration. */
+/**
+ * Local node and elected master status exposed to routing and administration.
+ */
 @Slf4j
 @Component
 public class MasterStatusService implements MasterStatusView {
-
     public static final String MASTER_CHANGE_NOTIFY_PATH = "/rtp_llm/notify_master";
 
     private final ZookeeperMasterElectService zookeeperMasterElectService;
@@ -34,6 +35,11 @@ public class MasterStatusService implements MasterStatusView {
         this.zookeeperMasterElectService.start();
     }
 
+    @Override
+    public boolean isNeedConsistency() {
+        return zookeeperMasterElectService.isConsistencyEnabled();
+    }
+
     public void offline() {
         if (!isNeedConsistency()) {
             log.warn("offline: ZooKeeper consistency is disabled.");
@@ -49,30 +55,6 @@ public class MasterStatusService implements MasterStatusView {
             return;
         }
         this.zookeeperMasterElectService.destroy();
-    }
-
-    @Override
-    public boolean isNeedConsistency() {
-        return zookeeperMasterElectService.isConsistencyEnabled();
-    }
-
-    @Override
-    public boolean isMaster() {
-        if (!isNeedConsistency()) {
-            return false;
-        }
-        return zookeeperMasterElectService.isMaster();
-    }
-
-    public String getMasterHostIpPort() {
-        if (!isNeedConsistency()) {
-            return null;
-        }
-        String masterHostIp = zookeeperMasterElectService.getMasterHostIp();
-        if (masterHostIp == null) {
-            return null;
-        }
-        return masterHostIp + ":" + localNode.serverPort();
     }
 
     public String getLocalHostIp() {
@@ -111,5 +93,24 @@ public class MasterStatusService implements MasterStatusView {
         resp.setMsg("leadership snapshot");
         resp.setLbStatus(JsonUtils.toStringOrEmpty(snapshot));
         return resp;
+    }
+
+    @Override
+    public boolean isMaster() {
+        if (!isNeedConsistency()) {
+            return false;
+        }
+        return zookeeperMasterElectService.isMaster();
+    }
+
+    public String getMasterHostIpPort() {
+        if (!isNeedConsistency()) {
+            return null;
+        }
+        String masterHostIp = zookeeperMasterElectService.getMasterHostIp();
+        if (masterHostIp == null) {
+            return null;
+        }
+        return masterHostIp + ":" + localNode.serverPort();
     }
 }

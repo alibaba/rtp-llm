@@ -10,7 +10,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.pv.DecisionGroup;
 import org.flexlb.dao.pv.RoutingDecision;
 import org.flexlb.dao.route.RoleType;
@@ -28,16 +27,23 @@ import java.util.concurrent.FutureTask;
 
 import static com.google.common.base.Preconditions.checkState;
 
-/** Request input and telemetry. Lifecycle decisions belong to the exact RequestContext. */
+/**
+ * Request input and telemetry. Lifecycle decisions belong to the exact RequestContext.
+ */
 @Getter
 public final class RequestData {
     private static final java.util.concurrent.atomic.AtomicLong WORKER_SEQUENCE =
             new java.util.concurrent.atomic.AtomicLong();
+
     private final FlexlbConfig config;
+
     private final long startTime = System.currentTimeMillis();
     private final long serviceStartNanos = System.nanoTime();
+
     private volatile Request request;
+
     private long originalNumericRequestId;
+
     private org.flexlb.dao.route.RequestPhase phase = org.flexlb.dao.route.RequestPhase.GENERATION;
     private java.util.List<org.flexlb.dao.route.RoleType> requestedRoles = java.util.List.of();
     private volatile SchedulingMetadata schedulingMetadata;
@@ -50,6 +56,7 @@ public final class RequestData {
     private volatile int generateInputSize;
 
     @Setter private Context traceContext;
+
     @Setter private long grpcEntryTime;
     @Setter private long grpcEntryNanos;
     @Setter private long routeSubmittedNanos;
@@ -60,25 +67,35 @@ public final class RequestData {
     @Setter private volatile long placementSequence;
     private long ackAtMs;
     private long ackAtNanos;
+
     @Setter private volatile Map<String, Object> schedulingDiagnostics;
     @Setter private String planType = "";
+
     @Setter private long planCost;
     @Setter private int victimCount;
 
     @Setter private Long requestMessageBytes;
     @Setter private Long requestBodyBytes;
     @Setter private DecisionGroup decisionGroup;
+
     private long totalTimeUs;
+
     private Long requestArrivalDelayMs;
     private Long requestBodyReadAndDeserializeTimeUs;
     private String cacheSource;
+
     private long cacheQueryUs;
     private int cacheQueryCount;
+
     private final EnumMap<RoleType, CacheMatchSelection> cacheSelections =
             new EnumMap<>(RoleType.class);
     private final EnumMap<RoleType, RoutingDecision> routingDecisions =
             new EnumMap<>(RoleType.class);
     private final EnumMap<RoleType, Integer> routingAttempts = new EnumMap<>(RoleType.class);
+
+    public RequestData(FlexlbConfig config) {
+        this.config = Objects.requireNonNull(config, "config");
+    }
 
     public synchronized void setOriginalNumericRequestId(long id) {
         checkState(requestScheduler == null, "registered request identity is immutable");
@@ -93,10 +110,6 @@ public final class RequestData {
     public synchronized void setRequestedRoles(java.util.List<RoleType> roles) {
         checkState(requestScheduler == null, "registered requested roles are immutable");
         requestedRoles = java.util.List.copyOf(roles);
-    }
-
-    public RequestData(FlexlbConfig config) {
-        this.config = Objects.requireNonNull(config, "config");
     }
 
     public synchronized void setRequest(Request value) {
@@ -121,30 +134,6 @@ public final class RequestData {
         future = value;
     }
 
-    /** Binding happens under the Repository -> Context lock; no callbacks execute here. */
-    synchronized void register(AbstractRequestScheduler owner, RequestFuture response) {
-        checkState(requestScheduler == null, "request data already registered");
-        Objects.requireNonNull(request, "request");
-        Objects.requireNonNull(owner, "requestScheduler");
-        Objects.requireNonNull(response, "response");
-        if (schedulingMetadata == null) {
-            schedulingMetadata =
-                    SchedulingMetadata.explicit(
-                            request.getRawPriority(), config.resolveExpiresAtMs(startTime));
-        }
-        requestScheduler = owner;
-        future = response;
-    }
-
-    /**
-     * Classifies scheduling timeouts before request resources have been fully released.
-     */
-    public StrategyErrorType schedulingTimeoutError() {
-        return config.isQueue()
-                ? StrategyErrorType.RESOURCE_EXHAUSTED
-                : StrategyErrorType.BATCH_SLO_EXPIRED;
-    }
-
     public String getRequestId() {
         return request.getRequestId();
     }
@@ -156,9 +145,8 @@ public final class RequestData {
     }
 
     public long getRequestExpiresAtMs() {
-        return schedulingMetadata == null
-                ? config.resolveExpiresAtMs(startTime)
-                : schedulingMetadata.expiresAtMs();
+        return Objects.requireNonNull(schedulingMetadata, "scheduling metadata required")
+                .expiresAtMs();
     }
 
     public Response getResponse() {
@@ -176,81 +164,17 @@ public final class RequestData {
     /** Parsing remains deferred until delivery, and FutureTask memoizes both value and failure. */
     public synchronized void setGenerateInputPb(ByteString bytes) {
         checkState(!(future instanceof RequestFuture), "registered delivery input is immutable");
-        ByteString inputBytes = config.getDispatcher().requiresGenerateInput() ? bytes : null;
+        ByteString inputBytes = bytes;
         generateInputSize = inputBytes == null ? 0 : inputBytes.size();
         generateInput =
                 inputBytes == null || inputBytes.isEmpty()
                         ? null
-                        : new FutureTask<>(() -> Delivery.parseInput(inputBytes));
-    }
-
-    boolean hasGenerateInput() {
-        return generateInput != null;
-    }
-
-    void prepareGenerateInput() {
-        var input = generateInput;
-        if (input != null) {
-            input.run();
-        }
-    }
-
-    EngineRpcService.GenerateInputPB getGenerateInput()
-            throws InvalidProtocolBufferException, InterruptedException {
-        var input = generateInput;
-        if (input == null) {
-            return null;
-        }
-        input.run();
-        try {
-            return input.get();
-        } catch (ExecutionException failure) {
-            if (failure.getCause() instanceof InvalidProtocolBufferException malformed) {
-                throw malformed;
-            }
-            throw Failures.propagate(failure.getCause(), "Generate input parsing failed");
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            throw interrupted;
-        }
-    }
-
-    /** Confirmed delivery or archival releases cached input; in-progress readers keep a local reference. */
-    synchronized void discardGenerateInput() {
-        generateInput = null;
-    }
-
-    /** Routing is final after confirmed delivery; execution retains only scalar request metadata. */
-    synchronized void releaseSchedulingInput() {
-        generateInput = null;
-        if (request != null
-                && (!request.getBlockCacheKeys().isEmpty()
-                        || !request.getCacheAffinityKeys().isEmpty())) {
-            request =
-                    request.toBuilder()
-                            .blockCacheKeys(java.util.List.of())
-                            .cacheAffinityKeys(java.util.List.of())
-                            .build();
-        }
+                        : new FutureTask<>(() -> BatchEnqueueHelper.parseInput(inputBytes));
     }
 
     public synchronized void initializeExecutionOrder(long nowMs) {
         if (workerEnqueueSequence == 0L) {
             initializeExecutionOrder(nowMs, WORKER_SEQUENCE.incrementAndGet());
-        }
-    }
-
-    synchronized void initializeExecutionOrder(long nowMs, long sequence) {
-        if (workerEnqueueSequence == 0L) {
-            firstWorkerEnqueueTime = nowMs;
-            workerEnqueueSequence = sequence;
-        }
-    }
-
-    synchronized void acknowledge(long nowMs, long nowNanos) {
-        if (ackAtMs == 0L) {
-            ackAtMs = nowMs;
-            ackAtNanos = nowNanos;
         }
     }
 
@@ -321,6 +245,81 @@ public final class RequestData {
                 cacheSelections,
                 routingDecisions,
                 routingAttempts);
+    }
+
+    /** Binding happens under the Repository -> Context lock; no callbacks execute here. */
+    synchronized void register(AbstractRequestScheduler owner, RequestFuture response) {
+        checkState(requestScheduler == null, "request data already registered");
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(owner, "requestScheduler");
+        Objects.requireNonNull(response, "response");
+        Objects.requireNonNull(schedulingMetadata, "scheduling metadata required");
+        requestScheduler = owner;
+        future = response;
+    }
+
+    boolean hasGenerateInput() {
+        return generateInput != null;
+    }
+
+    void prepareGenerateInput() {
+        var input = generateInput;
+        if (input != null) {
+            input.run();
+        }
+    }
+
+    EngineRpcService.GenerateInputPB getGenerateInput()
+            throws InvalidProtocolBufferException, InterruptedException {
+        var input = generateInput;
+        if (input == null) {
+            return null;
+        }
+        input.run();
+        try {
+            return input.get();
+        } catch (ExecutionException failure) {
+            if (failure.getCause() instanceof InvalidProtocolBufferException malformed) {
+                throw malformed;
+            }
+            throw Failures.propagate(failure.getCause(), "Generate input parsing failed");
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        }
+    }
+
+    /** Confirmed delivery or archival releases cached input; in-progress readers keep a local reference. */
+    synchronized void discardGenerateInput() {
+        generateInput = null;
+    }
+
+    /** Routing is final after confirmed delivery; execution retains only scalar request metadata. */
+    synchronized void releaseSchedulingInput() {
+        generateInput = null;
+        if (request != null
+                && (!request.getBlockCacheKeys().isEmpty()
+                        || !request.getCacheAffinityKeys().isEmpty())) {
+            request =
+                    request.toBuilder()
+                            .blockCacheKeys(java.util.List.of())
+                            .cacheAffinityKeys(java.util.List.of())
+                            .build();
+        }
+    }
+
+    synchronized void initializeExecutionOrder(long nowMs, long sequence) {
+        if (workerEnqueueSequence == 0L) {
+            firstWorkerEnqueueTime = nowMs;
+            workerEnqueueSequence = sequence;
+        }
+    }
+
+    synchronized void acknowledge(long nowMs, long nowNanos) {
+        if (ackAtMs == 0L) {
+            ackAtMs = nowMs;
+            ackAtNanos = nowNanos;
+        }
     }
 
     public record RoutingTelemetry(

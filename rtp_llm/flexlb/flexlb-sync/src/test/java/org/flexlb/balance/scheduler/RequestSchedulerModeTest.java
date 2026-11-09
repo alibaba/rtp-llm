@@ -27,7 +27,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Public submission and cancellation contracts against both scheduler modes. */
+/**
+ * Public submission and cancellation contracts against both scheduler modes.
+ */
 class RequestSchedulerModeTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -41,7 +43,7 @@ class RequestSchedulerModeTest {
             assertEquals(
                     StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
                     original.get(3, TimeUnit.SECONDS).getCode());
-            f.requests.stopAdmissionsAndAwaitCompletion();
+            f.scheduler.close();
             verify(f.router, times(1)).select(f.context, null);
             assertEquals(
                     0,
@@ -62,7 +64,7 @@ class RequestSchedulerModeTest {
             assertEquals(
                     StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
                     original.get(3, TimeUnit.SECONDS).getCode());
-            f.requests.stopAdmissionsAndAwaitCompletion();
+            f.scheduler.close();
             assertEquals(
                     0,
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(f.requests)
@@ -103,7 +105,7 @@ class RequestSchedulerModeTest {
             assertEquals(
                     StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                     original.get(3, TimeUnit.SECONDS).getCode());
-            f.requests.stopAdmissionsAndAwaitCompletion();
+            f.scheduler.close();
             verify(f.router, times(1)).select(f.context, null);
         } finally {
             release.countDown();
@@ -188,7 +190,8 @@ class RequestSchedulerModeTest {
             StrategyErrorType expected =
                     switch (outcome) {
                         case "REJECTED" -> StrategyErrorType.NO_PREFILL_WORKER;
-                        case "THROW", "STOPPED" -> StrategyErrorType.DISPATCH_FAILED;
+                        case "THROW" -> StrategyErrorType.DISPATCH_FAILED;
+                        case "STOPPED" -> StrategyErrorType.SCHEDULER_UNAVAILABLE;
                         case "EXPIRED" ->
                                 queued
                                         ? StrategyErrorType.RESOURCE_EXHAUSTED
@@ -201,8 +204,8 @@ class RequestSchedulerModeTest {
             }
             verify(f.router, times(outcome.equals("REJECTED") || outcome.equals("THROW") ? 1 : 0))
                     .select(f.context, null);
-            f.requests.stopAdmissionsAndAwaitCompletion();
-            assertEquals(0, f.requests.requests.liveRequestCount());
+            f.scheduler.close();
+            assertEquals(0, f.requests.repository.liveRequestCount());
             SchedulerTestSupport.runtime(f.scheduler).requests().stopAccepting();
             SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.scheduler));
 
@@ -239,6 +242,9 @@ class RequestSchedulerModeTest {
         return java.util.stream.Stream.concat(queueCases, directCases);
     }
 
+    /**
+     * Combines scheduler and dispatcher policies while keeping one canonical context and response future per request.
+     */
     private static final class Fixture implements AutoCloseable {
         final RequestRouteSelector router = mock(RequestRouteSelector.class);
         final AbstractRequestScheduler requests;
@@ -298,10 +304,7 @@ class RequestSchedulerModeTest {
             SchedulerTestSupport.runtime(scheduler).requests().stopAccepting();
             org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests)
                     .closeRegistration();
-            if (queue != null) {
-                queue.close();
-            }
-            requests.stopAdmissionsAndAwaitCompletion();
+            scheduler.close();
             SchedulerTestSupport.timer(
                             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests))
                     .close();

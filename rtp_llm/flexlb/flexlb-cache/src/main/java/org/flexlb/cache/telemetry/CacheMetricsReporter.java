@@ -72,13 +72,13 @@ import static org.flexlb.constant.MetricConstant.CACHE_UPDATE_ENGINE_BLOCK_CACHE
 @Slf4j
 @Component
 public class CacheMetricsReporter {
-
     /**
      * Bytes occupied by Long type (header 12 + data 8 + padding 4)
      */
     private static final long LONG_OBJECT_BYTES = 24;
 
     @Autowired private FlexMonitor monitor;
+
     private final ConcurrentHashMap<String, FlexMetricTags> engineTags = new ConcurrentHashMap<>();
 
     @PostConstruct
@@ -86,69 +86,6 @@ public class CacheMetricsReporter {
         monitor = SafeFlexMonitor.wrap(monitor);
         registerCacheMetrics();
         log.info("CacheMetricsReporter initialized and metrics registered");
-    }
-
-    /**
-     * Register all cache-related monitoring metrics
-     */
-    private void registerCacheMetrics() {
-        // Engine local cache metrics
-        monitor.register(CACHE_ENGINE_LOCAL_COUNT, FlexMetricType.GAUGE);
-        monitor.register(CACHE_ENGINE_LOCAL_BYTES, FlexMetricType.GAUGE);
-
-        // Global cache metrics
-        monitor.register(CACHE_GLOBAL_TOTAL_COUNT, FlexMetricType.GAUGE);
-        monitor.register(CACHE_GLOBAL_BYTES, FlexMetricType.GAUGE);
-
-        // Cache hit rate metrics
-        monitor.register(CACHE_HIT_COUNT, FlexMetricType.COUNTER);
-        monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
-        monitor.register(
-                CACHE_KVCM_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(
-                CACHE_KVCM_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricType.GAUGE);
-        monitor.register(
-                CACHE_LOCAL_STANDBY_PREDICTED_TOKENS,
-                FlexMetricType.GAUGE,
-                FlexPriorityType.PRECISE);
-        monitor.register(
-                CACHE_LOCAL_STANDBY_PREDICTED_RATIO,
-                FlexMetricType.GAUGE,
-                FlexPriorityType.PRECISE);
-        monitor.register(CACHE_INPUT_TOKENS, FlexMetricType.COUNTER);
-        monitor.register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.COUNTER);
-        monitor.register(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, FlexMetricType.COUNTER);
-        monitor.register(CACHE_KVCM_SELECTED_INPUT_TOKENS, FlexMetricType.COUNTER);
-        monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.COUNTER);
-        monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.COUNTER);
-        monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
-        monitor.register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
-        monitor.register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
-        monitor.register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
-        monitor.register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
-        monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
-        monitor.register(
-                CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS,
-                FlexMetricType.QPS,
-                FlexPriorityType.PRECISE);
-        monitor.register(CACHE_LOCAL_STANDBY_MAPPING_COUNT, FlexMetricType.GAUGE);
-        monitor.register(CACHE_MATCH_ACTIVE_SOURCE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(
-                CACHE_MATCH_SOURCE_CHANGE_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(
-                CACHE_MATCH_STANDBY_FALLBACK_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-
-        // Cache service response time metrics
-        monitor.register(CACHE_FIND_MATCHING_ENGINES_RT, FlexMetricType.GAUGE);
-        monitor.register(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, FlexMetricType.GAUGE);
-
-        // Cache diff related metrics
-        monitor.register(CACHE_DIFF_ADDED_BLOCKS_SIZE, FlexMetricType.GAUGE);
-        monitor.register(CACHE_DIFF_REMOVED_BLOCKS_SIZE, FlexMetricType.GAUGE);
-
-        // Engine view map size metrics
-        monitor.register(CACHE_ENGINE_VIEWS_MAP_SIZE, FlexMetricType.GAUGE);
     }
 
     /**
@@ -174,6 +111,45 @@ public class CacheMetricsReporter {
         monitor.report(CACHE_ENGINE_LOCAL_BYTES, tags, cacheBytes);
     }
 
+    /**
+     * Calculate memory footprint of engine cache
+     * Precise estimation: KeySetView<Long, Boolean>
+     * Based on 64-bit JVM + Compressed Oops memory model
+     *
+     * @param cacheCount Cache count
+     * @return Estimated bytes
+     */
+    public long calculateEngineCacheBytes(int cacheCount) {
+        if (cacheCount <= 0) {
+            return 0L;
+        }
+
+        // ConcurrentHashMap base structure overhead (object header 12 + fields 44 = 56 bytes
+        // aligned)
+        long baseStructureSize = 56L;
+
+        // KeySetView instance overhead (object header 12 + reference field 8 + padding 4 = 24
+        // bytes)
+        long keySetViewOverhead = 24L;
+
+        // table array overhead (capacity calculated based on 75% load factor)
+        int initialCapacity = Math.max(16, (cacheCount * 4 + 3) / 3);
+        long tableArraySize =
+                alignTo8Bytes(
+                        16L + initialCapacity * 4L); // Reference is 4 bytes with compressed oops
+
+        // Each ConcurrentHashMap.Node overhead (object header 12 + 4 fields 16 + padding 4 = 32
+        // bytes)
+        long nodeSize = 32L;
+
+        // Boolean.TRUE not counted
+
+        return baseStructureSize
+                + keySetViewOverhead
+                + tableArraySize
+                + cacheCount * (nodeSize + LONG_OBJECT_BYTES);
+    }
+
     /** Cache mutation/retirement is serialized by the owning generation's cache lock. */
     public void removeEngineLocalMetrics(String engineAddress) {
         var tags = engineTags.remove(engineAddress);
@@ -193,6 +169,50 @@ public class CacheMetricsReporter {
         monitor.report(CACHE_GLOBAL_TOTAL_COUNT, totalBlocks);
         monitor.report(CACHE_GLOBAL_BYTES, calculateGlobalCacheBytes(totalBlocks, totalMappings));
         monitor.report(CACHE_ENGINE_VIEWS_MAP_SIZE, views);
+    }
+
+    /**
+     * Calculate memory footprint of global cache
+     * Precise estimation: ConcurrentHashMap<Long, Set<String>>
+     * Based on 64-bit JVM + Compressed Oops complete memory model
+     *
+     * @param totalBlocks   Total cache block count
+     * @param totalMappings Total mapping count
+     * @return Estimated bytes
+     */
+    public long calculateGlobalCacheBytes(long totalBlocks, long totalMappings) {
+        if (totalBlocks <= 0) {
+            return 0L;
+        }
+
+        // ConcurrentHashMap base structure overhead (object header 12 + fields 44 = 56 bytes
+        // aligned)
+        long chmBaseSize = 56L;
+
+        // table array overhead (capacity calculated using a 75% load factor and 4-byte compressed
+        // references)
+        int initialCapacity = Math.max(16, (int) Math.ceil(totalBlocks / 0.75));
+        long tableArraySize = alignTo8Bytes(16L + initialCapacity * 4L);
+
+        // Each ConcurrentHashMap.Node overhead (object header 12 + 4 fields 16 + padding 4 = 32
+        // bytes)
+        long nodeSize = 32L;
+
+        // Each Set<String> overhead (ConcurrentHashMap.KeySetView)
+        long setWrapperSize = 24L; // Set wrapper object overhead
+        long setStructureSize = 40L; // Internal ConcurrentHashMap structure overhead
+
+        // Each String value overhead (engine IP:Port)
+        // Assume average IP:Port length is 15 characters (e.g., "192.168.1.1:8080")
+        long stringSize = getStringObjectSize();
+
+        // Total bytes = base structure + array + all nodes + all keys + all value sets + all
+        // strings
+        return chmBaseSize
+                + tableArraySize
+                + totalBlocks * (nodeSize + LONG_OBJECT_BYTES)
+                + totalBlocks * (setWrapperSize + setStructureSize)
+                + totalMappings * stringSize;
     }
 
     /**
@@ -289,15 +309,6 @@ public class CacheMetricsReporter {
         monitor.report(CACHE_LOCAL_STANDBY_MAPPING_COUNT, mappingCount);
     }
 
-    public void reportActiveCacheMatchSource(CacheMatchSource source) {
-        for (CacheMatchSource candidate : CacheMatchSource.values()) {
-            monitor.report(
-                    CACHE_MATCH_ACTIVE_SOURCE,
-                    FlexMetricTags.of("source", candidate.name()),
-                    candidate == source ? 1.0 : 0.0);
-        }
-    }
-
     public void reportCacheMatchSourceChange(
             CacheMatchSource previousSource, CacheMatchSource currentSource) {
         reportActiveCacheMatchSource(currentSource);
@@ -307,6 +318,15 @@ public class CacheMetricsReporter {
                         "from", previousSource.name(),
                         "to", currentSource.name()),
                 1.0);
+    }
+
+    public void reportActiveCacheMatchSource(CacheMatchSource source) {
+        for (CacheMatchSource candidate : CacheMatchSource.values()) {
+            monitor.report(
+                    CACHE_MATCH_ACTIVE_SOURCE,
+                    FlexMetricTags.of("source", candidate.name()),
+                    candidate == source ? 1.0 : 0.0);
+        }
     }
 
     public void reportStandbyFallback(String reason) {
@@ -389,115 +409,6 @@ public class CacheMetricsReporter {
     }
 
     /**
-     * Align memory to 8-byte boundary (64-bit JVM standard alignment)
-     *
-     * @param size Original size
-     * @return Aligned size
-     */
-    private static long alignTo8Bytes(long size) {
-        return (size + 7) & ~7L;
-    }
-
-    /**
-     * Calculate String object memory footprint (based on character count)
-     * Total overhead of String object + char array
-     *
-     * @return Memory footprint in bytes of String object
-     */
-    private static long getStringObjectSize() {
-        // String object: object header(12) + fields(8) + padding(4) = 24 bytes
-        long stringObjectSize = 24L;
-
-        // char[] array: array header(16) + data(charCount*2) + alignment
-        long charArraySize = alignTo8Bytes(16L + 15 * 2L);
-
-        return stringObjectSize + charArraySize;
-    }
-
-    /**
-     * Calculate memory footprint of engine cache
-     * Precise estimation: KeySetView<Long, Boolean>
-     * Based on 64-bit JVM + Compressed Oops memory model
-     *
-     * @param cacheCount Cache count
-     * @return Estimated bytes
-     */
-    public long calculateEngineCacheBytes(int cacheCount) {
-        if (cacheCount <= 0) {
-            return 0L;
-        }
-
-        // ConcurrentHashMap base structure overhead (object header 12 + fields 44 = 56 bytes
-        // aligned)
-        long baseStructureSize = 56L;
-
-        // KeySetView instance overhead (object header 12 + reference field 8 + padding 4 = 24
-        // bytes)
-        long keySetViewOverhead = 24L;
-
-        // table array overhead (capacity calculated based on 75% load factor)
-        int initialCapacity = Math.max(16, (cacheCount * 4 + 3) / 3);
-        long tableArraySize =
-                alignTo8Bytes(
-                        16L + initialCapacity * 4L); // Reference is 4 bytes with compressed oops
-
-        // Each ConcurrentHashMap.Node overhead (object header 12 + 4 fields 16 + padding 4 = 32
-        // bytes)
-        long nodeSize = 32L;
-
-        // Boolean.TRUE not counted
-
-        return baseStructureSize
-                + keySetViewOverhead
-                + tableArraySize
-                + cacheCount * (nodeSize + LONG_OBJECT_BYTES);
-    }
-
-    /**
-     * Calculate memory footprint of global cache
-     * Precise estimation: ConcurrentHashMap<Long, Set<String>>
-     * Based on 64-bit JVM + Compressed Oops complete memory model
-     *
-     * @param totalBlocks   Total cache block count
-     * @param totalMappings Total mapping count
-     * @return Estimated bytes
-     */
-    public long calculateGlobalCacheBytes(long totalBlocks, long totalMappings) {
-        if (totalBlocks <= 0) {
-            return 0L;
-        }
-
-        // ConcurrentHashMap base structure overhead (object header 12 + fields 44 = 56 bytes
-        // aligned)
-        long chmBaseSize = 56L;
-
-        // table array overhead (capacity calculated using a 75% load factor and 4-byte compressed
-        // references)
-        int initialCapacity = Math.max(16, (int) Math.ceil(totalBlocks / 0.75));
-        long tableArraySize = alignTo8Bytes(16L + initialCapacity * 4L);
-
-        // Each ConcurrentHashMap.Node overhead (object header 12 + 4 fields 16 + padding 4 = 32
-        // bytes)
-        long nodeSize = 32L;
-
-        // Each Set<String> overhead (ConcurrentHashMap.KeySetView)
-        long setWrapperSize = 24L; // Set wrapper object overhead
-        long setStructureSize = 40L; // Internal ConcurrentHashMap structure overhead
-
-        // Each String value overhead (engine IP:Port)
-        // Assume average IP:Port length is 15 characters (e.g., "192.168.1.1:8080")
-        long stringSize = getStringObjectSize();
-
-        // Total bytes = base structure + array + all nodes + all keys + all value sets + all
-        // strings
-        return chmBaseSize
-                + tableArraySize
-                + totalBlocks * (nodeSize + LONG_OBJECT_BYTES)
-                + totalBlocks * (setWrapperSize + setStructureSize)
-                + totalMappings * stringSize;
-    }
-
-    /**
      * Report cache-match lookup time in microseconds.
      *
      * @param roleType  Role type
@@ -550,6 +461,95 @@ public class CacheMetricsReporter {
                 FlexMetricTags.of("engineIp", ipIndex, "role", role != null ? role : "unknown");
 
         reportCacheDiffMetrics(tags, addedBlocksSize, removedBlocksSize);
+    }
+
+    /**
+     * Register all cache-related monitoring metrics
+     */
+    private void registerCacheMetrics() {
+        // Engine local cache metrics
+        monitor.register(CACHE_ENGINE_LOCAL_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_ENGINE_LOCAL_BYTES, FlexMetricType.GAUGE);
+
+        // Global cache metrics
+        monitor.register(CACHE_GLOBAL_TOTAL_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_GLOBAL_BYTES, FlexMetricType.GAUGE);
+
+        // Cache hit rate metrics
+        monitor.register(CACHE_HIT_COUNT, FlexMetricType.COUNTER);
+        monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
+        monitor.register(
+                CACHE_KVCM_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(
+                CACHE_KVCM_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricType.GAUGE);
+        monitor.register(
+                CACHE_LOCAL_STANDBY_PREDICTED_TOKENS,
+                FlexMetricType.GAUGE,
+                FlexPriorityType.PRECISE);
+        monitor.register(
+                CACHE_LOCAL_STANDBY_PREDICTED_RATIO,
+                FlexMetricType.GAUGE,
+                FlexPriorityType.PRECISE);
+        monitor.register(CACHE_INPUT_TOKENS, FlexMetricType.COUNTER);
+        monitor.register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.COUNTER);
+        monitor.register(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, FlexMetricType.COUNTER);
+        monitor.register(CACHE_KVCM_SELECTED_INPUT_TOKENS, FlexMetricType.COUNTER);
+        monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.COUNTER);
+        monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.COUNTER);
+        monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
+        monitor.register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
+        monitor.register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
+        monitor.register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
+        monitor.register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
+        monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
+        monitor.register(
+                CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS,
+                FlexMetricType.QPS,
+                FlexPriorityType.PRECISE);
+        monitor.register(CACHE_LOCAL_STANDBY_MAPPING_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_MATCH_ACTIVE_SOURCE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(
+                CACHE_MATCH_SOURCE_CHANGE_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(
+                CACHE_MATCH_STANDBY_FALLBACK_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+
+        // Cache service response time metrics
+        monitor.register(CACHE_FIND_MATCHING_ENGINES_RT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, FlexMetricType.GAUGE);
+
+        // Cache diff related metrics
+        monitor.register(CACHE_DIFF_ADDED_BLOCKS_SIZE, FlexMetricType.GAUGE);
+        monitor.register(CACHE_DIFF_REMOVED_BLOCKS_SIZE, FlexMetricType.GAUGE);
+
+        // Engine view map size metrics
+        monitor.register(CACHE_ENGINE_VIEWS_MAP_SIZE, FlexMetricType.GAUGE);
+    }
+
+    /**
+     * Calculate String object memory footprint (based on character count)
+     * Total overhead of String object + char array
+     *
+     * @return Memory footprint in bytes of String object
+     */
+    private static long getStringObjectSize() {
+        // String object: object header(12) + fields(8) + padding(4) = 24 bytes
+        long stringObjectSize = 24L;
+
+        // char[] array: array header(16) + data(charCount*2) + alignment
+        long charArraySize = alignTo8Bytes(16L + 15 * 2L);
+
+        return stringObjectSize + charArraySize;
+    }
+
+    /**
+     * Align memory to 8-byte boundary (64-bit JVM standard alignment)
+     *
+     * @param size Original size
+     * @return Aligned size
+     */
+    private static long alignTo8Bytes(long size) {
+        return (size + 7) & ~7L;
     }
 
     private void reportCacheDiffMetrics(

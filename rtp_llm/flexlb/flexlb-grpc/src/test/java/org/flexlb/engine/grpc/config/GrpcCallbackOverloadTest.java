@@ -37,6 +37,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Saturates production callback executors to check responses and cancellation still complete and transport buffers are released.
+ */
 @Timeout(30)
 class GrpcCallbackOverloadTest {
     private static final MethodDescriptor<byte[], byte[]> METHOD =
@@ -120,6 +123,9 @@ class GrpcCallbackOverloadTest {
         }
     }
 
+    /**
+     * Connects a real channel and server with tracked buffer allocators, then controls callback saturation and verifies buffers are released.
+     */
     private static final class Fixture implements AutoCloseable {
         final ThreadPoolExecutor executor;
         final PooledByteBufAllocator allocator = new PooledByteBufAllocator(true);
@@ -216,6 +222,15 @@ class GrpcCallbackOverloadTest {
             awaitIdle();
         }
 
+        @Override
+        public void close() throws Exception {
+            release.countDown();
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+
         void awaitIdle() throws Exception {
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
             while ((executor.getActiveCount() != 0 || !executor.getQueue().isEmpty())
@@ -278,15 +293,6 @@ class GrpcCallbackOverloadTest {
                     0,
                     allocator.pinnedDirectMemory(),
                     "response buffers must be released after close");
-        }
-
-        @Override
-        public void close() throws Exception {
-            release.countDown();
-            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
-            server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
-            executor.shutdownNow();
-            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
         }
     }
 

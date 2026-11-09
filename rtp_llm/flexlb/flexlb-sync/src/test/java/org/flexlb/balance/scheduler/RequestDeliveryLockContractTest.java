@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -49,7 +48,6 @@ import static org.mockito.Mockito.when;
  * Executable documentation for the RequestContext delivery lock boundary.
  */
 class RequestDeliveryLockContractTest {
-
     private FlexlbConfig config;
     private AbstractRequestScheduler lifecycle;
 
@@ -69,7 +67,7 @@ class RequestDeliveryLockContractTest {
 
     @AfterEach
     void tearDown() {
-        if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(lifecycle)) {
+        if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(lifecycle)) {
             lifecycle.closeOutstandingAndTerminalize();
             SchedulerTestSupport.timer(SchedulerTestSupport.runtime(lifecycle)).close();
             SchedulerTestSupport.closeRequestExecutors(SchedulerTestSupport.runtime(lifecycle));
@@ -79,9 +77,15 @@ class RequestDeliveryLockContractTest {
     @Test
     void firstBatchMemberPreparesAtomicallyAgainstConcurrentCancellation() throws Exception {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        Registered registered = registerItem(809L, endpoint);
+        var state =
+                org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
+                        new java.util.concurrent.locks.ReentrantLock(),
+                        org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
+                                1, QueueExecutionSettings.queueOrder(true)),
+                        System::currentTimeMillis);
+        Registered registered = registerQueuedItem(809L, endpoint, state);
         bind(lifecycle, registered);
-        var reservation = mock(PrefillEndpoint.BatchRecord.class);
+
         var submission = mock(DeliveryExecution.DeliveryPermit.class);
         CountDownLatch initializing = new CountDownLatch(1);
         CountDownLatch cancellationStarted = new CountDownLatch(1);
@@ -93,16 +97,14 @@ class RequestDeliveryLockContractTest {
                             cancellationStarted.countDown();
                             return lifecycle.cancel("809", 0L, CancelReason.CLIENT_CANCELLED);
                         });
-        org.mockito.Mockito.when(
-                        endpoint.reserveBatch(
-                                org.mockito.ArgumentMatchers.anyLong(),
-                                org.mockito.ArgumentMatchers.anyInt()))
-                .thenAnswer(
+        org.mockito.Mockito.doAnswer(
                         invocation -> {
                             assertTrue(Thread.holdsLock(registered.item().ctx()));
                             assertFalse(cancellation.isDone());
-                            return CapacityBoundary.Attempt.accepted(reservation);
-                        });
+                            return true;
+                        })
+                .when(endpoint)
+                .batchCapacityAvailable(org.mockito.ArgumentMatchers.anyInt());
         var runtime = SchedulerTestSupport.runtime(lifecycle);
         var execution = org.mockito.Mockito.spy(runtime.deliveries());
         org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
@@ -131,12 +133,6 @@ class RequestDeliveryLockContractTest {
                                                 DeliveryTestSupport.service(config)),
                                 org.mockito.Mockito.mock(
                                         org.flexlb.balance.scheduler.DeliveryExecution.class)));
-        var state =
-                org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                        new java.util.concurrent.locks.ReentrantLock(),
-                        org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
-                                1, QueueExecutionSettings.queueOrder(true)),
-                        System::currentTimeMillis);
         assertSame(
                 registered.item(),
                 org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(state, registered.item()));
@@ -172,8 +168,7 @@ class RequestDeliveryLockContractTest {
             assertEquals(
                     RequestState.Phase.CANCELLED, cancellation.get(5, TimeUnit.SECONDS).state());
             assertNull(
-                    DeliveryDispatcher.commitDelivery(
-                            lifecycle,
+                    lifecycle.commitDelivery(
                             new org.flexlb.balance.scheduler.Delivery.Member(
                                     registered.item(),
                                     RequestProtocolTestSupport.handoff(
@@ -183,7 +178,7 @@ class RequestDeliveryLockContractTest {
                                             })),
                             Delivery.SendMode.BATCH_ENQUEUE,
                             901L));
-            verify(endpoint).rollback(reservation);
+
             verify(submission).close();
             org.mockito.Mockito.verify(submission, org.mockito.Mockito.never())
                     .submit(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
@@ -197,7 +192,7 @@ class RequestDeliveryLockContractTest {
     void itemPublicationDoesNotOwnTheExactContextMonitor() throws Exception {
         Registered registered = registerItem(101L);
         RequestContext requestContext =
-                lifecycle.requests.findActive(registered.item().requestId());
+                lifecycle.repository.findActive(registered.item().requestId());
         PlacementOperation admission =
                 SchedulerTestSupport.claim(
                         lifecycle, registered.item().requestId(), registered.future());
@@ -242,7 +237,7 @@ class RequestDeliveryLockContractTest {
                     contenderEntered.await(5, TimeUnit.SECONDS),
                     "context operations must proceed during endpoint publication");
             synchronized (requestContext) {
-                assertSame(registered.item(), requestContext.snapshot().route());
+                assertNull(requestContext.snapshot().route());
             }
             assertFalse(
                     RequestProtocolTestSupport.prepareMember(lifecycle, registered.item()),
@@ -282,12 +277,12 @@ class RequestDeliveryLockContractTest {
     void declinedPublicationRetainsRollbackOwnershipUntilActualRelease() {
         Registered registered = registerItem(111L);
         RequestContext requestContext =
-                lifecycle.requests.findActive(registered.item().requestId());
+                lifecycle.repository.findActive(registered.item().requestId());
 
-        try (PlacementOperation admission =
-                        SchedulerTestSupport.claim(
-                                lifecycle, registered.item().requestId(), registered.future());
-                var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
+        PlacementOperation admission =
+                SchedulerTestSupport.claim(
+                        lifecycle, registered.item().requestId(), registered.future());
+        try (var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertFalse(
                     (RequestProtocolTestSupport.commitRoute(
@@ -296,8 +291,7 @@ class RequestDeliveryLockContractTest {
                                     RequestProtocolTestSupport.publication(() -> false))
                             == org.flexlb.balance.PlacementResult.Status.SUCCESS));
             synchronized (requestContext) {
-                assertSame(registered.item(), requestContext.snapshot().route());
-                assertFalse(requestContext.snapshot().placement().published());
+                assertNull(requestContext.snapshot().route());
                 assertFalse(requestContext.snapshot().preparedDelivery());
             }
         }
@@ -307,13 +301,13 @@ class RequestDeliveryLockContractTest {
     void throwingPublicationPreservesFailureAndRollbackOwnership() {
         Registered registered = registerItem(121L);
         RequestContext requestContext =
-                lifecycle.requests.findActive(registered.item().requestId());
+                lifecycle.repository.findActive(registered.item().requestId());
         IllegalStateException expected = new IllegalStateException("queue publication failed");
 
-        try (PlacementOperation admission =
-                        SchedulerTestSupport.claim(
-                                lifecycle, registered.item().requestId(), registered.future());
-                var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
+        PlacementOperation admission =
+                SchedulerTestSupport.claim(
+                        lifecycle, registered.item().requestId(), registered.future());
+        try (var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             IllegalStateException actual =
                     assertThrows(
@@ -328,8 +322,7 @@ class RequestDeliveryLockContractTest {
                                                     })));
             assertSame(expected, actual);
             synchronized (requestContext) {
-                assertSame(registered.item(), requestContext.snapshot().route());
-                assertFalse(requestContext.snapshot().placement().published());
+                assertNull(requestContext.snapshot().route());
                 assertFalse(requestContext.snapshot().preparedDelivery());
             }
         }
@@ -340,10 +333,10 @@ class RequestDeliveryLockContractTest {
         Registered registered = registerItem(131L);
         boolean[] preparedBeforeResolution = new boolean[1];
 
-        try (PlacementOperation admission =
-                        SchedulerTestSupport.claim(
-                                lifecycle, registered.item().requestId(), registered.future());
-                var admissionCompletion3 = RequestProtocolTestSupport.finishOnExit(admission)) {
+        PlacementOperation admission =
+                SchedulerTestSupport.claim(
+                        lifecycle, registered.item().requestId(), registered.future());
+        try (var admissionCompletion3 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertTrue(
                     (RequestProtocolTestSupport.commitRoute(
@@ -371,10 +364,10 @@ class RequestDeliveryLockContractTest {
         CountDownLatch releasePublication = new CountDownLatch(1);
         ExecutorService operations = Executors.newFixedThreadPool(2);
 
-        try (PlacementOperation admission =
-                        SchedulerTestSupport.claim(
-                                lifecycle, registered.item().requestId(), registered.future());
-                var admissionCompletion4 = RequestProtocolTestSupport.finishOnExit(admission)) {
+        PlacementOperation admission =
+                SchedulerTestSupport.claim(
+                        lifecycle, registered.item().requestId(), registered.future());
+        try (var admissionCompletion4 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             try {
                 Future<Boolean> publication =
@@ -424,17 +417,16 @@ class RequestDeliveryLockContractTest {
     @Test
     void cancellationAfterQueuePointOfNoReturnRemovesTheExactItemOnce() throws Exception {
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
-        Registered registered = registerItem(151L, prefill);
         PrefillEndpoint state =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         new java.util.concurrent.locks.ReentrantLock(),
                         org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
                                 1, QueueExecutionSettings.queueOrder(true)),
                         System::currentTimeMillis);
+        Registered registered = registerQueuedItem(151L, prefill, state);
         java.util.concurrent.atomic.AtomicInteger releases =
                 new java.util.concurrent.atomic.AtomicInteger();
-        when(prefill.releaseRequest(registered.item()))
-                .thenAnswer(
+        org.mockito.Mockito.doAnswer(
                         invocation -> {
                             assertFalse(
                                     Thread.holdsLock(registered.item().ctx()),
@@ -453,15 +445,17 @@ class RequestDeliveryLockContractTest {
                                     org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(state)
                                             .isHeldByCurrentThread());
                             return released;
-                        });
+                        })
+                .when(prefill)
+                .releaseRequest(registered.item());
         CountDownLatch queuePublished = new CountDownLatch(1);
         CountDownLatch returnFromPublication = new CountDownLatch(1);
         ExecutorService operations = Executors.newFixedThreadPool(2);
 
-        try (PlacementOperation admission =
-                        SchedulerTestSupport.claim(
-                                lifecycle, registered.item().requestId(), registered.future());
-                var admissionCompletion5 = RequestProtocolTestSupport.finishOnExit(admission)) {
+        PlacementOperation admission =
+                SchedulerTestSupport.claim(
+                        lifecycle, registered.item().requestId(), registered.future());
+        try (var admissionCompletion5 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             try {
                 Future<Boolean> publication =
@@ -513,7 +507,7 @@ class RequestDeliveryLockContractTest {
                         cancellation.get(5, TimeUnit.SECONDS).state());
 
                 returnFromPublication.countDown();
-                assertTrue(publication.get(5, TimeUnit.SECONDS));
+                assertFalse(publication.get(5, TimeUnit.SECONDS));
             } finally {
                 returnFromPublication.countDown();
                 operations.shutdownNow();
@@ -542,10 +536,10 @@ class RequestDeliveryLockContractTest {
     @Test
     void deliveryClaimKeepsEndpointHandoffAndContextClaimAtomic() throws Exception {
         Registered registered = registerItem(201L);
-        try (PlacementOperation admission =
-                        SchedulerTestSupport.claim(
-                                lifecycle, registered.item().requestId(), registered.future());
-                var admissionCompletion6 = RequestProtocolTestSupport.finishOnExit(admission)) {
+        PlacementOperation admission =
+                SchedulerTestSupport.claim(
+                        lifecycle, registered.item().requestId(), registered.future());
+        try (var admissionCompletion6 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertTrue(
                     (RequestProtocolTestSupport.commitRoute(
@@ -555,7 +549,7 @@ class RequestDeliveryLockContractTest {
                             == org.flexlb.balance.PlacementResult.Status.SUCCESS));
         }
         RequestContext requestContext =
-                lifecycle.requests.findActive(registered.item().requestId());
+                lifecycle.repository.findActive(registered.item().requestId());
         CountDownLatch transferEntered = new CountDownLatch(1);
         CountDownLatch releaseTransfer = new CountDownLatch(1);
         CountDownLatch contenderStarted = new CountDownLatch(1);
@@ -666,7 +660,7 @@ class RequestDeliveryLockContractTest {
         assertEquals(701L, snapshot.batchId());
         assertTrue(
                 lifecycle
-                                .requests
+                                .repository
                                 .findActive(registered.item().requestId())
                                 .snapshot()
                                 .delivery()
@@ -684,8 +678,7 @@ class RequestDeliveryLockContractTest {
         assertNotNull(first);
 
         assertNull(
-                DeliveryDispatcher.commitDelivery(
-                        lifecycle,
+                lifecycle.commitDelivery(
                         new org.flexlb.balance.scheduler.Delivery.Member(
                                 registered.item(),
                                 RequestProtocolTestSupport.handoff(
@@ -695,8 +688,7 @@ class RequestDeliveryLockContractTest {
                         Delivery.SendMode.BATCH_ENQUEUE,
                         702L));
         assertNull(
-                DeliveryDispatcher.commitDelivery(
-                        lifecycle,
+                lifecycle.commitDelivery(
                         new org.flexlb.balance.scheduler.Delivery.Member(
                                 registered.item(),
                                 RequestProtocolTestSupport.handoff(
@@ -724,7 +716,7 @@ class RequestDeliveryLockContractTest {
                 RequestProtocolTestSupport.claimBatch(
                         lifecycle, registered.item(), 703L, () -> true);
         assertNotNull(claim);
-        RequestContext original = lifecycle.requests.findActive("207");
+        RequestContext original = lifecycle.repository.findActive("207");
 
         RequestProtocolTestSupport.applyPrefillStatus(
                 lifecycle,
@@ -792,7 +784,7 @@ class RequestDeliveryLockContractTest {
         CompletableFuture<Response> future =
                 RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         assertSame(future, context.data().getFuture());
-        RouteExecution item =
+        RouteResult item =
                 SchedulingTestConfig.createRoute(
                         context,
                         new Response(),
@@ -824,7 +816,7 @@ class RequestDeliveryLockContractTest {
         } else {
             RequestProtocolTestSupport.routeDelivered(lifecycle, claim, precedingWork, 30_000L);
         }
-        RequestContext requestContext = lifecycle.requests.findActive("208");
+        RequestContext requestContext = lifecycle.repository.findActive("208");
         synchronized (requestContext) {
             assertTrue(requestContext.snapshot().engine().decodeAccepted());
             assertTrue(
@@ -936,7 +928,7 @@ class RequestDeliveryLockContractTest {
         CompletableFuture<Response> future =
                 RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         assertSame(future, context.data().getFuture());
-        RouteExecution item =
+        RouteResult item =
                 SchedulingTestConfig.createRoute(
                         context,
                         new Response(),
@@ -951,5 +943,19 @@ class RequestDeliveryLockContractTest {
 
     private RequestContext context(long requestId) {
         return RequestProtocolTestSupport.context(config, requestId);
+    }
+
+    private Registered registerQueuedItem(
+            long requestId, PrefillEndpoint endpoint, PrefillEndpoint ledger) {
+        org.flexlb.balance.endpoint.EndpointTestSupport.stubResources(endpoint, ledger);
+        org.mockito.Mockito.doReturn("127.0.0.1").when(endpoint).getIp();
+        org.mockito.Mockito.doReturn(8080).when(endpoint).getHttpPort();
+        org.mockito.Mockito.doReturn(8090).when(endpoint).getGrpcPort();
+        var context = context(requestId);
+        var future = RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
+        var route =
+                RequestExecutionTestSupport.registerPrefillRoute(
+                        context, endpoint, null, null, 0L, System.currentTimeMillis());
+        return new Registered(route, future);
     }
 }

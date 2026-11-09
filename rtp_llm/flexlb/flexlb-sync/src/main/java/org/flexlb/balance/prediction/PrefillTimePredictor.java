@@ -19,9 +19,60 @@ import static com.google.common.math.LongMath.saturatedAdd;
  * change an evaluation already in progress.
  */
 public interface PrefillTimePredictor {
+    /** Absolute visibility estimate. Unknown preceding work deliberately produces no deadline. */
+    public static long predictedVisibilityDeadlineMs(
+            WorkSnapshot work, long unstartedMs, double lifetime, long nowMs) {
+        if (unstartedMs < 0L || !Double.isFinite(lifetime) || lifetime < 1.0) {
+            throw new IllegalArgumentException("invalid delivery prediction inputs");
+        }
+        var preceding = java.util.Objects.requireNonNull(work).totalRemainingWorkMsAt(nowMs);
+        if (preceding.isEmpty()) {
+            return 0L;
+        }
+        double scaled = Math.ceil(saturatedAdd(preceding.getAsLong(), unstartedMs) * lifetime);
+        long duration = scaled >= Long.MAX_VALUE ? Long.MAX_VALUE : (long) scaled;
+        return saturatedAdd(nowMs, saturatedAdd(duration, 10_000L));
+    }
+
+    /** Evaluate one request and require a non-negative duration. */
+    public static long predictSingleRequestMs(
+            PrefillTimePredictor.Evaluator evaluator, long totalTokens, long hitTokens) {
+        long predictedMs = evaluator.estimateMs(totalTokens, hitTokens);
+        if (predictedMs < 0L) {
+            throw new InvalidPrefillPredictionException("SINGLE_REQUEST", predictedMs);
+        }
+        return predictedMs;
+    }
+
+    /** Evaluate committed work and convert it to lifecycle milliseconds. */
+    public static long predictCommittedBatchMs(
+            PrefillTimePredictor.Evaluator evaluator, PrefillBatchFeatures features) {
+        return committedDecisionGroupMs(evaluator.predictBatchMs(features));
+    }
+
+    /** Convert an already planned group duration to lifecycle milliseconds. */
+    public static long committedDecisionGroupMs(double predictedMs) {
+        requireValidDecisionGroupMs(predictedMs);
+        return predictedMs >= Long.MAX_VALUE ? Long.MAX_VALUE : (long) Math.ceil(predictedMs);
+    }
+
+    /** Require a finite, non-negative group duration. */
+    public static double requireValidDecisionGroupMs(double predictedMs) {
+        if (!Double.isFinite(predictedMs) || predictedMs < 0.0) {
+            throw new InvalidPrefillPredictionException("DECISION_GROUP", predictedMs);
+        }
+        return predictedMs;
+    }
 
     /** Capture the immutable model used by one scheduling operation. */
     Evaluator evaluator();
+
+    /**
+     * Publish learning from one completed batch when applicable.
+     *
+     * @return whether a replacement evaluator was published
+     */
+    LearningResult learn(PrefillBatchFeatures features, long predictedMs, long actualMs);
 
     interface Evaluator {
         /**
@@ -52,7 +103,9 @@ public interface PrefillTimePredictor {
         double predictBatchMs(PrefillBatchFeatures features);
     }
 
-    /** Not shared or reused after a membership/model change; result retains fractional milliseconds. */
+    /**
+     * Not shared or reused after a membership/model change; result retains fractional milliseconds.
+     */
     @FunctionalInterface
     interface BatchPrediction {
         double append(long seqLen, long hitCache);
@@ -64,13 +117,8 @@ public interface PrefillTimePredictor {
     }
 
     /**
-     * Publish learning from one completed batch when applicable.
-     *
-     * @return whether a replacement evaluator was published
+     * Immutable, payload-free features retained for prediction and learning.
      */
-    LearningResult learn(PrefillBatchFeatures features, long predictedMs, long actualMs);
-
-    /** Immutable, payload-free features retained for prediction and learning. */
     public record PrefillBatchFeatures(List<Item> items) {
 
         public PrefillBatchFeatures {
@@ -116,7 +164,9 @@ public interface PrefillTimePredictor {
         }
     }
 
-    /** A predictor returned a numeric value outside the scheduling contract. */
+    /**
+     * A predictor returned a numeric value outside the scheduling contract.
+     */
     public static final class InvalidPrefillPredictionException extends IllegalStateException {
         private final int memberIndex;
 
@@ -143,50 +193,5 @@ public interface PrefillTimePredictor {
         public int memberIndex() {
             return memberIndex;
         }
-    }
-
-    /** Absolute visibility estimate. Unknown preceding work deliberately produces no deadline. */
-    public static long predictedVisibilityDeadlineMs(
-            WorkSnapshot work, long unstartedMs, double lifetime, long nowMs) {
-        if (unstartedMs < 0L || !Double.isFinite(lifetime) || lifetime < 1.0) {
-            throw new IllegalArgumentException("invalid delivery prediction inputs");
-        }
-        var preceding = java.util.Objects.requireNonNull(work).totalRemainingWorkMsAt(nowMs);
-        if (preceding.isEmpty()) {
-            return 0L;
-        }
-        double scaled = Math.ceil(saturatedAdd(preceding.getAsLong(), unstartedMs) * lifetime);
-        long duration = scaled >= Long.MAX_VALUE ? Long.MAX_VALUE : (long) scaled;
-        return saturatedAdd(nowMs, saturatedAdd(duration, 10_000L));
-    }
-
-    /** Evaluate one request and require a non-negative duration. */
-    public static long predictSingleRequestMs(
-            PrefillTimePredictor.Evaluator evaluator, long totalTokens, long hitTokens) {
-        long predictedMs = evaluator.estimateMs(totalTokens, hitTokens);
-        if (predictedMs < 0L) {
-            throw new InvalidPrefillPredictionException("SINGLE_REQUEST", predictedMs);
-        }
-        return predictedMs;
-    }
-
-    /** Evaluate committed work and convert it to lifecycle milliseconds. */
-    public static long predictCommittedBatchMs(
-            PrefillTimePredictor.Evaluator evaluator, PrefillBatchFeatures features) {
-        return committedDecisionGroupMs(evaluator.predictBatchMs(features));
-    }
-
-    /** Convert an already planned group duration to lifecycle milliseconds. */
-    public static long committedDecisionGroupMs(double predictedMs) {
-        requireValidDecisionGroupMs(predictedMs);
-        return predictedMs >= Long.MAX_VALUE ? Long.MAX_VALUE : (long) Math.ceil(predictedMs);
-    }
-
-    /** Require a finite, non-negative group duration. */
-    public static double requireValidDecisionGroupMs(double predictedMs) {
-        if (!Double.isFinite(predictedMs) || predictedMs < 0.0) {
-            throw new InvalidPrefillPredictionException("DECISION_GROUP", predictedMs);
-        }
-        return predictedMs;
     }
 }

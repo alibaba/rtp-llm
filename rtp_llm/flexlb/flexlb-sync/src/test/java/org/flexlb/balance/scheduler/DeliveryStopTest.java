@@ -22,6 +22,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Exercises cancellation and preemption replies, including late proof, deduplication, and stop-task draining.
+ */
 class DeliveryStopTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.EnumSource(EngineGrpcClient.CancelReply.class)
@@ -362,14 +365,36 @@ class DeliveryStopTest {
                         org.mockito.Mockito.mock(
                                 org.flexlb.balance.scheduler.DeliveryExecution.class));
         try {
+            when(runtime.engineClient.cancelAsync(
+                            any(),
+                            org.mockito.ArgumentMatchers.anyInt(),
+                            any(),
+                            org.mockito.ArgumentMatchers.anyLong()))
+                    .thenReturn(
+                            java.util.concurrent.CompletableFuture.completedFuture(
+                                    EngineGrpcClient.CancelReply.ACCEPTED));
             var first = dispatcher.stop(claim);
             assertSame(first, dispatcher.stop(claim));
             assertEquals(
                     DeliveryDispatcher.StopResult.STALE,
                     dispatcher.stop(equalValue).get(2, TimeUnit.SECONDS));
+            org.mockito.Mockito.verify(
+                            runtime.engineClient, org.mockito.Mockito.timeout(2000).times(1))
+                    .cancelAsync(
+                            any(),
+                            org.mockito.ArgumentMatchers.anyInt(),
+                            any(),
+                            org.mockito.ArgumentMatchers.anyLong());
+            assertFalse(
+                    first.isDone(), "an in-flight send still requires physical cleanup evidence");
             claim.complete();
             first.get(2, TimeUnit.SECONDS);
-            verifyNoInteractions(runtime.engineClient);
+            org.mockito.Mockito.verify(runtime.engineClient, org.mockito.Mockito.times(1))
+                    .cancelAsync(
+                            any(),
+                            org.mockito.ArgumentMatchers.anyInt(),
+                            any(),
+                            org.mockito.ArgumentMatchers.anyLong());
         } finally {
             claim.complete();
             runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
@@ -603,6 +628,8 @@ class DeliveryStopTest {
                         org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(
                         java.util.concurrent.CompletableFuture.completedFuture(
+                                EngineGrpcClient.CancelReply.ACCEPTED),
+                        java.util.concurrent.CompletableFuture.completedFuture(
                                 EngineGrpcClient.CancelReply.REQUEST_CLEANED));
         var dispatcher =
                 new DeliveryDispatcher(
@@ -618,6 +645,12 @@ class DeliveryStopTest {
                                 org.flexlb.balance.scheduler.DeliveryExecution.class));
         try {
             var waiting = dispatcher.stop(first);
+            org.mockito.Mockito.verify(channel, org.mockito.Mockito.timeout(2000).times(1))
+                    .cancelAsync(
+                            any(),
+                            org.mockito.ArgumentMatchers.anyInt(),
+                            any(),
+                            org.mockito.ArgumentMatchers.anyLong());
             var other = dispatcher.stop(second);
             assertEquals(
                     DeliveryDispatcher.StopResult.REMOTE_CLEANED, other.get(2, TimeUnit.SECONDS));
@@ -631,27 +664,6 @@ class DeliveryStopTest {
             second.complete();
             runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
-    }
-
-    private static Delivery.Member sentClaim(SchedulerTestServices runtime) {
-        var claim = claim(runtime);
-        when(claim.owner().snapshot().delivery().send())
-                .thenReturn(ContextResult.SendState.DELIVERED);
-        when(claim.owner().snapshot().cancellation()).thenReturn(null);
-        when(claim.owner().snapshot().delivery().abandonment())
-                .thenReturn(CancelReason.CLIENT_CANCELLED);
-        when(claim.route().prefillEndpoint())
-                .thenReturn(mock(org.flexlb.balance.endpoint.PrefillEndpoint.class));
-        return claim;
-    }
-
-    private static PreemptionRegistration preemption(Delivery.Member claim, long attemptToken) {
-        return new PreemptionRegistration(
-                claim.owner(),
-                attemptToken,
-                new org.flexlb.balance.endpoint.DecodeResources.RequestReservation(
-                        attemptToken, String.valueOf(41L), attemptToken),
-                new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
     }
 
     @Test
@@ -1120,6 +1132,14 @@ class DeliveryStopTest {
                                                     SchedulingTestConfig.batchConfig())),
                             org.mockito.Mockito.mock(
                                     org.flexlb.balance.scheduler.DeliveryExecution.class));
+            when(runtime.engineClient.cancelAsync(
+                            any(),
+                            org.mockito.ArgumentMatchers.anyInt(),
+                            any(),
+                            org.mockito.ArgumentMatchers.anyLong()))
+                    .thenReturn(
+                            java.util.concurrent.CompletableFuture.completedFuture(
+                                    EngineGrpcClient.CancelReply.ACCEPTED));
             var first = cleanup.stop(claim);
             assertSame(first, cleanup.stop(claim));
             assertEquals(
@@ -1127,12 +1147,26 @@ class DeliveryStopTest {
                     cleanup.stop(equalValue).get(2, TimeUnit.SECONDS));
             assertFalse(first.isDone(), "rejecting a stale claim must not finish the current stop");
             assertFalse(claim.completion().toCompletableFuture().isDone());
+            org.mockito.Mockito.verify(
+                            runtime.engineClient, org.mockito.Mockito.timeout(2000).times(1))
+                    .cancelAsync(
+                            any(),
+                            org.mockito.ArgumentMatchers.anyInt(),
+                            any(),
+                            org.mockito.ArgumentMatchers.anyLong());
+            assertFalse(
+                    first.isDone(), "an in-flight send still requires physical cleanup evidence");
             claim.complete();
             first.get(2, TimeUnit.SECONDS);
             assertFalse(
                     equalValue.completion().toCompletableFuture().isDone(),
                     "physical settlement belongs only to the exact claim");
-            verifyNoInteractions(channel);
+            org.mockito.Mockito.verify(channel, org.mockito.Mockito.times(1))
+                    .cancelAsync(
+                            any(),
+                            org.mockito.ArgumentMatchers.anyInt(),
+                            any(),
+                            org.mockito.ArgumentMatchers.anyLong());
         } finally {
             runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
         }
@@ -1229,10 +1263,16 @@ class DeliveryStopTest {
         }
     }
 
-    private static java.util.concurrent.Executor stopWorkers(SchedulerTestServices runtime) {
-        return (java.util.concurrent.Executor)
-                org.springframework.test.util.ReflectionTestUtils.getField(
-                        runtime.tasks(), "stopWorkers");
+    private static Delivery.Member sentClaim(SchedulerTestServices runtime) {
+        var claim = claim(runtime);
+        when(claim.owner().snapshot().delivery().send())
+                .thenReturn(ContextResult.SendState.DELIVERED);
+        when(claim.owner().snapshot().cancellation()).thenReturn(null);
+        when(claim.owner().snapshot().delivery().abandonment())
+                .thenReturn(CancelReason.CLIENT_CANCELLED);
+        when(claim.route().prefillEndpoint())
+                .thenReturn(mock(org.flexlb.balance.endpoint.PrefillEndpoint.class));
+        return claim;
     }
 
     private static Delivery.Member claim(SchedulerTestServices runtime) {
@@ -1241,12 +1281,33 @@ class DeliveryStopTest {
         var scheduler = context.data().getRequestScheduler();
         when(scheduler.onPreemption(any(), any())).thenReturn(true);
         org.flexlb.balance.scheduler.SchedulerTestServices.bind(scheduler, runtime);
-        var route = mock(RouteExecution.class);
+        var route = mock(RouteResult.class);
         when(route.ctx()).thenReturn(context);
         var claim = DeliveryTestSupport.member(route, Delivery.SendMode.BATCH_ENQUEUE, 17);
         when(context.snapshot().delivery().identity()).thenReturn(claim);
-        when(context.snapshot().delivery().send()).thenReturn(ContextResult.SendState.NOT_STARTED);
+        when(context.snapshot().delivery().send()).thenReturn(ContextResult.SendState.SENDING);
+        when(context.snapshot().cancellation()).thenReturn(null);
+        when(context.snapshot().delivery().abandonment()).thenReturn(CancelReason.CLIENT_CANCELLED);
+        var endpoint = mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
+        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        when(endpoint.getGrpcPort()).thenReturn(9000);
+        when(route.prefillEndpoint()).thenReturn(endpoint);
         return claim;
+    }
+
+    private static PreemptionRegistration preemption(Delivery.Member claim, long attemptToken) {
+        return new PreemptionRegistration(
+                claim.owner(),
+                attemptToken,
+                new org.flexlb.balance.endpoint.DecodeResources.RequestReservation(
+                        attemptToken, String.valueOf(41L), attemptToken),
+                new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
+    }
+
+    private static java.util.concurrent.Executor stopWorkers(SchedulerTestServices runtime) {
+        return (java.util.concurrent.Executor)
+                org.springframework.test.util.ReflectionTestUtils.getField(
+                        runtime.tasks(), "stopWorkers");
     }
 
     private static SchedulerTestServices runtime() {

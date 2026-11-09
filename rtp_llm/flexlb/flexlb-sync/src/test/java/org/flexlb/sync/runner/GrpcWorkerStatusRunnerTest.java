@@ -34,7 +34,8 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks worker status projection, distinct step observations and generation-safe publication.
+ * Checks status polling publishes the exact worker generation and projects committed activity outside the status lock.
+ * Transport failures must not retire workers as if discovery had removed them.
  */
 class GrpcWorkerStatusRunnerTest {
 
@@ -103,7 +104,10 @@ class GrpcWorkerStatusRunnerTest {
         WorkerEndpoint endpoint = mock(WorkerEndpoint.class);
         EndpointRegistry registry =
                 org.mockito.Mockito.spy(
-                        RunnerTestSupport.endpointRegistry(mock(ConfigService.class)));
+                        RunnerTestSupport.endpointRegistry(
+                                org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                        org.flexlb.balance.scheduler.SchedulingTestConfig
+                                                .newConfig())));
         EndpointRegistry directory = directory(registry, status);
         org.mockito.Mockito.doAnswer(
                         invocation -> {
@@ -202,7 +206,10 @@ class GrpcWorkerStatusRunnerTest {
         WorkerEndpoint endpoint = mock(WorkerEndpoint.class);
         EndpointRegistry registry =
                 org.mockito.Mockito.spy(
-                        RunnerTestSupport.endpointRegistry(mock(ConfigService.class)));
+                        RunnerTestSupport.endpointRegistry(
+                                org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                        org.flexlb.balance.scheduler.SchedulingTestConfig
+                                                .newConfig())));
         EndpointRegistry directory = directory(registry, status);
         when(registry.get(RoleType.DECODE, ipPort, status)).thenReturn(endpoint);
         java.util.concurrent.atomic.AtomicBoolean projected =
@@ -280,7 +287,10 @@ class GrpcWorkerStatusRunnerTest {
                 RunnerTestSupport.alive(role, null, "127.0.0.1", 8080, 8081, "test-site");
         EndpointRegistry registry =
                 org.mockito.Mockito.spy(
-                        RunnerTestSupport.endpointRegistry(mock(ConfigService.class)));
+                        RunnerTestSupport.endpointRegistry(
+                                org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                        org.flexlb.balance.scheduler.SchedulingTestConfig
+                                                .newConfig())));
         directory(registry, status);
         assertNull(
                 registry.get(role, status.getLogicalIpPort()),

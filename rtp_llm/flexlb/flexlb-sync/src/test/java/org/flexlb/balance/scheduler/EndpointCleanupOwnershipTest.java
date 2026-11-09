@@ -60,7 +60,7 @@ class EndpointCleanupOwnershipTest {
 
     @AfterEach
     void close() {
-        if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
+        if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(registry)) {
             registry.closeOutstandingAndTerminalize();
             SchedulerTestSupport.timer(
                             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry))
@@ -90,9 +90,7 @@ class EndpointCleanupOwnershipTest {
             var selectedEndpoint = endpoint;
 
             assertNotNull(selectedEndpoint);
-            assertNotNull(
-                    EndpointTestSupport.reserveUnqueuedDecode(
-                            endpoint, selectedEndpoint, id, 1L, 1L, 50));
+            assertNotNull(EndpointTestSupport.registerDecode(endpoint, id, 1L, 1L, 50));
         }
         assertEquals(
                 0,
@@ -114,7 +112,7 @@ class EndpointCleanupOwnershipTest {
     void terminalRecordMembershipIsConservativeButNotEquivalentToLiveOwnership() throws Exception {
         long id = 7002L;
         var future = registry.submit(RequestProtocolTestSupport.context(config, id), () -> {});
-        RequestContext original = registry.requests.findActive(String.valueOf(id));
+        RequestContext original = registry.repository.findActive(String.valueOf(id));
         registry.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
         future.get(5, java.util.concurrent.TimeUnit.SECONDS);
         assertEquals(
@@ -125,7 +123,7 @@ class EndpointCleanupOwnershipTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
                         .retainsIdentity(String.valueOf(id)));
         assertNull(
-                registry.requests.findActive(String.valueOf(id)),
+                registry.repository.findActive(String.valueOf(id)),
                 "finished requests leave the active context directory");
         assertEquals(
                 RequestState.Phase.CANCELLED,
@@ -146,7 +144,7 @@ class EndpointCleanupOwnershipTest {
                         .retainsIdentity(String.valueOf(id)));
         var replacementFuture =
                 registry.submit(RequestProtocolTestSupport.context(config, id), () -> {});
-        assertNotSame(original, registry.requests.findActive(String.valueOf(id)));
+        assertNotSame(original, registry.repository.findActive(String.valueOf(id)));
         assertTrue(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
                         .retainsIdentity(String.valueOf(id)));
@@ -254,7 +252,7 @@ class EndpointCleanupOwnershipTest {
                                 ::retainsIdentity));
         assertDecodeLedger(endpoint, 1, 0, 200L, 350L);
 
-        RequestContext requestContext = registry.requests.findActive(String.valueOf(id));
+        RequestContext requestContext = registry.repository.findActive(String.valueOf(id));
         registry.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(
                 0,
@@ -317,7 +315,7 @@ class EndpointCleanupOwnershipTest {
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
                                 ::retainsIdentity));
         ledger.assertOwned(replacement, 70L);
-        RequestContext requestContext = registry.requests.findActive(String.valueOf(id));
+        RequestContext requestContext = registry.repository.findActive(String.valueOf(id));
         registry.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(
                 0,
@@ -382,7 +380,7 @@ class EndpointCleanupOwnershipTest {
         var ledger = new PrefillLedger(batch);
         var old = ledger.commit(id, 1L, 20L);
         ledger.advanceBeyondTtl();
-        RequestContext original = registry.requests.findActive(String.valueOf(id));
+        RequestContext original = registry.repository.findActive(String.valueOf(id));
         registry.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(
                 0,
@@ -456,7 +454,7 @@ class EndpointCleanupOwnershipTest {
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
                                 ::retainsIdentity));
         assertDecodeLedger(endpoint, 0, 1, 0L, 0L);
-        RequestContext original = registry.requests.findActive(String.valueOf(id));
+        RequestContext original = registry.repository.findActive(String.valueOf(id));
         registry.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(
                 0,
@@ -524,8 +522,7 @@ class EndpointCleanupOwnershipTest {
 
             assertNotNull(selectedEndpoint);
             var reservation =
-                    EndpointTestSupport.reserveUnqueuedDecode(
-                            endpoint, selectedEndpoint, id, hardKv, expectedKv, 50);
+                    EndpointTestSupport.registerDecode(endpoint, id, hardKv, expectedKv, 50);
             assertNotNull(reservation);
             return reservation;
         }
@@ -538,14 +535,12 @@ class EndpointCleanupOwnershipTest {
         assertEquals(reserved, view.reservedCount());
         assertEquals(confirmed, view.confirmedCount());
         assertEquals(reserved + confirmed, view.routing().totalLoad());
-        // These are immediate reservations, so both unqueued shadows and
-        // confirmed Engine owners occupy dispatch capacity.
-        assertEquals(reserved + confirmed, view.engineCapacityUsed());
+        // Queued selections own KV, while confirmed Engine owners consume dispatch capacity.
+        assertEquals(confirmed, view.engineCapacityUsed());
+        assertEquals(reserved, view.queuedCount());
         assertEquals(hardKv, view.routing().inflightHardKv());
         assertEquals(expectedKv, EndpointTestSupport.expectedReservedKv(view));
     }
-
-    private record CleanupRace<T>(int evicted, T owner) {}
 
     private <T> CleanupRace<T> raceRegistrationAfterAbsentCheck(
             long id,
@@ -623,4 +618,6 @@ class EndpointCleanupOwnershipTest {
             throw new AssertionError(interrupted);
         }
     }
+
+    private record CleanupRace<T>(int evicted, T owner) {}
 }

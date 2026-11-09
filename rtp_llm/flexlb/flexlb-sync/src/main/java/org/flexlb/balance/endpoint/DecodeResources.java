@@ -27,6 +27,7 @@ public final class DecodeResources {
     }
 
     public enum ReserveStatus {
+        VERSION_CONFLICT,
         ACQUIRED,
         ALREADY_OWNED,
         CAPACITY_FULL,
@@ -233,14 +234,6 @@ public final class DecodeResources {
      * The caller has resolved request protocol; this operation changes only exact resource ownership.
      */
     public record PreemptionUpdate(Kind kind, RequestReservation reservation) {
-        public enum Kind {
-            CANCEL_HANDED_OFF,
-            CANCELED,
-            REQUEST_FENCED,
-            ACTIVE,
-            FINISHED
-        }
-
         public PreemptionUpdate {
             java.util.Objects.requireNonNull(kind, "kind");
             java.util.Objects.requireNonNull(reservation, "reservation");
@@ -268,6 +261,14 @@ public final class DecodeResources {
 
         boolean releasesCapacity() {
             return kind != Kind.CANCEL_HANDED_OFF;
+        }
+
+        public enum Kind {
+            CANCEL_HANDED_OFF,
+            CANCELED,
+            REQUEST_FENCED,
+            ACTIVE,
+            FINISHED
         }
     }
 
@@ -345,6 +346,9 @@ public final class DecodeResources {
         }
     }
 
+    /**
+     * Freezes endpoint identity, observed load and registered capacity for Decode selection.
+     */
     public record DecodeRoutingView(
             String address,
             long generationId,
@@ -356,6 +360,12 @@ public final class DecodeResources {
             CapacityUsage placementUsage,
             CapacityUsage dispatchUsage,
             long inflightHardKv) {
+        public DecodeRoutingView {
+            java.util.Objects.requireNonNull(address, "address");
+            java.util.Objects.requireNonNull(topology, "topology");
+            java.util.Objects.requireNonNull(workerStatus, "workerStatus");
+            checkArgument(generationId > 0L, "Decode routing view requires a positive generation");
+        }
 
         public int engineCapacityUsed() {
             return Math.toIntExact(dispatchUsage.occupiedRequests());
@@ -371,13 +381,6 @@ public final class DecodeResources {
 
         public long totalKv() {
             return placementUsage.totalKvTokens();
-        }
-
-        public DecodeRoutingView {
-            java.util.Objects.requireNonNull(address, "address");
-            java.util.Objects.requireNonNull(topology, "topology");
-            java.util.Objects.requireNonNull(workerStatus, "workerStatus");
-            checkArgument(generationId > 0L, "Decode routing view requires a positive generation");
         }
     }
 
@@ -519,6 +522,9 @@ public final class DecodeResources {
         }
     }
 
+    /**
+     * Records nonnegative released request and KV capacity and combines releases with saturation.
+     */
     public record CapacityRelease(long requests, long hardKvTokens, long expectedKvTokens) {
         public static final CapacityRelease NONE = new CapacityRelease(0L, 0L, 0L);
 
@@ -528,16 +534,16 @@ public final class DecodeResources {
                     "invalid Decode capacity release");
         }
 
-        static long saturatedAddNonNegative(long left, long right) {
-            checkArgument(left >= 0 && right >= 0, "KV admission counters must be non-negative");
-            return saturatedAdd(left, right);
-        }
-
         public CapacityRelease plus(CapacityRelease other) {
             return new CapacityRelease(
                     saturatedAddNonNegative(requests, other.requests),
                     saturatedAddNonNegative(hardKvTokens, other.hardKvTokens),
                     saturatedAddNonNegative(expectedKvTokens, other.expectedKvTokens));
+        }
+
+        static long saturatedAddNonNegative(long left, long right) {
+            checkArgument(left >= 0 && right >= 0, "KV admission counters must be non-negative");
+            return saturatedAdd(left, right);
         }
     }
 

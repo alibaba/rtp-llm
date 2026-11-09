@@ -59,7 +59,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Root-cause regression for follower request threads blocked on a slow Master. */
+/**
+ * Root-cause regression for follower request threads blocked on a slow Master.
+ */
 class FollowerAsyncForwardingNettyTest {
 
     private static final int EXECUTOR_CORE_SIZE =
@@ -316,6 +318,9 @@ class FollowerAsyncForwardingNettyTest {
                 .build();
     }
 
+    /**
+     * Holds master responses until released so tests can inspect concurrent follower forwarding.
+     */
     private static final class SlowMaster implements AutoCloseable {
         private final CountDownLatch slowRequests;
         private final Map<Long, AtomicInteger> requestCounts = new ConcurrentHashMap<>();
@@ -361,6 +366,13 @@ class FollowerAsyncForwardingNettyTest {
                                     })
                             .build()
                             .start();
+        }
+
+        @Override
+        public void close() throws InterruptedException {
+            releaseResponses();
+            server.shutdownNow();
+            server.awaitTermination(5, TimeUnit.SECONDS);
         }
 
         static SlowMaster start(int expectedSlowRequests) throws Exception {
@@ -418,19 +430,16 @@ class FollowerAsyncForwardingNettyTest {
             observer.onCompleted();
         }
 
-        @Override
-        public void close() throws InterruptedException {
-            releaseResponses();
-            server.shutdownNow();
-            server.awaitTermination(5, TimeUnit.SECONDS);
-        }
-
         private record PendingResponse(
                 StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {}
     }
 
+    /**
+     * Delays master responses and records duplicate requests and invalid forwarding hops.
+     */
     private static final class DelayedMaster implements AutoCloseable {
         private final long responseDelayMs;
+
         private final Map<Long, AtomicInteger> requestCounts = new ConcurrentHashMap<>();
         private final AtomicInteger receivedRequests = new AtomicInteger();
         private final AtomicInteger duplicateRequests = new AtomicInteger();
@@ -480,6 +489,13 @@ class FollowerAsyncForwardingNettyTest {
                             .start();
         }
 
+        @Override
+        public void close() throws InterruptedException {
+            responseTimer.shutdownNow();
+            server.shutdownNow();
+            server.awaitTermination(5, TimeUnit.SECONDS);
+        }
+
         static DelayedMaster start(long responseDelayMs) throws Exception {
             return new DelayedMaster(responseDelayMs);
         }
@@ -499,22 +515,20 @@ class FollowerAsyncForwardingNettyTest {
         int invalidForwardHops() {
             return invalidForwardHops.get();
         }
-
-        @Override
-        public void close() throws InterruptedException {
-            responseTimer.shutdownNow();
-            server.shutdownNow();
-            server.awaitTermination(5, TimeUnit.SECONDS);
-        }
     }
 
+    /**
+     * Runs a follower and exposes completion of its request and callback executors.
+     */
     private static final class Follower implements AutoCloseable {
         private final AtomicInteger rejections = new AtomicInteger();
         private final AtomicInteger channelRejections = new AtomicInteger();
         private final AbstractRequestScheduler requestScheduler =
                 mock(AbstractRequestScheduler.class);
         private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
+
         private final int requestQueueCapacity;
+
         private final ThreadPoolExecutor requestExecutor;
         private final ThreadPoolExecutor channelExecutor;
         private final EventLoopGroup channelEventLoop;
@@ -591,6 +605,16 @@ class FollowerAsyncForwardingNettyTest {
                             .start();
         }
 
+        @Override
+        public void close() throws InterruptedException {
+            forwarder.shutdown();
+            server.shutdownNow();
+            server.awaitTermination(5, TimeUnit.SECONDS);
+            requestExecutor.shutdownNow();
+            channelExecutor.shutdownNow();
+            channelEventLoop.shutdownGracefully().sync();
+        }
+
         static Follower start(String masterHttpAddress, int requestQueueCapacity) throws Exception {
             return new Follower(masterHttpAddress, requestQueueCapacity);
         }
@@ -626,18 +650,11 @@ class FollowerAsyncForwardingNettyTest {
                                     && channelExecutor.getQueue().isEmpty(),
                     timeout);
         }
-
-        @Override
-        public void close() throws InterruptedException {
-            forwarder.shutdown();
-            server.shutdownNow();
-            server.awaitTermination(5, TimeUnit.SECONDS);
-            requestExecutor.shutdownNow();
-            channelExecutor.shutdownNow();
-            channelEventLoop.shutdownGracefully().sync();
-        }
     }
 
+    /**
+     * Sends scheduling calls and checks that each call receives exactly one terminal response.
+     */
     private static final class Client implements AutoCloseable {
         private final ManagedChannel channel;
         private final FlexlbServiceGrpc.FlexlbServiceStub asyncStub;
@@ -651,6 +668,12 @@ class FollowerAsyncForwardingNettyTest {
             channel = NettyChannelBuilder.forAddress("127.0.0.1", grpcPort).usePlaintext().build();
             asyncStub = FlexlbServiceGrpc.newStub(channel);
             blockingStub = FlexlbServiceGrpc.newBlockingStub(channel);
+        }
+
+        @Override
+        public void close() throws InterruptedException {
+            channel.shutdownNow();
+            channel.awaitTermination(5, TimeUnit.SECONDS);
         }
 
         static Client connect(int grpcPort) {
@@ -723,14 +746,11 @@ class FollowerAsyncForwardingNettyTest {
                                 + requestId);
             }
         }
-
-        @Override
-        public void close() throws InterruptedException {
-            channel.shutdownNow();
-            channel.awaitTermination(5, TimeUnit.SECONDS);
-        }
     }
 
+    /**
+     * Drives forwarding measurements and counts completed and outstanding RPCs.
+     */
     private static final class BenchmarkClient implements AutoCloseable {
         private final ManagedChannel channel;
         private final FlexlbServiceGrpc.FlexlbServiceStub asyncStub;
@@ -757,6 +777,12 @@ class FollowerAsyncForwardingNettyTest {
             successfulLatencyNanos = new long[requestCount];
             responseClaims = new AtomicIntegerArray(requestCount);
             terminalClaims = new AtomicIntegerArray(requestCount);
+        }
+
+        @Override
+        public void close() throws InterruptedException {
+            channel.shutdownNow();
+            channel.awaitTermination(5, TimeUnit.SECONDS);
         }
 
         static BenchmarkClient connect(int grpcPort, int requestCount) {
@@ -867,14 +893,12 @@ class FollowerAsyncForwardingNettyTest {
                     .sorted()
                     .toArray();
         }
-
-        @Override
-        public void close() throws InterruptedException {
-            channel.shutdownNow();
-            channel.awaitTermination(5, TimeUnit.SECONDS);
-        }
     }
 
+    /**
+     * Samples executor capacity while a forwarding workload runs and releases sampling resources on
+     * close.
+     */
     private static final class CapacitySampler implements AutoCloseable {
         private final Follower follower;
         private final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
@@ -890,6 +914,12 @@ class FollowerAsyncForwardingNettyTest {
         private CapacitySampler(Follower follower, long initialRssBytes) {
             this.follower = follower;
             maxRssBytes = new AtomicLong(initialRssBytes);
+        }
+
+        @Override
+        public void close() {
+            sample();
+            timer.shutdownNow();
         }
 
         void start() {
@@ -918,12 +948,6 @@ class FollowerAsyncForwardingNettyTest {
                 // Sampling must not perturb or abort the benchmark workload.
             }
         }
-
-        @Override
-        public void close() {
-            sample();
-            timer.shutdownNow();
-        }
     }
 
     private record GcSnapshot(long collections, long collectionTimeMs) {
@@ -943,6 +967,9 @@ class FollowerAsyncForwardingNettyTest {
         }
     }
 
+    /**
+     * Calculates and prints forwarding throughput and latency measurements.
+     */
     private record CapacityResult(
             double offeredQps,
             double terminalQps,
@@ -978,7 +1005,6 @@ class FollowerAsyncForwardingNettyTest {
             boolean allTerminated,
             boolean executorDrained,
             boolean callbackExecutorDrained) {
-
         static CapacityResult from(
                 BenchmarkClient client,
                 DelayedMaster master,
@@ -1030,18 +1056,6 @@ class FollowerAsyncForwardingNettyTest {
                     allTerminated,
                     executorDrained,
                     callbackExecutorDrained);
-        }
-
-        private static double perSecond(long count, long elapsedNanos) {
-            return elapsedNanos <= 0 ? 0.0 : count * 1_000_000_000.0 / elapsedNanos;
-        }
-
-        private static double percentileMillis(long[] sortedNanos, double percentile) {
-            if (sortedNanos.length == 0) {
-                return 0.0;
-            }
-            int index = Math.max(0, (int) Math.ceil(sortedNanos.length * percentile) - 1);
-            return sortedNanos[index] / 1_000_000.0;
         }
 
         void printJson() {
@@ -1115,6 +1129,18 @@ class FollowerAsyncForwardingNettyTest {
                     allTerminated,
                     executorDrained,
                     callbackExecutorDrained);
+        }
+
+        private static double perSecond(long count, long elapsedNanos) {
+            return elapsedNanos <= 0 ? 0.0 : count * 1_000_000_000.0 / elapsedNanos;
+        }
+
+        private static double percentileMillis(long[] sortedNanos, double percentile) {
+            if (sortedNanos.length == 0) {
+                return 0.0;
+            }
+            int index = Math.max(0, (int) Math.ceil(sortedNanos.length * percentile) - 1);
+            return sortedNanos[index] / 1_000_000.0;
         }
     }
 }

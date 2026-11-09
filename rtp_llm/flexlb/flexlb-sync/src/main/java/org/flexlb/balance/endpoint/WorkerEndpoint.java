@@ -22,45 +22,7 @@ import static com.google.common.base.Preconditions.checkState;
  * operate on it directly.
  */
 public class WorkerEndpoint {
-
-    /**
-     * Passive status facts. The sync workflow publishes them after releasing the generation lock.
-     */
-    public sealed interface StatusChange {
-        record None() implements StatusChange {}
-
-        record Encoder(java.util.List<EncoderEndpoint.RequestStatus> requests)
-                implements StatusChange {
-            public Encoder {
-                requests = java.util.List.copyOf(requests);
-            }
-        }
-
-        record Prefill(
-                java.util.List<PrefillEndpoint.PrefillRequestStatus> requestStatuses,
-                java.util.List<PrefillEndpoint.BatchCompletion> batchCompletions,
-                boolean schedulingInputsChanged,
-                boolean capacityReleased)
-                implements StatusChange {
-            public Prefill {
-                requestStatuses = java.util.List.copyOf(requestStatuses);
-                batchCompletions = java.util.List.copyOf(batchCompletions);
-            }
-        }
-
-        record Decode(
-                java.util.List<DecodeResources.DecodeRequestStatus> requests,
-                boolean placementCapacityChanged,
-                boolean dispatchCapacityChanged)
-                implements StatusChange {
-            public Decode {
-                requests = java.util.List.copyOf(requests);
-            }
-        }
-    }
-
     public static final StatusChange NO_STATUS_CHANGE = new StatusChange.None();
-
     private static final ExecutorService RETIREMENT_EXECUTOR =
             Executors.newFixedThreadPool(
                     4,
@@ -69,28 +31,18 @@ public class WorkerEndpoint {
     private final WorkerStatus status;
     private final ReentrantLock stateLock = new ReentrantLock();
 
-    final ReentrantLock stateLock() {
-        return stateLock;
-    }
-
-    public WorkerStatus getStatus() {
-        return status;
-    }
-
-    private enum RetirementPhase {
-        ACCEPTING_REQUESTS,
-        RETIRING,
-        CLEANUP_SCHEDULED,
-        CLEANING,
-        RETIRED
-    }
-
     private volatile RetirementPhase phase = RetirementPhase.ACCEPTING_REQUESTS;
+
     private final CompletableFuture<Void> retirementCompleted = new CompletableFuture<>();
+
     private volatile Thread cleanupThread;
 
     public WorkerEndpoint(WorkerStatus status) {
         this.status = Objects.requireNonNull(status, "status");
+    }
+
+    public WorkerStatus getStatus() {
+        return status;
     }
 
     // ==================== identity (delegated to status) ====================
@@ -166,20 +118,48 @@ public class WorkerEndpoint {
                 "Status facts belong to another endpoint role");
     }
 
-    protected final void requireStatusGeneration(WorkerStatus ws) {
-        checkArgument(status == ws, "WorkerStatus generation does not belong to this endpoint");
-    }
-
-    public final boolean isRetired() {
-        return phase != RetirementPhase.ACCEPTING_REQUESTS;
-    }
-
     /**
      * New requests require both a schedulable Worker and an Endpoint accepting requests.
      * Admission callers recheck this while holding the Endpoint state lock.
      */
     public final boolean acceptsNewRequests() {
         return !isRetired() && status.isAvailableForScheduling();
+    }
+
+    public final boolean isRetired() {
+        return phase != RetirementPhase.ACCEPTING_REQUESTS;
+    }
+
+    public final void close() {
+        retireInternal(stateLock.isHeldByCurrentThread());
+    }
+
+    // ==================== monitoring (EP-authoritative) ====================
+
+    /**
+     * Role-specific observable load metric for monitoring.
+     * <p>Prefill: identity-backed committed work (ms), absent while the
+     * endpoint cannot publish a coherent complete work view.
+     * <p>Decode: total active task count (confirmed running + inflight).
+     * Stateful endpoints skip the sample while their state lock is busy.
+     */
+    public OptionalLong tryGetLoadMetric() {
+        WorkerStatus.EngineObservation engine = status.committedEngineObservation();
+        return OptionalLong.of(
+                engine.runningTaskList() == null ? 0L : engine.runningTaskList().size());
+    }
+
+    protected final void requireStatusGeneration(WorkerStatus ws) {
+        checkArgument(status == ws, "WorkerStatus generation does not belong to this endpoint");
+    }
+
+    /**
+     * Remove request records in the Endpoint state lock, then notify outside it.
+     */
+    protected void closeEndpoint() {}
+
+    final ReentrantLock stateLock() {
+        return stateLock;
     }
 
     /**
@@ -194,25 +174,8 @@ public class WorkerEndpoint {
         }
     }
 
-    public final void close() {
-        retireInternal(stateLock.isHeldByCurrentThread());
-    }
-
     final void closeAsynchronously() {
         retireInternal(true);
-    }
-
-    private void retireInternal(boolean asynchronously) {
-        beginRetirement();
-        stateLock.lock();
-        try {
-            if (phase != RetirementPhase.RETIRING) return;
-            phase = RetirementPhase.CLEANUP_SCHEDULED;
-        } finally {
-            stateLock.unlock();
-        }
-        if (asynchronously) executeRetirement(this::finishRetirement);
-        else finishRetirement();
     }
 
     /**
@@ -236,6 +199,23 @@ public class WorkerEndpoint {
             throw new IllegalStateException(
                     "Endpoint retirement timed out: phase=" + phase, timeout);
         }
+    }
+
+    static void executeRetirement(Runnable cleanup) {
+        RETIREMENT_EXECUTOR.execute(cleanup);
+    }
+
+    private void retireInternal(boolean asynchronously) {
+        beginRetirement();
+        stateLock.lock();
+        try {
+            if (phase != RetirementPhase.RETIRING) return;
+            phase = RetirementPhase.CLEANUP_SCHEDULED;
+        } finally {
+            stateLock.unlock();
+        }
+        if (asynchronously) executeRetirement(this::finishRetirement);
+        else finishRetirement();
     }
 
     private void finishRetirement() {
@@ -265,27 +245,56 @@ public class WorkerEndpoint {
         Failures.rethrow(failure, "Endpoint retirement failed");
     }
 
-    static void executeRetirement(Runnable cleanup) {
-        RETIREMENT_EXECUTOR.execute(cleanup);
+    /**
+     * Passive status facts. The sync workflow publishes them after releasing the generation lock.
+     */
+    public sealed interface StatusChange {
+        record None() implements StatusChange {}
+
+        /**
+         * Freezes Encoder request observations for status processing outside the endpoint lock.
+         */
+        record Encoder(java.util.List<EncoderEndpoint.RequestStatus> requests)
+                implements StatusChange {
+            public Encoder {
+                requests = java.util.List.copyOf(requests);
+            }
+        }
+
+        /**
+         * Freezes Prefill request and batch changes together with scheduling and capacity notifications.
+         */
+        record Prefill(
+                java.util.List<PrefillEndpoint.PrefillRequestStatus> requestStatuses,
+                java.util.List<PrefillEndpoint.BatchCompletion> batchCompletions,
+                boolean schedulingInputsChanged,
+                boolean capacityReleased)
+                implements StatusChange {
+            public Prefill {
+                requestStatuses = java.util.List.copyOf(requestStatuses);
+                batchCompletions = java.util.List.copyOf(batchCompletions);
+            }
+        }
+
+        /**
+         * Freezes Decode request changes and the placement and dispatch capacity notification flags.
+         */
+        record Decode(
+                java.util.List<DecodeResources.DecodeRequestStatus> requests,
+                boolean placementCapacityChanged,
+                boolean dispatchCapacityChanged)
+                implements StatusChange {
+            public Decode {
+                requests = java.util.List.copyOf(requests);
+            }
+        }
     }
 
-    /**
-     * Remove request records in the Endpoint state lock, then notify outside it.
-     */
-    protected void closeEndpoint() {}
-
-    // ==================== monitoring (EP-authoritative) ====================
-
-    /**
-     * Role-specific observable load metric for monitoring.
-     * <p>Prefill: identity-backed committed work (ms), absent while the
-     * endpoint cannot publish a coherent complete work view.
-     * <p>Decode: total active task count (confirmed running + inflight).
-     * Stateful endpoints skip the sample while their state lock is busy.
-     */
-    public OptionalLong tryGetLoadMetric() {
-        WorkerStatus.EngineObservation engine = status.committedEngineObservation();
-        return OptionalLong.of(
-                engine.runningTaskList() == null ? 0L : engine.runningTaskList().size());
+    private enum RetirementPhase {
+        ACCEPTING_REQUESTS,
+        RETIRING,
+        CLEANUP_SCHEDULED,
+        CLEANING,
+        RETIRED
     }
 }

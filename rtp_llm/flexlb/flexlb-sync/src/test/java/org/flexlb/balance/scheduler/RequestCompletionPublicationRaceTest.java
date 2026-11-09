@@ -165,7 +165,7 @@ class RequestCompletionPublicationRaceTest {
                             .getRequestState("503", 0L)
                             .state());
         } finally {
-            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
+            if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(registry)) {
                 registry.closeOutstandingAndTerminalize();
                 SchedulerTestSupport.timer(
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry))
@@ -246,7 +246,7 @@ class RequestCompletionPublicationRaceTest {
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(scheduler)
                             .liveRequestCount());
         } finally {
-            RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(scheduler);
+            RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(scheduler);
             scheduler.closeOutstandingAndTerminalize();
             SchedulerTestSupport.timer(
                             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(scheduler))
@@ -370,13 +370,13 @@ class RequestCompletionPublicationRaceTest {
             RequestContext context = RequestProtocolTestSupport.context(config, 501L);
             CompletableFuture<Response> future =
                     RequestProtocolTestSupport.submitForManualPlacement(registry, context);
-            RequestContext requestContext = registry.requests.findActive("501");
+            RequestContext requestContext = registry.repository.findActive("501");
             PrefillEndpoint prefill = mock(PrefillEndpoint.class);
             when(prefill.getIp()).thenReturn("prefill");
             DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
             var reservation = new DecodeResources.RequestReservation(1L, String.valueOf(501L), 1L);
             context.data().setFuture(future);
-            RouteExecution item =
+            RouteResult item =
                     org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(
                             context,
                             new Response(),
@@ -421,7 +421,8 @@ class RequestCompletionPublicationRaceTest {
                     .thenReturn(
                             CompletableFuture.completedFuture(
                                     EngineGrpcClient.CancelReply.REQUEST_CLEANED));
-            assertTrue(claim.owner().data().getRequestScheduler().tryStartSend(claim));
+            assertEquals(
+                    ContextResult.SendState.SENDING, claim.owner().snapshot().delivery().send());
             var completions = new java.util.concurrent.atomic.AtomicInteger();
             CompletableFuture<Void> callback =
                     future.thenAccept(
@@ -463,7 +464,7 @@ class RequestCompletionPublicationRaceTest {
             assertEquals(
                     SchedulerTestSupport.Stage.FINALIZING,
                     SchedulerTestSupport.stage(requestContext));
-            assertSame(requestContext, registry.requests.findActive("501"));
+            assertSame(requestContext, registry.repository.findActive("501"));
             assertEquals(
                     StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                     registry.submit(RequestProtocolTestSupport.context(config, 501L), () -> {})
@@ -481,7 +482,7 @@ class RequestCompletionPublicationRaceTest {
             assertFalse(
                     future.get(2L, TimeUnit.SECONDS).isSuccess(),
                     "an obsolete success permit cannot win after TTL claims cleanup");
-            assertSame(requestContext, registry.requests.findActive("501"));
+            assertSame(requestContext, registry.repository.findActive("501"));
             assertEquals(
                     SchedulerTestSupport.Stage.FINALIZING,
                     SchedulerTestSupport.stage(requestContext));
@@ -502,7 +503,7 @@ class RequestCompletionPublicationRaceTest {
             assertEquals(
                     SchedulerTestSupport.Stage.FINISHED,
                     SchedulerTestSupport.stage(requestContext));
-            assertNull(registry.requests.findActive("501"));
+            assertNull(registry.repository.findActive("501"));
             assertEquals(
                     RequestState.Phase.TIMED_OUT,
                     org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry)
@@ -516,7 +517,7 @@ class RequestCompletionPublicationRaceTest {
             resumeCleanup.countDown();
             operations.shutdownNow();
             operations.awaitTermination(5L, TimeUnit.SECONDS);
-            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
+            if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(registry)) {
                 registry.closeOutstandingAndTerminalize();
                 SchedulerTestSupport.timer(
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry))
@@ -578,7 +579,7 @@ class RequestCompletionPublicationRaceTest {
                             SchedulerTestSupport.settleTerminalFixture(
                                     fixture.requestContext(), terminal);
                 }
-                fixture.scheduler().requests.archive(fixture.requestContext(), settled);
+                fixture.scheduler().repository.archive(fixture.requestContext(), settled);
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(fixture.scheduler())
                         .deadlines()
                         .remove(fixture.requestContext());
@@ -693,7 +694,7 @@ class RequestCompletionPublicationRaceTest {
                     RequestState.Phase.TIMED_OUT,
                     RequestState.from(fixture.requestContext().snapshot()).state());
         }
-        fixture.scheduler().requests.archive(fixture.requestContext(), settled);
+        fixture.scheduler().repository.archive(fixture.requestContext(), settled);
         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(fixture.scheduler())
                 .deadlines()
                 .remove(fixture.requestContext());
@@ -745,7 +746,7 @@ class RequestCompletionPublicationRaceTest {
             settled =
                     SchedulerTestSupport.settleTerminalFixture(fixture.requestContext(), terminal);
         }
-        fixture.scheduler().requests.archive(fixture.requestContext(), settled);
+        fixture.scheduler().repository.archive(fixture.requestContext(), settled);
         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(fixture.scheduler())
                 .deadlines()
                 .remove(fixture.requestContext());
@@ -837,7 +838,7 @@ class RequestCompletionPublicationRaceTest {
         try (var publisher = spy(new ResponseCompletionExecutor(1))) {
             Fixture fixture = fixture(publisher, !deliveryFailure);
             RequestContext context = fixture.requestContext();
-            RouteExecution exact = context.snapshot().route();
+            RouteResult exact = context.snapshot().route();
             var phase = context.snapshot().phase();
             org.mockito.Mockito.doReturn(false).when(publisher).register();
             try {
@@ -947,7 +948,7 @@ class RequestCompletionPublicationRaceTest {
         AbstractRequestScheduler owner =
                 RequestProtocolTestSupport.initialize(
                         responseExecutor, context, mock(ExpirationTimer.class));
-        RouteExecution item =
+        RouteResult item =
                 SchedulingTestConfig.createRoute(
                         context,
                         new Response(),
@@ -965,13 +966,12 @@ class RequestCompletionPublicationRaceTest {
                         owner, item, RequestProtocolTestSupport.publication(() -> true)));
         AbstractRequestScheduler.finishPlacement(admission);
         var claim =
-                DeliveryDispatcher.commitDelivery(
-                        owner,
+                owner.commitDelivery(
                         new org.flexlb.balance.scheduler.Delivery.Member(item, null),
                         Delivery.SendMode.BATCH_ENQUEUE,
                         801L);
         assertNotNull(claim);
-        assertTrue(owner.tryStartSend(claim));
+        assertEquals(ContextResult.SendState.SENDING, claim.owner().snapshot().delivery().send());
         if (delivered) {
             org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                     context,

@@ -4,8 +4,6 @@ import org.flexlb.balance.endpoint.PrefillRequestQueue;
 import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.eviction.DecodePreemptionPolicy;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.strategy.DecodeSelectionStrategy;
-import org.flexlb.balance.strategy.PrefillSelectionStrategy;
 import org.flexlb.balance.strategy.VitSelectionStrategy;
 import org.flexlb.config.ConfigService;
 import org.junit.jupiter.api.Test;
@@ -15,6 +13,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks that supplied Spring components replace defaults without instantiating their unused dependencies.
+ */
 class PlacementComponentsContractTest {
     @Test
     void suppliedComponentsReplaceDefaultsWithoutPrimaryOrDefaultDependencies() {
@@ -24,9 +25,12 @@ class PlacementComponentsContractTest {
         var queue = new ListPlacementQueue();
         var workers = mock(PrefillRequestQueue.Factory.class);
         var grouping = mock(GroupPlanner.class);
-        PrefillSelectionStrategy prefill = mock(PrefillSelectionStrategy.class);
-        DecodeSelectionStrategy decode =
-                (request, metadata, group, endpoints, capacity) -> {
+        org.flexlb.balance.strategy.PrefillSelectionStrategy prefill =
+                mock(
+                        org.flexlb.balance.strategy.PrefillSelectionStrategy.class,
+                        org.mockito.Mockito.CALLS_REAL_METHODS);
+        org.flexlb.balance.strategy.DecodeSelectionStrategy decode =
+                (request, metadata, group, endpoints, capacity, refresh, register) -> {
                     throw new AssertionError("assembly must not run selection");
                 };
         VitSelectionStrategy vit = addresses -> 0;
@@ -51,8 +55,8 @@ class PlacementComponentsContractTest {
                 .withBean(PlacementQueue.class, () -> queue)
                 .withBean(PrefillRequestQueue.Factory.class, () -> workers)
                 .withBean(GroupPlanner.class, () -> grouping)
-                .withBean(PrefillSelectionStrategy.class, () -> prefill)
-                .withBean(DecodeSelectionStrategy.class, () -> decode)
+                .withBean(org.flexlb.balance.strategy.PrefillSelectionStrategy.class, () -> prefill)
+                .withBean(org.flexlb.balance.strategy.DecodeSelectionStrategy.class, () -> decode)
                 .withBean(VitSelectionStrategy.class, () -> vit)
                 .withBean(DecodePreemption.class, () -> preemption)
                 .withBean(DecodePreemptionPolicy.class, () -> victims)
@@ -71,11 +75,15 @@ class PlacementComponentsContractTest {
                             assertThat(context.getBeansOfType(GroupPlanner.class).values())
                                     .containsExactly(grouping);
                             assertThat(
-                                            context.getBeansOfType(PrefillSelectionStrategy.class)
+                                            context.getBeansOfType(
+                                                            org.flexlb.balance.strategy
+                                                                    .PrefillSelectionStrategy.class)
                                                     .values())
                                     .containsExactly(prefill);
                             assertThat(
-                                            context.getBeansOfType(DecodeSelectionStrategy.class)
+                                            context.getBeansOfType(
+                                                            org.flexlb.balance.strategy
+                                                                    .DecodeSelectionStrategy.class)
                                                     .values())
                                     .containsExactly(decode);
                             assertThat(context.getBeansOfType(VitSelectionStrategy.class).values())

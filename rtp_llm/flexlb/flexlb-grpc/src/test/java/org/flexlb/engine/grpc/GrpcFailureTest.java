@@ -35,6 +35,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks failure classification uses typed causes and transport observations without inventing worker faults from message text.
+ * Cancellation, deadlines and local failures must retain their retry restrictions.
+ */
 class GrpcFailureTest {
     @Test
     void absentFailureProvidesNoFaultEvidence() {
@@ -105,6 +109,237 @@ class GrpcFailureTest {
         assertEquals(retryable, GrpcFailure.isRetryableTransportFailure(preferredWrapper));
         assertSame(preferredRoot, GrpcFailure.analyze(otherWrapper).rootCause());
         assertSame(otherRoot, GrpcFailure.analyze(preferredWrapper).rootCause());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void outermostGrpcStatusWinsEvenWhenItsCodeIsUnknown(boolean checkedException) {
+        Throwable inner = statusFailure(Status.DEADLINE_EXCEEDED, !checkedException);
+        Throwable outer = statusFailure(Status.UNKNOWN.withCause(inner), checkedException);
+
+        var analysis = GrpcFailure.analyze(new CompletionException(outer));
+
+        assertEquals(Status.Code.UNKNOWN, analysis.grpcCode());
+        assertEquals(GrpcFailure.Kind.RPC_FAILURE, analysis.kind());
+        assertSame(inner, analysis.rootCause());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void outermostGrpcStatusControlsRetryWhenNestedStatusesDisagree(boolean checkedException) {
+        for (Status terminal : new Status[] {Status.CANCELLED, Status.DEADLINE_EXCEEDED}) {
+            Throwable brokenConnection =
+                    statusFailure(
+                            Status.UNAVAILABLE.withCause(new ClosedChannelException()),
+                            !checkedException);
+            Throwable cancelled =
+                    statusFailure(terminal.withCause(brokenConnection), checkedException);
+            assertEquals(terminal.getCode(), GrpcFailure.analyze(cancelled).grpcCode());
+            assertFalse(GrpcFailure.isRetryableTransportFailure(cancelled));
+
+            Throwable innerCancellation =
+                    statusFailure(
+                            terminal.withCause(new ClosedChannelException()), !checkedException);
+            Throwable unavailable =
+                    statusFailure(
+                            Status.UNAVAILABLE.withCause(innerCancellation), checkedException);
+            assertEquals(Status.Code.UNAVAILABLE, GrpcFailure.analyze(unavailable).grpcCode());
+            assertTrue(GrpcFailure.isRetryableTransportFailure(unavailable));
+        }
+    }
+
+    @Test
+    void textCannotInventAnOomDeadlineOrBrokenConnection() {
+        var failure =
+                new IllegalStateException(
+                        "OutOfMemoryError DEADLINE_EXCEEDED Connection reset http2 exception");
+        assertEquals(GrpcFailure.Kind.RPC_FAILURE, GrpcFailure.classify(failure));
+        assertFalse(GrpcFailure.isRetryableTransportFailure(failure));
+        assertFalse(GrpcFailure.analyze(failure).confirmedLocalFailure());
+    }
+
+    @Test
+    void strongLocalCauseClassificationDoesNotReadExceptionMessages() {
+        var failure =
+                new RejectedExecutionException() {
+                    @Override
+                    public String getMessage() {
+                        throw new AssertionError("message must not be used");
+                    }
+                };
+        assertEquals(GrpcFailure.Kind.LOCAL_EXECUTOR_REJECTED, GrpcFailure.classify(failure));
+        assertFalse(GrpcFailure.isRetryableTransportFailure(failure));
+    }
+
+    @Test
+    void statusCodeWorksWithoutDescriptionAndDoesNotClaimWorkerFault() {
+        var deadline = Status.DEADLINE_EXCEEDED.asException();
+        assertEquals(GrpcFailure.Kind.DEADLINE_EXCEEDED, GrpcFailure.classify(deadline));
+        assertFalse(GrpcFailure.analyze(deadline).confirmedLocalFailure());
+        assertFalse(GrpcFailure.isRetryableTransportFailure(deadline));
+        assertEquals(
+                GrpcFailure.Kind.RPC_FAILURE,
+                GrpcFailure.classify(Status.RESOURCE_EXHAUSTED.asRuntimeException()));
+    }
+
+    @Test
+    void typedConnectionErrorsArePreservedWithoutAttributingThemToWorker() {
+        assertEquals(
+                GrpcFailure.Kind.CONNECT_TIMEOUT,
+                GrpcFailure.classify(
+                        Status.UNAVAILABLE.withCause(new ConnectTimeoutException()).asException()));
+        assertEquals(GrpcFailure.Kind.CONNECT_FAILED, GrpcFailure.classify(new ConnectException()));
+        var closed = Status.UNKNOWN.withCause(new ClosedChannelException()).asRuntimeException();
+        assertEquals(GrpcFailure.Kind.CHANNEL_CLOSED, GrpcFailure.classify(closed));
+        assertTrue(GrpcFailure.isRetryableTransportFailure(closed));
+        assertFalse(GrpcFailure.analyze(closed).confirmedLocalFailure());
+    }
+
+    @ParameterizedTest(name = "{1}")
+    @MethodSource("refinedTransportCauses")
+    void refinedTransportCausesRetainTheirLocalEvidenceAndRetryPolicy(
+            Throwable cause, GrpcFailure.Kind kind, boolean confirmedLocal, boolean retryable) {
+        var failure = Status.UNAVAILABLE.withCause(cause).asRuntimeException();
+        var analysis = GrpcFailure.analyze(failure);
+
+        assertEquals(kind, analysis.kind());
+        assertEquals(Status.Code.UNAVAILABLE, analysis.grpcCode());
+        assertSame(cause, analysis.rootCause());
+        assertEquals(confirmedLocal, analysis.confirmedLocalFailure());
+        assertEquals(retryable, analysis.retryableTransportFailure());
+        assertEquals(retryable, GrpcFailure.isRetryableTransportFailure(failure));
+        for (Status terminal : new Status[] {Status.CANCELLED, Status.DEADLINE_EXCEEDED}) {
+            assertFalse(
+                    GrpcFailure.analyze(terminal.withCause(cause).asException())
+                            .retryableTransportFailure());
+        }
+    }
+
+    @Test
+    void exactSocketObservationsSurviveAddressAnnotationsThroughTheirOriginalCause() {
+        var original = new ConnectException("Connection refused");
+        var annotated =
+                withCause(new ConnectException("Connection refused: /127.0.0.1:8080"), original);
+        var analysis =
+                GrpcFailure.analyze(Status.UNAVAILABLE.withCause(annotated).asRuntimeException());
+
+        assertEquals(GrpcFailure.Kind.CONNECT_REFUSED, analysis.kind());
+        assertSame(original, analysis.rootCause());
+        assertFalse(analysis.confirmedLocalFailure());
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                "Connection refused",
+                "Connection reset",
+                "Connection reset by peer",
+                "Broken pipe"
+            })
+    void socketTextOutsideItsExpectedExceptionTypeCannotInventATransportObservation(String text) {
+        assertEquals(
+                GrpcFailure.Kind.RPC_FAILURE,
+                GrpcFailure.classify(
+                        Status.UNAVAILABLE.withDescription(text).asRuntimeException()));
+        assertEquals(
+                GrpcFailure.Kind.RPC_FAILURE,
+                GrpcFailure.classify(new IllegalStateException(text)));
+        assertEquals(GrpcFailure.Kind.IO_FAILURE, GrpcFailure.classify(new IOException(text)));
+        assertEquals(
+                GrpcFailure.Kind.SOCKET_FAILURE,
+                GrpcFailure.classify(new SocketException("prefix " + text)));
+        assertEquals(
+                GrpcFailure.Kind.CONNECT_FAILED,
+                GrpcFailure.classify(new ConnectException("prefix " + text)));
+    }
+
+    @Test
+    void socketTextMatchingDoesNotGuessAcrossTypesOrStripMessageSuffixes() {
+        assertEquals(
+                GrpcFailure.Kind.SOCKET_FAILURE,
+                GrpcFailure.classify(new SocketException("Connection refused")));
+        assertEquals(
+                GrpcFailure.Kind.CONNECT_FAILED,
+                GrpcFailure.classify(new ConnectException("Connection reset")));
+        assertEquals(
+                GrpcFailure.Kind.CONNECT_FAILED,
+                GrpcFailure.classify(new ConnectException("Broken pipe")));
+        assertEquals(
+                GrpcFailure.Kind.CONNECT_FAILED,
+                GrpcFailure.classify(new ConnectException("Connection refused: /127.0.0.1:8080")));
+        assertEquals(
+                GrpcFailure.Kind.SOCKET_FAILURE,
+                GrpcFailure.classify(new SocketException("Connection reset: /127.0.0.1:8080")));
+        assertEquals(
+                GrpcFailure.Kind.SOCKET_FAILURE,
+                GrpcFailure.classify(new SocketException("Broken pipe\n")));
+    }
+
+    @Test
+    void earlierAttemptsDoNotReplaceTheFinalAttemptCause() {
+        var deadline = Status.DEADLINE_EXCEEDED.asRuntimeException();
+        deadline.addSuppressed(new OutOfMemoryError());
+        assertEquals(GrpcFailure.Kind.DEADLINE_EXCEEDED, GrpcFailure.classify(deadline));
+    }
+
+    @Test
+    void cancellationAndDeadlineCannotRetryEvenWithAnIoCause() {
+        for (Status status : new Status[] {Status.CANCELLED, Status.DEADLINE_EXCEEDED}) {
+            assertFalse(
+                    GrpcFailure.isRetryableTransportFailure(
+                            status.withCause(new ClosedChannelException()).asRuntimeException()));
+        }
+    }
+
+    @Test
+    void responseParsingAndUnspecifiedIoFailureDoNotRecreateConnections() {
+        var malformed =
+                withCause(
+                        new InvalidProtocolBufferException("Connection reset"), new EOFException());
+        var parsing = Status.INTERNAL.withCause(malformed).asRuntimeException();
+        assertEquals(GrpcFailure.Kind.PROTOBUF_FAILURE, GrpcFailure.classify(parsing));
+        assertFalse(GrpcFailure.isRetryableTransportFailure(parsing));
+        var io = Status.UNKNOWN.withCause(new IOException()).asException();
+        assertEquals(GrpcFailure.Kind.IO_FAILURE, GrpcFailure.classify(io));
+        assertFalse(GrpcFailure.isRetryableTransportFailure(io));
+    }
+
+    @Test
+    void cyclicCauseChainWithoutRecognizedTypesCannotHangFailureHandling() {
+        var first = new Exception();
+        var second = new Exception(first);
+        first.initCause(second);
+        assertTimeoutPreemptively(
+                Duration.ofSeconds(1),
+                () -> {
+                    assertEquals(GrpcFailure.Kind.RPC_FAILURE, GrpcFailure.classify(first));
+                    assertFalse(GrpcFailure.isRetryableTransportFailure(first));
+                });
+    }
+
+    @Test
+    void cyclicCauseChainRetainsAlreadyRecognizedFailureEvidence() {
+        for (Throwable recognized :
+                new Throwable[] {new ConnectException(), new OutOfMemoryError()}) {
+            var outer = new Exception(recognized);
+            recognized.initCause(outer);
+            assertTimeoutPreemptively(
+                    Duration.ofSeconds(1),
+                    () -> {
+                        var analysis = GrpcFailure.analyze(outer);
+                        boolean localMemoryFailure = recognized instanceof OutOfMemoryError;
+                        assertEquals(
+                                localMemoryFailure
+                                        ? GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED
+                                        : GrpcFailure.Kind.CONNECT_FAILED,
+                                analysis.kind());
+                        assertEquals(localMemoryFailure, analysis.confirmedLocalFailure());
+                        assertSame(recognized, analysis.rootCause());
+                        assertEquals(
+                                !localMemoryFailure,
+                                GrpcFailure.isRetryableTransportFailure(outer));
+                    });
+        }
     }
 
     private static Stream<Arguments> competingCauses() {
@@ -248,108 +483,9 @@ class GrpcFailureTest {
                         io));
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void outermostGrpcStatusWinsEvenWhenItsCodeIsUnknown(boolean checkedException) {
-        Throwable inner = statusFailure(Status.DEADLINE_EXCEEDED, !checkedException);
-        Throwable outer = statusFailure(Status.UNKNOWN.withCause(inner), checkedException);
-
-        var analysis = GrpcFailure.analyze(new CompletionException(outer));
-
-        assertEquals(Status.Code.UNKNOWN, analysis.grpcCode());
-        assertEquals(GrpcFailure.Kind.RPC_FAILURE, analysis.kind());
-        assertSame(inner, analysis.rootCause());
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void outermostGrpcStatusControlsRetryWhenNestedStatusesDisagree(boolean checkedException) {
-        for (Status terminal : new Status[] {Status.CANCELLED, Status.DEADLINE_EXCEEDED}) {
-            Throwable brokenConnection =
-                    statusFailure(
-                            Status.UNAVAILABLE.withCause(new ClosedChannelException()),
-                            !checkedException);
-            Throwable cancelled =
-                    statusFailure(terminal.withCause(brokenConnection), checkedException);
-            assertEquals(terminal.getCode(), GrpcFailure.analyze(cancelled).grpcCode());
-            assertFalse(GrpcFailure.isRetryableTransportFailure(cancelled));
-
-            Throwable innerCancellation =
-                    statusFailure(
-                            terminal.withCause(new ClosedChannelException()), !checkedException);
-            Throwable unavailable =
-                    statusFailure(
-                            Status.UNAVAILABLE.withCause(innerCancellation), checkedException);
-            assertEquals(Status.Code.UNAVAILABLE, GrpcFailure.analyze(unavailable).grpcCode());
-            assertTrue(GrpcFailure.isRetryableTransportFailure(unavailable));
-        }
-    }
-
-    @Test
-    void textCannotInventAnOomDeadlineOrBrokenConnection() {
-        var failure =
-                new IllegalStateException(
-                        "OutOfMemoryError DEADLINE_EXCEEDED Connection reset http2 exception");
-        assertEquals(GrpcFailure.Kind.RPC_FAILURE, GrpcFailure.classify(failure));
-        assertFalse(GrpcFailure.isRetryableTransportFailure(failure));
-        assertFalse(GrpcFailure.analyze(failure).confirmedLocalFailure());
-    }
-
-    @Test
-    void strongLocalCauseClassificationDoesNotReadExceptionMessages() {
-        var failure =
-                new RejectedExecutionException() {
-                    @Override
-                    public String getMessage() {
-                        throw new AssertionError("message must not be used");
-                    }
-                };
-        assertEquals(GrpcFailure.Kind.LOCAL_EXECUTOR_REJECTED, GrpcFailure.classify(failure));
-        assertFalse(GrpcFailure.isRetryableTransportFailure(failure));
-    }
-
-    @Test
-    void statusCodeWorksWithoutDescriptionAndDoesNotClaimWorkerFault() {
-        var deadline = Status.DEADLINE_EXCEEDED.asException();
-        assertEquals(GrpcFailure.Kind.DEADLINE_EXCEEDED, GrpcFailure.classify(deadline));
-        assertFalse(GrpcFailure.analyze(deadline).confirmedLocalFailure());
-        assertFalse(GrpcFailure.isRetryableTransportFailure(deadline));
-        assertEquals(
-                GrpcFailure.Kind.RPC_FAILURE,
-                GrpcFailure.classify(Status.RESOURCE_EXHAUSTED.asRuntimeException()));
-    }
-
-    @Test
-    void typedConnectionErrorsArePreservedWithoutAttributingThemToWorker() {
-        assertEquals(
-                GrpcFailure.Kind.CONNECT_TIMEOUT,
-                GrpcFailure.classify(
-                        Status.UNAVAILABLE.withCause(new ConnectTimeoutException()).asException()));
-        assertEquals(GrpcFailure.Kind.CONNECT_FAILED, GrpcFailure.classify(new ConnectException()));
-        var closed = Status.UNKNOWN.withCause(new ClosedChannelException()).asRuntimeException();
-        assertEquals(GrpcFailure.Kind.CHANNEL_CLOSED, GrpcFailure.classify(closed));
-        assertTrue(GrpcFailure.isRetryableTransportFailure(closed));
-        assertFalse(GrpcFailure.analyze(closed).confirmedLocalFailure());
-    }
-
-    @ParameterizedTest(name = "{1}")
-    @MethodSource("refinedTransportCauses")
-    void refinedTransportCausesRetainTheirLocalEvidenceAndRetryPolicy(
-            Throwable cause, GrpcFailure.Kind kind, boolean confirmedLocal, boolean retryable) {
-        var failure = Status.UNAVAILABLE.withCause(cause).asRuntimeException();
-        var analysis = GrpcFailure.analyze(failure);
-
-        assertEquals(kind, analysis.kind());
-        assertEquals(Status.Code.UNAVAILABLE, analysis.grpcCode());
-        assertSame(cause, analysis.rootCause());
-        assertEquals(confirmedLocal, analysis.confirmedLocalFailure());
-        assertEquals(retryable, analysis.retryableTransportFailure());
-        assertEquals(retryable, GrpcFailure.isRetryableTransportFailure(failure));
-        for (Status terminal : new Status[] {Status.CANCELLED, Status.DEADLINE_EXCEEDED}) {
-            assertFalse(
-                    GrpcFailure.analyze(terminal.withCause(cause).asException())
-                            .retryableTransportFailure());
-        }
+    private static <T extends Throwable> T withCause(T failure, Throwable cause) {
+        failure.initCause(cause);
+        return failure;
     }
 
     private static Stream<Arguments> refinedTransportCauses() {
@@ -391,139 +527,7 @@ class GrpcFailureTest {
                 Arguments.of(new EOFException(), GrpcFailure.Kind.UNEXPECTED_EOF, false, true));
     }
 
-    @Test
-    void exactSocketObservationsSurviveAddressAnnotationsThroughTheirOriginalCause() {
-        var original = new ConnectException("Connection refused");
-        var annotated =
-                withCause(new ConnectException("Connection refused: /127.0.0.1:8080"), original);
-        var analysis =
-                GrpcFailure.analyze(Status.UNAVAILABLE.withCause(annotated).asRuntimeException());
-
-        assertEquals(GrpcFailure.Kind.CONNECT_REFUSED, analysis.kind());
-        assertSame(original, analysis.rootCause());
-        assertFalse(analysis.confirmedLocalFailure());
-    }
-
-    @ParameterizedTest
-    @ValueSource(
-            strings = {
-                "Connection refused",
-                "Connection reset",
-                "Connection reset by peer",
-                "Broken pipe"
-            })
-    void socketTextOutsideItsExpectedExceptionTypeCannotInventATransportObservation(String text) {
-        assertEquals(
-                GrpcFailure.Kind.RPC_FAILURE,
-                GrpcFailure.classify(
-                        Status.UNAVAILABLE.withDescription(text).asRuntimeException()));
-        assertEquals(
-                GrpcFailure.Kind.RPC_FAILURE,
-                GrpcFailure.classify(new IllegalStateException(text)));
-        assertEquals(GrpcFailure.Kind.IO_FAILURE, GrpcFailure.classify(new IOException(text)));
-        assertEquals(
-                GrpcFailure.Kind.SOCKET_FAILURE,
-                GrpcFailure.classify(new SocketException("prefix " + text)));
-        assertEquals(
-                GrpcFailure.Kind.CONNECT_FAILED,
-                GrpcFailure.classify(new ConnectException("prefix " + text)));
-    }
-
-    @Test
-    void socketTextMatchingDoesNotGuessAcrossTypesOrStripMessageSuffixes() {
-        assertEquals(
-                GrpcFailure.Kind.SOCKET_FAILURE,
-                GrpcFailure.classify(new SocketException("Connection refused")));
-        assertEquals(
-                GrpcFailure.Kind.CONNECT_FAILED,
-                GrpcFailure.classify(new ConnectException("Connection reset")));
-        assertEquals(
-                GrpcFailure.Kind.CONNECT_FAILED,
-                GrpcFailure.classify(new ConnectException("Broken pipe")));
-        assertEquals(
-                GrpcFailure.Kind.CONNECT_FAILED,
-                GrpcFailure.classify(new ConnectException("Connection refused: /127.0.0.1:8080")));
-        assertEquals(
-                GrpcFailure.Kind.SOCKET_FAILURE,
-                GrpcFailure.classify(new SocketException("Connection reset: /127.0.0.1:8080")));
-        assertEquals(
-                GrpcFailure.Kind.SOCKET_FAILURE,
-                GrpcFailure.classify(new SocketException("Broken pipe\n")));
-    }
-
-    @Test
-    void earlierAttemptsDoNotReplaceTheFinalAttemptCause() {
-        var deadline = Status.DEADLINE_EXCEEDED.asRuntimeException();
-        deadline.addSuppressed(new OutOfMemoryError());
-        assertEquals(GrpcFailure.Kind.DEADLINE_EXCEEDED, GrpcFailure.classify(deadline));
-    }
-
-    @Test
-    void cancellationAndDeadlineCannotRetryEvenWithAnIoCause() {
-        for (Status status : new Status[] {Status.CANCELLED, Status.DEADLINE_EXCEEDED}) {
-            assertFalse(
-                    GrpcFailure.isRetryableTransportFailure(
-                            status.withCause(new ClosedChannelException()).asRuntimeException()));
-        }
-    }
-
-    @Test
-    void responseParsingAndUnspecifiedIoFailureDoNotRecreateConnections() {
-        var malformed =
-                withCause(
-                        new InvalidProtocolBufferException("Connection reset"), new EOFException());
-        var parsing = Status.INTERNAL.withCause(malformed).asRuntimeException();
-        assertEquals(GrpcFailure.Kind.PROTOBUF_FAILURE, GrpcFailure.classify(parsing));
-        assertFalse(GrpcFailure.isRetryableTransportFailure(parsing));
-        var io = Status.UNKNOWN.withCause(new IOException()).asException();
-        assertEquals(GrpcFailure.Kind.IO_FAILURE, GrpcFailure.classify(io));
-        assertFalse(GrpcFailure.isRetryableTransportFailure(io));
-    }
-
-    @Test
-    void cyclicCauseChainWithoutRecognizedTypesCannotHangFailureHandling() {
-        var first = new Exception();
-        var second = new Exception(first);
-        first.initCause(second);
-        assertTimeoutPreemptively(
-                Duration.ofSeconds(1),
-                () -> {
-                    assertEquals(GrpcFailure.Kind.RPC_FAILURE, GrpcFailure.classify(first));
-                    assertFalse(GrpcFailure.isRetryableTransportFailure(first));
-                });
-    }
-
-    @Test
-    void cyclicCauseChainRetainsAlreadyRecognizedFailureEvidence() {
-        for (Throwable recognized :
-                new Throwable[] {new ConnectException(), new OutOfMemoryError()}) {
-            var outer = new Exception(recognized);
-            recognized.initCause(outer);
-            assertTimeoutPreemptively(
-                    Duration.ofSeconds(1),
-                    () -> {
-                        var analysis = GrpcFailure.analyze(outer);
-                        boolean localMemoryFailure = recognized instanceof OutOfMemoryError;
-                        assertEquals(
-                                localMemoryFailure
-                                        ? GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED
-                                        : GrpcFailure.Kind.CONNECT_FAILED,
-                                analysis.kind());
-                        assertEquals(localMemoryFailure, analysis.confirmedLocalFailure());
-                        assertSame(recognized, analysis.rootCause());
-                        assertEquals(
-                                !localMemoryFailure,
-                                GrpcFailure.isRetryableTransportFailure(outer));
-                    });
-        }
-    }
-
     private static Throwable statusFailure(Status status, boolean checkedException) {
         return checkedException ? status.asException() : status.asRuntimeException();
-    }
-
-    private static <T extends Throwable> T withCause(T failure, Throwable cause) {
-        failure.initCause(cause);
-        return failure;
     }
 }

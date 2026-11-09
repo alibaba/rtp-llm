@@ -12,7 +12,9 @@ import io.grpc.Status;
 
 import java.util.function.LongSupplier;
 
-/** Records transport progress without inspecting messages or changing the RPC outcome. */
+/**
+ * Records transport progress without inspecting messages or changing the RPC outcome.
+ */
 public final class GrpcCallTrace extends ClientStreamTracer.Factory {
     public static final CallOptions.Key<GrpcCallTrace> CALL_TRACE =
             CallOptions.Key.create("flexlb.grpc.call-trace");
@@ -35,12 +37,16 @@ public final class GrpcCallTrace extends ClientStreamTracer.Factory {
             };
 
     private static final long UNSET = Long.MIN_VALUE;
+
     private static final ClientStreamTracer NOOP = new ClientStreamTracer() {};
 
     private final GrpcTransportObserver observer;
     private final LongSupplier clock;
+
     private final long startedNanos;
+
     private volatile TraceStream latestStream;
+
     private volatile long callbackStartedNanos = UNSET;
 
     public GrpcCallTrace(GrpcTransportObserver observer) {
@@ -51,41 +57,6 @@ public final class GrpcCallTrace extends ClientStreamTracer.Factory {
         this.observer = observer;
         this.clock = clock;
         this.startedNanos = nanoTime();
-    }
-
-    public enum Stage {
-        WAITING_TRANSPORT,
-        WAITING_HEADERS_WRITE,
-        WAITING_RESPONSE,
-        RECEIVING_RESPONSE,
-        RESPONSE_TRAILERS_RECEIVED
-    }
-
-    public record Snapshot(
-            Stage stage,
-            String transportEvent,
-            GrpcFailure.Kind transportCauseKind,
-            double callbackDelayMs,
-            double responseDeliveryMs,
-            double streamCreatedMs,
-            double outboundHeadersMs,
-            double inboundHeadersMs,
-            double inboundTrailersMs,
-            double streamClosedMs,
-            double callbackStartedMs,
-            double transportEventMs) {
-        public static final Snapshot EMPTY =
-                new Snapshot(
-                        Stage.WAITING_TRANSPORT, "NONE", null, -1, -1, -1, -1, -1, -1, -1, -1, -1);
-
-        public String failureOrigin(GrpcFailure.Analysis failure) {
-            return (failure != null && failure.confirmedLocalFailure())
-                            || transportCauseKind == GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED
-                            || transportCauseKind == GrpcFailure.Kind.LOCAL_EXECUTOR_REJECTED
-                            || transportCauseKind == GrpcFailure.Kind.LOCAL_BIND_FAILED
-                    ? "MASTER"
-                    : "UNCONFIRMED";
-        }
     }
 
     @Override
@@ -187,6 +158,44 @@ public final class GrpcCallTrace extends ClientStreamTracer.Factory {
 
     private static double elapsedMs(long start, long end) {
         return start == UNSET || end == UNSET || end - start < 0 ? -1 : (end - start) / 1_000_000.0;
+    }
+
+    public enum Stage {
+        WAITING_TRANSPORT,
+        WAITING_HEADERS_WRITE,
+        WAITING_RESPONSE,
+        RECEIVING_RESPONSE,
+        RESPONSE_TRAILERS_RECEIVED
+    }
+
+    /**
+     * Freezes transport timing and failure evidence used to attribute a completed RPC.
+     */
+    public record Snapshot(
+            Stage stage,
+            String transportEvent,
+            GrpcFailure.Kind transportCauseKind,
+            double callbackDelayMs,
+            double responseDeliveryMs,
+            double streamCreatedMs,
+            double outboundHeadersMs,
+            double inboundHeadersMs,
+            double inboundTrailersMs,
+            double streamClosedMs,
+            double callbackStartedMs,
+            double transportEventMs) {
+        public static final Snapshot EMPTY =
+                new Snapshot(
+                        Stage.WAITING_TRANSPORT, "NONE", null, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+
+        public String failureOrigin(GrpcFailure.Analysis failure) {
+            return (failure != null && failure.confirmedLocalFailure())
+                            || transportCauseKind == GrpcFailure.Kind.LOCAL_MEMORY_EXHAUSTED
+                            || transportCauseKind == GrpcFailure.Kind.LOCAL_EXECUTOR_REJECTED
+                            || transportCauseKind == GrpcFailure.Kind.LOCAL_BIND_FAILED
+                    ? "MASTER"
+                    : "UNCONFIRMED";
+        }
     }
 
     private final class TraceStream extends ClientStreamTracer {

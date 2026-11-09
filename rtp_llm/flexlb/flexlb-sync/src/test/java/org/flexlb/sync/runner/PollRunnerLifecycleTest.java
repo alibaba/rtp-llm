@@ -2,7 +2,6 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
-import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -27,6 +26,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Injects failures across status and cache polling to verify the exact generation lease is always released.
+ */
 class PollRunnerLifecycleTest {
     @ParameterizedTest
     @CsvSource({
@@ -45,7 +47,10 @@ class PollRunnerLifecycleTest {
         WorkerStatus status =
                 RunnerTestSupport.discovered(
                         RoleType.DECODE, null, "127.0.0.1", 8080, 19000, "site");
-        var registry = RunnerTestSupport.endpointRegistry(mock(ConfigService.class));
+        var registry =
+                RunnerTestSupport.endpointRegistry(
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig()));
         registry.currentOrDiscover(RoleType.DECODE, status.getLogicalIpPort(), () -> status);
         WorkerStatusRpcClient grpc = mock(WorkerStatusRpcClient.class);
         CacheAwareService cache = mock(CacheAwareService.class);

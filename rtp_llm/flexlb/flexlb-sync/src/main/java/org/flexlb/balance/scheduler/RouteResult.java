@@ -1,50 +1,65 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.endpoint.EncoderEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillRequestQueue;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
 /**
- * Immutable ordered combination of role selections. It owns no reservations or delivery state.
+ * One registered role combination and the exact route identity used by queues and callbacks.
+ * Selection binds its Prefill registration before publication. RequestContext owns publication
+ * and delivery state; this object retains only the request association and frozen role results.
  */
-public final class RouteResult {
+public final class RouteResult implements GroupPlanner.Input, PrefillRequestQueue.QueueItem {
+    private static final java.util.List<RoleType> ENDPOINT_CHECK_ORDER =
+            java.util.List.of(RoleType.PREFILL, RoleType.DECODE, RoleType.ENCODER, RoleType.VIT);
+
+    private final RequestContext ctx;
     private final String requestId;
     private final List<RoleSelection> roles;
 
-    RouteResult(String requestId, List<RoleSelection> roles) {
-        this.requestId = Objects.requireNonNull(requestId, "requestId");
+    public RouteResult(RequestContext context, List<RoleSelection> roles) {
+        this.ctx = Objects.requireNonNull(context, "context");
+        this.requestId = Objects.requireNonNull(context.data().getRequestId(), "requestId");
         this.roles = List.copyOf(roles);
+        var seen = java.util.EnumSet.noneOf(RoleType.class);
+        for (var selection : this.roles) {
+            checkState(
+                    Objects.equals(requestId, selection.requestId()),
+                    "selected Worker belongs to another request");
+            checkState(
+                    seen.add(
+                            selection.role().supportsPrefill()
+                                    ? RoleType.PREFILL
+                                    : selection.role()),
+                    "request requires at most one assignment per role");
+        }
+        checkState(
+                seen.contains(RoleType.PREFILL) || seen.contains(RoleType.ENCODER),
+                "one Prefill or Encoder route required");
+        var prefill = prefillReservation();
+        if (prefill != null) prefill.bind(this);
     }
 
+    @Override
     public String requestId() {
         return requestId;
     }
 
     public List<RoleSelection> roles() {
         return roles;
-    }
-
-    public RoleSelection role(RoleType role) {
-        for (var selection : roles) {
-            if (selection.role() == role
-                    || role.supportsPrefill() && selection.role().supportsPrefill())
-                return selection;
-        }
-        return null;
-    }
-
-    WorkerEndpoint endpoint(RoleType role) {
-        var selected = role(role);
-        return selected == null ? null : selected.endpoint();
     }
 
     public Response successResponse(boolean enqueuedByMaster) {
@@ -58,102 +73,137 @@ public final class RouteResult {
         return response;
     }
 
+    public GroupPlanner.Item planningInput() {
+        return prefillReservation().planningInput();
+    }
+
     /**
-     * Thread-confined selection scope; discarded after the immutable result is prepared.
+     * Exact Prefill resource record acquired during selection; presence does not imply publication.
      */
-    public static final class Builder {
-        private boolean acceptingSelections = true;
+    public PrefillEndpoint.RequestRecord prefillReservation() {
+        var prefill = (RoleSelection.Prefill) role(RoleType.PREFILL);
+        return prefill == null ? null : prefill.registration;
+    }
 
-        private final RequestContext ctx;
-        private ArrayList<RoleSelection> selections;
-
-        public Builder(RequestContext context) {
-            ctx = Objects.requireNonNull(context, "context");
+    public RoleSelection role(RoleType role) {
+        for (var selection : roles) {
+            if (selection.role() == role
+                    || role.supportsPrefill() && selection.role().supportsPrefill())
+                return selection;
         }
+        return null;
+    }
 
-        RequestContext ctx() {
-            return ctx;
-        }
+    public EncoderEndpoint encoderEndpoint() {
+        return (EncoderEndpoint) endpoint(RoleType.ENCODER);
+    }
 
-        private String requestId() {
-            return ctx.data().getRequestId();
-        }
+    public long prefillWorkMs() {
+        var prefill = (RoleSelection.Prefill) role(RoleType.PREFILL);
+        return prefill == null ? 0L : prefill.workMs();
+    }
 
-        public ServerStatus add(
-                WorkerEndpoint selectedEndpoint, ServerStatus status, long workMs, long version) {
-            try {
-                checkState(acceptingSelections, "route selection is not building");
-                ServerStatus metadata = validateSelection(selectedEndpoint, status);
-                RoleType role = metadata.getRole();
-                checkState(
-                        selection(role) == null,
-                        "request requires at most one assignment per role");
-                var selection = RoleSelection.capture(selectedEndpoint, metadata, workMs, version);
-                if (selections == null) selections = new ArrayList<>(3);
-                selections.add(selection);
-                return status;
-            } catch (RuntimeException | Error failure) {
-                acceptingSelections = false;
-                throw failure;
-            }
-        }
+    public RequestContext ctx() {
+        return ctx;
+    }
 
-        private ServerStatus validateSelection(
-                WorkerEndpoint selectedEndpoint, ServerStatus status) {
-            checkState(selectedEndpoint != null, "selected endpoint is required");
-            ServerStatus frozen = Objects.requireNonNull(status, "worker metadata");
-            checkArgument(frozen.isSuccess(), "route requires successful Worker metadata");
-            checkArgument(
-                    frozen.getRole() != null && frozen.getRole() != RoleType.FRONTEND,
-                    "unsupported Worker role");
-            checkState(
-                    java.util.Objects.equals(frozen.getRequestId(), requestId()),
-                    "selected Worker belongs to another request");
-            WorkerEndpoint endpoint = selectedEndpoint;
-            checkArgument(
-                    Objects.equals(frozen.getServerIp(), endpoint.getIp())
-                            && frozen.getHttpPort() == endpoint.getHttpPort()
-                            && frozen.getRoutingEngineIndex()
-                                    == endpoint.getStatus().getEngineIndex(),
-                    "selection metadata does not match selected endpoint address");
-            return frozen;
-        }
+    public long prefillDpRank() {
+        return role(RoleType.PREFILL).dpRank();
+    }
 
-        /**
-         * Freeze the selected roles once. Selection itself owns no resources to release.
-         */
-        RouteResult prepare() {
-            checkState(acceptingSelections, "route selection is not building");
-            acceptingSelections = false;
-            checkState(
-                    selection(RoleType.PREFILL) != null || selection(RoleType.ENCODER) != null,
-                    "one Prefill or Encoder route required");
-            return new RouteResult(requestId(), selections);
-        }
+    public PrefillEndpoint prefillEndpoint() {
+        return (PrefillEndpoint) endpoint(RoleType.PREFILL);
+    }
 
-        RoleSelection selection(RoleType role) {
-            if (selections != null)
-                for (var selection : selections) {
-                    if (selection.role() == role
-                            || role.supportsPrefill() && selection.role().supportsPrefill())
-                        return selection;
-                }
-            return null;
-        }
+    public DecodeEndpoint decodeEndpoint() {
+        return (DecodeEndpoint) endpoint(RoleType.DECODE);
+    }
 
-        <T> PlacementResult<T, PlacementKey> validateEndpoints(
-                PlacementResult<T, PlacementKey> result) {
-            var roles = selections;
-            if (roles == null) return result;
-            for (var assignment : roles) {
-                WorkerEndpoint endpoint = assignment.endpoint();
-                if (endpoint.acceptsNewRequests()) continue;
-                acceptingSelections = false;
-                return PlacementResult.endpointChanged(
-                        assignment.placementKey(),
-                        PlacementResult.success(new RouteResult(requestId(), roles)));
-            }
-            return result;
+    public DecodeResources.RequestReservation decodeReservation() {
+        var decode = (RoleSelection.Decode) role(RoleType.DECODE);
+        return decode == null ? null : decode.registration;
+    }
+
+    public long enqueuedAtMs() {
+        return ctx.data().getFirstWorkerEnqueueTime();
+    }
+
+    public boolean requestExpired(long nowMs) {
+        long expiry = expiresAtMs();
+        return expiry <= 0L || nowMs >= expiry;
+    }
+
+    public long expiresAtMs() {
+        return ctx.data().getRequestExpiresAtMs();
+    }
+
+    /**
+     * Normalized priority for the Worker queue index.
+     */
+    public int priority() {
+        return ctx.data().getPriority();
+    }
+
+    /**
+     * Stable FIFO sequence and same-priority tie-break; retained on re-offer.
+     */
+    public long enqueueSeq() {
+        return ctx.data().getWorkerEnqueueSequence();
+    }
+
+    /**
+     * Total sequence length of this request.
+     */
+    public long seqLen() {
+        return ctx.data().getRequest().getHardKvTokens();
+    }
+
+    /**
+     * Frozen cache-hit tokens on the assigned Prefill generation.
+     */
+    public long hitCache() {
+        return role(RoleType.PREFILL).hitCacheTokens();
+    }
+
+    /**
+     * Validate a selection before publication, or classify a rejected admission after it.
+     * An unavailable endpoint invalidates the whole selection, regardless of its role.
+     * Delivered routes must retain their delivery result instead of being validated again.
+     */
+    <T> PlacementResult<T, PlacementKey> validateEndpoints(
+            PlacementResult<T, PlacementKey> result) {
+        for (var role : roles()) {
+            if (!role.endpoint().acceptsNewRequests())
+                return PlacementResult.retry(Response.error(role.role().getErrorType()));
         }
+        return result;
+    }
+
+    boolean selectedEndpointsAvailable() {
+        return firstUnavailableEndpoint() == null;
+    }
+
+    WorkerEndpoint firstUnavailableEndpoint() {
+        for (RoleType role : ENDPOINT_CHECK_ORDER) {
+            var endpoint = endpoint(role);
+            if (endpoint != null && !endpoint.acceptsNewRequests()) return endpoint;
+        }
+        return null;
+    }
+
+    WorkerEndpoint endpoint(RoleType role) {
+        var selected = role(role);
+        return selected == null ? null : selected.endpoint();
+    }
+
+    boolean usesEndpoint(WorkerEndpoint endpoint) {
+        for (var selected : roles()) {
+            if (selected.endpoint() == endpoint) return true;
+        }
+        return false;
+    }
+
+    PlacementKey placementKey(RoleType role) {
+        return role(role).placementKey();
     }
 }

@@ -58,8 +58,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks Prefill selection observations and metric failures without changing valid selection
- * results.
+ * Checks Prefill cost and cache ranking alongside selection metrics.
+ * Failures and reentrant callbacks must release candidate workspaces without changing the selected result.
  */
 class CostBasedPrefillSelectionMetricTest {
     private static final int FULL_FLEET_SIZE = 750;
@@ -125,8 +125,7 @@ class CostBasedPrefillSelectionMetricTest {
     void selectionReleasesWorkspaceWithoutChangingItsOwnedResult() {
         PrefillCandidateSet workspace = candidateWorkspace().get();
 
-        {
-            Selection selected = select();
+        try (Selection selected = select()) {
             assertReleased(workspace);
             assertSame(workspace, candidateWorkspace().get());
             assertTrue(selected.prefill().isSuccess());
@@ -182,8 +181,7 @@ class CostBasedPrefillSelectionMetricTest {
                                 config),
                         StrategyTestSupport.parkedDelivery());
             }
-            {
-                Selection selected = select();
+            try (Selection selected = select()) {
                 assertEquals("10.0.0.2", selected.prefill().getServerIp());
                 assertEquals(5L, selected.prefill().getPrefillTime());
             }
@@ -211,8 +209,7 @@ class CostBasedPrefillSelectionMetricTest {
                         RoleType.PREFILL,
                         null);
 
-        assertEquals(PlacementResult.Status.ENDPOINT_CHANGED, result.status());
-        assertEquals(PlacementResult.Status.SUCCESS, result.selection().status());
+        assertEquals(PlacementResult.Status.BLOCKED, result.status());
         assertReleased(workspace);
     }
 
@@ -246,15 +243,13 @@ class CostBasedPrefillSelectionMetricTest {
                         reporter,
                         cacheReporter,
                         SchedulingTestConfig.configService(config));
-        try {
+        {
             assertSame(failure, assertThrows(IllegalStateException.class, this::select));
             Mockito.verify(directory, Mockito.never()).selectEndpoint(Mockito.any(), Mockito.any());
             assertTrue(
                     !selectedEndpoint.isRetired(),
                     "selection only reads capacity; no generation has been acquired");
             assertReleased(candidateWorkspace().get());
-        } finally {
-
         }
     }
 
@@ -313,8 +308,7 @@ class CostBasedPrefillSelectionMetricTest {
                         cacheReporter,
                         SchedulingTestConfig.configService(config));
 
-        {
-            Selection selected = select();
+        try (Selection selected = select()) {
             assertEquals("10.0.0.1", selected.prefill().getServerIp());
         }
 
@@ -330,8 +324,7 @@ class CostBasedPrefillSelectionMetricTest {
         Mockito.doReturn(originalDirectory)
                 .when(directory)
                 .prefillRoutingSnapshot(RoleType.PREFILL);
-        {
-            Selection selected = select();
+        try (Selection selected = select()) {
             assertEquals("10.0.0.1", selected.prefill().getServerIp());
         }
         assertReleased(nextWorkspace);
@@ -345,8 +338,7 @@ class CostBasedPrefillSelectionMetricTest {
                         invocation -> {
                             if (reentered.compareAndSet(false, true)) {
                                 assertReleased(workspace);
-                                {
-                                    Selection selected = select();
+                                try (Selection selected = select()) {
                                     assertEquals("10.0.0.1", selected.prefill().getServerIp());
                                 }
                                 assertEquals(1, workspace.size);
@@ -358,21 +350,13 @@ class CostBasedPrefillSelectionMetricTest {
                 .reportPrefillSelectedEstimates(
                         any(), any(), any(), Mockito.anyLong(), Mockito.anyLong());
 
-        {
-            Selection selected = select();
+        try (Selection selected = select()) {
             assertEquals("10.0.0.1", selected.prefill().getServerIp());
         }
 
         assertTrue(reentered.get());
         assertReleased(workspace);
         assertSame(workspace, candidateWorkspace().get());
-    }
-
-    @SuppressWarnings("unchecked")
-    private static ThreadLocal<PrefillCandidateSet> candidateWorkspace() {
-        return (ThreadLocal<PrefillCandidateSet>)
-                org.springframework.test.util.ReflectionTestUtils.getField(
-                        CostBasedPrefillStrategy.class, "CANDIDATES");
     }
 
     @Test
@@ -388,16 +372,14 @@ class CostBasedPrefillSelectionMetricTest {
                             var keys = List.copyOf(query.blockCacheKeys());
                             assertEquals(keys, query.blockCacheKeys());
                             if (reentered.compareAndSet(false, true)) {
-                                {
-                                    Selection inner = select();
+                                try (Selection inner = select()) {
                                     assertTrue(inner.prefill().isSuccess());
                                 }
                                 assertEquals(keys, query.blockCacheKeys());
                             }
                             return localMatches(Map.of());
                         });
-        {
-            Selection outer = select();
+        try (Selection outer = select()) {
             assertTrue(outer.prefill().isSuccess());
         }
         assertTrue(reentered.get());
@@ -421,8 +403,7 @@ class CostBasedPrefillSelectionMetricTest {
             org.springframework.test.util.ReflectionTestUtils.setField(
                     registry.get(RoleType.PREFILL, address), "predictor", null);
         }
-        {
-            Selection selected = select();
+        try (Selection selected = select()) {
             assertEquals("10.0.0.2", selected.prefill().getServerIp());
         }
         assertReleased(candidateWorkspace().get());
@@ -456,15 +437,14 @@ class CostBasedPrefillSelectionMetricTest {
                             regroup.accept(second, "target");
                             return localMatches(Map.of());
                         });
-        {
-            Selection selected =
-                    StrategyTestSupport.select(
-                                    strategy,
-                                    context.data().getRequest(),
-                                    context.data().getSchedulingMetadata(),
-                                    RoleType.PREFILL,
-                                    "target")
-                            .value();
+        try (Selection selected =
+                StrategyTestSupport.select(
+                                strategy,
+                                context.data().getRequest(),
+                                context.data().getSchedulingMetadata(),
+                                RoleType.PREFILL,
+                                "target")
+                        .value()) {
             assertEquals("10.0.0.1", selected.prefill().getServerIp());
         }
         assertReleased(candidateWorkspace().get());
@@ -489,28 +469,12 @@ class CostBasedPrefillSelectionMetricTest {
                                 .build());
         when(cache.findMatchingEngines(any()))
                 .thenReturn(localMatches(Map.of("10.0.0.1:8080", prefix)));
-        {
-            Selection selected = select();
+        try (Selection selected = select()) {
             assertEquals(effectiveHit, selected.prefill().getDebugInfo().getHitCacheLen());
         }
         verify(cacheReporter)
                 .reportSelectionCache(
                         RoleType.PREFILL, 1000L, effectiveHit, routingHit, routingHit);
-    }
-
-    private static void assertReleased(PrefillCandidateSet workspace) {
-        assertEquals(0, workspace.size);
-        assertTrue(workspace.addresses.isEmpty());
-        assertFalse(workspace.inUse);
-        assertEquals(Long.MAX_VALUE, workspace.minimumTtftRank);
-        assertFalse(workspace.hasKnownTtft);
-        assertEquals(0L, workspace.maximumCacheHit);
-        assertEquals(0L, workspace.maximumRoutingCacheMatchTokens);
-        for (int index = 0; index < workspace.capturedSources.length; index++) {
-            assertNull(workspace.capturedSources[index]);
-            assertNull(workspace.endpointAddresses[index]);
-            assertNull(workspace.admissionBlocks[index]);
-        }
     }
 
     @Test
@@ -519,8 +483,7 @@ class CostBasedPrefillSelectionMetricTest {
                 .setSchedulingMetadata(
                         SchedulingMetadata.explicit(50, System.currentTimeMillis() - 1L));
 
-        {
-            Selection ignored = select();
+        try (Selection ignored = select()) {
             assertTrue(ignored.prefill().isSuccess());
         }
     }
@@ -578,16 +541,17 @@ class CostBasedPrefillSelectionMetricTest {
                 .setSchedulingMetadata(
                         SchedulingMetadata.explicit(10, System.currentTimeMillis() + 120_000L));
         queuedContext.data().setFuture(new CompletableFuture<>());
-        org.flexlb.balance.scheduler.RouteExecution queued =
-                SchedulingTestConfig.createRoute(
-                        queuedContext,
-                        null,
-                        null,
-                        null,
-                        endpoint,
-                        null,
-                        null,
-                        System.currentTimeMillis());
+        org.flexlb.balance.scheduler.RouteResult queued =
+                org.flexlb.balance.scheduler.RequestExecutionTestSupport.mockProtocolRoute(
+                        SchedulingTestConfig.createRoute(
+                                queuedContext,
+                                null,
+                                null,
+                                null,
+                                endpoint,
+                                null,
+                                null,
+                                System.currentTimeMillis()));
         assertTrue(StrategyTestSupport.offer(endpoint, queued));
         context.data()
                 .setSchedulingMetadata(
@@ -605,8 +569,7 @@ class CostBasedPrefillSelectionMetricTest {
         assertEquals(expectedStatus, result.status());
         verify(cache).findMatchingEngines(any());
         if (result.status() == PlacementResult.Status.SUCCESS) {
-            {
-                Selection selected = result.value();
+            try (Selection selected = result.value()) {
                 assertEquals("10.0.0.1", selected.prefill().getServerIp());
                 assertTrue(selected.prefillWorkMs() > 0L);
             }
@@ -623,8 +586,7 @@ class CostBasedPrefillSelectionMetricTest {
         config.setDispatcher(batchDelivery ? new DispatcherConfig() : ConfigTestSupport.nonBatch());
         refreshContext();
 
-        {
-            Selection selected = select();
+        try (Selection selected = select()) {
             ArgumentCaptor<Long> ttft = ArgumentCaptor.forClass(Long.class);
             ArgumentCaptor<Long> execution = ArgumentCaptor.forClass(Long.class);
             verify(reporter)
@@ -646,8 +608,7 @@ class CostBasedPrefillSelectionMetricTest {
                 .reportPrefillSelectedEstimates(
                         any(), any(), any(), Mockito.anyLong(), Mockito.anyLong());
 
-        {
-            Selection selected = select();
+        try (Selection selected = select()) {
             assertTrue(selected.prefill().isSuccess());
             assertEquals("10.0.0.1", selected.prefill().getServerIp());
         }
@@ -677,8 +638,7 @@ class CostBasedPrefillSelectionMetricTest {
                         reporter,
                         cacheReporter,
                         SchedulingTestConfig.configService(config));
-        {
-            var selected = select();
+        try (var selected = select()) {
             assertTrue(selected.prefill().isSuccess());
             assertTrue(!selectedEndpoint.isRetired());
             assertFalse(selectedEndpoint.isRetired());
@@ -690,8 +650,7 @@ class CostBasedPrefillSelectionMetricTest {
     void cacheLeaderInsideTtftCapOverridesTheBaselineCandidate() {
         configureAffinity(600L, 5.0);
 
-        {
-            Selection selected = select();
+        try (Selection selected = select()) {
             assertEquals("10.0.0.2", selected.prefill().getServerIp());
             verify(cacheReporter)
                     .reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
@@ -736,8 +695,7 @@ class CostBasedPrefillSelectionMetricTest {
                 StrategyTestSupport.parkedDelivery());
         assertEquals(
                 0L, leader.captureRouteProjectionInputs().queue().constraints().batchKvCapacity());
-        {
-            Selection selected = select();
+        try (Selection selected = select()) {
             assertEquals("10.0.0.2", selected.prefill().getServerIp());
         }
     }
@@ -788,8 +746,7 @@ class CostBasedPrefillSelectionMetricTest {
                     result.blocker());
         } else {
             assertEquals(PlacementResult.Status.SUCCESS, result.status());
-            {
-                Selection selected = result.value();
+            try (Selection selected = result.value()) {
                 assertEquals("10.0.0.2", selected.prefill().getServerIp());
             }
         }
@@ -809,8 +766,7 @@ class CostBasedPrefillSelectionMetricTest {
         when(cache.findMatchingEngines(any()))
                 .thenReturn(localMatches(Map.of(cacheLeader + ":8080", 5)));
 
-        {
-            Selection selected = select();
+        try (Selection selected = select()) {
             assertEquals(
                     cacheLeader,
                     selected.prefill().getServerIp(),
@@ -830,8 +786,7 @@ class CostBasedPrefillSelectionMetricTest {
                             context.data().getRequest().toBuilder()
                                     .requestId(String.valueOf(30_000L + index))
                                     .build());
-            {
-                Selection selected = select();
+            try (Selection selected = select()) {
                 selectedIps.add(selected.prefill().getServerIp());
             }
         }
@@ -845,8 +800,7 @@ class CostBasedPrefillSelectionMetricTest {
             long maxExtraTtftMs, double minPrefixHitPercent, String reason) {
         configureAffinity(maxExtraTtftMs, minPrefixHitPercent);
 
-        {
-            Selection selected = select();
+        try (Selection selected = select()) {
             assertEquals("10.0.0.1", selected.prefill().getServerIp());
             verify(cacheReporter).reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.1", reason);
         }
@@ -882,8 +836,7 @@ class CostBasedPrefillSelectionMetricTest {
     void cacheLeaderRemainsPreferredAcrossRepeatedSelections() {
         configureAffinity(600L, 5.0);
 
-        {
-            Selection selected = select();
+        try (Selection selected = select()) {
             assertEquals("10.0.0.2", selected.prefill().getServerIp());
         }
         context.data()
@@ -892,8 +845,7 @@ class CostBasedPrefillSelectionMetricTest {
                                 .requestId(String.valueOf(20_002L))
                                 .build());
 
-        {
-            Selection selected = select();
+        try (Selection selected = select()) {
             assertEquals("10.0.0.2", selected.prefill().getServerIp());
         }
         verify(cacheReporter, times(2))
@@ -944,8 +896,7 @@ class CostBasedPrefillSelectionMetricTest {
                         RoleType.PREFILL,
                         null);
         assertEquals(PlacementResult.Status.SUCCESS, result.status());
-        {
-            Selection selected = result.value();
+        try (Selection selected = result.value()) {
             assertEquals("10.0.0.1", selected.prefill().getServerIp());
         }
     }
@@ -1002,18 +953,6 @@ class CostBasedPrefillSelectionMetricTest {
         assertEquals("CACHE_LEADER", candidates.affinityReason);
     }
 
-    private Selection select() {
-        PlacementResult<Selection, org.flexlb.balance.scheduler.PlacementKey> result =
-                StrategyTestSupport.select(
-                        strategy,
-                        context.data().getRequest(),
-                        context.data().getSchedulingMetadata(),
-                        RoleType.PREFILL,
-                        null);
-        assertEquals(PlacementResult.Status.SUCCESS, result.status());
-        return result.value();
-    }
-
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void knownSaturatedTtftWinsOverUnknownRegardlessOfCaptureOrder(boolean unknownFirst) {
@@ -1043,12 +982,66 @@ class CostBasedPrefillSelectionMetricTest {
         }
     }
 
+    @SuppressWarnings("unchecked")
+    private static ThreadLocal<PrefillCandidateSet> candidateWorkspace() {
+        return (ThreadLocal<PrefillCandidateSet>)
+                org.springframework.test.util.ReflectionTestUtils.getField(
+                        CostBasedPrefillStrategy.class, "CANDIDATES");
+    }
+
+    private static void assertReleased(PrefillCandidateSet workspace) {
+        assertEquals(0, workspace.size);
+        assertTrue(workspace.addresses.isEmpty());
+        assertFalse(workspace.inUse);
+        assertEquals(Long.MAX_VALUE, workspace.minimumTtftRank);
+        assertFalse(workspace.hasKnownTtft);
+        assertEquals(0L, workspace.maximumCacheHit);
+        assertEquals(0L, workspace.maximumRoutingCacheMatchTokens);
+        for (int index = 0; index < workspace.capturedSources.length; index++) {
+            assertNull(workspace.capturedSources[index]);
+            assertNull(workspace.endpointAddresses[index]);
+            assertNull(workspace.admissionBlocks[index]);
+        }
+    }
+
+    private Selection select() {
+        PlacementResult<Selection, org.flexlb.balance.scheduler.PlacementKey> result =
+                StrategyTestSupport.select(
+                        strategy,
+                        context.data().getRequest(),
+                        context.data().getSchedulingMetadata(),
+                        RoleType.PREFILL,
+                        null);
+        assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        return result.value();
+    }
+
     private void configureFocusedAffinity() {
         RoutingConfig.CacheAffinityConfig affinity = new RoutingConfig.CacheAffinityConfig();
         affinity.setMaxExtraTtftMs(10L);
         affinity.setMinPrefixHitPercent(0.0);
         config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
         refreshContext();
+    }
+
+    private void refreshContext() {
+        var refreshed = new RequestContext(config);
+        refreshed.data().setRequest(context.data().getRequest());
+        refreshed.data().setSchedulingMetadata(context.data().getSchedulingMetadata());
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                refreshed.data(), "startTime", context.data().getStartTime());
+        context = refreshed;
+        var currentRegistry =
+                (EndpointRegistry)
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                strategy.routing, "endpoints");
+        strategy =
+                new StrategyTestSupport.PrefillRoutingFixture(
+                        currentRegistry,
+                        cache,
+                        reporter,
+                        cacheReporter,
+                        SchedulingTestConfig.configService(config));
     }
 
     private PrefillCandidateSet candidates(long[] ttftMs, long[] hitTokens) {
@@ -1076,26 +1069,6 @@ class CostBasedPrefillSelectionMetricTest {
                     i + 1L);
         }
         return candidates;
-    }
-
-    private void refreshContext() {
-        var refreshed = new RequestContext(config);
-        refreshed.data().setRequest(context.data().getRequest());
-        refreshed.data().setSchedulingMetadata(context.data().getSchedulingMetadata());
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                refreshed.data(), "startTime", context.data().getStartTime());
-        context = refreshed;
-        var currentRegistry =
-                (EndpointRegistry)
-                        org.springframework.test.util.ReflectionTestUtils.getField(
-                                strategy.routing, "endpoints");
-        strategy =
-                new StrategyTestSupport.PrefillRoutingFixture(
-                        currentRegistry,
-                        cache,
-                        reporter,
-                        cacheReporter,
-                        SchedulingTestConfig.configService(config));
     }
 
     private void configureAffinity(long maxExtraTtftMs, double minPrefixHitPercent) {

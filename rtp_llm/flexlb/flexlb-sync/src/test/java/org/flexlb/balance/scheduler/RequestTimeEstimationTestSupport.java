@@ -16,35 +16,22 @@ import static com.google.common.base.Preconditions.checkArgument;
  * Frozen-value builders shared by request time estimation tests.
  */
 public final class RequestTimeEstimationTestSupport {
-
     static final long NOW_MS = 10_000L;
 
     static final Comparator<GroupPlanner.Item> FIFO =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparing(GroupPlanner.Item::requestId);
-
     static final Comparator<GroupPlanner.Item> PRIORITY =
             Comparator.comparingInt(GroupPlanner.Item::priority)
                     .reversed()
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparing(GroupPlanner.Item::requestId);
-
     static final org.flexlb.config.DispatcherConfig.Type ROUTE =
             org.flexlb.config.DispatcherConfig.Type.NON_BATCH;
-
     static final org.flexlb.config.DispatcherConfig.Type BATCH =
             org.flexlb.config.DispatcherConfig.Type.BATCH;
-
     static final PrefillTimePredictor.Evaluator TOKEN_EVALUATOR =
             new PrefillTimePredictor.Evaluator() {
-
-                @Override
-                public long estimateMs(long totalTokens, long hitTokens) {
-                    long sequence = Math.max(0L, totalTokens);
-                    long hit = Math.max(0L, Math.min(hitTokens, sequence));
-                    return (long) (sequence - hit + 0.3 * hit);
-                }
-
                 @Override
                 public double predictBatchMs(
                         org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures
@@ -53,9 +40,37 @@ public final class RequestTimeEstimationTestSupport {
                             .mapToLong(item -> estimateMs(item.seqLen(), item.hitCache()))
                             .sum();
                 }
+
+                @Override
+                public long estimateMs(long totalTokens, long hitTokens) {
+                    long sequence = Math.max(0L, totalTokens);
+                    long hit = Math.max(0L, Math.min(hitTokens, sequence));
+                    return (long) (sequence - hit + 0.3 * hit);
+                }
             };
 
     private RequestTimeEstimationTestSupport() {}
+
+    public static Candidate project(RequestTimeEstimation.Inputs inputs, Probe probe) {
+        return project(inputs, probe, inputs.queue().capturedAtMs());
+    }
+
+    public static Candidate project(
+            RequestTimeEstimation.Inputs inputs, Probe probe, long planningAtMs) {
+        RequestTimeEstimation.CandidateView view =
+                RequestTimeEstimation.current()
+                        .projectCandidate(
+                                inputs,
+                                String.valueOf(probe.requestId()),
+                                probe.priority(),
+                                probe.enqueuedAtMs(),
+                                probe.expiresAtMs(),
+                                probe.seqLen(),
+                                probe.hitCache(),
+                                probe.routingCacheMatchTokens(),
+                                planningAtMs);
+        return immutable(view);
+    }
 
     static GroupPlanner.Constraints constraints(int maxRequests, long collectionWindowMs) {
         return new GroupPlanner.Constraints(
@@ -145,6 +160,19 @@ public final class RequestTimeEstimationTestSupport {
                 new RequestTimeEstimation.Inputs(queue, work, 0L, evaluator, deliveryMode), probe);
     }
 
+    private static Candidate immutable(RequestTimeEstimation.CandidateView source) {
+        return new Candidate(
+                source.admissionState(),
+                source.admissionState() == RequestTimeEstimation.State.MODELED
+                        ? source.projectedTtftMsValue()
+                        : RequestTimeEstimation.UNKNOWN,
+                source.incomingPrefillMs(),
+                source.initialHeadDisposition(),
+                source.admissionDetail(),
+                source.cacheHitTokens(),
+                source.routingCacheMatchTokens());
+    }
+
     /** Virtual request evaluated against one frozen endpoint snapshot. */
     public record Probe(
             long requestId,
@@ -163,27 +191,6 @@ public final class RequestTimeEstimationTestSupport {
         }
     }
 
-    public static Candidate project(RequestTimeEstimation.Inputs inputs, Probe probe) {
-        return project(inputs, probe, inputs.queue().capturedAtMs());
-    }
-
-    public static Candidate project(
-            RequestTimeEstimation.Inputs inputs, Probe probe, long planningAtMs) {
-        RequestTimeEstimation.CandidateView view =
-                RequestTimeEstimation.current()
-                        .projectCandidate(
-                                inputs,
-                                String.valueOf(probe.requestId()),
-                                probe.priority(),
-                                probe.enqueuedAtMs(),
-                                probe.expiresAtMs(),
-                                probe.seqLen(),
-                                probe.hitCache(),
-                                probe.routingCacheMatchTokens(),
-                                planningAtMs);
-        return immutable(view);
-    }
-
     public record Candidate(
             RequestTimeEstimation.State state,
             long projectedTtftMsValue,
@@ -193,17 +200,4 @@ public final class RequestTimeEstimationTestSupport {
             long cacheHitTokens,
             long routingCacheMatchTokens)
             implements RequestTimeEstimation.CandidateView {}
-
-    private static Candidate immutable(RequestTimeEstimation.CandidateView source) {
-        return new Candidate(
-                source.admissionState(),
-                source.admissionState() == RequestTimeEstimation.State.MODELED
-                        ? source.projectedTtftMsValue()
-                        : RequestTimeEstimation.UNKNOWN,
-                source.incomingPrefillMs(),
-                source.initialHeadDisposition(),
-                source.admissionDetail(),
-                source.cacheHitTokens(),
-                source.routingCacheMatchTokens());
-    }
 }

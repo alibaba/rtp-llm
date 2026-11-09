@@ -50,6 +50,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks RPC futures complete with the original success or failure despite reporting errors.
+ * Only eligible transport failures may retry, and failed retries must complete the caller.
+ */
 class EngineGrpcClientCompletionTest {
     private final ThreadPoolExecutor executor =
             new ThreadPoolExecutor(1, 1, 1, TimeUnit.MINUTES, new LinkedBlockingQueue<>());
@@ -741,10 +745,15 @@ class EngineGrpcClientCompletionTest {
         }
     }
 
+    /**
+     * Creates in-process channels and injects failures at channel creation or call start to test the client completion boundary.
+     */
     private static final class TestClient extends EngineGrpcClient {
         private final String name;
         private final AtomicInteger channelCreations = new AtomicInteger();
+
         private int failingChannelCreation;
+
         private Error channelCreationFailure;
         private RuntimeException callStartFailure;
 
@@ -758,11 +767,6 @@ class EngineGrpcClientCompletionTest {
                     5000,
                     mock(org.flexlb.config.CacheMatchConfiguration.class));
             this.name = name;
-        }
-
-        private void failChannelCreation(int attempt, Error failure) {
-            failingChannelCreation = attempt;
-            channelCreationFailure = failure;
         }
 
         @Override
@@ -782,6 +786,11 @@ class EngineGrpcClientCompletionTest {
                     .propagateCauseWithStatus(true)
                     .intercept(GrpcCallTrace.INTERCEPTOR)
                     .build();
+        }
+
+        private void failChannelCreation(int attempt, Error failure) {
+            failingChannelCreation = attempt;
+            channelCreationFailure = failure;
         }
     }
 }

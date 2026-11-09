@@ -19,6 +19,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Compares lazy payload parsing with protobuf semantics and checks that large encoded fields retain their buffers.
+ */
 class GenerateInputPayloadTest {
     @Test
     void packedTokensStayEncodedAcrossMetadataChangesAndWholeBatchSerialization() throws Exception {
@@ -44,7 +47,7 @@ class GenerateInputPayloadTest {
                         .setUnknownFields(
                                 UnknownFieldSet.newBuilder().mergeVarintField(999, 71).build())
                         .build();
-        var wire = Delivery.parseInput(original.toByteString()).toBuilder();
+        var wire = BatchEnqueueHelper.parseInput(original.toByteString()).toBuilder();
         assertEquals(0, wire.getTokenIdsCount(), "Master must not materialize the token list");
         wire.setPriority(60)
                 .getGenerateConfigBuilder()
@@ -182,7 +185,7 @@ class GenerateInputPayloadTest {
                     InvalidProtocolBufferException.class, () -> GenerateInputPB.parseFrom(bytes));
             assertThrows(
                     InvalidProtocolBufferException.class,
-                    () -> Delivery.parseInput(ByteString.copyFrom(bytes)));
+                    () -> BatchEnqueueHelper.parseInput(ByteString.copyFrom(bytes)));
         }
     }
 
@@ -214,7 +217,9 @@ class GenerateInputPayloadTest {
         assertNotNull(
                 standard.getUnfinishedMessage(), "fixture must exercise partial-message retention");
         var failure =
-                assertThrows(InvalidProtocolBufferException.class, () -> Delivery.parseInput(wire));
+                assertThrows(
+                        InvalidProtocolBufferException.class,
+                        () -> BatchEnqueueHelper.parseInput(wire));
         assertNull(failure.getUnfinishedMessage());
         assertNull(
                 failure.getCause(),
@@ -245,11 +250,11 @@ class GenerateInputPayloadTest {
                 allocations.isThreadAllocatedMemorySupported());
         allocations.setThreadAllocatedMemoryEnabled(true);
         for (int i = 0; i < 3; i++) {
-            Delivery.parseInput(bytes);
+            BatchEnqueueHelper.parseInput(bytes);
         }
         long thread = Thread.currentThread().threadId();
         long before = allocations.getThreadAllocatedBytes(thread);
-        var prepared = Delivery.parseInput(bytes);
+        var prepared = BatchEnqueueHelper.parseInput(bytes);
         long allocated = allocations.getThreadAllocatedBytes(thread) - before;
         assertTrue(
                 allocated < 256 * 1024L,
@@ -274,10 +279,12 @@ class GenerateInputPayloadTest {
         try {
             expected = GenerateInputPB.parseFrom(bytes);
         } catch (InvalidProtocolBufferException malformed) {
-            assertThrows(InvalidProtocolBufferException.class, () -> Delivery.parseInput(bytes));
+            assertThrows(
+                    InvalidProtocolBufferException.class,
+                    () -> BatchEnqueueHelper.parseInput(bytes));
             return;
         }
-        var wire = Delivery.parseInput(bytes).toBuilder().build();
+        var wire = BatchEnqueueHelper.parseInput(bytes).toBuilder().build();
         assertEquals(0, wire.getTokenIdsCount());
         assertEquals(expected, GenerateInputPB.parseFrom(wire.toByteString()));
     }

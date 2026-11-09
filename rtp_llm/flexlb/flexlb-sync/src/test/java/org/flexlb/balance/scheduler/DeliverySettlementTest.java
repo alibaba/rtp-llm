@@ -52,13 +52,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks exact member release across mixed batch rejection and worker completion.
+ * Checks that transport and Worker evidence release only the exact resources whose ownership has ended.
  */
 class DeliverySettlementTest {
     private FlexlbConfig config;
     private AbstractRequestScheduler registry;
     private DeliverySettlementTestSupport ledger;
     private PrefillEndpoint prefill;
+
     private final java.util.Map<
                     Long, java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply>>
             cancellations = new java.util.concurrent.ConcurrentHashMap<>();
@@ -87,33 +88,39 @@ class DeliverySettlementTest {
                                         ignored -> new java.util.concurrent.CompletableFuture<>()));
         ledger = new DeliverySettlementTestSupport();
         prefill = mock(PrefillEndpoint.class);
-        when(prefill.acceptsNewRequests()).thenReturn(true);
-        when(prefill.releaseRequest(any()))
-                .thenAnswer(
+        EndpointTestSupport.stubResources(prefill, ledger.prefill);
+        when(prefill.getIp()).thenReturn("127.0.0.1");
+        when(prefill.getHttpPort()).thenReturn(8080);
+        when(prefill.getGrpcPort()).thenReturn(8090);
+        org.mockito.Mockito.doReturn(true).when(prefill).acceptsNewRequests();
+        org.mockito.Mockito.doAnswer(
                         invocation -> {
-                            RouteExecution item = invocation.getArgument(0);
+                            RouteResult item = invocation.getArgument(0);
                             RequestContext requestContext =
-                                    registry.requests.findActive(item.requestId());
+                                    registry.repository.findActive(item.requestId());
                             assertTrue(
                                     requestContext == null || !Thread.holdsLock(requestContext),
                                     "endpoint accounting must run outside the context monitor");
                             return org.flexlb.balance.endpoint.EndpointTestSupport.releaseRequest(
                                     ledger.prefill, item);
-                        });
+                        })
+                .when(prefill)
+                .releaseRequest(any());
     }
 
     @AfterEach
     void close() {
         // Mock RPCs have no network deadline; finish them before draining accepted callbacks.
+        var client = SchedulerTestSupport.engineClient(registry);
         org.mockito.Mockito.doReturn(
                         java.util.concurrent.CompletableFuture.completedFuture(
                                 EngineGrpcClient.CancelReply.FAILED))
-                .when(SchedulerTestSupport.engineClient(registry))
+                .when(client)
                 .cancelAsync(any(), anyInt(), any(), anyLong());
         cancellations
                 .values()
                 .forEach(reply -> reply.complete(EngineGrpcClient.CancelReply.FAILED));
-        if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
+        if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(registry)) {
             registry.closeOutstandingAndTerminalize();
             SchedulerTestSupport.timer(SchedulerTestSupport.runtime(registry)).close();
             SchedulerTestSupport.closeRequestExecutors(SchedulerTestSupport.runtime(registry));
@@ -127,10 +134,10 @@ class DeliverySettlementTest {
         reject(member);
         assertFalse(member.item().ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(1, 1);
-        assertTrue(registry.requests.isCurrent(member.requestContext()));
+        assertTrue(registry.repository.isCurrent(member.requestContext()));
         cleaned(member);
         assertOccupancy(0, 0);
-        assertFalse(registry.requests.isCurrent(member.requestContext()));
+        assertFalse(registry.repository.isCurrent(member.requestContext()));
         verify(member.item().decodeEndpoint())
                 .release(
                         member.item().decodeReservation(),
@@ -147,14 +154,12 @@ class DeliverySettlementTest {
                         EndpointTestSupport.decode(
                                 WorkerStatus.createDiscovered(
                                         RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
-                                registry.requests));
+                                registry.repository));
         DecodeResources.RequestReservation reservation;
         {
             var selectedEndpoint = decode;
 
-            reservation =
-                    EndpointTestSupport.reserveUnqueuedDecode(
-                            decode, selectedEndpoint, 2L, 1L, 1L, 50);
+            reservation = EndpointTestSupport.registerDecode(decode, 2L, 1L, 1L, 50);
         }
         Member member = member(2L, 12L, decode, reservation);
         ledger.commit(12L, List.of(member.item()));
@@ -305,8 +310,8 @@ class DeliverySettlementTest {
         ledger.commit(50L, List.of(old.item()));
         reject(old);
         cleaned(old);
-        var terminal = registry.requests.findTerminal("50");
-        assertTrue(registry.requests.removeExactTerminal(terminal, Long.MAX_VALUE));
+        var terminal = registry.repository.findTerminal("50");
+        assertTrue(registry.repository.removeExactTerminal(terminal, Long.MAX_VALUE));
         Member replacement = member(50L, 51L);
         ledger.commit(51L, List.of(replacement.item()));
         decodeFinished(old);
@@ -341,7 +346,7 @@ class DeliverySettlementTest {
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertOccupancy(1, 1);
-        assertSame(replacement.requestContext(), registry.requests.findActive("50"));
+        assertSame(replacement.requestContext(), registry.repository.findActive("50"));
         assertFalse(replacement.item().ctx().data().getFuture().isDone());
     }
 
@@ -370,7 +375,7 @@ class DeliverySettlementTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertFalse(member.item().ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(1, 1);
-        assertTrue(registry.requests.isCurrent(member.requestContext()));
+        assertTrue(registry.repository.isCurrent(member.requestContext()));
         var failure = SchedulerTestSupport.failure(registry);
         assertNotNull(failure);
         assertTrue(failure.getMessage().contains("injected endpoint failure"));
@@ -398,8 +403,8 @@ class DeliverySettlementTest {
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         assertOccupancy(0, 0);
-        assertFalse(registry.requests.isCurrent(member.requestContext()));
-        assertNotNull(registry.requests.findTerminal(member.item().requestId()));
+        assertFalse(registry.repository.isCurrent(member.requestContext()));
+        assertNotNull(registry.repository.findTerminal(member.item().requestId()));
         assertTrue(member.requestContext().snapshot().close().prefillSettled());
         assertTrue(member.requestContext().snapshot().close().decodeSettled());
         assertSame(
@@ -421,15 +426,13 @@ class DeliverySettlementTest {
                         EndpointTestSupport.decode(
                                 WorkerStatus.createDiscovered(
                                         RoleType.DECODE, null, "127.0.0.1", 8180, 8181, null),
-                                registry.requests));
+                                registry.repository));
         try {
             DecodeResources.RequestReservation reservation;
             {
                 var selectedEndpoint = decode;
 
-                reservation =
-                        EndpointTestSupport.reserveUnqueuedDecode(
-                                decode, selectedEndpoint, 131L, 1L, 2L, 50);
+                reservation = EndpointTestSupport.registerDecode(decode, 131L, 1L, 2L, 50);
             }
             var member = member(131L, 131L, decode, reservation, Delivery.SendMode.ROUTE_DECISION);
             ledger.commit(131L, List.of(member.item()));
@@ -467,8 +470,8 @@ class DeliverySettlementTest {
             assertEquals(0, decode.routingView().engineCapacityUsed());
             assertEquals(0, decode.routingView().inflightHardKv());
             assertOccupancy(0, 0);
-            assertFalse(registry.requests.isCurrent(member.requestContext()));
-            assertNotNull(registry.requests.findTerminal("131"));
+            assertFalse(registry.repository.isCurrent(member.requestContext()));
+            assertNotNull(registry.repository.findTerminal("131"));
             assertTrue(
                     member.item().ctx().data().getFuture().join().isSuccess(),
                     "cancellation must preserve the first frontend ACK");
@@ -493,14 +496,12 @@ class DeliverySettlementTest {
                         EndpointTestSupport.decode(
                                 WorkerStatus.createDiscovered(
                                         RoleType.DECODE, null, "127.0.0.1", 8180, 8181, null),
-                                registry.requests));
+                                registry.repository));
         DecodeResources.RequestReservation reservation;
         {
             var selectedEndpoint = decode;
 
-            reservation =
-                    EndpointTestSupport.reserveUnqueuedDecode(
-                            decode, selectedEndpoint, 91L, 1L, 2L, 50);
+            reservation = EndpointTestSupport.registerDecode(decode, 91L, 1L, 2L, 50);
         }
         var context = RequestProtocolTestSupport.context(config, 91L);
         var item =
@@ -520,9 +521,7 @@ class DeliverySettlementTest {
         try {
             assertEquals(1, decode.routingView().engineCapacityUsed());
             RequestProtocolTestSupport.closing(item);
-            context.completeClose(
-                    new ContextResult.CloseProgress(false, true, false, false),
-                    System.currentTimeMillis());
+            context.recordResourcesReleased(item, true, false, System.currentTimeMillis());
             Throwable failure =
                     source == Delivery.Result.Status.NOT_SENT
                             ? AbstractRequestScheduler.releaseRouteResources(
@@ -661,7 +660,7 @@ class DeliverySettlementTest {
                     .get(Long.parseLong(member.item().requestId()))
                     .complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             assertTrue(cleanupEntered.await(2, TimeUnit.SECONDS));
-            assertTrue(registry.requests.isCurrent(member.requestContext()));
+            assertTrue(registry.repository.isCurrent(member.requestContext()));
         } finally {
             releaseCleanup.countDown();
             callback.shutdownNow();
@@ -680,14 +679,12 @@ class DeliverySettlementTest {
                         EndpointTestSupport.decode(
                                 WorkerStatus.createDiscovered(
                                         RoleType.DECODE, null, "127.0.0.1", 8180, 8181, null),
-                                registry.requests));
+                                registry.repository));
         DecodeResources.RequestReservation reservation;
         {
             var selectedEndpoint = decode;
 
-            reservation =
-                    EndpointTestSupport.reserveUnqueuedDecode(
-                            decode, selectedEndpoint, 70L, 1L, 2L, 50);
+            reservation = EndpointTestSupport.registerDecode(decode, 70L, 1L, 2L, 50);
         }
         Member member = member(70L, 70L, decode, reservation);
         ledger.commit(70L, List.of(member.item()));
@@ -752,7 +749,7 @@ class DeliverySettlementTest {
             if (index == 0 && order.charAt(index) == 'A') {
                 assertOccupancy(1, 1);
                 assertTrue(
-                        registry.requests.isCurrent(member.requestContext()),
+                        registry.repository.isCurrent(member.requestContext()),
                         "ACK alone cannot archive execution ownership");
             }
         }
@@ -762,7 +759,7 @@ class DeliverySettlementTest {
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());
         assertEquals(0, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
-        assertFalse(registry.requests.isCurrent(member.requestContext()));
+        assertFalse(registry.repository.isCurrent(member.requestContext()));
         assertTrue(cancellations.isEmpty(), "normal completion must not start Engine cancel");
         DeliverySettlementTestSupport.decodeStatus(decode, 70L, true);
         ledger.finish(70L, member.item())
@@ -1024,7 +1021,7 @@ class DeliverySettlementTest {
                             member.claim().completion().toCompletableFuture().isDone(),
                             "partial evidence must retain delivery ownership: "
                                     + order.substring(0, i + 1));
-                    assertTrue(registry.requests.isCurrent(member.requestContext()));
+                    assertTrue(registry.repository.isCurrent(member.requestContext()));
                 }
             }
             assertTerminalsSettledAndArchived(member);
@@ -1271,39 +1268,17 @@ class DeliverySettlementTest {
                 EndpointTestSupport.decode(
                         WorkerStatus.createDiscovered(
                                 RoleType.DECODE, null, "127.0.0.1", 8180, 8181, null),
-                        registry.requests);
+                        registry.repository);
         DecodeResources.RequestReservation reservation;
         {
             var selectedEndpoint = decode;
 
-            reservation =
-                    EndpointTestSupport.reserveUnqueuedDecode(
-                            decode, selectedEndpoint, id, 1L, 2L, 50);
+            reservation = EndpointTestSupport.registerDecode(decode, id, 1L, 2L, 50);
         }
         Member member = member(id, id, decode, reservation);
         ledger.commit(id, List.of(member.item()));
         DeliverySettlementTestSupport.dispatchDecode(decode, reservation);
         return member;
-    }
-
-    private void assertTerminalsSettledAndArchived(Member member) {
-        assertOccupancy(0, 0);
-        assertEquals(0, member.item().decodeEndpoint().routingView().engineCapacityUsed());
-        assertFalse(
-                member.item()
-                        .decodeEndpoint()
-                        .ownership(member.item().decodeReservation())
-                        .owned());
-        assertAll(
-                "both Worker terminals and sender exit must finish request cleanup",
-                () ->
-                        assertTrue(
-                                member.claim().completion().toCompletableFuture().isDone(),
-                                "delivery settlement still waits after both Worker terminals"),
-                () ->
-                        assertFalse(
-                                registry.requests.isCurrent(member.requestContext()),
-                                "request remains active after both resource ledgers are empty"));
     }
 
     private Member member(long id, long batchId) {
@@ -1338,19 +1313,9 @@ class DeliverySettlementTest {
                                 .toByteString());
         var future = RequestProtocolTestSupport.submitForManualPlacement(registry, context);
         context.data().setFuture(future);
-        var prefillServer = new org.flexlb.dao.loadbalance.ServerStatus();
-        prefillServer.setServerIp("127.0.0.1");
-        prefillServer.setGrpcPort(8090);
         var item =
-                org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(
-                        context,
-                        new Response(),
-                        prefillServer,
-                        null,
-                        prefill,
-                        decode,
-                        reservation,
-                        System.currentTimeMillis());
+                RequestExecutionTestSupport.registerPrefillRoute(
+                        context, prefill, decode, reservation, 0L, System.currentTimeMillis());
         RequestProtocolTestSupport.beginRoutePublication(
                 registry, new RequestProtocolTestSupport.Registered(item, future));
         var claim =
@@ -1360,9 +1325,35 @@ class DeliverySettlementTest {
                                 registry, item, () -> true);
         assertNotNull(claim);
         if (kind == Delivery.SendMode.BATCH_ENQUEUE) {
-            assertTrue(claim.route().ctx().data().getRequestScheduler().tryStartSend(claim));
+            assertEquals(
+                    ContextResult.SendState.SENDING, claim.owner().snapshot().delivery().send());
         }
-        return new Member(item, registry.requests.findActive(String.valueOf(id)), claim);
+        return new Member(item, registry.repository.findActive(String.valueOf(id)), claim);
+    }
+
+    private void assertTerminalsSettledAndArchived(Member member) {
+        assertOccupancy(0, 0);
+        assertEquals(0, member.item().decodeEndpoint().routingView().engineCapacityUsed());
+        assertFalse(
+                member.item()
+                        .decodeEndpoint()
+                        .ownership(member.item().decodeReservation())
+                        .owned());
+        assertAll(
+                "both Worker terminals and sender exit must finish request cleanup",
+                () ->
+                        assertTrue(
+                                member.claim().completion().toCompletableFuture().isDone(),
+                                "delivery settlement still waits after both Worker terminals"),
+                () ->
+                        assertFalse(
+                                registry.repository.isCurrent(member.requestContext()),
+                                "request remains active after both resource ledgers are empty"));
+    }
+
+    private void assertOccupancy(int batches, int members) {
+        assertEquals(batches, ledger.prefill.stats().batchCount());
+        assertEquals(members, ledger.prefill.stats().locallyOwnedRequests());
     }
 
     private void cleaned(Member member) throws Exception {
@@ -1418,11 +1409,6 @@ class DeliverySettlementTest {
                         member.item().decodeReservation(), 601L));
     }
 
-    private void assertOccupancy(int batches, int members) {
-        assertEquals(batches, ledger.prefill.stats().batchCount());
-        assertEquals(members, ledger.prefill.stats().locallyOwnedRequests());
-    }
-
     private static void await(CountDownLatch latch) {
         try {
             assertTrue(latch.await(5, TimeUnit.SECONDS));
@@ -1432,6 +1418,5 @@ class DeliverySettlementTest {
         }
     }
 
-    private record Member(
-            RouteExecution item, RequestContext requestContext, Delivery.Member claim) {}
+    private record Member(RouteResult item, RequestContext requestContext, Delivery.Member claim) {}
 }

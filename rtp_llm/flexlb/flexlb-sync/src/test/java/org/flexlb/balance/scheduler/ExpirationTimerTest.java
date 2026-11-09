@@ -37,6 +37,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks deadline replacement, callback identity, and timer shutdown across installation and cancellation races.
+ */
 class ExpirationTimerTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.EnumSource(ExpirationTimer.Kind.class)
@@ -91,8 +94,7 @@ class ExpirationTimerTest {
                 RequestProtocolTestSupport.bind(
                         owner, new RequestProtocolTestSupport.Registered(route, future));
                 var claim =
-                        DeliveryDispatcher.commitDelivery(
-                                owner,
+                        owner.commitDelivery(
                                 new org.flexlb.balance.scheduler.Delivery.Member(route, null),
                                 Delivery.SendMode.ROUTE_DECISION,
                                 0L);
@@ -194,13 +196,6 @@ class ExpirationTimerTest {
         callback.get().run();
         verify(task).cancel(false);
         verify(owner, never()).onDeadline(any(), anyLong());
-    }
-
-    private static Object currentHandle(
-            ExpirationTimer timer, RequestContext context, ExpirationTimer.Kind kind) {
-        var slots = (Map<?, ?>) ReflectionTestUtils.getField(timer, "slots");
-        var handles = (Object[]) ReflectionTestUtils.getField(slots.get(context), "handles");
-        return handles[kind.ordinal()];
     }
 
     @Test
@@ -475,6 +470,13 @@ class ExpirationTimerTest {
                                                                         (bits & 4) != 0)));
     }
 
+    private static Object currentHandle(
+            ExpirationTimer timer, RequestContext context, ExpirationTimer.Kind kind) {
+        var slots = (Map<?, ?>) ReflectionTestUtils.getField(timer, "slots");
+        var handles = (Object[]) ReflectionTestUtils.getField(slots.get(context), "handles");
+        return handles[kind.ordinal()];
+    }
+
     private static RequestContext registeredContext() {
         var context = mock(RequestContext.class);
         var snapshot = mock(ContextResult.Snapshot.class);
@@ -495,6 +497,9 @@ class ExpirationTimerTest {
         return data;
     }
 
+    /**
+     * Installs all request deadline kinds and exposes their scheduled handles for cancellation and concurrent cleanup assertions.
+     */
     private static final class Fixture implements AutoCloseable {
         private final RequestContext context = registeredContext();
         private final AbstractRequestScheduler owner = mock(AbstractRequestScheduler.class);
@@ -526,6 +531,11 @@ class ExpirationTimerTest {
             inactivityTask = replaceTask(handles[ExpirationTimer.Kind.INACTIVITY.ordinal()]);
         }
 
+        @Override
+        public void close() {
+            timer.close();
+        }
+
         private static ScheduledFuture<?> replaceTask(Object handle) {
             ((ScheduledFuture<?>) ReflectionTestUtils.getField(handle, "scheduled")).cancel(false);
             var task = mock(ScheduledFuture.class);
@@ -538,11 +548,6 @@ class ExpirationTimerTest {
                 ReflectionTestUtils.invokeMethod(handle, "fire");
             }
             verify(owner, never()).onDeadline(any(), anyLong());
-        }
-
-        @Override
-        public void close() {
-            timer.close();
         }
     }
 }

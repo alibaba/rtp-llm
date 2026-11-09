@@ -36,13 +36,11 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -66,6 +64,32 @@ import static org.mockito.Mockito.when;
  */
 class DirectAdmissionContractTest {
 
+    @Test
+    void failedUnpublishedRollbackRemainsReachableUntilResourcesAreReleased() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            var context = fixture.context(9099L);
+            var future =
+                    RequestProtocolTestSupport.submitForManualPlacement(fixture.scheduler, context);
+            var operation = SchedulerTestSupport.claim(fixture.scheduler, "9099", future);
+            assertNotNull(operation);
+            var route = fixture.router.select(context, null).value();
+            assertNotNull(route);
+            var failure = new IllegalStateException("temporary cleanup failure");
+            org.mockito.Mockito.doThrow(failure)
+                    .doCallRealMethod()
+                    .when(fixture.decode)
+                    .release(
+                            route.decodeReservation(),
+                            DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+            assertSame(failure, AbstractRequestScheduler.finishPlacement(route, operation));
+            assertFalse(future.get(2, TimeUnit.SECONDS).isSuccess());
+            SchedulerTestSupport.awaitRequestWork(fixture.runtime);
+            assertNull(EndpointTestSupport.decodeReservation(fixture.decode, 9099L));
+            fixture.assertNoPrefillOwnership();
+            assertEquals(0, fixture.requests.repository.liveRequestCount());
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void vitRetirementDuringAdmissionReplansTheWholeRoute(boolean queued) throws Exception {
@@ -87,7 +111,7 @@ class DirectAdmissionContractTest {
                                 return call.callRealMethod();
                             })
                     .when(fixture.requests)
-                    .beginRoute(any());
+                    .placementFor(any());
             try {
                 var context = fixture.context(9016L);
                 var response =
@@ -110,7 +134,7 @@ class DirectAdmissionContractTest {
                         EndpointTestSupport.expectedReservedKv(fixture.decode.resourceSnapshot()));
                 verify(fixture.decode)
                         .release(any(), eq(DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
-                verify(fixture.requests, times(2)).beginRoute(any());
+                verify(fixture.requests, times(2)).placementFor(any());
             } finally {
                 first.close();
                 replacement.close();
@@ -127,7 +151,7 @@ class DirectAdmissionContractTest {
             var replacement = new AtomicReference<PrefillEndpoint>();
             doAnswer(
                             call -> {
-                                var route = call.getArgument(0, RouteExecution.class);
+                                var route = call.getArgument(0, RouteResult.class);
                                 assertNotNull(route.decodeReservation());
                                 assertEquals(
                                         1,
@@ -145,7 +169,7 @@ class DirectAdmissionContractTest {
                                 return call.callRealMethod();
                             })
                     .when(fixture.requests)
-                    .beginRoute(any());
+                    .placementFor(any());
 
             var context = fixture.context(9011L);
             var response =
@@ -177,16 +201,16 @@ class DirectAdmissionContractTest {
                     EndpointTestSupport.expectedReservedKv(fixture.decode.resourceSnapshot()));
             verify(fixture.decode, times(replacementAlsoRetires ? 2 : 1))
                     .release(any(), eq(DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
-            verify(fixture.requests, times(2)).beginRoute(any());
+            verify(fixture.requests, times(2)).placementFor(any());
             verify(fixture.prefillSelector, times(2))
-                    .select(
+                    .selectAndRegister(
                             any(),
                             any(),
                             eq(RoleType.PREFILL),
                             any(),
                             org.mockito.ArgumentMatchers.anyList(),
-                            org.mockito.ArgumentMatchers.any(
-                                    java.util.function.LongSupplier.class));
+                            org.mockito.ArgumentMatchers.any(java.util.function.LongSupplier.class),
+                            org.mockito.ArgumentMatchers.any());
         }
     }
 
@@ -205,16 +229,21 @@ class DirectAdmissionContractTest {
                         call -> {
                             Object bound = afterBinding ? call.callRealMethod() : null;
                             fixture.decode.close();
-                            when(fixture.decodeSelector.select(
+                            org.mockito.Mockito.doAnswer(
+                                            selection ->
+                                                    SelectionTestSupport.registerResult(
+                                                            selection,
+                                                            PlacementResult.success(
+                                                                    replacement.routingView())))
+                                    .when(fixture.decodeSelector)
+                                    .selectAndRegister(
                                             any(),
                                             any(),
                                             any(),
                                             org.mockito.ArgumentMatchers.anyList(),
-                                            any()))
-                                    .thenAnswer(
-                                            selection ->
-                                                    PlacementResult.success(
-                                                            replacement.routingView()));
+                                            any(),
+                                            org.mockito.ArgumentMatchers.any(),
+                                            org.mockito.ArgumentMatchers.any());
                             doAnswer(selection -> replacement)
                                     .when(fixture.endpoints)
                                     .selectDecodeEndpoint(any());
@@ -229,7 +258,7 @@ class DirectAdmissionContractTest {
                             return afterBinding ? bound : call.callRealMethod();
                         };
                 if (afterBinding)
-                    doAnswer(retireDuringAdmission).when(fixture.requests).beginRoute(any());
+                    doAnswer(retireDuringAdmission).when(fixture.requests).placementFor(any());
                 else
                     doAnswer(retireDuringAdmission)
                             .when(fixture.decode)
@@ -252,14 +281,15 @@ class DirectAdmissionContractTest {
                         EndpointTestSupport.expectedReservedKv(replacement.resourceSnapshot()));
                 assertEquals(1L, fixture.prefill.admissionSummary(0, 0).occupiedRequests());
                 verify(fixture.prefillSelector, times(2))
-                        .select(
+                        .selectAndRegister(
                                 any(),
                                 any(),
                                 eq(RoleType.PREFILL),
                                 any(),
                                 org.mockito.ArgumentMatchers.anyList(),
                                 org.mockito.ArgumentMatchers.any(
-                                        java.util.function.LongSupplier.class));
+                                        java.util.function.LongSupplier.class),
+                                org.mockito.ArgumentMatchers.any());
             } finally {
                 replacement.close();
             }
@@ -278,7 +308,7 @@ class DirectAdmissionContractTest {
                                 return call.callRealMethod();
                             })
                     .when(fixture.requests)
-                    .beginRoute(any());
+                    .placementFor(any());
             doAnswer(
                             call -> {
                                 if (admissions.getAndIncrement() == 1) {
@@ -307,14 +337,14 @@ class DirectAdmissionContractTest {
             assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
             assertEquals(0, SchedulerTestSupport.repository(fixture.requests).liveRequestCount());
             verify(fixture.prefillSelector)
-                    .select(
+                    .selectAndRegister(
                             any(),
                             any(),
                             eq(RoleType.PREFILL),
                             any(),
                             org.mockito.ArgumentMatchers.anyList(),
-                            org.mockito.ArgumentMatchers.any(
-                                    java.util.function.LongSupplier.class));
+                            org.mockito.ArgumentMatchers.any(java.util.function.LongSupplier.class),
+                            org.mockito.ArgumentMatchers.any());
         }
     }
 
@@ -328,8 +358,7 @@ class DirectAdmissionContractTest {
             var replacement = new AtomicReference<PrefillEndpoint>();
             doAnswer(
                             call -> {
-                                var recorded = call.callRealMethod();
-                                if (retirement.get() != null) return recorded;
+                                if (retirement.get() != null) return call.callRealMethod();
                                 assertEquals(
                                         1L,
                                         fixture.prefill.admissionSummary(0, 0).occupiedRequests());
@@ -352,10 +381,10 @@ class DirectAdmissionContractTest {
                                 }
                                 if (drainBeforeCommit) fixture.prefill.close();
                                 replacement.set(fixture.installReplacementPrefill());
-                                return recorded;
+                                return call.callRealMethod();
                             })
-                    .when(context)
-                    .bindPlacement(any(), any(), eq(PublicationResult.PUBLISHED));
+                    .when(fixture.scheduler)
+                    .commitDelivery(any(), any(), org.mockito.ArgumentMatchers.anyLong());
             try {
                 var response =
                         SchedulerTestServices.entry(fixture.scheduler)
@@ -363,7 +392,7 @@ class DirectAdmissionContractTest {
                                 .get(2L, TimeUnit.SECONDS);
                 SchedulerTestSupport.awaitRequestWork(fixture.runtime);
 
-                assertTrue(response.isSuccess());
+                assertTrue(response.isSuccess(), response::getErrorMessage);
                 assertNotNull(context.snapshot().delivery());
                 assertSame(replacement.get(), context.snapshot().route().prefillEndpoint());
                 fixture.assertNoPrefillOwnership();
@@ -376,9 +405,8 @@ class DirectAdmissionContractTest {
                         1, SchedulerTestSupport.repository(fixture.requests).liveRequestCount());
                 verify(fixture.decode)
                         .release(any(), eq(DecodeResources.ReleaseReason.LOCAL_ROLLBACK));
-                verify(context, times(2))
-                        .bindPlacement(any(), any(), eq(PublicationResult.PUBLISHED));
-                verify(fixture.requests, times(2)).beginRoute(any());
+                verify(context, times(2)).publishRoute(any(), any());
+                verify(fixture.requests, times(2)).placementFor(any());
             } finally {
                 if (retirement.get() != null) {
                     EndpointTestSupport.completeRetirement(
@@ -398,7 +426,7 @@ class DirectAdmissionContractTest {
             var replacement = new AtomicReference<PrefillEndpoint>();
             doAnswer(
                             call -> {
-                                var route = call.getArgument(0, RouteExecution.class);
+                                var route = call.getArgument(0, RouteResult.class);
                                 if (attempts.getAndIncrement() == 0) {
                                     assertSame(fixture.prefill, route.prefillEndpoint());
                                     assertNotNull(route.decodeReservation());
@@ -426,18 +454,22 @@ class DirectAdmissionContractTest {
                                         worker.lock.unlock();
                                     }
                                     fixture.bindPrefill(replacement.get());
-                                    when(fixture.prefillSelector.select(
+                                    org.mockito.Mockito.doAnswer(
+                                                    selection ->
+                                                            SelectionTestSupport.registerResult(
+                                                                    selection,
+                                                                    fixture.prefillSelection(
+                                                                            replacement.get())))
+                                            .when(fixture.prefillSelector)
+                                            .selectAndRegister(
                                                     any(),
                                                     any(),
                                                     eq(RoleType.PREFILL),
                                                     any(),
                                                     org.mockito.ArgumentMatchers.anyList(),
                                                     org.mockito.ArgumentMatchers.any(
-                                                            java.util.function.LongSupplier.class)))
-                                            .thenAnswer(
-                                                    selection ->
-                                                            fixture.prefillSelection(
-                                                                    replacement.get()));
+                                                            java.util.function.LongSupplier.class),
+                                                    org.mockito.ArgumentMatchers.any());
                                 } else {
                                     assertSame(replacement.get(), route.prefillEndpoint());
                                     // Decode capacity is one: the retry can reach here only after
@@ -448,7 +480,7 @@ class DirectAdmissionContractTest {
                                 return call.callRealMethod();
                             })
                     .when(fixture.requests)
-                    .beginRoute(any());
+                    .placementFor(any());
 
             var context = fixture.context(9012L);
             var response =
@@ -494,18 +526,34 @@ class DirectAdmissionContractTest {
     void completeSubmissionRejectsAnotherAdmissionBeforeResourcePreparation() throws Exception {
         try (Fixture fixture = new Fixture()) {
             var context = fixture.context(9001L);
-            var future = fixture.requests.submit(context, () -> {});
+            var future =
+                    new ResponseCompletionExecutor.RequestFuture((kind, result, failure) -> false);
+            assertEquals(
+                    RequestRepository.RegistrationResult.REGISTERED,
+                    fixture.requests.repository.register(
+                            context,
+                            fixture.requests,
+                            future,
+                            60_000L,
+                            fixture.requests.schedulingTimeoutError()));
             var admission = SchedulerTestSupport.claim(fixture.requests, "9001", future);
             var foreign = mock(PlacementOperation.class);
-            var route = mock(RouteExecution.class);
+            var route = mock(RouteResult.class);
             when(route.ctx()).thenReturn(context);
             try {
                 assertThrows(
                         IllegalStateException.class,
                         () -> fixture.requests.publishPlacement(route, foreign, null));
-                assertSame(admission, context.snapshot().placement().operation());
+                assertSame(admission, context.snapshot().placement());
                 org.mockito.Mockito.verifyNoInteractions(foreign);
-                fixture.assertNoPrefillOwnership();
+                assertEquals(1, fixture.requests.repository.pendingDeliveryRequestCount());
+                assertEquals(0L, fixture.prefill.progress().queueDepth());
+                assertEquals(
+                        0L,
+                        fixture.prefill
+                                .admissionSummary(0, fixture.prefill.requestLimit)
+                                .occupiedRequests());
+                assertEquals(0, fixture.prefill.stats().batchCount());
                 assertEquals(0, fixture.decode.routingView().engineCapacityUsed());
             } finally {
                 AbstractRequestScheduler.finishPlacement(admission);
@@ -516,22 +564,24 @@ class DirectAdmissionContractTest {
 
     @ParameterizedTest
     @ValueSource(ints = {1, 2})
-    void concurrentDirectAdmissionsUseCurrentCapacityWithoutRetryingSelection(int prefillCapacity)
+    void concurrentDirectSelectionsRegisterWithinCurrentCapacity(int prefillCapacity)
             throws Exception {
         try (Fixture fixture = new Fixture(prefillCapacity, 2);
                 var executor = Executors.newFixedThreadPool(2)) {
-            var readyToPublish = new CyclicBarrier(2);
-            doAnswer(
-                            call -> {
-                                // Both requests have selected this generation and acquired Decode
-                                // capacity.
-                                // Their Prefill publications must arbitrate against current
-                                // ownership.
-                                readyToPublish.await(2L, TimeUnit.SECONDS);
-                                return call.callRealMethod();
-                            })
-                    .when(fixture.requests)
-                    .beginRoute(any());
+            var service = SchedulingTestConfig.configService(fixture.config);
+            var cache = mock(org.flexlb.cache.match.CacheAwareService.class);
+            when(cache.findMatchingEngines(any()))
+                    .thenReturn(
+                            org.flexlb.cache.domain.CacheMatchResult.empty(
+                                    org.flexlb.cache.domain.CacheMatchSource.LOCAL_SYNC));
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                    fixture.router,
+                    "prefillSelector",
+                    new CostBasedPrefillStrategy(cache, service));
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                    fixture.router,
+                    "decodeSelector",
+                    new DecodeSelector(service, SchedulingTestConfig.capacity(fixture.config)));
             var first =
                     executor.submit(
                             () ->
@@ -551,11 +601,11 @@ class DirectAdmissionContractTest {
             for (var response : responses) {
                 if (!response.isSuccess()) {
                     assertEquals(
-                            StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                            StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(),
                             response.getCode());
-                    assertTrue(
-                            response.getErrorMessage()
-                                    .endsWith("trigger=Prefill request capacity exhausted"));
+                    assertEquals(
+                            org.flexlb.dao.loadbalance.AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                            response.getAdmissionRejectReason());
                 }
             }
             assertEquals(
@@ -568,16 +618,7 @@ class DirectAdmissionContractTest {
                     48L * prefillCapacity,
                     EndpointTestSupport.expectedReservedKv(fixture.decode.resourceSnapshot()));
             fixture.assertNoWaitingQueue();
-            verify(fixture.requests, times(2)).beginRoute(any());
-            verify(fixture.prefillSelector, times(2))
-                    .select(
-                            any(),
-                            any(),
-                            eq(RoleType.PREFILL),
-                            any(),
-                            org.mockito.ArgumentMatchers.anyList(),
-                            org.mockito.ArgumentMatchers.any(
-                                    java.util.function.LongSupplier.class));
+            verify(fixture.requests, times(prefillCapacity)).placementFor(any());
         }
     }
 
@@ -598,7 +639,7 @@ class DirectAdmissionContractTest {
             assertEquals(1, fixture.decode.routingView().engineCapacityUsed());
             fixture.assertNoWaitingQueue();
             org.junit.jupiter.api.Assertions.assertDoesNotThrow(
-                    fixture.requests.tasks::throwIfFailed);
+                    fixture.requests.taskPool::throwIfFailed);
             assertFalse(selectedEndpoint.isRetired());
         }
     }
@@ -673,8 +714,8 @@ class DirectAdmissionContractTest {
 
                 assertNotNull(selectedEndpoint);
                 occupant =
-                        fixture.decode
-                                .tryReserveQueuedRequest(String.valueOf(999L), 32L, 48L, 50, null)
+                        org.flexlb.balance.scheduler.SelectionTestSupport.registerQueuedDecode(
+                                        fixture.decode, String.valueOf(999L), 32L, 48L, 50)
                                 .value();
             }
             assertNotNull(occupant);
@@ -818,7 +859,7 @@ class DirectAdmissionContractTest {
                                         0L,
                                         EndpointTestSupport.expectedReservedKv(
                                                 fixture.decode.resourceSnapshot()));
-                                assertEquals(0, fixture.requests.requests.liveRequestCount());
+                                assertEquals(0, fixture.requests.repository.liveRequestCount());
 
                                 call.callRealMethod();
 
@@ -847,7 +888,7 @@ class DirectAdmissionContractTest {
                 assertTrue(raced.get());
                 assertTrue(response.isSuccess());
                 fixture.assertNoPrefillOwnership();
-                assertEquals(0, fixture.requests.requests.liveRequestCount());
+                assertEquals(0, fixture.requests.repository.liveRequestCount());
             } finally {
                 // A broken sender gate must fail this test without hanging runtime shutdown.
                 Delivery.Member claim = claimed.get();
@@ -876,7 +917,7 @@ class DirectAdmissionContractTest {
                     RequestProtocolTestSupport.submitForManualPlacement(fixture.scheduler, context);
             var primary = new IllegalStateException("Prefill commit unavailable");
             var cleanup = new IllegalStateException("Decode cleanup observer failed");
-            org.mockito.Mockito.doThrow(primary).when(prefill).commitDirect(any(), any());
+            org.mockito.Mockito.doThrow(primary).when(prefill).commitDirect(any());
             doAnswer(
                             call -> {
                                 call.callRealMethod();
@@ -885,29 +926,21 @@ class DirectAdmissionContractTest {
                     .when(fixture.decode)
                     .dispatch(any(), eq(DecodeResources.DispatchOutcome.ABANDONED));
             try {
+                var selectedRoles = new java.util.ArrayList<RoleSelection>();
+
+                selectedRoles.add(
+                        SelectionTestSupport.metadata(
+                                prefill, Fixture.metadata(prefill, 104L), 30_000L));
+                selectedRoles.add(
+                        SelectionTestSupport.metadata(
+                                fixture.decode, Fixture.metadata(fixture.decode, 104L), -1L));
+
                 var admission =
-                        SchedulingTestConfig.prepareRoute(
-                                        context,
-                                        route -> {
-                                            route.add(
-                                                    prefill,
-                                                    Fixture.metadata(prefill, 104L),
-                                                    30_000L,
-                                                    prefill.progress().ownershipVersion());
-                                            route.add(
-                                                    fixture.decode,
-                                                    Fixture.metadata(fixture.decode, 104L),
-                                                    -1L,
-                                                    fixture.decode.placementVersion());
-                                            return PlacementResult.success(route);
-                                        })
-                                .value();
-                try (var mutation =
-                                SchedulerTestSupport.claim(
-                                        SchedulerTestServices.lifecycle(fixture.scheduler),
-                                        "104",
-                                        future);
-                        var completion = RequestProtocolTestSupport.finishOnExit(mutation)) {
+                        SchedulerTestServices.registerSelection(context, selectedRoles).value();
+                var mutation =
+                        SchedulerTestSupport.claim(
+                                SchedulerTestServices.lifecycle(fixture.scheduler), "104", future);
+                try (var completion = RequestProtocolTestSupport.finishOnExit(mutation)) {
                     var thrown =
                             assertThrows(
                                     IllegalStateException.class,
@@ -919,6 +952,7 @@ class DirectAdmissionContractTest {
                     verify(fixture.decode)
                             .dispatch(any(), eq(DecodeResources.DispatchOutcome.ABANDONED));
                     assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
+                    AbstractRequestScheduler.finishPlacement(admission, null);
                 }
             } finally {
                 SchedulerTestServices.lifecycle(fixture.scheduler)
@@ -948,7 +982,7 @@ class DirectAdmissionContractTest {
                                 return work;
                             })
                     .when(prefill)
-                    .commitDirect(any(), any());
+                    .commitDirect(any());
             fixture.bindPrefill(prefill);
             assertFalse(
                     SchedulerTestServices.entry(fixture.scheduler)
@@ -979,18 +1013,20 @@ class DirectAdmissionContractTest {
                                 return handoff;
                             })
                     .when(prefill)
-                    .commitDirect(any(), any());
+                    .commitDirect(any());
             fixture.bindPrefill(prefill);
             var selected = fixture.prefillSelection(prefill);
-            when(fixture.prefillSelector.select(
+            org.mockito.Mockito.doAnswer(
+                            call -> SelectionTestSupport.registerResult(call, selected))
+                    .when(fixture.prefillSelector)
+                    .selectAndRegister(
                             eq(context.data().getRequest()),
                             eq(context.data().getSchedulingMetadata()),
                             eq(RoleType.PREFILL),
                             any(),
                             org.mockito.ArgumentMatchers.anyList(),
-                            org.mockito.ArgumentMatchers.any(
-                                    java.util.function.LongSupplier.class)))
-                    .thenReturn(selected);
+                            org.mockito.ArgumentMatchers.any(java.util.function.LongSupplier.class),
+                            org.mockito.ArgumentMatchers.any());
             assertFalse(
                     SchedulerTestServices.entry(fixture.scheduler)
                             .submit(context)
@@ -1008,10 +1044,8 @@ class DirectAdmissionContractTest {
     @CsvSource({"false,false", "true,false", "false,true", "true,true"})
     void queuePublicationRetainsCapacityAcrossWakeFailureAndRepeatedConsumption(
             boolean separateDecode, boolean wakeFails) throws Exception {
-        try (Fixture fixture = new Fixture()) {
-            var config = SchedulingTestConfig.newConfig();
-            SchedulingTestConfig.useFifoQueue(config);
-            SchedulingTestConfig.useNonBatchDispatcher(config);
+        try (Fixture fixture = new Fixture(16, 1, true)) {
+            var config = fixture.config;
             var prefill = spy(fixture.prefill);
             var wakeFailure = new IllegalStateException("wake failed after queue publication");
             if (wakeFails) {
@@ -1035,30 +1069,26 @@ class DirectAdmissionContractTest {
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(config))) {
                 var context = RequestProtocolTestSupport.context(config, 109L);
                 var future = SchedulerTestServices.lifecycle(queue).submit(context, () -> {});
-                try (var handle =
-                                SchedulerTestSupport.claim(
-                                        SchedulerTestServices.lifecycle(queue), "109", future);
-                        var finish = RequestProtocolTestSupport.finishOnExit(handle)) {
+                var handle =
+                        SchedulerTestSupport.claim(
+                                SchedulerTestServices.lifecycle(queue), "109", future);
+                try (var finish = RequestProtocolTestSupport.finishOnExit(handle)) {
                     assertNotNull(handle);
+                    var selectedRoles = new java.util.ArrayList<RoleSelection>();
+
+                    selectedRoles.add(
+                            SelectionTestSupport.metadata(
+                                    prefill, Fixture.metadata(prefill, 109L), 30_000L));
+                    if (separateDecode) {
+                        selectedRoles.add(
+                                SelectionTestSupport.metadata(
+                                        fixture.decode,
+                                        Fixture.metadata(fixture.decode, 109L),
+                                        -1L));
+                    }
+
                     var selected =
-                            SchedulingTestConfig.prepareRoute(
-                                            context,
-                                            route -> {
-                                                route.add(
-                                                        prefill,
-                                                        Fixture.metadata(prefill, 109L),
-                                                        30_000L,
-                                                        prefill.progress().ownershipVersion());
-                                                if (separateDecode) {
-                                                    route.add(
-                                                            fixture.decode,
-                                                            Fixture.metadata(fixture.decode, 109L),
-                                                            -1L,
-                                                            fixture.decode.placementVersion());
-                                                }
-                                                return PlacementResult.success(route);
-                                            })
-                                    .value();
+                            SchedulerTestServices.registerSelection(context, selectedRoles).value();
                     var plan = RequestProtocolTestSupport.plan(context, selected);
                     try (plan) {
                         if (wakeFails) {
@@ -1096,71 +1126,70 @@ class DirectAdmissionContractTest {
     }
 
     @Test
-    void queueActivationPreservesExistingDirectReservations() throws Exception {
-        try (Fixture fixture = new Fixture(4, 2)) {
-            assertTrue(
-                    SchedulerTestServices.entry(fixture.scheduler)
-                            .submit(fixture.context(101L))
-                            .get(2, TimeUnit.SECONDS)
-                            .isSuccess());
-
-            var config = SchedulingTestConfig.newConfig();
-            SchedulingTestConfig.useFifoQueue(config);
-            SchedulingTestConfig.useNonBatchDispatcher(config);
-            config.getDispatcher().setMaxInflightPerPrefillWorker(4);
-            config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(2L);
-            try (var queue =
-                    (QueuedRequestScheduler)
-                            org.flexlb.balance.scheduler.SchedulerTestSupport
-                                    .createStartedScheduler(
-                                            org.flexlb.balance.scheduler.SchedulerTestSupport
-                                                    .runtime(fixture.requests)
-                                                    .newLifecycle(
-                                                            config,
-                                                            SchedulingTestConfig.capacity(config),
-                                                            org.mockito.Mockito.mock(
-                                                                    org.flexlb.service
-                                                                            .TheoryCacheHitReporter
-                                                                            .class)),
-                                            config,
-                                            fixture.router,
-                                            mock(DecodePreemption.class),
-                                            fixture.placement,
-                                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(
-                                                    config),
-                                            new OrderedRequestQueue(config.isPriorityOrdering()))) {
-                var request = RequestProtocolTestSupport.context(config, 102L);
-                request.data()
-                        .setRequest(request.data().getRequest().toBuilder().seqLen(32L).build());
-                request.data()
-                        .setRequest(
-                                request.data().getRequest().toBuilder().maxNewTokens(16).build());
+    void firstQueueActivationPreservesExistingSelectionRegistrations() throws Exception {
+        try (Fixture fixture = new Fixture(4, 2, true)) {
+            assertFalse(fixture.prefill.queueEnabled());
+            var first =
+                    RequestExecutionTestSupport.registerPrefillRoute(
+                            fixture.context(101L),
+                            fixture.prefill,
+                            null,
+                            null,
+                            30_000L,
+                            System.currentTimeMillis());
+            var second =
+                    RequestExecutionTestSupport.registerPrefillRoute(
+                            fixture.context(102L),
+                            fixture.prefill,
+                            null,
+                            null,
+                            40_000L,
+                            System.currentTimeMillis());
+            var firstRecord = first.prefillReservation();
+            var secondRecord = second.prefillReservation();
+            assertEquals(
+                    2L,
+                    fixture.prefill
+                            .admissionSummary(0, fixture.prefill.requestLimit)
+                            .occupiedRequests());
+            try {
                 assertTrue(
-                        SchedulerTestServices.entry(queue)
-                                .submit(request)
-                                .get(3, TimeUnit.SECONDS)
-                                .isSuccess());
+                        fixture.prefill.enqueueRoute(
+                                first,
+                                QueueExecutionSettings.capture(
+                                        fixture.config,
+                                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                                fixture.config))));
+                assertTrue(fixture.prefill.queueEnabled());
+                assertSame(firstRecord, first.prefillReservation());
+                assertSame(secondRecord, second.prefillReservation());
+                assertTrue(firstRecord.belongsTo(first));
+                assertTrue(secondRecord.belongsTo(second));
+                assertEquals(30_000L, first.prefillWorkMs());
+                assertEquals(40_000L, second.prefillWorkMs());
                 assertEquals(
-                        2,
+                        2L,
                         fixture.prefill
                                 .admissionSummary(0, fixture.prefill.requestLimit)
                                 .occupiedRequests());
-                assertEquals(2, fixture.decode.routingView().engineCapacityUsed());
-                assertTrue(fixture.prefill.progress().queueDepth() == 0);
-
-                fixture.applyWorkerStatus(
-                        fixture.prefill, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
-                fixture.applyWorkerStatus(
-                        fixture.decode, Map.of(), Map.of("101", task(101L, TaskPhase.RUNNING)));
-                RequestProtocolTestSupport.awaitCondition(
-                        () -> fixture.requests.requests.findActive("101") == null);
+                assertEquals(1L, fixture.prefill.progress().queueDepth());
+                assertTrue(fixture.prefill.releaseRequest(first));
                 assertEquals(
-                        1,
+                        1L,
                         fixture.prefill
                                 .admissionSummary(0, fixture.prefill.requestLimit)
                                 .occupiedRequests());
-                assertNotNull(EndpointTestSupport.decodeReservation(fixture.decode, 102L));
+                assertTrue(secondRecord.belongsTo(second));
+            } finally {
+                fixture.prefill.rollback(firstRecord);
+                fixture.prefill.rollback(secondRecord);
             }
+            assertEquals(
+                    0L,
+                    fixture.prefill
+                            .admissionSummary(0, fixture.prefill.requestLimit)
+                            .occupiedRequests());
+            assertEquals(0L, fixture.prefill.progress().queueDepth());
         }
     }
 
@@ -1172,6 +1201,9 @@ class DirectAdmissionContractTest {
         return task;
     }
 
+    /**
+     * Assembles direct admission with real endpoint ledgers and controllable selection and retirement events.
+     */
     private static final class Fixture implements AutoCloseable {
         final PlacementAvailability placement = new PlacementAvailability();
         private final FlexlbConfig config = SchedulingTestConfig.newConfig();
@@ -1180,8 +1212,8 @@ class DirectAdmissionContractTest {
         private final DeliveryDispatcher queuedDelivery;
         private final PrefillEndpoint prefill;
         private final DecodeEndpoint decode;
-        private final CostBasedPrefillStrategy prefillSelector;
-        private final DecodeSelector decodeSelector;
+        private final org.flexlb.balance.strategy.PrefillSelectionStrategy prefillSelector;
+        private final org.flexlb.balance.strategy.DecodeSelectionStrategy decodeSelector;
         private final AbstractRequestScheduler scheduler;
         private final RequestRouteSelector router;
         private final SchedulerTestServices runtime;
@@ -1238,8 +1270,14 @@ class DirectAdmissionContractTest {
                                     queuedDelivery,
                                     service,
                                     mock(org.flexlb.engine.grpc.EngineGrpcClient.class)));
-            prefillSelector = mock(CostBasedPrefillStrategy.class);
-            decodeSelector = mock(DecodeSelector.class);
+            prefillSelector =
+                    mock(
+                            org.flexlb.balance.strategy.PrefillSelectionStrategy.class,
+                            org.mockito.Mockito.CALLS_REAL_METHODS);
+            decodeSelector =
+                    mock(
+                            org.flexlb.balance.strategy.DecodeSelectionStrategy.class,
+                            org.mockito.Mockito.CALLS_REAL_METHODS);
             var model = mock(ModelMetaConfig.class);
             when(model.requiredRoles())
                     .thenReturn(
@@ -1294,22 +1332,32 @@ class DirectAdmissionContractTest {
                                     worker(RoleType.DECODE, "127.0.0.2"), repository));
             applyWorkerStatus(decode, Map.of(), Map.of());
             bindPrefill(prefill);
-            when(prefillSelector.select(
+            org.mockito.Mockito.doAnswer(
+                            call ->
+                                    SelectionTestSupport.registerResult(
+                                            call, prefillSelection(prefill)))
+                    .when(prefillSelector)
+                    .selectAndRegister(
                             any(),
                             any(),
                             eq(RoleType.PREFILL),
                             any(),
                             org.mockito.ArgumentMatchers.anyList(),
-                            org.mockito.ArgumentMatchers.any(
-                                    java.util.function.LongSupplier.class)))
-                    .thenAnswer(call -> prefillSelection(prefill));
-            when(decodeSelector.select(
+                            org.mockito.ArgumentMatchers.any(java.util.function.LongSupplier.class),
+                            org.mockito.ArgumentMatchers.any());
+            org.mockito.Mockito.doAnswer(
+                            call ->
+                                    SelectionTestSupport.registerResult(
+                                            call, PlacementResult.success(decode.routingView())))
+                    .when(decodeSelector)
+                    .selectAndRegister(
                             any(),
                             org.mockito.ArgumentMatchers.any(),
                             any(),
                             org.mockito.ArgumentMatchers.anyList(),
-                            org.mockito.ArgumentMatchers.any()))
-                    .thenAnswer(call -> PlacementResult.success(decode.routingView()));
+                            org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.any());
             doAnswer(
                             call -> {
                                 call.getArgument(1, List.class).add(decode.routingView());
@@ -1320,13 +1368,13 @@ class DirectAdmissionContractTest {
             doAnswer(call -> decode).when(endpoints).selectDecodeEndpoint(any());
         }
 
-        private void bindPrefill(PrefillEndpoint selected) {
-            String address = selected.ipPort();
-            org.mockito.Mockito.doReturn(
-                            List.of(new EndpointRegistry.PrefillRoutingEntry(address, selected)))
-                    .when(endpoints)
-                    .prefillRoutingSnapshot(RoleType.PREFILL);
-            doAnswer(call -> selected).when(endpoints).selectEndpoint(RoleType.PREFILL, address);
+        @Override
+        public void close() {
+            try {
+                decode.close();
+            } finally {
+                SchedulerTestSupport.shutdown(runtime);
+            }
         }
 
         private PrefillEndpoint installReplacementPrefill() {
@@ -1347,16 +1395,55 @@ class DirectAdmissionContractTest {
                 worker.lock.unlock();
             }
             bindPrefill(replacement);
-            when(prefillSelector.select(
+            org.mockito.Mockito.doAnswer(
+                            call ->
+                                    SelectionTestSupport.registerResult(
+                                            call, prefillSelection(replacement)))
+                    .when(prefillSelector)
+                    .selectAndRegister(
                             any(),
                             any(),
                             eq(RoleType.PREFILL),
                             any(),
                             org.mockito.ArgumentMatchers.anyList(),
-                            org.mockito.ArgumentMatchers.any(
-                                    java.util.function.LongSupplier.class)))
-                    .thenAnswer(call -> prefillSelection(replacement));
+                            org.mockito.ArgumentMatchers.any(java.util.function.LongSupplier.class),
+                            org.mockito.ArgumentMatchers.any());
             return replacement;
+        }
+
+        private static WorkerStatus worker(RoleType role, String ip) {
+            return WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test");
+        }
+
+        private static WorkerStatusResponse status(
+                WorkerStatus worker,
+                Map<String, TaskInfo> running,
+                Map<String, TaskInfo> finished) {
+            var response = new WorkerStatusResponse();
+            response.setRole(worker.getRole());
+            response.setAlive(true);
+            response.setStatusVersion(
+                    Math.max(1L, worker.appliedStatusCursor().statusVersion() + 1L));
+            response.setLatestFinishedVersion(
+                    Math.max(0L, worker.appliedStatusCursor().latestFinishedTaskVersion())
+                            + (finished.isEmpty() ? 0L : 1L));
+            response.setRunningTaskInfo(running);
+            response.setRunningQueryLen((long) running.size());
+            response.setFinishedTaskInfo(finished);
+            if (worker.getRole() == RoleType.DECODE) {
+                response.setTotalKvCacheTokens(10_000L);
+                response.setAvailableKvCacheTokens(10_000L - running.size() * 32L);
+            }
+            return response;
+        }
+
+        private void bindPrefill(PrefillEndpoint selected) {
+            String address = selected.ipPort();
+            org.mockito.Mockito.doReturn(
+                            List.of(new EndpointRegistry.PrefillRoutingEntry(address, selected)))
+                    .when(endpoints)
+                    .prefillRoutingSnapshot(RoleType.PREFILL);
+            doAnswer(call -> selected).when(endpoints).selectEndpoint(RoleType.PREFILL, address);
         }
 
         private PlacementResult<
@@ -1378,7 +1465,9 @@ class DirectAdmissionContractTest {
                             null,
                             1,
                             new EndpointRegistry.PrefillRoutingEntry(selected.ipPort(), selected),
-                            null));
+                            null,
+                            new EndpointRegistry.PrefillRoutingEntry(selected.ipPort(), selected)
+                                    .projectionInputs()));
         }
 
         private RequestContext context(long requestId) {
@@ -1389,17 +1478,17 @@ class DirectAdmissionContractTest {
             return context;
         }
 
+        private void assertNoPrefillOwnership() {
+            assertNoWaitingQueue();
+            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(0, prefill.stats().batchCount());
+        }
+
         private void assertNoWaitingQueue() {
             assertEquals(
                     0, SchedulerTestSupport.repository(requests).pendingDeliveryRequestCount());
             assertEquals(0, prefill.progress().queueDepth());
             assertEquals(0, prefill.progress().queueDepth());
-        }
-
-        private void assertNoPrefillOwnership() {
-            assertNoWaitingQueue();
-            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
-            assertEquals(0, prefill.stats().batchCount());
         }
 
         private void assertItemNotBound(long requestId) {
@@ -1433,41 +1522,6 @@ class DirectAdmissionContractTest {
             }
             endpoint.publishStatus(projection);
             SchedulerTestSupport.awaitRequestWork(runtime);
-        }
-
-        @Override
-        public void close() {
-            try {
-                decode.close();
-            } finally {
-                SchedulerTestSupport.shutdown(runtime);
-            }
-        }
-
-        private static WorkerStatus worker(RoleType role, String ip) {
-            return WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test");
-        }
-
-        private static WorkerStatusResponse status(
-                WorkerStatus worker,
-                Map<String, TaskInfo> running,
-                Map<String, TaskInfo> finished) {
-            var response = new WorkerStatusResponse();
-            response.setRole(worker.getRole());
-            response.setAlive(true);
-            response.setStatusVersion(
-                    Math.max(1L, worker.appliedStatusCursor().statusVersion() + 1L));
-            response.setLatestFinishedVersion(
-                    Math.max(0L, worker.appliedStatusCursor().latestFinishedTaskVersion())
-                            + (finished.isEmpty() ? 0L : 1L));
-            response.setRunningTaskInfo(running);
-            response.setRunningQueryLen((long) running.size());
-            response.setFinishedTaskInfo(finished);
-            if (worker.getRole() == RoleType.DECODE) {
-                response.setTotalKvCacheTokens(10_000L);
-                response.setAvailableKvCacheTokens(10_000L - running.size() * 32L);
-            }
-            return response;
         }
 
         private static ServerStatus metadata(WorkerEndpoint endpoint, long requestId) {

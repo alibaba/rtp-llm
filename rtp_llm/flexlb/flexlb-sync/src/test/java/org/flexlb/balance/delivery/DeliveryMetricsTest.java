@@ -3,7 +3,7 @@ package org.flexlb.balance.delivery;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.Delivery;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -20,7 +20,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks delivery metric registration and reporting.
+ * Verifies both delivery modes report metrics when worker status or its role is unavailable.
  */
 class DeliveryMetricsTest {
     @ParameterizedTest
@@ -30,7 +30,7 @@ class DeliveryMetricsTest {
         var endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getIp()).thenReturn("10.0.0.1");
         if (hasStatus) when(endpoint.getStatus()).thenReturn(mock(WorkerStatus.class));
-        var route = mock(RouteExecution.class);
+        var route = mock(RouteResult.class);
         when(route.prefillEndpoint()).thenReturn(endpoint);
         when(route.priority()).thenReturn(50);
         var member = mock(Delivery.Member.class);

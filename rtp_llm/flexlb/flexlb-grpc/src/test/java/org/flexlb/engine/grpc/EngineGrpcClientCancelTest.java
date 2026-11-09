@@ -35,6 +35,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 
+/**
+ * Checks cancellation sends the original request and preserves the meaning of remote replies.
+ * Failure and timeout must not trigger status probes or replay the cancellation.
+ */
 class EngineGrpcClientCancelTest {
     @ParameterizedTest
     @EnumSource(
@@ -170,13 +174,18 @@ class EngineGrpcClientCancelTest {
         return CancelRequestPB.newBuilder().setRequestId(71L).setReason(reason).build();
     }
 
+    /**
+     * Runs an in-process engine with controllable cancellation replies and records whether the client issues extra RPCs.
+     */
     private static final class Engine extends RpcServiceGrpc.RpcServiceImplBase
             implements AutoCloseable {
         final AtomicInteger statusCalls = new AtomicInteger();
         final AtomicInteger cancelCalls = new AtomicInteger();
         final Server server;
         final EngineGrpcClient client;
+
         boolean delayCancel;
+
         Context cancelContext;
         Status cancelFailure;
         CancelRequestPB received;
@@ -211,14 +220,6 @@ class EngineGrpcClientCancelTest {
                     };
         }
 
-        CompletableFuture<CancelReply> cancel() {
-            return client.cancelAsync(
-                    "127.0.0.1",
-                    9090,
-                    request(RequestCancelReasonPB.REQUEST_CANCEL_REASON_CLIENT_CANCELLED),
-                    1000);
-        }
-
         @Override
         public void getWorkerStatus(
                 StatusVersionPB request, StreamObserver<WorkerStatusPB> observer) {
@@ -241,11 +242,6 @@ class EngineGrpcClientCancelTest {
             }
         }
 
-        void replyCancel() {
-            pendingCancel.onNext(response);
-            pendingCancel.onCompleted();
-        }
-
         @Override
         public void close() throws Exception {
             try {
@@ -254,6 +250,19 @@ class EngineGrpcClientCancelTest {
                 server.shutdownNow();
                 server.awaitTermination(2, TimeUnit.SECONDS);
             }
+        }
+
+        CompletableFuture<CancelReply> cancel() {
+            return client.cancelAsync(
+                    "127.0.0.1",
+                    9090,
+                    request(RequestCancelReasonPB.REQUEST_CANCEL_REASON_CLIENT_CANCELLED),
+                    1000);
+        }
+
+        void replyCancel() {
+            pendingCancel.onNext(response);
+            pendingCancel.onCompleted();
         }
     }
 }

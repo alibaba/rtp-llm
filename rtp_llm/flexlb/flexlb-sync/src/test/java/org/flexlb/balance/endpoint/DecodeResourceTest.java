@@ -39,15 +39,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Ledger transitions do not invoke the endpoint, scheduler, RPC client or callbacks.
  */
 class DecodeResourceTest {
-    private static DecodeResources.ResourceChange<DecodeResources.MutationStatus> markQueued(
-            DecodeEndpoint endpoint, DecodeResources.RequestReservation reservation) {
-        {
-            var selectedEndpoint = endpoint;
-
-            return endpoint.markQueued(reservation);
-        }
-    }
-
     private static final AdmissionCapacity CAPACITY = new AdmissionCapacity(2, 100);
 
     @Test
@@ -437,7 +428,8 @@ class DecodeResourceTest {
                 var selectedEndpoint = owner;
 
                 reservation =
-                        owner.tryReserveQueuedRequest(String.valueOf(3), 100, 200, 50, null)
+                        org.flexlb.balance.scheduler.SelectionTestSupport.registerQueuedDecode(
+                                        owner, String.valueOf(3), 100, 200, 50)
                                 .value();
             }
             var permit = owner.acquireDispatchPermit(reservation, CAPACITY).value();
@@ -550,8 +542,10 @@ class DecodeResourceTest {
         assertEquals(DecodeResources.DecodeRequestStatus.Kind.TERMINAL, terminal.getFirst().kind());
         assertEquals(victim, terminal.getFirst().reservation());
         assertFalse(state.ownership(victim).owned());
-        assertNotNull(state.finishPreemption(1, true));
-        assertEquals(1, state.routingView().engineCapacityUsed());
+        var incoming = state.finishPreemption(1, true);
+        assertNotNull(incoming);
+        assertTrue(state.ownership(incoming).withdrawable());
+        assertEquals(0, state.routingView().engineCapacityUsed());
         assertEquals(9_900L, state.routingView().realKvAvailable());
         assertEquals(
                 RELEASED,
@@ -950,6 +944,17 @@ class DecodeResourceTest {
         return status;
     }
 
+    private static WorkerStatusResponse response() {
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.DECODE);
+        response.setAlive(true);
+        response.setTotalKvCacheTokens(10_000L);
+        response.setAvailableKvCacheTokens(10_000L);
+        response.setRunningTaskInfo(Map.of());
+        response.setFinishedTaskInfo(Map.of());
+        return response;
+    }
+
     private static List<DecodeRequestStatus> calibrate(
             DecodeEndpoint state,
             WorkerStatus status,
@@ -976,16 +981,5 @@ class DecodeResourceTest {
         } finally {
             status.lock.unlock();
         }
-    }
-
-    private static WorkerStatusResponse response() {
-        WorkerStatusResponse response = new WorkerStatusResponse();
-        response.setRole(RoleType.DECODE);
-        response.setAlive(true);
-        response.setTotalKvCacheTokens(10_000L);
-        response.setAvailableKvCacheTokens(10_000L);
-        response.setRunningTaskInfo(Map.of());
-        response.setFinishedTaskInfo(Map.of());
-        return response;
     }
 }

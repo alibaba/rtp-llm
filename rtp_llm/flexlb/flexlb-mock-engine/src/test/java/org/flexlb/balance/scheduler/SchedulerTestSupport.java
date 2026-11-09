@@ -2,8 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.springframework.test.util.ReflectionTestUtils;
 
 /**
  * Builds and inspects exact Decode reservations for mock-engine tests.
@@ -12,37 +10,19 @@ public final class SchedulerTestSupport {
     /**
      * Build a real local reservation without publishing it to the master queue.
      */
-    public static DecodeResources.RequestReservation reserveUnqueuedDecode(
-            DecodeEndpoint endpoint,
-            WorkerEndpoint selectedEndpoint,
-            long requestId,
-            long hardKv,
-            long expectedKv,
-            int priority) {
-        var state = endpoint;
-        var lock = org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(state);
-        lock.lock();
-        try {
-            if (!Boolean.TRUE.equals(
-                    ReflectionTestUtils.invokeMethod(
-                            state, "requestIdAvailable", String.valueOf(requestId)))) {
-                throw new IllegalStateException("Decode request id is already owned: " + requestId);
-            }
-            DecodeResources.Acquisition<
-                            DecodeResources.ReserveStatus, DecodeResources.RequestReservation>
-                    acquired =
-                            ReflectionTestUtils.invokeMethod(
-                                    state,
-                                    "createReservation",
-                                    String.valueOf(requestId),
-                                    hardKv,
-                                    expectedKv,
-                                    priority,
-                                    org.flexlb.enums.DecodeTaskPhase.LOCAL_RESERVED);
-            return acquired.value();
-        } finally {
-            lock.unlock();
-        }
+    public static DecodeResources.RequestReservation registerDecode(
+            DecodeEndpoint endpoint, long requestId, long hardKv, long expectedKv, int priority) {
+        var acquired =
+                endpoint.tryRegisterSelection(
+                        endpoint.routingView(),
+                        String.valueOf(requestId),
+                        hardKv,
+                        expectedKv,
+                        priority,
+                        new DecodeResources.AdmissionCapacity(0L, 100L));
+        org.junit.jupiter.api.Assertions.assertEquals(
+                DecodeResources.ReserveStatus.ACQUIRED, acquired.status());
+        return acquired.value();
     }
 
     /**
@@ -53,6 +33,16 @@ public final class SchedulerTestSupport {
         return endpoint.isRetired()
                 ? null
                 : decodeReservation(endpoint.resourceSnapshot(), requestId);
+    }
+
+    public static PlacementOperation claim(
+            AbstractRequestScheduler scheduler,
+            String id,
+            java.util.concurrent.CompletableFuture<?> future) {
+        var context = scheduler.repository.findActive(id);
+        return context != null && context.data().getFuture() == future
+                ? scheduler.claimPlacement(context)
+                : null;
     }
 
     private static DecodeResources.RequestReservation decodeReservation(
@@ -69,15 +59,5 @@ public final class SchedulerTestSupport {
                             request.reservationToken());
             default -> null;
         };
-    }
-
-    public static PlacementOperation claim(
-            AbstractRequestScheduler scheduler,
-            String id,
-            java.util.concurrent.CompletableFuture<?> future) {
-        var context = scheduler.requests.findActive(id);
-        return context != null && context.data().getFuture() == future
-                ? scheduler.claimPlacement(context)
-                : null;
     }
 }

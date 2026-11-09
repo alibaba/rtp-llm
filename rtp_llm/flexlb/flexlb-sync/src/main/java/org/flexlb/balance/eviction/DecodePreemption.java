@@ -37,17 +37,20 @@ public interface DecodePreemption extends AutoCloseable {
     @Override
     void close();
 
+    /**
+     * Reports either the incoming request registration or a failed preemption attempt.
+     */
     public record PreemptionResult(
             DecodeResources.RequestReservation reservation, boolean controlFailure, String detail) {
-        public boolean committed() {
-            return reservation != null;
-        }
-
         public PreemptionResult {
             checkArgument(
                     reservation == null || !controlFailure,
                     "committed preemption cannot be a control failure");
             Objects.requireNonNull(detail, "detail");
+        }
+
+        public boolean committed() {
+            return reservation != null;
         }
     }
 }

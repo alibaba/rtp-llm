@@ -46,19 +46,19 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static org.flexlb.balance.endpoint.DecodeResources.CapacityRelease.saturatedAddNonNegative;
 
-/** Decode worker boundary: lifecycle selectedWorkers, resource operations and lock-free notifications.
- * This endpoint owns its resource records and their single mutation lock.
+/**
+ * Owns Decode resource records and their mutation lock, publishing capacity changes after mutations.
  */
 public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Decode {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
-    private final RequestRepository requests;
-    private final PlacementAvailability placementAvailability;
-    private final Set<Runnable> engineDispatchCapacityListeners = ConcurrentHashMap.newKeySet();
-
     private static final Comparator<RequestReservation> RETIREMENT_ORDER =
             Comparator.comparingLong(RequestReservation::endpointGenerationId)
                     .thenComparing(RequestReservation::requestId)
                     .thenComparingLong(RequestReservation::reservationToken);
+
+    private final RequestRepository requests;
+    private final PlacementAvailability placementAvailability;
+    private final Set<Runnable> engineDispatchCapacityListeners = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, RequestRecord> decodeRequests =
             new ConcurrentHashMap<>();
     private final Map<String, Long> settledHistory = new HashMap<>();
@@ -67,18 +67,31 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
     private final ResourceUsage reservedUsage = new ResourceUsage();
     private final ResourceUsage queuedUsage = new ResourceUsage();
     private final ResourceUsage dispatchUsage = new ResourceUsage();
+
     private volatile int confirmedEngineOwnedCount;
     private volatile long priorityPreemptionHeldKv;
     private volatile long priorityPreemptionHeldExpectedKv;
     private volatile long admissionVersion;
+
     private volatile DecodeRoutingView routingViewCache;
     private volatile DecodeResources.AdmissionSummary admissionSummaryCache;
+
     private long nextReservationToken = 1L;
 
     /**
      * Changed in Endpoint lock; a full observation publishes one revision after all rows settle.
      */
     private boolean calibrating;
+
+    DecodeEndpoint(
+            WorkerStatus status,
+            RequestRepository requests,
+            PlacementAvailability placementAvailability) {
+        super(status);
+        this.requests = java.util.Objects.requireNonNull(requests, "requests");
+        this.placementAvailability =
+                java.util.Objects.requireNonNull(placementAvailability, "placementAvailability");
+    }
 
     @Override
     public void publishStatus(StatusChange change) {
@@ -105,37 +118,19 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         }
     }
 
-    private void publishRequest(
-            RequestReservation reservation,
-            ContextResult.WorkerRequestEventType kind,
-            long errorCode,
-            String detail) {
-        var context = requests.findActive(reservation.requestId());
-        if (context == null) return;
-        var route = context.snapshot().route();
-        if (route == null || route.decodeEndpoint() != this) return;
-        context.data()
-                .getRequestScheduler()
-                .onWorkerRequestEvent(
-                        context,
-                        new ContextResult.WorkerRequestEvent(
-                                route,
-                                reservation,
-                                RoleType.DECODE,
-                                kind,
-                                errorCode,
-                                detail,
-                                System.currentTimeMillis()));
-    }
-
-    DecodeEndpoint(
-            WorkerStatus status,
-            RequestRepository requests,
-            PlacementAvailability placementAvailability) {
-        super(status);
-        this.requests = java.util.Objects.requireNonNull(requests, "requests");
-        this.placementAvailability =
-                java.util.Objects.requireNonNull(placementAvailability, "placementAvailability");
+    public void publishCapacity(CapacityEdge edge) {
+        if (edge != CapacityEdge.PLACEMENT) {
+            for (Runnable listener : engineDispatchCapacityListeners) {
+                try {
+                    listener.run();
+                } catch (Throwable failure) {
+                    logger.warn("Decode capacity listener failed", failure);
+                }
+            }
+        }
+        if (edge != CapacityEdge.DISPATCH) {
+            placementAvailability.changed(this);
+        }
     }
 
     /**
@@ -207,51 +202,6 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         }
     }
 
-    public static final class EngineDispatchPermit {
-
-        private final DecodeEndpoint endpoint;
-        final RequestRecord reservation;
-        boolean retiredByEndpoint;
-
-        /**
-         * Null until resolved; cached result for dispatch, including ownership lost after release.
-         */
-        private EngineDispatchPermitTransferStatus dispatchResult;
-
-        EngineDispatchPermit(DecodeEndpoint endpoint, RequestRecord reservation) {
-            this.endpoint = endpoint;
-            this.reservation = reservation;
-        }
-
-        /**
-         * Identity check uses immutable reservation fields; it does not wait for an Endpoint lock.
-         */
-        public boolean belongsTo(DecodeEndpoint expected, RequestReservation reservation) {
-            return endpoint == expected
-                    && reservation != null
-                    && endpoint.getStatus().getGenerationId() == reservation.endpointGenerationId()
-                    && this.reservation.matches(reservation);
-        }
-
-        /**
-         * Transfer this acquired slot without a second capacity check.
-         *
-         * @return a typed distinction between transfer, prior request-owner
-         *         loss, and endpoint-generation retirement
-         */
-        public ResourceChange<EngineDispatchPermitTransferStatus> dispatch() {
-            return endpoint.dispatch(this, DispatchOutcome.ENGINE_OWNED);
-        }
-
-        public boolean release() {
-            var result = endpoint.dispatch(this, DispatchOutcome.ABANDONED);
-            if (result.capacityReleased()) {
-                endpoint.publishCapacity(CapacityEdge.BOTH);
-            }
-            return result.status() == EngineDispatchPermitTransferStatus.TRANSFERRED;
-        }
-    }
-
     /**
      * The caller owns this subscription and closes it when its capacity wait ends.
      */
@@ -262,7 +212,9 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
     }
 
     public RequestReservation commitPreemption(long attemptToken) {
-        return finishPreemption(attemptToken, true);
+        var incoming = finishPreemption(attemptToken, true);
+        if (incoming != null) publishCapacity(CapacityEdge.BOTH);
+        return incoming;
     }
 
     public boolean abortPreemption(long attemptToken) {
@@ -303,37 +255,15 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         }
     }
 
+    public DecodeRoutingView routingView() {
+        return routingView(ipPort());
+    }
+
     public StatusChange applyStatusHeartbeat(
             WorkerStatus ws, WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         List<DecodeRequestStatus> requestStatuses = collectHeartbeatRequestStatuses(observation);
         return new StatusChange.Decode(requestStatuses, false, false);
-    }
-
-    // Retirement and orphan cleanup.
-
-    protected void closeEndpoint() {
-        List<RequestReservation> reservations = retire();
-        try {
-            for (var reservation : reservations) {
-                var context = requests.findActive(reservation.requestId());
-                if (context == null) continue;
-                context.data()
-                        .getRequestScheduler()
-                        .onEndpointRetired(
-                                context,
-                                new ContextResult.EndpointRetirement(
-                                        context.snapshot().route(),
-                                        reservation,
-                                        RoleType.DECODE,
-                                        this,
-                                        "Decode generation retired: "
-                                                + reservation.endpointGenerationId(),
-                                        System.currentTimeMillis()));
-            }
-        } finally {
-            publishCapacity(CapacityEdge.DISPATCH);
-        }
     }
 
     public int evictExpiredRequests(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
@@ -346,28 +276,11 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         return result.expiredReservations();
     }
 
-    public enum CapacityEdge {
-        DISPATCH,
-        PLACEMENT,
-        BOTH
-    }
-
-    public void publishCapacity(CapacityEdge edge) {
-        if (edge != CapacityEdge.PLACEMENT) {
-            for (Runnable listener : engineDispatchCapacityListeners) {
-                try {
-                    listener.run();
-                } catch (Throwable failure) {
-                    logger.warn("Decode capacity listener failed", failure);
-                }
-            }
-        }
-        if (edge != CapacityEdge.DISPATCH) {
-            placementAvailability.changed(this);
-        }
-    }
-
-    public Acquisition<ReserveStatus, RequestReservation> tryReserveQueuedRequest(
+    /**
+     * Register against the exact view used for ranking. No remote capacity is promised.
+     */
+    public Acquisition<ReserveStatus, RequestReservation> tryRegisterSelection(
+            DecodeRoutingView expected,
             String requestId,
             long hardKv,
             long expectedKv,
@@ -375,20 +288,18 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
             AdmissionCapacity capacity) {
         stateLock().lock();
         try {
-            if (!acceptsNewRequests())
+            if (!acceptsNewRequests() || expected.generationId() != getStatus().getGenerationId())
                 return Acquisition.unavailable(ReserveStatus.ENDPOINT_RETIRED);
-            if (!requestIdAvailable(requestId)) {
+            var current = routingView();
+            if (current.admissionVersion() != expected.admissionVersion()
+                    || current.workerStatus() != expected.workerStatus()
+                    || current.topology() != expected.topology())
+                return Acquisition.unavailable(ReserveStatus.VERSION_CONFLICT);
+            if (!requestIdAvailable(requestId))
                 return Acquisition.unavailable(ReserveStatus.ALREADY_OWNED);
-            }
-            if (capacity != null
-                    && !capacity.evaluate(
-                                    routingView().placementUsage(),
-                                    hardKv,
-                                    expectedKv,
-                                    CapacityRelease.NONE)
-                            .fits()) {
-                return Acquisition.unavailable(ReserveStatus.CAPACITY_FULL);
-            }
+            if (!capacity.evaluate(
+                            current.placementUsage(), hardKv, expectedKv, CapacityRelease.NONE)
+                    .fits()) return Acquisition.unavailable(ReserveStatus.CAPACITY_FULL);
             return createReservation(
                     requestId,
                     hardKv,
@@ -398,245 +309,6 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         } finally {
             stateLock().unlock();
         }
-    }
-
-    private Acquisition<ReserveStatus, RequestReservation> createReservation(
-            String requestId, long hardKv, long expectedKv, int priority, DecodeTaskPhase phase) {
-        checkState(
-                nextReservationToken > 0L && nextReservationToken != Long.MAX_VALUE,
-                "Decode reservation token space exhausted");
-        RequestRecord request =
-                new RequestRecord(requestId, hardKv, expectedKv, priority, nextReservationToken++);
-        var acquired = new Acquisition<>(ReserveStatus.ACQUIRED, request.reservation());
-        decodeRequests.put(requestId, request);
-        reservedUsage.adjust(1, hardKv, expectedKv);
-        if (phase == DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED) {
-            queuedUsage.adjust(1, hardKv, expectedKv);
-        }
-        request.phase = phase;
-        admissionVersion++;
-        return acquired;
-    }
-
-    private boolean requestIdAvailable(String requestId) {
-        // Every installed incoming attempt retains its exact request row until commit/abort/expiry.
-        return !decodeRequests.containsKey(requestId)
-                && !victimClaims.containsKey(requestId)
-                && !settledHistory.containsKey(requestId);
-    }
-
-    /**
-     * Exact resource obligation; absence also covers retired or replaced reservation identities.
-     */
-    public Ownership ownership(RequestReservation exact) {
-        if (exact == null || exact.endpointGenerationId() != getStatus().getGenerationId()) {
-            return Ownership.NONE;
-        }
-        stateLock().lock();
-        try {
-            RequestRecord request = decodeRequests.get(exact.requestId());
-            if (request == null || !request.matches(exact)) {
-                PreemptionClaim claim = victimClaims.get(exact.requestId());
-                return claim != null && claim.reservation.equals(exact)
-                        ? Ownership.HELD
-                        : Ownership.NONE;
-            }
-            if (request.confirmed()) {
-                return Ownership.CONFIRMED;
-            }
-            return request.queued()
-                            && request.dispatchPermit == null
-                            && request.incomingAttemptToken == 0L
-                            && !victimClaims.containsKey(exact.requestId())
-                    ? Ownership.WITHDRAWABLE
-                    : Ownership.HELD;
-        } finally {
-            stateLock().unlock();
-        }
-    }
-
-    ResourceChange<ReservationReleaseResult> releaseReservation(
-            RequestReservation exact, ReleaseReason reason) {
-        java.util.Objects.requireNonNull(reason, "reason");
-        if (exact == null) {
-            checkArgument(
-                    reason != ReleaseReason.LOCAL_ROLLBACK
-                            && reason != ReleaseReason.NOT_SENT
-                            && reason != ReleaseReason.UNSENT_ROUTE_ROLLBACK,
-                    "Decode reservation is required for release");
-            return ResourceChange.of(ReservationReleaseResult.STALE, false);
-        }
-        if (exact.endpointGenerationId() != getStatus().getGenerationId()) {
-            return ResourceChange.of(ReservationReleaseResult.STALE, false);
-        }
-        stateLock().lock();
-        try {
-            if (reason == ReleaseReason.EXPIRED || reason == ReleaseReason.REMOTE_CLEANUP) {
-                boolean released = settle(exact, Settlement.EXPIRED);
-                return ResourceChange.of(
-                        released
-                                ? ReservationReleaseResult.RELEASED
-                                : ReservationReleaseResult.STALE,
-                        released);
-            }
-            RequestRecord request = decodeRequests.get(exact.requestId());
-            boolean matches = request != null && request.matches(exact);
-            if (reason == ReleaseReason.NOT_SENT || reason == ReleaseReason.UNSENT_ROUTE_ROLLBACK) {
-                if (matches && request.confirmed()) {
-                    return ResourceChange.of(ReservationReleaseResult.ENGINE_ACCEPTED, false);
-                }
-                if (matches
-                        && !victimClaims.containsKey(exact.requestId())
-                        && request.incomingAttemptToken != 0L) {
-                    return ResourceChange.of(ReservationReleaseResult.CONFLICT, false);
-                }
-            } else if (matches
-                    && (request.incomingAttemptToken != 0L
-                            || request.confirmed()
-                            || request.phase == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN
-                            || victimClaims.containsKey(exact.requestId()))) {
-                checkState(
-                        reason != ReleaseReason.LOCAL_ROLLBACK,
-                        "Illegal Decode local release: exact ownership is held by Engine/protocol lifecycle: %s",
-                        exact);
-                return ResourceChange.of(ReservationReleaseResult.STILL_OWNED, false);
-            }
-            if (!matches) {
-                return ResourceChange.of(ReservationReleaseResult.STALE, false);
-            }
-            boolean released =
-                    settle(
-                            exact,
-                            reason == ReleaseReason.LOCAL_ROLLBACK
-                                            || reason == ReleaseReason.UNSENT_ROUTE_ROLLBACK
-                                    ? Settlement.ROLLBACK
-                                    : Settlement.TERMINAL);
-            return ResourceChange.of(
-                    released ? ReservationReleaseResult.RELEASED : ReservationReleaseResult.STALE,
-                    released);
-        } finally {
-            stateLock().unlock();
-        }
-    }
-
-    private enum Settlement {
-        ROLLBACK,
-        TERMINAL,
-        OBSERVED_TERMINAL,
-        EXPIRED
-    }
-
-    /**
-     * Only validated evidence reaches this kernel; request and claim obligations settle together.
-     */
-    private boolean settle(RequestReservation exact, Settlement proof) {
-        RequestRecord request = decodeRequests.get(exact.requestId());
-        boolean matches = request != null && request.matches(exact);
-        PreemptionClaim claim = victimClaims.get(exact.requestId());
-        if (claim != null && !claim.reservation.equals(exact)) {
-            claim = null;
-        }
-        if (!matches && claim == null) {
-            return false;
-        }
-        long version = admissionVersion;
-        if (matches && request.incomingAttemptToken != 0L) {
-            checkState(
-                    proof == Settlement.EXPIRED,
-                    "Decode terminal still owns its incoming attempt: %s",
-                    exact);
-            finishPreemption(request.incomingAttemptToken, false);
-        }
-        if (claim != null) {
-            PreemptionRecord attempt = preemptionAttempts.get(claim.attemptToken);
-            if (attempt != null) {
-                attempt.remainingVictims.remove(exact);
-            }
-            claim.close();
-        }
-        if (matches && decodeRequests.remove(exact.requestId(), request)) {
-            transition(request, null, null, 0L, 0L);
-        }
-        // Ordinary Engine completion may be rediscovered; cancellation claims retain their explicit
-        // fence.
-        if (proof != Settlement.ROLLBACK
-                && (proof != Settlement.OBSERVED_TERMINAL || claim != null)) {
-            settledHistory.put(exact.requestId(), System.currentTimeMillis());
-        }
-        if (!calibrating && admissionVersion == version) {
-            admissionVersion++;
-        }
-        return true;
-    }
-
-    /**
-     * Update derived counters once from old/new contributions, without allocating contribution objects.
-     */
-    private void transition(
-            RequestRecord request,
-            DecodeTaskPhase next,
-            EngineDispatchPermit permit,
-            long engineKv,
-            long observedAtMs) {
-        boolean reserved = !request.confirmed();
-        boolean queued = request.queued();
-        boolean dispatching = request.dispatchPermit != null;
-        boolean nextReserved = next != null && !next.isEngineConfirmed();
-        boolean nextQueued = next == DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED;
-        boolean nextDispatching = permit != null;
-        long hard = request.kvTokens, expected = request.expectedKvTokens;
-        reservedUsage.adjust(
-                (nextReserved ? 1 : 0) - (reserved ? 1 : 0),
-                (nextReserved ? hard : 0L) - (reserved ? hard : 0L),
-                (nextReserved ? expected : 0L) - (reserved ? expected : 0L));
-        queuedUsage.adjust(
-                (nextQueued ? 1 : 0) - (queued ? 1 : 0),
-                (nextQueued ? hard : 0L) - (queued ? hard : 0L),
-                (nextQueued ? expected : 0L) - (queued ? expected : 0L));
-        dispatchUsage.adjust(
-                (nextDispatching ? 1 : 0) - (dispatching ? 1 : 0),
-                (nextDispatching ? hard : 0L) - (dispatching ? hard : 0L),
-                (nextDispatching ? expected : 0L) - (dispatching ? expected : 0L));
-        confirmedEngineOwnedCount +=
-                (next != null && next.isEngineConfirmed() ? 1 : 0) - (reserved ? 0 : 1);
-        if (reserved && next != null && next.isEngineConfirmed()) {
-            request.kvTokens = Math.max(0L, engineKv);
-            request.expectedKvTokens = request.kvTokens;
-        }
-        request.dispatchPermit = permit;
-        if (observedAtMs > 0L) {
-            request.observedAtMs = observedAtMs;
-        }
-        // A removed row retains its last phase for advisory readers that already captured it.
-        if (next != null) {
-            request.phase = next;
-        }
-        if (!calibrating) {
-            admissionVersion++;
-        }
-    }
-
-    public ResourceChange<MutationStatus> markQueued(RequestReservation exact) {
-        checkArgument(exact != null, "Decode reservation is required for queued transition");
-        stateLock().lock();
-        try {
-            if (!acceptsNewRequests()) return ResourceChange.of(MutationStatus.STALE, false);
-            RequestRecord request = decodeRequests.get(exact.requestId());
-            if (request == null || !request.matches(exact) || request.confirmed()) {
-                return ResourceChange.of(MutationStatus.STALE, false);
-            }
-            if (request.queued()) {
-                return ResourceChange.of(MutationStatus.APPLIED, false);
-            }
-            if (request.phase == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN) {
-                return ResourceChange.of(MutationStatus.STALE, false);
-            }
-            transition(request, DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED, null, 0L, 0L);
-        } finally {
-            stateLock().unlock();
-        }
-        publishCapacity(CapacityEdge.BOTH);
-        return ResourceChange.of(MutationStatus.APPLIED, true);
     }
 
     public Acquisition<EngineDispatchPermitAcquireStatus, EngineDispatchPermit>
@@ -702,39 +374,6 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         }
     }
 
-    private CapacityUsage usage(boolean dispatch, WorkerStatus.EngineObservation fields) {
-        long hard =
-                dispatch
-                        ? Math.max(0L, reservedUsage.hardKv - queuedUsage.hardKv)
-                                + dispatchUsage.hardKv
-                        : reservedUsage.hardKv;
-        long expected =
-                dispatch
-                        ? Math.max(0L, reservedUsage.expectedKv - queuedUsage.expectedKv)
-                                + dispatchUsage.expectedKv
-                        : reservedUsage.expectedKv;
-        long reported =
-                fields.totalKvCacheTokens() > 0L
-                        ? Math.max(
-                                0L, fields.totalKvCacheTokens() - fields.availableKvCacheTokens())
-                        : 0L;
-        int count = confirmedEngineOwnedCount + reservedUsage.requests;
-        if (dispatch) {
-            count +=
-                    Math.max(0, dispatchUsage.requests)
-                            - Math.clamp(
-                                    queuedUsage.requests, 0, Math.max(0, reservedUsage.requests));
-        }
-        return new CapacityUsage(
-                count,
-                Math.max(0L, fields.totalKvCacheTokens()),
-                Math.max(0L, fields.availableKvCacheTokens()),
-                saturatedAddNonNegative(hard, priorityPreemptionHeldKv),
-                saturatedAddNonNegative(
-                        saturatedAddNonNegative(reported, expected),
-                        priorityPreemptionHeldExpectedKv));
-    }
-
     public RequestReservation replaceQueuedRequests(
             List<RequestReservation> victims,
             String incomingId,
@@ -774,13 +413,43 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                                     hardKv,
                                     expectedKv,
                                     priority,
-                                    DecodeTaskPhase.LOCAL_RESERVED)
+                                    DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED)
                             .value();
         } finally {
             stateLock().unlock();
         }
         if (replaced != null) publishCapacity(CapacityEdge.BOTH);
         return replaced;
+    }
+
+    /**
+     * Exact resource obligation; absence also covers retired or replaced reservation identities.
+     */
+    public Ownership ownership(RequestReservation exact) {
+        if (exact == null || exact.endpointGenerationId() != getStatus().getGenerationId()) {
+            return Ownership.NONE;
+        }
+        stateLock().lock();
+        try {
+            RequestRecord request = decodeRequests.get(exact.requestId());
+            if (request == null || !request.matches(exact)) {
+                PreemptionClaim claim = victimClaims.get(exact.requestId());
+                return claim != null && claim.reservation.equals(exact)
+                        ? Ownership.HELD
+                        : Ownership.NONE;
+            }
+            if (request.confirmed()) {
+                return Ownership.CONFIRMED;
+            }
+            return request.queued()
+                            && request.dispatchPermit == null
+                            && request.incomingAttemptToken == 0L
+                            && !victimClaims.containsKey(exact.requestId())
+                    ? Ownership.WITHDRAWABLE
+                    : Ownership.HELD;
+        } finally {
+            stateLock().unlock();
+        }
     }
 
     public PreemptionBeginResult beginPreemption(
@@ -932,163 +601,6 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         }
     }
 
-    RequestReservation finishPreemption(long token, boolean commit) {
-        stateLock().lock();
-        try {
-            PreemptionRecord attempt = preemptionAttempts.get(token);
-            if (attempt == null) {
-                return null;
-            }
-            RequestRecord incoming = decodeRequests.get(attempt.incoming.requestId());
-            if (commit
-                    && (!acceptsNewRequests()
-                            || incoming == null
-                            || !incoming.matches(attempt.incoming)
-                            || incoming.confirmed()
-                            || !attempt.remainingVictims.isEmpty())) {
-                return null;
-            }
-            long version = admissionVersion;
-            preemptionAttempts.remove(token);
-            if (incoming != null && incoming.matches(attempt.incoming)) {
-                incoming.incomingAttemptToken = 0L;
-            }
-            if (!commit) {
-                for (RequestReservation victim : attempt.remainingVictims) {
-                    PreemptionClaim claim = victimClaims.get(victim.requestId());
-                    if (claim != null
-                            && claim.attemptToken == token
-                            && claim.reservation.equals(victim)
-                            && !claim.cancellationHandedOff) {
-                        claim.close();
-                    }
-                }
-                if (incoming != null && !incoming.confirmed()) {
-                    settle(attempt.incoming, Settlement.ROLLBACK);
-                }
-            }
-            if (!calibrating && admissionVersion == version) {
-                admissionVersion++;
-            }
-            return attempt.incoming;
-        } finally {
-            stateLock().unlock();
-        }
-    }
-
-    List<DecodeRequestStatus> calibrateLocked(WorkerStatus.StatusObservation observation) {
-        checkState(
-                stateLock().isHeldByCurrentThread(),
-                "Decode calibration requires an Endpoint lock");
-        checkArgument(
-                observation.owner() == getStatus(), "Status belongs to another Decode generation");
-        checkState(!calibrating, "Decode calibration cannot reenter");
-        calibrating = true;
-        try {
-            List<DecodeRequestStatus> evidence = new ArrayList<>();
-            Set<String> present = new HashSet<>(),
-                    allocated = new HashSet<>(),
-                    terminal = new HashSet<>();
-            observation.finishedTasks().values().forEach(task -> terminal.add(task.requestId()));
-            long now = System.currentTimeMillis();
-            for (WorkerStatus.TaskObservation task :
-                    observation.engine().runningTaskList().values()) {
-                String id = task.requestId();
-                if (terminal.contains(id) || settledHistory.containsKey(id)) {
-                    continue;
-                }
-                present.add(id);
-                boolean allocation =
-                        task.phase() == TaskPhase.KV_ALLOCATED || task.phase() == TaskPhase.RUNNING;
-                if (allocation) {
-                    allocated.add(id);
-                }
-                observeActive(task, allocation, now);
-                RequestRecord request = decodeRequests.get(id);
-                if (request != null && request.reservationToken > 0L) {
-                    evidence.add(
-                            allocation
-                                    ? DecodeRequestStatus.allocated(request.reservation())
-                                    : DecodeRequestStatus.active(request.reservation()));
-                }
-            }
-            // Capture exact terminal proof before absent-owner pruning can discard its identity.
-            for (WorkerStatus.TaskObservation task : observation.finishedTasks().values()) {
-                String id = task.requestId();
-                if (settledHistory.containsKey(id)) {
-                    continue;
-                }
-                RequestRecord request = decodeRequests.get(id);
-                PreemptionClaim claim = victimClaims.get(id);
-                RequestReservation exact =
-                        request != null && request.reservationToken > 0L
-                                ? request.reservation()
-                                : claim == null ? null : claim.reservation;
-                if (exact != null && settle(exact, Settlement.OBSERVED_TERMINAL)) {
-                    evidence.add(DecodeRequestStatus.terminal(exact, task.errorCode()));
-                } else if (exact == null && request != null && request.confirmed()) {
-                    decodeRequests.remove(id, request);
-                    transition(request, null, null, 0L, 0L);
-                }
-            }
-            for (RequestRecord request : decodeRequests.values()) {
-                if (!request.confirmed()) {
-                    continue;
-                }
-                PreemptionClaim claim = victimClaims.get(request.requestId);
-                if (claim != null) {
-                    claim.hold(!allocated.contains(request.requestId));
-                } else if (!present.contains(request.requestId)) {
-                    // FULL absence ends this Engine owner and invalidates its provisional
-                    // admission.
-                    // Abort keeps already-outbound victim claims until their independent terminal
-                    // proof.
-                    if (request.incomingAttemptToken != 0L) {
-                        finishPreemption(request.incomingAttemptToken, false);
-                    }
-                    if (decodeRequests.remove(request.requestId, request)) {
-                        transition(request, null, null, 0L, 0L);
-                    }
-                    settledHistory.put(request.requestId, now);
-                }
-            }
-            return List.copyOf(evidence);
-        } finally {
-            calibrating = false;
-            admissionVersion++;
-        }
-    }
-
-    private void observeActive(WorkerStatus.TaskObservation task, boolean allocated, long now) {
-        RequestRecord request = decodeRequests.get(task.requestId());
-        if (allocated) {
-            PreemptionClaim claim = victimClaims.get(task.requestId());
-            if (claim != null) {
-                claim.hold(false);
-            }
-            if (request == null) {
-                request = new RequestRecord(task.requestId(), 0L, 0L, 0, 0L);
-                decodeRequests.put(task.requestId(), request);
-                reservedUsage.adjust(1, 0L, 0L);
-            }
-            transition(
-                    request,
-                    task.phase() == TaskPhase.RUNNING
-                            ? DecodeTaskPhase.RUNNING
-                            : DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
-                    null,
-                    task.inputLength(),
-                    now);
-        } else if (request != null) {
-            transition(
-                    request,
-                    request.confirmed() ? request.phase : DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
-                    null,
-                    0L,
-                    now);
-        }
-    }
-
     /**
      * A private candidate has no local owners and therefore cannot emit request evidence.
      */
@@ -1107,220 +619,11 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
         }
     }
 
-    List<DecodeRequestStatus> collectHeartbeatRequestStatuses(
-            WorkerStatus.StatusObservation observation) {
-        checkArgument(
-                observation.owner() == getStatus(),
-                "Status observation belongs to another Decode generation");
-        List<DecodeRequestStatus> captured;
-        stateLock().lock();
-        try {
-            List<DecodeRequestStatus> evidence = new ArrayList<>(observation.activeTasks().size());
-            for (WorkerStatus.TaskObservation task : observation.activeTasks().values()) {
-                RequestRecord request = decodeRequests.get(task.requestId());
-                PreemptionClaim claim = victimClaims.get(task.requestId());
-                RequestReservation exact =
-                        request != null && request.reservationToken > 0L
-                                ? request.reservation()
-                                : request == null && claim != null ? claim.reservation : null;
-                if (exact != null) {
-                    evidence.add(
-                            task.phase() == TaskPhase.KV_ALLOCATED
-                                            || task.phase() == TaskPhase.RUNNING
-                                    ? DecodeRequestStatus.allocated(exact)
-                                    : DecodeRequestStatus.active(exact));
-                }
-            }
-            captured = evidence;
-        } finally {
-            stateLock().unlock();
-        }
-        return List.copyOf(captured);
-    }
-
-    List<RequestReservation> retire() {
-        Set<RequestReservation> owners = new HashSet<>();
-        List<RequestReservation> foreignVictims = new ArrayList<>();
-        long generationId = getStatus().getGenerationId();
-        stateLock().lock();
-        try {
-            decodeRequests.forEach(
-                    (requestId, reservation) -> {
-                        if (reservation.reservationToken > 0L) {
-                            owners.add(
-                                    new RequestReservation(
-                                            generationId, requestId, reservation.reservationToken));
-                        }
-                    });
-            for (PreemptionRecord attempt : preemptionAttempts.values()) {
-                owners.add(attempt.incoming);
-                for (RequestReservation victim : attempt.remainingVictims) {
-                    if (victim.endpointGenerationId() != generationId) {
-                        foreignVictims.add(victim);
-                        continue;
-                    }
-                    owners.add(victim);
-                }
-            }
-            victimClaims.values().forEach(claim -> owners.add(claim.reservation));
-            // Capture exact identities before clearing permits and accounting.
-            for (RequestRecord reservation : decodeRequests.values()) {
-                EngineDispatchPermit permit = reservation.dispatchPermit;
-                if (permit != null) {
-                    permit.retiredByEndpoint = true;
-                    reservation.dispatchPermit = null;
-                }
-            }
-            decodeRequests.clear();
-            settledHistory.clear();
-            victimClaims.clear();
-            dispatchUsage.reset();
-            reservedUsage.reset();
-            queuedUsage.reset();
-            confirmedEngineOwnedCount = 0;
-            preemptionAttempts.clear();
-            priorityPreemptionHeldKv = 0L;
-            priorityPreemptionHeldExpectedKv = 0L;
-            admissionVersion++;
-        } finally {
-            stateLock().unlock();
-        }
-        for (var victim : foreignVictims) {
-            logger.error(
-                    "Decode retirement ignored a priority victim from another generation: "
-                            + "request_id={} expected_generation={} actual_generation={}",
-                    victim.requestId(),
-                    generationId,
-                    victim.endpointGenerationId());
-        }
-        List<RequestReservation> ordered = new ArrayList<>(owners);
-        ordered.sort(RETIREMENT_ORDER);
-        return List.copyOf(ordered);
-    }
-
-    record CleanupCandidate(long reservationToken, DecodeTaskPhase phase, long observedAtMs) {}
-
-    Map<String, CleanupCandidate> cleanupCandidates() {
-        stateLock().lock();
-        try {
-            Map<String, CleanupCandidate> candidates = new HashMap<>();
-            decodeRequests.forEach(
-                    (id, request) ->
-                            candidates.put(
-                                    id,
-                                    new CleanupCandidate(
-                                            request.reservationToken,
-                                            request.phase,
-                                            request.observedAtMs)));
-            return candidates;
-        } finally {
-            stateLock().unlock();
-        }
-    }
-
-    CleanupResult expireReservations(long ttlMs, Map<String, CleanupCandidate> orphanCandidates) {
-        stateLock().lock();
-        try {
-            long nowMs = System.currentTimeMillis();
-            long cutoff = nowMs - ttlMs;
-            int expiredReservations = 0;
-            boolean changed = settledHistory.values().removeIf(settledAt -> settledAt < cutoff);
-            for (Map.Entry<String, RequestRecord> entry : decodeRequests.entrySet()) {
-                String requestId = entry.getKey();
-                RequestRecord request = entry.getValue();
-                CleanupCandidate candidate = orphanCandidates.get(requestId);
-                if (victimClaims.containsKey(requestId)
-                        || candidate == null
-                        || candidate.reservationToken != request.reservationToken
-                        || candidate.phase != request.phase
-                        || candidate.observedAtMs != request.observedAtMs) {
-                    continue;
-                }
-                boolean confirmed = request.confirmed();
-                boolean expired =
-                        confirmed
-                                ? request.observedAtMs < cutoff
-                                : nowMs - request.observedAtMs > ttlMs;
-                if (!expired) {
-                    continue;
-                }
-                // An orphan incoming row must also surrender its attempt and local
-                // victim claims.
-                if (request.incomingAttemptToken != 0L) {
-                    finishPreemption(request.incomingAttemptToken, false);
-                }
-                if (decodeRequests.remove(requestId, request)) {
-                    transition(request, null, null, 0L, 0L);
-                }
-                if (!confirmed) {
-                    expiredReservations++;
-                }
-                changed = true;
-            }
-            if (changed) {
-                admissionVersion++;
-            }
-            return new CleanupResult(expiredReservations, changed);
-        } finally {
-            stateLock().unlock();
-        }
-    }
-
-    record CleanupResult(int expiredReservations, boolean capacityReleased) {}
-
     @Override
     public OptionalLong tryGetLoadMetric() {
         if (!stateLock().tryLock()) return OptionalLong.empty();
         try {
             return OptionalLong.of(confirmedEngineOwnedCount + reservedUsage.requests);
-        } finally {
-            stateLock().unlock();
-        }
-    }
-
-    public DecodeRoutingView routingView() {
-        return routingView(ipPort());
-    }
-
-    DecodeRoutingView routingView(String address) {
-        DecodeRoutingView observed = routingViewCache;
-        if (observed != null
-                && observed.address().equals(address)
-                && observed.admissionVersion() == admissionVersion
-                && observed.workerStatus() == getStatus().committedWorkerStatus()
-                && observed.topology() == getStatus().topologySnapshot()) {
-            return observed;
-        }
-        stateLock().lock();
-        try {
-            WorkerStatus.CommittedWorkerStatus committed = getStatus().committedWorkerStatus();
-            WorkerStatus.TopologySnapshot topology = getStatus().topologySnapshot();
-            var cached = routingViewCache;
-            if (cached == null
-                    || !cached.address().equals(address)
-                    || cached.admissionVersion() != admissionVersion
-                    || cached.workerStatus() != committed
-                    || cached.topology() != topology) {
-                cached =
-                        new DecodeRoutingView(
-                                address,
-                                getStatus().getGenerationId(),
-                                topology,
-                                committed,
-                                admissionVersion,
-                                confirmedEngineOwnedCount + reservedUsage.requests,
-                                confirmedEngineOwnedCount
-                                        + reservedUsage.requests
-                                        - Math.clamp(
-                                                queuedUsage.requests,
-                                                0,
-                                                Math.max(0, reservedUsage.requests)),
-                                usage(false, committed.fields()),
-                                usage(true, committed.fields()),
-                                reservedUsage.hardKv);
-                routingViewCache = cached;
-            }
-            return cached;
         } finally {
             stateLock().unlock();
         }
@@ -1443,6 +746,690 @@ public class DecodeEndpoint extends WorkerEndpoint implements EndpointStats.Deco
                 reservedUsage.hardKv,
                 age);
     }
+
+    // Retirement and orphan cleanup.
+
+    protected void closeEndpoint() {
+        List<RequestReservation> reservations = retire();
+        try {
+            for (var reservation : reservations) {
+                var context = requests.findActive(reservation.requestId());
+                if (context == null) continue;
+                context.data()
+                        .getRequestScheduler()
+                        .onEndpointRetired(
+                                context,
+                                new ContextResult.EndpointRetirement(
+                                        context.snapshot().route(),
+                                        reservation,
+                                        RoleType.DECODE,
+                                        this,
+                                        "Decode generation retired: "
+                                                + reservation.endpointGenerationId(),
+                                        System.currentTimeMillis()));
+            }
+        } finally {
+            publishCapacity(CapacityEdge.DISPATCH);
+        }
+    }
+
+    ResourceChange<ReservationReleaseResult> releaseReservation(
+            RequestReservation exact, ReleaseReason reason) {
+        java.util.Objects.requireNonNull(reason, "reason");
+        if (exact == null) {
+            checkArgument(
+                    reason != ReleaseReason.LOCAL_ROLLBACK
+                            && reason != ReleaseReason.NOT_SENT
+                            && reason != ReleaseReason.UNSENT_ROUTE_ROLLBACK,
+                    "Decode reservation is required for release");
+            return ResourceChange.of(ReservationReleaseResult.STALE, false);
+        }
+        if (exact.endpointGenerationId() != getStatus().getGenerationId()) {
+            return ResourceChange.of(ReservationReleaseResult.STALE, false);
+        }
+        stateLock().lock();
+        try {
+            if (reason == ReleaseReason.EXPIRED || reason == ReleaseReason.REMOTE_CLEANUP) {
+                boolean released = settle(exact, Settlement.EXPIRED);
+                return ResourceChange.of(
+                        released
+                                ? ReservationReleaseResult.RELEASED
+                                : ReservationReleaseResult.STALE,
+                        released);
+            }
+            RequestRecord request = decodeRequests.get(exact.requestId());
+            boolean matches = request != null && request.matches(exact);
+            if (reason == ReleaseReason.NOT_SENT || reason == ReleaseReason.UNSENT_ROUTE_ROLLBACK) {
+                if (matches && request.confirmed()) {
+                    return ResourceChange.of(ReservationReleaseResult.ENGINE_ACCEPTED, false);
+                }
+                if (matches
+                        && !victimClaims.containsKey(exact.requestId())
+                        && request.incomingAttemptToken != 0L) {
+                    return ResourceChange.of(ReservationReleaseResult.CONFLICT, false);
+                }
+            } else if (matches
+                    && (request.incomingAttemptToken != 0L
+                            || request.confirmed()
+                            || request.phase == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN
+                            || victimClaims.containsKey(exact.requestId()))) {
+                checkState(
+                        reason != ReleaseReason.LOCAL_ROLLBACK,
+                        "Illegal Decode local release: exact ownership is held by Engine/protocol lifecycle: %s",
+                        exact);
+                return ResourceChange.of(ReservationReleaseResult.STILL_OWNED, false);
+            }
+            if (!matches) {
+                return ResourceChange.of(ReservationReleaseResult.STALE, false);
+            }
+            boolean released =
+                    settle(
+                            exact,
+                            reason == ReleaseReason.LOCAL_ROLLBACK
+                                            || reason == ReleaseReason.UNSENT_ROUTE_ROLLBACK
+                                    ? Settlement.ROLLBACK
+                                    : Settlement.TERMINAL);
+            return ResourceChange.of(
+                    released ? ReservationReleaseResult.RELEASED : ReservationReleaseResult.STALE,
+                    released);
+        } finally {
+            stateLock().unlock();
+        }
+    }
+
+    List<DecodeRequestStatus> calibrateLocked(WorkerStatus.StatusObservation observation) {
+        checkState(
+                stateLock().isHeldByCurrentThread(),
+                "Decode calibration requires an Endpoint lock");
+        checkArgument(
+                observation.owner() == getStatus(), "Status belongs to another Decode generation");
+        checkState(!calibrating, "Decode calibration cannot reenter");
+        calibrating = true;
+        try {
+            List<DecodeRequestStatus> evidence = new ArrayList<>();
+            Set<String> present = new HashSet<>(),
+                    allocated = new HashSet<>(),
+                    terminal = new HashSet<>();
+            observation.finishedTasks().values().forEach(task -> terminal.add(task.requestId()));
+            long now = System.currentTimeMillis();
+            for (WorkerStatus.TaskObservation task :
+                    observation.engine().runningTaskList().values()) {
+                String id = task.requestId();
+                if (terminal.contains(id) || settledHistory.containsKey(id)) {
+                    continue;
+                }
+                present.add(id);
+                boolean allocation =
+                        task.phase() == TaskPhase.KV_ALLOCATED || task.phase() == TaskPhase.RUNNING;
+                if (allocation) {
+                    allocated.add(id);
+                }
+                observeActive(task, allocation, now);
+                RequestRecord request = decodeRequests.get(id);
+                if (request != null && request.reservationToken > 0L) {
+                    evidence.add(
+                            allocation
+                                    ? DecodeRequestStatus.allocated(request.reservation())
+                                    : DecodeRequestStatus.active(request.reservation()));
+                }
+            }
+            // Capture exact terminal proof before absent-owner pruning can discard its identity.
+            for (WorkerStatus.TaskObservation task : observation.finishedTasks().values()) {
+                String id = task.requestId();
+                if (settledHistory.containsKey(id)) {
+                    continue;
+                }
+                RequestRecord request = decodeRequests.get(id);
+                PreemptionClaim claim = victimClaims.get(id);
+                RequestReservation exact =
+                        request != null && request.reservationToken > 0L
+                                ? request.reservation()
+                                : claim == null ? null : claim.reservation;
+                if (exact != null && settle(exact, Settlement.OBSERVED_TERMINAL)) {
+                    evidence.add(DecodeRequestStatus.terminal(exact, task.errorCode()));
+                } else if (exact == null && request != null && request.confirmed()) {
+                    decodeRequests.remove(id, request);
+                    transition(request, null, null, 0L, 0L);
+                }
+            }
+            for (RequestRecord request : decodeRequests.values()) {
+                if (!request.confirmed()) {
+                    continue;
+                }
+                PreemptionClaim claim = victimClaims.get(request.requestId);
+                if (claim != null) {
+                    claim.hold(!allocated.contains(request.requestId));
+                } else if (!present.contains(request.requestId)) {
+                    // FULL absence ends this Engine owner and invalidates its provisional
+                    // admission.
+                    // Abort keeps already-outbound victim claims until their independent terminal
+                    // proof.
+                    if (request.incomingAttemptToken != 0L) {
+                        finishPreemption(request.incomingAttemptToken, false);
+                    }
+                    if (decodeRequests.remove(request.requestId, request)) {
+                        transition(request, null, null, 0L, 0L);
+                    }
+                    settledHistory.put(request.requestId, now);
+                }
+            }
+            return List.copyOf(evidence);
+        } finally {
+            calibrating = false;
+            admissionVersion++;
+        }
+    }
+
+    RequestReservation finishPreemption(long token, boolean commit) {
+        stateLock().lock();
+        try {
+            PreemptionRecord attempt = preemptionAttempts.get(token);
+            if (attempt == null) {
+                return null;
+            }
+            RequestRecord incoming = decodeRequests.get(attempt.incoming.requestId());
+            if (commit
+                    && (!acceptsNewRequests()
+                            || incoming == null
+                            || !incoming.matches(attempt.incoming)
+                            || incoming.confirmed()
+                            || !attempt.remainingVictims.isEmpty())) {
+                return null;
+            }
+            long version = admissionVersion;
+            preemptionAttempts.remove(token);
+            if (incoming != null && incoming.matches(attempt.incoming)) {
+                incoming.incomingAttemptToken = 0L;
+                if (commit)
+                    transition(
+                            incoming, DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED, null, 0L, 0L);
+            }
+            if (!commit) {
+                for (RequestReservation victim : attempt.remainingVictims) {
+                    PreemptionClaim claim = victimClaims.get(victim.requestId());
+                    if (claim != null
+                            && claim.attemptToken == token
+                            && claim.reservation.equals(victim)
+                            && !claim.cancellationHandedOff) {
+                        claim.close();
+                    }
+                }
+                if (incoming != null && !incoming.confirmed()) {
+                    settle(attempt.incoming, Settlement.ROLLBACK);
+                }
+            }
+            if (!calibrating && admissionVersion == version) {
+                admissionVersion++;
+            }
+            return attempt.incoming;
+        } finally {
+            stateLock().unlock();
+        }
+    }
+
+    List<DecodeRequestStatus> collectHeartbeatRequestStatuses(
+            WorkerStatus.StatusObservation observation) {
+        checkArgument(
+                observation.owner() == getStatus(),
+                "Status observation belongs to another Decode generation");
+        List<DecodeRequestStatus> captured;
+        stateLock().lock();
+        try {
+            List<DecodeRequestStatus> evidence = new ArrayList<>(observation.activeTasks().size());
+            for (WorkerStatus.TaskObservation task : observation.activeTasks().values()) {
+                RequestRecord request = decodeRequests.get(task.requestId());
+                PreemptionClaim claim = victimClaims.get(task.requestId());
+                RequestReservation exact =
+                        request != null && request.reservationToken > 0L
+                                ? request.reservation()
+                                : request == null && claim != null ? claim.reservation : null;
+                if (exact != null) {
+                    evidence.add(
+                            task.phase() == TaskPhase.KV_ALLOCATED
+                                            || task.phase() == TaskPhase.RUNNING
+                                    ? DecodeRequestStatus.allocated(exact)
+                                    : DecodeRequestStatus.active(exact));
+                }
+            }
+            captured = evidence;
+        } finally {
+            stateLock().unlock();
+        }
+        return List.copyOf(captured);
+    }
+
+    List<RequestReservation> retire() {
+        Set<RequestReservation> owners = new HashSet<>();
+        List<RequestReservation> foreignVictims = new ArrayList<>();
+        long generationId = getStatus().getGenerationId();
+        stateLock().lock();
+        try {
+            decodeRequests.forEach(
+                    (requestId, reservation) -> {
+                        if (reservation.reservationToken > 0L) {
+                            owners.add(
+                                    new RequestReservation(
+                                            generationId, requestId, reservation.reservationToken));
+                        }
+                    });
+            for (PreemptionRecord attempt : preemptionAttempts.values()) {
+                owners.add(attempt.incoming);
+                for (RequestReservation victim : attempt.remainingVictims) {
+                    if (victim.endpointGenerationId() != generationId) {
+                        foreignVictims.add(victim);
+                        continue;
+                    }
+                    owners.add(victim);
+                }
+            }
+            victimClaims.values().forEach(claim -> owners.add(claim.reservation));
+            // Capture exact identities before clearing permits and accounting.
+            for (RequestRecord reservation : decodeRequests.values()) {
+                EngineDispatchPermit permit = reservation.dispatchPermit;
+                if (permit != null) {
+                    permit.retiredByEndpoint = true;
+                    reservation.dispatchPermit = null;
+                }
+            }
+            decodeRequests.clear();
+            settledHistory.clear();
+            victimClaims.clear();
+            dispatchUsage.reset();
+            reservedUsage.reset();
+            queuedUsage.reset();
+            confirmedEngineOwnedCount = 0;
+            preemptionAttempts.clear();
+            priorityPreemptionHeldKv = 0L;
+            priorityPreemptionHeldExpectedKv = 0L;
+            admissionVersion++;
+        } finally {
+            stateLock().unlock();
+        }
+        for (var victim : foreignVictims) {
+            logger.error(
+                    "Decode retirement ignored a priority victim from another generation: "
+                            + "request_id={} expected_generation={} actual_generation={}",
+                    victim.requestId(),
+                    generationId,
+                    victim.endpointGenerationId());
+        }
+        List<RequestReservation> ordered = new ArrayList<>(owners);
+        ordered.sort(RETIREMENT_ORDER);
+        return List.copyOf(ordered);
+    }
+
+    Map<String, CleanupCandidate> cleanupCandidates() {
+        stateLock().lock();
+        try {
+            Map<String, CleanupCandidate> candidates = new HashMap<>();
+            decodeRequests.forEach(
+                    (id, request) ->
+                            candidates.put(
+                                    id,
+                                    new CleanupCandidate(
+                                            request.reservationToken,
+                                            request.phase,
+                                            request.observedAtMs)));
+            return candidates;
+        } finally {
+            stateLock().unlock();
+        }
+    }
+
+    CleanupResult expireReservations(long ttlMs, Map<String, CleanupCandidate> orphanCandidates) {
+        stateLock().lock();
+        try {
+            long nowMs = System.currentTimeMillis();
+            long cutoff = nowMs - ttlMs;
+            int expiredReservations = 0;
+            boolean changed = settledHistory.values().removeIf(settledAt -> settledAt < cutoff);
+            for (Map.Entry<String, RequestRecord> entry : decodeRequests.entrySet()) {
+                String requestId = entry.getKey();
+                RequestRecord request = entry.getValue();
+                CleanupCandidate candidate = orphanCandidates.get(requestId);
+                if (victimClaims.containsKey(requestId)
+                        || candidate == null
+                        || candidate.reservationToken != request.reservationToken
+                        || candidate.phase != request.phase
+                        || candidate.observedAtMs != request.observedAtMs) {
+                    continue;
+                }
+                boolean confirmed = request.confirmed();
+                boolean expired =
+                        confirmed
+                                ? request.observedAtMs < cutoff
+                                : nowMs - request.observedAtMs > ttlMs;
+                if (!expired) {
+                    continue;
+                }
+                // An orphan incoming row must also surrender its attempt and local
+                // victim claims.
+                if (request.incomingAttemptToken != 0L) {
+                    finishPreemption(request.incomingAttemptToken, false);
+                }
+                if (decodeRequests.remove(requestId, request)) {
+                    transition(request, null, null, 0L, 0L);
+                }
+                if (!confirmed) {
+                    expiredReservations++;
+                }
+                changed = true;
+            }
+            if (changed) {
+                admissionVersion++;
+            }
+            return new CleanupResult(expiredReservations, changed);
+        } finally {
+            stateLock().unlock();
+        }
+    }
+
+    DecodeRoutingView routingView(String address) {
+        DecodeRoutingView observed = routingViewCache;
+        if (observed != null
+                && observed.address().equals(address)
+                && observed.admissionVersion() == admissionVersion
+                && observed.workerStatus() == getStatus().committedWorkerStatus()
+                && observed.topology() == getStatus().topologySnapshot()) {
+            return observed;
+        }
+        stateLock().lock();
+        try {
+            WorkerStatus.CommittedWorkerStatus committed = getStatus().committedWorkerStatus();
+            WorkerStatus.TopologySnapshot topology = getStatus().topologySnapshot();
+            var cached = routingViewCache;
+            if (cached == null
+                    || !cached.address().equals(address)
+                    || cached.admissionVersion() != admissionVersion
+                    || cached.workerStatus() != committed
+                    || cached.topology() != topology) {
+                cached =
+                        new DecodeRoutingView(
+                                address,
+                                getStatus().getGenerationId(),
+                                topology,
+                                committed,
+                                admissionVersion,
+                                confirmedEngineOwnedCount + reservedUsage.requests,
+                                confirmedEngineOwnedCount
+                                        + reservedUsage.requests
+                                        - Math.clamp(
+                                                queuedUsage.requests,
+                                                0,
+                                                Math.max(0, reservedUsage.requests)),
+                                usage(false, committed.fields()),
+                                usage(true, committed.fields()),
+                                reservedUsage.hardKv);
+                routingViewCache = cached;
+            }
+            return cached;
+        } finally {
+            stateLock().unlock();
+        }
+    }
+
+    private void publishRequest(
+            RequestReservation reservation,
+            ContextResult.WorkerRequestEventType kind,
+            long errorCode,
+            String detail) {
+        var context = requests.findActive(reservation.requestId());
+        if (context == null) return;
+        var route = context.snapshot().route();
+        if (route == null || route.decodeEndpoint() != this) return;
+        context.data()
+                .getRequestScheduler()
+                .onWorkerRequestEvent(
+                        context,
+                        new ContextResult.WorkerRequestEvent(
+                                route,
+                                reservation,
+                                RoleType.DECODE,
+                                kind,
+                                errorCode,
+                                detail,
+                                System.currentTimeMillis()));
+    }
+
+    private Acquisition<ReserveStatus, RequestReservation> createReservation(
+            String requestId, long hardKv, long expectedKv, int priority, DecodeTaskPhase phase) {
+        checkState(
+                nextReservationToken > 0L && nextReservationToken != Long.MAX_VALUE,
+                "Decode reservation token space exhausted");
+        RequestRecord request =
+                new RequestRecord(requestId, hardKv, expectedKv, priority, nextReservationToken++);
+        var acquired = new Acquisition<>(ReserveStatus.ACQUIRED, request.reservation());
+        decodeRequests.put(requestId, request);
+        reservedUsage.adjust(1, hardKv, expectedKv);
+        if (phase == DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED) {
+            queuedUsage.adjust(1, hardKv, expectedKv);
+        }
+        request.phase = phase;
+        admissionVersion++;
+        return acquired;
+    }
+
+    private boolean requestIdAvailable(String requestId) {
+        // Every installed incoming attempt retains its exact request row until commit/abort/expiry.
+        return !decodeRequests.containsKey(requestId)
+                && !victimClaims.containsKey(requestId)
+                && !settledHistory.containsKey(requestId);
+    }
+
+    /**
+     * Only validated evidence reaches this kernel; request and claim obligations settle together.
+     */
+    private boolean settle(RequestReservation exact, Settlement proof) {
+        RequestRecord request = decodeRequests.get(exact.requestId());
+        boolean matches = request != null && request.matches(exact);
+        PreemptionClaim claim = victimClaims.get(exact.requestId());
+        if (claim != null && !claim.reservation.equals(exact)) {
+            claim = null;
+        }
+        if (!matches && claim == null) {
+            return false;
+        }
+        long version = admissionVersion;
+        if (matches && request.incomingAttemptToken != 0L) {
+            checkState(
+                    proof == Settlement.EXPIRED,
+                    "Decode terminal still owns its incoming attempt: %s",
+                    exact);
+            finishPreemption(request.incomingAttemptToken, false);
+        }
+        if (claim != null) {
+            PreemptionRecord attempt = preemptionAttempts.get(claim.attemptToken);
+            if (attempt != null) {
+                attempt.remainingVictims.remove(exact);
+            }
+            claim.close();
+        }
+        if (matches && decodeRequests.remove(exact.requestId(), request)) {
+            transition(request, null, null, 0L, 0L);
+        }
+        // Ordinary Engine completion may be rediscovered; cancellation claims retain their explicit
+        // fence.
+        if (proof != Settlement.ROLLBACK
+                && (proof != Settlement.OBSERVED_TERMINAL || claim != null)) {
+            settledHistory.put(exact.requestId(), System.currentTimeMillis());
+        }
+        if (!calibrating && admissionVersion == version) {
+            admissionVersion++;
+        }
+        return true;
+    }
+
+    /**
+     * Update derived counters once from old/new contributions, without allocating contribution objects.
+     */
+    private void transition(
+            RequestRecord request,
+            DecodeTaskPhase next,
+            EngineDispatchPermit permit,
+            long engineKv,
+            long observedAtMs) {
+        boolean reserved = !request.confirmed();
+        boolean queued = request.queued();
+        boolean dispatching = request.dispatchPermit != null;
+        boolean nextReserved = next != null && !next.isEngineConfirmed();
+        boolean nextQueued = next == DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED;
+        boolean nextDispatching = permit != null;
+        long hard = request.kvTokens, expected = request.expectedKvTokens;
+        reservedUsage.adjust(
+                (nextReserved ? 1 : 0) - (reserved ? 1 : 0),
+                (nextReserved ? hard : 0L) - (reserved ? hard : 0L),
+                (nextReserved ? expected : 0L) - (reserved ? expected : 0L));
+        queuedUsage.adjust(
+                (nextQueued ? 1 : 0) - (queued ? 1 : 0),
+                (nextQueued ? hard : 0L) - (queued ? hard : 0L),
+                (nextQueued ? expected : 0L) - (queued ? expected : 0L));
+        dispatchUsage.adjust(
+                (nextDispatching ? 1 : 0) - (dispatching ? 1 : 0),
+                (nextDispatching ? hard : 0L) - (dispatching ? hard : 0L),
+                (nextDispatching ? expected : 0L) - (dispatching ? expected : 0L));
+        confirmedEngineOwnedCount +=
+                (next != null && next.isEngineConfirmed() ? 1 : 0) - (reserved ? 0 : 1);
+        if (reserved && next != null && next.isEngineConfirmed()) {
+            request.kvTokens = Math.max(0L, engineKv);
+            request.expectedKvTokens = request.kvTokens;
+        }
+        request.dispatchPermit = permit;
+        if (observedAtMs > 0L) {
+            request.observedAtMs = observedAtMs;
+        }
+        // A removed row retains its last phase for advisory readers that already captured it.
+        if (next != null) {
+            request.phase = next;
+        }
+        if (!calibrating) {
+            admissionVersion++;
+        }
+    }
+
+    private CapacityUsage usage(boolean dispatch, WorkerStatus.EngineObservation fields) {
+        long hard =
+                dispatch
+                        ? Math.max(0L, reservedUsage.hardKv - queuedUsage.hardKv)
+                                + dispatchUsage.hardKv
+                        : reservedUsage.hardKv;
+        long expected =
+                dispatch
+                        ? Math.max(0L, reservedUsage.expectedKv - queuedUsage.expectedKv)
+                                + dispatchUsage.expectedKv
+                        : reservedUsage.expectedKv;
+        long reported =
+                fields.totalKvCacheTokens() > 0L
+                        ? Math.max(
+                                0L, fields.totalKvCacheTokens() - fields.availableKvCacheTokens())
+                        : 0L;
+        int count = confirmedEngineOwnedCount + reservedUsage.requests;
+        if (dispatch) {
+            count +=
+                    Math.max(0, dispatchUsage.requests)
+                            - Math.clamp(
+                                    queuedUsage.requests, 0, Math.max(0, reservedUsage.requests));
+        }
+        return new CapacityUsage(
+                count,
+                Math.max(0L, fields.totalKvCacheTokens()),
+                Math.max(0L, fields.availableKvCacheTokens()),
+                saturatedAddNonNegative(hard, priorityPreemptionHeldKv),
+                saturatedAddNonNegative(
+                        saturatedAddNonNegative(reported, expected),
+                        priorityPreemptionHeldExpectedKv));
+    }
+
+    private void observeActive(WorkerStatus.TaskObservation task, boolean allocated, long now) {
+        RequestRecord request = decodeRequests.get(task.requestId());
+        if (allocated) {
+            PreemptionClaim claim = victimClaims.get(task.requestId());
+            if (claim != null) {
+                claim.hold(false);
+            }
+            if (request == null) {
+                request = new RequestRecord(task.requestId(), 0L, 0L, 0, 0L);
+                decodeRequests.put(task.requestId(), request);
+                reservedUsage.adjust(1, 0L, 0L);
+            }
+            transition(
+                    request,
+                    task.phase() == TaskPhase.RUNNING
+                            ? DecodeTaskPhase.RUNNING
+                            : DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                    null,
+                    task.inputLength(),
+                    now);
+        } else if (request != null) {
+            transition(
+                    request,
+                    request.confirmed() ? request.phase : DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
+                    null,
+                    0L,
+                    now);
+        }
+    }
+
+    public static final class EngineDispatchPermit {
+
+        private final DecodeEndpoint endpoint;
+        final RequestRecord reservation;
+        boolean retiredByEndpoint;
+
+        /**
+         * Null until resolved; cached result for dispatch, including ownership lost after release.
+         */
+        private EngineDispatchPermitTransferStatus dispatchResult;
+
+        EngineDispatchPermit(DecodeEndpoint endpoint, RequestRecord reservation) {
+            this.endpoint = endpoint;
+            this.reservation = reservation;
+        }
+
+        /**
+         * Identity check uses immutable reservation fields; it does not wait for an Endpoint lock.
+         */
+        public boolean belongsTo(DecodeEndpoint expected, RequestReservation reservation) {
+            return endpoint == expected
+                    && reservation != null
+                    && endpoint.getStatus().getGenerationId() == reservation.endpointGenerationId()
+                    && this.reservation.matches(reservation);
+        }
+
+        /**
+         * Transfer this acquired slot without a second capacity check.
+         *
+         * @return a typed distinction between transfer, prior request-owner
+         *         loss, and endpoint-generation retirement
+         */
+        public ResourceChange<EngineDispatchPermitTransferStatus> dispatch() {
+            return endpoint.dispatch(this, DispatchOutcome.ENGINE_OWNED);
+        }
+
+        public boolean release() {
+            var result = endpoint.dispatch(this, DispatchOutcome.ABANDONED);
+            if (result.capacityReleased()) {
+                endpoint.publishCapacity(CapacityEdge.BOTH);
+            }
+            return result.status() == EngineDispatchPermitTransferStatus.TRANSFERRED;
+        }
+    }
+
+    public enum CapacityEdge {
+        DISPATCH,
+        PLACEMENT,
+        BOTH
+    }
+
+    private enum Settlement {
+        ROLLBACK,
+        TERMINAL,
+        OBSERVED_TERMINAL,
+        EXPIRED
+    }
+
+    record CleanupCandidate(long reservationToken, DecodeTaskPhase phase, long observedAtMs) {}
+
+    record CleanupResult(int expiredReservations, boolean capacityReleased) {}
 
     private static final class ResourceUsage {
         private volatile int requests;

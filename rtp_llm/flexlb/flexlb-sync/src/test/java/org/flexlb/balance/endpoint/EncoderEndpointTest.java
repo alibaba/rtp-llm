@@ -5,7 +5,7 @@ import org.flexlb.balance.scheduler.ContextResult;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestData;
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -25,9 +25,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks Encoder admission and release of local request capacity.
+ * Checks Encoder admission and load accounting across release and retirement, including stale route identities.
  */
 class EncoderEndpointTest {
+    private final AbstractRequestScheduler lifecycle = mock(AbstractRequestScheduler.class);
+    private final PlacementAvailability availability = mock(PlacementAvailability.class);
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void eitherClosedAdmissionGateRejectsCommitButAllowsRelease(boolean retired) {
@@ -48,9 +51,6 @@ class EncoderEndpointTest {
             endpoint.awaitRetirement(2000L);
         }
     }
-
-    private final AbstractRequestScheduler lifecycle = mock(AbstractRequestScheduler.class);
-    private final PlacementAvailability availability = mock(PlacementAvailability.class);
 
     @Test
     void scoringCountsEngineAndPendingTokensWithoutHoldingTheLockDuringEngineTraversal() {
@@ -156,8 +156,8 @@ class EncoderEndpointTest {
         }
     }
 
-    private RouteExecution route(String id, long tokens) {
-        var route = mock(RouteExecution.class);
+    private RouteResult route(String id, long tokens) {
+        var route = mock(RouteResult.class);
         var context = mock(RequestContext.class);
         var data = mock(RequestData.class);
         when(route.requestId()).thenReturn(String.valueOf(id));

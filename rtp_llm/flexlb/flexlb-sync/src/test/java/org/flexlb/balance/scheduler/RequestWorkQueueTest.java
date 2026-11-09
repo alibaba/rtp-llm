@@ -12,7 +12,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -22,6 +21,9 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Verifies serialized close effects, required response delivery, and rejected handoff cleanup.
+ */
 class RequestWorkQueueTest {
     @Test
     @Timeout(10)
@@ -51,11 +53,12 @@ class RequestWorkQueueTest {
                             entered.countDown();
                             RequestProtocolTestSupport.await(release);
                         },
-                        false);
+                        false,
+                        null);
             }
             assertTrue(entered.await(5, TimeUnit.SECONDS));
             try (var accepted = pool.registerRequestWork(context)) {
-                accepted.submitClose(next::countDown, false);
+                accepted.submitClose(next::countDown, false, null);
             }
             workers.submit(driver.get()).get(5, TimeUnit.SECONDS);
             assertEquals(
@@ -89,19 +92,65 @@ class RequestWorkQueueTest {
                         failure,
                         assertThrows(
                                 IllegalStateException.class,
-                                () -> accepted.submitClose(ran::incrementAndGet, false)));
-                assertTrue(accepted.canRetrySubmission());
-                assertFalse(accepted.hasTaskOwner());
+                                () -> accepted.submitClose(ran::incrementAndGet, false, null)));
             }
             pool.awaitIdle();
             assertSame(failure, assertThrows(IllegalStateException.class, pool::throwIfFailed));
             assertEquals(0, ran.get());
+            org.mockito.Mockito.verify(dispatch, org.mockito.Mockito.times(1)).execute(any());
             try (var accepted = pool.registerRequestWork(context)) {
-                accepted.submitClose(ran::incrementAndGet, true);
+                accepted.submitClose(ran::incrementAndGet, true, null);
             }
             pool.awaitIdle();
             assertEquals(1, ran.get(), "failed handoff cannot strand the request lane");
         } finally {
+            pool.close();
+        }
+    }
+
+    @Test
+    void requiredResponsesRunInOrderEvenWhenCleanupIsAlreadyPending() {
+        var pool = new RequestTaskPool();
+        var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 7104L);
+        var driver = new AtomicReference<Runnable>();
+        var dispatch = mock(ExecutorService.class);
+        doAnswer(
+                        call -> {
+                            driver.set(call.getArgument(0));
+                            return null;
+                        })
+                .when(dispatch)
+                .execute(any());
+        when(dispatch.isTerminated()).thenReturn(true);
+        ReflectionTestUtils.setField(pool, "requestWorkers", dispatch);
+        var effects = new java.util.ArrayList<String>();
+        var rejected = new AtomicInteger();
+        try {
+            try (var work = pool.registerRequestWork(context)) {
+                work.submitClose(
+                        () -> effects.add("cleanup"), false, cause -> rejected.incrementAndGet());
+            }
+            for (String response : java.util.List.of("response-1", "response-2")) {
+                try (var work = pool.registerRequestWork(context)) {
+                    work.submitCloseResponse(
+                            () -> effects.add(response),
+                            false,
+                            cause -> rejected.incrementAndGet());
+                }
+            }
+            try (var work = pool.registerRequestWork(context)) {
+                work.submitClose(
+                        () -> effects.add("duplicate-cleanup"),
+                        false,
+                        cause -> rejected.incrementAndGet());
+            }
+            driver.get().run();
+            pool.awaitIdle();
+            pool.throwIfFailed();
+            assertEquals(java.util.List.of("cleanup", "response-1", "response-2"), effects);
+            assertEquals(0, rejected.get(), "coalescing cleanup is not a failed response handoff");
+        } finally {
+            if (driver.get() != null) driver.get().run();
             pool.close();
         }
     }
@@ -125,8 +174,7 @@ class RequestWorkQueueTest {
         try {
             for (int i = 0; i < 101; i++) {
                 try (var accepted = pool.registerRequestWork(context)) {
-                    accepted.submitClose(ran::incrementAndGet, false);
-                    assertEquals(i == 0, accepted.hasTaskOwner());
+                    accepted.submitClose(ran::incrementAndGet, false, null);
                 }
             }
             driver.get().run();
@@ -136,7 +184,7 @@ class RequestWorkQueueTest {
             assertEquals(
                     0, ((java.util.Map<?, ?>) ReflectionTestUtils.getField(queue, "lanes")).size());
             try (var accepted = pool.registerRequestWork(context)) {
-                accepted.submitClose(ran::incrementAndGet, true);
+                accepted.submitClose(ran::incrementAndGet, true, null);
             }
             pool.awaitIdle();
             pool.throwIfFailed();

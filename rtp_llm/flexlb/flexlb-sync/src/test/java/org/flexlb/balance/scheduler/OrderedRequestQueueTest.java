@@ -17,6 +17,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Checks priority/FIFO queue order, exact unlinking and retry progress through blocked entries.
  */
 class OrderedRequestQueueTest {
+    private static final org.flexlb.config.FlexlbConfig ENTRY_CONFIG =
+            SchedulingTestConfig.newConfig();
 
     @Test
     void withdrawnRouteReturnsAheadOfNewerSamePriorityRequests() {
@@ -400,9 +402,6 @@ class OrderedRequestQueueTest {
             assertTrue(ready.isEmpty(), "every awakened or newly added request must be visited");
         }
     }
-
-    private static final org.flexlb.config.FlexlbConfig ENTRY_CONFIG =
-            SchedulingTestConfig.newConfig();
 
     private static GlobalQueueEntry entry(int priority) {
         var context = new RequestContext(ENTRY_CONFIG);

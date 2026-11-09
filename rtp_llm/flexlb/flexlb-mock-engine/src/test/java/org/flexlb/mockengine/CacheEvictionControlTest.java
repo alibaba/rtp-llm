@@ -51,12 +51,11 @@ import static org.junit.jupiter.api.Assertions.fail;
  * surface — serves the post-eviction key set under the bumped version.
  */
 class CacheEvictionControlTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private static final int BASE_PORT = 63900;
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
     private MockControlServer controlServer;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -453,22 +452,6 @@ class CacheEvictionControlTest {
                                 observer));
     }
 
-    private JsonNode engineByName(String name) throws Exception {
-        JsonNode engines =
-                MAPPER.readTree(
-                                httpGet(
-                                        MockEngineTestSupport.controlPort(controlServer),
-                                        "/snapshot"))
-                        .get("engines");
-        for (JsonNode engine : engines) {
-            if (name.equals(engine.get("name").asText())) {
-                return engine;
-            }
-        }
-        fail("engine " + name + " not found in /snapshot");
-        return null;
-    }
-
     /** Poll until the engine's cache_keys count reaches expected (admits are async). */
     private void awaitEngineCacheKeys(String engineName, int expected, long timeoutMs)
             throws Exception {
@@ -486,6 +469,22 @@ class CacheEvictionControlTest {
                         + engineName
                         + ", got "
                         + engineByName(engineName).get("cache_keys").asInt());
+    }
+
+    private JsonNode engineByName(String name) throws Exception {
+        JsonNode engines =
+                MAPPER.readTree(
+                                httpGet(
+                                        MockEngineTestSupport.controlPort(controlServer),
+                                        "/snapshot"))
+                        .get("engines");
+        for (JsonNode engine : engines) {
+            if (name.equals(engine.get("name").asText())) {
+                return engine;
+            }
+        }
+        fail("engine " + name + " not found in /snapshot");
+        return null;
     }
 
     private void awaitCompleted(

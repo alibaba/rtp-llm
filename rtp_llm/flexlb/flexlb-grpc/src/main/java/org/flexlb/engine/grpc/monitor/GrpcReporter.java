@@ -43,11 +43,23 @@ import static org.flexlb.constant.MetricConstant.GRPC_RESPONSE_SIZE;
  */
 @Component
 public class GrpcReporter {
+    private static final String[] RECEIVING_METRICS = {
+        "app.grpc.server.receiving.active", "app.grpc.server.receiving.control.active",
+        "app.grpc.server.receiving.rejected.total", "app.grpc.server.receiving.timed.out.total",
+        "app.grpc.server.receiving.timers.active", "app.grpc.server.executor.queue.size",
+        "app.grpc.server.executor.active.threads", "app.grpc.server.control.queue.size",
+        "app.grpc.server.control.active.threads", "app.grpc.server.receiving.budget.used.bytes",
+        "app.grpc.server.receiving.control.budget.used.bytes"
+    };
 
     private final FlexMonitor monitor;
 
     private ThreadPoolExecutor clientExecutor;
     private Map<String, EventLoopGroup> eventLoops = Map.of();
+
+    public GrpcReporter(FlexMonitor monitor) {
+        this.monitor = SafeFlexMonitor.wrap(monitor);
+    }
 
     @Autowired(required = false)
     public void bindTransportStats(
@@ -92,40 +104,6 @@ public class GrpcReporter {
         eventLoops.forEach(this::reportEventLoopGroup);
     }
 
-    private void reportEventLoopGroup(String eventLoopGroupName, EventLoopGroup eventLoopGroup) {
-        int totalActiveExecutorCount = 0;
-        int totalPendingTask = 0;
-        for (EventExecutor executor : eventLoopGroup) {
-            boolean isShutdown = executor.isShutdown();
-            boolean isTerminated = executor.isTerminated();
-            boolean isShuttingDown = executor.isShuttingDown();
-            // Record active worker count
-            if (!isShutdown && !isTerminated && !isShuttingDown) {
-                totalActiveExecutorCount++;
-            }
-            if (executor instanceof SingleThreadEventExecutor singleThreadEventExecutor) {
-                int pendingTasks = singleThreadEventExecutor.pendingTasks();
-                totalPendingTask += pendingTasks;
-            }
-        }
-        Map<String, String> metricMap = new HashMap<>();
-        metricMap.put("name", eventLoopGroupName);
-        metricMap.put("type", "active-executor-count");
-        monitor.report(
-                org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO,
-                FlexMetricTags.of(metricMap),
-                totalActiveExecutorCount);
-        metricMap.put("type", "pending-task-total-count");
-        monitor.report(
-                org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO,
-                FlexMetricTags.of(metricMap),
-                totalPendingTask);
-    }
-
-    public GrpcReporter(FlexMonitor monitor) {
-        this.monitor = SafeFlexMonitor.wrap(monitor);
-    }
-
     public void registerServerExecutor(
             ExecutorStats stats, int maximumPoolSize, LongSupplier callerRuns) {
         monitor.observe(
@@ -159,15 +137,6 @@ public class GrpcReporter {
                 stats,
                 ignored -> callerRuns.getAsLong());
     }
-
-    private static final String[] RECEIVING_METRICS = {
-        "app.grpc.server.receiving.active", "app.grpc.server.receiving.control.active",
-        "app.grpc.server.receiving.rejected.total", "app.grpc.server.receiving.timed.out.total",
-        "app.grpc.server.receiving.timers.active", "app.grpc.server.executor.queue.size",
-        "app.grpc.server.executor.active.threads", "app.grpc.server.control.queue.size",
-        "app.grpc.server.control.active.threads", "app.grpc.server.receiving.budget.used.bytes",
-        "app.grpc.server.receiving.control.budget.used.bytes"
-    };
 
     public void registerReceivingMetrics() {
         for (String name : RECEIVING_METRICS) monitor.register(name, FlexMetricType.GAUGE);
@@ -317,5 +286,35 @@ public class GrpcReporter {
                             "TRAILERS_TO_CALLBACK"),
                     transport.responseDeliveryMs());
         }
+    }
+
+    private void reportEventLoopGroup(String eventLoopGroupName, EventLoopGroup eventLoopGroup) {
+        int totalActiveExecutorCount = 0;
+        int totalPendingTask = 0;
+        for (EventExecutor executor : eventLoopGroup) {
+            boolean isShutdown = executor.isShutdown();
+            boolean isTerminated = executor.isTerminated();
+            boolean isShuttingDown = executor.isShuttingDown();
+            // Record active worker count
+            if (!isShutdown && !isTerminated && !isShuttingDown) {
+                totalActiveExecutorCount++;
+            }
+            if (executor instanceof SingleThreadEventExecutor singleThreadEventExecutor) {
+                int pendingTasks = singleThreadEventExecutor.pendingTasks();
+                totalPendingTask += pendingTasks;
+            }
+        }
+        Map<String, String> metricMap = new HashMap<>();
+        metricMap.put("name", eventLoopGroupName);
+        metricMap.put("type", "active-executor-count");
+        monitor.report(
+                org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO,
+                FlexMetricTags.of(metricMap),
+                totalActiveExecutorCount);
+        metricMap.put("type", "pending-task-total-count");
+        monitor.report(
+                org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO,
+                FlexMetricTags.of(metricMap),
+                totalPendingTask);
     }
 }

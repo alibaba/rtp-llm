@@ -55,15 +55,10 @@ import static org.mockito.Mockito.when;
  */
 @DisplayName("DecodePreemption.tryReclaim contracts")
 class DecodePreemptionTest {
-
     private RequestSchedulerReporter reporter;
-
     private DeliveryDispatcher dispatcher;
-
     private AbstractRequestScheduler requests;
-
     private DecodeEndpoint blockedEndpoint;
-
     private DefaultDecodePreemption acquirer;
 
     @BeforeEach
@@ -88,21 +83,6 @@ class DecodePreemptionTest {
         SchedulingTestConfig.usePriorityQueue(config);
         config.priorityOrdering().setPreemption(new PreemptionConfig());
         configureAdmission(config);
-    }
-
-    private void configureAdmission(FlexlbConfig config) {
-        acquirer =
-                org.mockito.Mockito.spy(
-                        new DefaultDecodePreemption(
-                                dispatcher,
-                                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
-                                        requests),
-                                mock(org.flexlb.balance.scheduler.RequestTaskExecutor.class),
-                                mock(org.flexlb.balance.scheduler.TaskTimer.class),
-                                reporter,
-                                SchedulingTestConfig.configService(config),
-                                SchedulingTestConfig.capacity(config),
-                                new PriorityDecodePreemptionPolicy()));
     }
 
     @ParameterizedTest
@@ -284,20 +264,6 @@ class DecodePreemptionTest {
         }
     }
 
-    private void assertZeroSideEffect() {
-        verifyNoInteractions(dispatcher);
-        verify(acquirer, never()).preempt(any(), any());
-        verifyNoInteractions(requests);
-        verifyNoInteractions(blockedEndpoint);
-        verifyNoInteractions(reporter);
-    }
-
-    private CompletableFuture<DecodePreemption.PreemptionResult> tryReclaim(
-            RequestContext context, CompletableFuture<Response> future) {
-        when(context.data().getFuture()).thenReturn(future);
-        return acquirer.tryReclaim(context, blockedEndpoint);
-    }
-
     // ─── Shutdown ────────────────────────────────────────────────────────
     @Test
     @DisplayName("A shut-down acquirer declines without side effects")
@@ -396,6 +362,35 @@ class DecodePreemptionTest {
         configureAdmission(directConfig);
         assertNull(tryReclaim(ctx, new CompletableFuture<>()));
         assertZeroSideEffect();
+    }
+
+    private void configureAdmission(FlexlbConfig config) {
+        acquirer =
+                org.mockito.Mockito.spy(
+                        new DefaultDecodePreemption(
+                                dispatcher,
+                                org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
+                                        requests),
+                                mock(org.flexlb.balance.scheduler.RequestTaskExecutor.class),
+                                mock(org.flexlb.balance.scheduler.TaskTimer.class),
+                                reporter,
+                                SchedulingTestConfig.configService(config),
+                                SchedulingTestConfig.capacity(config),
+                                new PriorityDecodePreemptionPolicy()));
+    }
+
+    private void assertZeroSideEffect() {
+        verifyNoInteractions(dispatcher);
+        verify(acquirer, never()).preempt(any(), any());
+        verifyNoInteractions(requests);
+        verifyNoInteractions(blockedEndpoint);
+        verifyNoInteractions(reporter);
+    }
+
+    private CompletableFuture<DecodePreemption.PreemptionResult> tryReclaim(
+            RequestContext context, CompletableFuture<Response> future) {
+        when(context.data().getFuture()).thenReturn(future);
+        return acquirer.tryReclaim(context, blockedEndpoint);
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────

@@ -37,7 +37,6 @@ import static org.mockito.Mockito.when;
  * Checks Micrometer metric registration, tags and reported values.
  */
 class MicrometerFlexMonitorTest {
-
     @Test
     void liveMetricsReadCurrentValuesAndRespectTheAllowlist() {
         var registry = new SimpleMeterRegistry();
@@ -391,31 +390,6 @@ class MicrometerFlexMonitorTest {
         }
     }
 
-    private static void assertExportedDepth(
-            PrometheusMeterRegistry registry, String role, double expected) {
-        assertEquals(
-                expected, registry.get("flexlb.worker.depth").tag("role", role).gauge().value());
-        var samples =
-                registry.scrape()
-                        .lines()
-                        .filter(
-                                line ->
-                                        line.startsWith("flexlb_worker_depth{")
-                                                && line.contains("role=\"" + role + "\""))
-                        .toList();
-        assertEquals(1, samples.size());
-        assertFalse(samples.getFirst().contains("engineIp="));
-        assertTrue(samples.getFirst().endsWith(" " + expected), samples.getFirst());
-    }
-
-    private static void assertGaugeCachesEmpty(MicrometerFlexMonitor monitor) throws Exception {
-        for (String name : java.util.List.of("gaugeCache", "gaugeSources", "tagsCache")) {
-            var field = MicrometerFlexMonitor.class.getDeclaredField(name);
-            field.setAccessible(true);
-            assertTrue(((Map<?, ?>) field.get(monitor)).isEmpty(), name);
-        }
-    }
-
     @AfterEach
     void resetAllowedMetrics() {
         MicrometerFlexMonitor.setAllowedMetrics(null);
@@ -535,6 +509,31 @@ class MicrometerFlexMonitorTest {
         } finally {
             monitor.close();
             registry.close();
+        }
+    }
+
+    private static void assertExportedDepth(
+            PrometheusMeterRegistry registry, String role, double expected) {
+        assertEquals(
+                expected, registry.get("flexlb.worker.depth").tag("role", role).gauge().value());
+        var samples =
+                registry.scrape()
+                        .lines()
+                        .filter(
+                                line ->
+                                        line.startsWith("flexlb_worker_depth{")
+                                                && line.contains("role=\"" + role + "\""))
+                        .toList();
+        assertEquals(1, samples.size());
+        assertFalse(samples.getFirst().contains("engineIp="));
+        assertTrue(samples.getFirst().endsWith(" " + expected), samples.getFirst());
+    }
+
+    private static void assertGaugeCachesEmpty(MicrometerFlexMonitor monitor) throws Exception {
+        for (String name : java.util.List.of("gaugeCache", "gaugeSources", "tagsCache")) {
+            var field = MicrometerFlexMonitor.class.getDeclaredField(name);
+            field.setAccessible(true);
+            assertTrue(((Map<?, ?>) field.get(monitor)).isEmpty(), name);
         }
     }
 }

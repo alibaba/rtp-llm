@@ -19,12 +19,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * @author zjw
- * description:
- * date: 2025/4/23
+ * Manages reusable service channels and retires them when Engine addresses are removed.
  */
 public abstract class AbstractGrpcClient implements EngineAddressResolver.Listener {
-
     /**
      * Maintain different channel for different service type.
      *
@@ -56,6 +53,28 @@ public abstract class AbstractGrpcClient implements EngineAddressResolver.Listen
         updateGrpcChannelPool(hosts);
     }
 
+    @Scheduled(fixedRate = 2000)
+    public void reportChannelPoolSize() {
+        grpcReporter.reportChannelPoolSize(channelPool.size());
+    }
+
+    @PreDestroy
+    public void shutdownChannelPool() {
+        Set<String> channelKeys = new HashSet<>(channelPool.keySet());
+        for (String channelKey : channelKeys) {
+            Invoker invoker = channelPool.remove(channelKey);
+            if (invoker != null) {
+                try {
+                    invoker.shutdown(CloseReason.CLIENT_SHUTDOWN);
+                } catch (Exception e) {
+                    Logger.error(
+                            "shutdown channel for ipPort {} failed in pre-destroy", channelKey, e);
+                }
+            }
+        }
+        Logger.warn("grpc channel pool shutdown finished");
+    }
+
     /**
      * Update gRPC channel pool based on latest hosts
      * Create new channels for newly online workers, remove channels for offline workers
@@ -64,6 +83,61 @@ public abstract class AbstractGrpcClient implements EngineAddressResolver.Listen
      */
     protected boolean precreate(ServiceType service) {
         return true;
+    }
+
+    protected Invoker getInvoker(String channelKey) {
+        Invoker invoker = channelPool.get(channelKey);
+        if (invoker == null) {
+            Logger.warn("ip:{} grpc channel not found, channelPool:{}", channelKey, channelPool);
+        }
+        return invoker;
+    }
+
+    protected Invoker putInvokerIfAbsent(String channelKey, ManagedChannel managedChannel) {
+        Invoker newInvoker = new Invoker(channelKey, managedChannel);
+        Invoker existing = channelPool.putIfAbsent(channelKey, newInvoker);
+        if (existing != null) {
+            newInvoker.shutdown(CloseReason.DUPLICATE_DISCARDED);
+            return existing;
+        }
+        return newInvoker;
+    }
+
+    protected Invoker replaceInvoker(
+            String channelKey, Invoker expectedInvoker, ManagedChannel managedChannel) {
+        Invoker newInvoker = new Invoker(channelKey, managedChannel);
+        if (expectedInvoker == null) {
+            Invoker existing = channelPool.putIfAbsent(channelKey, newInvoker);
+            if (existing != null) {
+                newInvoker.shutdown(CloseReason.DUPLICATE_DISCARDED);
+                return existing;
+            }
+            return newInvoker;
+        }
+
+        boolean replaced = channelPool.replace(channelKey, expectedInvoker, newInvoker);
+        if (!replaced) {
+            newInvoker.shutdown(CloseReason.DUPLICATE_DISCARDED);
+            return channelPool.get(channelKey);
+        }
+
+        expectedInvoker.shutdown(CloseReason.REPLACED);
+        return newInvoker;
+    }
+
+    protected abstract ManagedChannel createChannel(String hostKey);
+
+    protected static String createKey(String ip, int port, ServiceType serviceType) {
+        return ip + ":" + port + ":" + serviceType.getSuffix();
+    }
+
+    protected static String[] parseServiceKey(String serviceKey) {
+        String[] parts = serviceKey.split(":");
+        if (parts.length == 3) {
+            return new String[] {parts[0], parts[1], parts[2]};
+        }
+
+        throw new IllegalArgumentException("Invalid service key format: " + serviceKey);
     }
 
     private void updateGrpcChannelPool(List<WorkerHost> hosts) {
@@ -129,83 +203,6 @@ public abstract class AbstractGrpcClient implements EngineAddressResolver.Listen
                 channelPool.size());
     }
 
-    @Scheduled(fixedRate = 2000)
-    public void reportChannelPoolSize() {
-        grpcReporter.reportChannelPoolSize(channelPool.size());
-    }
-
-    protected Invoker getInvoker(String channelKey) {
-        Invoker invoker = channelPool.get(channelKey);
-        if (invoker == null) {
-            Logger.warn("ip:{} grpc channel not found, channelPool:{}", channelKey, channelPool);
-        }
-        return invoker;
-    }
-
-    protected Invoker putInvokerIfAbsent(String channelKey, ManagedChannel managedChannel) {
-        Invoker newInvoker = new Invoker(channelKey, managedChannel);
-        Invoker existing = channelPool.putIfAbsent(channelKey, newInvoker);
-        if (existing != null) {
-            newInvoker.shutdown(CloseReason.DUPLICATE_DISCARDED);
-            return existing;
-        }
-        return newInvoker;
-    }
-
-    protected Invoker replaceInvoker(
-            String channelKey, Invoker expectedInvoker, ManagedChannel managedChannel) {
-        Invoker newInvoker = new Invoker(channelKey, managedChannel);
-        if (expectedInvoker == null) {
-            Invoker existing = channelPool.putIfAbsent(channelKey, newInvoker);
-            if (existing != null) {
-                newInvoker.shutdown(CloseReason.DUPLICATE_DISCARDED);
-                return existing;
-            }
-            return newInvoker;
-        }
-
-        boolean replaced = channelPool.replace(channelKey, expectedInvoker, newInvoker);
-        if (!replaced) {
-            newInvoker.shutdown(CloseReason.DUPLICATE_DISCARDED);
-            return channelPool.get(channelKey);
-        }
-
-        expectedInvoker.shutdown(CloseReason.REPLACED);
-        return newInvoker;
-    }
-
-    @PreDestroy
-    public void shutdownChannelPool() {
-        Set<String> channelKeys = new HashSet<>(channelPool.keySet());
-        for (String channelKey : channelKeys) {
-            Invoker invoker = channelPool.remove(channelKey);
-            if (invoker != null) {
-                try {
-                    invoker.shutdown(CloseReason.CLIENT_SHUTDOWN);
-                } catch (Exception e) {
-                    Logger.error(
-                            "shutdown channel for ipPort {} failed in pre-destroy", channelKey, e);
-                }
-            }
-        }
-        Logger.warn("grpc channel pool shutdown finished");
-    }
-
-    protected abstract ManagedChannel createChannel(String hostKey);
-
-    protected static String createKey(String ip, int port, ServiceType serviceType) {
-        return ip + ":" + port + ":" + serviceType.getSuffix();
-    }
-
-    protected static String[] parseServiceKey(String serviceKey) {
-        String[] parts = serviceKey.split(":");
-        if (parts.length == 3) {
-            return new String[] {parts[0], parts[1], parts[2]};
-        }
-
-        throw new IllegalArgumentException("Invalid service key format: " + serviceKey);
-    }
-
     public enum CloseReason {
         DISCOVERY_REMOVED,
         REPLACED,
@@ -213,7 +210,9 @@ public abstract class AbstractGrpcClient implements EngineAddressResolver.Listen
         DUPLICATE_DISCARDED
     }
 
-    /** A local close request; it does not establish the cause of a preceding transport failure. */
+    /**
+     * A local close request; it does not establish the cause of a preceding transport failure.
+     */
     public record CloseObservation(CloseReason reason, long nanoTime, boolean forced) {}
 
     /**

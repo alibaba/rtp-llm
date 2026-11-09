@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
@@ -31,16 +31,11 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Real resource locks and ledgers; only the predictor and notification sinks are substituted. */
+/**
+ * Real resource locks and ledgers; only the predictor and notification sinks are substituted.
+ */
 @Timeout(20)
 class PrefillEndpointConcurrencyTest {
-    enum Change {
-        REMOVE_ONE,
-        REMOVE_ALL,
-        REPLACE_REQUEST_ID,
-        RETIRE
-    }
-
     @ParameterizedTest
     @EnumSource(Change.class)
     void statusCommitRechecksConcurrentCleanupAndNeverRestoresOldOwnership(Change change)
@@ -166,7 +161,7 @@ class PrefillEndpointConcurrencyTest {
         assertEquals(0, endpoint.stats().batchCount());
     }
 
-    private static RouteExecution route(PrefillEndpoint endpoint, FlexlbConfig config, long id) {
+    private static RouteResult route(PrefillEndpoint endpoint, FlexlbConfig config, long id) {
         var ctx = new RequestContext(config);
         ctx.data().setRequest(Request.builder().requestId(String.valueOf(id)).seqLen(100L).build());
         var server = new ServerStatus();
@@ -174,16 +169,24 @@ class PrefillEndpointConcurrencyTest {
         server.setServerIp("127.0.0.1");
         server.setHttpPort(8080);
         server.setGrpcPort(8090);
-        return SchedulingTestConfig.createRoute(
-                ctx, null, server, null, endpoint, null, null, System.currentTimeMillis());
+        return org.flexlb.balance.scheduler.RequestExecutionTestSupport.mockProtocolRoute(
+                SchedulingTestConfig.createRoute(
+                        ctx, null, server, null, endpoint, null, null, System.currentTimeMillis()));
     }
 
     private static void commit(
-            PrefillEndpoint endpoint, long id, long ms, List<RouteExecution> routes) {
+            PrefillEndpoint endpoint, long id, long ms, List<RouteResult> routes) {
         for (var route : routes) assertTrue(EndpointTestSupport.offer(endpoint, route));
         try (var ignored = EndpointTestSupport.commitBatch(endpoint, id, ms, routes)) {
             // Close the temporary Worker selection; leave real resource ownership for the
             // concurrent actors.
         }
+    }
+
+    enum Change {
+        REMOVE_ONE,
+        REMOVE_ALL,
+        REPLACE_REQUEST_ID,
+        RETIRE
     }
 }

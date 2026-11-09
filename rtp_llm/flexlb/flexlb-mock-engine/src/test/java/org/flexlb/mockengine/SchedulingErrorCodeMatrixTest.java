@@ -43,6 +43,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SchedulingErrorCodeMatrixTest {
     private static final long REQUEST_ID = 71_001L;
 
+    static Stream<String> modes() {
+        return Stream.concat(Stream.of("DIRECT"), queuedModes());
+    }
+
     static Stream<String> queuedModes() {
         return Stream.of("FIFO", "PRIORITY")
                 .flatMap(
@@ -57,10 +61,6 @@ class SchedulingErrorCodeMatrixTest {
                                                                                         + decision
                                                                                         + "/"
                                                                                         + dispatch)));
-    }
-
-    static Stream<String> modes() {
-        return Stream.concat(Stream.of("DIRECT"), queuedModes());
     }
 
     static Stream<String> batchModes() {
@@ -146,6 +146,10 @@ class SchedulingErrorCodeMatrixTest {
         }
     }
 
+    static Stream<Arguments> prefillPriorityCases() {
+        return directPriorityCases().filter(arguments -> (int) arguments.get()[0] > 0);
+    }
+
     static Stream<Arguments> directPriorityCases() {
         return Stream.of(
                 Arguments.of(70, 8430, HIGHER_PRIORITY_AHEAD, "higher-priority requests are ahead"),
@@ -156,10 +160,6 @@ class SchedulingErrorCodeMatrixTest {
                         RESOURCE_EXHAUSTED,
                         "admission capacity is temporarily exhausted"),
                 Arguments.of(0, 8432, UNSPECIFIED, "blocker priority attribution is unavailable"));
-    }
-
-    static Stream<Arguments> prefillPriorityCases() {
-        return directPriorityCases().filter(arguments -> (int) arguments.get()[0] > 0);
     }
 
     @ParameterizedTest(name = "DIRECT: Prefill owner P{0} -> {1}")
@@ -340,6 +340,9 @@ class SchedulingErrorCodeMatrixTest {
         assertTrue(response.getErrorMessage().contains(message), response.getErrorMessage());
     }
 
+    /**
+     * Configures a real mock-engine runtime for one scheduler mode and capacity limit, then submits requests and drains it on close.
+     */
     private static final class Fixture implements AutoCloseable {
         final AutoTpmE2EHarness harness;
         final org.flexlb.balance.scheduler.AbstractRequestScheduler service;
@@ -383,6 +386,11 @@ class SchedulingErrorCodeMatrixTest {
             service = harness.scheduler;
         }
 
+        @Override
+        public void close() throws Exception {
+            harness.close();
+        }
+
         RequestContext context() {
             return harness.context(REQUEST_ID, 50);
         }
@@ -397,14 +405,9 @@ class SchedulingErrorCodeMatrixTest {
                 var selectedEndpoint = endpoint;
 
                 assertNotNull(
-                        SchedulerTestSupport.reserveUnqueuedDecode(
-                                endpoint, selectedEndpoint, REQUEST_ID - 1, 0L, 0L, priority));
+                        SchedulerTestSupport.registerDecode(
+                                endpoint, REQUEST_ID - 1, 0L, 0L, priority));
             }
-        }
-
-        @Override
-        public void close() throws Exception {
-            harness.close();
         }
     }
 }

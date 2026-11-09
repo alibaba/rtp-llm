@@ -49,10 +49,16 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks VIT cache affinity across residency tiers, polling failures and worker replacement.
+ * Cached placement must still respect group, health and generation constraints.
+ */
 class VitCacheDirectoryTest {
     private VitCacheDirectory directory;
     private VitCacheSelector selector;
+
     private final Map<String, WorkerStatus> live = new HashMap<>();
+
     private WorkerStatus a;
     private WorkerStatus b;
     private EndpointRegistry workers;
@@ -86,43 +92,6 @@ class VitCacheDirectoryTest {
     @AfterEach
     void tearDown() {
         directory.stop();
-    }
-
-    private WorkerStatus worker(String ip, String group) {
-        return WorkerStatus.createDiscovered(RoleType.VIT, group, ip, 8000, 8001, "");
-    }
-
-    private RequestContext context(String... keys) {
-        Request request =
-                Request.builder()
-                        .requestId("123")
-                        .cacheAffinityKeys(List.of(keys))
-                        .generateTimeout(30000L)
-                        .build();
-        RequestContext context = new RequestContext(new FlexlbConfig());
-        context.data().setRequest(request);
-        return context;
-    }
-
-    private void snapshot(WorkerStatus worker, String epoch, String... keys) {
-        directory.replace(
-                worker,
-                MultimodalCacheStatusPB.newBuilder()
-                        .setWorkerInstance(epoch)
-                        .addAllKeys(List.of(keys))
-                        .build());
-    }
-
-    private void tierSnapshot(
-            WorkerStatus worker, List<String> hashes, List<String> gpu, List<String> cpu) {
-        directory.replace(
-                worker,
-                MultimodalCacheStatusPB.newBuilder()
-                        .setWorkerInstance("instance")
-                        .addAllKeys(hashes)
-                        .addAllGpuEmbeddingKeys(gpu)
-                        .addAllCpuEmbeddingKeys(cpu)
-                        .build());
     }
 
     @Test
@@ -467,16 +436,53 @@ class VitCacheDirectoryTest {
         copied.setWorkerGeneration(a.getGenerationId());
         ctx.data().setRequest(ctx.data().getRequest().toBuilder().selectedVit(copied).build());
         {
-            var scope = new org.flexlb.balance.scheduler.RouteResult.Builder(ctx);
-            var routeSelection = selector.selectForRoute(ctx, "one", scope);
+            var routeSelection = selector.selectForRoute(ctx, "one");
             org.junit.jupiter.api.Assertions.assertNotNull(routeSelection);
-            assertEquals(a.getGenerationId(), routeSelection.getWorkerGeneration());
+            assertEquals(
+                    a.getGenerationId(),
+                    routeSelection.toServerStatus(ctx.data().getRequestId()).getWorkerGeneration());
         }
         live.put(a.getLogicalIpPort(), worker(a.getIp(), "one"));
         assertFalse(selector.validate(ctx, "one").isSuccess());
         {
-            var scope = new org.flexlb.balance.scheduler.RouteResult.Builder(ctx);
-            org.junit.jupiter.api.Assertions.assertNull(selector.selectForRoute(ctx, "one", scope));
+            org.junit.jupiter.api.Assertions.assertNull(selector.selectForRoute(ctx, "one"));
         }
+    }
+
+    private WorkerStatus worker(String ip, String group) {
+        return WorkerStatus.createDiscovered(RoleType.VIT, group, ip, 8000, 8001, "");
+    }
+
+    private RequestContext context(String... keys) {
+        Request request =
+                Request.builder()
+                        .requestId("123")
+                        .cacheAffinityKeys(List.of(keys))
+                        .generateTimeout(30000L)
+                        .build();
+        RequestContext context = new RequestContext(new FlexlbConfig());
+        context.data().setRequest(request);
+        return context;
+    }
+
+    private void snapshot(WorkerStatus worker, String epoch, String... keys) {
+        directory.replace(
+                worker,
+                MultimodalCacheStatusPB.newBuilder()
+                        .setWorkerInstance(epoch)
+                        .addAllKeys(List.of(keys))
+                        .build());
+    }
+
+    private void tierSnapshot(
+            WorkerStatus worker, List<String> hashes, List<String> gpu, List<String> cpu) {
+        directory.replace(
+                worker,
+                MultimodalCacheStatusPB.newBuilder()
+                        .setWorkerInstance("instance")
+                        .addAllKeys(hashes)
+                        .addAllGpuEmbeddingKeys(gpu)
+                        .addAllCpuEmbeddingKeys(cpu)
+                        .build());
     }
 }

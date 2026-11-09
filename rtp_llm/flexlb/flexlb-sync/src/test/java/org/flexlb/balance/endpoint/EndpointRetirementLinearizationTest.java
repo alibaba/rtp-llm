@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.PlacementAvailability;
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
@@ -24,7 +24,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks endpoint retirement ordering against concurrent acquisition and cleanup.
+ * Races late admissions with registry detachment to verify every stateful endpoint closes admission before draining requests.
  */
 class EndpointRetirementLinearizationTest {
 
@@ -79,7 +79,7 @@ class EndpointRetirementLinearizationTest {
                                 referencesCaptured.countDown();
                                 assertTrue(resumeAdmission.await(2, TimeUnit.SECONDS));
 
-                                var lateRoute = mock(RouteExecution.class);
+                                var lateRoute = mock(RouteResult.class);
                                 org.mockito.Mockito.when(lateRoute.prefillEndpoint())
                                         .thenReturn(prefill);
                                 boolean queueOfferAccepted = prefill.tryEnqueueRoute(lateRoute);
@@ -88,14 +88,26 @@ class EndpointRetirementLinearizationTest {
                                     WorkerEndpoint selectedEndpoint = prefill;
 
                                     prefillAdmissionAvailable =
-                                            prefill.reserveBatch(900L, 1).accepted();
+                                            prefill.commitDelivery(
+                                                            org.flexlb.balance.scheduler
+                                                                    .DeliveryTestSupport.queued(
+                                                                    java.util.List.of(lateRoute),
+                                                                    new org.flexlb.balance.scheduler
+                                                                            .DeliveryTestSupport
+                                                                            .BatchInput(900L, 1),
+                                                                    new long[] {1L},
+                                                                    null,
+                                                                    System.currentTimeMillis()))
+                                                    != null;
                                 }
                                 boolean decodeAdmissionAvailable;
                                 {
                                     WorkerEndpoint selectedEndpoint = decode;
 
                                     decodeAdmissionAvailable =
-                                            decode.tryReserveQueuedRequest("late", 1L, 1L, 50, null)
+                                            org.flexlb.balance.scheduler.SelectionTestSupport
+                                                            .registerQueuedDecode(
+                                                                    decode, "late", 1L, 1L, 50)
                                                             .status()
                                                     == DecodeResources.ReserveStatus.ACQUIRED;
                                 }

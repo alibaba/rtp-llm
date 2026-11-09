@@ -40,14 +40,16 @@ final class PlacementCapacityWaitQueue {
         return domain != null && domain.retry != entry;
     }
 
-    /** The only park boundary: do not sleep through an edge published during planning. */
+    /**
+     * Register a waiter without missing a capacity change published during selection.
+     */
     boolean park(GlobalQueueEntry entry, PlacementKey blocker, long observedSequence) {
         Objects.requireNonNull(blocker, "blocker");
-        if (availability.lastChangedSequence(blocker.capacityDomain()) > observedSequence) {
+        PlacementKey key = blocker.waitingDomain();
+        if (availability.lastChangedSequence(key) > observedSequence) {
             return false;
         }
         remove(entry, false);
-        PlacementKey key = blocker.capacityDomain();
         Domain domain = domains.computeIfAbsent(key, Domain::new);
         unindex(domain);
         domain.entries.add(entry);
@@ -56,11 +58,15 @@ final class PlacementCapacityWaitQueue {
         return true;
     }
 
-    /** Constant number of domain lookups, independent of backlog size. */
+    /** A departing request did not consume the remaining retry opportunity. */
+    void remove(GlobalQueueEntry entry) {
+        remove(entry, true);
+    }
+
+    /**
+     * Wake the affected group and role with a constant number of lookups.
+     */
     void capacityChanged(PlacementKey key) {
-        if (key.endpoint() != null) {
-            release(key.capacityDomain());
-        }
         if (key.group() != null) {
             release(new PlacementKey(key.role(), key.group(), null));
         }
@@ -86,11 +92,6 @@ final class PlacementCapacityWaitQueue {
         }
     }
 
-    /** A departing request did not consume the remaining retry opportunity. */
-    void remove(GlobalQueueEntry entry) {
-        remove(entry, true);
-    }
-
     void clear() {
         domains.clear();
         ready.clear();
@@ -113,14 +114,6 @@ final class PlacementCapacityWaitQueue {
         index(domain);
     }
 
-    private void release(PlacementKey key) {
-        Domain domain = domains.get(key);
-        if (domain != null) {
-            domain.available = true;
-            index(domain);
-        }
-    }
-
     private void unindex(Domain domain) {
         if (!domain.entries.isEmpty()) {
             ready.remove(domain);
@@ -134,6 +127,14 @@ final class PlacementCapacityWaitQueue {
             } else if (domain.available) {
                 ready.add(domain);
             }
+        }
+    }
+
+    private void release(PlacementKey key) {
+        Domain domain = domains.get(key);
+        if (domain != null) {
+            domain.available = true;
+            index(domain);
         }
     }
 

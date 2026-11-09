@@ -1,9 +1,8 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -45,11 +44,27 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks immutable Prefill snapshots and atomic delivery commits under cancellation, worker feedback and retirement.
+ * Stale routes must not commit or release replacement resource records.
+ */
 class PrefillResourceSnapshotTest {
+    private final AtomicLong clock = new AtomicLong(100);
+    private final ReentrantLock lock = new ReentrantLock();
+    private final OrderedPrefillRequestQueue waiting =
+            OrderedPrefillRequestQueue.ordered(
+                    4,
+                    Comparator.comparing(
+                            org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem::requestId));
+    private final PrefillEndpoint state =
+            org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
+                    lock, waiting, clock::get);
+    private final EndpointRetirementTestSupport generation =
+            new EndpointRetirementTestSupport(() -> {});
+
     @Test
     void blockedAdmissionProbeAllowsQueueMutationAndRetriesChangedVersion() throws Exception {
         var route = item(9903);
-        when(route.planningInput()).thenCallRealMethod();
         enqueue(route);
         var entered = new CountDownLatch(1);
         var resume = new CountDownLatch(1);
@@ -110,25 +125,15 @@ class PrefillResourceSnapshotTest {
         assertTrue(state.captureQueue(1).items().isEmpty());
     }
 
-    private final AtomicLong clock = new AtomicLong(100);
-    private final ReentrantLock lock = new ReentrantLock();
-    private final OrderedPrefillRequestQueue waiting =
-            OrderedPrefillRequestQueue.ordered(
-                    4,
-                    Comparator.comparing(
-                            org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem::requestId));
-    private final PrefillEndpoint state =
-            org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                    lock, waiting, clock::get);
-    private final EndpointRetirementTestSupport generation =
-            new EndpointRetirementTestSupport(() -> {});
-
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void commitKeepsThePreparedDeliveryAndCloseOnlyReleasesTemporaryOwnership(boolean batch) {
         var route = item(9200L);
         enqueue(route);
-        var reservation = batch ? state.reserveBatch(92L, 1).value() : null;
+        var reservation =
+                batch
+                        ? new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(92L, 1)
+                        : null;
         var delivery =
                 org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
                         List.of(route), reservation, new long[] {25L}, null, clock.get());
@@ -157,7 +162,7 @@ class PrefillResourceSnapshotTest {
         org.mockito.Mockito.when(route.prefillEndpoint()).thenReturn(state);
         enqueue(route);
         var selectedEndpoint = generation;
-        var reservation = state.reserveBatch(93L, 1).value();
+        var reservation = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(93L, 1);
         var delivery =
                 org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
                         List.of(route), reservation, new long[] {25L}, null, clock.get());
@@ -179,46 +184,41 @@ class PrefillResourceSnapshotTest {
     }
 
     @Test
-    void requestSettlementAndBatchRollbackReleaseTheirOwnResourcesExactlyOnce() {
+    void cancelledBatchCandidateConsumesNoBatchCapacity() {
         var request = item(9100L);
         enqueue(request);
-        var selectedEndpoint = generation;
-        var reservation = state.reserveBatch(90L, 1).value();
-        assertNotNull(reservation);
-        try {
-            assertSame(request, state.closeQueue().getFirst());
-            var released = state.releaseRequest(request);
-            assertTrue(released);
-            assertFalse(state.releaseRequest(request));
-            assertFalse(state.batchCapacityAvailable(1));
-            assertTrue(state.rollback(reservation));
-            assertFalse(selectedEndpoint.isRetired());
-            assertFalse(state.rollback(reservation));
-            assertTrue(state.batchCapacityAvailable(1));
-            assertEquals(0L, state.admissionSummary(0, 0L).occupiedRequests());
-        } finally {
-            state.rollback(reservation);
-        }
+        var plan =
+                org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
+                        List.of(request),
+                        new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(90L, 1),
+                        new long[] {10L},
+                        null,
+                        clock.get());
+        assertSame(request, state.closeQueue().getFirst());
+        assertTrue(state.releaseRequest(request));
+        assertFalse(state.releaseRequest(request));
+        plan.close();
+        assertTrue(state.batchCapacityAvailable(1));
+        assertEquals(0L, state.admissionSummary(0, 0L).occupiedRequests());
     }
 
     @Test
-    void cancellingPreparedHeadLeavesBatchSlotWithDelivery() {
+    void cancellingPreparedHeadRejectsCommitWithoutOccupyingBatchSlot() {
         var head = item(9101L);
         enqueue(head);
-        var selectedEndpoint = generation;
-        var reservation = state.reserveBatch(91L, 1).value();
-        assertNotNull(reservation);
-        try {
-            var released = state.releaseRequest(head);
-            assertFalse(state.batchCapacityAvailable(1), "delivery still owns its preparation");
-            assertTrue(state.rollback(reservation));
-            assertFalse(selectedEndpoint.isRetired());
-            assertFalse(state.rollback(reservation), "late owner close is idempotent");
-            assertTrue(state.batchCapacityAvailable(1));
-            assertTrue(waitingItems().isEmpty());
-        } finally {
-            state.rollback(reservation);
-        }
+        var plan =
+                org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
+                        List.of(head),
+                        new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(91L, 1),
+                        new long[] {10L},
+                        null,
+                        clock.get());
+        assertTrue(state.batchCapacityAvailable(1));
+        assertTrue(state.releaseRequest(head));
+        assertNull(state.commitDelivery(plan));
+        plan.close();
+        assertTrue(state.batchCapacityAvailable(1));
+        assertTrue(waitingItems().isEmpty());
     }
 
     @ParameterizedTest
@@ -227,22 +227,21 @@ class PrefillResourceSnapshotTest {
         var member = item(9102L);
         enqueue(member);
         var selectedEndpoint = generation;
-        var reservation = batch ? state.reserveBatch(92L, 1).value() : null;
+        var reservation =
+                batch
+                        ? new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(92L, 1)
+                        : null;
         var plan =
                 org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
                         List.of(member), reservation, new long[] {10L}, null, clock.get());
         var released = state.releaseRequest(member);
-        try {
+        {
             runWithStateLock(
                     lock,
                     () -> {
                         assertNull(state.commitLocked(plan));
                         assertEquals(0, state.progress().queueDepth());
                     });
-        } finally {
-            if (reservation != null) {
-                state.rollback(reservation);
-            }
         }
     }
 
@@ -253,7 +252,7 @@ class PrefillResourceSnapshotTest {
         assertEquals(0L, first.occupiedRequests());
         var limited = state.admissionSummary(50, 2L);
         assertEquals(limited, state.admissionSummary(50, 2L));
-        RouteExecution route = item(701);
+        RouteResult route = item(701);
         when(route.priority()).thenReturn(40);
         enqueue(route);
         var occupied = state.admissionSummary(50, 1L);
@@ -274,19 +273,22 @@ class PrefillResourceSnapshotTest {
     @CsvSource({"false,false", "false,true", "true,false", "true,true"})
     void selectionCommitIncludesFailedBoundaryAndQueueDepth(
             boolean batch, boolean expiredBoundary) {
-        RouteExecution selected = item(1), failed = item(2), waiting = item(3);
+        RouteResult selected = item(1), failed = item(2), waiting = item(3);
         enqueue(selected);
         enqueue(failed);
         enqueue(waiting);
         when(failed.requestExpired(clock.get())).thenReturn(expiredBoundary);
         var selectedEndpoint = generation;
-        var reservation = batch ? state.reserveBatch(9L, 1).value() : null;
+        var reservation =
+                batch
+                        ? new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(9L, 1)
+                        : null;
         try (var committed =
                 withStateLock(
                         lock,
                         () ->
                                 batch
-                                        ? reservation.owner.commitLocked(
+                                        ? state.commitLocked(
                                                 org.flexlb.balance.scheduler.DeliveryTestSupport
                                                         .queued(
                                                                 List.of(selected),
@@ -316,69 +318,65 @@ class PrefillResourceSnapshotTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void failedBoundaryValidationCannotPartiallyCommitSelection(boolean batch) {
-        RouteExecution selected = item(1), failed = item(2);
+        RouteResult selected = item(1), failed = item(2);
         enqueue(selected);
         enqueue(failed);
         var failure = new IllegalStateException("boundary validation failed");
         when(failed.requestExpired(clock.get())).thenThrow(failure);
         var selectedEndpoint = generation;
-        var reservation = batch ? state.reserveBatch(9L, 1).value() : null;
-        try {
-            runWithStateLock(
-                    lock,
-                    () -> {
-                        assertSame(
-                                failure,
-                                assertThrows(
-                                        IllegalStateException.class,
-                                        () -> {
-                                            if (batch) {
-                                                reservation.owner.commitLocked(
-                                                        org.flexlb.balance.scheduler
-                                                                .DeliveryTestSupport.queued(
-                                                                List.of(selected),
-                                                                reservation,
-                                                                new long[] {10L},
-                                                                failed,
-                                                                clock.get()));
-                                            } else {
-                                                state.commitLocked(
-                                                        org.flexlb.balance.scheduler
-                                                                .DeliveryTestSupport.queued(
-                                                                List.of(selected),
-                                                                null,
-                                                                new long[] {10L},
-                                                                failed,
-                                                                clock.get()));
-                                            }
-                                        }));
-                        assertEquals(List.of(selected, failed), waitingItems());
-                        assertEquals(2, state.admissionSummary(0, 0L).occupiedRequests());
-                        assertNoWork(state.committedSnapshot(), 1L, 2L);
-                    });
-        } finally {
-            if (reservation != null) {
-                EndpointTestSupport.preparation(reservation).close();
-            } else {
-
-            }
-        }
+        var reservation =
+                batch
+                        ? new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(9L, 1)
+                        : null;
+        runWithStateLock(
+                lock,
+                () -> {
+                    assertSame(
+                            failure,
+                            assertThrows(
+                                    IllegalStateException.class,
+                                    () -> {
+                                        if (batch) {
+                                            state.commitLocked(
+                                                    org.flexlb.balance.scheduler.DeliveryTestSupport
+                                                            .queued(
+                                                                    List.of(selected),
+                                                                    reservation,
+                                                                    new long[] {10L},
+                                                                    failed,
+                                                                    clock.get()));
+                                        } else {
+                                            state.commitLocked(
+                                                    org.flexlb.balance.scheduler.DeliveryTestSupport
+                                                            .queued(
+                                                                    List.of(selected),
+                                                                    null,
+                                                                    new long[] {10L},
+                                                                    failed,
+                                                                    clock.get()));
+                                        }
+                                    }));
+                    assertEquals(List.of(selected, failed), waitingItems());
+                    assertEquals(2, state.admissionSummary(0, 0L).occupiedRequests());
+                    assertNoWork(state.committedSnapshot(), 1L, 2L);
+                });
         assertEquals(0, state.queueCounters().batchSlots());
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void directCommitOwnsItsLockWhileBatchCommitUsesTheSelectionLock(boolean batch) {
-        RouteExecution request = item(1);
+        RouteResult request = item(1);
         if (batch) {
             enqueue(request);
             {
-                var reservation = state.reserveBatch(9L, 1).value();
-                try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                var reservation =
+                        new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(9L, 1);
+                {
                     assertThrows(
                             IllegalStateException.class,
                             () ->
-                                    reservation.owner.commitLocked(
+                                    state.commitLocked(
                                             org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
                                                     List.of(request),
                                                     reservation,
@@ -386,7 +384,7 @@ class PrefillResourceSnapshotTest {
                                                     null,
                                                     System.currentTimeMillis())));
                     assertEquals(List.of(request), state.captureQueue(1).items());
-                    assertEquals(1, state.queueCounters().batchSlots());
+                    assertEquals(0, state.queueCounters().batchSlots());
                     {
                         var handoff =
                                 EndpointTestSupport.commitBatch(
@@ -398,11 +396,14 @@ class PrefillResourceSnapshotTest {
             }
         } else {
             {
-                var reservation = state.reserveUnqueuedRoute(request, 10L, 1L).value();
+                var reservation =
+                        org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                        state, request, 10L, 1L)
+                                .value();
                 {
                     var handoff =
                             org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                    state, request, reservation);
+                                    state, request);
                     try (var preparationReservation =
                             EndpointTestSupport.preparation(reservation)) {
                         assertNotNull(handoff);
@@ -421,15 +422,18 @@ class PrefillResourceSnapshotTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void concurrentDeliveryClosePreservesCommittedRequests(boolean batch) throws Exception {
-        RouteExecution request = item(1);
+        RouteResult request = item(1);
         org.flexlb.balance.scheduler.Delivery delivery;
         if (batch) {
             enqueue(request);
-            var record = state.reserveBatch(9L, 1).value();
+            var record = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(9L, 1);
             delivery = EndpointTestSupport.commitBatch(state, record, List.of(request), 10L);
         } else {
-            var record = state.reserveUnqueuedRoute(request, 10L, Long.MAX_VALUE).value();
-            delivery = EndpointTestSupport.commitDirect(state, request, record);
+            var record =
+                    org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                    state, request, 10L, Long.MAX_VALUE)
+                            .value();
+            delivery = EndpointTestSupport.commitDirect(state, request);
         }
         try (var closers = Executors.newVirtualThreadPerTaskExecutor()) {
             var first = closers.submit(delivery::close);
@@ -444,13 +448,13 @@ class PrefillResourceSnapshotTest {
     }
 
     @Test
-    void duplicateBatchMembersFailBeforeQueueMutationAndKeepTheLeaseRetryable() {
-        RouteExecution first = item(1), second = item(2);
+    void duplicateBatchMembersFailBeforeQueueMutationAndAllowCorrectedCandidate() {
+        RouteResult first = item(1), second = item(2);
         enqueue(first);
         enqueue(second);
         {
-            var lease = state.reserveBatch(9L, 1).value();
-            try (var preparationLease = EndpointTestSupport.preparation(lease)) {
+            var lease = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(9L, 1);
+            {
                 var before = state.captureQueue(4);
                 assertThrows(
                         IllegalStateException.class,
@@ -461,7 +465,7 @@ class PrefillResourceSnapshotTest {
                         before,
                         state.captureQueue(4),
                         "invalid input must not detach any ACTIVE member");
-                assertEquals(1, state.queueCounters().batchSlots());
+                assertEquals(0, state.queueCounters().batchSlots());
                 try (var committed =
                         EndpointTestSupport.commitBatch(
                                 state, lease, List.of(first, second), 10L)) {
@@ -479,7 +483,7 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void queueCaptureKeepsBoundedOrderAndVersionsAcrossChanges() {
-        RouteExecution first = item(1), second = item(2), third = item(3), tail = item(4);
+        RouteResult first = item(1), second = item(2), third = item(3), tail = item(4);
         enqueue(first);
         enqueue(second);
         enqueue(third);
@@ -526,10 +530,10 @@ class PrefillResourceSnapshotTest {
                 });
         assertTrue(availability.getAsBoolean());
         {
-            var lease = ledger.reserveBatch(9L, 1).value();
-            try (var preparationLease = EndpointTestSupport.preparation(lease)) {
+            var lease = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(9L, 1);
+            {
                 org.junit.jupiter.api.Assertions.assertNotNull(lease);
-                assertFalse(availability.getAsBoolean());
+                assertTrue(availability.getAsBoolean());
             }
         }
         assertTrue(availability.getAsBoolean());
@@ -538,14 +542,23 @@ class PrefillResourceSnapshotTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void rollbackIsIdempotentAndPreservesWaitingBatchMembers(boolean batch) {
-        RouteExecution request = item(91L);
+        RouteResult request = item(91L);
         Runnable rollback;
         if (batch) {
             enqueue(request);
-            var record = state.reserveBatch(9L, 1).value();
-            rollback = () -> state.rollback(record);
+            var delivery =
+                    org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
+                            List.of(request),
+                            new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(9L, 1),
+                            new long[] {10L},
+                            null,
+                            clock.get());
+            rollback = delivery::close;
         } else {
-            var record = state.reserveUnqueuedRoute(request, 10L, 10L).value();
+            var record =
+                    org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                    state, request, 10L, 10L)
+                            .value();
             rollback = () -> state.rollback(record);
         }
         rollback.run();
@@ -556,74 +569,38 @@ class PrefillResourceSnapshotTest {
     }
 
     @Test
-    void batchIdRemainsReservedUntilItsLastMemberSettles() {
-        RouteExecution first = item(1), sibling = item(2), next = item(3);
+    void committedBatchIdRemainsInUseUntilItsLastMemberSettles() {
+        RouteResult first = item(1), sibling = item(2), next = item(3);
         enqueue(first);
         enqueue(sibling);
         enqueue(next);
-        {
-            var lease = state.reserveBatch(10, 4).value();
-            try (var preparationLease = EndpointTestSupport.preparation(lease)) {
-                {
-                    var probe = generation;
-
-                    var rejected = state.reserveBatch(10, 4);
-                    assertFalse(rejected.accepted());
-                    assertEquals(CapacityBoundary.Status.FAILED, rejected.boundary().status());
-                    assertTrue(rejected.boundary().cause() instanceof IllegalStateException);
-                    assertTrue(rejected.boundary().cause().getMessage().contains("batch_id=10"));
-                }
-                {
-                    var handoff =
-                            EndpointTestSupport.commitBatch(
-                                    state, lease, List.of(first, sibling), 30);
-
-                    assertEquals(1, state.stats().batchCount());
-                }
-                assertTrue(EndpointTestSupport.releaseRequest(state, first));
-                {
-                    var probe = generation;
-
-                    assertEquals(
-                            CapacityBoundary.Status.FAILED,
-                            state.reserveBatch(10, 4).boundary().status());
-                }
-                assertTrue(EndpointTestSupport.releaseRequest(state, sibling));
-                {
-                    var replacement = state.reserveBatch(10, 4).value();
-                    try (var preparationReplacement =
-                            EndpointTestSupport.preparation(replacement)) {
-                        {
-                            var handoff =
-                                    EndpointTestSupport.commitBatch(
-                                            state, replacement, List.of(next), 20);
-
-                            assertEquals(List.of(10L), batchIds());
-                            assertWork(state.committedSnapshot(), 20L, 3L);
-                            assertEquals(1, state.stats().batchCount());
-                        }
-                        assertTrue(EndpointTestSupport.releaseRequest(state, next));
-                    }
-                }
-            }
-        }
-        assertEquals(0, state.stats().locallyOwnedRequests());
-        assertEquals(0, state.stats().batchCount());
+        var input = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(10, 4);
+        assertNotNull(EndpointTestSupport.commitBatch(state, input, List.of(first, sibling), 30));
+        assertThrows(
+                IllegalStateException.class,
+                () -> EndpointTestSupport.commitBatch(state, input, List.of(next), 20));
+        assertTrue(state.releaseRequest(first));
+        assertThrows(
+                IllegalStateException.class,
+                () -> EndpointTestSupport.commitBatch(state, input, List.of(next), 20));
+        assertTrue(state.releaseRequest(sibling));
+        assertNotNull(EndpointTestSupport.commitBatch(state, input, List.of(next), 20));
+        assertEquals(List.of(10L), batchIds());
     }
 
     @Test
     void orphanSweepSharesTtlAndKeepsEveryMemberOfARetainedBatch() {
-        RouteExecution first = item(1), sibling = item(2), individual = item(3), queued = item(4);
+        RouteResult first = item(1), sibling = item(2), individual = item(3), queued = item(4);
         enqueue(first);
         enqueue(sibling);
         enqueue(queued);
         long beforeCommitVersion = waiting.version();
         {
-            var batch = state.reserveBatch(1, 4).value();
+            var batch = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(1, 4);
             {
                 var handoff =
                         EndpointTestSupport.commitBatch(state, batch, List.of(first, sibling), 30);
-                try (var preparationBatch = EndpointTestSupport.preparation(batch)) {
+                {
                     assertEquals(2, state.stats().locallyOwnedRequests());
                     assertTrue(
                             waiting.version() > beforeCommitVersion,
@@ -633,24 +610,29 @@ class PrefillResourceSnapshotTest {
             }
         }
         {
-            var reservation = state.reserveUnqueuedRoute(individual, 20, Long.MAX_VALUE).value();
+            var reservation =
+                    org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                    state, individual, 20, Long.MAX_VALUE)
+                            .value();
             {
                 var handoff =
                         org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                state, individual, reservation);
+                                state, individual);
                 try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                     assertEquals(3, state.stats().locallyOwnedRequests());
                 }
             }
         }
         clock.set(105);
-        RouteExecution fresh = item(5);
+        RouteResult fresh = item(5);
         {
-            var reservation = state.reserveUnqueuedRoute(fresh, 20, Long.MAX_VALUE).value();
+            var reservation =
+                    org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                    state, fresh, 20, Long.MAX_VALUE)
+                            .value();
             {
                 var handoff =
-                        org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                state, fresh, reservation);
+                        org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(state, fresh);
                 try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                     assertEquals(4, state.stats().locallyOwnedRequests());
                 }
@@ -682,8 +664,14 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void concurrentReadersShareACompleteImmutableMaterialization() throws Exception {
-        var second = state.reserveUnqueuedRoute(item(2), 20, Long.MAX_VALUE).value();
-        var first = state.reserveUnqueuedRoute(item(1), 10, Long.MAX_VALUE).value();
+        var second =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, item(2), 20, Long.MAX_VALUE)
+                        .value();
+        var first =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, item(1), 10, Long.MAX_VALUE)
+                        .value();
         var captured = capture();
         try (var executor = Executors.newFixedThreadPool(8)) {
             CountDownLatch start = new CountDownLatch(1);
@@ -714,7 +702,10 @@ class PrefillResourceSnapshotTest {
         var queued = item(1);
         enqueue(queued);
         var before = capture();
-        var reservation = state.reserveUnqueuedRoute(item(2), 20, Long.MAX_VALUE).value();
+        var reservation =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, item(2), 20, Long.MAX_VALUE)
+                        .value();
         var after = capture();
         assertSame(before.active(), after.active());
         assertNoWork(before.work().calculate(), 1L, 2L);
@@ -727,7 +718,7 @@ class PrefillResourceSnapshotTest {
         assertEquals(
                 List.of(queued.requestId()),
                 before.active().items().stream()
-                        .map(org.flexlb.balance.scheduler.RouteExecution::requestId)
+                        .map(org.flexlb.balance.scheduler.RouteResult::requestId)
                         .toList());
         EndpointTestSupport.rollback(reservation);
         assertSame(added.active(), capture().active());
@@ -737,7 +728,8 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void clockRollbackRecapturesWorkWithoutMutatingEarlierSnapshots() {
-        state.reserveUnqueuedRoute(item(1), 10, Long.MAX_VALUE);
+        org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                state, item(1), 10, Long.MAX_VALUE);
         var original = capture();
         clock.set(101);
         assertSame(original.work(), capture().work());
@@ -756,9 +748,7 @@ class PrefillResourceSnapshotTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void queuedRouteCommitValidatesEveryCanonicalIdentityBeforeTransferringAny(boolean replaced) {
-        RouteExecution first = routeItem(101),
-                second = routeItem(102),
-                replacement = routeItem(102);
+        RouteResult first = routeItem(101), second = routeItem(102), replacement = routeItem(102);
         enqueue(first);
         enqueue(second);
         assertTrue(state.releaseRequest(second));
@@ -775,7 +765,7 @@ class PrefillResourceSnapshotTest {
         assertEquals(replaced ? List.of(first, replacement) : List.of(first), waitingItems());
         assertEquals(replaced ? 2L : 1L, state.admissionSummary(0, 0L).occupiedRequests());
         assertNoWork(state.committedSnapshot(), 101L, 102L);
-        RouteExecution validSecond = replaced ? replacement : second;
+        RouteResult validSecond = replaced ? replacement : second;
         if (!replaced) {
             enqueue(second);
         }
@@ -794,45 +784,34 @@ class PrefillResourceSnapshotTest {
         assertNoWork(state.committedSnapshot(), 101L, 102L);
     }
 
-    private static RouteExecution routeItem(long id) {
-        var config = new FlexlbConfig();
-        config.getDispatcher().setType(DispatcherConfig.Type.NON_BATCH);
-        var context = new RequestContext(config);
-        var request = Request.builder().requestId(String.valueOf(id)).seqLen(100L).build();
-        context.data().setRequest(request);
-        context.data().setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));
-        return SchedulingTestConfig.createRoute(context, null, null, null, null, null, null, 100L);
-    }
-
     @Test
-    void queuedRouteCommitCannotConsumeAnIndependentBatchRecord() {
-        RouteExecution first = item(1), second = item(2);
+    void routeCommitDoesNotConsumeAnUncommittedBatchCandidate() {
+        RouteResult first = item(1), second = item(2);
         enqueue(first);
         enqueue(second);
-        var batch = state.reserveBatch(11L, 1).value();
-        try (var preparation = EndpointTestSupport.preparation(batch);
-                var committed =
-                        EndpointTestSupport.commitQueuedRoutes(
-                                state, List.of(first, second), new long[] {30L, 40L})) {
+        var batch = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(11L, 1);
+        try (var committed =
+                EndpointTestSupport.commitQueuedRoutes(
+                        state, List.of(first, second), new long[] {30L, 40L})) {
             assertNotNull(committed);
             assertTrue(waitingItems().isEmpty());
             assertEquals(70L, state.committedSnapshot().totalRemainingWorkMs().orElseThrow());
-            assertEquals(1, state.queueCounters().batchSlots());
+            assertEquals(0, state.queueCounters().batchSlots());
         }
         assertEquals(0, state.queueCounters().batchSlots());
         assertEquals(70L, state.committedSnapshot().totalRemainingWorkMs().orElseThrow());
     }
 
     @Test
-    void releasingQueuedRequestDoesNotConsumeDeliveryReservation() {
-        RouteExecution head = item(1);
+    void releasingQueuedRequestLeavesNoBatchCapacityOccupied() {
+        RouteResult head = item(1);
         enqueue(head);
-        var batch = state.reserveBatch(11L, 1).value();
-        try (var preparation = EndpointTestSupport.preparation(batch)) {
+        var batch = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(11L, 1);
+        {
             var release = state.releaseRequest(head);
             assertTrue(release);
             assertEquals(0L, state.admissionSummary(0, 0L).occupiedRequests());
-            assertEquals(1, state.queueCounters().batchSlots());
+            assertEquals(0, state.queueCounters().batchSlots());
             assertFalse(state.releaseRequest(head));
         }
         assertEquals(0, state.queueCounters().batchSlots());
@@ -840,7 +819,7 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void releasingCommittedBatchMemberRetainsItsSiblingsAndSlot() {
-        RouteExecution first = item(1), second = item(2);
+        RouteResult first = item(1), second = item(2);
         commitBatch(List.of(first, second), 100L);
         assertTrue(state.releaseRequest(first));
         assertFalse(state.releaseRequest(first));
@@ -854,10 +833,12 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void queuedAndImmediateRoutesUseOneCommitAndTerminalOwnership() {
-        RouteExecution queued = item(1), immediate = item(2);
+        RouteResult queued = item(1), immediate = item(2);
         enqueue(queued);
         var immediateReservation =
-                state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).value();
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, immediate, 40L, Long.MAX_VALUE)
+                        .value();
         try (var preparation = EndpointTestSupport.preparation(immediateReservation)) {
             assertEquals(List.of(queued), waitingItems());
             assertWork(state.committedSnapshot(), 40L, 2L);
@@ -876,7 +857,7 @@ class PrefillResourceSnapshotTest {
             {
                 var handoff =
                         org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                state, immediate, immediateReservation);
+                                state, immediate);
 
                 assertEquals(
                         30L,
@@ -891,9 +872,12 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void immediatePreparationIsVisibleToLaterPredictionsAndRollbackRemovesIt() {
-        RouteExecution immediate = item(1);
+        RouteResult immediate = item(1);
         {
-            var reservation = state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).value();
+            var reservation =
+                    org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                    state, immediate, 40L, Long.MAX_VALUE)
+                            .value();
             try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                 assertTrue(waitingItems().isEmpty());
                 assertEquals(
@@ -910,9 +894,12 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void leaseRollbackRetainsQueuedWorkButReleasesUnqueuedAdmission() {
-        RouteExecution queued = item(1), immediate = item(2);
+        RouteResult queued = item(1), immediate = item(2);
         enqueue(queued);
-        var reservation = state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).value();
+        var reservation =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, immediate, 40L, Long.MAX_VALUE)
+                        .value();
         EndpointTestSupport.rollback(reservation);
         assertEquals(List.of(queued), waitingItems());
         assertNoWork(state.committedSnapshot(), 1L, 2L);
@@ -920,7 +907,7 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void routeCommitRejectsMissingQueueIndexBeforeCommittingAnyMember() {
-        RouteExecution first = item(1), second = item(2);
+        RouteResult first = item(1), second = item(2);
         enqueue(first);
         enqueue(second);
         assertTrue(waiting.remove(second));
@@ -950,15 +937,19 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void retirementProjectsQueuedPreparedAndCommittedItemsWithoutModeExceptions() {
-        RouteExecution queued = item(1), prepared = item(2), committed = item(3);
+        RouteResult queued = item(1), prepared = item(2), committed = item(3);
         enqueue(queued);
-        var preparedReservation = state.reserveUnqueuedRoute(prepared, 20L, Long.MAX_VALUE).value();
+        var preparedReservation =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, prepared, 20L, Long.MAX_VALUE)
+                        .value();
         var committedReservation =
-                state.reserveUnqueuedRoute(committed, 30L, Long.MAX_VALUE).value();
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, committed, 30L, Long.MAX_VALUE)
+                        .value();
         {
             var handoff =
-                    org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                            state, committed, committedReservation);
+                    org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(state, committed);
 
             assertWork(state.committedSnapshot(), 50L, 2L, 3L);
             assertFalse(state.committedSnapshot().containsRequest("1"));
@@ -986,7 +977,11 @@ class PrefillResourceSnapshotTest {
                         config.getDispatcher().getType(),
                         mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
                         new org.flexlb.balance.scheduler.PlacementAvailability(),
-                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
+                        config.isQueue()
+                                ? org.flexlb.balance.scheduler.QueueExecutionSettings.capture(
+                                        config,
+                                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(config))
+                                : null,
                         order -> OrderedPrefillRequestQueue.ordered(4, order)) {
                     @Override
                     protected void closeEndpoint() {
@@ -996,7 +991,7 @@ class PrefillResourceSnapshotTest {
                         if (callbackFails) throw callbackFailure;
                     }
                 };
-        var reservation = endpoint.reserveBatch(99L, 1).value();
+        var reservation = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(99L, 1);
         assertNotNull(reservation);
 
         if (callbackFails) {
@@ -1011,25 +1006,23 @@ class PrefillResourceSnapshotTest {
         }
         assertEquals(1, cleanups.get());
         assertEquals(0, endpoint.queueCounters().batchSlots());
-        assertFalse(endpoint.rollback(reservation));
     }
 
     @Test
     void retirementDoesNotReportAnUncommittedBatchAsCompleted() {
         var request = item(1);
         enqueue(request);
-        var record = state.reserveBatch(9L, 1).value();
+        var record = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(9L, 1);
         var retired = state.retireResources();
         assertEquals(List.of(request), retired.ownedItems());
         assertTrue(retired.batchCompletions().isEmpty());
         assertEquals(0, state.queueCounters().batchSlots());
         assertTrue(waitingItems().isEmpty());
-        assertFalse(state.rollback(record));
     }
 
     @Test
     void retirementEmitsOneCompletionForSharedBatchAndRetainsDetachedStopOwner() {
-        RouteExecution first = item(1), second = item(2), detached = item(3);
+        RouteResult first = item(1), second = item(2), detached = item(3);
         commitBatch(List.of(first, second), 100L);
         enqueue(detached);
         assertSame(detached, state.closeQueue().getFirst());
@@ -1049,8 +1042,11 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void cancellationBeforeCommitReleasesAnUnqueuedAdmissionExactlyOnce() {
-        RouteExecution immediate = item(1);
-        var reservation = state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).value();
+        RouteResult immediate = item(1);
+        var reservation =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, immediate, 40L, Long.MAX_VALUE)
+                        .value();
         assertTrue(state.releaseRequest(immediate));
         assertFalse(state.releaseRequest(immediate));
         EndpointTestSupport.rollback(reservation);
@@ -1062,14 +1058,13 @@ class PrefillResourceSnapshotTest {
     void failedDirectCommitDoesNotRetainAGenerationHandoff() {
         var request = item(9001L);
         var other = item(9002L);
-        var reservation = state.reserveUnqueuedRoute(request, 10L, 1L).value();
+        var reservation =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, request, 10L, 1L)
+                        .value();
         var before = state.progress();
 
-        assertThrows(
-                IllegalStateException.class,
-                () ->
-                        org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                state, other, reservation));
+        assertNull(state.commitDirect(other));
 
         assertEquals(before, state.progress());
         assertFalse(lock.isHeldByCurrentThread());
@@ -1082,13 +1077,14 @@ class PrefillResourceSnapshotTest {
     @Test
     void retiredGenerationRejectsDirectCommitWithoutConsumingTheReservation() {
         var request = item(9003L);
-        var reservation = state.reserveUnqueuedRoute(request, 10L, 1L).value();
+        var reservation =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, request, 10L, 1L)
+                        .value();
         var before = state.progress();
         state.beginRetirement();
 
-        assertNull(
-                org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                        state, request, reservation));
+        assertNull(org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(state, request));
 
         assertEquals(before, state.progress());
         assertTrue(state.rollback(reservation));
@@ -1101,26 +1097,28 @@ class PrefillResourceSnapshotTest {
         PrefillEndpoint other =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         new ReentrantLock(), OrderedPrefillRequestQueue.disabled(), clock::get);
-        RouteExecution localRequest = item(1), otherRequest = item(1);
-        var localReservation = state.reserveUnqueuedRoute(localRequest, 10L, 1L).value();
-        var otherReservation = other.reserveUnqueuedRoute(otherRequest, 20L, 1L).value();
+        RouteResult localRequest = item(1), otherRequest = item(1);
+        var localReservation =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, localRequest, 10L, 1L)
+                        .value();
+        var otherReservation =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                other, otherRequest, 20L, 1L)
+                        .value();
         {
             var permit = generation;
             try (var localPreparation = EndpointTestSupport.preparation(localReservation);
                     var otherPreparation = EndpointTestSupport.preparation(otherReservation)) {
                 assertThrows(
                         IllegalArgumentException.class, () -> other.rollback(localReservation));
-                assertThrows(
-                        IllegalArgumentException.class,
-                        () ->
-                                org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                        other, otherRequest, localReservation));
+                assertNull(other.commitDirect(localRequest));
                 assertEquals(1L, state.admissionSummary(0, 0L).occupiedRequests());
                 assertEquals(1L, other.admissionSummary(0, 0L).occupiedRequests());
                 {
                     var handoff =
                             org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                    other, otherRequest, otherReservation);
+                                    other, otherRequest);
 
                     assertTrue(other.releaseRequest(otherRequest));
                 }
@@ -1136,7 +1134,7 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void staleRouteCannotCommitOrReleaseReplacementWithTheSameRequestId() {
-        RouteExecution first = item(1), replacement = item(1);
+        RouteResult first = item(1), replacement = item(1);
         enqueue(first);
         assertTrue(state.releaseRequest(first));
         enqueue(replacement);
@@ -1158,7 +1156,7 @@ class PrefillResourceSnapshotTest {
         var ledger =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         lock, waiting, clock::get);
-        RouteExecution request = item(1);
+        RouteResult request = item(1);
         runWithStateLock(
                 lock,
                 () -> {
@@ -1184,11 +1182,11 @@ class PrefillResourceSnapshotTest {
     }
 
     @Test
-    void activeRemovalLeavesOpenBatchLeaseWithPreparingTransaction() {
+    void removingUncommittedCandidateLeavesNoBatchCapacityOccupied() {
         var ledger =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         lock, waiting, clock::get);
-        RouteExecution request = item(1);
+        RouteResult request = item(1);
         runWithStateLock(
                 lock,
                 () -> {
@@ -1197,7 +1195,7 @@ class PrefillResourceSnapshotTest {
                             org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(
                                     ledger, request));
                 });
-        var lease = ledger.reserveBatch(9L, 1).value();
+        var lease = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(9L, 1);
         runWithStateLock(
                 lock,
                 () -> {
@@ -1207,12 +1205,11 @@ class PrefillResourceSnapshotTest {
                                     ledger, request));
                     assertTrue(waiting.isEmpty());
                     assertEquals(1L, ledger.admissionSummary(0, 0L).occupiedRequests());
-                    assertEquals(1, ledger.queueCounters().batchSlots());
+                    assertEquals(0, ledger.queueCounters().batchSlots());
                 });
         assertTrue(ledger.releaseRequest(request));
-        assertFalse(ledger.batchCapacityAvailable(1));
-        EndpointTestSupport.rollback(lease);
-        EndpointTestSupport.rollback(lease);
+        assertTrue(ledger.batchCapacityAvailable(1));
+
         runWithStateLock(
                 lock,
                 () -> {
@@ -1222,17 +1219,23 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void interleavedImmediateCommitsCaptureOtherWorkAtTheActualCommitBoundary() {
-        RouteExecution first = item(1), second = item(2);
+        RouteResult first = item(1), second = item(2);
         {
-            var firstReservation = state.reserveUnqueuedRoute(first, 30L, Long.MAX_VALUE).value();
-            var secondReservation = state.reserveUnqueuedRoute(second, 40L, Long.MAX_VALUE).value();
+            var firstReservation =
+                    org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                    state, first, 30L, Long.MAX_VALUE)
+                            .value();
+            var secondReservation =
+                    org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                    state, second, 40L, Long.MAX_VALUE)
+                            .value();
             try (var preparationFirstReservation =
                             EndpointTestSupport.preparation(firstReservation);
                     var preparationSecondReservation =
                             EndpointTestSupport.preparation(secondReservation)) {
                 try (var secondHandoff =
                         org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                state, second, secondReservation)) {
+                                state, second)) {
                     assertEquals(
                             30L,
                             secondHandoff
@@ -1243,7 +1246,7 @@ class PrefillResourceSnapshotTest {
                 }
                 try (var firstHandoff =
                         org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                state, first, firstReservation)) {
+                                state, first)) {
                     assertEquals(
                             40L,
                             firstHandoff
@@ -1259,15 +1262,17 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void batchAndIndividualCommitsCaptureTheSamePrecedingTimeline() {
-        RouteExecution immediate = item(1), batchMember = item(2), later = item(3);
+        RouteResult immediate = item(1), batchMember = item(2), later = item(3);
         {
             var immediateReservation =
-                    state.reserveUnqueuedRoute(immediate, 30L, Long.MAX_VALUE).value();
+                    org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                    state, immediate, 30L, Long.MAX_VALUE)
+                            .value();
             try (var preparationImmediateReservation =
                             EndpointTestSupport.preparation(immediateReservation);
                     var firstHandoff =
                             org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                    state, immediate, immediateReservation)) {
+                                    state, immediate)) {
                 assertEquals(
                         0L,
                         firstHandoff
@@ -1277,12 +1282,11 @@ class PrefillResourceSnapshotTest {
                                 .orElseThrow());
                 enqueue(batchMember);
                 {
-                    var batchReservation = state.reserveBatch(10L, 2).value();
-                    try (var preparationBatchRecord =
-                                    EndpointTestSupport.preparation(batchReservation);
-                            var batchHandoff =
-                                    EndpointTestSupport.commitBatch(
-                                            state, batchReservation, List.of(batchMember), 40L)) {
+                    var batchReservation =
+                            new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(10L, 2);
+                    try (var batchHandoff =
+                            EndpointTestSupport.commitBatch(
+                                    state, batchReservation, List.of(batchMember), 40L)) {
                         assertEquals(
                                 30L,
                                 batchHandoff
@@ -1294,12 +1298,14 @@ class PrefillResourceSnapshotTest {
                 }
                 {
                     var laterReservation =
-                            state.reserveUnqueuedRoute(later, 50L, Long.MAX_VALUE).value();
+                            org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                            state, later, 50L, Long.MAX_VALUE)
+                                    .value();
                     try (var preparationLaterReservation =
                                     EndpointTestSupport.preparation(laterReservation);
                             var laterHandoff =
                                     org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                            state, later, laterReservation)) {
+                                            state, later)) {
                         assertEquals(
                                 70L,
                                 laterHandoff
@@ -1316,7 +1322,7 @@ class PrefillResourceSnapshotTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void batchHandoffFreezesPrecedingWorkAcrossClockAdvanceAndTerminalCleanup(boolean cached) {
-        RouteExecution preceding = item(81), incoming = item(82);
+        RouteResult preceding = item(81), incoming = item(82);
         commitBatch(List.of(preceding), 300L);
         reconcile(
                 Map.of(),
@@ -1329,11 +1335,12 @@ class PrefillResourceSnapshotTest {
         clock.set(150L);
         enqueue(incoming);
         {
-            var reservation = state.reserveBatch(82L, 2).value();
+            var reservation =
+                    new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(82L, 2);
             {
                 var handoff =
                         EndpointTestSupport.commitBatch(state, reservation, List.of(incoming), 50L);
-                try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                {
                     if (cached) {
                         assertSame(earlier, handoff.precedingWork());
                     }
@@ -1356,7 +1363,7 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void localCleanupPreservesRunningBatchWorkAndItsClock() {
-        RouteExecution a = item(1), b = item(2), c = item(3);
+        RouteResult a = item(1), b = item(2), c = item(3);
         commitBatch(List.of(a, b, c), 300L);
         reconcile(
                 Map.of(),
@@ -1465,7 +1472,7 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void onlyWorkerRemovalBeforeExecutionRepredictsTheQueuedBatch() {
-        RouteExecution a = item(1), b = item(2);
+        RouteResult a = item(1), b = item(2);
         commitBatch(List.of(a, b), 300L);
         clock.set(1_000);
         reconcile(
@@ -1489,7 +1496,7 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void predictionFailureLeavesBatchAndWaitingOwnershipUnchanged() {
-        RouteExecution a = item(1), b = item(2), queued = item(3);
+        RouteResult a = item(1), b = item(2), queued = item(3);
         commitBatch(List.of(a, b), 300L);
         enqueue(queued);
         var before = capture();
@@ -1539,7 +1546,7 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void invalidatedStatusReductionDoesNotPolluteBatchResults() {
-        RouteExecution first = item(1), second = item(2), queued = item(3);
+        RouteResult first = item(1), second = item(2), queued = item(3);
         commitBatch(List.of(first, second), 300L);
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
@@ -1576,16 +1583,17 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void terminalBatchAndUnchangedBatchRetainTheirOwnFacts() {
-        RouteExecution a = item(1), b = item(2), c = item(3), d = item(4);
+        RouteResult a = item(1), b = item(2), c = item(3), d = item(4);
         commitBatch(List.of(a, b), 300L);
         enqueue(c);
         enqueue(d);
         {
-            var reservation = state.reserveBatch(11L, 2).value();
+            var reservation =
+                    new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(11L, 2);
             {
                 var handoff =
                         EndpointTestSupport.commitBatch(state, reservation, List.of(c, d), 400L);
-                try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                {
                     assertTrue(waitingItems().isEmpty());
                 }
             }
@@ -1647,7 +1655,7 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void localCleanupDoesNotInventExecutionEvidenceOrEnableLearning() {
-        RouteExecution first = item(1), rejected = item(2), survivor = item(3);
+        RouteResult first = item(1), rejected = item(2), survivor = item(3);
         commitBatch(List.of(first, rejected, survivor), 300L);
         assertTrue(EndpointTestSupport.releaseRequest(state, first));
         var partial =
@@ -1682,7 +1690,7 @@ class PrefillResourceSnapshotTest {
     @Test
     void partialSuccessThenFailureCompletesBatchOnceWithoutLearningOrRepacking() {
         commitBatch(List.of(item(1), item(2)), 400L);
-        ToLongFunction<List<RouteExecution>> noRepacking =
+        ToLongFunction<List<RouteResult>> noRepacking =
                 survivors -> {
                     throw new AssertionError("execution evidence must prevent repacking");
                 };
@@ -1711,23 +1719,23 @@ class PrefillResourceSnapshotTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void oldBatchCompletionDoesNotSettleAReusedMemberId(boolean workerTerminal) {
-        RouteExecution first = item(1), sibling = item(2);
+        RouteResult first = item(1), sibling = item(2);
         commitBatch(List.of(first, sibling), 300L);
         assertTrue(EndpointTestSupport.releaseRequest(state, first));
 
-        RouteExecution replacement = item(1);
+        RouteResult replacement = item(1);
         enqueue(replacement);
         {
-            var lease = state.reserveBatch(11L, 2).value();
+            var lease = new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(11L, 2);
             {
                 var handoff =
                         EndpointTestSupport.commitBatch(state, lease, List.of(replacement), 100L);
-                try (var preparationLease = EndpointTestSupport.preparation(lease)) {
+                {
                     assertEquals(2, state.queueCounters().batchSlots());
                 }
             }
         }
-        ToLongFunction<List<RouteExecution>> noRepacking =
+        ToLongFunction<List<RouteResult>> noRepacking =
                 unused -> {
                     throw new AssertionError("completed batches do not need reprediction");
                 };
@@ -1769,24 +1777,26 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void staleDirectReservationCannotCommitOrReleaseItsReplacement() {
-        RouteExecution old = routeItem(101), replacement = routeItem(101);
-        var stale = state.reserveUnqueuedRoute(old, 30L, 10L).value();
+        RouteResult old = routeItem(101), replacement = routeItem(101);
+        var stale =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, old, 30L, 10L)
+                        .value();
         assertTrue(state.rollback(stale));
-        var current = state.reserveUnqueuedRoute(replacement, 40L, 10L).value();
+        var current =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, replacement, 40L, 10L)
+                        .value();
         {
             var selectedEndpoint = generation;
             try (var cleanup = EndpointTestSupport.preparation(current)) {
-                assertThrows(
-                        IllegalStateException.class,
-                        () ->
-                                org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                        state, replacement, stale));
+                assertNull(state.commitDirect(old));
                 assertFalse(state.rollback(stale));
                 assertEquals(40L, remainingWork());
                 assertEquals(1L, state.admissionSummary(0, 0L).occupiedRequests());
                 try (var committed =
                         org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                state, replacement, current)) {
+                                state, replacement)) {
                     assertEquals(
                             0L,
                             committed
@@ -1802,23 +1812,25 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void mismatchedDirectReservationLeavesBothRequestsRetryable() {
-        RouteExecution first = routeItem(101), second = routeItem(102);
-        var firstReservation = state.reserveUnqueuedRoute(first, 30L, 10L).value();
-        var secondReservation = state.reserveUnqueuedRoute(second, 40L, 10L).value();
+        RouteResult first = routeItem(101), second = routeItem(102);
+        var firstReservation =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, first, 30L, 10L)
+                        .value();
+        var secondReservation =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                state, second, 40L, 10L)
+                        .value();
         {
             var firstWorker = generation;
             var secondWorker = generation;
             try (var firstCleanup = EndpointTestSupport.preparation(firstReservation);
                     var secondCleanup = EndpointTestSupport.preparation(secondReservation)) {
-                assertThrows(
-                        IllegalStateException.class,
-                        () ->
-                                org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                        state, second, firstReservation));
+                assertThrows(IllegalArgumentException.class, () -> firstReservation.bind(second));
                 assertEquals(70L, remainingWork());
                 try (var committed =
                         org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                state, first, firstReservation)) {
+                                state, first)) {
                     assertEquals(
                             40L,
                             committed
@@ -1829,7 +1841,7 @@ class PrefillResourceSnapshotTest {
                 }
                 try (var committed =
                         org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                state, second, secondReservation)) {
+                                state, second)) {
                     assertEquals(
                             30L,
                             committed
@@ -1856,7 +1868,7 @@ class PrefillResourceSnapshotTest {
                         task(1, null, 500L, 700L),
                         "second-success",
                         task(2, null, 0L, 200L));
-        ToLongFunction<List<RouteExecution>> noRepacking =
+        ToLongFunction<List<RouteResult>> noRepacking =
                 unused -> {
                     throw new AssertionError("a completed batch needs no prediction");
                 };
@@ -1962,7 +1974,7 @@ class PrefillResourceSnapshotTest {
 
     @Test
     void heartbeatRenewsExecutionWithoutConsumingTerminalFactsOrInvalidatingUnchangedInputs() {
-        RouteExecution first = item(1), second = item(2);
+        RouteResult first = item(1), second = item(2);
         commitBatch(List.of(first, second), 300L);
         var worker = EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090);
         WorkerStatusResponse response = new WorkerStatusResponse();
@@ -2025,26 +2037,12 @@ class PrefillResourceSnapshotTest {
         assertEquals(0, state.stats().batchCount());
     }
 
-    private void commitBatch(List<RouteExecution> members, long predictedMs) {
-        members.forEach(this::enqueue);
-        {
-            var reservation = state.reserveBatch(10L, 2).value();
-            {
-                var handoff =
-                        EndpointTestSupport.commitBatch(state, reservation, members, predictedMs);
-                try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
-                    assertTrue(waitingItems().isEmpty());
-                }
-            }
-        }
-    }
-
     @Test
     void unchangedWorkerObservationReusesWorkAndProjectionVersion() {
-        RouteExecution request = item(1);
+        RouteResult request = item(1);
         commitBatch(List.of(request), 100L);
         var active = Map.of("1", task(1, TaskPhase.RUNNING, 0L, 0L));
-        ToLongFunction<List<RouteExecution>> noRepacking =
+        ToLongFunction<List<RouteResult>> noRepacking =
                 ignored -> {
                     throw new AssertionError("unchanged membership needs no prediction");
                 };
@@ -2062,10 +2060,41 @@ class PrefillResourceSnapshotTest {
                 80L, after.work().calculate().totalRemainingWorkMsAt(clock.get()).orElseThrow());
     }
 
+    private static RouteResult routeItem(long id) {
+        var config = new FlexlbConfig();
+        config.getDispatcher().setType(DispatcherConfig.Type.NON_BATCH);
+        var context = new RequestContext(config);
+        var request = Request.builder().requestId(String.valueOf(id)).seqLen(100L).build();
+        context.data().setRequest(request);
+        context.data().setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));
+        return org.flexlb.balance.scheduler.RequestExecutionTestSupport.mockProtocolRoute(
+                SchedulingTestConfig.createRoute(
+                        context, null, null, null, null, null, null, 100L));
+    }
+
+    private void commitBatch(List<RouteResult> members, long predictedMs) {
+        members.forEach(this::enqueue);
+        {
+            var reservation =
+                    new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(10L, 2);
+            {
+                var handoff =
+                        EndpointTestSupport.commitBatch(state, reservation, members, predictedMs);
+                {
+                    assertTrue(waitingItems().isEmpty());
+                }
+            }
+        }
+    }
+
+    private List<RouteResult> waitingItems() {
+        return state.captureQueue(Integer.MAX_VALUE).items();
+    }
+
     private WorkerEndpoint.StatusChange.Prefill reconcile(
             Map<String, TaskInfo> finished,
             Map<String, TaskInfo> active,
-            ToLongFunction<List<RouteExecution>> repredictor) {
+            ToLongFunction<List<RouteResult>> repredictor) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setFinishedTaskInfo(finished);
@@ -2078,18 +2107,18 @@ class PrefillResourceSnapshotTest {
         return outcome;
     }
 
+    private static void assertNoWork(WorkSnapshot snapshot, long... excludedIds) {
+        assertWork(snapshot, 0L);
+        for (long id : excludedIds) {
+            assertFalse(snapshot.containsRequest(String.valueOf(id)), "retained request " + id);
+        }
+    }
+
     private static void assertWork(WorkSnapshot snapshot, long expectedMs, long... includedIds) {
         assertFalse(snapshot.hasUnknownWork());
         assertEquals(expectedMs, snapshot.totalRemainingWorkMs().orElseThrow());
         for (long id : includedIds) {
             assertTrue(snapshot.containsRequest(String.valueOf(id)), "missing request " + id);
-        }
-    }
-
-    private static void assertNoWork(WorkSnapshot snapshot, long... excludedIds) {
-        assertWork(snapshot, 0L);
-        for (long id : excludedIds) {
-            assertFalse(snapshot.containsRequest(String.valueOf(id)), "retained request " + id);
         }
     }
 
@@ -2136,18 +2165,12 @@ class PrefillResourceSnapshotTest {
         return task;
     }
 
-    private static RouteExecution item(long id) {
-        var item = mock(RouteExecution.class);
+    private static RouteResult item(long id) {
+        var item = mock(RouteResult.class);
         when(item.requestId()).thenReturn(String.valueOf(id));
         when(item.seqLen()).thenReturn(100L);
         return item;
     }
-
-    private record Snapshot(
-            PrefillEndpoint.Progress version,
-            long capturedAtMs,
-            PrefillRequestQueue.Snapshot active,
-            org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot work) {}
 
     private Snapshot capture() {
         return withStateLock(
@@ -2162,7 +2185,7 @@ class PrefillResourceSnapshotTest {
                 });
     }
 
-    private void enqueue(RouteExecution item) {
+    private void enqueue(RouteResult item) {
         runWithStateLock(
                 lock,
                 () -> {
@@ -2172,7 +2195,9 @@ class PrefillResourceSnapshotTest {
                 });
     }
 
-    private List<RouteExecution> waitingItems() {
-        return state.captureQueue(Integer.MAX_VALUE).items();
-    }
+    private record Snapshot(
+            PrefillEndpoint.Progress version,
+            long capturedAtMs,
+            PrefillRequestQueue.Snapshot active,
+            org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot work) {}
 }

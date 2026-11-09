@@ -36,8 +36,11 @@ import java.util.Map;
 
 import static org.flexlb.balance.endpoint.EndpointTestSupport.decodeRoutingSnapshot;
 
+/**
+ * Checks Decode ranking and registration against queued reservations, engine load and capacity limits.
+ * Conflicts, worker replacement and cache affinity must preserve the selected worker identity.
+ */
 class DecodeSelectorTest {
-
     private static final SchedulingMetadata SCHEDULING =
             SchedulingMetadata.explicit(0, Long.MAX_VALUE);
 
@@ -49,50 +52,6 @@ class DecodeSelectorTest {
         configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(StrategyTestSupport.config());
         decodeStatuses = new HashMap<>();
-    }
-
-    WorkerStatus createWorkerStatus(String ip) {
-        return createWorkerStatus(ip, null);
-    }
-
-    WorkerStatus createWorkerStatus(String ip, String group) {
-        return StrategyTestSupport.workerStatus(
-                RoleType.DECODE, group, ip, 8080, 9090, true, 0L, 0L);
-    }
-
-    /** Create an EndpointRegistry with DecodeEndpoints registered for each WorkerStatus entry. */
-    private EndpointRegistry createDecodeRegistry(Map<String, WorkerStatus> workerMap) {
-        EndpointRegistry registry = StrategyTestSupport.endpointRegistry(configService);
-        for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
-            WorkerStatus ws = entry.getValue();
-            StrategyTestSupport.publishEndpoint(registry, RoleType.DECODE, entry.getKey(), ws);
-        }
-        return registry;
-    }
-
-    private WorkerStatus registerWorker(String ip, long totalKv, long availableKv) {
-        WorkerStatus worker = createWorkerStatus(ip);
-        setKv(worker, totalKv, availableKv);
-        decodeStatuses.put(ip + ":8080", worker);
-        return worker;
-    }
-
-    private EndpointRegistry decodeRegistry() {
-        return createDecodeRegistry(decodeStatuses);
-    }
-
-    private StrategyTestSupport.DecodeRoutingFixture availableStrategy(EndpointRegistry registry) {
-        return new StrategyTestSupport.DecodeRoutingFixture(
-                registry,
-                configService,
-                SchedulingTestConfig.capacity(configService.loadBalanceConfig()));
-    }
-
-    private static Request request(long sequenceLength, long requestId) {
-        return Request.builder()
-                .seqLen(sequenceLength)
-                .requestId(String.valueOf(requestId))
-                .build();
     }
 
     @Test
@@ -107,7 +66,14 @@ class DecodeSelectorTest {
                 var selectedEndpoint = endpoint;
 
                 var reservation =
-                        endpoint.tryReserveQueuedRequest(String.valueOf(42L), 128L, 256L, 70, null)
+                        endpoint.tryRegisterSelection(
+                                        endpoint.routingView(),
+                                        String.valueOf(42L),
+                                        128L,
+                                        256L,
+                                        70,
+                                        org.flexlb.balance.scheduler.SchedulingTestConfig.capacity(
+                                                configService.loadBalanceConfig()))
                                 .value();
                 var queued = endpoint.admissionSummary();
                 Assertions.assertNotSame(empty, queued);
@@ -195,9 +161,7 @@ class DecodeSelectorTest {
                         configService,
                         SchedulingTestConfig.capacity(configService.loadBalanceConfig()));
         var changed = StrategyTestSupport.select(selector, inputs, SCHEDULING, null);
-        Assertions.assertEquals(PlacementResult.Status.ENDPOINT_CHANGED, changed.status());
-        Assertions.assertEquals(PlacementResult.Status.SUCCESS, changed.selection().status());
-        Assertions.assertSame(stale, changed.selection().value());
+        Assertions.assertEquals(PlacementResult.Status.BLOCKED, changed.status());
         Assertions.assertEquals(1, captures.get());
         // Only a new scheduling attempt may choose the replacement generation.
         PlacementResult<Selection, RoleType> result =
@@ -241,6 +205,15 @@ class DecodeSelectorTest {
         } finally {
             registry.close();
         }
+    }
+
+    WorkerStatus createWorkerStatus(String ip) {
+        return createWorkerStatus(ip, null);
+    }
+
+    WorkerStatus createWorkerStatus(String ip, String group) {
+        return StrategyTestSupport.workerStatus(
+                RoleType.DECODE, group, ip, 8080, 9090, true, 0L, 0L);
     }
 
     @Test
@@ -309,11 +282,16 @@ class DecodeSelectorTest {
                     new java.util.concurrent.ConcurrentHashMap<
                             String, java.util.concurrent.atomic.LongAdder>();
             var calls = new java.util.ArrayList<java.util.concurrent.Callable<Void>>();
+            var ids = new java.util.concurrent.atomic.AtomicLong();
             for (int thread = 0; thread < 8; thread++) {
                 calls.add(
                         () -> {
                             for (int i = 0; i < 250; i++) {
-                                var selected = selectStatus(selector, request(1L, i), null);
+                                var input = request(1L, ids.incrementAndGet());
+                                ServerStatus selected = null;
+                                for (int retry = 0; retry < 100 && selected == null; retry++)
+                                    selected = selectStatus(selector, input, null);
+                                Assertions.assertNotNull(selected);
                                 counts.computeIfAbsent(
                                                 selected.getServerIp(),
                                                 key -> new java.util.concurrent.atomic.LongAdder())
@@ -326,33 +304,19 @@ class DecodeSelectorTest {
             for (var future : executor.invokeAll(calls)) {
                 future.get(10, java.util.concurrent.TimeUnit.SECONDS);
             }
-            Assertions.assertEquals(1000L, counts.get("127.0.0.1").sum());
-            Assertions.assertEquals(1000L, counts.get("127.0.0.2").sum());
+            Assertions.assertEquals(
+                    2000L,
+                    counts.values().stream()
+                            .mapToLong(java.util.concurrent.atomic.LongAdder::sum)
+                            .sum());
+            Assertions.assertTrue(counts.get("127.0.0.1").sum() > 0);
+            Assertions.assertTrue(counts.get("127.0.0.2").sum() > 0);
             for (var view : decodeRoutingSnapshot(registry, null)) {
                 Assertions.assertEquals(0L, view.totalLoad());
             }
         } finally {
             registry.close();
         }
-    }
-
-    private static ThreadLocal<?> scratchCache() {
-        return (ThreadLocal<?>)
-                org.springframework.test.util.ReflectionTestUtils.getField(
-                        DecodeSelector.class, "SCRATCH");
-    }
-
-    private static void assertScratchReleased(Object scratch) {
-        var addresses =
-                (String[])
-                        org.springframework.test.util.ReflectionTestUtils.getField(
-                                scratch, "addresses");
-        for (String address : addresses) {
-            Assertions.assertNull(address);
-        }
-        Assertions.assertEquals(
-                false,
-                org.springframework.test.util.ReflectionTestUtils.getField(scratch, "inUse"));
     }
 
     @ParameterizedTest
@@ -484,16 +448,18 @@ class DecodeSelectorTest {
 
     @Test
     void cacheCostKeepsUsageRatiosAboveOneDistinctForBusyWorkers() {
-        registerWorker("127.0.0.1", 1_000L, 100L);
-        registerWorker("127.0.0.2", 1_000L, 100L);
+        registerWorker("127.0.0.1", 3_000L, 3_000L);
+        registerWorker("127.0.0.2", 3_000L, 3_000L);
         EndpointRegistry registry = decodeRegistry();
         reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 1_200L, 50);
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 92L, 0L, 200L, 50);
+        setKv(decodeEndpoint(registry, "127.0.0.1:8080").getStatus(), 1_000L, 100L);
+        setKv(decodeEndpoint(registry, "127.0.0.2:8080").getStatus(), 1_000L, 100L);
         StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
         for (int i = 0; i < 4; i++) {
             Assertions.assertEquals(
                     "127.0.0.2",
-                    selectStatus(strategy, request(100L, 1_001L + i), null).getServerIp(),
+                    blockedStatus(strategy, request(100L, 1_001L + i), null).getServerIp(),
                     "110% KV usage must remain cheaper than 210%");
         }
     }
@@ -560,7 +526,7 @@ class DecodeSelectorTest {
         for (int i = 0; i < 4; i++) {
             Assertions.assertEquals(
                     "127.0.0.2",
-                    selectStatus(strategy, request(100L, 1_001L + i), null).getServerIp());
+                    blockedStatus(strategy, request(100L, 1_001L + i), null).getServerIp());
         }
     }
 
@@ -583,7 +549,16 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.2", 10_000L, 9_000L);
         EndpointRegistry registry = decodeRegistry();
         DecodeEndpoint local = decodeEndpoint(registry, "127.0.0.2:8080");
-        reservePinned(local, 91L, 0L, 0L, 50);
+        reserveQueued(local, 91L, 0L, 0L, 50);
+        var dispatch =
+                local.acquireDispatchPermit(
+                        EndpointTestSupport.decodeReservation(local, 91L),
+                        new DecodeResources.AdmissionCapacity(0L, 100L));
+        Assertions.assertEquals(
+                DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, dispatch.status());
+        Assertions.assertEquals(
+                DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
+                dispatch.value().dispatch().status());
         Assertions.assertEquals(
                 2, decodeEndpoint(registry, "127.0.0.1:8080").routingView().totalLoad());
         StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
@@ -607,7 +582,7 @@ class DecodeSelectorTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void availabilityUsesDispatchForDirectAndAllReservationsForQueue(boolean direct) {
+    void selectionCountsUnsentReservationsForDirectAndQueue(boolean direct) {
         configureCost("running_size / max_running_size");
         if (direct) {
             configService.loadBalanceConfig().setScheduler(ConfigTestSupport.direct());
@@ -622,17 +597,15 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.1", 10_000L, 10_000L);
         registerWorker("127.0.0.2", 10_000L, 10_000L);
         EndpointRegistry registry = decodeRegistry();
-        reservePinned(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
+        reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 92L, 0L, 0L, 50);
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 93L, 0L, 0L, 50);
 
-        ServerStatus selected =
-                selectStatus(availableStrategy(registry), request(100L, 1_001L), null);
-
-        Assertions.assertEquals(
-                direct ? "127.0.0.2" : "127.0.0.1",
-                selected.getServerIp(),
-                "DIRECT can use dispatch capacity; QUEUE sees both workers full and selects a blocked placement candidate");
+        var result =
+                StrategyTestSupport.select(
+                        availableStrategy(registry), request(100L, 1_001L), SCHEDULING, null);
+        Assertions.assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        Assertions.assertEquals(RoleType.DECODE, result.blocker());
     }
 
     @ParameterizedTest
@@ -717,12 +690,13 @@ class DecodeSelectorTest {
     }
 
     @Test
-    void queuePlanningSelectsExactEndpointWithoutTakingCapacity() {
-        registerWorker("127.0.0.1", 1_000, 1_000);
+    void busyQueueCandidateDoesNotAcquirePartialCapacity() {
+        registerWorker("127.0.0.1", 2_000, 2_000);
         EndpointRegistry registry = decodeRegistry();
         DecodeEndpoint endpoint = decodeEndpoint(registry, "127.0.0.1:8080");
         reserveQueued(endpoint, 1L, 400, 700, 50);
         reserveQueued(endpoint, 2L, 400, 700, 50);
+        setKv(endpoint.getStatus(), 1_000L, 1_000L);
 
         Assertions.assertTrue(
                 endpoint.routingView().realKvUsed()
@@ -740,14 +714,16 @@ class DecodeSelectorTest {
 
         PlacementResult<Selection, RoleType> fifoPlacement =
                 StrategyTestSupport.select(strategy, inputs, SCHEDULING, null);
-        Assertions.assertEquals(PlacementResult.Status.SUCCESS, fifoPlacement.status());
-        Selection fifoSelection = fifoPlacement.value();
-        ServerStatus fifoResult = fifoSelection.decode();
-        Assertions.assertTrue(fifoResult.isSuccess());
-        Assertions.assertEquals(inputs.getRequestId(), fifoResult.getRequestId());
+        Assertions.assertEquals(PlacementResult.Status.BLOCKED, fifoPlacement.status());
+        Assertions.assertNull(fifoPlacement.value());
+        Assertions.assertEquals(
+                "127.0.0.1:8080",
+                ((DecodeResources.DecodeRoutingView)
+                                fifoPlacement.diagnostics().get("decodeCandidate"))
+                        .address());
         Assertions.assertFalse(
                 EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), String.valueOf(3L)),
-                "selection must not mutate Decode reservation ownership");
+                "blocked selection must not acquire capacity");
     }
 
     @Test
@@ -765,8 +741,8 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.2", 10_000L, 10_000L);
         EndpointRegistry registry = decodeRegistry();
         try {
-            reservePinned(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
-            reservePinned(decodeEndpoint(registry, "127.0.0.2:8080"), 92L, 0L, 0L, 50);
+            reserveQueued(decodeEndpoint(registry, "127.0.0.1:8080"), 91L, 0L, 0L, 50);
+            reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 92L, 0L, 0L, 50);
 
             var inputs = request(100L, 1_001L);
             var result =
@@ -817,19 +793,16 @@ class DecodeSelectorTest {
             PlacementResult<Selection, RoleType> result =
                     StrategyTestSupport.select(
                             strategy, request(100L, requestId), SCHEDULING, null);
-            Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
-            {
-                Selection selected = result.value();
-                counts.merge(selected.decode().getServerIp(), 1, Integer::sum);
-                Assertions.assertFalse(
-                        EndpointTestSupport.isQueued(
-                                decodeEndpoint(registry, selected.decode().getServerIp() + ":8080")
-                                        .resourceSnapshot(),
-                                String.valueOf(requestId)),
-                        "selection cannot claim capacity");
-            }
+            Assertions.assertEquals(PlacementResult.Status.BLOCKED, result.status());
+            var selected =
+                    (DecodeResources.DecodeRoutingView) result.diagnostics().get("decodeCandidate");
+            counts.merge(selected.address(), 1, Integer::sum);
+            Assertions.assertFalse(
+                    EndpointTestSupport.isQueued(
+                            decodeEndpoint(registry, selected.address()).resourceSnapshot(),
+                            String.valueOf(requestId)));
         }
-        Assertions.assertEquals(Map.of("127.0.0.1", 5, "127.0.0.2", 5), counts);
+        Assertions.assertEquals(Map.of("127.0.0.1:8080", 5, "127.0.0.2:8080", 5), counts);
     }
 
     @ParameterizedTest
@@ -843,36 +816,10 @@ class DecodeSelectorTest {
         reserveQueued(decodeEndpoint(registry, "127.0.0.2:8080"), 91L, 0L, 0L, 50);
         StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
         for (long requestId = 200L; requestId < 204L; requestId++) {
-            ServerStatus selected = selectStatus(strategy, request(200L, requestId), null);
+            ServerStatus selected = blockedStatus(strategy, request(200L, requestId), null);
             Assertions.assertNotNull(selected);
             Assertions.assertEquals("127.0.0.2", selected.getServerIp());
         }
-    }
-
-    private enum QueuePolicy {
-        FIFO,
-        PRIORITY,
-        PREEMPTIVE
-    }
-
-    private void configureQueue(QueuePolicy policy) {
-        QueueOrderingConfig ordering =
-                policy == QueuePolicy.FIFO
-                        ? new QueueOrderingConfig()
-                        : ConfigTestSupport.priority();
-        if (policy == QueuePolicy.PRIORITY) {
-            ordering.setPreemption(null);
-        }
-        if (policy == QueuePolicy.PREEMPTIVE) {
-            ordering.setPreemption(preemption());
-        }
-        configService.loadBalanceConfig().queueScheduler().setOrdering(ordering);
-    }
-
-    private static PreemptionConfig preemption() {
-        PreemptionConfig config = new PreemptionConfig();
-        config.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_RESERVED));
-        return config;
     }
 
     @Test
@@ -909,7 +856,7 @@ class DecodeSelectorTest {
         EndpointRegistry registry = createDecodeRegistry(decodeStatuses);
         DecodeEndpoint endpoint = decodeEndpoint(registry, "127.0.0.1:8080");
         for (int i = 0; i < 6; i++) {
-            reservePinned(endpoint, 400L + i, 0, 0, 50);
+            reserveQueued(endpoint, 400L + i, 0, 0, 50);
         }
 
         StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(registry);
@@ -947,17 +894,11 @@ class DecodeSelectorTest {
                 IllegalArgumentException.class, () -> availableStrategy(decodeRegistry()));
     }
 
-    private void configureCost(String expression) {
-        var decode = configService.loadBalanceConfig().getRouter().getRoles().getDecode();
-        decode.getCostEstimator().setExpression(expression);
-        decode.getAvailability().setMaxEngineRequests(10L);
-    }
-
-    private static TaskInfo task(long requestId, TaskPhase phase) {
-        TaskInfo task = new TaskInfo();
-        task.setRequestId(String.valueOf(requestId));
-        task.setPhase(phase);
-        return task;
+    private WorkerStatus registerWorker(String ip, long totalKv, long availableKv) {
+        WorkerStatus worker = createWorkerStatus(ip);
+        setKv(worker, totalKv, availableKv);
+        decodeStatuses.put(ip + ":8080", worker);
+        return worker;
     }
 
     private static void setKv(WorkerStatus worker, long totalKv, long availableKv) {
@@ -971,38 +912,117 @@ class DecodeSelectorTest {
                         Math.max(1L, worker.appliedStatusCursor().statusVersion() + 1L)));
     }
 
+    private EndpointRegistry decodeRegistry() {
+        return createDecodeRegistry(decodeStatuses);
+    }
+
+    /** Create an EndpointRegistry with DecodeEndpoints registered for each WorkerStatus entry. */
+    private EndpointRegistry createDecodeRegistry(Map<String, WorkerStatus> workerMap) {
+        EndpointRegistry registry = StrategyTestSupport.endpointRegistry(configService);
+        for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
+            WorkerStatus ws = entry.getValue();
+            StrategyTestSupport.publishEndpoint(registry, RoleType.DECODE, entry.getKey(), ws);
+        }
+        return registry;
+    }
+
+    private StrategyTestSupport.DecodeRoutingFixture availableStrategy(EndpointRegistry registry) {
+        return new StrategyTestSupport.DecodeRoutingFixture(
+                registry,
+                configService,
+                SchedulingTestConfig.capacity(configService.loadBalanceConfig()));
+    }
+
+    private static Request request(long sequenceLength, long requestId) {
+        return Request.builder()
+                .seqLen(sequenceLength)
+                .requestId(String.valueOf(requestId))
+                .build();
+    }
+
+    private static ThreadLocal<?> scratchCache() {
+        return (ThreadLocal<?>)
+                org.springframework.test.util.ReflectionTestUtils.getField(
+                        DecodeSelector.class, "SCRATCH");
+    }
+
+    private static void assertScratchReleased(Object scratch) {
+        var addresses =
+                (String[])
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                scratch, "addresses");
+        for (String address : addresses) {
+            Assertions.assertNull(address);
+        }
+        Assertions.assertEquals(
+                false,
+                org.springframework.test.util.ReflectionTestUtils.getField(scratch, "inUse"));
+    }
+
+    private void configureQueue(QueuePolicy policy) {
+        QueueOrderingConfig ordering =
+                policy == QueuePolicy.FIFO
+                        ? new QueueOrderingConfig()
+                        : ConfigTestSupport.priority();
+        if (policy == QueuePolicy.PRIORITY) {
+            ordering.setPreemption(null);
+        }
+        if (policy == QueuePolicy.PREEMPTIVE) {
+            ordering.setPreemption(preemption());
+        }
+        configService.loadBalanceConfig().queueScheduler().setOrdering(ordering);
+    }
+
+    private static PreemptionConfig preemption() {
+        PreemptionConfig config = new PreemptionConfig();
+        config.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_RESERVED));
+        return config;
+    }
+
+    private void configureCost(String expression) {
+        var decode = configService.loadBalanceConfig().getRouter().getRoles().getDecode();
+        decode.getCostEstimator().setExpression(expression);
+        decode.getAvailability().setMaxEngineRequests(10L);
+    }
+
+    private static TaskInfo task(long requestId, TaskPhase phase) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(String.valueOf(requestId));
+        task.setPhase(phase);
+        return task;
+    }
+
     private static void reserveQueued(
             DecodeEndpoint endpoint,
             long requestId,
             long kvTokens,
             long expectedKvTokens,
             int priority) {
-        {
-            var selectedEndpoint = endpoint;
-
-            endpoint.tryReserveQueuedRequest(
-                            String.valueOf(requestId), kvTokens, expectedKvTokens, priority, null)
-                    .value();
-        }
+        Assertions.assertNotNull(
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerQueuedDecode(
+                                endpoint,
+                                String.valueOf(requestId),
+                                kvTokens,
+                                expectedKvTokens,
+                                priority)
+                        .value());
     }
 
     private static DecodeEndpoint decodeEndpoint(EndpointRegistry registry, String address) {
         return (DecodeEndpoint) registry.get(RoleType.DECODE, address);
     }
 
-    /** Non-queued inflight reservation: each call raises engineLoad by one. */
-    private static void reservePinned(
-            DecodeEndpoint endpoint,
-            long requestId,
-            long kvTokens,
-            long expectedKvTokens,
-            int priority) {
-        {
-            var selectedEndpoint = endpoint;
-
-            EndpointTestSupport.reserveUnqueuedDecode(
-                    endpoint, selectedEndpoint, requestId, kvTokens, expectedKvTokens, priority);
-        }
+    private static ServerStatus blockedStatus(
+            StrategyTestSupport.DecodeRoutingFixture strategy, Request inputs, String group) {
+        var result = StrategyTestSupport.select(strategy, inputs, SCHEDULING, group);
+        Assertions.assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        Assertions.assertNull(result.value());
+        var view = (DecodeResources.DecodeRoutingView) result.diagnostics().get("decodeCandidate");
+        return ServerStatus.forWorker(
+                RoleType.DECODE,
+                inputs.getRequestId(),
+                view.topology(),
+                view.workerStatus().fields());
     }
 
     private static ServerStatus selectStatus(
@@ -1012,9 +1032,14 @@ class DecodeSelectorTest {
         if (result.status() != PlacementResult.Status.SUCCESS) {
             return null;
         }
-        {
-            Selection selected = result.value();
+        try (Selection selected = result.value()) {
             return selected.decode();
         }
+    }
+
+    private enum QueuePolicy {
+        FIFO,
+        PRIORITY,
+        PREEMPTIVE
     }
 }

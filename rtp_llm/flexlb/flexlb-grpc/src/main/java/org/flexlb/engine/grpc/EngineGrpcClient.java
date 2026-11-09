@@ -32,16 +32,25 @@ import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Worker RPC boundary for status, cache, delivery and cancellation. */
+/**
+ * Worker RPC boundary for status, cache, delivery and cancellation.
+ */
 @Component
 public class EngineGrpcClient extends AbstractGrpcClient {
-
     private static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 20;
+
     public static final String CONNECT_TIMEOUT_PROPERTY = "flexlb.engine-grpc.connect-timeout-ms";
     public static final String VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY =
             "flexlb.engine-grpc.vit-cache-max-inbound-message-bytes";
+
     private static final int DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 8 * 1024 * 1024;
     private static final int DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES = 16 * 1024 * 1024;
+
+    public static final String ENQUEUE_TIMEOUT_PROPERTY = "flexlb.engine-grpc.enqueue-timeout-ms";
+
+    private static final long DEFAULT_ENQUEUE_TIMEOUT_MILLIS = 5000L;
+    private static final int MAX_METRICS_ERROR_MESSAGE_CHARS = 256;
+    private static final long METRICS_WARNING_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(30);
 
     @Value(
             "${"
@@ -53,22 +62,12 @@ public class EngineGrpcClient extends AbstractGrpcClient {
 
     @Getter private final Executor executor;
     @Getter private final EventLoopGroup eventLoopGroup;
-    public static final String ENQUEUE_TIMEOUT_PROPERTY = "flexlb.engine-grpc.enqueue-timeout-ms";
-    private static final long DEFAULT_ENQUEUE_TIMEOUT_MILLIS = 5000L;
+
     private final int connectTimeoutMillis;
     private final long enqueueTimeoutMillis;
     private final boolean cacheStatusEnabled;
 
-    private enum MetricOperation {
-        CALL_METRICS,
-        CONNECTION_DURATION,
-        CALL_FAILURE,
-        DELIVERY_DELAY
-    }
-
     private final GrpcTransportObserver transportObserver = new GrpcTransportObserver();
-    private static final int MAX_METRICS_ERROR_MESSAGE_CHARS = 256;
-    private static final long METRICS_WARNING_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(30);
     private final AtomicLongArray lastMetricsWarningNanos =
             new AtomicLongArray(MetricOperation.values().length);
 
@@ -98,6 +97,125 @@ public class EngineGrpcClient extends AbstractGrpcClient {
         nameResolver.subscribe(this);
     }
 
+    /**
+     * Get worker status via gRPC (async)
+     */
+    public CompletableFuture<EngineRpcService.WorkerStatusPB> getWorkerStatusAsync(
+            String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCallAsync(
+                ip,
+                port,
+                stub -> stub.getRpcServiceFutureStub().getWorkerStatus(request),
+                requestTimeoutMs,
+                ServiceType.WORKER_STATUS);
+    }
+
+    /**
+     * Get cache status via gRPC (async)
+     */
+    public CompletableFuture<EngineRpcService.CacheStatusPB> getCacheStatusAsync(
+            String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCallAsync(
+                ip,
+                port,
+                stub -> stub.getRpcServiceFutureStub().getCacheStatus(request),
+                requestTimeoutMs,
+                ServiceType.CACHE_STATUS);
+    }
+
+    /**
+     * Get multimodal worker status via gRPC (async)
+     */
+    public CompletableFuture<EngineRpcService.WorkerStatusPB> getMultimodalWorkerStatusAsync(
+            String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCallAsync(
+                ip,
+                port,
+                stub -> stub.getMultimodalFutureStub().getWorkerStatus(request),
+                requestTimeoutMs,
+                ServiceType.MULTIMODAL_WORKER_STATUS);
+    }
+
+    /**
+     * Get multimodal cache status via gRPC (async)
+     */
+    public CompletableFuture<EngineRpcService.CacheStatusPB> getMultimodalCacheStatusAsync(
+            String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCallAsync(
+                ip,
+                port,
+                stub -> stub.getMultimodalFutureStub().getCacheStatus(request),
+                requestTimeoutMs,
+                ServiceType.MULTIMODAL_CACHE_STATUS);
+    }
+
+    /**
+     * Submit a batch of already-routed requests to a Prefill worker (async)
+     */
+    public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(
+            String ip, int port, EngineRpcService.EnqueueBatchRequestPB request) {
+        return batchEnqueueAsync(ip, port, request, enqueueTimeoutMillis);
+    }
+
+    public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(
+            String ip,
+            int port,
+            EngineRpcService.EnqueueBatchRequestPB request,
+            long requestTimeoutMs) {
+        // EnqueueBatch is not safe to replay after an ambiguous connection
+        // failure: the Engine may have accepted the first invocation even
+        // though its ACK was lost. Reconciliation is owned by the scheduler's
+        // request-id cancel fence, so this client must expose the ambiguity
+        // instead of issuing a second EnqueueBatch automatically.
+        return executeGrpcCallAsync(
+                ip,
+                port,
+                stub -> stub.getRpcServiceFutureStub().enqueueBatch(request),
+                requestTimeoutMs,
+                ServiceType.BATCH_ENQUEUE);
+    }
+
+    /**
+     * Sends one cancellation attempt to the original Prefill using a detached gRPC context.
+     * Engines must support ordinary cancellation and report downstream cleanup results.
+     * Transport failures complete exceptionally; the caller owns retry and resource release.
+     */
+    public CompletableFuture<CancelReply> cancelAsync(
+            String ip, int port, EngineRpcService.CancelRequestPB request, long requestTimeoutMs) {
+        try {
+            checkArgument(
+                    ip != null && !ip.isBlank() && port > 0, "Cancel requires a routable Prefill");
+            checkArgument(request != null, "Cancel request is required");
+            Context detached = Context.current().fork();
+            Context previous = detached.attach();
+            try {
+                // A transport failure is not proof that Cancel was rejected; never replay it here.
+                return executeGrpcCallAsync(
+                                ip,
+                                port,
+                                stub -> stub.getRpcServiceFutureStub().cancel(request),
+                                Math.max(1, requestTimeoutMs),
+                                ServiceType.ENGINE_CANCEL)
+                        .thenApply(
+                                response ->
+                                        switch (response.getStatus()) {
+                                            case CANCEL_STATUS_ACCEPTED -> CancelReply.ACCEPTED;
+                                            case CANCEL_STATUS_NOT_FOUND -> CancelReply.NOT_FOUND;
+                                            case CANCEL_STATUS_TOMBSTONED ->
+                                                    response.getDecodeCleanupComplete()
+                                                            ? CancelReply.REQUEST_CLEANED
+                                                            : CancelReply.REQUEST_FENCED;
+                                            case CANCEL_STATUS_UNSPECIFIED, UNRECOGNIZED ->
+                                                    CancelReply.FAILED;
+                                        });
+            } finally {
+                detached.detach(previous);
+            }
+        } catch (RuntimeException | Error failure) {
+            return CompletableFuture.failedFuture(failure);
+        }
+    }
+
     @Override
     protected boolean precreate(ServiceType service) {
         return cacheStatusEnabled
@@ -105,8 +223,47 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                         && service != ServiceType.MULTIMODAL_CACHE_STATUS;
     }
 
-    static boolean retriesBrokenConnections(ServiceType serviceType) {
-        return serviceType != ServiceType.BATCH_ENQUEUE && serviceType != ServiceType.ENGINE_CANCEL;
+    @Override
+    protected ManagedChannel createChannel(String channelKey) {
+        String[] parts = parseServiceKey(channelKey);
+        String ip = parts[0];
+        int port = Integer.parseInt(parts[1]);
+        int maxInboundMessageBytes =
+                ServiceType.MULTIMODAL_CACHE_STATUS.getSuffix().equals(parts[2])
+                        ? vitCacheMaxInboundMessageBytes
+                        : DEFAULT_MAX_INBOUND_MESSAGE_BYTES;
+        Logger.info("Creating new channel for ip: {}, port: {}", ip, port);
+        return NettyChannelBuilder.forAddress(ip, port)
+                .channelFactory(transportObserver::newChannel)
+                .withOption(ChannelOption.TCP_NODELAY, true)
+                .withOption(ChannelOption.SO_KEEPALIVE, true)
+                .withOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
+                // Connection timeout in milliseconds
+                .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeoutMillis)
+                // Write buffer water mark: prevents memory accumulation and pendingTasks buildup
+                .withOption(
+                        ChannelOption.WRITE_BUFFER_WATER_MARK,
+                        new WriteBufferWaterMark(64 * 1024, 128 * 1024))
+                // Receive/send buffer size
+                .withOption(ChannelOption.SO_RCVBUF, 512 * 1024)
+                .withOption(ChannelOption.SO_SNDBUF, 512 * 1024)
+                // ViT directory snapshots have a separate configurable message limit.
+                .maxInboundMessageSize(maxInboundMessageBytes)
+                // HTTP/2 initial flow control window: prevents transmission issues due to flow
+                // control
+                .initialFlowControlWindow(2 * 1024 * 1024)
+                // gRPC keepalive configuration: keeps connection active, prevents disconnection by
+                // intermediate devices
+                .keepAliveTime(2, TimeUnit.SECONDS)
+                .keepAliveTimeout(10, TimeUnit.SECONDS)
+                .keepAliveWithoutCalls(true)
+                .executor(executor)
+                .eventLoopGroup(eventLoopGroup)
+                .usePlaintext()
+                .proxyDetector(GrpcUtil.NOOP_PROXY_DETECTOR)
+                .intercept(GrpcCallTrace.INTERCEPTOR)
+                .disableRetry()
+                .build();
     }
 
     static boolean shouldRetry(ServiceType serviceType, Throwable failure, GrpcCallTrace trace) {
@@ -136,6 +293,10 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             // An unreadable cause must not replace the original RPC failure.
             return false;
         }
+    }
+
+    static boolean retriesBrokenConnections(ServiceType serviceType) {
+        return serviceType != ServiceType.BATCH_ENQUEUE && serviceType != ServiceType.ENGINE_CANCEL;
     }
 
     private <R> CompletableFuture<R> executeGrpcCallAsync(
@@ -284,6 +445,112 @@ public class EngineGrpcClient extends AbstractGrpcClient {
         return resultFuture;
     }
 
+    private static void debugSafely(String format, Object... arguments) {
+        try {
+            Logger.debug(format, arguments);
+        } catch (RuntimeException | Error ignored) {
+            // Diagnostics must not prevent an RPC from starting or reaching its terminal result.
+        }
+    }
+
+    private static <R> ListenableFuture<R> startInContext(
+            Context context,
+            Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
+            GrpcFutureStubWrapper stub) {
+        // One owner covers both attempts, including cancellation while the stub
+        // is starting and has not yet returned its future. gRPC propagates this
+        // context to the transport and checks it before starting a cancelled call.
+        Context previous = context.attach();
+        try {
+            return grpcCall.apply(stub);
+        } finally {
+            context.detach(previous);
+        }
+    }
+
+    private void reportSuccessfulCall(
+            ServiceType serviceType,
+            long originalStartTime,
+            boolean retry,
+            String ip,
+            int port,
+            Object response) {
+        try {
+            long duration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - originalStartTime);
+            grpcReporter.reportCallMetrics(
+                    serviceType.getOperationName(),
+                    duration,
+                    serviceType != ServiceType.CACHE_STATUS
+                                    && serviceType != ServiceType.MULTIMODAL_CACHE_STATUS
+                                    && response instanceof com.google.protobuf.MessageLite message
+                            ? message.getSerializedSize()
+                            : 0,
+                    retry);
+        } catch (RuntimeException | Error failure) {
+            // Metrics cannot change the response or prevent Future completion.
+            logMetricsFailure(MetricOperation.CALL_METRICS, serviceType, ip, port, failure);
+        }
+    }
+
+    /** At most one warning per failure stage every 30 seconds; successful calls touch no limiter state. */
+    private void logMetricsFailure(
+            MetricOperation operation,
+            ServiceType serviceType,
+            String ip,
+            int port,
+            Throwable failure) {
+        long now = System.nanoTime();
+        int slot = operation.ordinal();
+        long previous = lastMetricsWarningNanos.get(slot);
+        if ((previous == 0L || now - previous >= METRICS_WARNING_INTERVAL_NANOS)
+                && lastMetricsWarningNanos.compareAndSet(slot, previous, now)) {
+            try {
+                String message = failure.getMessage();
+                String summary =
+                        message == null
+                                ? "UNKNOWN"
+                                : message.substring(
+                                                0,
+                                                Math.min(
+                                                        message.length(),
+                                                        MAX_METRICS_ERROR_MESSAGE_CHARS))
+                                        .replace('\n', ' ')
+                                        .replace('\r', ' ');
+                Logger.warn(
+                        "event=grpc_metrics_failed stage={} service={} endpoint={}:{} errorType={} error={}",
+                        operation,
+                        serviceType.getOperationName(),
+                        ip,
+                        port,
+                        failure.getClass().getSimpleName(),
+                        summary);
+            } catch (RuntimeException | Error loggingFailure) {
+                // Failure reporting must not prevent the RPC future from completing.
+            }
+        }
+    }
+
+    private void reportDeliveryDelay(
+            ServiceType serviceType, boolean retry, GrpcCallTrace trace, String ip, int port) {
+        if (trace == null) {
+            return;
+        }
+        try {
+            grpcReporter.reportDeliveryDelay(serviceType.getSuffix(), retry, trace.snapshot());
+        } catch (RuntimeException | Error failure) {
+            logMetricsFailure(MetricOperation.DELIVERY_DELAY, serviceType, ip, port, failure);
+        }
+    }
+
+    private void reportConnectionDuration(
+            ServiceType serviceType, long duration, String ip, int port) {
+        try {
+            grpcReporter.reportConnectionDuration(serviceType.getOperationName(), duration);
+        } catch (RuntimeException | Error failure) {
+            logMetricsFailure(MetricOperation.CONNECTION_DURATION, serviceType, ip, port, failure);
+        }
+    }
+
     private <R> void retryWithNewChannelAsync(
             String channelKey,
             Invoker staleInvoker,
@@ -403,21 +670,6 @@ public class EngineGrpcClient extends AbstractGrpcClient {
         }
     }
 
-    private static <R> ListenableFuture<R> startInContext(
-            Context context,
-            Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
-            GrpcFutureStubWrapper stub) {
-        // One owner covers both attempts, including cancellation while the stub
-        // is starting and has not yet returned its future. gRPC propagates this
-        // context to the transport and checks it before starting a cancelled call.
-        Context previous = context.attach();
-        try {
-            return grpcCall.apply(stub);
-        } finally {
-            context.detach(previous);
-        }
-    }
-
     private void completeFailure(
             CompletableFuture<?> resultFuture,
             Throwable failure,
@@ -444,38 +696,6 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             reportDeliveryDelay(serviceType, retry, trace, ip, port);
         } finally {
             resultFuture.completeExceptionally(failure);
-        }
-    }
-
-    private static void debugSafely(String format, Object... arguments) {
-        try {
-            Logger.debug(format, arguments);
-        } catch (RuntimeException | Error ignored) {
-            // Diagnostics must not prevent an RPC from starting or reaching its terminal result.
-        }
-    }
-
-    private void reportSuccessfulCall(
-            ServiceType serviceType,
-            long originalStartTime,
-            boolean retry,
-            String ip,
-            int port,
-            Object response) {
-        try {
-            long duration = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - originalStartTime);
-            grpcReporter.reportCallMetrics(
-                    serviceType.getOperationName(),
-                    duration,
-                    serviceType != ServiceType.CACHE_STATUS
-                                    && serviceType != ServiceType.MULTIMODAL_CACHE_STATUS
-                                    && response instanceof com.google.protobuf.MessageLite message
-                            ? message.getSerializedSize()
-                            : 0,
-                    retry);
-        } catch (RuntimeException | Error failure) {
-            // Metrics cannot change the response or prevent Future completion.
-            logMetricsFailure(MetricOperation.CALL_METRICS, serviceType, ip, port, failure);
         }
     }
 
@@ -524,233 +744,21 @@ public class EngineGrpcClient extends AbstractGrpcClient {
         }
     }
 
-    private void reportDeliveryDelay(
-            ServiceType serviceType, boolean retry, GrpcCallTrace trace, String ip, int port) {
-        if (trace == null) {
-            return;
-        }
-        try {
-            grpcReporter.reportDeliveryDelay(serviceType.getSuffix(), retry, trace.snapshot());
-        } catch (RuntimeException | Error failure) {
-            logMetricsFailure(MetricOperation.DELIVERY_DELAY, serviceType, ip, port, failure);
-        }
-    }
-
-    private void reportConnectionDuration(
-            ServiceType serviceType, long duration, String ip, int port) {
-        try {
-            grpcReporter.reportConnectionDuration(serviceType.getOperationName(), duration);
-        } catch (RuntimeException | Error failure) {
-            logMetricsFailure(MetricOperation.CONNECTION_DURATION, serviceType, ip, port, failure);
-        }
-    }
-
-    /** At most one warning per failure stage every 30 seconds; successful calls touch no limiter state. */
-    private void logMetricsFailure(
-            MetricOperation operation,
-            ServiceType serviceType,
-            String ip,
-            int port,
-            Throwable failure) {
-        long now = System.nanoTime();
-        int slot = operation.ordinal();
-        long previous = lastMetricsWarningNanos.get(slot);
-        if ((previous == 0L || now - previous >= METRICS_WARNING_INTERVAL_NANOS)
-                && lastMetricsWarningNanos.compareAndSet(slot, previous, now)) {
-            try {
-                String message = failure.getMessage();
-                String summary =
-                        message == null
-                                ? "UNKNOWN"
-                                : message.substring(
-                                                0,
-                                                Math.min(
-                                                        message.length(),
-                                                        MAX_METRICS_ERROR_MESSAGE_CHARS))
-                                        .replace('\n', ' ')
-                                        .replace('\r', ' ');
-                Logger.warn(
-                        "event=grpc_metrics_failed stage={} service={} endpoint={}:{} errorType={} error={}",
-                        operation,
-                        serviceType.getOperationName(),
-                        ip,
-                        port,
-                        failure.getClass().getSimpleName(),
-                        summary);
-            } catch (RuntimeException | Error loggingFailure) {
-                // Failure reporting must not prevent the RPC future from completing.
-            }
-        }
+    private enum MetricOperation {
+        CALL_METRICS,
+        CONNECTION_DURATION,
+        CALL_FAILURE,
+        DELIVERY_DELAY
     }
 
     /**
-     * Get worker status via gRPC (async)
+     * Protocol evidence only; the scheduler decides when request resources can be released.
      */
-    public CompletableFuture<EngineRpcService.WorkerStatusPB> getWorkerStatusAsync(
-            String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCallAsync(
-                ip,
-                port,
-                stub -> stub.getRpcServiceFutureStub().getWorkerStatus(request),
-                requestTimeoutMs,
-                ServiceType.WORKER_STATUS);
-    }
-
-    /**
-     * Get cache status via gRPC (async)
-     */
-    public CompletableFuture<EngineRpcService.CacheStatusPB> getCacheStatusAsync(
-            String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCallAsync(
-                ip,
-                port,
-                stub -> stub.getRpcServiceFutureStub().getCacheStatus(request),
-                requestTimeoutMs,
-                ServiceType.CACHE_STATUS);
-    }
-
-    /**
-     * Get multimodal worker status via gRPC (async)
-     */
-    public CompletableFuture<EngineRpcService.WorkerStatusPB> getMultimodalWorkerStatusAsync(
-            String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCallAsync(
-                ip,
-                port,
-                stub -> stub.getMultimodalFutureStub().getWorkerStatus(request),
-                requestTimeoutMs,
-                ServiceType.MULTIMODAL_WORKER_STATUS);
-    }
-
-    /**
-     * Get multimodal cache status via gRPC (async)
-     */
-    public CompletableFuture<EngineRpcService.CacheStatusPB> getMultimodalCacheStatusAsync(
-            String ip, int port, EngineRpcService.CacheVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCallAsync(
-                ip,
-                port,
-                stub -> stub.getMultimodalFutureStub().getCacheStatus(request),
-                requestTimeoutMs,
-                ServiceType.MULTIMODAL_CACHE_STATUS);
-    }
-
-    /**
-     * Submit a batch of already-routed requests to a Prefill worker (async)
-     */
-    public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(
-            String ip, int port, EngineRpcService.EnqueueBatchRequestPB request) {
-        return batchEnqueueAsync(ip, port, request, enqueueTimeoutMillis);
-    }
-
-    public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(
-            String ip,
-            int port,
-            EngineRpcService.EnqueueBatchRequestPB request,
-            long requestTimeoutMs) {
-        // EnqueueBatch is not safe to replay after an ambiguous connection
-        // failure: the Engine may have accepted the first invocation even
-        // though its ACK was lost. Reconciliation is owned by the scheduler's
-        // request-id cancel fence, so this client must expose the ambiguity
-        // instead of issuing a second EnqueueBatch automatically.
-        return executeGrpcCallAsync(
-                ip,
-                port,
-                stub -> stub.getRpcServiceFutureStub().enqueueBatch(request),
-                requestTimeoutMs,
-                ServiceType.BATCH_ENQUEUE);
-    }
-
-    /** Protocol evidence only; the scheduler decides when request resources can be released. */
     public enum CancelReply {
         ACCEPTED, // Cancel intent accepted; execution may still be running.
         NOT_FOUND, // Request absent, without a fence against a racing Enqueue.
         REQUEST_FENCED, // Prefill rejects any later Enqueue for this request id.
         REQUEST_CLEANED, // Fence plus explicit downstream cleanup proof.
         FAILED // Unspecified or unrecognized protocol response; outcome is unknown.
-    }
-
-    /**
-     * Sends one cancellation attempt to the original Prefill using a detached gRPC context.
-     * Engines must support ordinary cancellation and report downstream cleanup results.
-     * Transport failures complete exceptionally; the caller owns retry and resource release.
-     */
-    public CompletableFuture<CancelReply> cancelAsync(
-            String ip, int port, EngineRpcService.CancelRequestPB request, long requestTimeoutMs) {
-        try {
-            checkArgument(
-                    ip != null && !ip.isBlank() && port > 0, "Cancel requires a routable Prefill");
-            checkArgument(request != null, "Cancel request is required");
-            Context detached = Context.current().fork();
-            Context previous = detached.attach();
-            try {
-                // A transport failure is not proof that Cancel was rejected; never replay it here.
-                return executeGrpcCallAsync(
-                                ip,
-                                port,
-                                stub -> stub.getRpcServiceFutureStub().cancel(request),
-                                Math.max(1, requestTimeoutMs),
-                                ServiceType.ENGINE_CANCEL)
-                        .thenApply(
-                                response ->
-                                        switch (response.getStatus()) {
-                                            case CANCEL_STATUS_ACCEPTED -> CancelReply.ACCEPTED;
-                                            case CANCEL_STATUS_NOT_FOUND -> CancelReply.NOT_FOUND;
-                                            case CANCEL_STATUS_TOMBSTONED ->
-                                                    response.getDecodeCleanupComplete()
-                                                            ? CancelReply.REQUEST_CLEANED
-                                                            : CancelReply.REQUEST_FENCED;
-                                            case CANCEL_STATUS_UNSPECIFIED, UNRECOGNIZED ->
-                                                    CancelReply.FAILED;
-                                        });
-            } finally {
-                detached.detach(previous);
-            }
-        } catch (RuntimeException | Error failure) {
-            return CompletableFuture.failedFuture(failure);
-        }
-    }
-
-    @Override
-    protected ManagedChannel createChannel(String channelKey) {
-        String[] parts = parseServiceKey(channelKey);
-        String ip = parts[0];
-        int port = Integer.parseInt(parts[1]);
-        int maxInboundMessageBytes =
-                ServiceType.MULTIMODAL_CACHE_STATUS.getSuffix().equals(parts[2])
-                        ? vitCacheMaxInboundMessageBytes
-                        : DEFAULT_MAX_INBOUND_MESSAGE_BYTES;
-        Logger.info("Creating new channel for ip: {}, port: {}", ip, port);
-        return NettyChannelBuilder.forAddress(ip, port)
-                .channelFactory(transportObserver::newChannel)
-                .withOption(ChannelOption.TCP_NODELAY, true)
-                .withOption(ChannelOption.SO_KEEPALIVE, true)
-                .withOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
-                // Connection timeout in milliseconds
-                .withOption(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeoutMillis)
-                // Write buffer water mark: prevents memory accumulation and pendingTasks buildup
-                .withOption(
-                        ChannelOption.WRITE_BUFFER_WATER_MARK,
-                        new WriteBufferWaterMark(64 * 1024, 128 * 1024))
-                // Receive/send buffer size
-                .withOption(ChannelOption.SO_RCVBUF, 512 * 1024)
-                .withOption(ChannelOption.SO_SNDBUF, 512 * 1024)
-                // ViT directory snapshots have a separate configurable message limit.
-                .maxInboundMessageSize(maxInboundMessageBytes)
-                // HTTP/2 initial flow control window: prevents transmission issues due to flow
-                // control
-                .initialFlowControlWindow(2 * 1024 * 1024)
-                // gRPC keepalive configuration: keeps connection active, prevents disconnection by
-                // intermediate devices
-                .keepAliveTime(2, TimeUnit.SECONDS)
-                .keepAliveTimeout(10, TimeUnit.SECONDS)
-                .keepAliveWithoutCalls(true)
-                .executor(executor)
-                .eventLoopGroup(eventLoopGroup)
-                .usePlaintext()
-                .proxyDetector(GrpcUtil.NOOP_PROXY_DETECTOR)
-                .intercept(GrpcCallTrace.INTERCEPTOR)
-                .disableRetry()
-                .build();
     }
 }

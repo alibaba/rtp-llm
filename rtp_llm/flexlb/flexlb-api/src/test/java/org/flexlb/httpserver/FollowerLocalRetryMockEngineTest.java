@@ -146,6 +146,13 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
                             .start();
         }
 
+        @Override
+        public void close() throws Exception {
+            server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+            forwarder.shutdown();
+            channelLoop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
+        }
+
         @SuppressWarnings("unchecked")
         void useBoundedConnectFailure(int port) {
             // A bound but non-listening socket can drop SYNs on macOS instead of
@@ -163,13 +170,6 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
                             org.springframework.test.util.ReflectionTestUtils.getField(
                                     forwarder, "channels");
             channels.put("127.0.0.1:" + port, channel);
-        }
-
-        @Override
-        public void close() throws Exception {
-            server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
-            forwarder.shutdown();
-            channelLoop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
         }
 
         String httpAddress() {

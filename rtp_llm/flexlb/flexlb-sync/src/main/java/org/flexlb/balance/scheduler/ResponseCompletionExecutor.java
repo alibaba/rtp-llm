@@ -23,7 +23,6 @@ import static org.flexlb.util.Failures.recover;
  * owns request arbitration, lock checks, deadlines and ACK reporting.
  */
 public final class ResponseCompletionExecutor implements AutoCloseable {
-
     private final ThreadLocal<Boolean> completing = new ThreadLocal<>();
     private final ThreadPoolExecutor completionWorkers;
 
@@ -32,6 +31,7 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
 
     // Registration's atomic phase owns exact release; the executor only needs a drain count.
     private final Object completionLock = new Object();
+
     private int pendingCompletions;
 
     ResponseCompletionExecutor(int configuredWorkers) {
@@ -49,6 +49,43 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
                         Thread.ofPlatform().daemon().name("response-completion-", 0).factory(),
                         new ThreadPoolExecutor.AbortPolicy());
         completionWorkers.prestartAllCoreThreads();
+    }
+
+    /** Stops registration, drains accepted completions and closes workers. */
+    @Override
+    public void close() {
+        if (isCompletingOnCurrentThread()) {
+            throw new IllegalStateException("response completion cannot wait for its own callback");
+        }
+        boolean interrupted = false;
+        try {
+            synchronized (completionLock) {
+                if (closeResult == null) {
+                    closeResult = new CompletableFuture<>();
+                }
+                while (pendingCompletions != 0) {
+                    try {
+                        completionLock.wait();
+                    } catch (InterruptedException interruption) {
+                        interrupted = true;
+                    }
+                }
+                // Drained workers no longer need this monitor. Serialize final
+                // closure so concurrent callers receive the same result.
+                if (!closeResult.isDone()) {
+                    finishClose();
+                }
+                Failures.rethrow(closeResult.join(), "response completion executor close failed");
+            }
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    public boolean isCompletingOnCurrentThread() {
+        return Boolean.TRUE.equals(completing.get());
     }
 
     boolean register() {
@@ -87,43 +124,6 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
         }
     }
 
-    public boolean isCompletingOnCurrentThread() {
-        return Boolean.TRUE.equals(completing.get());
-    }
-
-    /** Stops registration, drains accepted completions and closes workers. */
-    @Override
-    public void close() {
-        if (isCompletingOnCurrentThread()) {
-            throw new IllegalStateException("response completion cannot wait for its own callback");
-        }
-        boolean interrupted = false;
-        try {
-            synchronized (completionLock) {
-                if (closeResult == null) {
-                    closeResult = new CompletableFuture<>();
-                }
-                while (pendingCompletions != 0) {
-                    try {
-                        completionLock.wait();
-                    } catch (InterruptedException interruption) {
-                        interrupted = true;
-                    }
-                }
-                // Drained workers no longer need this monitor. Serialize final
-                // closure so concurrent callers receive the same result.
-                if (!closeResult.isDone()) {
-                    finishClose();
-                }
-                Failures.rethrow(closeResult.join(), "response completion executor close failed");
-            }
-        } finally {
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        }
-    }
-
     private void finishClose() {
         boolean interrupted = false;
         Throwable failure = null;
@@ -146,16 +146,10 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
         }
     }
 
-    /** One response execution owner, registered before Context freezes the selected outcome. */
+    /**
+     * One response execution owner, registered before Context freezes the selected outcome.
+     */
     static final class Registration implements AutoCloseable {
-        private enum Phase {
-            RESERVED,
-            SUBMITTED,
-            RUNNING,
-            COMPLETED,
-            CLOSED
-        }
-
         private final AtomicReference<Phase> phase = new AtomicReference<>(Phase.RESERVED);
         private final ResponseCompletionExecutor executor;
         final RequestContext owner;
@@ -164,6 +158,13 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
             this.owner = Objects.requireNonNull(owner);
             this.executor = executor;
             checkState(executor.register(), "frontend publication is closed");
+        }
+
+        @Override
+        public void close() {
+            if (phase.compareAndSet(Phase.RESERVED, Phase.CLOSED)) {
+                executor.release();
+            }
         }
 
         static Registration reserve(
@@ -202,18 +203,6 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
             return run(Phase.RESERVED, completion);
         }
 
-        private boolean run(Phase expected, BooleanSupplier completion) {
-            if (!phase.compareAndSet(expected, Phase.RUNNING)) {
-                return false;
-            }
-            try {
-                return executor.invoke(completion);
-            } finally {
-                phase.set(Phase.COMPLETED);
-                executor.release();
-            }
-        }
-
         void reject(Throwable failure) {
             if (phase.compareAndSet(Phase.SUBMITTED, Phase.CLOSED)) {
                 try {
@@ -239,27 +228,31 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
             };
         }
 
-        @Override
-        public void close() {
-            if (phase.compareAndSet(Phase.RESERVED, Phase.CLOSED)) {
+        private boolean run(Phase expected, BooleanSupplier completion) {
+            if (!phase.compareAndSet(expected, Phase.RUNNING)) {
+                return false;
+            }
+            try {
+                return executor.invoke(completion);
+            } finally {
+                phase.set(Phase.COMPLETED);
                 executor.release();
             }
         }
+
+        private enum Phase {
+            RESERVED,
+            SUBMITTED,
+            RUNNING,
+            COMPLETED,
+            CLOSED
+        }
     }
 
-    /** External writes remain synchronous and arbitrate through Scheduler; owned writes run outside Context. */
+    /**
+     * External writes remain synchronous and arbitrate through Scheduler; owned writes run outside Context.
+     */
     public static final class RequestFuture extends CompletableFuture<Response> {
-        public enum Completion {
-            RESPONSE,
-            FAILURE,
-            CANCELLATION
-        }
-
-        @FunctionalInterface
-        public interface CompletionTarget {
-            boolean complete(Completion completion, Response response, Throwable failure);
-        }
-
         private volatile CompletionTarget target;
 
         public RequestFuture(CompletionTarget target) {
@@ -307,6 +300,20 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
             } finally {
                 target = null;
             }
+        }
+
+        public enum Completion {
+            RESPONSE,
+            FAILURE,
+            CANCELLATION
+        }
+
+        /**
+         * Routes a future completion attempt through the request completion owner.
+         */
+        @FunctionalInterface
+        public interface CompletionTarget {
+            boolean complete(Completion completion, Response response, Throwable failure);
         }
     }
 }

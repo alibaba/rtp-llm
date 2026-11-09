@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 
 import java.util.Comparator;
 import java.util.List;
@@ -32,16 +32,17 @@ public final class PrefillCleanupDeadlockFixture {
                     clock::get);
     private final EndpointRetirementTestSupport generation =
             new EndpointRetirementTestSupport(() -> {});
-    private final RouteExecution next;
+    private final RouteResult next;
 
     public PrefillCleanupDeadlockFixture(long requestId, boolean batch) {
-        RouteExecution first = item(requestId);
+        RouteResult first = item(requestId);
         next = item(requestId + 1);
         if (batch) {
             enqueue(first);
             {
-                var reservation = state.reserveBatch(1L, 2).value();
-                try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                var reservation =
+                        new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(1L, 2);
+                {
                     assertNotNull(reservation);
                     {
                         var handoff =
@@ -54,13 +55,16 @@ public final class PrefillCleanupDeadlockFixture {
             }
         } else {
             {
-                var reservation = state.reserveUnqueuedRoute(first, 20L, 0L).value();
+                var reservation =
+                        org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                        state, first, 20L, 0L)
+                                .value();
                 try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                     assertNotNull(reservation);
                     {
                         var handoff =
                                 org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                        state, first, reservation);
+                                        state, first);
 
                         assertNotNull(handoff);
                     }
@@ -83,14 +87,15 @@ public final class PrefillCleanupDeadlockFixture {
 
     public void reserveNextBatch() {
         {
-            var reservation = state.reserveBatch(2L, 2).value();
-            try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+            var reservation =
+                    new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(2L, 2);
+            {
                 assertNotNull(reservation);
             }
         }
     }
 
-    private void enqueue(RouteExecution item) {
+    private void enqueue(RouteResult item) {
         runWithStateLock(
                 lock,
                 () -> {
@@ -100,8 +105,8 @@ public final class PrefillCleanupDeadlockFixture {
                 });
     }
 
-    private static RouteExecution item(long id) {
-        RouteExecution item = mock(RouteExecution.class);
+    private static RouteResult item(long id) {
+        RouteResult item = mock(RouteResult.class);
         when(item.requestId()).thenReturn(String.valueOf(id));
         when(item.seqLen()).thenReturn(100L);
         return item;

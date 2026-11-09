@@ -77,7 +77,6 @@ import static org.mockito.Mockito.when;
  * participates in the discovery/registration decision path.
  */
 class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String PREFILL_DOMAIN = "mock.prefill.hosts.address";
     private static final String DECODE_DOMAIN = "mock.decode.hosts.address";
@@ -89,7 +88,6 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     private static final long CONVERGENCE_CAP_MS = 10_000L;
 
     @TempDir Path tempDir;
-
     private MockPrefillWorker workerB;
     private MockPrefillWorker workerC;
     private Path discoveryFile;
@@ -99,8 +97,55 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     private EngineHealthReporter healthReporter;
     private ScheduledExecutorService syncScheduler;
     private ExecutorService statusCheckExecutor;
+
     private final AtomicInteger routerCounter = new AtomicInteger();
     private final AtomicLong requestIdCounter = new AtomicLong(810_000L);
+
+    // ════════════════════════════════════════════════════════════════
+    //  Round-robin router over the LIVE endpoint set
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * Route each request to the next live prefill endpoint from the
+     * {@code EndpointRegistry} — the set the discovery pipeline maintains —
+     * so additions and evictions are reflected in routing immediately.
+     */
+    @Override
+    protected RequestRouteSelector createRouter() {
+        RequestRouteSelector roundRobin = mock(RequestRouteSelector.class);
+        when(roundRobin.select(any(RequestContext.class), any()))
+                .thenAnswer(
+                        inv -> {
+                            RequestContext ctx = inv.getArgument(0);
+                            List<String> candidates =
+                                    new ArrayList<>(
+                                            endpointRegistry.endpointAddressSnapshot(
+                                                    RoleType.PREFILL));
+                            if (candidates.isEmpty()) {
+                                Response empty = new Response();
+                                empty.setSuccess(false);
+                                return PlacementResult.rejected(empty);
+                            }
+                            Collections.sort(candidates);
+                            String chosen =
+                                    candidates.get(
+                                            routerCounter.getAndIncrement() % candidates.size());
+                            var worker = endpointRegistry.get(RoleType.PREFILL, chosen).getStatus();
+                            String ip = worker.getIp();
+                            int httpPort = worker.getPort();
+                            // routeResult() pins the exact worker generations. The scheduler
+                            // reserves Decode capacity before publishing the Prefill queue entry;
+                            // the batcher later acquires a permit against that exact reservation.
+                            return routeResult(
+                                    ctx,
+                                    routeResponse(
+                                            Long.parseLong(ctx.data().getRequestId()),
+                                            ip,
+                                            httpPort,
+                                            httpPort + 1));
+                        });
+        return roundRobin;
+    }
 
     @BeforeEach
     void setUpFileDiscoveryPipeline() throws Exception {
@@ -356,52 +401,6 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         } catch (java.nio.file.AtomicMoveNotSupportedException e) {
             Files.move(tmp, discoveryFile, StandardCopyOption.REPLACE_EXISTING);
         }
-    }
-
-    // ════════════════════════════════════════════════════════════════
-    //  Round-robin router over the LIVE endpoint set
-    // ════════════════════════════════════════════════════════════════
-
-    /**
-     * Route each request to the next live prefill endpoint from the
-     * {@code EndpointRegistry} — the set the discovery pipeline maintains —
-     * so additions and evictions are reflected in routing immediately.
-     */
-    @Override
-    protected RequestRouteSelector createRouter() {
-        RequestRouteSelector roundRobin = mock(RequestRouteSelector.class);
-        when(roundRobin.select(any(RequestContext.class), any()))
-                .thenAnswer(
-                        inv -> {
-                            RequestContext ctx = inv.getArgument(0);
-                            List<String> candidates =
-                                    new ArrayList<>(
-                                            endpointRegistry.endpointAddressSnapshot(
-                                                    RoleType.PREFILL));
-                            if (candidates.isEmpty()) {
-                                Response empty = new Response();
-                                empty.setSuccess(false);
-                                return PlacementResult.rejected(empty);
-                            }
-                            Collections.sort(candidates);
-                            String chosen =
-                                    candidates.get(
-                                            routerCounter.getAndIncrement() % candidates.size());
-                            var worker = endpointRegistry.get(RoleType.PREFILL, chosen).getStatus();
-                            String ip = worker.getIp();
-                            int httpPort = worker.getPort();
-                            // routeResult() pins the exact worker generations. The scheduler
-                            // reserves Decode capacity before publishing the Prefill queue entry;
-                            // the batcher later acquires a permit against that exact reservation.
-                            return routeResult(
-                                    ctx,
-                                    routeResponse(
-                                            Long.parseLong(ctx.data().getRequestId()),
-                                            ip,
-                                            httpPort,
-                                            httpPort + 1));
-                        });
-        return roundRobin;
     }
 
     private Response routeResponse(

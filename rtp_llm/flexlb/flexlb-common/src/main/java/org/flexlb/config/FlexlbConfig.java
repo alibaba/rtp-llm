@@ -14,10 +14,10 @@ import static com.google.common.base.Preconditions.checkState;
 @Getter
 @Setter
 public final class FlexlbConfig {
-
     public static final int CURRENT_SCHEMA_VERSION = 3;
 
     private int schemaVersion = CURRENT_SCHEMA_VERSION;
+
     private SchedulerConfig scheduler = new SchedulerConfig();
     private DispatcherConfig dispatcher = new DispatcherConfig();
     private RequestLifecycleConfig requestLifecycle = new RequestLifecycleConfig();
@@ -29,6 +29,7 @@ public final class FlexlbConfig {
     private CacheMatchingConfig cacheMatching = new LocalSyncCacheMatchingConfig();
     private OptimizerRuntimeConfig optimizer = new OptimizerRuntimeConfig();
     private ConsistencyConfig consistency = new NoConsistencyConfig();
+
     private boolean enableFallback;
     private long fallbackBatchTokenCapacity = 1_048_576L;
 
@@ -45,16 +46,6 @@ public final class FlexlbConfig {
     @JsonIgnore
     public boolean isDirect() {
         return scheduler.getType() == SchedulerConfig.Type.DIRECT;
-    }
-
-    @JsonIgnore
-    public boolean isQueue() {
-        return scheduler.getType() == SchedulerConfig.Type.QUEUE;
-    }
-
-    @JsonIgnore
-    public boolean isPriorityOrdering() {
-        return isQueue() && scheduler.getOrdering().getType() == QueueOrderingConfig.Type.PRIORITY;
     }
 
     @JsonIgnore
@@ -88,6 +79,16 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
+    public boolean isPriorityOrdering() {
+        return isQueue() && scheduler.getOrdering().getType() == QueueOrderingConfig.Type.PRIORITY;
+    }
+
+    @JsonIgnore
+    public boolean isQueue() {
+        return scheduler.getType() == SchedulerConfig.Type.QUEUE;
+    }
+
+    @JsonIgnore
     public long resolveExpiresAtMs(long startTime) {
         return isQueue() ? scheduler.resolveExpiresAtMs(startTime) : Long.MAX_VALUE;
     }
@@ -104,16 +105,16 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
+    public SchedulerConfig queueScheduler() {
+        checkState(isQueue(), "queue scheduler configuration is not active");
+        return scheduler;
+    }
+
+    @JsonIgnore
     public boolean isFixedWindowDecision() {
         return isQueue()
                 && queueScheduler().getDecision().getType()
                         == DecisionPolicyConfig.Type.FIXED_WINDOW;
-    }
-
-    @JsonIgnore
-    public SchedulerConfig queueScheduler() {
-        checkState(isQueue(), "queue scheduler configuration is not active");
-        return scheduler;
     }
 
     @JsonIgnore

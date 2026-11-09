@@ -25,6 +25,10 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 
+/**
+ * Checks response registration executes at most once across rejected submission, late tasks and shutdown.
+ * Closing must wait for accepted callbacks without allowing a callback to wait on itself.
+ */
 @Timeout(15)
 class ResponseCompletionExecutorTest {
     @Test
@@ -226,19 +230,22 @@ class ResponseCompletionExecutorTest {
         }
     }
 
+    /**
+     * Retains the original response worker pool while tests replace submission behavior, then restores and closes it for cleanup.
+     */
     private static final class Fixture implements AutoCloseable {
         private final ResponseCompletionExecutor executor = new ResponseCompletionExecutor(1);
         private final ThreadPoolExecutor primary =
                 (ThreadPoolExecutor) ReflectionTestUtils.getField(executor, "completionWorkers");
 
-        private void restore() {
-            ReflectionTestUtils.setField(executor, "completionWorkers", primary);
-        }
-
         @Override
         public void close() {
             restore();
             executor.close();
+        }
+
+        private void restore() {
+            ReflectionTestUtils.setField(executor, "completionWorkers", primary);
         }
     }
 }

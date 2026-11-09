@@ -9,8 +9,11 @@ import java.util.List;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Immutable formula evaluator shared by single-request and batch predictions.
- * Endpoints with equal configured expressions share a model identity; learning only records samples. */
+/**
+ * Evaluates one immutable parsed Prefill formula for single requests or batches, including per-item
+ * sums and batch-wide features. Shared expression identity permits prediction reuse; learning
+ * records eligible completion samples without replacing this evaluator.
+ */
 public class FormulaPredictor implements PrefillTimePredictor, PrefillTimePredictor.Evaluator {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
@@ -73,9 +76,10 @@ public class FormulaPredictor implements PrefillTimePredictor, PrefillTimePredic
         return LearningResult.MODEL_UNCHANGED;
     }
 
-    /** Thread-local scalar bindings; immutable items supply aggregate bindings directly. */
+    /**
+     * Thread-local scalar bindings; immutable items supply aggregate bindings directly.
+     */
     static final class PrefillTimeVariableBindings {
-
         private static final ThreadLocal<BindingContext> BINDING_CTX =
                 ThreadLocal.withInitial(BindingContext::new);
 
@@ -121,28 +125,6 @@ public class FormulaPredictor implements PrefillTimePredictor, PrefillTimePredic
             return ctx.topLevelVars;
         }
 
-        static final class AppendBindings {
-            final double[] batch = new double[PrefillTimeFormula.VAR_COUNT];
-            final double[] item = new double[PrefillTimeFormula.VAR_COUNT];
-            private long totalInput, totalHit, maxInput, maxCompute;
-            private int count;
-
-            void append(long seqLen, long hitCache) {
-                checkArgument(
-                        seqLen >= 0 && hitCache >= 0 && hitCache <= seqLen,
-                        "Invalid request token counts");
-                fillRequestVars(item, seqLen, hitCache);
-                long input = (long) item[PrefillTimeFormula.IDX_INPUT_TOKENS];
-                long hit = (long) item[PrefillTimeFormula.IDX_HIT_CACHE_TOKENS];
-                totalInput += input;
-                totalHit += hit;
-                maxInput = Math.max(maxInput, input);
-                maxCompute = Math.max(maxCompute, input - hit);
-                batch[PrefillTimeFormula.IDX_BATCH_SIZE] = ++count;
-                fillBatchVars(batch, totalInput, totalHit, maxInput, maxCompute);
-            }
-        }
-
         private static void fillBatchVars(
                 double[] vars,
                 long totalInputTokens,
@@ -166,6 +148,31 @@ public class FormulaPredictor implements PrefillTimePredictor, PrefillTimePredic
             vars[PrefillTimeFormula.IDX_HIT_CACHE_TOKENS] = hitCacheTokens;
             vars[PrefillTimeFormula.IDX_COMPUTE_TOKENS] = totalTokens - hitCacheTokens;
             vars[PrefillTimeFormula.IDX_HAS_HIT_CACHE] = hitCacheTokens > 0 ? 1.0 : 0.0;
+        }
+
+        /**
+         * Updates formula inputs incrementally as requests are appended to a predicted batch.
+         */
+        static final class AppendBindings {
+            final double[] batch = new double[PrefillTimeFormula.VAR_COUNT];
+            final double[] item = new double[PrefillTimeFormula.VAR_COUNT];
+            private long totalInput, totalHit, maxInput, maxCompute;
+            private int count;
+
+            void append(long seqLen, long hitCache) {
+                checkArgument(
+                        seqLen >= 0 && hitCache >= 0 && hitCache <= seqLen,
+                        "Invalid request token counts");
+                fillRequestVars(item, seqLen, hitCache);
+                long input = (long) item[PrefillTimeFormula.IDX_INPUT_TOKENS];
+                long hit = (long) item[PrefillTimeFormula.IDX_HIT_CACHE_TOKENS];
+                totalInput += input;
+                totalHit += hit;
+                maxInput = Math.max(maxInput, input);
+                maxCompute = Math.max(maxCompute, input - hit);
+                batch[PrefillTimeFormula.IDX_BATCH_SIZE] = ++count;
+                fillBatchVars(batch, totalInput, totalHit, maxInput, maxCompute);
+            }
         }
 
         static final class BindingContext {

@@ -8,11 +8,29 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
+import java.util.function.Function;
 import java.util.function.LongSupplier;
 
-/** Synchronous recommendation only; the caller validates identity and acquires resources. */
+/**
+ * Ranks Prefill candidates and coordinates registration of the selected request impact.
+ */
 public interface PrefillSelectionStrategy {
-    /** Synchronous snapshot access; only the selected input identity may be retained in the result. */
+    /**
+     * Rank candidates and register the winner. Refresh only conflicting candidates before retrying.
+     * SUCCESS guarantees that the registration callback returned REGISTERED.
+     */
+    <I extends CandidateInput> PlacementResult<Selection<I>, PlacementKey> selectAndRegister(
+            Request request,
+            SchedulingMetadata metadata,
+            RoleType role,
+            String group,
+            List<I> inputs,
+            LongSupplier clock,
+            Function<Selection<I>, PlacementResult.Registration> register);
+
+    /**
+     * Synchronous snapshot access; only the selected input identity may be retained in the result.
+     */
     interface CandidateInput {
         String address();
 
@@ -28,7 +46,9 @@ public interface PrefillSelectionStrategy {
 
         RequestTimeEstimation.Inputs projectionInputs();
 
-        /** Read-only current capacity. Selection never reserves a slot. */
+        /**
+         * Read-only capacity probe; registration is a separate atomic endpoint operation.
+         */
         boolean requestCapacityAvailable();
 
         /** Exact priority counts, read only on a capacity failure. */
@@ -60,13 +80,6 @@ public interface PrefillSelectionStrategy {
             String affinityReason,
             int workerCount,
             I input,
-            org.flexlb.cache.domain.CacheMatchResult cacheMatches) {}
-
-    <I extends CandidateInput> PlacementResult<Selection<I>, PlacementKey> select(
-            Request request,
-            SchedulingMetadata metadata,
-            RoleType role,
-            String group,
-            List<I> inputs,
-            LongSupplier clock);
+            org.flexlb.cache.domain.CacheMatchResult cacheMatches,
+            RequestTimeEstimation.Inputs projectionInputs) {}
 }

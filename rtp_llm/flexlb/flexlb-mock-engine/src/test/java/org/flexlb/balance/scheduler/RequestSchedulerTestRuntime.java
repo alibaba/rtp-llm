@@ -2,9 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.eviction.DefaultDecodePreemption;
@@ -29,9 +27,10 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 
-/** Test-only composition root for mock-engine end-to-end scheduler tests. */
+/**
+ * Test-only composition root for mock-engine end-to-end scheduler tests.
+ */
 public final class RequestSchedulerTestRuntime implements AutoCloseable {
-
     private final RequestRepository requests = new RequestRepository();
     private final PlacementAvailability placementAvailability = new PlacementAvailability();
     private final BindingRouter router;
@@ -40,19 +39,11 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final AbstractRequestScheduler scheduler;
     private final AbstractRequestScheduler entry;
     private final SchedulerTestServices runtime;
+
     private volatile boolean deliveryPaused;
+
     private final java.util.Set<Runnable> deliveryListeners =
             new java.util.concurrent.CopyOnWriteArraySet<>();
-
-    /** Pause only new delivery admission; accepted batches and remote ACKs still execute normally. */
-    public void pauseDelivery() {
-        deliveryPaused = true;
-    }
-
-    public void resumeDelivery() {
-        deliveryPaused = false;
-        deliveryListeners.forEach(Runnable::run);
-    }
 
     public RequestSchedulerTestRuntime(
             ConfigService configService,
@@ -149,6 +140,16 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         scheduler.start();
     }
 
+    /** Pause only new delivery admission; accepted batches and remote ACKs still execute normally. */
+    public void pauseDelivery() {
+        deliveryPaused = true;
+    }
+
+    public void resumeDelivery() {
+        deliveryPaused = false;
+        deliveryListeners.forEach(Runnable::run);
+    }
+
     public RequestRepository requestRegistry() {
         return requests;
     }
@@ -185,36 +186,26 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             throw new IllegalArgumentException("successful fixture route has no worker metadata");
         }
 
-        RouteResult.Builder route = new RouteResult.Builder(context);
-        try {
-            for (ServerStatus status : response.getServerStatus()) {
-                if (status == null) {
-                    continue;
-                }
-                String address = status.getLogicalIpPort();
-                var selectedEndpoint = registry.selectEndpoint(status.getRole(), address);
-                if (selectedEndpoint == null) {
-                    throw new IllegalStateException(
-                            "fixture route references an unpublished endpoint: " + address);
-                }
-                long version =
-                        selectedEndpoint instanceof PrefillEndpoint prefill
-                                ? prefill.progress().ownershipVersion()
-                                : selectedEndpoint instanceof DecodeEndpoint decode
-                                        ? decode.placementVersion()
-                                        : 0L;
-                route.add(
-                        selectedEndpoint,
-                        status,
-                        status.getRole().supportsPrefill()
-                                ? Math.max(0L, status.getPrefillTime())
-                                : -1L,
-                        version);
+        var roles = new java.util.ArrayList<RoleSelection>();
+        for (ServerStatus status : response.getServerStatus()) {
+            if (status == null) {
+                continue;
             }
-            return PlacementResult.success(route.prepare());
-        } catch (RuntimeException | Error failure) {
-            throw failure;
+            String address = status.getLogicalIpPort();
+            var selectedEndpoint = registry.selectEndpoint(status.getRole(), address);
+            if (selectedEndpoint == null) {
+                throw new IllegalStateException(
+                        "fixture route references an unpublished endpoint: " + address);
+            }
+            roles.add(
+                    SelectionTestSupport.metadata(
+                            selectedEndpoint,
+                            status,
+                            status.getRole().supportsPrefill()
+                                    ? Math.max(0L, status.getPrefillTime())
+                                    : -1L));
         }
+        return SchedulerTestServices.registerSelection(context, roles);
     }
 
     /** Apply a newer worker status or refresh liveness from a same-version heartbeat. */
@@ -261,9 +252,19 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     @Override
     public void close() {
         decodePreemption.stopAdmission();
-        runtime.shutdown(ShutdownMode.DRAIN, Duration.ofSeconds(30L));
+        // The harness stops worker feedback before closing, so queued work cannot drain.
+        runtime.shutdown(ShutdownMode.IMMEDIATE, Duration.ofSeconds(30L));
     }
 
+    private static ModelMetaConfig emptyModelMeta() {
+        ModelMetaConfig meta = org.mockito.Mockito.mock(ModelMetaConfig.class);
+        org.mockito.Mockito.when(meta.requiredRoles()).thenReturn(List.of());
+        return meta;
+    }
+
+    /**
+     * Binds one router after the runtime is assembled, then delegates selection and blocked-endpoint queries.
+     */
     private static final class BindingRouter extends RequestRouteSelector {
         private RequestRouteSelector delegate;
 
@@ -290,6 +291,26 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     emptyModelMeta());
         }
 
+        @Override
+        public PlacementResult<RouteResult, PlacementKey> select(
+                RequestContext context, String policyGroup) {
+            return requireBound().select(context, policyGroup);
+        }
+
+        @Override
+        WorkerEndpoint blockedEndpoint(PlacementKey key) {
+            return requireBound().blockedEndpoint(key);
+        }
+
+        @Override
+        PlacementResult<RouteResult, PlacementKey> select(
+                RequestContext context,
+                String group,
+                org.flexlb.balance.endpoint.DecodeEndpoint endpoint,
+                org.flexlb.balance.endpoint.DecodeResources.RequestReservation reservation) {
+            return requireBound().select(context, group, endpoint, reservation);
+        }
+
         private synchronized void bind(RequestRouteSelector exactRouter) {
             Objects.requireNonNull(exactRouter, "exactRouter");
             if (delegate != null) {
@@ -298,23 +319,11 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             delegate = exactRouter;
         }
 
-        @Override
-        public PlacementResult<RouteResult, PlacementKey> select(
-                RequestContext context, String policyGroup) {
-            return requireBound().select(context, policyGroup);
-        }
-
         private synchronized RequestRouteSelector requireBound() {
             if (delegate == null) {
                 throw new IllegalStateException("test router is not bound");
             }
             return delegate;
         }
-    }
-
-    private static ModelMetaConfig emptyModelMeta() {
-        ModelMetaConfig meta = org.mockito.Mockito.mock(ModelMetaConfig.class);
-        org.mockito.Mockito.when(meta.requiredRoles()).thenReturn(List.of());
-        return meta;
     }
 }

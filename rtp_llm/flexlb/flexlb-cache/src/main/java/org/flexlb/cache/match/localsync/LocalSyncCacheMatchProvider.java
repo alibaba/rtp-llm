@@ -26,7 +26,6 @@ import java.util.Set;
 @Component
 public class LocalSyncCacheMatchProvider
         implements CacheMatchProvider, EngineAddressResolver.Listener {
-
     private final KvCacheManager kvCacheManager;
     private final CacheMetricsReporter cacheMetricsReporter;
 
@@ -108,16 +107,16 @@ public class LocalSyncCacheMatchProvider
         }
     }
 
+    public void removeEngineBlockCache(String engineIpPort) {
+        kvCacheManager.removeEngineCache(engineIpPort);
+    }
+
     private void reportUpdateTime(String address, String role, long startTime, String success) {
         org.flexlb.metric.SafeFlexMonitor.run(
                 "cache.update",
                 () ->
                         cacheMetricsReporter.reportUpdateEngineBlockCacheRT(
                                 address, role, startTime, success));
-    }
-
-    public void removeEngineBlockCache(String engineIpPort) {
-        kvCacheManager.removeEngineCache(engineIpPort);
     }
 
     private WorkerCacheUpdateResult buildSuccessResult(

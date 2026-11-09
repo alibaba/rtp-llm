@@ -21,15 +21,16 @@ import static com.google.common.base.Preconditions.checkState;
  * a separate ordered index and share the scan budget with forward progress.</p>
  */
 public final class OrderedRequestQueue implements PlacementQueue {
-
     private static final int PRIORITY_LEVELS = PriorityNormalizer.MAX_PRIORITY + 1;
 
     private final boolean priorityOrdering;
+
     private final Comparator<GlobalQueueEntry> order;
     private final NavigableSet<GlobalQueueEntry> readyRetries;
     private final Bucket[] buckets;
     private final BitSet pendingPriorities = new BitSet(PRIORITY_LEVELS);
     private final int[] priorityCounts = new int[PRIORITY_LEVELS];
+
     private int size;
     private long nextSequence;
 
@@ -46,26 +47,6 @@ public final class OrderedRequestQueue implements PlacementQueue {
     public void add(GlobalQueueEntry entry) {
         entry.sequence = ++nextSequence;
         insert(entry, false);
-    }
-
-    /** FIFO uses bucket zero; PRIORITY uses the request's priority as its bucket. */
-    private int bucketIndex(GlobalQueueEntry entry) {
-        return priorityOrdering ? entry.priority() : 0;
-    }
-
-    private void insert(GlobalQueueEntry entry, boolean restoring) {
-        int index = bucketIndex(entry);
-        Bucket bucket = buckets[index];
-        if (bucket == null) {
-            buckets[index] = bucket = new Bucket();
-        }
-        bucket.insert(entry, restoring);
-        size++;
-        priorityCounts[entry.priority()]++;
-        if (bucket.nextToScan == null || entry.sequence < bucket.nextToScan.sequence) {
-            bucket.nextToScan = entry;
-        }
-        pendingPriorities.set(index);
     }
 
     public int[] priorityCounts() {
@@ -132,6 +113,22 @@ public final class OrderedRequestQueue implements PlacementQueue {
         readyRetries.add(entry);
     }
 
+    public List<GlobalQueueEntry> drain() {
+        List<GlobalQueueEntry> entries = new ArrayList<>(size);
+        for (Bucket bucket : buckets) {
+            if (bucket == null) {
+                continue;
+            }
+            while (bucket.head != null) {
+                GlobalQueueEntry entry = bucket.head;
+                remove(entry);
+                entries.add(entry);
+            }
+        }
+        checkState(size == 0, "ordered queue drain left active entries");
+        return entries;
+    }
+
     public boolean remove(GlobalQueueEntry entry) {
         if (entry.removed) {
             return false;
@@ -150,25 +147,29 @@ public final class OrderedRequestQueue implements PlacementQueue {
         return true;
     }
 
-    public List<GlobalQueueEntry> drain() {
-        List<GlobalQueueEntry> entries = new ArrayList<>(size);
-        for (Bucket bucket : buckets) {
-            if (bucket == null) {
-                continue;
-            }
-            while (bucket.head != null) {
-                GlobalQueueEntry entry = bucket.head;
-                remove(entry);
-                entries.add(entry);
-            }
-        }
-        checkState(size == 0, "ordered queue drain left active entries");
-        return entries;
-    }
-
     @Override
     public Comparator<GlobalQueueEntry> order() {
         return order;
+    }
+
+    private void insert(GlobalQueueEntry entry, boolean restoring) {
+        int index = bucketIndex(entry);
+        Bucket bucket = buckets[index];
+        if (bucket == null) {
+            buckets[index] = bucket = new Bucket();
+        }
+        bucket.insert(entry, restoring);
+        size++;
+        priorityCounts[entry.priority()]++;
+        if (bucket.nextToScan == null || entry.sequence < bucket.nextToScan.sequence) {
+            bucket.nextToScan = entry;
+        }
+        pendingPriorities.set(index);
+    }
+
+    /** FIFO uses bucket zero; PRIORITY uses the request's priority as its bucket. */
+    private int bucketIndex(GlobalQueueEntry entry) {
+        return priorityOrdering ? entry.priority() : 0;
     }
 
     private static final class Bucket {

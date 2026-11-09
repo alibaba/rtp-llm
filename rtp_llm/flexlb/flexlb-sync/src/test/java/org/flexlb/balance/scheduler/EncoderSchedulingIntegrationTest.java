@@ -49,7 +49,19 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Exercises Encoder selection, admission limits, and capacity wakeups through the request schedulers.
+ */
 class EncoderSchedulingIntegrationTest {
+    private final ConfigService configService = mock(ConfigService.class);
+    private final EndpointRegistry endpoints = mock(EndpointRegistry.class);
+    private final List<EncoderEndpoint> workers = new CopyOnWriteArrayList<>();
+    private final PlacementAvailability availability = new PlacementAvailability();
+
+    private AbstractRequestScheduler lifecycle;
+    private RequestRepository requests;
+    private FlexlbConfig config;
+
     @ParameterizedTest
     @CsvSource({"false,false", "false,true", "true,false", "true,true"})
     void cancellationDuringEncoderCommitRejectsDeliveryAndReleasesAdmission(
@@ -62,7 +74,7 @@ class EncoderSchedulingIntegrationTest {
         var resume = new java.util.concurrent.CountDownLatch(1);
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            RouteExecution route = call.getArgument(0);
+                            RouteResult route = call.getArgument(0);
                             assertFalse(Thread.holdsLock(route.ctx()));
                             boolean committed = !beforeCommit && (boolean) call.callRealMethod();
                             entered.countDown();
@@ -113,7 +125,7 @@ class EncoderSchedulingIntegrationTest {
         var resume = new java.util.concurrent.CountDownLatch(1);
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            RouteExecution route = call.getArgument(0);
+                            RouteResult route = call.getArgument(0);
                             assertFalse(Thread.holdsLock(route.ctx()));
                             boolean committed = !beforeCommit && (boolean) call.callRealMethod();
                             entered.countDown();
@@ -163,7 +175,7 @@ class EncoderSchedulingIntegrationTest {
                                 return call.callRealMethod();
                             })
                     .when(lifecycle)
-                    .beginRoute(any());
+                    .placementFor(any());
         } else {
             org.mockito.Mockito.doAnswer(
                             call -> {
@@ -179,14 +191,6 @@ class EncoderSchedulingIntegrationTest {
         assertEquals(1L, replacement.get().requestCount());
     }
 
-    private final ConfigService configService = mock(ConfigService.class);
-    private final EndpointRegistry endpoints = mock(EndpointRegistry.class);
-    private final List<EncoderEndpoint> workers = new CopyOnWriteArrayList<>();
-    private final PlacementAvailability availability = new PlacementAvailability();
-    private AbstractRequestScheduler lifecycle;
-    private RequestRepository requests;
-    private FlexlbConfig config;
-
     @BeforeEach
     void setUp() {
         when(endpoints.encoderRoutingSnapshot()).thenAnswer(call -> List.copyOf(workers));
@@ -201,46 +205,6 @@ class EncoderSchedulingIntegrationTest {
                                         .findFirst()
                                         .orElse(null));
         configure(false, 1, List.of(RoleType.ENCODER));
-    }
-
-    private void configure(boolean queue, int limit, List<RoleType> roles) {
-        configure(queue, limit, roles, true);
-    }
-
-    private void configure(boolean queue, int limit, List<RoleType> roles, boolean start) {
-        if (lifecycle != null) stop();
-        config = SchedulingTestConfig.batchConfig();
-        if (queue) SchedulingTestConfig.useFifoQueue(config);
-        else config.setScheduler(org.flexlb.config.ConfigTestSupport.direct());
-        SchedulingTestConfig.useNonBatchDispatcher(config);
-        config.getDispatcher().setMaxInflightPerEncoderWorker(limit);
-        when(configService.loadBalanceConfig()).thenReturn(config);
-        var model = mock(ModelMetaConfig.class);
-        when(model.requiredRoles()).thenReturn(roles);
-        var selector =
-                new RequestRouteSelector(
-                        endpoints,
-                        mock(PrefillSelectionStrategy.class),
-                        mock(DecodeSelectionStrategy.class),
-                        mock(VitSelectionStrategy.class),
-                        new EncoderStrategy(),
-                        mock(CacheAwareService.class),
-                        null,
-                        mock(EngineHealthReporter.class),
-                        mock(CacheMetricsReporter.class),
-                        configService,
-                        model);
-        lifecycle =
-                SchedulerTestSupport.create(
-                        configService,
-                        mock(DeliveryMetricsReporter.class),
-                        mock(RequestSchedulerReporter.class),
-                        mock(TheoryCacheHitReporter.class),
-                        selector,
-                        mock(DecodePreemption.class),
-                        availability,
-                        start);
-        requests = SchedulerTestSupport.repository(lifecycle);
     }
 
     @AfterEach
@@ -393,14 +357,50 @@ class EncoderSchedulingIntegrationTest {
                 pending.get(2, TimeUnit.SECONDS).getCode());
     }
 
-    private CompletableFuture<Response> submit(long id, long tokens, Long hit) {
-        return lifecycle.submit(context(Long.toString(id), tokens, hit));
+    private void configure(boolean queue, int limit, List<RoleType> roles) {
+        configure(queue, limit, roles, true);
     }
 
-    private static String selected(CompletableFuture<Response> future) throws Exception {
-        var result = future.get(2, TimeUnit.SECONDS);
-        assertTrue(result.isSuccess(), result.getErrorMessage());
-        return result.getServerStatus().getFirst().getServerIp();
+    private void configure(boolean queue, int limit, List<RoleType> roles, boolean start) {
+        if (lifecycle != null) stop();
+        config = SchedulingTestConfig.batchConfig();
+        if (queue) SchedulingTestConfig.useFifoQueue(config);
+        else config.setScheduler(org.flexlb.config.ConfigTestSupport.direct());
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        config.getDispatcher().setMaxInflightPerEncoderWorker(limit);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        var model = mock(ModelMetaConfig.class);
+        when(model.requiredRoles()).thenReturn(roles);
+        var selector =
+                new RequestRouteSelector(
+                        endpoints,
+                        mock(
+                                PrefillSelectionStrategy.class,
+                                org.mockito.Mockito.CALLS_REAL_METHODS),
+                        mock(DecodeSelectionStrategy.class, org.mockito.Mockito.CALLS_REAL_METHODS),
+                        mock(VitSelectionStrategy.class),
+                        new EncoderStrategy(),
+                        mock(CacheAwareService.class),
+                        null,
+                        mock(EngineHealthReporter.class),
+                        mock(CacheMetricsReporter.class),
+                        configService,
+                        model);
+        lifecycle =
+                SchedulerTestSupport.create(
+                        configService,
+                        mock(DeliveryMetricsReporter.class),
+                        mock(RequestSchedulerReporter.class),
+                        mock(TheoryCacheHitReporter.class),
+                        selector,
+                        mock(DecodePreemption.class),
+                        availability,
+                        start);
+        requests = SchedulerTestSupport.repository(lifecycle);
+    }
+
+    private CompletableFuture<Response> submit(long id, long tokens, Long hit) {
+        return lifecycle.submit(context(Long.toString(id), tokens, hit));
     }
 
     private RequestContext context(String id, long tokens, Long hit) {
@@ -419,6 +419,12 @@ class EncoderSchedulingIntegrationTest {
                 .setSchedulingMetadata(
                         SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));
         return context;
+    }
+
+    private static String selected(CompletableFuture<Response> future) throws Exception {
+        var result = future.get(2, TimeUnit.SECONDS);
+        assertTrue(result.isSuccess(), result.getErrorMessage());
+        return result.getServerStatus().getFirst().getServerIp();
     }
 
     private EncoderEndpoint worker(

@@ -39,7 +39,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
-/** Planning input changes are independent from locally owned request/work changes. */
+/**
+ * Planning input changes are independent from locally owned request/work changes.
+ */
 class PrefillPlanningInputChangeTest {
 
     @ParameterizedTest
@@ -131,8 +133,8 @@ class PrefillPlanningInputChangeTest {
         CountDownLatch selected = new CountDownLatch(1);
         doAnswer(
                         invocation -> {
-                            List<RouteExecution> candidates = invocation.getArgument(0);
-                            RouteExecution exact = candidates.getFirst();
+                            List<RouteResult> candidates = invocation.getArgument(0);
+                            RouteResult exact = candidates.getFirst();
                             assertTrue(worker.prefillEndpoint().removeQueued(exact));
                             selected.countDown();
                             return null;
@@ -150,16 +152,17 @@ class PrefillPlanningInputChangeTest {
         context.data()
                 .setRequest(Request.builder().requestId("51").rawPriority(0).seqLen(10L).build());
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(0, Long.MAX_VALUE));
-        RouteExecution route =
-                SchedulingTestConfig.createRoute(
-                        context,
-                        null,
-                        null,
-                        null,
-                        endpoint,
-                        null,
-                        null,
-                        System.currentTimeMillis());
+        RouteResult route =
+                org.flexlb.balance.scheduler.RequestExecutionTestSupport.mockProtocolRoute(
+                        SchedulingTestConfig.createRoute(
+                                context,
+                                null,
+                                null,
+                                null,
+                                endpoint,
+                                null,
+                                null,
+                                System.currentTimeMillis()));
         RequestExecutionTestSupport.start(worker);
         try {
             assertTrue(RequestExecutionTestSupport.offer(worker, route));

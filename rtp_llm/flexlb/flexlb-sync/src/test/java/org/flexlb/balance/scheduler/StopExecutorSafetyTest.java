@@ -22,6 +22,9 @@ import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks that remote-stop waits cannot starve local work and that shutdown drains accepted stop continuations.
+ */
 @Timeout(15)
 class StopExecutorSafetyTest {
     @Test
@@ -51,7 +54,7 @@ class StopExecutorSafetyTest {
                 assertFalse(runtime.tasks.executeStopWork(context, workflow));
             }
             try (var local = runtime.tasks.registerRequestWork(context)) {
-                local.submitClose(locallySettled::countDown, false);
+                local.submitClose(locallySettled::countDown, false, null);
             }
             assertTrue(locallySettled.await(2, TimeUnit.SECONDS));
             SchedulerTestSupport.awaitRequestWork(runtime);

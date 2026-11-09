@@ -22,15 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+/**
+ * Compares incremental predictions with full evaluation across queue edits, numeric limits and model changes.
+ * Concurrent planning sessions must keep their accumulators independent.
+ */
 class IncrementalPredictionTest {
-    static String formula() throws Exception {
-        try (var stream =
-                IncrementalPredictionTest.class.getResourceAsStream(
-                        "/prediction/deepseek-v4.txt")) {
-            return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-        }
-    }
-
     @Test
     void everyPrefixIsBitExactForRealFormulaAndNumericEdges() throws Exception {
         for (String expression :
@@ -65,6 +61,14 @@ class IncrementalPredictionTest {
                             "expression=" + expression + " prefix=" + prefix.size());
                 }
             }
+        }
+    }
+
+    static String formula() throws Exception {
+        try (var stream =
+                IncrementalPredictionTest.class.getResourceAsStream(
+                        "/prediction/deepseek-v4.txt")) {
+            return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
         }
     }
 
@@ -202,9 +206,9 @@ class IncrementalPredictionTest {
                     }
                 };
         var mode = org.flexlb.config.DispatcherConfig.Type.BATCH;
-        var items = new ArrayList<org.flexlb.balance.scheduler.RouteExecution>();
+        var items = new ArrayList<org.flexlb.balance.scheduler.RouteResult>();
         for (int i = 0; i < 4; i++) {
-            var request = mock(org.flexlb.balance.scheduler.RouteExecution.class);
+            var request = mock(org.flexlb.balance.scheduler.RouteResult.class);
             org.mockito.Mockito.when(request.seqLen()).thenReturn(100L);
             org.mockito.Mockito.when(request.hitCache()).thenReturn(0L);
             items.add(request);

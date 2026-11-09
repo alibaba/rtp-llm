@@ -15,6 +15,7 @@ package org.flexlb.util;
  * request id as the final deterministic tie-break.
  */
 public final class PriorityOrdering {
+    private PriorityOrdering() {}
 
     /**
      * Allocation-free deterministic total order used by worker queues and
@@ -35,6 +36,4 @@ public final class PriorityOrdering {
         int sequenceOrder = Long.compare(leftEnqueueSeq, rightEnqueueSeq);
         return sequenceOrder != 0 ? sequenceOrder : leftRequestId.compareTo(rightRequestId);
     }
-
-    private PriorityOrdering() {}
 }

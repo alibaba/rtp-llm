@@ -26,8 +26,60 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** A custom scheduler owns its decisions and triggers while inheriting shared request management. */
+/**
+ * A custom scheduler owns its decisions and triggers while inheriting shared request management.
+ */
 class CustomRequestSchedulerContractTest {
+    @Test
+    void missingSchedulingMetadataIsRejectedWithoutCreatingDefaults() {
+        try (var scheduler = new ManualScheduler(true)) {
+            var context = RequestProtocolTestSupport.context(scheduler.config, 81904L);
+            context.data().setSchedulingMetadata(null);
+            assertEquals(
+                    StrategyErrorType.INVALID_REQUEST.getErrorCode(),
+                    scheduler.submit(context).join().getCode());
+            org.junit.jupiter.api.Assertions.assertNull(context.data().getSchedulingMetadata());
+            org.junit.jupiter.api.Assertions.assertNull(context.data().getRequestScheduler());
+            assertEquals(0, scheduler.runtime.requests().liveRequestCount());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void schedulerChoosesTimeoutErrorForEveryTimeoutEntry(boolean queued) throws Exception {
+        try (var scheduler =
+                new ManualScheduler(true, queued) {
+                    @Override
+                    protected StrategyErrorType schedulingTimeoutError() {
+                        return StrategyErrorType.ADMISSION_UNAVAILABLE;
+                    }
+                }) {
+            var expired = RequestProtocolTestSupport.context(scheduler.config, 81901L);
+            expired.data()
+                    .setSchedulingMetadata(
+                            org.flexlb.dao.SchedulingMetadata.explicit(
+                                    50, System.currentTimeMillis() - 1));
+            assertEquals(
+                    StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(),
+                    scheduler.submit(expired).get(2, TimeUnit.SECONDS).getCode());
+
+            var timed = RequestProtocolTestSupport.context(scheduler.config, 81902L);
+            var timedResult = scheduler.submit(timed);
+            var deadline = timed.snapshot().deadlines().request();
+            scheduler.onDeadline(deadline, deadline.atMs());
+            assertEquals(
+                    StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(),
+                    timedResult.get(2, TimeUnit.SECONDS).getCode());
+
+            var cancelled = RequestProtocolTestSupport.context(scheduler.config, 81903L);
+            var cancelledResult = scheduler.submit(cancelled);
+            scheduler.cancel("81903", 0L, CancelReason.DEADLINE_EXCEEDED);
+            assertEquals(
+                    StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(),
+                    cancelledResult.get(2, TimeUnit.SECONDS).getCode());
+        }
+    }
+
     @Test
     void customBeanReplacesDefaultAssemblyWithoutCreatingItsDependencies() {
         try (ManualScheduler scheduler = new ManualScheduler(true)) {
@@ -53,7 +105,8 @@ class CustomRequestSchedulerContractTest {
                             context -> {
                                 org.assertj.core.api.Assertions.assertThat(context)
                                         .hasSingleBean(RequestScheduler.class)
-                                        .doesNotHaveBean(QueuedRequestScheduler.class);
+                                        .doesNotHaveBean(QueuedRequestScheduler.class)
+                                        .doesNotHaveBean(EndpointRegistry.class);
                                 org.junit.jupiter.api.Assertions.assertSame(
                                         scheduler, context.getBean(RequestScheduler.class));
                             });
@@ -239,6 +292,9 @@ class CustomRequestSchedulerContractTest {
         }
     }
 
+    /**
+     * Exposes manual scheduling turns while retaining the shared request lifecycle and shutdown facilities.
+     */
     private static class ManualScheduler extends AbstractRequestScheduler {
         final FlexlbConfig config;
         final SchedulerTestServices runtime;
@@ -254,11 +310,19 @@ class CustomRequestSchedulerContractTest {
         }
 
         private ManualScheduler(boolean alternative, FlexlbConfig config) {
-            this(alternative, config, facilities(config));
+            this(alternative, config, mock(EndpointRegistry.class));
         }
 
         private ManualScheduler(
-                boolean alternative, FlexlbConfig config, SchedulerTestServices runtime) {
+                boolean alternative, FlexlbConfig config, EndpointRegistry endpoints) {
+            this(alternative, config, endpoints, facilities(config, endpoints));
+        }
+
+        private ManualScheduler(
+                boolean alternative,
+                FlexlbConfig config,
+                EndpointRegistry endpoints,
+                SchedulerTestServices runtime) {
             super(
                     runtime.requests(),
                     runtime.tasks,
@@ -266,7 +330,8 @@ class CustomRequestSchedulerContractTest {
                     runtime.dispatcher,
                     runtime.responseCompletions(),
                     runtime.deliveryReporter,
-                    mock(TheoryCacheHitReporter.class));
+                    mock(TheoryCacheHitReporter.class),
+                    endpoints);
             this.config = config;
             this.runtime = runtime;
             queue = alternative ? new ListPlacementQueue() : new OrderedRequestQueue(false);
@@ -276,34 +341,6 @@ class CustomRequestSchedulerContractTest {
                                     Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
             SchedulerTestServices.bind(this, runtime);
             runtime.registerScheduler(this);
-        }
-
-        private static FlexlbConfig configuration(boolean queued) {
-            var config = SchedulingTestConfig.batchConfig();
-            if (!queued) {
-                config.setScheduler(org.flexlb.config.ConfigTestSupport.direct());
-                config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
-            }
-            return config;
-        }
-
-        private static SchedulerTestServices facilities(FlexlbConfig config) {
-            var service = mock(ConfigService.class);
-            when(service.loadBalanceConfig()).thenReturn(config);
-            var runtime =
-                    new SchedulerTestServices(
-                            new RequestRepository(),
-                            mock(EndpointRegistry.class),
-                            mock(DeliveryMetricsReporter.class),
-                            mock(RequestSchedulerReporter.class),
-                            SchedulerTestSupport.dispatcher(),
-                            service,
-                            mock(EngineGrpcClient.class));
-            org.springframework.test.util.ReflectionTestUtils.setField(
-                    runtime.dispatcher,
-                    "decodeAdmissionCapacity",
-                    SchedulingTestConfig.capacity(config));
-            return runtime;
         }
 
         @Override
@@ -339,6 +376,18 @@ class CustomRequestSchedulerContractTest {
             }
         }
 
+        @Override
+        public void close() {
+            SchedulerTestSupport.shutdown(runtime);
+        }
+
+        @Override
+        protected StrategyErrorType schedulingTimeoutError() {
+            return config.isQueue()
+                    ? StrategyErrorType.RESOURCE_EXHAUSTED
+                    : StrategyErrorType.BATCH_SLO_EXPIRED;
+        }
+
         boolean advance() {
             GlobalQueueEntry selected;
             synchronized (queue) {
@@ -352,9 +401,33 @@ class CustomRequestSchedulerContractTest {
             return true;
         }
 
-        @Override
-        public void close() {
-            SchedulerTestSupport.shutdown(runtime);
+        private static FlexlbConfig configuration(boolean queued) {
+            var config = SchedulingTestConfig.batchConfig();
+            if (!queued) {
+                config.setScheduler(org.flexlb.config.ConfigTestSupport.direct());
+                config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+            }
+            return config;
+        }
+
+        private static SchedulerTestServices facilities(
+                FlexlbConfig config, EndpointRegistry endpoints) {
+            var service = mock(ConfigService.class);
+            when(service.loadBalanceConfig()).thenReturn(config);
+            var runtime =
+                    new SchedulerTestServices(
+                            new RequestRepository(),
+                            endpoints,
+                            mock(DeliveryMetricsReporter.class),
+                            mock(RequestSchedulerReporter.class),
+                            SchedulerTestSupport.dispatcher(),
+                            service,
+                            mock(EngineGrpcClient.class));
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                    runtime.dispatcher,
+                    "decodeAdmissionCapacity",
+                    SchedulingTestConfig.capacity(config));
+            return runtime;
         }
     }
 }

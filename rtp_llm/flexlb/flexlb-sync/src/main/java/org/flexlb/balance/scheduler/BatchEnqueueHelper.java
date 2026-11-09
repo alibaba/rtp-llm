@@ -1,10 +1,17 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.dao.loadbalance.ServerStatus;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.CodedInputStream;
+import com.google.protobuf.CodedOutputStream;
+import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.protobuf.UnknownFieldSet;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.telemetry.FlexlbTrace;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -16,20 +23,71 @@ import java.util.concurrent.CompletionException;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Builds EnqueueBatch requests and validates complete responses against the exact sent members. */
+/**
+ * Parses immutable request bytes and builds EnqueueBatch payloads for exact selected members.
+ * Validates the complete response against the sent members; owns no request or resource state.
+ */
 final class BatchEnqueueHelper {
+    /**
+     * Validate input without allocating a decoded token array; Engine sees the same protobuf wire fields.
+     */
+    static GenerateInputPB parseInput(ByteString bytes) throws InvalidProtocolBufferException {
+        try {
+            CodedInputStream input = bytes.newCodedInput();
+            var metadata = GenerateInputPB.newBuilder();
+            var tokens = new Tokens();
+            int retainedStart = 0;
+            int tagStart = 0;
+            for (int tag; (tag = input.readTag()) != 0; tagStart = input.getTotalBytesRead()) {
+                if (tag == 16 || tag == 18) {
+                    mergeMetadata(metadata, bytes, retainedStart, tagStart);
+                    tokens.readField(tag, input, bytes);
+                    retainedStart = input.getTotalBytesRead();
+                    continue;
+                }
+                if (!input.skipField(tag)) {
+                    input.checkLastTagWas(0);
+                }
+            }
+            input.checkLastTagWas(0);
+            mergeMetadata(metadata, bytes, retainedStart, bytes.size());
+            var parsed = metadata.build();
+            ByteString encoded = tokens.finish();
+            if (!encoded.isEmpty() && bytes.asReadOnlyByteBufferList().size() > 1) {
+                // A segmented input may use a copying stream decoder for metadata. Give
+                // tokens their own compact storage so they cannot pin copied large fields.
+                var compact = ByteString.newOutput(encoded.size());
+                encoded.writeTo(compact);
+                encoded = compact.toByteString();
+            }
+            if (!encoded.isEmpty()) {
+                // Unknown fields use the standard protobuf writer. On the Engine this is the
+                // known packed token_ids field again; no schema or RPC method changes.
+                var field = UnknownFieldSet.Field.newBuilder().addLengthDelimited(encoded).build();
+                parsed =
+                        parsed.toBuilder()
+                                .mergeUnknownFields(
+                                        UnknownFieldSet.newBuilder().mergeField(2, field).build())
+                                .build();
+            }
+            return parsed;
+        } catch (InvalidProtocolBufferException malformed) {
+            // Diagnostics can outlive dispatch. Never let a parse failure pin a partial
+            // tensor/message.
+            throw malformed.setUnfinishedMessage(null);
+        } catch (IOException failure) {
+            throw new InvalidProtocolBufferException(failure);
+        }
+    }
+
     /** O(1) wire-size bound using the route's exact, immutable endpoint addresses. */
-    static long payloadSizeUpperBound(RouteExecution route) {
+    static long payloadSizeUpperBound(RouteResult route) {
         return route.ctx().data().getGenerateInputSize()
                 + 64L
                 + addressSizeUpperBound(route.prefillEndpoint().getIp())
                 + (route.decodeEndpoint() == null
                         ? 0L
                         : addressSizeUpperBound(route.decodeEndpoint().getIp()));
-    }
-
-    private static long addressSizeUpperBound(String ip) {
-        return 64L + (ip == null ? 0L : 3L * ip.length());
     }
 
     static EngineRpcService.EnqueueBatchRequestPB prepare(
@@ -173,6 +231,23 @@ final class BatchEnqueueHelper {
         return List.of(results);
     }
 
+    private static void mergeMetadata(
+            GenerateInputPB.Builder metadata, ByteString bytes, int start, int end)
+            throws IOException {
+        if (start == end) {
+            return;
+        }
+        var input = bytes.substring(start, end).newCodedInput();
+        // ByteString is immutable: tensors and unknown byte fields can share its storage.
+        input.enableAliasing(true);
+        metadata.mergeFrom(input);
+        input.checkLastTagWas(0);
+    }
+
+    private static long addressSizeUpperBound(String ip) {
+        return 64L + (ip == null ? 0L : 3L * ip.length());
+    }
+
     private static void acknowledge(
             Map<String, Integer> expected,
             Delivery.Result[] results,
@@ -205,8 +280,8 @@ final class BatchEnqueueHelper {
         }
     }
 
-    private static EngineRpcService.GenerateInputPB input(
-            RouteExecution item, RoleAddresses addresses) throws Exception {
+    private static EngineRpcService.GenerateInputPB input(RouteResult item, RoleAddresses addresses)
+            throws Exception {
         var data = item.ctx().data();
         var prepared = data.getGenerateInput();
         if (prepared == null) {
@@ -233,8 +308,8 @@ final class BatchEnqueueHelper {
             }
         }
         var config = input.getGenerateConfigBuilder().clearRoleAddrs();
-        var prefill = item.prefill();
-        var decode = item.decode();
+        var prefill = item.role(RoleType.PREFILL);
+        var decode = item.role(RoleType.DECODE);
         if (prefill != null) {
             addresses.prefill = role(prefill, addresses.prefill);
             config.addRoleAddrs(addresses.prefill);
@@ -247,22 +322,72 @@ final class BatchEnqueueHelper {
     }
 
     private static EngineRpcService.RoleAddrPB role(
-            ServerStatus status, EngineRpcService.RoleAddrPB cached) {
-        var role = status.getRole();
+            RoleSelection selected, EngineRpcService.RoleAddrPB cached) {
+        var role = selected.role();
         if (cached != null
                 && cached.getRoleStr().equals(role.getCode())
-                && cached.getIp().equals(status.getServerIp())
-                && cached.getHttpPort() == status.getHttpPort()
-                && cached.getGrpcPort() == status.getGrpcPort()) {
+                && cached.getIp().equals(selected.ip())
+                && cached.getHttpPort() == selected.httpPort()
+                && cached.getGrpcPort() == selected.grpcPort()) {
             return cached;
         }
         return EngineRpcService.RoleAddrPB.newBuilder()
                 .setRole(RoleTypeProtoConverter.toRoleAddrProto(role))
                 .setRoleStr(role.getCode())
-                .setIp(status.getServerIp())
-                .setHttpPort(status.getHttpPort())
-                .setGrpcPort(status.getGrpcPort())
+                .setIp(selected.ip())
+                .setHttpPort(selected.httpPort())
+                .setGrpcPort(selected.grpcPort())
                 .build();
+    }
+
+    /**
+     * Combines packed and unpacked token fields while preserving the original token sequence.
+     */
+    private static final class Tokens {
+        private ByteString packed;
+        private ByteString.Output combined;
+        private CodedOutputStream writer;
+
+        private void readField(int tag, CodedInputStream input, ByteString bytes)
+                throws IOException {
+            if (tag == 16) {
+                writer().writeInt32NoTag(input.readInt32());
+                return;
+            }
+            int length = input.readRawVarint32();
+            int previousLimit = input.pushLimit(length);
+            int start = input.getTotalBytesRead();
+            while (input.getBytesUntilLimit() > 0) {
+                input.readInt32();
+            }
+            input.popLimit(previousLimit);
+            ByteString chunk = bytes.substring(start, input.getTotalBytesRead());
+            if (packed == null && writer == null) {
+                packed = chunk;
+            } else {
+                writer().writeRawBytes(chunk);
+            }
+        }
+
+        private CodedOutputStream writer() throws IOException {
+            if (writer == null) {
+                combined = ByteString.newOutput(packed == null ? 32 : Math.max(32, packed.size()));
+                writer = CodedOutputStream.newInstance(combined, 64);
+                if (packed != null) {
+                    writer.writeRawBytes(packed);
+                    packed = null;
+                }
+            }
+            return writer;
+        }
+
+        private ByteString finish() throws IOException {
+            if (writer == null) {
+                return packed == null ? ByteString.EMPTY : packed;
+            }
+            writer.flush();
+            return combined.toByteString();
+        }
     }
 
     private static final class RoleAddresses {

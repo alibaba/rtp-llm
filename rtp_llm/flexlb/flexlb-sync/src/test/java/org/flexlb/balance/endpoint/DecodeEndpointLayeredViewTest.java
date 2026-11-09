@@ -181,7 +181,8 @@ class DecodeEndpointLayeredViewTest {
         verify(monitor).report(AUTO_TPM_DECODE_SHADOW_KV_RESERVED, tags, 300.0);
         verify(monitor).report(AUTO_TPM_DECODE_RUNNING_COUNT, tags, 1.0);
         verify(monitor).report(AUTO_TPM_DECODE_ACCEPTED_COUNT, tags, 1.0);
-        verify(monitor).report(AUTO_TPM_DECODE_ENGINE_LOAD, tags, 3.0);
+        assertEquals(1, endpoint.resourceSnapshot().queuedCount());
+        verify(monitor).report(AUTO_TPM_DECODE_ENGINE_LOAD, tags, 2.0);
         verifyNoMoreInteractions(monitor);
     }
 
@@ -454,7 +455,7 @@ class DecodeEndpointLayeredViewTest {
         org.mockito.Mockito.doReturn(victimContext).when(requests).findActive("1");
         org.mockito.Mockito.doReturn(incomingContext).when(requests).findActive("9");
         for (var context : List.of(victimContext, incomingContext)) {
-            var route = mock(org.flexlb.balance.scheduler.RouteExecution.class);
+            var route = mock(org.flexlb.balance.scheduler.RouteResult.class);
             var snapshot = mock(org.flexlb.balance.scheduler.ContextResult.Snapshot.class);
             when(context.snapshot()).thenReturn(snapshot);
             when(snapshot.route()).thenReturn(route);
@@ -526,7 +527,7 @@ class DecodeEndpointLayeredViewTest {
 
     @Test
     void ttlEvictionCannotReleaseClaimedEngineVisibleShadow() throws Exception {
-        reserve(1L, 500, 508, 30);
+        dispatch(reserve(1L, 500, 508, 30));
         // Keep a wide age gap so the provisional incoming reservation cannot
         // become TTL-eligible merely because this test runs on a loaded JVM.
         Thread.sleep(150);
@@ -562,6 +563,7 @@ class DecodeEndpointLayeredViewTest {
     @ValueSource(booleans = {false, true})
     void claimedShadowConfirmedLaterRetainsCapacityUntilTerminal(boolean receivedAgain) {
         DecodeResources.RequestReservation victim = reserve(1L, 500, 508, 30);
+        dispatch(victim);
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
                 beginPreemption(105L, List.of(1L), 9L, 700, 708, 70));
@@ -708,7 +710,7 @@ class DecodeEndpointLayeredViewTest {
                 List.of(1L, 2L, 3L),
                 snapshot.requests().keySet().stream().map(Long::parseLong).sorted().toList());
         assertEquals(
-                DecodeTaskPhase.LOCAL_RESERVED,
+                DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED,
                 snapshot.requests().values().stream()
                         .filter(item -> item.requestId().equals("1"))
                         .findFirst()
@@ -856,6 +858,16 @@ class DecodeEndpointLayeredViewTest {
         EndpointTestSupport.applyStatus(endpoint, response).run();
     }
 
+    private void dispatch(DecodeResources.RequestReservation reservation) {
+        var acquired =
+                endpoint.acquireDispatchPermit(
+                        reservation, new DecodeResources.AdmissionCapacity(0L, 100L));
+        assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+        assertEquals(
+                DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
+                acquired.value().dispatch().status());
+    }
+
     private DecodeResources.RequestReservation reserve(
             long requestId, long hardKv, long expectedKv, int priority) {
         {
@@ -863,8 +875,8 @@ class DecodeEndpointLayeredViewTest {
 
             assertTrue(selectedEndpoint != null);
             DecodeResources.RequestReservation reservation =
-                    EndpointTestSupport.reserveUnqueuedDecode(
-                            endpoint, selectedEndpoint, requestId, hardKv, expectedKv, priority);
+                    EndpointTestSupport.registerDecode(
+                            endpoint, requestId, hardKv, expectedKv, priority);
             reservations.put(requestId, reservation);
             return reservation;
         }

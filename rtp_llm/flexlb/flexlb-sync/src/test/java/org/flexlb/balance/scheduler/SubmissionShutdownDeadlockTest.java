@@ -32,7 +32,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
-/** Real submit/stop/shutdown paths; only endpoint selection and thread timing are isolated. */
+/**
+ * Real submit/stop/shutdown paths; only endpoint selection and thread timing are isolated.
+ */
 class SubmissionShutdownDeadlockTest {
     @ParameterizedTest(name = "queued={0}")
     @ValueSource(booleans = {false, true})
@@ -173,7 +175,7 @@ class SubmissionShutdownDeadlockTest {
                         "stopped submit must reject and release the external lock; otherwise active submit "
                                 + "waits for that lock, drain waits for active submit, and late submit waits behind drain");
                 assertEquals(
-                        StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
+                        StrategyErrorType.SCHEDULER_UNAVAILABLE.getErrorCode(),
                         lateResult.get(3, TimeUnit.SECONDS).get(3, TimeUnit.SECONDS).getCode());
                 assertNull(
                         lateContext.data().getRequestScheduler(),
@@ -195,6 +197,9 @@ class SubmissionShutdownDeadlockTest {
         }
     }
 
+    /**
+     * Starts a direct or queued scheduler with shared request services so submissions can race shutdown under an external lock.
+     */
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.newConfig();
         final RequestRouteSelector router = mock(RequestRouteSelector.class);
@@ -237,13 +242,13 @@ class SubmissionShutdownDeadlockTest {
             runtime.registerScheduler(scheduler);
         }
 
-        RequestContext context(long id) {
-            return RequestProtocolTestSupport.context(config, id);
-        }
-
         @Override
         public void close() {
             SchedulerTestSupport.shutdown(runtime);
+        }
+
+        RequestContext context(long id) {
+            return RequestProtocolTestSupport.context(config, id);
         }
     }
 }

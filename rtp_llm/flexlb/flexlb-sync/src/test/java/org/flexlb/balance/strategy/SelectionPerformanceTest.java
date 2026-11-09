@@ -29,7 +29,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Production selection only: no RPC, Mockito invocation or asynchronous work in the measured loop. */
+/**
+ * Production selection only: no RPC, Mockito invocation or asynchronous work in the measured loop.
+ */
 @Tag("performance-regression")
 class SelectionPerformanceTest {
     private static final List<RoleType> ROLES = List.of(RoleType.DECODE, RoleType.PREFILL);
@@ -95,6 +97,14 @@ class SelectionPerformanceTest {
                             ((org.flexlb.balance.scheduler.RoleSelection.Prefill)
                                             result.value().role(RoleType.PREFILL))
                                     .workMs();
+                    var route = result.value();
+                    route.prefillEndpoint().releaseRequest(route);
+                    if (route.decodeReservation() != null)
+                        route.decodeEndpoint()
+                                .release(
+                                        route.decodeReservation(),
+                                        org.flexlb.balance.endpoint.DecodeResources.ReleaseReason
+                                                .LOCAL_ROLLBACK);
                 }
                 long nanos = System.nanoTime() - start;
                 long cpuNanos = bean.getCurrentThreadCpuTime() - cpu;

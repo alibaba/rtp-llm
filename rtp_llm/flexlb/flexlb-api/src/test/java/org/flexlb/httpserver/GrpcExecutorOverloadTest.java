@@ -29,6 +29,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Verifies admission rejection and cleanup of accepted Netty calls when the request executor is saturated or closing.
+ */
 @Timeout(30)
 class GrpcExecutorOverloadTest {
     private static final MethodDescriptor<byte[], byte[]> METHOD =
@@ -148,6 +151,9 @@ class GrpcExecutorOverloadTest {
         }
     }
 
+    /**
+     * Runs a real Netty server and client with a bounded executor, controllable saturation and tracked direct buffers.
+     */
     private static class Fixture implements AutoCloseable {
         final FlexlbGrpcServer.CountingCallerRunsHandler policy =
                 new FlexlbGrpcServer.CountingCallerRunsHandler();
@@ -207,6 +213,16 @@ class GrpcExecutorOverloadTest {
                             .build();
         }
 
+        @Override
+        public void close() throws Exception {
+            release.countDown();
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            transport.shutdownGracefully(0, 5, TimeUnit.SECONDS).sync();
+            executor.shutdown();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+
         ClientCall<byte[], byte[]> newCall() {
             return channel.newCall(
                     METHOD, CallOptions.DEFAULT.withDeadlineAfter(10, TimeUnit.SECONDS));
@@ -226,16 +242,6 @@ class GrpcExecutorOverloadTest {
             assertTrue(running.await(5, TimeUnit.SECONDS));
             executor.execute(saturationDrained::countDown);
             assertEquals(0, executor.getQueue().remainingCapacity());
-        }
-
-        @Override
-        public void close() throws Exception {
-            release.countDown();
-            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
-            server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
-            transport.shutdownGracefully(0, 5, TimeUnit.SECONDS).sync();
-            executor.shutdown();
-            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
         }
     }
 }

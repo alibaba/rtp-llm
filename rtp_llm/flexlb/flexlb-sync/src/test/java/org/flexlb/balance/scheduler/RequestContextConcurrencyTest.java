@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.dao.loadbalance.Request;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -10,12 +9,9 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
-import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -23,73 +19,92 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Exercises real Context transitions; the route supplies immutable identity only. */
+/**
+ * Exercises the real scheduler's atomic delivery commit against concurrent cancellation.
+ */
 @Timeout(30)
 class RequestContextConcurrencyTest {
-    enum Order {
-        CANCEL_FIRST,
-        SEND_FIRST,
-        TOGETHER
-    }
-
     @ParameterizedTest
     @EnumSource(Order.class)
-    void cancelAndSendHaveOneLegalOrderAndSnapshotsNeverLoseCancellation(Order order)
+    void cancelAndCommitHaveOneLegalOrderAndSnapshotsNeverLoseCancellation(Order order)
             throws Exception {
+        var config = SchedulingTestConfig.batchConfig();
+        var owner =
+                SchedulerTestSupport.create(
+                        SchedulingTestConfig.configService(config),
+                        mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
+                        mock(org.flexlb.service.monitor.RequestSchedulerReporter.class),
+                        mock(org.flexlb.service.TheoryCacheHitReporter.class));
+        var runtime = SchedulerTestSupport.runtime(owner);
+        var channel = mock(org.flexlb.engine.grpc.EngineGrpcClient.class);
+        when(channel.cancelAsync(
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(
+                        java.util.concurrent.CompletableFuture.completedFuture(
+                                org.flexlb.engine.grpc.EngineGrpcClient.CancelReply.FAILED));
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                runtime.dispatcher, "grpcClient", channel);
         var workers = Executors.newFixedThreadPool(3, Thread.ofPlatform().daemon().factory());
         try {
             for (int round = 0; round < 100; round++) {
-                var context = new RequestContext(SchedulingTestConfig.batchConfig());
-                context.data()
-                        .setRequest(
-                                Request.builder().requestId(String.valueOf(round + 1L)).build());
-                context.register(String.valueOf(round + 1L), 1000L, 100_000L, 10_000L);
-                var route = mock(RouteExecution.class);
-                when(route.selectedEndpointsAvailable()).thenReturn(true);
-                when(route.ctx()).thenReturn(context);
-                when(route.requestId()).thenReturn(String.valueOf(round + 1L));
-                var placement = context.beginPlacement(null);
-                assertTrue(context.bindPlacement(placement, route, PublicationResult.PREPARED));
-                assertTrue(context.bindPlacement(placement, route, PublicationResult.PUBLISHED));
-                context.completePlacement(placement, PublicationResult.PUBLISHED, 1000L);
-                var member = new Delivery.Member(route, null);
-                var prepared =
-                        context.prepareDelivery(member, Delivery.SendMode.BATCH_ENQUEUE, 1L, 1001L);
-                assertNotNull(prepared);
-                context.publishDelivery(prepared);
+                var context = RequestProtocolTestSupport.context(config, round + 1L);
+                var future = RequestProtocolTestSupport.submitForManualPlacement(owner, context);
+                var endpoint = mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
+                when(endpoint.getIp()).thenReturn("127.0.0.1");
+                when(endpoint.getHttpPort()).thenReturn(8080);
+                when(endpoint.getGrpcPort()).thenReturn(8090);
+                var route =
+                        SchedulingTestConfig.createRoute(
+                                context,
+                                null,
+                                null,
+                                null,
+                                endpoint,
+                                null,
+                                null,
+                                System.currentTimeMillis());
+                RequestProtocolTestSupport.bind(
+                        owner, new RequestProtocolTestSupport.Registered(route, future));
+                var transfers = new java.util.concurrent.atomic.AtomicInteger();
+                var member =
+                        new Delivery.Member(
+                                route,
+                                RequestProtocolTestSupport.handoff(
+                                        () -> {
+                                            transfers.incrementAndGet();
+                                            return true;
+                                        }));
                 var before = context.snapshot();
                 var start = new CyclicBarrier(3);
                 var cancelled = new CountDownLatch(1);
-                var sent = new CountDownLatch(1);
+                var committed = new CountDownLatch(1);
                 var cancel =
                         workers.submit(
                                 () -> {
                                     start.await(5, TimeUnit.SECONDS);
-                                    if (order == Order.SEND_FIRST)
-                                        assertTrue(sent.await(5, TimeUnit.SECONDS));
+                                    if (order == Order.COMMIT_FIRST)
+                                        assertTrue(committed.await(5, TimeUnit.SECONDS));
                                     try {
-                                        return context.requestCancel(
-                                                new Cancellation(
-                                                        1L,
-                                                        CancelReason.CLIENT_CANCELLED,
-                                                        false,
-                                                        1002L,
-                                                        null,
-                                                        "concurrent cancellation"));
+                                        return owner.cancel(
+                                                context, 0L, CancelReason.CLIENT_CANCELLED);
                                     } finally {
                                         cancelled.countDown();
                                     }
                                 });
-                var send =
+                var commit =
                         workers.submit(
                                 () -> {
                                     start.await(5, TimeUnit.SECONDS);
                                     if (order == Order.CANCEL_FIRST)
                                         assertTrue(cancelled.await(5, TimeUnit.SECONDS));
                                     try {
-                                        return context.beginSend(member, 1002L);
+                                        return owner.commitDelivery(
+                                                member, Delivery.SendMode.BATCH_ENQUEUE, 1L);
                                     } finally {
-                                        sent.countDown();
+                                        committed.countDown();
                                     }
                                 });
                 var reader =
@@ -99,42 +114,68 @@ class RequestContextConcurrencyTest {
                                     boolean sawCancellation = false;
                                     for (int sample = 0; sample < 200; sample++) {
                                         var snapshot = context.snapshot();
-                                        assertSame(member, snapshot.delivery().identity());
+                                        if (snapshot.delivery() != null) {
+                                            assertSame(member, snapshot.delivery().identity());
+                                            assertEquals(
+                                                    SendState.SENDING, snapshot.delivery().send());
+                                        }
                                         if (sawCancellation) assertNotNull(snapshot.cancellation());
                                         if (snapshot.cancellation() != null) {
                                             sawCancellation = true;
-                                            assertNotNull(snapshot.pendingEnd());
+                                            assertTrue(
+                                                    snapshot.pendingEnd() != null
+                                                            || snapshot.outcome() != null);
                                             assertFalse(snapshot.canConfirmDelivery());
                                         }
                                     }
                                     return null;
                                 });
-                assertTrue(cancel.get(5, TimeUnit.SECONDS));
-                var result = send.get(5, TimeUnit.SECONDS);
+                assertNotNull(cancel.get(5, TimeUnit.SECONDS));
+                var result = commit.get(5, TimeUnit.SECONDS);
                 reader.get(5, TimeUnit.SECONDS);
-                if (order == Order.CANCEL_FIRST)
-                    assertEquals(RequestContext.SendResult.CANCELLED, result);
-                if (order == Order.SEND_FIRST)
-                    assertEquals(RequestContext.SendResult.STARTED, result);
-                assertTrue(
-                        result == RequestContext.SendResult.CANCELLED
-                                || result == RequestContext.SendResult.STARTED);
+                if (order == Order.CANCEL_FIRST) assertNull(result);
+                if (order == Order.COMMIT_FIRST) assertSame(member, result);
                 var after = context.snapshot();
-                assertEquals(
-                        result == RequestContext.SendResult.STARTED
-                                ? SendState.SENDING
-                                : SendState.NOT_STARTED,
-                        after.delivery().send());
+                if (result == null) assertNull(after.delivery());
+                else {
+                    assertSame(member, result);
+                    assertEquals(SendState.SENDING, after.delivery().send());
+                }
+                assertEquals(result == null ? 0 : 1, transfers.get());
                 assertNotNull(after.cancellation());
-                assertFalse(context.confirmDelivery(1003L));
-                assertNotEquals(
-                        RequestContext.SendResult.STARTED, context.beginSend(member, 1003L));
+                assertFalse(context.confirmDelivery(System.currentTimeMillis()));
+                assertNull(
+                        owner.commitDelivery(
+                                new Delivery.Member(route, null),
+                                Delivery.SendMode.BATCH_ENQUEUE,
+                                1L));
                 assertNull(before.cancellation(), "published snapshots must remain immutable");
-                assertEquals(SendState.NOT_STARTED, before.delivery().send());
+                assertNull(before.delivery(), "the pre-commit snapshot must not acquire a sender");
+                if (result != null) {
+                    owner.onDeliveryResult(
+                            new ContextResult.TransportResult(
+                                    member,
+                                    Delivery.Result.notSent(
+                                            new java.util.concurrent.CancellationException()),
+                                    System.currentTimeMillis()));
+                }
+                assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
+                RequestProtocolTestSupport.awaitCondition(
+                        () -> !owner.repository.isCurrent(context));
+                org.mockito.Mockito.verify(endpoint, org.mockito.Mockito.times(1))
+                        .releaseRequest(route);
+                member.close();
             }
         } finally {
             workers.shutdownNow();
             assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
+            SchedulerTestSupport.shutdown(runtime);
         }
+    }
+
+    enum Order {
+        CANCEL_FIRST,
+        COMMIT_FIRST,
+        TOGETHER
     }
 }

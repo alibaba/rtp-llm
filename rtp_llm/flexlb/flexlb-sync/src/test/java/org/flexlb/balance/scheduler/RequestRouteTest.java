@@ -17,6 +17,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -24,9 +25,12 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 
+/**
+ * Checks frozen role metadata and endpoint validation without making route validation own endpoint cleanup.
+ */
 class RequestRouteTest {
     @Test
-    void executionReadsFrozenSelectionFacts() {
+    void routeReadsFrozenSelectionFacts() {
         var context = context();
         var worker = prefill();
         var selectedEndpoint = worker;
@@ -37,24 +41,30 @@ class RequestRouteTest {
         metadata.setDebugInfo(debug);
         try {
             var result =
-                    SchedulingTestConfig.prepareRoute(
-                            context,
-                            route -> {
-                                route.add(selectedEndpoint, metadata, 10L, 5L);
-                                return PlacementResult.success(route);
-                            });
+                    PlacementResult.success(
+                            new RouteResult(
+                                    context,
+                                    List.of(
+                                            SelectionTestSupport.metadata(
+                                                    selectedEndpoint, metadata, 10L))));
             {
                 var route = result.value();
                 metadata.setGroup("changed");
                 metadata.setDpRank(99L);
                 debug.setHitCacheLen(99L);
-                route.prefill().setGroup("export changed");
+                route.role(org.flexlb.dao.route.RoleType.PREFILL)
+                        .toServerStatus(route.requestId())
+                        .setGroup("export changed");
                 route.successResponse(true)
                         .getServerStatus()
                         .getFirst()
                         .getDebugInfo()
                         .setHitCacheLen(1L);
-                assertEquals("original", route.prefill().getGroup());
+                assertEquals(
+                        "original",
+                        route.role(org.flexlb.dao.route.RoleType.PREFILL)
+                                .toServerStatus(route.requestId())
+                                .getGroup());
                 assertEquals(17L, route.hitCache());
                 assertEquals(7L, route.prefillDpRank());
                 assertEquals(10L, route.prefillWorkMs());
@@ -63,7 +73,12 @@ class RequestRouteTest {
                 assertTrue(!selectedEndpoint.isRetired());
             }
             assertFalse(selectedEndpoint.isRetired());
-            assertEquals("original", result.value().prefill().getGroup());
+            assertEquals(
+                    "original",
+                    result.value()
+                            .role(org.flexlb.dao.route.RoleType.PREFILL)
+                            .toServerStatus(result.value().requestId())
+                            .getGroup());
         } finally {
             worker.close();
             org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
@@ -71,7 +86,7 @@ class RequestRouteTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"failed", "request", "address", "work", "version", "role"})
+    @ValueSource(strings = {"failed", "request", "work", "role"})
     void validationFailureLeavesEndpointAvailable(String invalid) {
         var worker = prefill();
         var selectedEndpoint = worker;
@@ -82,23 +97,21 @@ class RequestRouteTest {
         if (invalid.equals("request")) {
             metadata.setRequestId(String.valueOf(99L));
         }
-        if (invalid.equals("address")) {
-            metadata.setHttpPort(9999);
-        }
-
         if (invalid.equals("role")) {
             metadata.setRole(RoleType.DECODE);
         }
         try {
-            var route = new RouteResult.Builder(context());
+            var route = new java.util.ArrayList<RoleSelection>();
             assertThrows(
                     RuntimeException.class,
-                    () ->
-                            route.add(
-                                    selectedEndpoint,
-                                    metadata,
-                                    invalid.equals("work") ? -1L : 10L,
-                                    invalid.equals("version") ? -1L : 0L));
+                    () -> {
+                        route.add(
+                                SelectionTestSupport.metadata(
+                                        selectedEndpoint,
+                                        metadata,
+                                        invalid.equals("work") ? -1L : 10L));
+                        new RouteResult(context(), route);
+                    });
             assertFalse(selectedEndpoint.isRetired());
         } finally {
             worker.close();
@@ -115,56 +128,15 @@ class RequestRouteTest {
             assertThrows(
                     IllegalStateException.class,
                     () ->
-                            SchedulingTestConfig.prepareRoute(
+                            new RouteResult(
                                     context(),
-                                    route -> {
-                                        route.add(first, metadata(worker), 1L, 0L);
-                                        route.add(duplicate, metadata(worker), 1L, 0L);
-                                        return PlacementResult.success(route);
-                                    }));
+                                    List.of(
+                                            SelectionTestSupport.metadata(
+                                                    first, metadata(worker), 1L),
+                                            SelectionTestSupport.metadata(
+                                                    duplicate, metadata(worker), 1L))));
             assertFalse(first.isRetired());
             assertFalse(duplicate.isRetired());
-        } finally {
-            worker.close();
-            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
-        }
-    }
-
-    @Test
-    void blockedResultLeavesSelectedEndpointsAvailable() {
-        var worker = prefill();
-        var selectedEndpoint = worker;
-        try {
-            var result =
-                    SchedulingTestConfig.prepareRoute(
-                            context(),
-                            route -> {
-                                route.add(selectedEndpoint, metadata(worker), 1L, 0L);
-                                return PlacementResult.blocked(
-                                        new PlacementKey(RoleType.DECODE, null, null));
-                            });
-            assertEquals(PlacementResult.Status.BLOCKED, result.status());
-            assertFalse(selectedEndpoint.isRetired());
-        } finally {
-            worker.close();
-            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
-        }
-    }
-
-    @Test
-    void failedAddCannotBeRecoveredIntoACompletedRoute() {
-        var worker = prefill();
-        var invalid = metadata(worker);
-        invalid.setSuccess(false);
-        try {
-            var route = new RouteResult.Builder(context());
-            assertThrows(IllegalArgumentException.class, () -> route.add(worker, invalid, 1L, 0L));
-            var nextWorker = worker;
-            assertThrows(
-                    IllegalStateException.class,
-                    () -> route.add(nextWorker, metadata(worker), 1L, 0L));
-            assertFalse(nextWorker.isRetired());
-            assertThrows(IllegalStateException.class, route::prepare);
         } finally {
             worker.close();
             org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
@@ -199,18 +171,18 @@ class RequestRouteTest {
                     };
             var prefill = prefill();
             try {
-                var route = new RouteResult.Builder(context());
+                var route = new java.util.ArrayList<RoleSelection>();
                 if (role == RoleType.DECODE || role == RoleType.VIT)
-                    route.add(prefill, metadata(prefill), 1L, 0L);
+                    route.add(SelectionTestSupport.metadata(prefill, metadata(prefill), 1L));
                 var metadata = metadata(worker);
                 if (retireBeforeAdd) worker.close();
-                assertSame(metadata, route.add(worker, metadata, 1L, 0L));
+                route.add(SelectionTestSupport.metadata(worker, metadata, 1L));
                 if (!retireBeforeAdd) worker.close();
-                var selected = route.prepare();
-                var result = route.validateEndpoints(PlacementResult.success(selected));
-                assertEquals(PlacementResult.Status.ENDPOINT_CHANGED, result.status());
-                assertEquals(role, result.blocker().role());
-                assertEquals(selected.roles(), ((RouteResult) result.selection().value()).roles());
+                var selected = new RouteResult(context(), route);
+                var result = selected.validateEndpoints(PlacementResult.success(selected));
+                assertEquals(PlacementResult.Status.RETRY, result.status());
+                assertNull(result.blocker());
+                assertNull(result.value());
             } finally {
                 worker.close();
                 prefill.close();
@@ -234,7 +206,7 @@ class RequestRouteTest {
         var selectedWorkers = new java.util.ArrayList<WorkerEndpoint>();
         var roles = new java.util.ArrayList<RoleType>();
         try {
-            var route = new RouteResult.Builder(context());
+            var route = new java.util.ArrayList<RoleSelection>();
             for (char role : order.toCharArray()) {
                 WorkerEndpoint worker =
                         switch (role) {
@@ -245,9 +217,11 @@ class RequestRouteTest {
                 var selectedEndpoint = worker;
                 selectedWorkers.add(selectedEndpoint);
                 roles.add(worker.getStatus().getRole());
-                route.add(selectedEndpoint, metadata(worker), role == 'P' ? 1L : -1L, 0L);
+                route.add(
+                        SelectionTestSupport.metadata(
+                                selectedEndpoint, metadata(worker), role == 'P' ? 1L : -1L));
             }
-            var selected = route.prepare();
+            var selected = new RouteResult(context(), route);
             assertEquals(
                     roles,
                     selected.successResponse(true).getServerStatus().stream()
@@ -256,7 +230,6 @@ class RequestRouteTest {
             for (var selectedEndpoint : selectedWorkers) {
                 assertFalse(selectedEndpoint.isRetired());
             }
-            assertThrows(IllegalStateException.class, route::prepare);
             assertTrue(selectedWorkers.stream().noneMatch(WorkerEndpoint::isRetired));
             assertEquals(
                     roles,
@@ -288,11 +261,14 @@ class RequestRouteTest {
         var metadata = metadata(worker);
         metadata.setSuccess(false);
         try {
-            var route = new RouteResult.Builder(context());
+            var route = new java.util.ArrayList<RoleSelection>();
             var failure =
                     assertThrows(
                             IllegalArgumentException.class,
-                            () -> route.add(selectedEndpoint, metadata, 1L, 0L));
+                            () ->
+                                    route.add(
+                                            SelectionTestSupport.metadata(
+                                                    selectedEndpoint, metadata, 1L)));
             assertEquals(List.of(), List.of(failure.getSuppressed()));
             assertFalse(selectedEndpoint.isRetired());
         } finally {

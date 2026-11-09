@@ -29,9 +29,13 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * <p>Start builds the serving endpoint and its configured execution resources. Drain first waits
+ * for the configured request quiet period, then shuts down serving and waits for accepted calls
+ * while their dependencies remain alive; destruction releases the server-owned resources.
+ */
 @Component
 public class FlexlbGrpcServer implements ExecutorStats {
-
     /**
      * Offset from HTTP port to gRPC port for FlexLB's own servers.
      * This is separate from CommonConstants.GRPC_PORT_OFFSET which applies
@@ -40,6 +44,7 @@ public class FlexlbGrpcServer implements ExecutorStats {
     static final int FLEXLB_GRPC_PORT_OFFSET = 2;
 
     private static final int DEFAULT_HTTP_PORT = 7001;
+
     private final long quietPeriodNanos;
 
     private final FlexlbServiceImpl flexlbServiceImpl;
@@ -219,6 +224,32 @@ public class FlexlbGrpcServer implements ExecutorStats {
                 guard.controlReceivingBytes());
     }
 
+    @PreDestroy
+    public void shutdown() {
+        drain();
+        if (receivingGuard != null) {
+            receivingGuard.close();
+        }
+        if (grpcControlExecutor != null) {
+            grpcControlExecutor.shutdown();
+        }
+        if (bossGroup != null) {
+            bossGroup.shutdownGracefully();
+        }
+        if (grpcServerEventLoopGroup != null) {
+            grpcServerEventLoopGroup.shutdownGracefully();
+        }
+        if (grpcExecutor != null) {
+            grpcExecutor.shutdown();
+            try {
+                grpcExecutor.awaitTermination(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                // Preserve already accepted lifecycle callbacks even during interrupted shutdown.
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
     /** Called before Spring destroys any serving resources. */
     public synchronized void drain() {
         if (server == null || server.isTerminated()) {
@@ -264,33 +295,9 @@ public class FlexlbGrpcServer implements ExecutorStats {
         }
     }
 
-    @PreDestroy
-    public void shutdown() {
-        drain();
-        if (receivingGuard != null) {
-            receivingGuard.close();
-        }
-        if (grpcControlExecutor != null) {
-            grpcControlExecutor.shutdown();
-        }
-        if (bossGroup != null) {
-            bossGroup.shutdownGracefully();
-        }
-        if (grpcServerEventLoopGroup != null) {
-            grpcServerEventLoopGroup.shutdownGracefully();
-        }
-        if (grpcExecutor != null) {
-            grpcExecutor.shutdown();
-            try {
-                grpcExecutor.awaitTermination(5, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                // Preserve already accepted lifecycle callbacks even during interrupted shutdown.
-                Thread.currentThread().interrupt();
-            }
-        }
-    }
-
-    /** Accepted transport callbacks retain cleanup ownership even during executor shutdown. */
+    /**
+     * Accepted transport callbacks retain cleanup ownership even during executor shutdown.
+     */
     static class CountingCallerRunsHandler implements RejectedExecutionHandler {
         private final AtomicLong callerRunsCount = new AtomicLong();
 

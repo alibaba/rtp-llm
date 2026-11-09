@@ -19,25 +19,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Verifies that receiving reservations remain charged until queued message-buffer cleanup has run.
+ */
 class GrpcReceivingGuardOwnershipTest {
-    static class Call extends ServerCall<Object, Object> {
-        public void request(int n) {}
-
-        public void sendHeaders(Metadata h) {}
-
-        public void sendMessage(Object o) {}
-
-        public void close(Status s, Metadata h) {}
-
-        public boolean isCancelled() {
-            return false;
-        }
-
-        public MethodDescriptor<Object, Object> getMethodDescriptor() {
-            return null;
-        }
-    }
-
     @Test
     void errorCannotReturnReservationBeforeQueuedActualByteBufCleanup() {
         queued(false);
@@ -146,6 +131,27 @@ class GrpcReceivingGuardOwnershipTest {
         } finally {
             c.detach(before);
             guard.close();
+        }
+    }
+
+    /**
+     * Supplies a minimal server call while the test controls listener execution and buffer cleanup.
+     */
+    static class Call extends ServerCall<Object, Object> {
+        public void request(int n) {}
+
+        public void sendHeaders(Metadata h) {}
+
+        public void sendMessage(Object o) {}
+
+        public void close(Status s, Metadata h) {}
+
+        public boolean isCancelled() {
+            return false;
+        }
+
+        public MethodDescriptor<Object, Object> getMethodDescriptor() {
+            return null;
         }
     }
 }

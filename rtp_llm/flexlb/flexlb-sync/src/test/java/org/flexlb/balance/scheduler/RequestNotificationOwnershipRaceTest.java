@@ -34,7 +34,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** A frontend cancel owns its publication; a queued close retains its independently claimed notification. */
+/**
+ * A frontend cancel owns its publication; a queued close retains its independently claimed notification.
+ */
 @Timeout(15)
 class RequestNotificationOwnershipRaceTest {
     @Test
@@ -91,7 +93,8 @@ class RequestNotificationOwnershipRaceTest {
                         workStarted.countDown();
                         RequestProtocolTestSupport.await(finishWork);
                     },
-                    false);
+                    false,
+                    null);
         }
         SchedulerTestSupport.startScheduling(owner);
         try {

@@ -31,41 +31,29 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
         implements ServerCallExecutorSupplier, ServerInterceptor, AutoCloseable {
     private static final Context.Key<Lease> LEASE = Context.key("receive-guard");
+
     private final int limit;
     private final long timeoutNanos;
+
     private final Executor business;
     private final Executor control;
+
     private final int controlLimit;
+
     private final AtomicInteger controlReceiving = new AtomicInteger();
     private final ScheduledThreadPoolExecutor timer;
     private final java.util.Set<Lease> active = ConcurrentHashMap.newKeySet();
+
     private volatile boolean stopping;
+
     private final AtomicInteger receiving = new AtomicInteger();
     private final AtomicLong rejected = new AtomicLong();
     private final AtomicLong timedOut = new AtomicLong();
     private final AtomicLong receivingBytes = new AtomicLong();
     private final AtomicLong controlReceivingBytes = new AtomicLong();
+
     private final long scheduleByteLimit;
     private final long controlByteLimit;
-
-    public long receivingBytes() {
-        return receivingBytes.get();
-    }
-
-    public long controlReceivingBytes() {
-        return controlReceivingBytes.get();
-    }
-
-    // Package-private convenience for deterministic lifecycle fixtures. Production always uses
-    // the explicit lane byte budgets resolved at startup by GrpcReceivingBudget.
-    GrpcReceivingGuard(int limit, long timeoutMillis, Executor business) {
-        this(limit, 1, timeoutMillis, business, business);
-    }
-
-    GrpcReceivingGuard(
-            int limit, int controlLimit, long timeoutMillis, Executor business, Executor control) {
-        this(limit, controlLimit, timeoutMillis, business, control, Long.MAX_VALUE, Long.MAX_VALUE);
-    }
 
     public GrpcReceivingGuard(
             int limit,
@@ -99,6 +87,25 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
         timer.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
     }
 
+    // Package-private convenience for deterministic lifecycle fixtures. Production always uses
+    // the explicit lane byte budgets resolved at startup by GrpcReceivingBudget.
+    GrpcReceivingGuard(int limit, long timeoutMillis, Executor business) {
+        this(limit, 1, timeoutMillis, business, business);
+    }
+
+    GrpcReceivingGuard(
+            int limit, int controlLimit, long timeoutMillis, Executor business, Executor control) {
+        this(limit, controlLimit, timeoutMillis, business, control, Long.MAX_VALUE, Long.MAX_VALUE);
+    }
+
+    public long receivingBytes() {
+        return receivingBytes.get();
+    }
+
+    public long controlReceivingBytes() {
+        return controlReceivingBytes.get();
+    }
+
     public int receiving() {
         return receiving.get();
     }
@@ -117,23 +124,6 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
 
     public long timedOut() {
         return timedOut.get();
-    }
-
-    private boolean acquire(AtomicInteger counter, int maximum) {
-        if (stopping) return false;
-        for (; ; ) {
-            int v = counter.get();
-            if (v >= maximum) return false;
-            if (counter.compareAndSet(v, v + 1)) return true;
-        }
-    }
-
-    private boolean acquireBytes(AtomicLong counter, long maximum, long bytes) {
-        for (; ; ) {
-            long current = counter.get();
-            if (bytes < 0 || bytes > maximum || current > maximum - bytes) return false;
-            if (counter.compareAndSet(current, current + bytes)) return true;
-        }
     }
 
     @Override
@@ -277,20 +267,67 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
         };
     }
 
+    @Override
+    public void close() {
+        stopping = true;
+        for (Lease lease : active) {
+            ServerCall<?, ?> call;
+            synchronized (lease) {
+                call = lease.call;
+            }
+            if (call != null)
+                lease.close(Status.UNAVAILABLE.withDescription("receiving guard stopped"));
+        }
+        timer.shutdownNow();
+        try {
+            timer.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private boolean acquire(AtomicInteger counter, int maximum) {
+        if (stopping) return false;
+        for (; ; ) {
+            int v = counter.get();
+            if (v >= maximum) return false;
+            if (counter.compareAndSet(v, v + 1)) return true;
+        }
+    }
+
+    private boolean acquireBytes(AtomicLong counter, long maximum, long bytes) {
+        for (; ; ) {
+            long current = counter.get();
+            if (bytes < 0 || bytes > maximum || current > maximum - bytes) return false;
+            if (counter.compareAndSet(current, current + bytes)) return true;
+        }
+    }
+
+    /**
+     * Tracks one receiving request and its byte charges until reception or cancellation releases them.
+     */
     private final class Lease {
         final boolean admitted;
+
         final AtomicInteger counter;
+
         final boolean control;
+
         final AtomicLong byteCounter;
+
         final long byteLimit;
+
         long chargedBytes;
+
         final long created = System.nanoTime();
+
         volatile boolean closed;
         boolean finished;
         boolean handlerStarted;
         boolean transportClosed;
         boolean startCallFailed;
         boolean cleanupMarkerQueued;
+
         ServerCall<?, ?> call;
         ScheduledFuture<?> timeout;
 
@@ -326,6 +363,13 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
                     new Metadata());
         }
 
+        synchronized void terminal() {
+            closed = true;
+            transportClosed = true;
+            if (timeout != null) timeout.cancel(false);
+            if (!handlerStarted) finish();
+        }
+
         synchronized void finish() {
             if (finished) return;
             finished = true;
@@ -337,21 +381,14 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
             active.remove(this);
         }
 
-        synchronized void terminal() {
-            closed = true;
-            transportClosed = true;
-            if (timeout != null) timeout.cancel(false);
-            if (!handlerStarted) finish();
+        void close(Status status) {
+            if (claimClose()) call.close(status, new Metadata());
         }
 
         synchronized boolean claimClose() {
             if (closed) return false;
             closed = true;
             return true;
-        }
-
-        void close(Status status) {
-            if (claimClose()) call.close(status, new Metadata());
         }
 
         void expire() {
@@ -398,25 +435,6 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
             } catch (RuntimeException | Error ignored) {
                 /* fail closed, never reuse a possibly retained reservation */
             }
-        }
-    }
-
-    @Override
-    public void close() {
-        stopping = true;
-        for (Lease lease : active) {
-            ServerCall<?, ?> call;
-            synchronized (lease) {
-                call = lease.call;
-            }
-            if (call != null)
-                lease.close(Status.UNAVAILABLE.withDescription("receiving guard stopped"));
-        }
-        timer.shutdownNow();
-        try {
-            timer.awaitTermination(5, TimeUnit.SECONDS);
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
         }
     }
 }

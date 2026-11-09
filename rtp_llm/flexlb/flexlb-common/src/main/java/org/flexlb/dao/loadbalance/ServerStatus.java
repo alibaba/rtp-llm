@@ -16,6 +16,10 @@ import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
 
+/**
+ * Describes one selected worker and preserves logical engine identity independently of its physical
+ * address.
+ */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class ServerStatus {
@@ -38,10 +42,6 @@ public class ServerStatus {
 
     @JsonProperty("preempt_request_ids")
     private List<String> preemptRequestIds = List.of();
-
-    public void setPreemptRequestIds(List<String> preemptRequestIds) {
-        this.preemptRequestIds = preemptRequestIds == null ? List.of() : preemptRequestIds;
-    }
 
     @JsonProperty("dp_rank")
     private long dpRank;
@@ -96,6 +96,10 @@ public class ServerStatus {
 
     @JsonProperty("message")
     private String message;
+
+    public void setPreemptRequestIds(List<String> preemptRequestIds) {
+        this.preemptRequestIds = preemptRequestIds == null ? List.of() : preemptRequestIds;
+    }
 
     public static ServerStatus forWorker(
             RoleType role,

@@ -39,16 +39,8 @@ class OpenTelemetryBootstrapTest {
     @TempDir Path directory;
     @SystemStub private EnvironmentVariables environment = new EnvironmentVariables();
     private Path originalHostnameFile;
-    private final ObjectMapper mapper = new ObjectMapper();
 
-    private static void resetBootstrap() throws Exception {
-        synchronized (OpenTelemetryBootstrap.class) {
-            OpenTelemetryBootstrap.shutdown();
-            Field initialized = OpenTelemetryBootstrap.class.getDeclaredField("initialized");
-            initialized.setAccessible(true);
-            initialized.setBoolean(null, false);
-        }
-    }
+    private final ObjectMapper mapper = new ObjectMapper();
 
     @BeforeEach
     void setUp() throws Exception {
@@ -200,6 +192,15 @@ class OpenTelemetryBootstrapTest {
             } else {
                 System.setProperty("otel.sdk.disabled", previous);
             }
+        }
+    }
+
+    private static void resetBootstrap() throws Exception {
+        synchronized (OpenTelemetryBootstrap.class) {
+            OpenTelemetryBootstrap.shutdown();
+            Field initialized = OpenTelemetryBootstrap.class.getDeclaredField("initialized");
+            initialized.setAccessible(true);
+            initialized.setBoolean(null, false);
         }
     }
 }

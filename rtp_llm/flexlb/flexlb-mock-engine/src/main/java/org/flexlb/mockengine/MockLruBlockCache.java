@@ -46,7 +46,6 @@ import static com.google.common.base.Preconditions.checkState;
  * standard order is {@code decodeQueueLock -> cache} (never the reverse).
  */
 final class MockLruBlockCache {
-
     /** Default reserve watermark ratio (production reserve_block_num_ ≈ 5% of init available). */
     static final double DEFAULT_RESERVE_RATIO = 0.05;
 
@@ -85,28 +84,6 @@ final class MockLruBlockCache {
      */
     synchronized int prefixHitBlocks(List<Long> keys) {
         return matchPrefix(keys).size();
-    }
-
-    /**
-     * Prefix match against ALL indexed keys, including ones referenced in-flight.
-     *
-     * <p>KV v2 fix #5: the match is a READ through {@code get()} (not
-     * {@code containsKey}), so the access-ordered map refreshes each matched
-     * entry's recency — the prefix-match read path itself keeps matched
-     * chains hot. This is the decode-side positive feedback: the more a
-     * prefix is matched, the later its blocks sit in the eviction order
-     * ("the more you use it, the more you save"), matching the production
-     * prefix-match read that touches every block it confirms.
-     */
-    private List<Long> matchPrefix(List<Long> keys) {
-        List<Long> hits = new ArrayList<>();
-        for (Long key : keys) {
-            if (blocks.get(key) == null) {
-                break;
-            }
-            hits.add(key);
-        }
-        return hits;
     }
 
     // ─────────────────────────── admission ───────────────────────────
@@ -162,17 +139,32 @@ final class MockLruBlockCache {
     }
 
     /**
-     * Grow a running request's allocation by one block (decode per-step growth —
-     * production incrMalloc; only free/LRU are consulted, no reserve gate).
-     * @return false when the pool is exhausted (caller degrades growth).
+     * Available blocks: free + pure-LRU (production availableBlocksNum —
+     * the prefix cache counts toward availability; held does not).
      */
-    synchronized boolean grow(BlockLease lease) {
-        if (freeBlocks() <= 0 && !evictOne()) {
-            return false;
+    synchronized int availableBlocks() {
+        return totalBlocks - heldBlocks - referencedKeyBlocks();
+    }
+
+    /** Cache-key blocks referenced by in-flight requests. */
+    synchronized int referencedKeyBlocks() {
+        int referenced = 0;
+        for (Integer ref : blocks.values()) {
+            if (ref != null && ref > 0) {
+                referenced++;
+            }
         }
-        lease.nakedBlocks++;
-        heldBlocks++;
-        return true;
+        return referenced;
+    }
+
+    /** Reserve watermark in blocks: ceil(reserveRatio x totalBlocks). */
+    synchronized int reserveBlocks() {
+        return (int) Math.ceil(totalBlocks * reserveRatio);
+    }
+
+    /** Fully unallocated blocks. */
+    synchronized int freeBlocks() {
+        return totalBlocks - heldBlocks - blocks.size();
     }
 
     /**
@@ -194,6 +186,20 @@ final class MockLruBlockCache {
             }
         }
         return new AllocationOutcome(lease, null);
+    }
+
+    /**
+     * Grow a running request's allocation by one block (decode per-step growth —
+     * production incrMalloc; only free/LRU are consulted, no reserve gate).
+     * @return false when the pool is exhausted (caller degrades growth).
+     */
+    synchronized boolean grow(BlockLease lease) {
+        if (freeBlocks() <= 0 && !evictOne()) {
+            return false;
+        }
+        lease.nakedBlocks++;
+        heldBlocks++;
+        return true;
     }
 
     /**
@@ -354,38 +360,63 @@ final class MockLruBlockCache {
         return totalBlocks;
     }
 
-    /**
-     * Available blocks: free + pure-LRU (production availableBlocksNum —
-     * the prefix cache counts toward availability; held does not).
-     */
-    synchronized int availableBlocks() {
-        return totalBlocks - heldBlocks - referencedKeyBlocks();
-    }
-
     /** Blocks held by in-flight requests (keyless allocations + growth). */
     synchronized int heldBlocks() {
         return heldBlocks;
     }
 
-    /** Cache-key blocks referenced by in-flight requests. */
-    synchronized int referencedKeyBlocks() {
-        int referenced = 0;
-        for (Integer ref : blocks.values()) {
-            if (ref != null && ref > 0) {
-                referenced++;
+    /**
+     * Prefix match against ALL indexed keys, including ones referenced in-flight.
+     *
+     * <p>KV v2 fix #5: the match is a READ through {@code get()} (not
+     * {@code containsKey}), so the access-ordered map refreshes each matched
+     * entry's recency — the prefix-match read path itself keeps matched
+     * chains hot. This is the decode-side positive feedback: the more a
+     * prefix is matched, the later its blocks sit in the eviction order
+     * ("the more you use it, the more you save"), matching the production
+     * prefix-match read that touches every block it confirms.
+     */
+    private List<Long> matchPrefix(List<Long> keys) {
+        List<Long> hits = new ArrayList<>();
+        for (Long key : keys) {
+            if (blocks.get(key) == null) {
+                break;
+            }
+            hits.add(key);
+        }
+        return hits;
+    }
+
+    /** Family of a gate failure: {@code required + reserve} vs the PHYSICAL pool. */
+    private AllocationFailure failureFamily(int requiredBlocks) {
+        return requiredBlocks + reserveBlocks() > totalBlocks
+                ? AllocationFailure.PERMANENT
+                : AllocationFailure.RETRYABLE;
+    }
+
+    // ─────────────────────────── internals ───────────────────────────
+
+    private void dereference(List<Long> hitKeys) {
+        for (Long key : hitKeys) {
+            Integer ref = blocks.get(key);
+            int next = ref == null ? 0 : ref - 1;
+            blocks.put(key, Math.max(0, next));
+        }
+    }
+
+    /**
+     * Evict the eldest PURE-LRU entry (ref == 0). Referenced keys are skipped.
+     * @return true when a block was freed
+     */
+    private boolean evictOne() {
+        for (java.util.Map.Entry<Long, Integer> entry : blocks.entrySet()) {
+            if (entry.getValue() == 0) {
+                blocks.remove(entry.getKey());
+                evictions++;
+                return true;
             }
         }
-        return referenced;
-    }
-
-    /** Fully unallocated blocks. */
-    synchronized int freeBlocks() {
-        return totalBlocks - heldBlocks - blocks.size();
-    }
-
-    /** Reserve watermark in blocks: ceil(reserveRatio x totalBlocks). */
-    synchronized int reserveBlocks() {
-        return (int) Math.ceil(totalBlocks * reserveRatio);
+        return false;
     }
 
     // ─────────────────────────── failure classification ───────────────────────────
@@ -419,38 +450,6 @@ final class MockLruBlockCache {
         boolean success() {
             return lease != null;
         }
-    }
-
-    /** Family of a gate failure: {@code required + reserve} vs the PHYSICAL pool. */
-    private AllocationFailure failureFamily(int requiredBlocks) {
-        return requiredBlocks + reserveBlocks() > totalBlocks
-                ? AllocationFailure.PERMANENT
-                : AllocationFailure.RETRYABLE;
-    }
-
-    // ─────────────────────────── internals ───────────────────────────
-
-    private void dereference(List<Long> hitKeys) {
-        for (Long key : hitKeys) {
-            Integer ref = blocks.get(key);
-            int next = ref == null ? 0 : ref - 1;
-            blocks.put(key, Math.max(0, next));
-        }
-    }
-
-    /**
-     * Evict the eldest PURE-LRU entry (ref == 0). Referenced keys are skipped.
-     * @return true when a block was freed
-     */
-    private boolean evictOne() {
-        for (java.util.Map.Entry<Long, Integer> entry : blocks.entrySet()) {
-            if (entry.getValue() == 0) {
-                blocks.remove(entry.getKey());
-                evictions++;
-                return true;
-            }
-        }
-        return false;
     }
 
     /**

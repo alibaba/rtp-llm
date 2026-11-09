@@ -6,7 +6,7 @@ import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestExecutionTestSupport;
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -32,8 +32,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -44,9 +42,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** The configured limit, real worker publication lock and canonical request ledger together. */
+/**
+ * The configured limit, real worker publication lock and canonical request ledger together.
+ */
 class RequestExecutionRequestCapacityTest {
-
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void waitingRequestsDoNotConsumeDeliverySlotsOrEvictQueuedOwners(boolean priority) {
@@ -56,7 +55,7 @@ class RequestExecutionRequestCapacityTest {
             config.getScheduler().setOrdering(ConfigTestSupport.priority());
         }
         try (Fixture fixture = fixture(config)) {
-            List<RouteExecution> routes = new ArrayList<>();
+            List<RouteResult> routes = new ArrayList<>();
             for (long id = 1; id <= 8; id++) {
                 var route = item(config, fixture.endpoint, id, priority ? (int) id : 0);
                 routes.add(route);
@@ -87,13 +86,13 @@ class RequestExecutionRequestCapacityTest {
         config.getDispatcher().setMaxInflightPerPrefillWorker(4);
         try (Fixture fixture = fixture(config);
                 var writers = Executors.newFixedThreadPool(8)) {
-            var routes = new ArrayList<RouteExecution>();
+            var routes = new ArrayList<RouteResult>();
             for (long id = 1; id <= 64; id++) {
                 var route = item(config, fixture.endpoint, id);
                 routes.add(route);
                 assertTrue(EndpointTestSupport.offer(fixture.endpoint, route));
             }
-            var futures = new ArrayList<java.util.concurrent.Future<RouteExecution>>();
+            var futures = new ArrayList<java.util.concurrent.Future<RouteResult>>();
             for (var route : routes) {
                 futures.add(
                         writers.submit(
@@ -112,7 +111,7 @@ class RequestExecutionRequestCapacityTest {
                                     }
                                 }));
             }
-            var committed = new ArrayList<RouteExecution>();
+            var committed = new ArrayList<RouteResult>();
             for (var future : futures) {
                 var route = future.get();
                 if (route != null) committed.add(route);
@@ -138,7 +137,7 @@ class RequestExecutionRequestCapacityTest {
                                     new long[] {100L},
                                     null,
                                     System.currentTimeMillis()))) {
-                assertNotNull(handoff);
+                org.junit.jupiter.api.Assertions.assertNotNull(handoff);
             }
             assertFalse(fixture.endpoint.requestCapacityAvailable(4, 1));
         }
@@ -160,7 +159,7 @@ class RequestExecutionRequestCapacityTest {
             } else {
                 assertTrue(fixture.endpoint.removeQueued(route));
             }
-            assertNull(
+            org.junit.jupiter.api.Assertions.assertNull(
                     EndpointTestSupport.commitQueued(
                             fixture.endpoint,
                             org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
@@ -172,13 +171,6 @@ class RequestExecutionRequestCapacityTest {
             assertTrue(fixture.endpoint.requestCapacityAvailable(1, 1));
             assertEquals(0, fixture.endpoint.stats().batchCount());
         }
-    }
-
-    private static FlexlbConfig preemptionConfig() {
-        FlexlbConfig config = productionConfig();
-        config.setDispatcher(ConfigTestSupport.nonBatch());
-        config.getScheduler().setOrdering(ConfigTestSupport.priority());
-        return config;
     }
 
     @Test
@@ -204,8 +196,8 @@ class RequestExecutionRequestCapacityTest {
         IllegalStateException failure = new IllegalStateException("reservation failed");
         RequestExecutionTestSupport.start(runtime);
         try {
-            RouteExecution previous = item(config, endpoint, 1L);
-            RouteExecution incoming = org.mockito.Mockito.spy(item(config, endpoint, 2L, 90));
+            RouteResult previous = item(config, endpoint, 1L);
+            RouteResult incoming = item(config, endpoint, 2L, 90);
             doAnswer(
                             invocation -> {
                                 assertEquals(
@@ -231,7 +223,7 @@ class RequestExecutionRequestCapacityTest {
                             .admissionSummary(0, 0L)
                             .occupiedRequests());
             verify(requests.events(), times(0)).rejectRoute(any(), org.mockito.Mockito.isNull());
-            RouteExecution next = item(config, endpoint, 3L);
+            RouteResult next = item(config, endpoint, 3L);
             assertTrue(RequestExecutionTestSupport.offer(runtime, next));
             assertEquals(
                     List.of(previous, next), RequestExecutionTestSupport.capture(runtime).items());
@@ -241,7 +233,7 @@ class RequestExecutionRequestCapacityTest {
                             .admissionSummary(0, 0L)
                             .occupiedRequests());
         } finally {
-            assertNull(runtime.stopAndAwait());
+            org.junit.jupiter.api.Assertions.assertNull(runtime.stopAndAwait());
         }
     }
 
@@ -276,7 +268,7 @@ class RequestExecutionRequestCapacityTest {
                 .isRetired();
         RequestExecutionTestSupport.start(runtime);
         try {
-            RouteExecution item = item(config, endpoint, 1L);
+            RouteResult item = item(config, endpoint, 1L);
             assertFalse(RequestExecutionTestSupport.offer(runtime, item));
             assertEquals(
                     0L,
@@ -286,7 +278,7 @@ class RequestExecutionRequestCapacityTest {
             assertTrue(RequestExecutionTestSupport.capture(runtime).items().isEmpty());
             assertFalse(endpoint.releaseRequest(item));
         } finally {
-            assertNull(runtime.stopAndAwait());
+            org.junit.jupiter.api.Assertions.assertNull(runtime.stopAndAwait());
         }
     }
 
@@ -339,44 +331,45 @@ class RequestExecutionRequestCapacityTest {
     }
 
     @Test
-    void defaultBatchLimitAllowsTwoReservationsAndReopensAfterRelease() {
+    void defaultBatchLimitAllowsTwoCommitsAndReopensAfterRelease() {
         FlexlbConfig config = productionConfig();
         try (Fixture fixture = fixture(config)) {
-            var items = new ArrayList<RouteExecution>();
-            var reservations = new ArrayList<PrefillEndpoint.BatchRecord>();
-            try {
-                for (long id = 1L; id <= 3L; id++) {
-                    RouteExecution queued = item(config, fixture.endpoint, id);
-                    items.add(queued);
-                    assertEquals(2, config.getDispatcher().getMaxInflightPerPrefillWorker());
-                    assertTrue(
-                            EndpointTestSupport.offer(fixture.endpoint, queued),
-                            "BATCH does not impose an additional request-count limit on the waiting queue");
-                }
-                for (int index = 0; index < 2; index++) {
-                    var result =
-                            fixture.endpoint.reserveBatch(
-                                    100L + index,
-                                    config.getDispatcher().getMaxInflightPerPrefillWorker());
-                    assertTrue(result.accepted());
-                    reservations.add(result.value());
-                }
-                assertEquals(
-                        CapacityBoundary.Resource.PREFILL_BATCH,
-                        fixture.endpoint.reserveBatch(102L, 2).boundary().resource());
-                assertEquals(2, fixture.endpoint.queueCounters().batchSlots());
-                var released = fixture.endpoint.rollback(reservations.removeFirst());
-                assertTrue(released);
-                assertEquals(1, fixture.endpoint.queueCounters().batchSlots());
-                var replacement = fixture.endpoint.reserveBatch(102L, 2);
-                assertTrue(replacement.accepted());
-                reservations.add(replacement.value());
-            } finally {
-                reservations.forEach(
-                        reservation -> assertTrue(fixture.endpoint.rollback(reservation)));
-                assertEquals(0, fixture.endpoint.queueCounters().batchSlots());
+            var items = new ArrayList<RouteResult>();
+            for (long id = 1; id <= 3; id++) {
+                var queued = item(config, fixture.endpoint, id);
+                items.add(queued);
+                assertTrue(EndpointTestSupport.offer(fixture.endpoint, queued));
             }
+            int limit = config.getDispatcher().getMaxInflightPerPrefillWorker();
+            assertEquals(2, limit);
+            for (int index = 0; index < 2; index++)
+                org.junit.jupiter.api.Assertions.assertNotNull(
+                        EndpointTestSupport.commitBatch(
+                                fixture.endpoint,
+                                new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(
+                                        100L + index, limit),
+                                List.of(items.get(index)),
+                                10));
+            var candidate =
+                    new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(102L, limit);
+            org.junit.jupiter.api.Assertions.assertNull(
+                    EndpointTestSupport.commitBatch(
+                            fixture.endpoint, candidate, List.of(items.get(2)), 10));
+            assertEquals(2, fixture.endpoint.queueCounters().batchSlots());
+            assertTrue(fixture.endpoint.releaseRequest(items.getFirst()));
+            org.junit.jupiter.api.Assertions.assertNotNull(
+                    EndpointTestSupport.commitBatch(
+                            fixture.endpoint, candidate, List.of(items.get(2)), 10));
+            items.forEach(fixture.endpoint::releaseRequest);
+            assertEquals(0, fixture.endpoint.queueCounters().batchSlots());
         }
+    }
+
+    private static FlexlbConfig preemptionConfig() {
+        FlexlbConfig config = productionConfig();
+        config.setDispatcher(ConfigTestSupport.nonBatch());
+        config.getScheduler().setOrdering(ConfigTestSupport.priority());
+        return config;
     }
 
     private static FlexlbConfig productionConfig() {
@@ -386,12 +379,11 @@ class RequestExecutionRequestCapacityTest {
         return config;
     }
 
-    private static RouteExecution item(
-            FlexlbConfig config, PrefillEndpoint endpoint, long requestId) {
+    private static RouteResult item(FlexlbConfig config, PrefillEndpoint endpoint, long requestId) {
         return item(config, endpoint, requestId, 50);
     }
 
-    private static RouteExecution item(
+    private static RouteResult item(
             FlexlbConfig config, PrefillEndpoint endpoint, long requestId, int priority) {
         Request request =
                 Request.builder().requestId(String.valueOf(requestId)).seqLen(100L).build();
@@ -399,8 +391,16 @@ class RequestExecutionRequestCapacityTest {
         context.data().setRequest(request);
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         context.data().setFuture(new CompletableFuture<Response>());
-        return SchedulingTestConfig.createRoute(
-                context, null, null, null, endpoint, null, null, System.currentTimeMillis());
+        return org.flexlb.balance.scheduler.RequestExecutionTestSupport.mockProtocolRoute(
+                SchedulingTestConfig.createRoute(
+                        context,
+                        null,
+                        null,
+                        null,
+                        endpoint,
+                        null,
+                        null,
+                        System.currentTimeMillis()));
     }
 
     private static Fixture fixture(FlexlbConfig config) {

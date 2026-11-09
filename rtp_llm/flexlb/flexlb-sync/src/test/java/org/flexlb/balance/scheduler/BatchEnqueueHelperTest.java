@@ -18,6 +18,9 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Verifies immutable payload construction and exact-member response ordering.
+ */
 class BatchEnqueueHelperTest {
     @Test
     void resultsFollowClaimOrderRatherThanWireOrder() {
@@ -121,8 +124,9 @@ class BatchEnqueueHelperTest {
     @ValueSource(booleans = {false, true})
     void payloadBoundCoversFrozenRoleAddressesWithoutParsing(boolean separateDecode)
             throws Exception {
-        var member = claim(91L);
-        var context = member.owner();
+        var context = spy(new RequestContext(SchedulingTestConfig.batchConfig()));
+        context.data()
+                .setRequest(org.flexlb.dao.loadbalance.Request.builder().requestId("91").build());
         var data = spy(context.data());
         doReturn(data).when(context).data();
         data.setGenerateInputPb(
@@ -134,21 +138,25 @@ class BatchEnqueueHelperTest {
         var prefill = mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
         String address = "worker-" + "节点".repeat(80);
         when(prefill.getIp()).thenReturn(address);
-        when(member.route().prefillEndpoint()).thenReturn(prefill);
         var status = new org.flexlb.dao.loadbalance.ServerStatus();
         status.setRole(org.flexlb.dao.route.RoleType.PREFILL);
         status.setServerIp(address);
         status.setHttpPort(65535);
         status.setGrpcPort(65535);
-        when(member.route().prefill()).thenReturn(status);
+        status.setSuccess(true);
+        status.setRequestId(context.data().getRequestId());
+        var selections = new java.util.ArrayList<RoleSelection>();
+        selections.add(SelectionTestSupport.metadata(prefill, status, 0L));
         if (separateDecode) {
             var decode = mock(org.flexlb.balance.endpoint.DecodeEndpoint.class);
             when(decode.getIp()).thenReturn(address);
-            when(member.route().decodeEndpoint()).thenReturn(decode);
             var decoded = org.flexlb.dao.loadbalance.ServerStatus.copyOf(status);
             decoded.setRole(org.flexlb.dao.route.RoleType.DECODE);
-            when(member.route().decode()).thenReturn(decoded);
+            selections.add(SelectionTestSupport.metadata(decode, decoded, 0L));
         }
+        var member =
+                DeliveryTestSupport.member(
+                        new RouteResult(context, selections), Delivery.SendMode.BATCH_ENQUEUE, 17L);
         long bound = 16L + BatchEnqueueHelper.payloadSizeUpperBound(member.route());
         verify(data, never()).getGenerateInput();
         assertTrue(bound >= BatchEnqueueHelper.prepare(17L, List.of(member)).getSerializedSize());
@@ -156,9 +164,12 @@ class BatchEnqueueHelperTest {
 
     private static Delivery.Member claim(long id) {
         var ctx = spy(new RequestContext(SchedulingTestConfig.batchConfig()));
-        var route = mock(RouteExecution.class);
-        when(route.ctx()).thenReturn(ctx);
-        when(route.requestId()).thenReturn(String.valueOf(id));
+        ctx.data()
+                .setRequest(
+                        org.flexlb.dao.loadbalance.Request.builder()
+                                .requestId(String.valueOf(id))
+                                .build());
+        var route = RequestProtocolTestSupport.mockSelectedRoute(ctx);
         return DeliveryTestSupport.member(route, Delivery.SendMode.BATCH_ENQUEUE, 17);
     }
 }

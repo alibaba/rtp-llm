@@ -7,10 +7,13 @@ import java.util.List;
 import java.util.Set;
 import java.util.function.Predicate;
 
-/** Independent test implementation: no intrusive links or default-queue delegation. */
+/**
+ * Independent test implementation: no intrusive links or default-queue delegation.
+ */
 final class ListPlacementQueue implements PlacementQueue {
     private final List<GlobalQueueEntry> entries = new ArrayList<>();
     private final Set<GlobalQueueEntry> pending = new HashSet<>();
+
     private long sequence;
 
     @Override
@@ -30,14 +33,6 @@ final class ListPlacementQueue implements PlacementQueue {
     }
 
     @Override
-    public boolean remove(GlobalQueueEntry entry) {
-        if (!entries.remove(entry)) return false;
-        pending.remove(entry);
-        entry.markRemoved();
-        return true;
-    }
-
-    @Override
     public List<GlobalQueueEntry> scanForPlanningCandidates(
             int limit, int budget, Predicate<GlobalQueueEntry> eligible) {
         var ordered = new ArrayList<>(pending);
@@ -50,6 +45,11 @@ final class ListPlacementQueue implements PlacementQueue {
             if (eligible.test(entry)) result.add(entry);
         }
         return result;
+    }
+
+    @Override
+    public Comparator<GlobalQueueEntry> order() {
+        return Comparator.comparingLong(GlobalQueueEntry::sequence);
     }
 
     @Override
@@ -82,7 +82,10 @@ final class ListPlacementQueue implements PlacementQueue {
     }
 
     @Override
-    public Comparator<GlobalQueueEntry> order() {
-        return Comparator.comparingLong(GlobalQueueEntry::sequence);
+    public boolean remove(GlobalQueueEntry entry) {
+        if (!entries.remove(entry)) return false;
+        pending.remove(entry);
+        entry.markRemoved();
+        return true;
     }
 }

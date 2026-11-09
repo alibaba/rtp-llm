@@ -16,25 +16,13 @@ import static org.flexlb.balance.prediction.ArithmeticFormulaAst.Node;
  * Batch-aware callers may additionally enable {@code sum(expression)}.
  */
 public final class ArithmeticFormula {
-
     // Bounded reuse also avoids one generated class per equal-model endpoint.
     private static final int MAX_COMPILED_FORMULAS = 128;
+
     private static final Map<ParseKey, ArithmeticFormula> COMPILED =
             new LinkedHashMap<>(MAX_COMPILED_FORMULAS, 0.75f, true);
 
-    private record ParseKey(
-            String expression,
-            Map<String, Integer> variables,
-            Set<String> excludedVariables,
-            boolean allowAggregates) {}
-
     private final Compiled compiled;
-
-    private record Compiled(
-            Executable full,
-            Executable bindings,
-            ArithmeticFormulaCompiler.Incremental incremental) {}
-
     private final Set<String> referencedVariables;
 
     private ArithmeticFormula(Node root, Set<String> referencedVariables, boolean allowAggregates) {
@@ -106,11 +94,6 @@ public final class ArithmeticFormula {
         return compiled.full().evaluate(vars, itemVars);
     }
 
-    /** Stable per-item bindings read directly by the compiled aggregate loop. */
-    public interface Variables {
-        double variable(int index);
-    }
-
     public double evaluateWithBindings(double[] vars, List<? extends Variables> items) {
         checkState(compiled.bindings() != null, "Batch aggregates are disabled");
         return compiled.bindings().evaluate(vars, items);
@@ -119,6 +102,24 @@ public final class ArithmeticFormula {
     /** A fresh, caller-owned accumulator for a nonempty append-only batch; null on compiler fallback. */
     public Aggregation newAggregation() {
         return compiled.incremental() == null ? null : new Aggregation(compiled.incremental());
+    }
+
+    private record ParseKey(
+            String expression,
+            Map<String, Integer> variables,
+            Set<String> excludedVariables,
+            boolean allowAggregates) {}
+
+    private record Compiled(
+            Executable full,
+            Executable bindings,
+            ArithmeticFormulaCompiler.Incremental incremental) {}
+
+    /**
+     * Stable per-item bindings read directly by the compiled aggregate loop.
+     */
+    public interface Variables {
+        double variable(int index);
     }
 
     public static final class Aggregation {

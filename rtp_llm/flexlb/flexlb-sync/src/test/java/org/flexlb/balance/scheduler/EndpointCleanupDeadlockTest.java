@@ -91,8 +91,10 @@ class EndpointCleanupDeadlockTest {
         }
     }
 
+    /**
+     * Runs lock-order races in a separate process so a deadlock can be detected without hanging the test JVM.
+     */
     public static class Reproducer {
-
         public static void main(String[] args) {
             try {
                 run(args[0]);
@@ -101,105 +103,6 @@ class EndpointCleanupDeadlockTest {
                 failure.printStackTrace();
                 System.exit(1);
             }
-        }
-
-        private static void verifyTimerClose() throws Exception {
-            var config = SchedulingTestConfig.batchConfig();
-            ConfigService service = mock(ConfigService.class);
-            when(service.loadBalanceConfig()).thenReturn(config);
-            AbstractRequestScheduler registry = mock(AbstractRequestScheduler.class);
-            ExpirationTimer timer =
-                    new ExpirationTimer(
-                            org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry),
-                            (task, delay) -> mock(java.util.concurrent.Future.class));
-            RequestContext requestContext = RequestProtocolTestSupport.context(config, 992L);
-            when(SchedulerTestSupport.repository(registry).isCurrent(requestContext))
-                    .thenReturn(true);
-            AbstractRequestScheduler requestOwner =
-                    RequestProtocolTestSupport.initialize(
-                            mock(ResponseCompletionExecutor.class), requestContext, timer);
-
-            CountDownLatch contextHeld = new CountDownLatch(1);
-            CountDownLatch closeReachesContexts = new CountDownLatch(1);
-            AtomicReference<Throwable> failure = new AtomicReference<>();
-            @SuppressWarnings("unchecked")
-            var slots =
-                    (java.util.concurrent.ConcurrentMap<RequestContext, ?>)
-                            org.springframework.test.util.ReflectionTestUtils.getField(
-                                    timer, "slots");
-            var observed = spy(slots);
-            doAnswer(
-                            call -> {
-                                closeReachesContexts.countDown();
-                                return call.callRealMethod();
-                            })
-                    .when(observed)
-                    .keySet();
-            org.springframework.test.util.ReflectionTestUtils.setField(timer, "slots", observed);
-            Thread holder =
-                    new Thread(
-                            () -> {
-                                try {
-                                    synchronized (requestContext) {
-                                        contextHeld.countDown();
-                                        assertTrue(closeReachesContexts.await(5, TimeUnit.SECONDS));
-                                        // close() is about to acquire Context. Registration must
-                                        // remain available
-                                        // to reject this late request; holding it while waiting for
-                                        // Context deadlocks.
-                                        assertThrows(
-                                                java.util.concurrent.RejectedExecutionException
-                                                        .class,
-                                                () ->
-                                                        timer.update(
-                                                                requestContext,
-                                                                new ExpirationTimer.Plan(
-                                                                        requestContext
-                                                                                        .snapshot()
-                                                                                        .deadlines()
-                                                                                        .revision()
-                                                                                + 1L,
-                                                                        requestContext
-                                                                                .snapshot()
-                                                                                .deadlines()
-                                                                                .request(),
-                                                                        requestContext
-                                                                                .snapshot()
-                                                                                .deadlines()
-                                                                                .visibility(),
-                                                                        requestContext
-                                                                                .snapshot()
-                                                                                .deadlines()
-                                                                                .inactivity())));
-                                    }
-                                } catch (Throwable error) {
-                                    failure.set(error);
-                                }
-                            },
-                            "context-checks-timer-registration");
-            Thread closer =
-                    new Thread(
-                            () -> {
-                                try {
-                                    assertTrue(contextHeld.await(5, TimeUnit.SECONDS));
-                                    timer.close();
-                                } catch (Throwable error) {
-                                    failure.set(error);
-                                }
-                            },
-                            "timer-close-waits-for-context");
-            holder.setDaemon(true);
-            closer.setDaemon(true);
-            holder.start();
-            closer.start();
-            holder.join(8_000);
-            closer.join(8_000);
-            if (failure.get() != null) {
-                throw new AssertionError(failure.get());
-            }
-            assertFalse(
-                    holder.isAlive() || closer.isAlive(),
-                    "Context / timer registration lock cycle");
         }
 
         private static void run(String kind) throws Exception {
@@ -220,7 +123,7 @@ class EndpointCleanupDeadlockTest {
             long id = 991L;
             var context = RequestProtocolTestSupport.context(config, id);
             var future = RequestProtocolTestSupport.submitForManualPlacement(registry, context);
-            RequestContext requestContext = registry.requests.findActive(String.valueOf(id));
+            RequestContext requestContext = registry.repository.findActive(String.valueOf(id));
             CountDownLatch contextHeld = new CountDownLatch(1);
             CountDownLatch endpointHeld = new CountDownLatch(1);
             AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -252,9 +155,7 @@ class EndpointCleanupDeadlockTest {
                     var selectedEndpoint = endpoint;
 
                     assertNotNull(selectedEndpoint);
-                    reservation =
-                            EndpointTestSupport.reserveUnqueuedDecode(
-                                    endpoint, selectedEndpoint, id, 1L, 1L, 50);
+                    reservation = EndpointTestSupport.registerDecode(endpoint, id, 1L, 1L, 50);
                 }
                 assertNotNull(reservation);
                 org.junit.jupiter.api.Assertions.assertSame(future, context.data().getFuture());
@@ -376,6 +277,105 @@ class EndpointCleanupDeadlockTest {
                 throw new AssertionError("Cleanup and business operation did not finish");
             }
             System.out.println("COMPLETED " + kind);
+        }
+
+        private static void verifyTimerClose() throws Exception {
+            var config = SchedulingTestConfig.batchConfig();
+            ConfigService service = mock(ConfigService.class);
+            when(service.loadBalanceConfig()).thenReturn(config);
+            AbstractRequestScheduler registry = mock(AbstractRequestScheduler.class);
+            ExpirationTimer timer =
+                    new ExpirationTimer(
+                            org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry),
+                            (task, delay) -> mock(java.util.concurrent.Future.class));
+            RequestContext requestContext = RequestProtocolTestSupport.context(config, 992L);
+            when(SchedulerTestSupport.repository(registry).isCurrent(requestContext))
+                    .thenReturn(true);
+            AbstractRequestScheduler requestOwner =
+                    RequestProtocolTestSupport.initialize(
+                            mock(ResponseCompletionExecutor.class), requestContext, timer);
+
+            CountDownLatch contextHeld = new CountDownLatch(1);
+            CountDownLatch closeReachesContexts = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            @SuppressWarnings("unchecked")
+            var slots =
+                    (java.util.concurrent.ConcurrentMap<RequestContext, ?>)
+                            org.springframework.test.util.ReflectionTestUtils.getField(
+                                    timer, "slots");
+            var observed = spy(slots);
+            doAnswer(
+                            call -> {
+                                closeReachesContexts.countDown();
+                                return call.callRealMethod();
+                            })
+                    .when(observed)
+                    .keySet();
+            org.springframework.test.util.ReflectionTestUtils.setField(timer, "slots", observed);
+            Thread holder =
+                    new Thread(
+                            () -> {
+                                try {
+                                    synchronized (requestContext) {
+                                        contextHeld.countDown();
+                                        assertTrue(closeReachesContexts.await(5, TimeUnit.SECONDS));
+                                        // close() is about to acquire Context. Registration must
+                                        // remain available
+                                        // to reject this late request; holding it while waiting for
+                                        // Context deadlocks.
+                                        assertThrows(
+                                                java.util.concurrent.RejectedExecutionException
+                                                        .class,
+                                                () ->
+                                                        timer.update(
+                                                                requestContext,
+                                                                new ExpirationTimer.Plan(
+                                                                        requestContext
+                                                                                        .snapshot()
+                                                                                        .deadlines()
+                                                                                        .revision()
+                                                                                + 1L,
+                                                                        requestContext
+                                                                                .snapshot()
+                                                                                .deadlines()
+                                                                                .request(),
+                                                                        requestContext
+                                                                                .snapshot()
+                                                                                .deadlines()
+                                                                                .visibility(),
+                                                                        requestContext
+                                                                                .snapshot()
+                                                                                .deadlines()
+                                                                                .inactivity())));
+                                    }
+                                } catch (Throwable error) {
+                                    failure.set(error);
+                                }
+                            },
+                            "context-checks-timer-registration");
+            Thread closer =
+                    new Thread(
+                            () -> {
+                                try {
+                                    assertTrue(contextHeld.await(5, TimeUnit.SECONDS));
+                                    timer.close();
+                                } catch (Throwable error) {
+                                    failure.set(error);
+                                }
+                            },
+                            "timer-close-waits-for-context");
+            holder.setDaemon(true);
+            closer.setDaemon(true);
+            holder.start();
+            closer.start();
+            holder.join(8_000);
+            closer.join(8_000);
+            if (failure.get() != null) {
+                throw new AssertionError(failure.get());
+            }
+            assertFalse(
+                    holder.isAlive() || closer.isAlive(),
+                    "Context / timer registration lock cycle");
         }
     }
 }

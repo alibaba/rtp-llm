@@ -58,7 +58,6 @@ import static org.mockito.Mockito.when;
  * Delivery and queued withdrawal arbitrate through the real exact Decode resource ledger.
  */
 class QueuedDeliveryWithdrawalRaceTest {
-
     @Test
     @Timeout(15)
     void cancellationDoesNotWaitForTheQueuePreparationThread() throws Exception {
@@ -83,9 +82,9 @@ class QueuedDeliveryWithdrawalRaceTest {
                 SchedulerTestSupport.awaitRequestWork(fixture.runtime);
                 assertEquals(ContextResult.Phase.CLOSED, fixture.context.snapshot().phase());
                 assertEquals(0, fixture.decode.resourceSnapshot().activeDispatchPermits());
-                assertFalse(
+                assertTrue(
                         fixture.prefill.batchCapacityAvailable(1),
-                        "the paused delivery owns its batch slot until rollback");
+                        "an uncommitted candidate owns no batch slot");
                 verify(fixture.client, never()).batchEnqueueAsync(anyString(), anyInt(), any());
             } finally {
                 allowCommit.countDown();
@@ -214,6 +213,47 @@ class QueuedDeliveryWithdrawalRaceTest {
         }
     }
 
+    private static <T> T construct(Class<T> type, Class<?>[] signature, Object... args)
+            throws Exception {
+        var constructor = type.getDeclaredConstructor(signature);
+        constructor.setAccessible(true);
+        return constructor.newInstance(args);
+    }
+
+    private static WorkerStatusResponse status(RoleType role) {
+        var response = new WorkerStatusResponse();
+        response.setRole(role);
+        response.setAlive(true);
+        response.setStatusVersion(1L);
+        response.setLatestFinishedVersion(0L);
+        response.setRunningTaskInfo(Map.of());
+        response.setFinishedTaskInfo(Map.of());
+        response.setRunningQueryLen(0L);
+        response.setTotalKvCacheTokens(100000L);
+        response.setAvailableKvCacheTokens(100000L);
+        return response;
+    }
+
+    private static void applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
+        WorkerStatus worker = endpoint.getStatus();
+        org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange projection;
+        worker.lock.lock();
+        try {
+            projection =
+                    endpoint.applyPreparedStatus(
+                            worker,
+                            worker.prepareNewStatus(
+                                    WorkerStatusTestSupport.freezeStatusResponse(
+                                            worker, response)));
+        } finally {
+            worker.lock.unlock();
+        }
+        endpoint.publishStatus(projection);
+    }
+
+    /**
+     * Runs a real queued P/D route with controllable preparation gates and deterministic transport replies.
+     */
     private static final class Fixture implements AutoCloseable {
         final EngineGrpcClient client = mock(EngineGrpcClient.class);
         final SchedulerTestServices runtime;
@@ -224,7 +264,7 @@ class QueuedDeliveryWithdrawalRaceTest {
         final RequestContext context;
         final CompletableFuture<Response> future;
         final DecodeResources.RequestReservation reservation;
-        final RouteExecution route;
+        final RouteResult route;
 
         Fixture() throws Exception {
             var config = SchedulingTestConfig.batchConfig();
@@ -310,7 +350,7 @@ class QueuedDeliveryWithdrawalRaceTest {
                                 org.flexlb.config.DispatcherConfig.Type.class,
                                 DeliveryMetricsReporter.class,
                                 PlacementAvailability.class,
-                                org.flexlb.balance.planner.GroupPlanner.class,
+                                QueueExecutionSettings.class,
                                 org.flexlb.balance.endpoint.PrefillRequestQueue.Factory.class
                             },
                             pStatus,
@@ -318,7 +358,9 @@ class QueuedDeliveryWithdrawalRaceTest {
                             dispatcher.mode(),
                             reporter,
                             availability,
-                            org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
+                            QueueExecutionSettings.capture(
+                                    config,
+                                    org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)),
                             (org.flexlb.balance.endpoint.PrefillRequestQueue.Factory)
                                     order ->
                                             org.flexlb.balance.endpoint.OrderedPrefillRequestQueue
@@ -375,12 +417,13 @@ class QueuedDeliveryWithdrawalRaceTest {
                 var selectedEndpoint = decode;
 
                 reservation =
-                        decode.tryReserveQueuedRequest(
+                        decode.tryRegisterSelection(
+                                        decode.routingView(),
                                         String.valueOf(context.data().getRequestId()),
                                         16L,
                                         16L,
                                         50,
-                                        null)
+                                        SchedulingTestConfig.capacity(config))
                                 .value();
             }
             assertNotNull(reservation);
@@ -394,16 +437,14 @@ class QueuedDeliveryWithdrawalRaceTest {
             var responseTemplate = new Response();
             responseTemplate.setSuccess(true);
             route =
-                    SchedulingTestConfig.createRoute(
-                            context,
-                            responseTemplate,
-                            null,
-                            decodeMetadata,
-                            prefill,
-                            decode,
-                            reservation,
-                            System.currentTimeMillis());
-            responseTemplate.setServerStatus(List.of(route.prefill(), route.decode()));
+                    RequestExecutionTestSupport.registerPrefillRoute(
+                            context, prefill, decode, reservation, 0L, System.currentTimeMillis());
+            responseTemplate.setServerStatus(
+                    List.of(
+                            route.role(org.flexlb.dao.route.RoleType.PREFILL)
+                                    .toServerStatus(route.requestId()),
+                            route.role(org.flexlb.dao.route.RoleType.DECODE)
+                                    .toServerStatus(route.requestId())));
             var admission =
                     SchedulerTestSupport.claim(
                             SchedulerTestServices.lifecycle(owner),
@@ -431,31 +472,12 @@ class QueuedDeliveryWithdrawalRaceTest {
             AbstractRequestScheduler.finishPlacement(admission);
         }
 
-        void select(PrefillTimePredictor.Evaluator evaluator) {
-            batcher.processSelection(
-                    List.of(route),
-                    "single_request",
-                    evaluator,
-                    OptionalLong.empty(),
-                    null,
-                    Delivery.PrefixPolicy.ORDERED_PREFIX,
-                    () -> true);
-        }
-
-        void assertDelivered() throws Exception {
-            assertNotNull(
-                    context.snapshot().delivery(), "a committed route must retain its sender");
-            assertTrue(future.get(5, TimeUnit.SECONDS).isSuccess());
-            assertEquals(0, prefill.progress().queueDepth());
-            assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
-            verify(client, times(1)).batchEnqueueAsync(anyString(), anyInt(), any());
-        }
-
         @Override
         public void close() {
             runtime.deliveries().awaitDeliveries();
-            ReflectionTestUtils.invokeMethod(runtime, "closeRequestExecutors");
-            ((ExpirationTimer) ReflectionTestUtils.getField(runtime, "timer")).close();
+            owner.closeExecutors();
+            runtime.deadlines().close();
+            runtime.closeTimers();
             for (String field : List.of("dispatchExecutor", "completionExecutor")) {
                 assertTrue(
                         ((ExecutorService)
@@ -475,43 +497,25 @@ class QueuedDeliveryWithdrawalRaceTest {
                         field + " must terminate after the execution registrations drain");
             }
         }
-    }
 
-    private static <T> T construct(Class<T> type, Class<?>[] signature, Object... args)
-            throws Exception {
-        var constructor = type.getDeclaredConstructor(signature);
-        constructor.setAccessible(true);
-        return constructor.newInstance(args);
-    }
-
-    private static WorkerStatusResponse status(RoleType role) {
-        var response = new WorkerStatusResponse();
-        response.setRole(role);
-        response.setAlive(true);
-        response.setStatusVersion(1L);
-        response.setLatestFinishedVersion(0L);
-        response.setRunningTaskInfo(Map.of());
-        response.setFinishedTaskInfo(Map.of());
-        response.setRunningQueryLen(0L);
-        response.setTotalKvCacheTokens(100000L);
-        response.setAvailableKvCacheTokens(100000L);
-        return response;
-    }
-
-    private static void applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
-        WorkerStatus worker = endpoint.getStatus();
-        org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange projection;
-        worker.lock.lock();
-        try {
-            projection =
-                    endpoint.applyPreparedStatus(
-                            worker,
-                            worker.prepareNewStatus(
-                                    WorkerStatusTestSupport.freezeStatusResponse(
-                                            worker, response)));
-        } finally {
-            worker.lock.unlock();
+        void select(PrefillTimePredictor.Evaluator evaluator) {
+            batcher.processSelection(
+                    List.of(route),
+                    "single_request",
+                    evaluator,
+                    OptionalLong.empty(),
+                    null,
+                    Delivery.PrefixPolicy.ORDERED_PREFIX,
+                    () -> true);
         }
-        endpoint.publishStatus(projection);
+
+        void assertDelivered() throws Exception {
+            assertNotNull(
+                    context.snapshot().delivery(), "a committed route must retain its sender");
+            assertTrue(future.get(5, TimeUnit.SECONDS).isSuccess());
+            assertEquals(0, prefill.progress().queueDepth());
+            assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
+            verify(client, times(1)).batchEnqueueAsync(anyString(), anyInt(), any());
+        }
     }
 }

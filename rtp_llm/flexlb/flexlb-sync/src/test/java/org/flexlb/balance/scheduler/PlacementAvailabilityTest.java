@@ -13,12 +13,12 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks placement availability versions for exact endpoints, groups and topology changes.
+ * Checks monotonic role and group capacity versions, including delayed events and retired history.
  */
 class PlacementAvailabilityTest {
 
     @Test
-    void exactReleaseAdvancesExactGroupAndRoleEdges() {
+    void workerReleaseAdvancesGroupAndRoleEdges() {
         PlacementAvailability availability = new PlacementAvailability();
         List<PlacementKey> changed = new ArrayList<>();
         availability.addListener(changed::add);
@@ -37,14 +37,14 @@ class PlacementAvailabilityTest {
     }
 
     @Test
-    void anotherEndpointDoesNotAdvanceExactEdge() {
+    void anotherEndpointInTheSameGroupAdvancesTheWaitingEdge() {
         PlacementAvailability availability = new PlacementAvailability();
         PlacementKey waiting = PlacementKey.exact(RoleType.PREFILL, "g1", "127.0.0.1:8000");
 
         PlacementAvailabilityTestSupport.changed(
                 availability, PlacementKey.exact(RoleType.PREFILL, "g1", "127.0.0.2:8000"));
 
-        assertEquals(0L, availability.lastChangedSequence(waiting));
+        assertTrue(availability.lastChangedSequence(waiting) > 0L);
     }
 
     @Test
@@ -62,14 +62,14 @@ class PlacementAvailabilityTest {
     }
 
     @Test
-    void endpointGroupChangesShareOneExactCapacityVersion() {
+    void endpointGroupChangesHaveIndependentGroupVersions() {
         var availability = new PlacementAvailability();
         var oldGroup = PlacementKey.exact(RoleType.PREFILL, "old", "127.0.0.1:8000");
         var newGroup = PlacementKey.exact(RoleType.PREFILL, "new", oldGroup.endpoint());
         PlacementAvailabilityTestSupport.changed(availability, oldGroup);
         PlacementAvailabilityTestSupport.changed(availability, newGroup);
 
-        assertEquals(2L, availability.lastChangedSequence(oldGroup));
+        assertEquals(1L, availability.lastChangedSequence(oldGroup));
         assertEquals(2L, availability.lastChangedSequence(newGroup));
         assertEquals(
                 1L,
@@ -79,9 +79,31 @@ class PlacementAvailabilityTest {
                 availability.lastChangedSequence(new PlacementKey(RoleType.PREFILL, "new", null)));
         assertEquals(2L, availability.lastChangedSequence(PlacementKey.anyGroup(RoleType.PREFILL)));
         assertEquals(
-                0L,
+                2L,
                 availability.lastChangedSequence(
                         PlacementKey.exact(RoleType.PREFILL, "new", "127.0.0.2:8000")));
+    }
+
+    @Test
+    void retirementFloorPreventsSleepingOnDiscardedHistory() {
+        var availability = new PlacementAvailability();
+        var worker =
+                org.flexlb.dao.master.WorkerStatus.createDiscovered(
+                        RoleType.PREFILL, "g1", "127.0.0.1", 8000, 8001, null);
+        var key = new PlacementKey(RoleType.PREFILL, "g1", null);
+        availability.changed(worker, worker.getLogicalIpPort());
+        long observed = availability.sequence();
+        worker.lock.lock();
+        try {
+            worker.beginRetirementAfterEndpointGateClosed();
+        } finally {
+            worker.lock.unlock();
+        }
+        availability.clearRetired(worker);
+        assertTrue(availability.lastChangedSequence(key) > observed);
+        assertTrue(
+                availability.lastChangedSequence(PlacementKey.anyGroup(RoleType.PREFILL))
+                        > observed);
     }
 
     @Test
@@ -89,14 +111,17 @@ class PlacementAvailabilityTest {
         PlacementAvailability availability = new PlacementAvailability();
         PlacementKey group = new PlacementKey(RoleType.PREFILL, "g1", null);
         PlacementKey role = PlacementKey.anyGroup(RoleType.PREFILL);
-        PlacementKey olderExact = mock(PlacementKey.class);
+        PlacementKey olderExact = PlacementKey.exact(RoleType.PREFILL, "g1", "127.0.0.1:8000");
         PlacementKey newerExact = PlacementKey.exact(RoleType.PREFILL, "g1", "127.0.0.2:8000");
-        when(olderExact.role()).thenReturn(RoleType.PREFILL);
-        when(olderExact.group()).thenReturn("g1");
-        when(olderExact.capacityDomain()).thenCallRealMethod();
-        // Interleave before the older publisher reaches its shared group and role keys.
+        var olderWorker = mock(org.flexlb.dao.master.WorkerStatus.class);
+        var topology =
+                org.flexlb.dao.master.WorkerStatus.createDiscovered(
+                                RoleType.PREFILL, "g1", "127.0.0.1", 8000, 8001, null)
+                        .topologySnapshot();
+        when(olderWorker.getRole()).thenReturn(RoleType.PREFILL);
+        when(olderWorker.topologySnapshot()).thenReturn(topology);
         var interleaved = new java.util.concurrent.atomic.AtomicBoolean();
-        when(olderExact.endpoint())
+        when(olderWorker.isActiveGeneration())
                 .thenAnswer(
                         ignored -> {
                             if (interleaved.compareAndSet(false, true)) {
@@ -104,12 +129,12 @@ class PlacementAvailabilityTest {
                             }
                             assertEquals(2L, availability.lastChangedSequence(group));
                             assertEquals(2L, availability.lastChangedSequence(role));
-                            return "127.0.0.1:8000";
+                            return true;
                         });
         List<PlacementKey> events = new ArrayList<>();
         availability.addListener(events::add);
 
-        PlacementAvailabilityTestSupport.changed(availability, olderExact);
+        availability.changed(olderWorker, olderExact.endpoint());
 
         assertAll(
                 () ->
@@ -122,7 +147,7 @@ class PlacementAvailabilityTest {
                                 2L,
                                 availability.lastChangedSequence(role),
                                 "a delayed exact publication must preserve the newer role edge"));
-        assertEquals(1L, availability.lastChangedSequence(olderExact));
+        assertEquals(2L, availability.lastChangedSequence(olderExact));
         assertEquals(2L, availability.lastChangedSequence(newerExact));
         assertEquals(List.of(newerExact, olderExact), events);
     }

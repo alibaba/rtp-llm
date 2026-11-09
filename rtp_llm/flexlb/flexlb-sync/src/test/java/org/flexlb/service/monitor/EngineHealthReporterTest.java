@@ -1220,44 +1220,6 @@ class EngineHealthReporterTest {
                 CacheStatus.builder().blockSize(64).cacheKeySize(7).build());
     }
 
-    private void reportBalance(RequestData data) {
-        var response = data.getResponse();
-        reporter.reportBalancingService(
-                response.getCode(), System.currentTimeMillis() - data.getStartTime());
-        for (var selected : response.getServerStatus()) {
-            if (selected == null || selected.getRole() == null) continue;
-            reporter.reportSelectionResult(
-                    selected.getRole(), response.isSuccess(), response.getCode());
-            reporter.reportSelectedWorker(
-                    selected.getRole(),
-                    data.selectionReason(selected.getRole()),
-                    selected.getServerIp() + ":" + selected.getHttpPort(),
-                    response.isSuccess(),
-                    response.getCode());
-        }
-    }
-
-    private void reportStatus(
-            WorkerStatus status, WorkerEndpoint endpoint, int active, int finished) {
-        reporter.reportStatusCheckerSuccess(
-                status,
-                endpoint == null ? OptionalLong.empty() : endpoint.tryGetLoadMetric(),
-                active,
-                finished);
-        if (status.getRole() == RoleType.ENCODER) {
-            var engine = status.committedEngineObservation();
-            long observed =
-                    Math.max(0, engine.runningQueryLen()) + Math.max(0, engine.waitingQueryLen());
-            long total =
-                    endpoint instanceof EncoderEndpoint encoder ? encoder.requestCount() : observed;
-            reporter.reportEncoderStatus(
-                    status.getMetricIpPort(),
-                    Math.max(0, total - observed),
-                    total,
-                    endpoint instanceof EncoderEndpoint encoder ? encoder.uncachedTokens() : 0);
-        }
-    }
-
     private WorkerStatus workerStatus(String ip, RoleType role) {
         return workerStatus(ip, role, 0L, 0L, null);
     }
@@ -1316,6 +1278,44 @@ class EngineHealthReporterTest {
             workerStatus.lock.unlock();
         }
         return workerStatus;
+    }
+
+    private void reportBalance(RequestData data) {
+        var response = data.getResponse();
+        reporter.reportBalancingService(
+                response.getCode(), System.currentTimeMillis() - data.getStartTime());
+        for (var selected : response.getServerStatus()) {
+            if (selected == null || selected.getRole() == null) continue;
+            reporter.reportSelectionResult(
+                    selected.getRole(), response.isSuccess(), response.getCode());
+            reporter.reportSelectedWorker(
+                    selected.getRole(),
+                    data.selectionReason(selected.getRole()),
+                    selected.getServerIp() + ":" + selected.getHttpPort(),
+                    response.isSuccess(),
+                    response.getCode());
+        }
+    }
+
+    private void reportStatus(
+            WorkerStatus status, WorkerEndpoint endpoint, int active, int finished) {
+        reporter.reportStatusCheckerSuccess(
+                status,
+                endpoint == null ? OptionalLong.empty() : endpoint.tryGetLoadMetric(),
+                active,
+                finished);
+        if (status.getRole() == RoleType.ENCODER) {
+            var engine = status.committedEngineObservation();
+            long observed =
+                    Math.max(0, engine.runningQueryLen()) + Math.max(0, engine.waitingQueryLen());
+            long total =
+                    endpoint instanceof EncoderEndpoint encoder ? encoder.requestCount() : observed;
+            reporter.reportEncoderStatus(
+                    status.getMetricIpPort(),
+                    Math.max(0, total - observed),
+                    total,
+                    endpoint instanceof EncoderEndpoint encoder ? encoder.uncachedTokens() : 0);
+        }
     }
 
     /**

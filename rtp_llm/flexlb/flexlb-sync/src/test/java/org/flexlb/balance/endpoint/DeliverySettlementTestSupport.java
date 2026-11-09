@@ -1,7 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
@@ -17,7 +16,6 @@ import static org.flexlb.balance.endpoint.EndpointTestSupport.runWithStateLock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Real endpoint accounting used by delivery callback ordering tests.
@@ -43,7 +41,7 @@ public final class DeliverySettlementTestSupport {
                         System::currentTimeMillis);
     }
 
-    public void enqueue(RouteExecution item) {
+    public void enqueue(RouteResult item) {
         runWithStateLock(
                 lock,
                 () -> {
@@ -53,21 +51,16 @@ public final class DeliverySettlementTestSupport {
                 });
     }
 
-    public CapacityBoundary.Attempt<PrefillEndpoint.BatchRecord> reserveBatch(
-            long batchId, int maxBatches) {
-        return prefill.reserveBatch(batchId, maxBatches);
-    }
-
     public org.flexlb.balance.scheduler.Delivery commit(
             org.flexlb.balance.scheduler.Delivery plan) {
         return prefill.commitDelivery(plan);
     }
 
-    public void commit(long batchId, List<RouteExecution> items) {
+    public void commit(long batchId, List<RouteResult> items) {
         runWithStateLock(
                 lock,
                 () -> {
-                    for (RouteExecution item : items) {
+                    for (RouteResult item : items) {
                         assertSame(
                                 item,
                                 org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(
@@ -75,8 +68,9 @@ public final class DeliverySettlementTestSupport {
                     }
                 });
         {
-            var reservation = prefill.reserveBatch(batchId, 2).value();
-            try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+            var reservation =
+                    new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(batchId, 2);
+            {
                 assertNotNull(reservation);
                 {
                     var handoff =
@@ -88,7 +82,7 @@ public final class DeliverySettlementTestSupport {
         }
     }
 
-    public List<PrefillEndpoint.PrefillRequestStatus> finish(long batchId, RouteExecution item) {
+    public List<PrefillEndpoint.PrefillRequestStatus> finish(long batchId, RouteResult item) {
         TaskInfo finished = new TaskInfo();
         finished.setRequestId(String.valueOf(item.requestId()));
         finished.setBatchId(batchId);
@@ -104,21 +98,6 @@ public final class DeliverySettlementTestSupport {
         return result.requestStatuses();
     }
 
-    public static void queueDecode(
-            DecodeEndpoint endpoint, DecodeResources.RequestReservation reservation) {
-        WorkerStatusResponse response = new WorkerStatusResponse();
-        response.setRunningTaskInfo(Map.of());
-        response.setFinishedTaskInfo(Map.of());
-        response.setAvailableKvCacheTokens(10_000L);
-        response.setTotalKvCacheTokens(10_000L);
-        EndpointTestSupport.applyStatus(endpoint, response).run();
-        {
-            var selectedEndpoint = endpoint;
-
-            assertTrue(endpoint.markQueued(reservation).status().applied());
-        }
-    }
-
     public static void dispatchDecode(
             DecodeEndpoint endpoint, DecodeResources.RequestReservation reservation) {
         queueDecode(endpoint, reservation);
@@ -130,6 +109,22 @@ public final class DeliverySettlementTestSupport {
         assertEquals(
                 DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                 permit.dispatch().status());
+    }
+
+    public static void queueDecode(
+            DecodeEndpoint endpoint, DecodeResources.RequestReservation reservation) {
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRunningTaskInfo(Map.of());
+        response.setFinishedTaskInfo(Map.of());
+        response.setAvailableKvCacheTokens(10_000L);
+        response.setTotalKvCacheTokens(10_000L);
+        EndpointTestSupport.applyStatus(endpoint, response).run();
+        org.junit.jupiter.api.Assertions.assertTrue(
+                endpoint.resourceSnapshot()
+                        .requests()
+                        .get(reservation.requestId())
+                        .phase()
+                        .isMasterQueued());
     }
 
     public static void decodeStatus(DecodeEndpoint endpoint, long requestId, boolean finished) {

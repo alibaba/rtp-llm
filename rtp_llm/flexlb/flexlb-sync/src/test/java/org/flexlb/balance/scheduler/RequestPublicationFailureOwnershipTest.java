@@ -54,6 +54,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks that publication failures preserve exact cleanup ownership and release response registrations.
+ */
 @Timeout(15)
 class RequestPublicationFailureOwnershipTest {
     @Test
@@ -120,15 +123,14 @@ class RequestPublicationFailureOwnershipTest {
                                 throw failure;
                             })
                     .when(context)
-                    .publishDelivery(any());
+                    .recordDeliveryStarted(any(), anyLong());
             try {
                 assertSame(
                         failure,
                         assertThrows(
                                 IllegalStateException.class,
                                 () ->
-                                        DeliveryDispatcher.commitDelivery(
-                                                f.owner,
+                                        f.owner.commitDelivery(
                                                 new org.flexlb.balance.scheduler.Delivery.Member(
                                                         route, null),
                                                 Delivery.SendMode.ROUTE_DECISION,
@@ -315,8 +317,7 @@ class RequestPublicationFailureOwnershipTest {
             RequestProtocolTestSupport.bind(
                     f.owner, new RequestProtocolTestSupport.Registered(route, future));
             var delivery =
-                    DeliveryDispatcher.commitDelivery(
-                            f.owner,
+                    f.owner.commitDelivery(
                             new org.flexlb.balance.scheduler.Delivery.Member(route, null),
                             Delivery.SendMode.ROUTE_DECISION,
                             0L);
@@ -394,8 +395,7 @@ class RequestPublicationFailureOwnershipTest {
             RequestProtocolTestSupport.bind(
                     f.owner, new RequestProtocolTestSupport.Registered(route, future));
             var delivery =
-                    DeliveryDispatcher.commitDelivery(
-                            f.owner,
+                    f.owner.commitDelivery(
                             new org.flexlb.balance.scheduler.Delivery.Member(route, null),
                             Delivery.SendMode.ROUTE_DECISION,
                             0L);
@@ -470,7 +470,8 @@ class RequestPublicationFailureOwnershipTest {
                             null,
                             null,
                             System.currentTimeMillis());
-            try (var admission = SchedulerTestSupport.claim(f.owner, "9303", future)) {
+            var admission = SchedulerTestSupport.claim(f.owner, "9303", future);
+            {
                 assertNotNull(admission);
                 assertEquals(
                         org.flexlb.balance.PlacementResult.Status.SUCCESS,
@@ -505,105 +506,116 @@ class RequestPublicationFailureOwnershipTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void deferredSubmissionFailureDistinguishesUnusedPublicationFromAnAlreadyRunningOwner(
-            boolean alreadyRunning) throws Exception {
+    void closeSubmissionFailureRetainsPublicationAndCleanupUntilTheirOwnersFinish(
+            boolean startedBeforeFailure) throws Exception {
         try (var f = new Fixture()) {
             var context = RequestProtocolTestSupport.context(f.config, 9304L);
             var future = RequestProtocolTestSupport.submitForManualPlacement(f.owner, context);
-            org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
-                    f.runtime, "tasks", spy(f.runtime.tasks));
-            var source = f.runtime.tasks.registerRequestWork(context);
-            RequestTaskPool.WorkRegistration accepted;
+            var endpoint = mock(PrefillEndpoint.class);
+            var route =
+                    SchedulingTestConfig.createRoute(
+                            context,
+                            new Response(),
+                            null,
+                            null,
+                            endpoint,
+                            null,
+                            null,
+                            System.currentTimeMillis());
+            RequestProtocolTestSupport.bind(
+                    f.owner, new RequestProtocolTestSupport.Registered(route, future));
+            var workers =
+                    (java.util.concurrent.ExecutorService)
+                            ReflectionTestUtils.getField(f.runtime.tasks, "requestWorkers");
+            var dispatch = mock(java.util.concurrent.ExecutorService.class);
+            var failure =
+                    new java.util.concurrent.RejectedExecutionException("close dispatch rejected");
+            var originalTimer = f.runtime.deadlines();
+            var timer = spy(originalTimer);
+            var started = new CountDownLatch(1);
+            var finish = new CountDownLatch(1);
+            var block = new AtomicBoolean(startedBeforeFailure);
+            doAnswer(
+                            call -> {
+                                if (block.getAndSet(false)) {
+                                    started.countDown();
+                                    assertTrue(finish.await(5, TimeUnit.SECONDS));
+                                }
+                                return call.callRealMethod();
+                            })
+                    .when(timer)
+                    .update(eq(context), any());
+            SchedulerTestServices.setDependency(f.runtime, "timer", timer);
+            doAnswer(
+                            call -> {
+                                if (startedBeforeFailure) {
+                                    workers.execute(call.getArgument(0));
+                                    assertTrue(started.await(5, TimeUnit.SECONDS));
+                                }
+                                throw failure;
+                            })
+                    .when(dispatch)
+                    .execute(any(Runnable.class));
+            ReflectionTestUtils.setField(f.runtime.tasks, "requestWorkers", dispatch);
             try {
-                accepted = spy(source);
-            } catch (RuntimeException | Error failure) {
-                source.close();
-                throw failure;
-            }
-            try (accepted) {
-                var runtime = f.runtime;
-                var firstRegistration = new AtomicBoolean(true);
-                doAnswer(
-                                call ->
-                                        firstRegistration.getAndSet(false)
-                                                ? accepted
-                                                : call.callRealMethod())
-                        .when(runtime.tasks)
-                        .registerRequestWork(context);
-                org.flexlb.balance.scheduler.SchedulerTestServices.bind(f.owner, runtime);
-                var originalTimer = f.runtime.deadlines();
-                var timer = spy(originalTimer);
-                var started = new CountDownLatch(1);
-                var finish = new CountDownLatch(1);
-                var block = new AtomicBoolean(alreadyRunning);
-                doAnswer(
-                                call -> {
-                                    if (block.getAndSet(false)) {
-                                        started.countDown();
-                                        assertTrue(finish.await(5, TimeUnit.SECONDS));
-                                    }
-                                    return call.callRealMethod();
-                                })
-                        .when(timer)
-                        .update(eq(context), any());
-                org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
-                        runtime, "timer", timer);
-                var failure = new IllegalStateException("submit failed");
-                doAnswer(
-                                call -> {
-                                    if (alreadyRunning) {
-                                        call.callRealMethod();
-                                        assertTrue(started.await(5, TimeUnit.SECONDS));
-                                    }
-                                    throw failure;
-                                })
-                        .when(accepted)
-                        .submit(any(Runnable.class));
-                try {
-                    var end =
-                            new EndEvidence(
-                                    null,
-                                    EndKind.INACTIVITY,
-                                    null,
-                                    false,
-                                    0L,
-                                    StrategyErrorType.BATCH_SLO_EXPIRED,
-                                    "request inactive",
-                                    false,
-                                    false);
+                var end =
+                        EndEvidence.failure(
+                                route,
+                                EndKind.INACTIVITY,
+                                StrategyErrorType.BATCH_SLO_EXPIRED,
+                                "request inactive");
+                assertSame(
+                        failure,
+                        assertThrows(
+                                java.util.concurrent.RejectedExecutionException.class,
+                                () -> f.owner.closeRequest(context, end)));
+                verify(dispatch, times(1)).execute(any(Runnable.class));
+                if (startedBeforeFailure) {
+                    assertEquals(1, registrations(f.runtime));
+                    assertFalse(future.isDone());
+                    assertFalse(context.snapshot().close().notificationsAttempted());
+                    verify(endpoint, never()).releaseRequest(route);
+                    finish.countDown();
+                } else {
                     assertSame(
                             failure,
                             assertThrows(
-                                    IllegalStateException.class,
-                                    () -> f.owner.closeRequest(context, end)));
-                    if (alreadyRunning) {
-                        assertTrue(accepted.hasTaskOwner());
-                        assertEquals(1, registrations(f.runtime));
-                        assertFalse(future.isDone());
-                        assertFalse(context.snapshot().close().notificationsAttempted());
-                        finish.countDown();
-                        assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
-                    } else {
-                        assertFalse(accepted.hasTaskOwner());
-                        assertSame(
-                                failure,
-                                assertThrows(
-                                                ExecutionException.class,
-                                                () -> future.get(5, TimeUnit.SECONDS))
-                                        .getCause());
-                    }
-                    SchedulerTestSupport.awaitRequestWork(f.runtime);
-                    RequestProtocolTestSupport.awaitCondition(() -> registrations(f.runtime) == 0);
-                    assertEquals(EndKind.INACTIVITY, context.snapshot().outcome().kind());
-                    assertEquals(Phase.CLOSED, context.snapshot().phase());
-                    assertEquals(0, f.runtime.requests().liveRequestCount());
-                } finally {
-                    finish.countDown();
-                    doCallRealMethod().when(runtime.tasks).registerRequestWork(context);
-                    org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
-                            runtime, "timer", originalTimer);
-                    org.flexlb.balance.scheduler.SchedulerTestServices.bind(f.owner, f.runtime);
+                                            ExecutionException.class,
+                                            () -> future.get(5, TimeUnit.SECONDS))
+                                    .getCause());
+                    f.runtime.tasks.awaitIdle();
+                    assertEquals(0, registrations(f.runtime));
+                    assertEquals(Phase.ENDING, context.snapshot().phase());
+                    assertSame(route, context.snapshot().route());
+                    assertTrue(f.runtime.requests().isCurrent(context));
+                    verify(endpoint, never()).releaseRequest(route);
+                    ReflectionTestUtils.setField(f.runtime.tasks, "requestWorkers", workers);
+                    f.owner.scheduleClose(context);
                 }
+                if (startedBeforeFailure) {
+                    assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());
+                }
+                f.runtime.tasks.awaitIdle();
+                RequestProtocolTestSupport.awaitCondition(() -> registrations(f.runtime) == 0);
+                assertEquals(EndKind.INACTIVITY, context.snapshot().outcome().kind());
+                assertEquals(Phase.CLOSED, context.snapshot().phase());
+                assertEquals(0, f.runtime.requests().liveRequestCount());
+                verify(endpoint, times(1)).releaseRequest(route);
+                if (startedBeforeFailure) {
+                    assertDoesNotThrow(
+                            f.runtime.tasks::throwIfFailed,
+                            "the caller's submission exception is not a rejection of an executing task");
+                } else {
+                    assertSame(
+                            failure,
+                            assertThrows(
+                                    java.util.concurrent.RejectedExecutionException.class,
+                                    f.runtime.tasks::throwIfFailed));
+                }
+            } finally {
+                finish.countDown();
+                ReflectionTestUtils.setField(f.runtime.tasks, "requestWorkers", workers);
+                SchedulerTestServices.setDependency(f.runtime, "timer", originalTimer);
             }
         }
     }

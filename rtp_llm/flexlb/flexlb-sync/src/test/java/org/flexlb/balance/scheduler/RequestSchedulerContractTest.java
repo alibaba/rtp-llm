@@ -39,6 +39,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Exercises request ownership, cancellation, admission, and shutdown through both direct and queued schedulers.
+ */
 class RequestSchedulerContractTest {
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"cancel", "timeout", "failure"})
@@ -169,7 +172,7 @@ class RequestSchedulerContractTest {
                 SchedulerTestServices.lifecycle(other)
                         .cancel("944", 0L, CancelReason.CLIENT_CANCELLED);
                 oldFuture.get(3, TimeUnit.SECONDS);
-                var repository = f.requests.requests;
+                var repository = f.requests.repository;
                 assertTrue(
                         repository.removeExactTerminal(
                                 repository.findTerminal("944"), Long.MAX_VALUE));
@@ -204,15 +207,20 @@ class RequestSchedulerContractTest {
             assertThrows(
                     NullPointerException.class,
                     () ->
-                            f.requests.requests.register(
-                                    request, null, new RequestFuture((a, b, c) -> false)));
+                            f.requests.repository.register(
+                                    request,
+                                    null,
+                                    new RequestFuture((a, b, c) -> false),
+                                    60_000L,
+                                    org.flexlb.dao.loadbalance.StrategyErrorType
+                                            .BATCH_SLO_EXPIRED));
             assertSame(originalFuture, request.data().getFuture());
             assertNull(request.data().getRequestScheduler());
-            assertNull(f.requests.requests.findActive("900"));
+            assertNull(f.requests.repository.findActive("900"));
 
             var future = f.requests.submit(request, () -> {});
-            try (var admission = SchedulerTestSupport.claim(f.requests, "900", future);
-                    var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            var admission = SchedulerTestSupport.claim(f.requests, "900", future);
+            try (var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 SchedulerTestServices.entry(f.scheduler)
                         .cancel("900", 0, CancelReason.CLIENT_CANCELLED);
@@ -523,7 +531,7 @@ class RequestSchedulerContractTest {
             SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(api));
 
             assertEquals(
-                    StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
+                    StrategyErrorType.SCHEDULER_UNAVAILABLE.getErrorCode(),
                     SchedulerTestServices.entry(api).submit(f.context(2)).join().getCode());
             verify(f.router, times(1)).select(any(), any());
         }
@@ -555,7 +563,7 @@ class RequestSchedulerContractTest {
                         SchedulerTestSupport.repository(f.requests).isClosed(),
                         "draining must not close accepted admission");
                 assertEquals(
-                        StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
+                        StrategyErrorType.SCHEDULER_UNAVAILABLE.getErrorCode(),
                         SchedulerTestServices.entry(api).submit(f.context(11)).join().getCode());
             } finally {
                 release.countDown();
@@ -582,8 +590,8 @@ class RequestSchedulerContractTest {
             var request = f.context(20);
             var future = f.requests.submit(request, () -> {});
             SchedulerTestSupport.runtime(api).requests().stopAccepting();
-            try (var admission = SchedulerTestSupport.claim(f.requests, "20", future);
-                    var admissionCompletion3 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            var admission = SchedulerTestSupport.claim(f.requests, "20", future);
+            try (var admissionCompletion3 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertNotNull(
                         SchedulerTestServices.entry(api)
@@ -609,8 +617,8 @@ class RequestSchedulerContractTest {
             AbstractRequestScheduler api = f.scheduler;
             var request = f.context(30);
             var future = f.requests.submit(request, () -> {});
-            try (var admission = SchedulerTestSupport.claim(f.requests, "30", future);
-                    var admissionCompletion4 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            var admission = SchedulerTestSupport.claim(f.requests, "30", future);
+            try (var admissionCompletion4 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertTrue(future.cancel(true));
                 SchedulerTestSupport.runtime(api).requests().stopAccepting();
@@ -669,8 +677,94 @@ class RequestSchedulerContractTest {
         }
     }
 
-    private static <T> PlacementResult<T, PlacementKey> rejection() {
-        return PlacementResult.rejected(Response.error(StrategyErrorType.NO_PREFILL_WORKER));
+    @Test
+    void withdrawalCompletesBeforePendingDeliveryTaskButShutdownWaitsForItsExit() throws Exception {
+        var release = new CountDownLatch(1);
+        try (Fixture f = new Fixture(true, false)) {
+            var context = f.context(950L);
+            org.mockito.Mockito.doNothing().when(f.requests).onRequest(context);
+            var response = f.requests.submit(context);
+            var endpoint = mock(PrefillEndpoint.class);
+            var route =
+                    SchedulingTestConfig.createRoute(
+                            context,
+                            new Response(),
+                            null,
+                            null,
+                            endpoint,
+                            null,
+                            null,
+                            System.currentTimeMillis());
+            var operation = f.requests.claimPlacement(context);
+            assertNotNull(operation);
+            assertEquals(
+                    PlacementResult.Status.SUCCESS,
+                    RequestProtocolTestSupport.commitRoute(
+                            f.requests, route, RequestProtocolTestSupport.publication(() -> true)));
+            AbstractRequestScheduler.finishPlacement(operation);
+
+            var pendingDelivery = new Delivery(endpoint, false, 1, null, "pending send");
+            pendingDelivery.members().add(new Delivery.Member(route, null));
+            var runtime = SchedulerTestSupport.runtime(f.requests);
+            var endpoints =
+                    (EndpointRegistry)
+                            org.springframework.test.util.ReflectionTestUtils.getField(
+                                    runtime, "endpoints");
+            var entered = new CountDownLatch(1);
+            var permit = runtime.deliveries().tryReserveDelivery().value();
+            assertNotNull(permit);
+            permit.submit(
+                    () -> {
+                        try {
+                            entered.countDown();
+                            assertTrue(release.await(3, TimeUnit.SECONDS));
+                        } catch (InterruptedException interrupted) {
+                            throw new AssertionError(interrupted);
+                        } finally {
+                            assertNull(pendingDelivery.releaseMembers());
+                        }
+                    },
+                    failure -> {
+                        throw new AssertionError(failure);
+                    });
+            assertTrue(entered.await(3, TimeUnit.SECONDS));
+            assertTrue(
+                    f.requests.onRouteFailure(
+                            route,
+                            ContextResult.RouteFailureReason.ENDPOINT_UNAVAILABLE,
+                            "endpoint unavailable before send"),
+                    () -> "withdrawal rejected: " + context.snapshot());
+            assertNull(
+                    context.snapshot().placement(),
+                    "withdrawal must not wait for the pending delivery task");
+            assertNull(context.snapshot().route());
+            assertFalse(response.isDone(), "withdrawal returns the request for reselection");
+            assertEquals(1L, release.getCount(), "the delivery task is still running");
+            verify(endpoint, times(1)).releaseRequest(route);
+
+            CompletableFuture<Void> shutdown =
+                    CompletableFuture.runAsync(
+                            () ->
+                                    runtime.shutdown(
+                                            ShutdownMode.IMMEDIATE, java.time.Duration.ZERO));
+            try {
+                RequestProtocolTestSupport.awaitCondition(() -> runtime.requests().isClosed());
+                assertThrows(
+                        java.util.concurrent.TimeoutException.class,
+                        () -> shutdown.get(100, TimeUnit.MILLISECONDS));
+                verify(endpoints, org.mockito.Mockito.never()).close();
+            } finally {
+                release.countDown();
+                shutdown.get(3, TimeUnit.SECONDS);
+            }
+            assertNull(context.snapshot().placement());
+            assertEquals(0, runtime.requests().liveRequestCount());
+            assertFalse(response.get(3, TimeUnit.SECONDS).isSuccess());
+            verify(endpoint, times(1)).releaseRequest(route);
+            verify(endpoints).close();
+        } finally {
+            release.countDown();
+        }
     }
 
     @Test
@@ -691,8 +785,8 @@ class RequestSchedulerContractTest {
                             null,
                             null,
                             System.currentTimeMillis());
-            try (var admission = SchedulerTestSupport.claim(f.requests, "50", future);
-                    var admissionCompletion5 = RequestProtocolTestSupport.finishOnExit(admission)) {
+            var admission = SchedulerTestSupport.claim(f.requests, "50", future);
+            try (var admissionCompletion5 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertEquals(
                         PlacementResult.Status.SUCCESS,
@@ -717,7 +811,7 @@ class RequestSchedulerContractTest {
             org.mockito.Mockito.doReturn(true).when(endpoint).releaseRequest(route);
             f.requests.scheduleClose(request);
             RequestProtocolTestSupport.awaitCondition(
-                    () -> !f.requests.requests.isCurrent(request));
+                    () -> !f.requests.repository.isCurrent(request));
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.requests));
             verify(endpoint, times(4)).releaseRequest(route);
@@ -734,7 +828,7 @@ class RequestSchedulerContractTest {
     }
 
     @Test
-    void admissionFailureIsRecordedAndReleasesDrainGate() throws Exception {
+    void placementCompletionFailureIsRecordedAndFinishesPlacement() throws Exception {
         try (Fixture f = new Fixture(false)) {
             var context = f.context(940L);
             var future = f.requests.submit(context, () -> {});
@@ -761,11 +855,6 @@ class RequestSchedulerContractTest {
                 assertNull(context.snapshot().placement());
                 assertDoesNotThrow(() -> AbstractRequestScheduler.finishPlacement(handle));
                 verify(timer, times(3)).update(org.mockito.ArgumentMatchers.eq(context), any());
-                f.requests.stopAdmissionsAndAwaitCompletion();
-                assertEquals(
-                        0L,
-                        org.springframework.test.util.ReflectionTestUtils.getField(
-                                f.requests, "activeAdmissions"));
             } finally {
                 org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                         org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.requests),
@@ -777,6 +866,13 @@ class RequestSchedulerContractTest {
         }
     }
 
+    private static <T> PlacementResult<T, PlacementKey> rejection() {
+        return PlacementResult.rejected(Response.error(StrategyErrorType.NO_PREFILL_WORKER));
+    }
+
+    /**
+     * Builds either scheduler mode around a controlled selector and owns the shared runtime used by its requests.
+     */
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.newConfig();
         final RequestRouteSelector router = mock(RequestRouteSelector.class);
@@ -784,6 +880,10 @@ class RequestSchedulerContractTest {
         final AbstractRequestScheduler scheduler;
 
         Fixture(boolean queued) {
+            this(queued, true);
+        }
+
+        Fixture(boolean queued, boolean startPlacement) {
             if (queued) {
                 SchedulingTestConfig.useFifoQueue(config);
             } else {
@@ -801,26 +901,26 @@ class RequestSchedulerContractTest {
                             mock(TheoryCacheHitReporter.class),
                             router,
                             mock(DecodePreemption.class),
-                            new PlacementAvailability());
+                            new PlacementAvailability(),
+                            startPlacement);
             scheduler =
                     ((AbstractRequestScheduler)
                             org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(requests));
-        }
-
-        RequestContext context(long id) {
-            return RequestProtocolTestSupport.context(config, id);
         }
 
         @Override
         public void close() {
             SchedulerTestSupport.repository(requests).closeRegistration();
             RequestProtocolTestSupport.close(scheduler);
-            requests.stopAdmissionsAndAwaitCompletion();
             SchedulerTestSupport.timer(SchedulerTestSupport.runtime(requests)).close();
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests));
             requests.closeOutstandingAndTerminalize();
             SchedulerTestSupport.closeRequestExecutors(SchedulerTestSupport.runtime(requests));
+        }
+
+        RequestContext context(long id) {
+            return RequestProtocolTestSupport.context(config, id);
         }
     }
 }

@@ -39,6 +39,9 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * Reproduces receiving timeouts and buffer cleanup with blocked request execution over real Netty transport.
+ */
 public class GrpcReceivingGuardRepro {
     static final MethodDescriptor<byte[], byte[]> METHOD =
             MethodDescriptor.<byte[], byte[]>newBuilder()
@@ -47,110 +50,6 @@ public class GrpcReceivingGuardRepro {
                     .setRequestMarshaller(new Bytes())
                     .setResponseMarshaller(new Bytes())
                     .build();
-
-    static class Bytes implements MethodDescriptor.Marshaller<byte[]> {
-        public InputStream stream(byte[] v) {
-            return new ByteArrayInputStream(v);
-        }
-
-        public byte[] parse(InputStream i) {
-            try {
-                return i.readAllBytes();
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-        }
-    }
-
-    static void check(boolean x, String m) {
-        if (!x) throw new AssertionError(m);
-    }
-
-    static void until(java.util.function.BooleanSupplier p, String m) throws Exception {
-        long e = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (System.nanoTime() < e) {
-            if (p.getAsBoolean())
-                return; // A sampled allocator zero can legitimately change on a new PING.
-            Thread.sleep(2);
-        }
-        throw new AssertionError(m);
-    }
-
-    // Exclude lazy TCP/HTTP2 setup from the later sub-second saturation assertion.
-    static void awaitReady(ManagedChannel channel) throws Exception {
-        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (System.nanoTime() < until) {
-            ConnectivityState state = channel.getState(true);
-            if (state == ConnectivityState.READY) return;
-            check(state != ConnectivityState.SHUTDOWN, "test channel shutdown before READY");
-            CountDownLatch changed = new CountDownLatch(1);
-            channel.notifyWhenStateChanged(state, changed::countDown);
-            changed.await(
-                    Math.min(TimeUnit.SECONDS.toNanos(1), Math.max(1, until - System.nanoTime())),
-                    TimeUnit.NANOSECONDS);
-        }
-        throw new AssertionError("test channel did not become HTTP/2 READY");
-    }
-
-    static void frame(DataOutputStream o, int type, int flags, int stream, byte[] b)
-            throws Exception {
-        o.writeByte(b.length >>> 16);
-        o.writeByte(b.length >>> 8);
-        o.writeByte(b.length);
-        o.writeByte(type);
-        o.writeByte(flags);
-        o.writeInt(stream);
-        o.write(b);
-    }
-
-    static Socket partial(int port) throws Exception {
-        Socket s = new Socket("127.0.0.1", port);
-        var o = new DataOutputStream(s.getOutputStream());
-        o.write("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
-        frame(o, 4, 0, 0, new byte[0]);
-        ByteBuf h = Unpooled.buffer();
-        new DefaultHttp2HeadersEncoder()
-                .encodeHeaders(
-                        1,
-                        new DefaultHttp2Headers()
-                                .method("POST")
-                                .scheme("http")
-                                .authority("localhost")
-                                .path("/receiving.Test/Call")
-                                .set("content-type", "application/grpc")
-                                .set("te", "trailers"),
-                        h);
-        byte[] b = new byte[h.readableBytes()];
-        h.readBytes(b);
-        h.release();
-        frame(o, 1, 4, 1, b);
-        var bo = new ByteArrayOutputStream();
-        var q = new DataOutputStream(bo);
-        q.writeByte(0);
-        q.writeInt(1024 * 1024);
-        q.write(new byte[32763]);
-        b = bo.toByteArray();
-        frame(o, 0, 0, 1, Arrays.copyOfRange(b, 0, 16384));
-        frame(o, 0, 0, 1, Arrays.copyOfRange(b, 16384, b.length));
-        o.flush();
-        return s;
-    }
-
-    static ClientCall<byte[], byte[]> full(ManagedChannel c, CompletableFuture<Status> done) {
-        var call = c.newCall(METHOD, CallOptions.DEFAULT);
-        call.start(
-                new ClientCall.Listener<>() {
-                    @Override
-                    public void onClose(Status s, Metadata t) {
-                        done.complete(s);
-                    }
-                },
-                new Metadata());
-        call.request(1);
-        call.sendMessage(new byte[8192]);
-        call.halfClose();
-        return call;
-    }
 
     public static void main(String[] args) throws Exception {
         var pool = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
@@ -279,6 +178,113 @@ public class GrpcReceivingGuardRepro {
             guard.close();
             pool.shutdownNow();
             pool.awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
+    static void until(java.util.function.BooleanSupplier p, String m) throws Exception {
+        long e = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < e) {
+            if (p.getAsBoolean())
+                return; // A sampled allocator zero can legitimately change on a new PING.
+            Thread.sleep(2);
+        }
+        throw new AssertionError(m);
+    }
+
+    // Exclude lazy TCP/HTTP2 setup from the later sub-second saturation assertion.
+    static void awaitReady(ManagedChannel channel) throws Exception {
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < until) {
+            ConnectivityState state = channel.getState(true);
+            if (state == ConnectivityState.READY) return;
+            check(state != ConnectivityState.SHUTDOWN, "test channel shutdown before READY");
+            CountDownLatch changed = new CountDownLatch(1);
+            channel.notifyWhenStateChanged(state, changed::countDown);
+            changed.await(
+                    Math.min(TimeUnit.SECONDS.toNanos(1), Math.max(1, until - System.nanoTime())),
+                    TimeUnit.NANOSECONDS);
+        }
+        throw new AssertionError("test channel did not become HTTP/2 READY");
+    }
+
+    static void check(boolean x, String m) {
+        if (!x) throw new AssertionError(m);
+    }
+
+    static Socket partial(int port) throws Exception {
+        Socket s = new Socket("127.0.0.1", port);
+        var o = new DataOutputStream(s.getOutputStream());
+        o.write("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+        frame(o, 4, 0, 0, new byte[0]);
+        ByteBuf h = Unpooled.buffer();
+        new DefaultHttp2HeadersEncoder()
+                .encodeHeaders(
+                        1,
+                        new DefaultHttp2Headers()
+                                .method("POST")
+                                .scheme("http")
+                                .authority("localhost")
+                                .path("/receiving.Test/Call")
+                                .set("content-type", "application/grpc")
+                                .set("te", "trailers"),
+                        h);
+        byte[] b = new byte[h.readableBytes()];
+        h.readBytes(b);
+        h.release();
+        frame(o, 1, 4, 1, b);
+        var bo = new ByteArrayOutputStream();
+        var q = new DataOutputStream(bo);
+        q.writeByte(0);
+        q.writeInt(1024 * 1024);
+        q.write(new byte[32763]);
+        b = bo.toByteArray();
+        frame(o, 0, 0, 1, Arrays.copyOfRange(b, 0, 16384));
+        frame(o, 0, 0, 1, Arrays.copyOfRange(b, 16384, b.length));
+        o.flush();
+        return s;
+    }
+
+    static void frame(DataOutputStream o, int type, int flags, int stream, byte[] b)
+            throws Exception {
+        o.writeByte(b.length >>> 16);
+        o.writeByte(b.length >>> 8);
+        o.writeByte(b.length);
+        o.writeByte(type);
+        o.writeByte(flags);
+        o.writeInt(stream);
+        o.write(b);
+    }
+
+    static ClientCall<byte[], byte[]> full(ManagedChannel c, CompletableFuture<Status> done) {
+        var call = c.newCall(METHOD, CallOptions.DEFAULT);
+        call.start(
+                new ClientCall.Listener<>() {
+                    @Override
+                    public void onClose(Status s, Metadata t) {
+                        done.complete(s);
+                    }
+                },
+                new Metadata());
+        call.request(1);
+        call.sendMessage(new byte[8192]);
+        call.halfClose();
+        return call;
+    }
+
+    /**
+     * Marshals raw byte arrays for receiving-limit transport tests.
+     */
+    static class Bytes implements MethodDescriptor.Marshaller<byte[]> {
+        public InputStream stream(byte[] v) {
+            return new ByteArrayInputStream(v);
+        }
+
+        public byte[] parse(InputStream i) {
+            try {
+                return i.readAllBytes();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 }

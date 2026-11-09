@@ -25,7 +25,6 @@ import java.util.concurrent.TimeUnit;
  * Small fail-open facade for the FlexLB manual tracing points.
  */
 public final class FlexlbTrace {
-
     public static final String INSTRUMENTATION_NAME = "org.flexlb";
 
     /**
@@ -82,7 +81,6 @@ public final class FlexlbTrace {
             AttributeKey.stringKey("server.address");
 
     public static final AttributeKey<Long> SERVER_PORT = AttributeKey.longKey("server.port");
-
     private static final TextMapSetter<Map<String, String>> MAP_SETTER =
             (carrier, key, value) -> carrier.put(key, value);
     private static final TextMapPropagator W3C_PROPAGATOR = W3CTraceContextPropagator.getInstance();
@@ -91,7 +89,9 @@ public final class FlexlbTrace {
     // strongly here would retain it forever.
     private static final Map<Span, BusinessError> BUSINESS_ERRORS =
             Collections.synchronizedMap(new WeakHashMap<>());
+
     private static volatile boolean enabled;
+
     private static volatile Tracer tracer = OpenTelemetry.noop().getTracer(INSTRUMENTATION_NAME);
 
     private FlexlbTrace() {}
@@ -177,15 +177,6 @@ public final class FlexlbTrace {
         }
     }
 
-    /**
-     * Adds an attribute to the already-created Schedule SERVER span. The
-     * scheduling work is asynchronous, so this deliberately does not create
-     * a child span or replace the request context.
-     */
-    public static <T> void setScheduleAttribute(Context context, AttributeKey<T> key, T value) {
-        setAttribute(spanFromContext(context), key, value);
-    }
-
     public static void setScheduleDuration(
             Context context, AttributeKey<Long> key, long startNanos, long endNanos) {
         if (startNanos > 0 && endNanos >= startNanos) {
@@ -194,36 +185,13 @@ public final class FlexlbTrace {
         }
     }
 
-    public static void finish(Span span, Throwable error) {
-        if (!enabled || span == null) {
-            return;
-        }
-        BusinessError expectedError = null;
-        try {
-            // Inside the guard: the marker map is a synchronized WeakHashMap keyed
-            // by Span, so it calls hashCode()/equals() on an implementation this
-            // class does not control.
-            expectedError = error == null ? BUSINESS_ERRORS.remove(span) : null;
-            if (error == null) {
-                if (expectedError == null) {
-                    span.setStatus(StatusCode.OK);
-                } else {
-                    setBusinessError(span, expectedError.code(), expectedError.type());
-                }
-            } else {
-                BUSINESS_ERRORS.remove(span);
-                span.recordException(error);
-                span.setStatus(StatusCode.ERROR, error.getClass().getSimpleName());
-            }
-        } catch (Throwable ignored) {
-            // Exporter/provider failures are explicitly fail-open.
-        } finally {
-            try {
-                span.end();
-            } catch (Throwable ignored) {
-                // Exporter/provider failures are explicitly fail-open.
-            }
-        }
+    /**
+     * Adds an attribute to the already-created Schedule SERVER span. The
+     * scheduling work is asynchronous, so this deliberately does not create
+     * a child span or replace the request context.
+     */
+    public static <T> void setScheduleAttribute(Context context, AttributeKey<T> key, T value) {
+        setAttribute(spanFromContext(context), key, value);
     }
 
     /**
@@ -257,6 +225,38 @@ public final class FlexlbTrace {
             } else {
                 setAttribute(span, ERROR_TYPE, canonicalCode);
                 span.setStatus(StatusCode.ERROR, canonicalCode);
+            }
+        } catch (Throwable ignored) {
+            // Exporter/provider failures are explicitly fail-open.
+        } finally {
+            try {
+                span.end();
+            } catch (Throwable ignored) {
+                // Exporter/provider failures are explicitly fail-open.
+            }
+        }
+    }
+
+    public static void finish(Span span, Throwable error) {
+        if (!enabled || span == null) {
+            return;
+        }
+        BusinessError expectedError = null;
+        try {
+            // Inside the guard: the marker map is a synchronized WeakHashMap keyed
+            // by Span, so it calls hashCode()/equals() on an implementation this
+            // class does not control.
+            expectedError = error == null ? BUSINESS_ERRORS.remove(span) : null;
+            if (error == null) {
+                if (expectedError == null) {
+                    span.setStatus(StatusCode.OK);
+                } else {
+                    setBusinessError(span, expectedError.code(), expectedError.type());
+                }
+            } else {
+                BUSINESS_ERRORS.remove(span);
+                span.recordException(error);
+                span.setStatus(StatusCode.ERROR, error.getClass().getSimpleName());
             }
         } catch (Throwable ignored) {
             // Exporter/provider failures are explicitly fail-open.

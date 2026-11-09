@@ -9,8 +9,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Assertion utilities for verifying Prefill and Decode resource cleanup.
  */
 public final class InflightAssertions {
-
     private InflightAssertions() {}
+
+    /**
+     * Assert that all inflight resources are released within the given timeout.
+     */
+    public static void assertResourcesReleasedWithin(
+            PrefillEndpoint prefillEp, DecodeEndpoint decodeEp, long timeoutMs) {
+        assertTrue(
+                waitForResourcesReleased(prefillEp, decodeEp, timeoutMs, 50),
+                "Inflight resources not released within "
+                        + timeoutMs
+                        + "ms"
+                        + " (prefill batches="
+                        + (prefillEp != null ? prefillEp.stats().batchCount() : "null")
+                        + ", decode inflight="
+                        + (decodeEp != null ? decodeEp.resourceSnapshot().reservedCount() : "null")
+                        + ")");
+    }
 
     /**
      * Wait for all inflight resources to be released, polling at the given interval.
@@ -38,22 +54,5 @@ public final class InflightAssertions {
             }
         }
         return false;
-    }
-
-    /**
-     * Assert that all inflight resources are released within the given timeout.
-     */
-    public static void assertResourcesReleasedWithin(
-            PrefillEndpoint prefillEp, DecodeEndpoint decodeEp, long timeoutMs) {
-        assertTrue(
-                waitForResourcesReleased(prefillEp, decodeEp, timeoutMs, 50),
-                "Inflight resources not released within "
-                        + timeoutMs
-                        + "ms"
-                        + " (prefill batches="
-                        + (prefillEp != null ? prefillEp.stats().batchCount() : "null")
-                        + ", decode inflight="
-                        + (decodeEp != null ? decodeEp.resourceSnapshot().reservedCount() : "null")
-                        + ")");
     }
 }

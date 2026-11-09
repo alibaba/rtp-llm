@@ -55,7 +55,6 @@ import static org.mockito.Mockito.when;
  * Concurrency contracts at the final, threaded Prefill scheduling boundary.
  */
 class RequestExecutionSchedulingTest {
-
     private final List<PrefillQueueScheduler> runtimes = new ArrayList<>();
 
     @AfterEach
@@ -541,19 +540,20 @@ class RequestExecutionSchedulingTest {
         var future = RequestProtocolTestSupport.submitForManualPlacement(scheduler, context);
         context.data().setFuture(future);
         var request =
-                SchedulingTestConfig.createRoute(
-                        context,
-                        null,
-                        null,
-                        null,
-                        endpoint,
-                        null,
-                        null,
-                        System.currentTimeMillis());
+                org.flexlb.balance.scheduler.RequestExecutionTestSupport.mockProtocolRoute(
+                        SchedulingTestConfig.createRoute(
+                                context,
+                                null,
+                                null,
+                                null,
+                                endpoint,
+                                null,
+                                null,
+                                System.currentTimeMillis()));
         CountDownLatch published = new CountDownLatch(1);
         CountDownLatch allowCommit = new CountDownLatch(1);
+        var routing = SchedulerTestSupport.claim(scheduler, "901", future);
         try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
-                var routing = SchedulerTestSupport.claim(scheduler, "901", future);
                 var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(routing)) {
             assertNotNull(routing);
             var committed =
@@ -600,7 +600,7 @@ class RequestExecutionSchedulingTest {
             }
         } finally {
             runtime.stopAndAwait();
-            RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(scheduler);
+            RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(scheduler);
             scheduler.closeOutstandingAndTerminalize();
             SchedulerTestSupport.timer(SchedulerTestSupport.runtime(scheduler)).close();
             SchedulerTestSupport.closeRequestExecutors(SchedulerTestSupport.runtime(scheduler));
@@ -619,11 +619,16 @@ class RequestExecutionSchedulingTest {
                         config,
                         SchedulerTestSupport.dispatcher(),
                         mock(AbstractRequestScheduler.class));
-        RouteExecution route = spy(item(config, endpoint, 902L, 50, System.currentTimeMillis()));
+        RouteResult route = item(config, endpoint, 902L, 50, System.currentTimeMillis());
         RequestContext context = route.ctx();
-        context.register("902", System.currentTimeMillis(), Long.MAX_VALUE, 60_000L);
+        context.register(
+                "902",
+                System.currentTimeMillis(),
+                Long.MAX_VALUE,
+                60_000L,
+                org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
         var operation = context.beginPlacement(null);
-        context.bindPlacement(operation, route, ContextResult.PublicationResult.PREPARED);
+
         CountDownLatch sampled = new CountDownLatch(1);
         CountDownLatch committed = new CountDownLatch(1);
         AtomicInteger reads = new AtomicInteger();
@@ -657,6 +662,8 @@ class RequestExecutionSchedulingTest {
                     executor.submit(
                             () -> {
                                 await(sampled);
+                                org.mockito.Mockito.doReturn(context).when(route).ctx();
+                                assertTrue(context.publishRoute(operation, route));
                                 try {
                                     assertEquals(
                                             RequestChangeAssertions.UpdateKind.APPLIED,
@@ -717,7 +724,7 @@ class RequestExecutionSchedulingTest {
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
         EventDrivenBlock delivery = new EventDrivenBlock(resource);
         PrefillQueueScheduler runtime = runningRuntime(config, endpoint, delivery);
-        RouteExecution head = item(config, endpoint, 1L, 50, System.currentTimeMillis());
+        RouteResult head = item(config, endpoint, 1L, 50, System.currentTimeMillis());
 
         assertTrue(RequestExecutionTestSupport.offer(runtime, head));
         await(delivery.firstAttempt);
@@ -794,7 +801,7 @@ class RequestExecutionSchedulingTest {
                 .watchCapacity(any(), any(), any());
         RequestExecutionTestSupport.start(runtime);
         try {
-            RouteExecution head = item(config, endpoint, 71L, 50, System.currentTimeMillis());
+            RouteResult head = item(config, endpoint, 71L, 50, System.currentTimeMillis());
             assertTrue(RequestExecutionTestSupport.offer(runtime, head));
             await(subscribing);
             assertEquals(
@@ -950,7 +957,7 @@ class RequestExecutionSchedulingTest {
                         config,
                         new EventDrivenBlock(),
                         events);
-        RouteExecution request = item(config, endpoint, 915L, 50, System.currentTimeMillis());
+        RouteResult request = item(config, endpoint, 915L, 50, System.currentTimeMillis());
         SchedulerTestSupport.bindOwner(request.ctx(), events);
         var state = RequestExecutionTestSupport.state(runtime);
         runWithStateLock(
@@ -984,7 +991,7 @@ class RequestExecutionSchedulingTest {
         PrefillQueueScheduler runtime =
                 boundaryRuntime(
                         "removal-failure", endpoint, config, new EventDrivenBlock(), events);
-        RouteExecution request = item(config, endpoint, 914L, 50, System.currentTimeMillis());
+        RouteResult request = item(config, endpoint, 914L, 50, System.currentTimeMillis());
         SchedulerTestSupport.bindOwner(request.ctx(), events);
         var state = RequestExecutionTestSupport.state(runtime);
         runWithStateLock(
@@ -1049,7 +1056,7 @@ class RequestExecutionSchedulingTest {
                 new BoundaryDelivery() {
                     @Override
                     CapacityBoundary selectBoundary(
-                            List<RouteExecution> candidates,
+                            List<RouteResult> candidates,
                             PrefillTimePredictor.Evaluator evaluator,
                             OptionalLong prediction) {
                         return CapacityBoundary.failed(failure);
@@ -1057,7 +1064,7 @@ class RequestExecutionSchedulingTest {
                 };
         PrefillQueueScheduler runtime =
                 boundaryRuntime("removal-notification", endpoint, config, delivery, events);
-        RouteExecution request = item(config, endpoint, 916L, 50, System.currentTimeMillis());
+        RouteResult request = item(config, endpoint, 916L, 50, System.currentTimeMillis());
         SchedulerTestSupport.bindOwner(request.ctx(), events);
         var state = RequestExecutionTestSupport.state(runtime);
         runWithStateLock(
@@ -1100,7 +1107,7 @@ class RequestExecutionSchedulingTest {
         delivery.install(runtime);
         runtimes.add(runtime);
         RequestExecutionTestSupport.start(runtime);
-        RouteExecution head = item(config, endpoint, 11L, 50, System.currentTimeMillis());
+        RouteResult head = item(config, endpoint, 11L, 50, System.currentTimeMillis());
 
         try {
             assertTrue(RequestExecutionTestSupport.offer(runtime, head));
@@ -1143,7 +1150,10 @@ class RequestExecutionSchedulingTest {
                 org.flexlb.balance.endpoint.EndpointTestSupport.requestExecution(endpoint);
         runtimes.add(worker);
         var occupied = item(config, endpoint, 31L, 50, System.currentTimeMillis());
-        var reservation = endpoint.reserveUnqueuedRoute(occupied, 1L, 1L).value();
+        var reservation =
+                org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                endpoint, occupied, 1L, 1L)
+                        .value();
         assertNotNull(reservation);
         var waiting = new CountDownLatch(1);
         var resumed = new CountDownLatch(1);
@@ -1200,7 +1210,7 @@ class RequestExecutionSchedulingTest {
         runtimes.add(runtime);
         RequestExecutionTestSupport.start(runtime);
         long now = System.currentTimeMillis();
-        RouteExecution head = item(config, endpoint, 21L, 50, now);
+        RouteResult head = item(config, endpoint, 21L, 50, now);
         assertTrue(RequestExecutionTestSupport.offer(runtime, head));
         await(delivery.firstCapacity.subscribed);
         RequestTimeEstimation.Inputs inputs = endpoint.captureRouteProjectionInputs();
@@ -1217,7 +1227,7 @@ class RequestExecutionSchedulingTest {
         assertTrue(
                 candidate.selectable(),
                 "a delivery-only wait must leave incoming backlog selectable");
-        RouteExecution backlog = item(config, endpoint, 22L, 50, now + 1L);
+        RouteResult backlog = item(config, endpoint, 22L, 50, now + 1L);
         assertTrue(RequestExecutionTestSupport.offer(runtime, backlog));
         TimeUnit.MILLISECONDS.sleep(100L);
         assertEquals(
@@ -1244,7 +1254,7 @@ class RequestExecutionSchedulingTest {
         delivery.install(runtime);
         runtimes.add(runtime);
         RequestExecutionTestSupport.start(runtime);
-        RouteExecution head = spy(item(config, endpoint, 13L, 50, System.currentTimeMillis()));
+        RouteResult head = item(config, endpoint, 13L, 50, System.currentTimeMillis());
         CountDownLatch materializing = new CountDownLatch(1);
         CountDownLatch finish = new CountDownLatch(1);
         doAnswer(
@@ -1256,7 +1266,7 @@ class RequestExecutionSchedulingTest {
                             return invocation.callRealMethod();
                         })
                 .when(head)
-                .seqLen();
+                .planningInput();
         try (var readers =
                 java.util.concurrent.Executors.newFixedThreadPool(
                         16, Thread.ofPlatform().name("projection-reader-", 0).factory())) {
@@ -1310,7 +1320,7 @@ class RequestExecutionSchedulingTest {
         delivery.install(runtime);
         runtimes.add(runtime);
         RequestExecutionTestSupport.start(runtime);
-        RouteExecution head = spy(item(config, endpoint, 12L, 50, System.currentTimeMillis()));
+        RouteResult head = item(config, endpoint, 12L, 50, System.currentTimeMillis());
         AtomicReference<Thread> capturingThread = new AtomicReference<>();
         CountDownLatch materializingSnapshot = new CountDownLatch(1);
         CountDownLatch finishSnapshot = new CountDownLatch(1);
@@ -1323,7 +1333,7 @@ class RequestExecutionSchedulingTest {
                             return invocation.callRealMethod();
                         })
                 .when(head)
-                .seqLen();
+                .planningInput();
 
         try {
             assertTrue(RequestExecutionTestSupport.offer(runtime, head));
@@ -1399,26 +1409,27 @@ class RequestExecutionSchedulingTest {
                         })
                 .when(endpoint)
                 .signal(PrefillEndpoint.Signal.INPUT);
-        when(endpoint.releaseRequest(any(RouteExecution.class)))
+        when(endpoint.releaseRequest(any(RouteResult.class)))
                 .thenAnswer(call -> ownership.releaseRequest(call.getArgument(0)));
         RequestExecutionTestSupport.start(runtime);
         long now = System.currentTimeMillis();
-        RouteExecution first = item(config, endpoint, 1L, 50, now);
-        RouteExecution revoked = item(config, endpoint, 2L, 50, now + 1L);
-        for (RouteExecution route : List.of(first, revoked)) {
+        RouteResult first = item(config, endpoint, 1L, 50, now);
+        RouteResult revoked = item(config, endpoint, 2L, 50, now + 1L);
+        for (RouteResult route : List.of(first, revoked)) {
             route.ctx()
                     .data()
                     .setGenerateInputPb(com.google.protobuf.ByteString.copyFromUtf8("input"));
             assertSame(
                     RequestProtocolTestSupport.submitForManualPlacement(scheduler, route.ctx()),
                     route.ctx().data().getFuture());
-            assertTrue(scheduler.requests.isCurrent(route.ctx()));
+            assertTrue(scheduler.repository.isCurrent(route.ctx()));
         }
 
         try {
-            try (var admission =
+            var admission =
                     SchedulerTestSupport.claim(
-                            scheduler, first.requestId(), first.ctx().data().getFuture())) {
+                            scheduler, first.requestId(), first.ctx().data().getFuture());
+            {
                 assertNotNull(admission);
                 try {
                     assertEquals(
@@ -1435,10 +1446,11 @@ class RequestExecutionSchedulingTest {
                 }
             }
             await(firstStatusRead);
-            try (var admission =
+            var secondAdmission =
                     SchedulerTestSupport.claim(
-                            scheduler, revoked.requestId(), revoked.ctx().data().getFuture())) {
-                assertNotNull(admission);
+                            scheduler, revoked.requestId(), revoked.ctx().data().getFuture());
+            {
+                assertNotNull(secondAdmission);
                 try {
                     assertEquals(
                             org.flexlb.balance.PlacementResult.Status.SUCCESS,
@@ -1450,7 +1462,7 @@ class RequestExecutionSchedulingTest {
                                                     RequestExecutionTestSupport.offer(
                                                             runtime, revoked))));
                 } finally {
-                    AbstractRequestScheduler.finishPlacement(admission);
+                    AbstractRequestScheduler.finishPlacement(secondAdmission);
                 }
             }
             allowFirstStatusRead.countDown();
@@ -1464,7 +1476,7 @@ class RequestExecutionSchedulingTest {
                     0,
                     delivery.prepareCalls.get(),
                     "a selection containing a revoked identity cannot prepare");
-            List<RouteExecution> remaining = RequestExecutionTestSupport.capture(runtime).items();
+            List<RouteResult> remaining = RequestExecutionTestSupport.capture(runtime).items();
             assertEquals(1, remaining.size());
             assertSame(first, remaining.getFirst());
         } finally {
@@ -1536,7 +1548,7 @@ class RequestExecutionSchedulingTest {
         return config;
     }
 
-    private static RouteExecution item(
+    private static RouteResult item(
             FlexlbConfig config,
             PrefillEndpoint endpoint,
             long requestId,
@@ -1552,8 +1564,9 @@ class RequestExecutionSchedulingTest {
         context.data().setRequest(request);
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         context.data().setFuture(new CompletableFuture<Response>());
-        return SchedulingTestConfig.createRoute(
-                context, null, null, null, endpoint, null, null, enqueuedAtMs);
+        return org.flexlb.balance.scheduler.RequestExecutionTestSupport.mockProtocolRoute(
+                SchedulingTestConfig.createRoute(
+                        context, null, null, null, endpoint, null, null, enqueuedAtMs));
     }
 
     private static PrefillEndpoint stableEndpoint(WorkerStatus status) {
@@ -1580,22 +1593,6 @@ class RequestExecutionSchedulingTest {
         return status;
     }
 
-    private static WorkerStatus gatedFirstStatusRead(
-            CountDownLatch entered, CountDownLatch proceed) {
-        WorkerStatus status = mock(WorkerStatus.class);
-        AtomicBoolean first = new AtomicBoolean(true);
-        when(status.committedEngineObservation())
-                .thenAnswer(
-                        ignored -> {
-                            if (first.compareAndSet(true, false)) {
-                                entered.countDown();
-                                await(proceed);
-                            }
-                            return capacity();
-                        });
-        return status;
-    }
-
     private static WorkerStatus.EngineObservation capacity() {
         return new WorkerStatus.EngineObservation(
                 RoleType.PREFILL,
@@ -1614,6 +1611,22 @@ class RequestExecutionSchedulingTest {
                 0L);
     }
 
+    private static WorkerStatus gatedFirstStatusRead(
+            CountDownLatch entered, CountDownLatch proceed) {
+        WorkerStatus status = mock(WorkerStatus.class);
+        AtomicBoolean first = new AtomicBoolean(true);
+        when(status.committedEngineObservation())
+                .thenAnswer(
+                        ignored -> {
+                            if (first.compareAndSet(true, false)) {
+                                entered.countDown();
+                                await(proceed);
+                            }
+                            return capacity();
+                        });
+        return status;
+    }
+
     private static void await(CountDownLatch latch) {
         try {
             assertTrue(
@@ -1624,12 +1637,12 @@ class RequestExecutionSchedulingTest {
         }
     }
 
-    /** Queue scheduling fixture: stubs Worker boundaries, never Dispatcher business APIs. */
+    /**
+     * Queue scheduling fixture: stubs Worker boundaries, never Dispatcher business APIs.
+     */
     private abstract static class BoundaryDelivery {
-        abstract CapacityBoundary selectBoundary(
-                List<RouteExecution> candidates,
-                PrefillTimePredictor.Evaluator evaluator,
-                OptionalLong plannedPrediction);
+        private final java.util.Map<CapacityBoundary, TestAvailability> bindings =
+                new java.util.IdentityHashMap<>();
 
         void install(PrefillQueueScheduler worker) {
             doAnswer(
@@ -1660,8 +1673,20 @@ class RequestExecutionSchedulingTest {
                     .watchCapacity(any(), any(), any());
         }
 
-        private final java.util.Map<CapacityBoundary, TestAvailability> bindings =
-                new java.util.IdentityHashMap<>();
+        abstract CapacityBoundary selectBoundary(
+                List<RouteResult> candidates,
+                PrefillTimePredictor.Evaluator evaluator,
+                OptionalLong plannedPrediction);
+
+        boolean capacityAvailable(RouteResult item, CapacityBoundary boundary) {
+            return bindings.get(boundary).isAvailable();
+        }
+
+        Runnable watchCapacity(RouteResult item, CapacityBoundary boundary, Runnable wake) {
+            var source = bindings.get(boundary);
+            source.addListener(wake);
+            return () -> source.removeListener(wake);
+        }
 
         CapacityBoundary unavailable(TestAvailability availability) {
             return boundary(availability, CapacityBoundary.Resource.DISPATCH_EXECUTOR);
@@ -1677,19 +1702,11 @@ class RequestExecutionSchedulingTest {
             bindings.put(boundary, availability);
             return boundary;
         }
-
-        boolean capacityAvailable(RouteExecution item, CapacityBoundary boundary) {
-            return bindings.get(boundary).isAvailable();
-        }
-
-        Runnable watchCapacity(RouteExecution item, CapacityBoundary boundary, Runnable wake) {
-            var source = bindings.get(boundary);
-            source.addListener(wake);
-            return () -> source.removeListener(wake);
-        }
     }
 
-    @lombok.RequiredArgsConstructor
+    /**
+     * Exposes successive capacity sources so tests can verify wakeup-driven retries instead of polling.
+     */
     private static final class EventDrivenBlock extends BoundaryDelivery {
 
         private final CapacityBoundary.Resource resource;
@@ -1708,9 +1725,13 @@ class RequestExecutionSchedulingTest {
             this(CapacityBoundary.Resource.DISPATCH_EXECUTOR);
         }
 
+        private EventDrivenBlock(CapacityBoundary.Resource resource) {
+            this.resource = resource;
+        }
+
         @Override
         CapacityBoundary selectBoundary(
-                List<RouteExecution> candidates,
+                List<RouteResult> candidates,
                 PrefillTimePredictor.Evaluator evaluator,
                 OptionalLong plannedPrediction) {
             int attempt = attempts.incrementAndGet();
@@ -1723,6 +1744,9 @@ class RequestExecutionSchedulingTest {
         }
     }
 
+    /**
+     * Pauses two preparation attempts to inspect projection caching while the blocking capacity source changes.
+     */
     private static final class ProjectionCacheBlock extends BoundaryDelivery {
 
         private final TestAvailability firstCapacity = new TestAvailability();
@@ -1741,7 +1765,7 @@ class RequestExecutionSchedulingTest {
 
         @Override
         CapacityBoundary selectBoundary(
-                List<RouteExecution> candidates,
+                List<RouteResult> candidates,
                 PrefillTimePredictor.Evaluator evaluator,
                 OptionalLong plannedPrediction) {
             if (attempts.incrementAndGet() == 1) {

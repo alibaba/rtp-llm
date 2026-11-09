@@ -30,20 +30,10 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks failed endpoint cleanup retains the exact generation for retry and monitoring remains readable while resource locks are held.
+ */
 class ReviewLifecycleRegressionTest {
-    private EndpointRegistry registry() {
-        ConfigService config = mock(ConfigService.class);
-        when(config.loadBalanceConfig()).thenReturn(SchedulingTestConfig.newConfig());
-        return new EndpointRegistry(
-                config,
-                new RequestRepository(),
-                mock(DeliveryMetricsReporter.class),
-                EndpointTestSupport.routeStrategy(EndpointTestSupport.requestRuntime()),
-                new PlacementAvailability(),
-                org.flexlb.balance.planner.BuiltinGroupPlanner.from(config.loadBalanceConfig()),
-                order -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(16, order));
-    }
-
     @Test
     void failedCleanupCannotRunASuccessfulGenerationFinalizer() {
         var failure = new IllegalStateException("cleanup failed");
@@ -156,5 +146,18 @@ class ReviewLifecycleRegressionTest {
         } finally {
             registry.close();
         }
+    }
+
+    private EndpointRegistry registry() {
+        ConfigService config = mock(ConfigService.class);
+        when(config.loadBalanceConfig()).thenReturn(SchedulingTestConfig.newConfig());
+        return new EndpointRegistry(
+                config,
+                new RequestRepository(),
+                mock(DeliveryMetricsReporter.class),
+                EndpointTestSupport.routeStrategy(EndpointTestSupport.requestRuntime()),
+                new PlacementAvailability(),
+                org.flexlb.balance.planner.BuiltinGroupPlanner.from(config.loadBalanceConfig()),
+                order -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(16, order));
     }
 }

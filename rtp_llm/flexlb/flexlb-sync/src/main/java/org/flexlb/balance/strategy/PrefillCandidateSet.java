@@ -9,10 +9,12 @@ import java.util.Objects;
 
 import static com.google.common.base.Preconditions.checkArgument;
 
-/** Thread-confined fleet capture; ranking compacts survivors into the same columns. */
+/**
+ * Thread-confined fleet capture; ranking compacts survivors into the same columns.
+ */
 final class PrefillCandidateSet {
-
     private static final int INITIAL_CAPACITY = 16;
+
     String[] endpointAddresses = new String[0];
     int[] tieIndexes = new int[0];
     PrefillSelectionStrategy.CandidateInput[] capturedSources =
@@ -24,8 +26,11 @@ final class PrefillCandidateSet {
     long[] routingCacheMatchTokens = new long[0];
     long[] ownershipVersions = new long[0];
     String[] admissionBlocks = new String[0];
+    RequestTimeEstimation.Inputs[] inputs = new RequestTimeEstimation.Inputs[0];
+
     int size;
     int registeredCount;
+
     // Borrowed only during the synchronous cache lookup, before ranking compacts these columns.
     final List<String> addresses =
             new AbstractList<>() {
@@ -39,6 +44,7 @@ final class PrefillCandidateSet {
                     return registeredCount;
                 }
             };
+
     boolean inUse;
     long minimumTtftRank = Long.MAX_VALUE;
     boolean hasKnownTtft;
@@ -62,6 +68,7 @@ final class PrefillCandidateSet {
         Arrays.fill(capturedSources, 0, registeredCount, null);
         affinityReason = null;
         Arrays.fill(admissionBlocks, 0, size, null);
+        Arrays.fill(inputs, 0, size, null);
         size = 0;
         registeredCount = 0;
         minimumTtftRank = Long.MAX_VALUE;
@@ -98,6 +105,37 @@ final class PrefillCandidateSet {
         return projectedTtftMs[index] < 0L ? Long.MAX_VALUE : projectedTtftMs[index];
     }
 
+    void remove(int index) {
+        int remaining = size - index - 1;
+        for (Object array :
+                new Object[] {
+                    endpointAddresses,
+                    capturedSources,
+                    projectedTtftMs,
+                    incomingPrefillMs,
+                    cacheHitTokens,
+                    routingCacheMatchTokens,
+                    ownershipVersions,
+                    admissionBlocks,
+                    inputs
+                }) System.arraycopy(array, index + 1, array, index, remaining);
+        size--;
+        endpointAddresses[size] = null;
+        capturedSources[size] = null;
+        admissionBlocks[size] = null;
+        inputs[size] = null;
+        minimumTtftRank = Long.MAX_VALUE;
+        hasKnownTtft = false;
+        maximumCacheHit = maximumRoutingCacheMatchTokens = 0L;
+        for (int i = 0; i < size; i++) {
+            minimumTtftRank = Math.min(minimumTtftRank, ttftRank(i));
+            hasKnownTtft |= projectedTtftMs[i] >= 0L;
+            maximumCacheHit = Math.max(maximumCacheHit, cacheHitTokens[i]);
+            maximumRoutingCacheMatchTokens =
+                    Math.max(maximumRoutingCacheMatchTokens, routingCacheMatchTokens[i]);
+        }
+    }
+
     private void ensureCapacity(int expectedCapacity) {
         if (capturedSources.length >= expectedCapacity) {
             return;
@@ -108,6 +146,7 @@ final class PrefillCandidateSet {
         capturedSources = Arrays.copyOf(capturedSources, capacity);
         tieIndexes = Arrays.copyOf(tieIndexes, capacity);
         admissionBlocks = Arrays.copyOf(admissionBlocks, capacity);
+        inputs = Arrays.copyOf(inputs, capacity);
         projectedTtftMs = Arrays.copyOf(projectedTtftMs, capacity);
         incomingPrefillMs = Arrays.copyOf(incomingPrefillMs, capacity);
         cacheHitTokens = Arrays.copyOf(cacheHitTokens, capacity);

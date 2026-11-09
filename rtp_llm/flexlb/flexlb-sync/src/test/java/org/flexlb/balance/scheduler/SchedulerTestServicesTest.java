@@ -34,6 +34,9 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks shared test-runtime startup, request ownership, and shutdown draining through real lifecycle components.
+ */
 class SchedulerTestServicesTest {
     @Test
     void drainEscalatesToImmediateAndFreezesAdmissionAfterItsDeadline() {
@@ -88,7 +91,8 @@ class SchedulerTestServicesTest {
                                                     entered.countDown();
                                                     RequestProtocolTestSupport.await(release);
                                                 },
-                                                false);
+                                                false,
+                                                null);
                                     }
                                     sourceReturned.complete(null);
                                 });
@@ -221,6 +225,10 @@ class SchedulerTestServicesTest {
                                     .setRequestId(991L)
                                     .build()
                                     .toByteString());
+            wrongMode
+                    .data()
+                    .setSchedulingMetadata(
+                            org.flexlb.dao.SchedulingMetadata.explicit(50, Long.MAX_VALUE));
             var rejected =
                     SchedulerTestServices.entry(
                                     (AbstractRequestScheduler)
@@ -282,6 +290,12 @@ class SchedulerTestServicesTest {
                                 service,
                                 mock(EngineGrpcClient.class)));
         var scheduler = mock(AbstractRequestScheduler.class);
+        scheduler =
+                spy(
+                        runtime.newLifecycle(
+                                config,
+                                SchedulingTestConfig.capacity(config),
+                                mock(TheoryCacheHitReporter.class)));
         var expected = new IllegalStateException("placement close failed");
         doThrow(expected).when(scheduler).close();
         var deliveries = spy(runtime.deliveries());
@@ -303,7 +317,6 @@ class SchedulerTestServicesTest {
                         deliveries,
                         endpoints);
         order.verify(scheduler).close();
-        order.verify(SchedulerTestServices.lifecycle(scheduler)).stopAdmissionsAndAwaitCompletion();
         order.verify(deliveries).awaitDeliveries();
         order.verify(endpoints).close();
         order.verify(SchedulerTestServices.lifecycle(scheduler)).closeOutstandingAndTerminalize();

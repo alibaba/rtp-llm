@@ -46,6 +46,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+/**
+ * Exercises cancellation and deadline propagation across live RPCs and transport retries.
+ * Cancellation must stop the active attempt even while retry setup or callback registration is in progress.
+ */
 @Timeout(30)
 class EngineGrpcClientCancellationAuditTest {
     @Test
@@ -362,6 +366,9 @@ class EngineGrpcClientCancellationAuditTest {
         }
     }
 
+    /**
+     * Runs a real Netty engine with gates around retry and cancellation, recording attempts and releasing channels and executors on close.
+     */
     private static final class Fixture implements AutoCloseable {
         final AtomicInteger attempts = new AtomicInteger(), inline = new AtomicInteger();
         final AtomicLong retryDeadlineMs = new AtomicLong();
@@ -385,6 +392,8 @@ class EngineGrpcClientCancellationAuditTest {
                         });
         final TestClient client;
         final Server server;
+
+        CompletableFuture<EngineRpcService.WorkerStatusPB> latest;
 
         Fixture(boolean closeFirst, boolean blockRetry, boolean succeedRetry) throws Exception {
             this(closeFirst, blockRetry, succeedRetry, 0);
@@ -462,7 +471,17 @@ class EngineGrpcClientCancellationAuditTest {
             client = new TestClient(executor, clientLoop, blockRetry);
         }
 
-        CompletableFuture<EngineRpcService.WorkerStatusPB> latest;
+        @Override
+        public void close() throws Exception {
+            release.countDown();
+            client.allowRetryCreation.countDown();
+            client.allowRetryStart.countDown();
+            client.shutdownChannelPool();
+            executor.shutdownNow();
+            server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            clientLoop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
+            serverLoop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
+        }
 
         String resultDiagnostic() {
             return latest == null ? "not started" : latest.toString();
@@ -480,18 +499,6 @@ class EngineGrpcClientCancellationAuditTest {
                             EngineRpcService.StatusVersionPB.getDefaultInstance(),
                             timeoutMs);
             return latest;
-        }
-
-        @Override
-        public void close() throws Exception {
-            release.countDown();
-            client.allowRetryCreation.countDown();
-            client.allowRetryStart.countDown();
-            client.shutdownChannelPool();
-            executor.shutdownNow();
-            server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
-            clientLoop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
-            serverLoop.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
         }
     }
 }

@@ -34,6 +34,9 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks deferred payload preparation, replacement, and cancellation before a request reaches selection.
+ */
 @Timeout(10)
 class GenerateInputPreparationTest {
     @Test
@@ -63,13 +66,24 @@ class GenerateInputPreparationTest {
     }
 
     @Test
-    void nonBatchDoesNotRetainOrParseInput() throws Exception {
+    void dispatcherDiscardsUnusedInputWithoutParsingIt() throws Exception {
         var config = SchedulingTestConfig.newConfig();
         config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
         var data = new RequestContext(config).data();
         data.setGenerateInputPb(ByteString.copyFrom(new byte[] {(byte) 0xff}));
+        assertTrue(data.hasGenerateInput());
+        var dispatcher =
+                new DeliveryDispatcher(
+                        null,
+                        DeliveryTestSupport.service(config),
+                        mock(DeliveryMetricsReporter.class),
+                        mock(TaskTimer.class),
+                        SchedulingTestConfig.capacity(config),
+                        mock(DeliveryExecution.class));
+        assertNull(dispatcher.validateRequestInput(data));
+        dispatcher.releaseUnusedInput(data);
         assertFalse(data.hasGenerateInput());
-        assertEquals(0, data.getGenerateInputSize());
+        assertEquals(1, data.getGenerateInputSize());
         assertNull(data.getGenerateInput());
     }
 
@@ -87,7 +101,9 @@ class GenerateInputPreparationTest {
                 repository.register(
                         context,
                         mock(AbstractRequestScheduler.class),
-                        new RequestFuture((kind, value, failure) -> true)));
+                        new RequestFuture((kind, value, failure) -> true),
+                        60_000L,
+                        org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED));
         assertThrows(
                 IllegalStateException.class,
                 () -> context.data().setGenerateInputPb(ByteString.EMPTY));
@@ -163,7 +179,6 @@ class GenerateInputPreparationTest {
             release.countDown();
             assertEquals(deadline ? 8431 : 8504, future.get(3, TimeUnit.SECONDS).getCode());
             RequestProtocolTestSupport.close(queue);
-            registry.stopAdmissionsAndAwaitCompletion();
             verify(router, never())
                     .select(any(), org.mockito.ArgumentMatchers.nullable(String.class));
             assertEquals(
@@ -173,7 +188,7 @@ class GenerateInputPreparationTest {
         } finally {
             release.countDown();
             RequestProtocolTestSupport.close(queue);
-            if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
+            if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(registry)) {
                 registry.closeOutstandingAndTerminalize();
             }
             SchedulerTestSupport.timer(

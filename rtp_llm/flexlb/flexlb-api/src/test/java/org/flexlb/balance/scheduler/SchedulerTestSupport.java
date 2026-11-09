@@ -14,6 +14,9 @@ import static org.mockito.Mockito.when;
  * Builds and inspects request ownership for API tests.
  */
 public final class SchedulerTestSupport {
+    private static final Map<AbstractRequestScheduler, RequestRepository> mockRepositories =
+            new WeakHashMap<>();
+
     /**
      * Read shadow ownership for assertions, without granting a production lookup capability.
      */
@@ -22,6 +25,32 @@ public final class SchedulerTestSupport {
         return endpoint.isRetired()
                 ? null
                 : decodeReservation(endpoint.resourceSnapshot(), requestId);
+    }
+
+    public static synchronized RequestRepository repository(AbstractRequestScheduler owner) {
+        if (owner == null) {
+            return null;
+        }
+        return owner.repository != null
+                ? owner.repository
+                : mockRepositories.computeIfAbsent(owner, SchedulerTestSupport::mockRepository);
+    }
+
+    public static void bindOwner(RequestContext context, AbstractRequestScheduler owner) {
+        if (context.data().getRequestScheduler() == null) {
+            // Minimal fixtures may bind an owner without registering a runnable request.
+            ReflectionTestUtils.setField(context.data(), "requestScheduler", owner);
+        }
+    }
+
+    public static PlacementOperation claim(
+            AbstractRequestScheduler scheduler,
+            String id,
+            java.util.concurrent.CompletableFuture<?> future) {
+        var context = scheduler.repository.findActive(id);
+        return context != null && context.data().getFuture() == future
+                ? scheduler.claimPlacement(context)
+                : null;
     }
 
     private static DecodeResources.RequestReservation decodeReservation(
@@ -40,18 +69,6 @@ public final class SchedulerTestSupport {
         };
     }
 
-    private static final Map<AbstractRequestScheduler, RequestRepository> mockRepositories =
-            new WeakHashMap<>();
-
-    public static synchronized RequestRepository repository(AbstractRequestScheduler owner) {
-        if (owner == null) {
-            return null;
-        }
-        return owner.requests != null
-                ? owner.requests
-                : mockRepositories.computeIfAbsent(owner, SchedulerTestSupport::mockRepository);
-    }
-
     private static RequestRepository mockRepository(AbstractRequestScheduler owner) {
         var repository = mock(RequestRepository.class);
         when(repository.ownerOf(org.mockito.ArgumentMatchers.anyString())).thenReturn(owner);
@@ -65,22 +82,5 @@ public final class SchedulerTestSupport {
                             return context;
                         });
         return repository;
-    }
-
-    public static void bindOwner(RequestContext context, AbstractRequestScheduler owner) {
-        if (context.data().getRequestScheduler() == null) {
-            // Minimal fixtures may bind an owner without registering a runnable request.
-            ReflectionTestUtils.setField(context.data(), "requestScheduler", owner);
-        }
-    }
-
-    public static PlacementOperation claim(
-            AbstractRequestScheduler scheduler,
-            String id,
-            java.util.concurrent.CompletableFuture<?> future) {
-        var context = scheduler.requests.findActive(id);
-        return context != null && context.data().getFuture() == future
-                ? scheduler.claimPlacement(context)
-                : null;
     }
 }

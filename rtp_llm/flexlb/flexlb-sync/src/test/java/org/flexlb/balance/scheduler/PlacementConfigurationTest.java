@@ -29,16 +29,10 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks scheduler assembly and startup ordering, including ownership of the shared dispatcher at shutdown.
+ */
 class PlacementConfigurationTest {
-    static class RequestConsumer {
-        final AbstractRequestScheduler entry;
-
-        RequestConsumer(
-                @org.springframework.context.annotation.Lazy AbstractRequestScheduler entry) {
-            this.entry = entry;
-        }
-    }
-
     @ParameterizedTest
     @EnumSource(DispatcherConfig.Type.class)
     void springAssemblyUsesOneDispatcherBeforeServingAndRuntimeCloses(
@@ -70,6 +64,8 @@ class PlacementConfigurationTest {
                                 org.mockito.Mockito.mock(
                                         org.flexlb.balance.scheduler.DeliveryExecution.class)));
         RequestRepository repository;
+        ScheduledTaskTimer taskTimer;
+        ScheduledTaskTimer deadlineTaskTimer;
         try (var spring = new AnnotationConfigApplicationContext()) {
             spring.setEnvironment(environment);
             spring.registerBean(
@@ -111,7 +107,6 @@ class PlacementConfigurationTest {
             assertSame(batchDispatcher, deliveryStrategy);
             assertEquals(dispatcherType, deliveryStrategy.mode());
             var scheduler = spring.getBean(RequestScheduler.class);
-            scheduler.start();
             if (dispatcherType == DispatcherConfig.Type.BATCH) {
                 assertInstanceOf(DeliveryDispatcher.class, deliveryStrategy);
                 assertInstanceOf(QueuedRequestScheduler.class, scheduler);
@@ -127,16 +122,30 @@ class PlacementConfigurationTest {
             assertEquals(
                     StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                     future.get(3, TimeUnit.SECONDS).getCode());
-            repository.closeRegistration();
-            scheduler.close();
-            SchedulerTestSupport.lifecycle(scheduler).stopAdmissionsAndAwaitCompletion();
-            spring.getBean(ExpirationTimer.class).close();
-            spring.getBean("deadlineTaskTimer", ScheduledTaskTimer.class).close();
-            spring.getBean(RequestTaskPool.class).close();
-            spring.getBean(ResponseCompletionExecutor.class).close();
-            spring.getBean(ScheduledTaskTimer.class).close();
-            spring.getBean(DeliveryExecution.class).awaitDeliveries();
+            taskTimer = spring.getBean("taskTimer", ScheduledTaskTimer.class);
+            deadlineTaskTimer = spring.getBean("deadlineTaskTimer", ScheduledTaskTimer.class);
+            spring.getBean(AbstractRequestScheduler.class).shutdown(System.nanoTime());
+            taskTimer.schedule(() -> {}, 0L).get(2, TimeUnit.SECONDS);
+            deadlineTaskTimer.schedule(() -> {}, 0L).get(2, TimeUnit.SECONDS);
         }
         assertTrue(repository.isClosed());
+        org.junit.jupiter.api.Assertions.assertThrows(
+                java.util.concurrent.RejectedExecutionException.class,
+                () -> taskTimer.schedule(() -> {}, 0L));
+        org.junit.jupiter.api.Assertions.assertThrows(
+                java.util.concurrent.RejectedExecutionException.class,
+                () -> deadlineTaskTimer.schedule(() -> {}, 0L));
+    }
+
+    /**
+     * Receives the lazily assembled scheduler to verify Spring resolves the shared request entry point.
+     */
+    static class RequestConsumer {
+        final AbstractRequestScheduler entry;
+
+        RequestConsumer(
+                @org.springframework.context.annotation.Lazy AbstractRequestScheduler entry) {
+            this.entry = entry;
+        }
     }
 }

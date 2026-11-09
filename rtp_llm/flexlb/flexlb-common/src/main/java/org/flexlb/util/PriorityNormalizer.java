@@ -15,7 +15,6 @@ package org.flexlb.util;
  * explicitly carried but invalid values also fall back to the default.
  */
 public final class PriorityNormalizer {
-
     /** gRPC metadata header carrying the caller QoS level (fallback channel). */
     public static final String QOS_HEADER_NAME = "x-dashscope-inner-qos-level";
 
@@ -50,15 +49,6 @@ public final class PriorityNormalizer {
     }
 
     /**
-     * Returns true iff the value is a valid priority level.
-     * Valid range is 1-100; 0 is the NO_PRIORITY sentinel, negatives and
-     * values above 100 are invalid.
-     */
-    public static boolean isValid(int priority) {
-        return priority >= MIN_PRIORITY && priority <= MAX_PRIORITY;
-    }
-
-    /**
      * Normalize the request priority.
      *
      * @param protoPriority   value from the proto field; 0 means unset
@@ -76,6 +66,15 @@ public final class PriorityNormalizer {
             return headerPriority;
         }
         return isValid(defaultPriority) ? defaultPriority : DEFAULT_PRIORITY;
+    }
+
+    /**
+     * Returns true iff the value is a valid priority level.
+     * Valid range is 1-100; 0 is the NO_PRIORITY sentinel, negatives and
+     * values above 100 are invalid.
+     */
+    public static boolean isValid(int priority) {
+        return priority >= MIN_PRIORITY && priority <= MAX_PRIORITY;
     }
 
     /** Parse caller QoS without assigning a default scheduling priority. */

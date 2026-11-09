@@ -67,15 +67,16 @@ import static org.mockito.Mockito.when;
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ZkLeaderElectionTest {
-
     private static final String ROLE_ID = "ha-casetest-role";
     private static final String LEADER_PATH = "/master_lb_leader/" + ROLE_ID;
     private static final String MASTER_NAMESPACE = "whale-master";
+
     private static final int SESSION_TIMEOUT_MS = 10_000;
     private static final long AWAIT_TIMEOUT_MS = 20_000;
     private static final long STABLE_WINDOW_MS = 2_000;
 
     private TestingServer zkServer;
+
     private final List<AutoCloseable> perTestResources = new CopyOnWriteArrayList<>();
 
     @BeforeAll
@@ -209,53 +210,8 @@ class ZkLeaderElectionTest {
         }
     }
 
-    // ------------------------------------------------------------------
-    // helpers
-    // ------------------------------------------------------------------
-
-    /** An elector service bound to a live curator client + leader selector. */
-    private record BoundElector(
-            ZookeeperMasterElectService service,
-            CuratorFramework client,
-            LeaderSelector selector,
-            String localIp)
-            implements AutoCloseable {
-        @Override
-        public void close() {
-            CloseableUtils.closeQuietly(selector);
-            CloseableUtils.closeQuietly(client);
-        }
-    }
-
     private BoundElector startElector(String localIp) {
         return bindAndStart(newElectService(localIp), localIp);
-    }
-
-    /**
-     * Builds the production service with mocked auxiliary dependencies. The
-     * constructor leaves election disabled because the test JVM has no
-     * {@code FLEXLB_SYNC_CONSISTENCY_CONFIG} env var (needConsistency=false).
-     */
-    private ZookeeperMasterElectService newElectService(String localIp) {
-        GeneralHttpNettyService httpService = mock(GeneralHttpNettyService.class);
-        when(httpService.request(any(), any(), anyString(), any())).thenReturn(Mono.empty());
-        EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
-        Environment environment = mock(Environment.class);
-
-        ZookeeperMasterElectService service =
-                new ZookeeperMasterElectService(
-                        httpService,
-                        healthReporter,
-                        environment,
-                        org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
-                                new org.flexlb.config.FlexlbConfig()),
-                        org.mockito.Mockito.mock(org.flexlb.config.DeploymentIdentity.class));
-        ReflectionTestUtils.setField(
-                service,
-                "localNode",
-                new ZookeeperMasterElectService.LocalNodeIdentity(localIp, "18080", ROLE_ID));
-        ReflectionTestUtils.setField(service, "notificationPort", 18_080);
-        return service;
     }
 
     /** Creates a fresh curator client + auto-requeue selector and starts election. */
@@ -284,6 +240,33 @@ class ZkLeaderElectionTest {
         perTestResources.add(bound);
         service.start();
         return bound;
+    }
+
+    /**
+     * Builds the production service with mocked auxiliary dependencies. The
+     * constructor leaves election disabled because the test JVM has no
+     * {@code FLEXLB_SYNC_CONSISTENCY_CONFIG} env var (needConsistency=false).
+     */
+    private ZookeeperMasterElectService newElectService(String localIp) {
+        GeneralHttpNettyService httpService = mock(GeneralHttpNettyService.class);
+        when(httpService.request(any(), any(), anyString(), any())).thenReturn(Mono.empty());
+        EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
+        Environment environment = mock(Environment.class);
+
+        ZookeeperMasterElectService service =
+                new ZookeeperMasterElectService(
+                        httpService,
+                        healthReporter,
+                        environment,
+                        org.flexlb.balance.scheduler.SchedulingTestConfig.configService(
+                                new org.flexlb.config.FlexlbConfig()),
+                        org.mockito.Mockito.mock(org.flexlb.config.DeploymentIdentity.class));
+        ReflectionTestUtils.setField(
+                service,
+                "localNode",
+                new ZookeeperMasterElectService.LocalNodeIdentity(localIp, "18080", ROLE_ID));
+        ReflectionTestUtils.setField(service, "notificationPort", 18_080);
+        return service;
     }
 
     /** Mode-1 style hard death: selector first (stops its worker threads), then client. */
@@ -315,6 +298,17 @@ class ZkLeaderElectionTest {
             }
         }
         fail("no unique master within " + AWAIT_TIMEOUT_MS + "ms: " + describe(electors));
+    }
+
+    private static String describe(BoundElector... electors) {
+        StringBuilder sb = new StringBuilder("[");
+        for (BoundElector elector : electors) {
+            sb.append(elector.localIp())
+                    .append(" isMaster=")
+                    .append(elector.service().isMaster())
+                    .append(", ");
+        }
+        return sb.append("]").toString();
     }
 
     private void awaitStableMasterState(
@@ -349,15 +343,30 @@ class ZkLeaderElectionTest {
                         + describe(expectedFollower));
     }
 
-    private static String describe(BoundElector... electors) {
-        StringBuilder sb = new StringBuilder("[");
-        for (BoundElector elector : electors) {
-            sb.append(elector.localIp())
-                    .append(" isMaster=")
-                    .append(elector.service().isMaster())
-                    .append(", ");
+    private static int freePort() throws IOException {
+        try (ServerSocket socket = new ServerSocket(0)) {
+            return socket.getLocalPort();
         }
-        return sb.append("]").toString();
+    }
+
+    // ------------------------------------------------------------------
+    // helpers
+    // ------------------------------------------------------------------
+
+    /**
+     * An elector service bound to a live curator client + leader selector.
+     */
+    private record BoundElector(
+            ZookeeperMasterElectService service,
+            CuratorFramework client,
+            LeaderSelector selector,
+            String localIp)
+            implements AutoCloseable {
+        @Override
+        public void close() {
+            CloseableUtils.closeQuietly(selector);
+            CloseableUtils.closeQuietly(client);
+        }
     }
 
     /**
@@ -379,15 +388,13 @@ class ZkLeaderElectionTest {
             executor.scheduleAtFixedRate(this::sample, 0, 20, TimeUnit.MILLISECONDS);
         }
 
-        void watch(BoundElector elector) {
-            watched.add(elector);
+        @Override
+        public void close() {
+            executor.shutdownNow();
         }
 
-        private void sample() {
-            long masters = watched.stream().filter(elector -> elector.service().isMaster()).count();
-            if (masters > 1) {
-                splitBrain.set(true);
-            }
+        void watch(BoundElector elector) {
+            watched.add(elector);
         }
 
         void assertNeverSplitBrain() {
@@ -396,15 +403,11 @@ class ZkLeaderElectionTest {
                     "split brain: more than one elector held isMaster=true at a sampled instant");
         }
 
-        @Override
-        public void close() {
-            executor.shutdownNow();
-        }
-    }
-
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
+        private void sample() {
+            long masters = watched.stream().filter(elector -> elector.service().isMaster()).count();
+            if (masters > 1) {
+                splitBrain.set(true);
+            }
         }
     }
 }

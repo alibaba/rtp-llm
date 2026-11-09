@@ -28,7 +28,12 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+/**
+ * Checks role-specific discovery and replacement while keeping routing views and resource cleanup tied to the exact worker generation.
+ */
 class EndpointRegistryRoleTest {
+    private EndpointRegistry registry;
+    private PlacementAvailability availability;
 
     @Test
     void vitSelectionSkipsRetiringEndpointsBeforeTheirRegistryEntriesAreRemoved() {
@@ -72,9 +77,6 @@ class EndpointRegistryRoleTest {
         assertEquals(original, addresses.get());
         assertEquals(3, original.size(), "an earlier directory remains an immutable snapshot");
     }
-
-    private EndpointRegistry registry;
-    private PlacementAvailability availability;
 
     @BeforeEach
     void setUp() {
@@ -411,8 +413,8 @@ class EndpointRegistryRoleTest {
 
             assertTrue(selectedEndpoint != null);
             oldReservation =
-                    oldEndpoint
-                            .tryReserveQueuedRequest(String.valueOf(41L), 100L, 110L, 50, null)
+                    org.flexlb.balance.scheduler.SelectionTestSupport.registerQueuedDecode(
+                                    oldEndpoint, String.valueOf(41L), 100L, 110L, 50)
                             .value();
         }
 
@@ -478,6 +480,15 @@ class EndpointRegistryRoleTest {
         return EndpointTestSupport.workerStatus(roleType, "127.0.0.1", port, port + 1);
     }
 
+    private void retire(RoleType role, String address, WorkerStatus status) {
+        EndpointRegistry.Retirement detached = detachUnderGenerationLock(role, address, status);
+        assertNotNull(detached);
+        EndpointTestSupport.completeRetirement(
+                detached,
+                org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
+                org.slf4j.LoggerFactory.getLogger(getClass()));
+    }
+
     private EndpointRegistry.Retirement detachUnderGenerationLock(
             RoleType role, String address, WorkerStatus expectedStatus) {
         expectedStatus.lock.lock();
@@ -486,14 +497,5 @@ class EndpointRegistryRoleTest {
         } finally {
             expectedStatus.lock.unlock();
         }
-    }
-
-    private void retire(RoleType role, String address, WorkerStatus status) {
-        EndpointRegistry.Retirement detached = detachUnderGenerationLock(role, address, status);
-        assertNotNull(detached);
-        EndpointTestSupport.completeRetirement(
-                detached,
-                org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
-                org.slf4j.LoggerFactory.getLogger(getClass()));
     }
 }

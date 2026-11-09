@@ -13,7 +13,9 @@ import org.flexlb.dao.route.RequestPhase;
 import java.util.List;
 import java.util.Map;
 
-/** One completed FlexLB scheduling decision written to {@code pv.log}. */
+/**
+ * One completed FlexLB scheduling decision written to {@code pv.log}.
+ */
 @Data
 public class PvLogData {
 
@@ -44,7 +46,10 @@ public class PvLogData {
     private String admissionRejectReason;
     private String scheduleOrigin;
     private int priority;
-    private long requestExpiresAtMs;
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Long requestExpiresAtMs;
+
     private long latencyMs;
     private long batchId;
     private String requestState;
@@ -90,7 +95,10 @@ public class PvLogData {
         this.admissionRejectReason = admissionRejectReason;
         this.scheduleOrigin = scheduleOrigin;
         this.priority = ctx.getPriority();
-        this.requestExpiresAtMs = ctx.getRequestExpiresAtMs();
+        this.requestExpiresAtMs =
+                ctx.getSchedulingMetadata() == null
+                        ? null
+                        : ctx.getSchedulingMetadata().expiresAtMs();
         this.latencyMs = Math.max(0, completedAtMs - ctx.getStartTime());
         this.batchId = batchId;
         this.requestState = requestState;

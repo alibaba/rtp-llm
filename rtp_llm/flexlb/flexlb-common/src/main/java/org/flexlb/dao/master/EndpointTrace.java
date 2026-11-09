@@ -18,6 +18,251 @@ public final class EndpointTrace {
     private static final int MAX_SUPPRESSED_ERRORS = 4;
     private static final int MAX_REASON_CHARS = 128;
 
+    private volatile Poll latestStatusPoll;
+    private volatile Poll latestCachePoll;
+
+    // WorkerStatus serializes poll creation with its health monitor.
+    private long nextPollId;
+
+    private final AtomicBoolean endpointPublished = new AtomicBoolean();
+    private final AtomicLong gateClosedAtMs = new AtomicLong();
+    private final AtomicReference<String> error = new AtomicReference<>();
+
+    private volatile String phase = "DISCOVERED";
+    private volatile String retirementPhase = "UNKNOWN";
+
+    private volatile boolean retiring;
+
+    private volatile String unavailableReason = "UNKNOWN";
+
+    private volatile long decidedAtMs;
+    private volatile long lastSuccessAgeUs = -1L;
+    private volatile long consecutiveFailures = -1L;
+    private volatile long cleanupAttemptNanos;
+    private volatile long cleanupAcquiredNanos;
+    private volatile long cleanupWaitUs = -1L;
+    private volatile long cleanupHoldUs = -1L;
+    private volatile long scannedKeys;
+    private volatile long removedMappings;
+
+    public void recordUnavailable(String reason, long lastSuccessUs, long failures) {
+        unavailableReason = bounded(reason, MAX_REASON_CHARS);
+        decidedAtMs = System.currentTimeMillis();
+        lastSuccessAgeUs =
+                lastSuccessUs == 0L
+                        ? -1L
+                        : TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - lastSuccessUs;
+        consecutiveFailures = failures;
+        record(Stage.UNAVAILABLE_DECISION);
+    }
+
+    public void record(Stage stage) {
+        if (stage == Stage.ENDPOINT_PUBLISHED && !endpointPublished.compareAndSet(false, true)) {
+            return;
+        }
+        if (stage == Stage.ENDPOINT_GATE_CLOSED
+                && !gateClosedAtMs.compareAndSet(0L, System.currentTimeMillis())) {
+            return;
+        }
+        switch (stage) {
+            case GENERATION_RETIRING -> retiring = true;
+            case ENDPOINT_WITHDRAWN -> gateClosedAtMs.compareAndSet(0L, System.currentTimeMillis());
+            case CACHE_INDEX_LOCK_ATTEMPT -> cleanupAttemptNanos = System.nanoTime();
+            case CACHE_INDEX_LOCK_ACQUIRED -> {
+                long now = System.nanoTime();
+                long started = cleanupAttemptNanos;
+                // Close the active interval before publishing its total to avoid double counting in
+                // snapshots.
+                cleanupAttemptNanos = 0L;
+                cleanupWaitUs = Math.max(0L, cleanupWaitUs) + elapsedUs(started, now);
+                cleanupAcquiredNanos = now;
+            }
+            case CACHE_INDEX_LOCK_RELEASED -> {
+                long now = System.nanoTime();
+                long started = cleanupAcquiredNanos;
+                cleanupAcquiredNanos = 0L;
+                cleanupHoldUs = Math.max(0L, cleanupHoldUs) + elapsedUs(started, now);
+            }
+            default -> {}
+        }
+        phase = stage.name();
+        if (stage.retirement) {
+            retirementPhase = stage.name();
+        }
+    }
+
+    public void record(Stage stage, Throwable failure) {
+        record(stage);
+        if (failure != null && error.get() == null) {
+            error.compareAndSet(null, errorSummary(failure));
+        }
+    }
+
+    public void record(Stage stage, String reason) {
+        error.set(bounded(reason, MAX_ERROR_MESSAGE_CHARS));
+        record(stage);
+    }
+
+    public String unavailableReason() {
+        return unavailableReason;
+    }
+
+    public void recordCleanupCounts(long scanned, long removed) {
+        scannedKeys = scanned;
+        removedMappings = removed;
+    }
+
+    /** WorkerStatus holds its health monitor so only an admitted poll replaces the latest snapshot. */
+    public Poll beginPoll(String kind, long cycle) {
+        Poll pollTrace = new Poll(kind, ++nextPollId, cycle);
+        switch (kind) {
+            case "STATUS" -> latestStatusPoll = pollTrace;
+            case "CACHE" -> latestCachePoll = pollTrace;
+            default -> throw new IllegalArgumentException("Unknown poll kind: " + kind);
+        }
+        return pollTrace;
+    }
+
+    /** Captures both poll kinds without locks; concurrent fields can describe adjacent instants. */
+    public Snapshot snapshot() {
+        Poll statusPoll = latestStatusPoll;
+        Poll cachePoll = latestCachePoll;
+        boolean isRetiring = retiring;
+        long now = System.nanoTime();
+        // Read totals before active starts, matching record's clear-before-accumulate order.
+        return new Snapshot(
+                System.currentTimeMillis(),
+                isRetiring,
+                isRetiring ? retirementPhase : phase,
+                unavailableReason,
+                decidedAtMs,
+                lastSuccessAgeUs,
+                consecutiveFailures,
+                gateClosedAtMs.get(),
+                ongoingTotalUs(cleanupWaitUs, cleanupAttemptNanos, now),
+                ongoingTotalUs(cleanupHoldUs, cleanupAcquiredNanos, now),
+                scannedKeys,
+                removedMappings,
+                error.get(),
+                statusPoll == null ? null : statusPoll.snapshot(now),
+                cachePoll == null ? null : cachePoll.snapshot(now));
+    }
+
+    public static Throwable unwrap(Throwable failure) {
+        if (!(failure instanceof CompletionException || failure instanceof ExecutionException)) {
+            return failure;
+        }
+        var seen = new IdentityHashMap<Throwable, Boolean>();
+        for (int depth = 0;
+                depth < MAX_CAUSE_DEPTH
+                        && (failure instanceof CompletionException
+                                || failure instanceof ExecutionException)
+                        && seen.put(failure, Boolean.TRUE) == null;
+                depth++) {
+            Throwable cause = failure.getCause();
+            if (cause == null) {
+                break;
+            }
+            failure = cause;
+        }
+        return failure;
+    }
+
+    private static long ongoingTotalUs(long completedUs, long startNanos, long now) {
+        return startNanos == 0L
+                ? completedUs
+                : Math.max(0L, completedUs) + elapsedUs(startNanos, now);
+    }
+
+    private static long elapsedUs(long startNanos, long endNanos) {
+        return startNanos == 0L
+                ? -1L
+                : TimeUnit.NANOSECONDS.toMicros(Math.max(0L, endNanos - startNanos));
+    }
+
+    private static String errorSummary(Throwable failure) {
+        if (failure == null) {
+            return null;
+        }
+        var text = new StringBuilder();
+        try {
+            Throwable unwrapped = unwrap(failure);
+            // Preserve types before the bounded message: an outer description must not hide the
+            // root cause.
+            appendCauseTypes(text, unwrapped);
+            appendSuppressedTypes(text, failure);
+            String message = unwrapped.getMessage();
+            if (message != null) {
+                text.append(':').append(bounded(message, MAX_ERROR_MESSAGE_CHARS));
+            }
+        } catch (RuntimeException | LinkageError ignored) {
+            if (text.isEmpty()) {
+                text.append(bounded(failure.getClass().getName(), MAX_ERROR_TYPE_CHARS));
+            }
+        }
+        return text.toString();
+    }
+
+    private static void appendCauseTypes(StringBuilder text, Throwable failure) {
+        var seen = new IdentityHashMap<Throwable, Boolean>();
+        int depth = 0;
+        while (failure != null && depth < MAX_CAUSE_DEPTH) {
+            if (depth != 0) {
+                text.append("->");
+            }
+            if (seen.put(failure, Boolean.TRUE) != null) {
+                text.append("[cycle]");
+                return;
+            }
+            String type = failure.getClass().getSimpleName();
+            text.append(
+                    bounded(
+                            type.isEmpty() ? failure.getClass().getName() : type,
+                            MAX_ERROR_TYPE_CHARS));
+            failure = failure.getCause();
+            depth++;
+        }
+        if (failure != null) {
+            text.append("->[truncated]");
+        }
+    }
+
+    private static String bounded(String text, int limit) {
+        return text == null
+                ? "UNKNOWN"
+                : text.substring(0, Math.min(limit, text.length()))
+                        .replace('\n', ' ')
+                        .replace('\r', ' ');
+    }
+
+    private static void appendSuppressedTypes(StringBuilder text, Throwable failure) {
+        var seen = new IdentityHashMap<Throwable, Boolean>();
+        int count = 0;
+        for (int depth = 0;
+                failure != null
+                        && depth < MAX_CAUSE_DEPTH
+                        && seen.put(failure, Boolean.TRUE) == null;
+                depth++, failure = failure.getCause()) {
+            for (Throwable suppressed : failure.getSuppressed()) {
+                // Suppressed attempts are diagnostic history, not the final failure's causal chain.
+                if (count == 0) {
+                    text.append(" suppressed=[");
+                } else {
+                    text.append(';');
+                }
+                if (count == MAX_SUPPRESSED_ERRORS) {
+                    text.append("[truncated]]");
+                    return;
+                }
+                appendCauseTypes(text, suppressed);
+                count++;
+            }
+        }
+        if (count != 0) {
+            text.append(']');
+        }
+    }
+
     public enum Stage {
         CACHE_CLEANUP_BEGIN(true),
         CACHE_CLEANUP_END(true),
@@ -180,6 +425,9 @@ public final class EndpointTrace {
         }
     }
 
+    /**
+     * Freezes transport timing and failure evidence used to attribute a completed RPC.
+     */
     public record Snapshot(
             long capturedAtMs,
             boolean retiring,
@@ -271,120 +519,27 @@ public final class EndpointTrace {
         }
     }
 
-    private volatile Poll latestStatusPoll;
-    private volatile Poll latestCachePoll;
-    // WorkerStatus serializes poll creation with its health monitor.
-    private long nextPollId;
-    private final AtomicBoolean endpointPublished = new AtomicBoolean();
-    private final AtomicLong gateClosedAtMs = new AtomicLong();
-    private final AtomicReference<String> error = new AtomicReference<>();
-
-    private volatile String phase = "DISCOVERED";
-    private volatile String retirementPhase = "UNKNOWN";
-    private volatile boolean retiring;
-    private volatile String unavailableReason = "UNKNOWN";
-    private volatile long decidedAtMs;
-    private volatile long lastSuccessAgeUs = -1L;
-    private volatile long consecutiveFailures = -1L;
-    private volatile long cleanupAttemptNanos;
-    private volatile long cleanupAcquiredNanos;
-    private volatile long cleanupWaitUs = -1L;
-    private volatile long cleanupHoldUs = -1L;
-    private volatile long scannedKeys;
-    private volatile long removedMappings;
-
-    public void record(Stage stage) {
-        if (stage == Stage.ENDPOINT_PUBLISHED && !endpointPublished.compareAndSet(false, true)) {
-            return;
-        }
-        if (stage == Stage.ENDPOINT_GATE_CLOSED
-                && !gateClosedAtMs.compareAndSet(0L, System.currentTimeMillis())) {
-            return;
-        }
-        switch (stage) {
-            case GENERATION_RETIRING -> retiring = true;
-            case ENDPOINT_WITHDRAWN -> gateClosedAtMs.compareAndSet(0L, System.currentTimeMillis());
-            case CACHE_INDEX_LOCK_ATTEMPT -> cleanupAttemptNanos = System.nanoTime();
-            case CACHE_INDEX_LOCK_ACQUIRED -> {
-                long now = System.nanoTime();
-                long started = cleanupAttemptNanos;
-                // Close the active interval before publishing its total to avoid double counting in
-                // snapshots.
-                cleanupAttemptNanos = 0L;
-                cleanupWaitUs = Math.max(0L, cleanupWaitUs) + elapsedUs(started, now);
-                cleanupAcquiredNanos = now;
-            }
-            case CACHE_INDEX_LOCK_RELEASED -> {
-                long now = System.nanoTime();
-                long started = cleanupAcquiredNanos;
-                cleanupAcquiredNanos = 0L;
-                cleanupHoldUs = Math.max(0L, cleanupHoldUs) + elapsedUs(started, now);
-            }
-            default -> {}
-        }
-        phase = stage.name();
-        if (stage.retirement) {
-            retirementPhase = stage.name();
-        }
-    }
-
-    public void record(Stage stage, Throwable failure) {
-        record(stage);
-        if (failure != null && error.get() == null) {
-            error.compareAndSet(null, errorSummary(failure));
-        }
-    }
-
-    public void record(Stage stage, String reason) {
-        error.set(bounded(reason, MAX_ERROR_MESSAGE_CHARS));
-        record(stage);
-    }
-
-    public void recordUnavailable(String reason, long lastSuccessUs, long failures) {
-        unavailableReason = bounded(reason, MAX_REASON_CHARS);
-        decidedAtMs = System.currentTimeMillis();
-        lastSuccessAgeUs =
-                lastSuccessUs == 0L
-                        ? -1L
-                        : TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - lastSuccessUs;
-        consecutiveFailures = failures;
-        record(Stage.UNAVAILABLE_DECISION);
-    }
-
-    public String unavailableReason() {
-        return unavailableReason;
-    }
-
-    public void recordCleanupCounts(long scanned, long removed) {
-        scannedKeys = scanned;
-        removedMappings = removed;
-    }
-
-    /** WorkerStatus holds its health monitor so only an admitted poll replaces the latest snapshot. */
-    public Poll beginPoll(String kind, long cycle) {
-        Poll pollTrace = new Poll(kind, ++nextPollId, cycle);
-        switch (kind) {
-            case "STATUS" -> latestStatusPoll = pollTrace;
-            case "CACHE" -> latestCachePoll = pollTrace;
-            default -> throw new IllegalArgumentException("Unknown poll kind: " + kind);
-        }
-        return pollTrace;
-    }
-
+    /**
+     * Collects timing and failure details for one endpoint status poll.
+     */
     public static final class Poll {
         private final long id;
         private final long syncCycleId;
+
         private final String kind;
+
         private final long startedAtMs = System.currentTimeMillis();
         private final long startedNanos = System.nanoTime();
+
         private final AtomicLong skippedBusy = new AtomicLong();
         private final AtomicReference<Stage> firstFailureStage = new AtomicReference<>();
+
         private volatile String error = "DETAILS_PENDING";
         private volatile String stage = "LEASE_ACQUIRED";
         private volatile String rpcResult = "NOT_STARTED";
         private volatile String outcome;
-        private volatile long rpcTimeoutMs;
 
+        private volatile long rpcTimeoutMs;
         private volatile long runnerSubmittedNanos;
         private volatile long runnerStartedNanos;
         private volatile long rpcStartedNanos;
@@ -403,7 +558,6 @@ public final class EndpointTrace {
         private volatile long cacheLockAttemptNanos;
         private volatile long cacheLockAcquiredNanos;
         private volatile long cacheLockReleasedNanos;
-
         // These counters have one writer: this poll's cache callback.
         private volatile long indexWaitStartedNanos;
         private volatile long indexAcquiredNanos;
@@ -417,16 +571,21 @@ public final class EndpointTrace {
             this.syncCycleId = cycle;
         }
 
-        public void record(Stage point) {
-            record(point, (Throwable) null);
-        }
-
         public Stage failureStage() {
             return firstFailureStage.get();
         }
 
         public boolean hasCallbackStarted() {
             return callbackStartedNanos != 0L;
+        }
+
+        public void recordRpcStarted(long timeoutMs) {
+            rpcTimeoutMs = timeoutMs;
+            record(Stage.RPC_STARTED);
+        }
+
+        public void record(Stage point) {
+            record(point, (Throwable) null);
         }
 
         public void record(Stage point, Throwable failure) {
@@ -485,11 +644,6 @@ public final class EndpointTrace {
             record(point);
         }
 
-        public void recordRpcStarted(long timeoutMs) {
-            rpcTimeoutMs = timeoutMs;
-            record(Stage.RPC_STARTED);
-        }
-
         public void skippedBusy() {
             skippedBusy.incrementAndGet();
         }
@@ -545,145 +699,5 @@ public final class EndpointTrace {
                     ? -1L
                     : TimeUnit.NANOSECONDS.toMillis(Math.max(0L, atNanos - startedNanos));
         }
-    }
-
-    /** Captures both poll kinds without locks; concurrent fields can describe adjacent instants. */
-    public Snapshot snapshot() {
-        Poll statusPoll = latestStatusPoll;
-        Poll cachePoll = latestCachePoll;
-        boolean isRetiring = retiring;
-        long now = System.nanoTime();
-        // Read totals before active starts, matching record's clear-before-accumulate order.
-        return new Snapshot(
-                System.currentTimeMillis(),
-                isRetiring,
-                isRetiring ? retirementPhase : phase,
-                unavailableReason,
-                decidedAtMs,
-                lastSuccessAgeUs,
-                consecutiveFailures,
-                gateClosedAtMs.get(),
-                ongoingTotalUs(cleanupWaitUs, cleanupAttemptNanos, now),
-                ongoingTotalUs(cleanupHoldUs, cleanupAcquiredNanos, now),
-                scannedKeys,
-                removedMappings,
-                error.get(),
-                statusPoll == null ? null : statusPoll.snapshot(now),
-                cachePoll == null ? null : cachePoll.snapshot(now));
-    }
-
-    private static long ongoingTotalUs(long completedUs, long startNanos, long now) {
-        return startNanos == 0L
-                ? completedUs
-                : Math.max(0L, completedUs) + elapsedUs(startNanos, now);
-    }
-
-    private static long elapsedUs(long startNanos, long endNanos) {
-        return startNanos == 0L
-                ? -1L
-                : TimeUnit.NANOSECONDS.toMicros(Math.max(0L, endNanos - startNanos));
-    }
-
-    private static String errorSummary(Throwable failure) {
-        if (failure == null) {
-            return null;
-        }
-        var text = new StringBuilder();
-        try {
-            Throwable unwrapped = unwrap(failure);
-            // Preserve types before the bounded message: an outer description must not hide the
-            // root cause.
-            appendCauseTypes(text, unwrapped);
-            appendSuppressedTypes(text, failure);
-            String message = unwrapped.getMessage();
-            if (message != null) {
-                text.append(':').append(bounded(message, MAX_ERROR_MESSAGE_CHARS));
-            }
-        } catch (RuntimeException | LinkageError ignored) {
-            if (text.isEmpty()) {
-                text.append(bounded(failure.getClass().getName(), MAX_ERROR_TYPE_CHARS));
-            }
-        }
-        return text.toString();
-    }
-
-    private static void appendCauseTypes(StringBuilder text, Throwable failure) {
-        var seen = new IdentityHashMap<Throwable, Boolean>();
-        int depth = 0;
-        while (failure != null && depth < MAX_CAUSE_DEPTH) {
-            if (depth != 0) {
-                text.append("->");
-            }
-            if (seen.put(failure, Boolean.TRUE) != null) {
-                text.append("[cycle]");
-                return;
-            }
-            String type = failure.getClass().getSimpleName();
-            text.append(
-                    bounded(
-                            type.isEmpty() ? failure.getClass().getName() : type,
-                            MAX_ERROR_TYPE_CHARS));
-            failure = failure.getCause();
-            depth++;
-        }
-        if (failure != null) {
-            text.append("->[truncated]");
-        }
-    }
-
-    private static void appendSuppressedTypes(StringBuilder text, Throwable failure) {
-        var seen = new IdentityHashMap<Throwable, Boolean>();
-        int count = 0;
-        for (int depth = 0;
-                failure != null
-                        && depth < MAX_CAUSE_DEPTH
-                        && seen.put(failure, Boolean.TRUE) == null;
-                depth++, failure = failure.getCause()) {
-            for (Throwable suppressed : failure.getSuppressed()) {
-                // Suppressed attempts are diagnostic history, not the final failure's causal chain.
-                if (count == 0) {
-                    text.append(" suppressed=[");
-                } else {
-                    text.append(';');
-                }
-                if (count == MAX_SUPPRESSED_ERRORS) {
-                    text.append("[truncated]]");
-                    return;
-                }
-                appendCauseTypes(text, suppressed);
-                count++;
-            }
-        }
-        if (count != 0) {
-            text.append(']');
-        }
-    }
-
-    public static Throwable unwrap(Throwable failure) {
-        if (!(failure instanceof CompletionException || failure instanceof ExecutionException)) {
-            return failure;
-        }
-        var seen = new IdentityHashMap<Throwable, Boolean>();
-        for (int depth = 0;
-                depth < MAX_CAUSE_DEPTH
-                        && (failure instanceof CompletionException
-                                || failure instanceof ExecutionException)
-                        && seen.put(failure, Boolean.TRUE) == null;
-                depth++) {
-            Throwable cause = failure.getCause();
-            if (cause == null) {
-                break;
-            }
-            failure = cause;
-        }
-        return failure;
-    }
-
-    private static String bounded(String text, int limit) {
-        return text == null
-                ? "UNKNOWN"
-                : text.substring(0, Math.min(limit, text.length()))
-                        .replace('\n', ' ')
-                        .replace('\r', ' ');
     }
 }

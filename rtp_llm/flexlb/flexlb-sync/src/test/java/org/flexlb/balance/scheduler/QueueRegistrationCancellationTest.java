@@ -33,7 +33,9 @@ import static org.mockito.Mockito.nullable;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Real registration and queue lifecycle; endpoint selection is isolated by a mock router. */
+/**
+ * Real registration and queue lifecycle; endpoint selection is isolated by a mock router.
+ */
 class QueueRegistrationCancellationTest {
     @Test
     void factoryWaitsForExplicitStartBeforeSelectingQueuedRequests() throws Exception {
@@ -288,6 +290,9 @@ class QueueRegistrationCancellationTest {
         }
     }
 
+    /**
+     * Wires a real queued scheduler with a controllable start and pluggable placement queue while isolating worker selection.
+     */
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.batchConfig();
         final RequestRouteSelector router = mock(RequestRouteSelector.class);
@@ -335,13 +340,13 @@ class QueueRegistrationCancellationTest {
             }
         }
 
-        RequestContext context(long id) {
-            return RequestProtocolTestSupport.context(config, id);
-        }
-
         @Override
         public void close() {
             SchedulerTestSupport.shutdown(runtime);
+        }
+
+        RequestContext context(long id) {
+            return RequestProtocolTestSupport.context(config, id);
         }
     }
 }

@@ -23,7 +23,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
-import static org.flexlb.balance.scheduler.ContextResult.DeliveryFacts;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
 import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
@@ -55,13 +54,16 @@ class RequestInactivityTest {
 
     private AbstractRequestScheduler registry;
     private RequestContext requestContext;
-    private RouteExecution item;
+    private RouteResult item;
     private PrefillEndpoint prefill;
     private DecodeEndpoint decode;
     private Delivery.Member claim;
+
     private boolean deliveryCompleted;
+
     private final CompletableFuture<EngineGrpcClient.CancelReply> cleanup =
             new CompletableFuture<>();
+
     private long registeredAtMs;
     private long handedOffAtMs;
 
@@ -92,7 +94,7 @@ class RequestInactivityTest {
         RequestContext context = RequestProtocolTestSupport.context(config, REQUEST_ID);
         CompletableFuture<Response> future =
                 RequestProtocolTestSupport.submitForManualPlacement(registry, context);
-        requestContext = registry.requests.findActive(String.valueOf(REQUEST_ID));
+        requestContext = registry.repository.findActive(String.valueOf(REQUEST_ID));
         registeredAtMs = requestContext.snapshot().createdAtMs();
         prefill = mock(PrefillEndpoint.class);
         decode = RequestProtocolTestSupport.decodeEndpoint();
@@ -117,7 +119,7 @@ class RequestInactivityTest {
         RequestProtocolTestSupport.bind(registry, registered);
         claim = RequestProtocolTestSupport.claimBatch(registry, item, 1L, () -> true);
         assertNotNull(claim);
-        assertTrue(claim.route().ctx().data().getRequestScheduler().tryStartSend(claim));
+        assertEquals(ContextResult.SendState.SENDING, claim.owner().snapshot().delivery().send());
         handedOffAtMs = requestContext.snapshot().delivery().startedAtMs();
     }
 
@@ -127,7 +129,7 @@ class RequestInactivityTest {
                 EngineGrpcClient.CancelReply
                         .FAILED); // Finish the mock RPC before draining its accepted callback.
         if (registry != null
-                && RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(registry)) {
+                && RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(registry)) {
             registry.closeOutstandingAndTerminalize();
             SchedulerTestSupport.timer(
                             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry))
@@ -203,7 +205,7 @@ class RequestInactivityTest {
         RequestProtocolTestSupport.expireInactiveRequest(
                 registry, requestContext, firstAt + 1_000 + TIMEOUT_MS - 1);
         assertTrue(
-                registry.requests.isCurrent(requestContext),
+                registry.repository.isCurrent(requestContext),
                 "the last matching heartbeat extends liveness");
         verify(prefill, never()).releaseRequest(item);
         verify(decode, never()).release(any(), any());
@@ -305,19 +307,6 @@ class RequestInactivityTest {
         assertTrue(
                 requestContext.snapshot().engine().decodeAccepted(),
                 "a malformed status must not prevent later valid activity");
-    }
-
-    private void active(RoleType source, long nowMs) {
-        registry.onWorkerRequestEvent(
-                requestContext,
-                new WorkerRequestEvent(
-                        item,
-                        source == RoleType.DECODE ? item.decodeReservation() : null,
-                        source,
-                        WorkerRequestEventType.ACTIVE,
-                        0L,
-                        null,
-                        nowMs));
     }
 
     @ParameterizedTest
@@ -435,27 +424,11 @@ class RequestInactivityTest {
         }
         try {
             assertTrue(started.await(1L, TimeUnit.SECONDS));
-            long past = System.currentTimeMillis() - TIMEOUT_MS - 1_000L;
-            org.springframework.test.util.ReflectionTestUtils.setField(
-                    requestContext, "lastWorkerAtMs", past);
-            var old = requestContext.snapshot().delivery();
-            var aged =
-                    new DeliveryFacts(
-                            old.identity(),
-                            old.send(),
-                            old.acknowledged(),
-                            old.abandonment(),
-                            old.executionFinished(),
-                            old.prefillProof(),
-                            old.decodeProof(),
-                            past);
-            org.springframework.test.util.ReflectionTestUtils.setField(
-                    requestContext, "delivery", aged);
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                    requestContext, "commitSnapshot", System.currentTimeMillis());
-            registry.onDeadline(
-                    requestContext.snapshot().deadlines().inactivity(), System.currentTimeMillis());
-            completeDelivery(Delivery.Result.delivered());
+            long expiredAtMs = handedOffAtMs + TIMEOUT_MS + 1_000L;
+            registry.onDeadline(exact, expiredAtMs);
+            registry.onDeliveryResult(
+                    new TransportResult(claim, Delivery.Result.delivered(), expiredAtMs));
+            deliveryCompleted = true;
             verify(responses, never()).submit(any(), any());
             assertEquals(
                     RequestState.Phase.TIMED_OUT,
@@ -492,7 +465,7 @@ class RequestInactivityTest {
                 RequestState.Phase.CANCEL_REQUESTED,
                 registry.cancel(String.valueOf(REQUEST_ID), 0L, CancelReason.CLIENT_CANCELLED)
                         .state());
-        assertEquals(1, registry.requests.liveRequestCount());
+        assertEquals(1, registry.repository.liveRequestCount());
         assertFalse(claim.completion().toCompletableFuture().isDone());
 
         synchronized (requestContext) {
@@ -512,7 +485,7 @@ class RequestInactivityTest {
     @EnumSource(StaleFact.class)
     void staleEndpointOrRequestGenerationCannotRenewInactivity(StaleFact source) {
         long lateStatusAt = registeredAtMs + 2L * TIMEOUT_MS;
-        RouteExecution route = item;
+        RouteResult route = item;
         var reservation = item.decodeReservation();
         RoleType role =
                 source == StaleFact.PREFILL_ENDPOINT || source == StaleFact.PREFILL_ITEM
@@ -525,7 +498,8 @@ class RequestInactivityTest {
                     SchedulingTestConfig.createRoute(
                             item.ctx(),
                             SchedulingTestConfig.routeResponse(item),
-                            item.prefill(),
+                            item.role(org.flexlb.dao.route.RoleType.PREFILL)
+                                    .toServerStatus(item.requestId()),
                             null,
                             source == StaleFact.PREFILL_ENDPOINT
                                     ? mock(PrefillEndpoint.class)
@@ -585,6 +559,19 @@ class RequestInactivityTest {
         active(source, nowMs);
     }
 
+    private void active(RoleType source, long nowMs) {
+        registry.onWorkerRequestEvent(
+                requestContext,
+                new WorkerRequestEvent(
+                        item,
+                        source == RoleType.DECODE ? item.decodeReservation() : null,
+                        source,
+                        WorkerRequestEventType.ACTIVE,
+                        0L,
+                        null,
+                        nowMs));
+    }
+
     private void assertLiveAndCharged() {
         assertEquals(
                 1,
@@ -599,20 +586,20 @@ class RequestInactivityTest {
         verify(prefill, never()).releaseRequest(any());
     }
 
-    private void completeDelivery(Delivery.Result result) {
-        registry.onDeliveryResult(new TransportResult(claim, result, System.currentTimeMillis()));
-        deliveryCompleted = true;
-    }
-
     private void acknowledgeDelivery() throws Exception {
         completeDelivery(Delivery.Result.delivered());
         assertTrue(item.ctx().data().getFuture().get(1L, TimeUnit.SECONDS).isSuccess());
     }
 
+    private void completeDelivery(Delivery.Result result) {
+        registry.onDeliveryResult(new TransportResult(claim, result, System.currentTimeMillis()));
+        deliveryCompleted = true;
+    }
+
     private void assertExpiredAndReleased(RequestState.Phase expectedState) {
         if (!claim.completion().toCompletableFuture().isDone()) {
             assertEquals(
-                    1, registry.requests.liveRequestCount(), "expiry retains cleanup ownership");
+                    1, registry.repository.liveRequestCount(), "expiry retains cleanup ownership");
             cleanup.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
             if (!deliveryCompleted) {
                 assertFalse(

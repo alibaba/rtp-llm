@@ -5,7 +5,7 @@
 ## 调度、队列和策略
 
 选路结果与执行状态分开保存。单角色快照只在 `RoleSelection` 保存一份，
-`RouteResult` 组合这些快照，`RouteExecution` 保存一次准入和投递的运行关联。
+`RouteResult` 组合这些快照并关联请求，同一个对象作为本次准入、队列成员和投递回调的精确身份。
 
 ```mermaid
 classDiagram
@@ -15,15 +15,14 @@ classDiagram
     RoleSelection <|-- Auxiliary
     RouteResult "1" *-- "1..*" RoleSelection : 有序角色组合
     RoleSelection --> WorkerEndpoint : 精确端点引用
-    RouteExecution --> RouteResult : 不复制选择字段
-    RouteExecution --> RequestContext : 请求运行数据
-    RouteExecution --> Delivery : 准备过程
-    RequestContext --> RouteExecution : 当前执行身份
+    RouteResult --> RequestContext : 请求运行数据
+    Delivery --> RouteResult : 本次成员引用
+    RequestContext --> RouteResult : 当前执行身份
     RouteResult ..> Response : 按需协议投影
 ```
 
-`Prefill` 保存估计工作量和资源版本，`Decode` 保存资源版本；`Auxiliary` 用于当前没有
-附加资源估计的 Encoder/VIT。预留句柄属于 `RouteExecution`，实际资源账本属于 Endpoint。
+`Prefill` 保存估计工作量和精确登记，`Decode` 保存精确登记；`Auxiliary` 用于当前没有
+附加资源估计的 Encoder/VIT。精确登记分别属于 `RoleSelection.Prefill` 与 `RoleSelection.Decode`；RouteResult 不另存或补挂句柄，实际资源账本属于 Endpoint。
 Snapshot 和异步事件沿用执行对象的引用身份，旧回调不能命中新一次选路。
 
 ```mermaid
@@ -106,7 +105,7 @@ classDiagram
     DeliveryMember --> RequestContext : 请求实例
 ```
 
-`PlacementOperation` 是一次选路操作的不可变身份，只保存所属 Context 和待撤回的旧 Route。操作是否正在完成只记录在 Context 的 `PlacementFacts.completing` 中，操作对象不再保存另一份 resolved 状态。Scheduler 完成前先由 Context 按对象身份认领清理；重复或过期操作不会再次释放资源或归还准入计数。清理期间保留 placement，清理结束才移除，防止取消、停服或下一次选路提前推进。`PlacementOperation.close()` 仅检查是否显式完成，不执行资源清理。`Delivery.Member` 从准备资源到投递使用同一份精确成员身份；发送结果、取消和资源释放事实仍保存在 `RequestContext`。响应设施内保留 `ResponseCompletionExecutor.RequestFuture`。
+`PlacementOperation` 是一次选路操作的不可变身份，只保存所属 Context 和待撤回的旧 Route。操作是否正在完成只记录在 Context 的 `PlacementFacts.completing` 中，操作对象不再保存另一份 resolved 状态。Scheduler 完成前先由 Context 按对象身份认领清理；重复或过期操作不会再次释放资源或归还准入计数。清理期间保留 placement，清理结束才移除，防止取消、停服或下一次选路提前推进。`PlacementOperation` 不实现 AutoCloseable；真实完成及资源清理由 Scheduler 推进。`Delivery.Member` 从准备资源到投递使用同一份精确成员身份；发送结果、取消和资源释放事实仍保存在 `RequestContext`。响应设施内保留 `ResponseCompletionExecutor.RequestFuture`。
 
 `RequestRoute` 在发布前附加精确 Decode 预留，选择与资源准备共用同一个对象。`AbstractRequestScheduler.beginRoute` 绑定精确请求身份，Dispatcher 在资源操作后直接记录 Context 的发布事实；调度器基类不再提供 publishRoute 转发协议；重复发布由 Context 的已发布状态拒绝。
 
@@ -192,4 +191,4 @@ Prefill/Decode 默认选择策略分开表达候选筛选、成本或缓存亲�
 
 Worker queue order includes blocked-head alternatives: `PrefillRequestQueue.candidatesAfterBlockedHead` defaults to no bypass, and `recordDispatch` receives only successful commits under the endpoint lock. `OrderedPrefillRequestQueue` owns the bounded bypass rule and allowance. `GroupPlanner` decides readiness for ordinary and bypass groups; the Scheduler preserves its deadline while watching head capacity.
 
-`PlacementResult.ENDPOINT_CHANGED` retains the successful strategy result when its exact Prefill/Decode generation cannot be captured. It is distinct from strategy `BLOCKED`; retry timing remains with RequestScheduler. Class and module budgets remain unfinished.
+`PlacementResult.RETRY` 表示本轮需要重新选择；`BLOCKED` 表示按策略等待容量。结果不再嵌套旧的选择结果。QueuedRequestScheduler 使用局部变量完成普通选点与发布；异步抢占仅保留原操作、Decode Endpoint 与 Future，PlacementPlan 和二次接收登记协议已删除。

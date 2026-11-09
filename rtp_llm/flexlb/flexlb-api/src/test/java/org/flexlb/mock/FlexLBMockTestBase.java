@@ -17,6 +17,7 @@ import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.InternalRuntimeSettings;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -72,63 +73,44 @@ import static org.mockito.Mockito.withSettings;
  * </pre>
  */
 public abstract class FlexLBMockTestBase {
-
     private static final Logger log = LoggerFactory.getLogger(FlexLBMockTestBase.class);
-
-    // ==================== Managed resources ====================
-    protected MockPrefillWorker mockPrefillWorker;
-
-    protected MockDecodeWorker mockDecodeWorker;
-
-    protected AbstractRequestScheduler scheduler;
-
-    protected EndpointRegistry endpointRegistry;
-
-    protected FlexlbConfig config;
-
-    protected ConfigService configService;
-
-    protected RequestRouteSelector router;
-
-    protected EngineGrpcClient grpcClient;
-
-    protected DeliveryDispatcher dispatcher;
-
-    protected DeliveryMetricsReporter reporter;
-
-    protected EndpointRegistry engineWorkerStatus;
-
-    protected RequestSchedulerTestRuntime schedulerRuntime;
-
-    private NioEventLoopGroup eventLoopGroup;
-
-    private ThreadPoolExecutor grpcExecutor;
 
     /**
      * Addressable logical endpoints: one subnet per 254 endpoints.
      */
     private static final int LOGICAL_WORKER_INDEX_LIMIT = 254 * 254;
 
+    // ==================== Managed resources ====================
+    protected MockPrefillWorker mockPrefillWorker;
+    protected MockDecodeWorker mockDecodeWorker;
+    protected AbstractRequestScheduler scheduler;
+    protected EndpointRegistry endpointRegistry;
+    protected FlexlbConfig config;
+    protected ConfigService configService;
+    protected RequestRouteSelector router;
+    protected EngineGrpcClient grpcClient;
+    protected DeliveryDispatcher dispatcher;
+    protected DeliveryMetricsReporter reporter;
+    protected EndpointRegistry engineWorkerStatus;
+    protected RequestSchedulerTestRuntime schedulerRuntime;
+    private NioEventLoopGroup eventLoopGroup;
+    private ThreadPoolExecutor grpcExecutor;
+
     // Additional prefill workers started by tests (for multi-worker scenarios)
     private final List<MockPrefillWorker> additionalPrefillWorkers = new ArrayList<>();
-
     private final List<String> additionalPrefillIpPorts = new ArrayList<>();
-
     private final List<String> additionalDecodeIpPorts = new ArrayList<>();
 
     // ==================== Worker addresses (set by setupWorkers) ====================
     protected String prefillIp;
 
     protected int prefillHttpPort;
-
     protected int prefillGrpcPort;
 
     protected String prefillIpPort;
-
     protected String decodeIp;
 
     protected int decodeHttpPort;
-
     protected int decodeGrpcPort;
 
     protected String decodeIpPort;
@@ -379,6 +361,21 @@ public abstract class FlexLBMockTestBase {
         return scheduler.submit(createRequestContext(requestId));
     }
 
+    // ==================== Internal: RequestContext construction ====================
+    protected RequestContext createRequestContext(long requestId) {
+        return createRequestContext(requestId, 128);
+    }
+
+    protected RequestContext createRequestContext(String requestId) {
+        return createRequestContext(requestId, 128);
+    }
+
+    protected RequestContext createRequestContext(long requestId, long seqLen) {
+        var context = createRequestContext(Long.toString(requestId), seqLen);
+        context.data().setGenerateInputPb(ByteString.copyFrom(generateInputBytes(requestId)));
+        return context;
+    }
+
     /**
      * Submit a request with the given ID and seq_len.
      */
@@ -389,10 +386,6 @@ public abstract class FlexLBMockTestBase {
     // ==================== Helper: endpoint accessors ====================
     protected PrefillEndpoint getPrefillEndpoint() {
         return (PrefillEndpoint) endpointRegistry.get(RoleType.PREFILL, prefillIpPort + "@0");
-    }
-
-    protected DecodeEndpoint getDecodeEndpoint() {
-        return (DecodeEndpoint) endpointRegistry.get(RoleType.DECODE, decodeIpPort + "@0");
     }
 
     // ==================== Helper: multi-worker support ====================
@@ -521,63 +514,12 @@ public abstract class FlexLBMockTestBase {
         return endpoint;
     }
 
-    // ==================== Internal: RequestContext construction ====================
-    protected RequestContext createRequestContext(long requestId) {
-        return createRequestContext(requestId, 128);
-    }
-
-    protected RequestContext createRequestContext(String requestId) {
-        return createRequestContext(requestId, 128);
-    }
-
-    protected RequestContext createRequestContext(long requestId, long seqLen) {
-        var context = createRequestContext(Long.toString(requestId), seqLen);
-        context.data().setGenerateInputPb(ByteString.copyFrom(generateInputBytes(requestId)));
-        return context;
-    }
-
-    private RequestContext createRequestContext(String requestId, long seqLen) {
-        Request request =
-                Request.builder()
-                        .requestId(String.valueOf(requestId))
-                        .seqLen(seqLen)
-                        .maxNewTokens(8)
-                        .numBeams(1)
-                        .model("mock-model")
-                        .build();
-
-        RequestContext ctx = new RequestContext(config);
-        ctx.data().setRequest(request);
-        ctx.data().setGenerateInputPb(ByteString.EMPTY);
-        return ctx;
-    }
-
-    private static byte[] generateInputBytes(long requestId) {
-        EngineRpcService.GenerateInputPB input =
-                EngineRpcService.GenerateInputPB.newBuilder()
-                        .setRequestId(requestId)
-                        .addTokenIds(101)
-                        .addTokenIds(102)
-                        .setGenerateConfig(
-                                EngineRpcService.GenerateConfigPB.newBuilder()
-                                        .setMaxNewTokens(8)
-                                        .setGroupTimeout(com.google.protobuf.Int32Value.of(77))
-                                        .build())
-                        .build();
-        return input.toByteArray();
-    }
-
     /**
      * Apply one strictly newer response through the production transaction.
      */
     protected final void applyWorkerStatusResponse(
             WorkerStatus status, WorkerStatusResponse response) {
         schedulerRuntime.applyStatus(status, response);
-    }
-
-    private void discover(WorkerStatus status) {
-        engineWorkerStatus.currentOrDiscover(
-                status.getRole(), status.getLogicalIpPort(), () -> status);
     }
 
     /**
@@ -601,6 +543,53 @@ public abstract class FlexLBMockTestBase {
                         total,
                         status.appliedStatusCursor().statusVersion() + 1L);
         schedulerRuntime.applyStatus(status, response);
+    }
+
+    protected DecodeEndpoint getDecodeEndpoint() {
+        return (DecodeEndpoint) endpointRegistry.get(RoleType.DECODE, decodeIpPort + "@0");
+    }
+
+    private RequestContext createRequestContext(String requestId, long seqLen) {
+        Request request =
+                Request.builder()
+                        .requestId(String.valueOf(requestId))
+                        .seqLen(seqLen)
+                        .maxNewTokens(8)
+                        .numBeams(1)
+                        .model("mock-model")
+                        .build();
+
+        RequestContext ctx = new RequestContext(config);
+        ctx.data().setRequest(request);
+        ctx.data()
+                .setSchedulingMetadata(
+                        SchedulingMetadata.of(
+                                request.getRawPriority(),
+                                null,
+                                config.resolveExpiresAtMs(ctx.data().getStartTime()),
+                                config.defaultPriority()));
+        ctx.data().setGenerateInputPb(ByteString.EMPTY);
+        return ctx;
+    }
+
+    private static byte[] generateInputBytes(long requestId) {
+        EngineRpcService.GenerateInputPB input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(requestId)
+                        .addTokenIds(101)
+                        .addTokenIds(102)
+                        .setGenerateConfig(
+                                EngineRpcService.GenerateConfigPB.newBuilder()
+                                        .setMaxNewTokens(8)
+                                        .setGroupTimeout(com.google.protobuf.Int32Value.of(77))
+                                        .build())
+                        .build();
+        return input.toByteArray();
+    }
+
+    private void discover(WorkerStatus status) {
+        engineWorkerStatus.currentOrDiscover(
+                status.getRole(), status.getLogicalIpPort(), () -> status);
     }
 
     private WorkerEndpoint publishEndpoint(

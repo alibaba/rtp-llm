@@ -21,37 +21,34 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks that executor rejection after scheduler stop returns the planning slot without failing the request twice.
+ */
 class QueuedSchedulerStopRaceTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void rejectedExecutionAfterStopReleasesTheSlotWithoutRecordingARequestFailure(
             boolean stopping) {
         var config = SchedulingTestConfig.batchConfig();
-        var lifecycle = mock(AbstractRequestScheduler.class);
         var requests = mock(RequestRepository.class);
         when(requests.snapshotActive()).thenReturn(java.util.List.of());
-        ReflectionTestUtils.setField(lifecycle, "requests", requests);
         var tasks = mock(RequestTaskPool.class);
-        ReflectionTestUtils.setField(lifecycle, "tasks", tasks);
-        ReflectionTestUtils.setField(lifecycle, "dispatcher", mock(DeliveryDispatcher.class));
-        ReflectionTestUtils.setField(lifecycle, "expirationTimer", mock(ExpirationTimer.class));
-        ReflectionTestUtils.setField(
-                lifecycle, "responseCompletions", mock(ResponseCompletionExecutor.class));
-        ReflectionTestUtils.setField(
-                lifecycle,
-                "deliveryReporter",
-                mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class));
-        ReflectionTestUtils.setField(
-                lifecycle, "cacheTrace", mock(org.flexlb.service.TheoryCacheHitReporter.class));
         var scheduler =
-                SchedulerTestServices.queued(
+                new QueuedRequestScheduler(
                         config,
                         mock(RequestRouteSelector.class),
                         mock(DecodePreemption.class),
-                        lifecycle,
+                        requests,
+                        tasks,
+                        mock(ExpirationTimer.class),
+                        mock(DeliveryDispatcher.class),
+                        mock(ResponseCompletionExecutor.class),
+                        mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class),
+                        mock(org.flexlb.service.TheoryCacheHitReporter.class),
                         new PlacementAvailability(),
                         new OrderedRequestQueue(false),
-                        BuiltinGroupPlanner.from(config));
+                        BuiltinGroupPlanner.from(config),
+                        mock(org.flexlb.balance.endpoint.EndpointRegistry.class));
         var original = (ExecutorService) ReflectionTestUtils.getField(scheduler, "planners");
         var executor = mock(ExecutorService.class);
         var rejection =

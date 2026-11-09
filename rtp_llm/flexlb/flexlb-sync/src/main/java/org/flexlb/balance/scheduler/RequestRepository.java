@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RequestPhase;
 import org.springframework.stereotype.Component;
 
@@ -11,19 +12,19 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
-/** Shared identity directory; request decisions remain with the exact context and its owner. */
+/**
+ * Shared identity directory; request decisions remain with the exact context and its owner.
+ */
 @Component
 public final class RequestRepository {
-    @org.springframework.scheduling.annotation.Scheduled(fixedRate = 60_000L)
-    public void maintainExpiration() {
-        if (!closed) expireTerminalRecords(System.currentTimeMillis() - 10_000L);
-    }
-
     private final Object registrationLock = new Object();
     private final EnumMap<RequestPhase, ConcurrentMap<String, RequestContext>> activeByPhase =
             new EnumMap<>(RequestPhase.class);
     private final EnumMap<RequestPhase, ConcurrentMap<String, TerminalRecord>> terminalByPhase =
             new EnumMap<>(RequestPhase.class);
+
+    private volatile boolean closed;
+    private volatile boolean stopping;
 
     public RequestRepository() {
         for (RequestPhase phase : RequestPhase.values()) {
@@ -32,63 +33,22 @@ public final class RequestRepository {
         }
     }
 
-    private volatile boolean closed;
-    private volatile boolean stopping;
-
-    enum RegistrationResult {
-        REGISTERED,
-        DUPLICATE_ID,
-        CONTEXT_BOUND,
-        INPUT_REQUIRED,
-        CLOSED
+    @org.springframework.scheduling.annotation.Scheduled(fixedRate = 60_000L)
+    public void maintainExpiration() {
+        if (!closed) expireTerminalRecords(System.currentTimeMillis() - 10_000L);
     }
 
-    public record TerminalRecord(RequestState state, AbstractRequestScheduler owner) {}
+    public AbstractRequestScheduler ownerOf(String requestId) {
+        return ownerOf(requestId, RequestPhase.GENERATION);
+    }
 
-    RegistrationResult register(
-            RequestContext context, AbstractRequestScheduler scheduler, RequestFuture response) {
-        java.util.Objects.requireNonNull(context);
-        java.util.Objects.requireNonNull(scheduler);
-        java.util.Objects.requireNonNull(response);
-        synchronized (registrationLock) {
-            if (closed || stopping) {
-                return RegistrationResult.CLOSED;
-            }
-            synchronized (context) {
-                var data = context.data();
-                synchronized (data) {
-                    String id = data.getRequestId();
-                    var activeRequests = activeByPhase.get(data.getPhase());
-                    var terminalRecords = terminalByPhase.get(data.getPhase());
-                    if (activeRequests.containsKey(id) || terminalRecords.containsKey(id)) {
-                        return RegistrationResult.DUPLICATE_ID;
-                    }
-                    if (data.getRequestScheduler() != null || context.snapshot().key() != null) {
-                        return RegistrationResult.CONTEXT_BOUND;
-                    }
-                    if (data.getPhase() == RequestPhase.GENERATION
-                            && data.getConfig().getDispatcher().requiresGenerateInput()
-                            && !data.hasGenerateInput()) {
-                        return RegistrationResult.INPUT_REQUIRED;
-                    }
-                    long timeout =
-                            data.getConfig().getRequestLifecycle().getRequest().getTimeoutMs();
-                    if (timeout <= 0L) {
-                        throw new IllegalArgumentException(
-                                "positive request inactivity timeout required");
-                    }
-                    if (data.getPhase() == RequestPhase.ENCODER
-                            || !data.getConfig().getDispatcher().requiresGenerateInput()) {
-                        data.discardGenerateInput();
-                    }
-                    data.register(scheduler, response);
-                    context.register(
-                            id, System.currentTimeMillis(), data.getRequestExpiresAtMs(), timeout);
-                    activeRequests.put(id, context);
-                }
-            }
-            return RegistrationResult.REGISTERED;
+    public AbstractRequestScheduler ownerOf(String requestId, RequestPhase phase) {
+        RequestContext context = findActive(requestId, phase);
+        if (context != null) {
+            return context.data().getRequestScheduler();
         }
+        TerminalRecord terminal = findTerminal(requestId, phase);
+        return terminal == null ? null : terminal.owner();
     }
 
     public RequestContext findActive(String requestId) {
@@ -107,32 +67,9 @@ public final class RequestRepository {
         return terminalByPhase.get(phase).get(requestId);
     }
 
-    public AbstractRequestScheduler ownerOf(String requestId) {
-        return ownerOf(requestId, RequestPhase.GENERATION);
-    }
-
-    public AbstractRequestScheduler ownerOf(String requestId, RequestPhase phase) {
-        RequestContext context = findActive(requestId, phase);
-        if (context != null) {
-            return context.data().getRequestScheduler();
-        }
-        TerminalRecord terminal = findTerminal(requestId, phase);
-        return terminal == null ? null : terminal.owner();
-    }
-
-    public List<RequestContext> snapshotActive() {
-        return activeByPhase.values().stream().flatMap(map -> map.values().stream()).toList();
-    }
-
     public boolean retainsIdentity(String requestId) {
         return activeByPhase.values().stream().anyMatch(map -> map.containsKey(requestId))
                 || terminalByPhase.values().stream().anyMatch(map -> map.containsKey(requestId));
-    }
-
-    public boolean isCurrent(RequestContext exact) {
-        return exact != null
-                && activeByPhase.get(exact.data().getPhase()).get(exact.data().getRequestId())
-                        == exact;
     }
 
     public boolean closeRegistration() {
@@ -178,6 +115,10 @@ public final class RequestRepository {
         return true;
     }
 
+    public List<RequestContext> snapshotActive() {
+        return activeByPhase.values().stream().flatMap(map -> map.values().stream()).toList();
+    }
+
     public boolean isStopping() {
         return stopping;
     }
@@ -186,55 +127,14 @@ public final class RequestRepository {
         return closed;
     }
 
-    void archive(RequestContext exact, RequestState terminal) {
-        synchronized (registrationLock) {
-            if (activeByPhase.get(exact.data().getPhase()).get(exact.data().getRequestId())
-                    != exact) {
-                return;
-            }
-            terminalByPhase
-                    .get(exact.data().getPhase())
-                    .put(
-                            exact.data().getRequestId(),
-                            new TerminalRecord(terminal, exact.data().getRequestScheduler()));
-            activeByPhase.get(exact.data().getPhase()).remove(exact.data().getRequestId(), exact);
-            exact.data().releaseSchedulingInput();
-        }
-    }
-
-    boolean removeExactTerminal(TerminalRecord exact, long before) {
-        if (exact == null || exact.state().updatedAtMs() >= before) {
-            return false;
-        }
-        synchronized (registrationLock) {
-            if (terminalByPhase.get(exact.state().requestPhase()).get(exact.state().requestId())
-                    != exact) {
-                return false;
-            }
-            return terminalByPhase
-                    .get(exact.state().requestPhase())
-                    .remove(exact.state().requestId(), exact);
-        }
-    }
-
-    void expireTerminalRecords(long before) {
-        terminalByPhase
-                .values()
-                .forEach(map -> map.forEach((id, record) -> removeExactTerminal(record, before)));
-    }
-
-    public int liveRequestCount() {
-        return activeByPhase.values().stream().mapToInt(Map::size).sum();
-    }
-
-    /** Count accepted QUEUE requests before delivery handoff, not just global queue entries. */
+    /**
+     * Count accepted requests before delivery handoff, including direct requests.
+     */
     public int pendingDeliveryRequestCount() {
         int pending = 0;
         for (RequestContext context : snapshotActive()) {
             var state = context.snapshot();
-            if (context.data().getConfig().isQueue()
-                    && state.phase() == ContextResult.Phase.OPEN
-                    && state.delivery() == null) {
+            if (state.phase() == ContextResult.Phase.OPEN && state.delivery() == null) {
                 pending++;
             }
         }
@@ -269,6 +169,16 @@ public final class RequestRepository {
         return List.copyOf(snapshots);
     }
 
+    public int liveRequestCount() {
+        return activeByPhase.values().stream().mapToInt(Map::size).sum();
+    }
+
+    public boolean isCurrent(RequestContext exact) {
+        return exact != null
+                && activeByPhase.get(exact.data().getPhase()).get(exact.data().getRequestId())
+                        == exact;
+    }
+
     public RequestState getRequestState(String requestId, long expectedBatchId) {
         return getRequestState(requestId, expectedBatchId, RequestPhase.GENERATION);
     }
@@ -283,4 +193,93 @@ public final class RequestRepository {
                         : terminal == null ? null : terminal.state();
         return state != null && state.matchesBatch(expectedBatchId) ? state : null;
     }
+
+    RegistrationResult register(
+            RequestContext context,
+            AbstractRequestScheduler scheduler,
+            RequestFuture response,
+            long inactivityTimeoutMs,
+            StrategyErrorType timeoutError) {
+        java.util.Objects.requireNonNull(context);
+        java.util.Objects.requireNonNull(scheduler);
+        java.util.Objects.requireNonNull(response);
+        java.util.Objects.requireNonNull(timeoutError, "timeout error required");
+        if (inactivityTimeoutMs <= 0L) {
+            throw new IllegalArgumentException("positive request inactivity timeout required");
+        }
+        synchronized (registrationLock) {
+            if (closed || stopping) {
+                return RegistrationResult.CLOSED;
+            }
+            synchronized (context) {
+                var data = context.data();
+                synchronized (data) {
+                    String id = data.getRequestId();
+                    var activeRequests = activeByPhase.get(data.getPhase());
+                    var terminalRecords = terminalByPhase.get(data.getPhase());
+                    if (activeRequests.containsKey(id) || terminalRecords.containsKey(id)) {
+                        return RegistrationResult.DUPLICATE_ID;
+                    }
+                    if (data.getRequestScheduler() != null || context.snapshot().key() != null) {
+                        return RegistrationResult.CONTEXT_BOUND;
+                    }
+                    data.register(scheduler, response);
+                    context.register(
+                            id,
+                            System.currentTimeMillis(),
+                            data.getRequestExpiresAtMs(),
+                            inactivityTimeoutMs,
+                            timeoutError);
+                    activeRequests.put(id, context);
+                }
+            }
+            return RegistrationResult.REGISTERED;
+        }
+    }
+
+    void archive(RequestContext exact, RequestState terminal) {
+        synchronized (registrationLock) {
+            if (activeByPhase.get(exact.data().getPhase()).get(exact.data().getRequestId())
+                    != exact) {
+                return;
+            }
+            terminalByPhase
+                    .get(exact.data().getPhase())
+                    .put(
+                            exact.data().getRequestId(),
+                            new TerminalRecord(terminal, exact.data().getRequestScheduler()));
+            activeByPhase.get(exact.data().getPhase()).remove(exact.data().getRequestId(), exact);
+            exact.data().releaseSchedulingInput();
+        }
+    }
+
+    void expireTerminalRecords(long before) {
+        terminalByPhase
+                .values()
+                .forEach(map -> map.forEach((id, record) -> removeExactTerminal(record, before)));
+    }
+
+    boolean removeExactTerminal(TerminalRecord exact, long before) {
+        if (exact == null || exact.state().updatedAtMs() >= before) {
+            return false;
+        }
+        synchronized (registrationLock) {
+            if (terminalByPhase.get(exact.state().requestPhase()).get(exact.state().requestId())
+                    != exact) {
+                return false;
+            }
+            return terminalByPhase
+                    .get(exact.state().requestPhase())
+                    .remove(exact.state().requestId(), exact);
+        }
+    }
+
+    enum RegistrationResult {
+        REGISTERED,
+        DUPLICATE_ID,
+        CONTEXT_BOUND,
+        CLOSED
+    }
+
+    public record TerminalRecord(RequestState state, AbstractRequestScheduler owner) {}
 }

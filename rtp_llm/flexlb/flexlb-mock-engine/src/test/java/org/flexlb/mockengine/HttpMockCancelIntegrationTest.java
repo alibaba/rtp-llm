@@ -66,17 +66,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * </ul>
  */
 class HttpMockCancelIntegrationTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private static final int BASE_PORT = 63500;
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
     private MockControlServer controlServer;
     private JavaMockEngineCluster.FastRpcService prefillService;
     private JavaMockEngineCluster.FastRpcService decodeService;
+
     private int nextPortOffset;
 
     @BeforeEach
@@ -683,21 +683,6 @@ class HttpMockCancelIntegrationTest {
         controlServer.start();
     }
 
-    private boolean scheduleOwnedDecode(long requestId) throws Exception {
-        prefillService.registerDecodeOwnership(requestId, decodeService);
-        boolean accepted =
-                invokeScheduleDecodeCompletion(decodeService, shapeOf(requestId), -1, null);
-        if (!accepted) {
-            prefillService.clearDecodeOwnership(requestId, decodeService);
-        }
-        return accepted;
-    }
-
-    private EngineGrpcClient channel() {
-        return MockEngineClients.overHttp(
-                "http://127.0.0.1:" + MockEngineTestSupport.controlPort(controlServer));
-    }
-
     private MockPerformanceModel model(double decodeStepMs, boolean reportQueuedAsKvAllocated)
             throws Exception {
         Map<String, Object> decodeConfig = new LinkedHashMap<>();
@@ -708,8 +693,14 @@ class HttpMockCancelIntegrationTest {
                 tempDir, "10", 0.1, decodeStepMs, Map.of(), decodeConfig);
     }
 
-    private MockPerformanceModel.RequestShape shapeOf(long requestId) throws Exception {
-        return MockEngineTestSupport.requestShape(decodeService.getPerformance(), requestId, 8);
+    private boolean scheduleOwnedDecode(long requestId) throws Exception {
+        prefillService.registerDecodeOwnership(requestId, decodeService);
+        boolean accepted =
+                invokeScheduleDecodeCompletion(decodeService, shapeOf(requestId), -1, null);
+        if (!accepted) {
+            prefillService.clearDecodeOwnership(requestId, decodeService);
+        }
+        return accepted;
     }
 
     private static boolean invokeScheduleDecodeCompletion(
@@ -720,5 +711,14 @@ class HttpMockCancelIntegrationTest {
             throws Exception {
         return MockEngineTestSupport.scheduleDecodeCompletion(
                 service, shape, batchId, responseQueue);
+    }
+
+    private MockPerformanceModel.RequestShape shapeOf(long requestId) throws Exception {
+        return MockEngineTestSupport.requestShape(decodeService.getPerformance(), requestId, 8);
+    }
+
+    private EngineGrpcClient channel() {
+        return MockEngineClients.overHttp(
+                "http://127.0.0.1:" + MockEngineTestSupport.controlPort(controlServer));
     }
 }

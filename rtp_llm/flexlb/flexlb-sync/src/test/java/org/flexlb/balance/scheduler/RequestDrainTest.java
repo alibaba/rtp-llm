@@ -15,6 +15,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 
+/**
+ * Distinguishes waiting for frontend responses from releasing resources or archiving their request contexts.
+ */
 class RequestDrainTest {
     @Test
     void responseCompletionWakesDrainWithoutReleasingOrArchivingTheRequest() throws Exception {
@@ -24,7 +27,12 @@ class RequestDrainTest {
         var response = new RequestFuture((kind, result, failure) -> false);
         assertEquals(
                 RequestRepository.RegistrationResult.REGISTERED,
-                requests.register(context, owner, response));
+                requests.register(
+                        context,
+                        owner,
+                        response,
+                        60_000L,
+                        org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED));
         assertThrows(IllegalStateException.class, () -> requests.awaitResponses(Long.MAX_VALUE));
         requests.stopAccepting();
         assertFalse(requests.awaitResponses(System.nanoTime()));
@@ -61,7 +69,12 @@ class RequestDrainTest {
                     RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), i + 1L);
             assertEquals(
                     RequestRepository.RegistrationResult.REGISTERED,
-                    requests.register(context, owner, responses.get(i)));
+                    requests.register(
+                            context,
+                            owner,
+                            responses.get(i),
+                            60_000L,
+                            org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED));
         }
         requests.stopAccepting();
         failed.completeExceptionallyOwned(new IllegalStateException("test failure"));
@@ -78,7 +91,12 @@ class RequestDrainTest {
         var requests = new RequestRepository();
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 1L);
         var response = new RequestFuture((kind, result, failure) -> false);
-        requests.register(context, mock(AbstractRequestScheduler.class), response);
+        requests.register(
+                context,
+                mock(AbstractRequestScheduler.class),
+                response,
+                60_000L,
+                org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED);
         requests.stopAccepting();
         Thread.currentThread().interrupt();
         try {

@@ -37,20 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  */
 class FaultInjectionE2ETest {
-
     private static final int BASE_PORT = 62900;
-
-    /** 通用布防：单请求批次 + 快派发，每个请求恰好一次 enqueueBatch。 */
-    private static void arm(AutoTpmE2EHarness h) {
-        h.startAutoPump(10);
-    }
-
-    private static Response submitTo(AutoTpmE2EHarness h, int prefillIndex, long requestId)
-            throws Exception {
-        h.prefillSelector = ctx -> prefillIndex;
-        CompletableFuture<Response> future = h.scheduler.submit(h.context(requestId, 50));
-        return future.get(10, TimeUnit.SECONDS);
-    }
 
     // ==================== C1 failOnEnqueue + enqueueErrorMessage ====================
 
@@ -392,14 +379,22 @@ class FaultInjectionE2ETest {
         }
     }
 
+    /** 通用布防：单请求批次 + 快派发，每个请求恰好一次 enqueueBatch。 */
+    private static void arm(AutoTpmE2EHarness h) {
+        h.startAutoPump(10);
+    }
+
+    private static Response submitTo(AutoTpmE2EHarness h, int prefillIndex, long requestId)
+            throws Exception {
+        h.prefillSelector = ctx -> prefillIndex;
+        CompletableFuture<Response> future = h.scheduler.submit(h.context(requestId, 50));
+        return future.get(10, TimeUnit.SECONDS);
+    }
+
     private static long engineCancelCalls(JavaMockEngineCluster.FastRpcService engine) {
         var counts = (java.util.Map<?, ?>) engine.getSnapshot().get("rpc_counts");
         return ((Number) counts.get("cancel")).longValue();
     }
-
-    // ==================== 数据面直连 helpers ====================
-
-    private record StreamResult(Throwable error, boolean completed) {}
 
     /** 直连 generate_stream，等 500ms 观察流事件（fault 场景内即时返回或保持沉默）。 */
     private static StreamResult callGenerateStream(
@@ -462,4 +457,8 @@ class FaultInjectionE2ETest {
         boolean finished = terminal.await(500, TimeUnit.MILLISECONDS);
         return new StreamResult(error.get(), finished && error.get() == null);
     }
+
+    // ==================== 数据面直连 helpers ====================
+
+    private record StreamResult(Throwable error, boolean completed) {}
 }

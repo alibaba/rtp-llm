@@ -40,7 +40,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks combined Prefill and Decode scheduling behavior across configured modes.
+ * Verifies that a fused Worker supplies the complete route without requiring separate Decode capacity.
  */
 class PdfusionSchedulingTest {
     @ParameterizedTest
@@ -140,17 +140,10 @@ class PdfusionSchedulingTest {
         RequestRouteSelector router =
                 new RequestRouteSelector(
                         directory,
-                        new CostBasedPrefillStrategy(
-                                cache,
-                                SchedulingTestConfig.configService(
-                                        SchedulingTestConfig.newConfig())),
+                        new CostBasedPrefillStrategy(cache, service),
                         new DecodeSelector(
-                                SchedulingTestConfig.configService(
-                                        SchedulingTestConfig.newConfig()),
-                                SchedulingTestConfig.capacity(
-                                        SchedulingTestConfig.configService(
-                                                        SchedulingTestConfig.newConfig())
-                                                .loadBalanceConfig())),
+                                service,
+                                SchedulingTestConfig.capacity(service.loadBalanceConfig())),
                         new VitWorkerSelector(),
                         org.mockito.Mockito.mock(
                                 org.flexlb.balance.strategy.EncoderSelectionStrategy.class),
@@ -158,7 +151,7 @@ class PdfusionSchedulingTest {
                         null,
                         mock(EngineHealthReporter.class),
                         org.mockito.Mockito.mock(CacheMetricsReporter.class),
-                        SchedulingTestConfig.configService(SchedulingTestConfig.newConfig()),
+                        service,
                         model);
         SchedulerTestServices runtime =
                 org.mockito.Mockito.spy(

@@ -22,8 +22,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks endpoint snapshots apply role and group filters and only expose published capacity from the matching worker generation.
+ */
 class EndpointDiscoveryTest {
-
     private EndpointRegistry registry;
 
     @BeforeEach
@@ -147,32 +149,6 @@ class EndpointDiscoveryTest {
         assertRoleEndpoint(RoleType.VIT, 8102);
     }
 
-    private List<String> decodeAddresses(String group) {
-        return decodeRoutingSnapshot(registry, group).stream()
-                .map(DecodeResources.DecodeRoutingView::address)
-                .toList();
-    }
-
-    private void assertRoleEndpoint(RoleType role, int port) {
-        WorkerStatus status = status(role, null, port);
-        WorkerEndpoint registered =
-                RunnerTestSupport.publishEndpoint(
-                        registry, role, status.getLogicalIpPort(), status);
-
-        assertEquals(List.of(status.getLogicalIpPort()), registry.endpointAddressSnapshot(role));
-        {
-            WorkerEndpoint selectedEndpoint =
-                    registry.selectEndpoint(role, status.getLogicalIpPort());
-
-            assertNotNull(selectedEndpoint);
-            assertSame(registered, selectedEndpoint);
-        }
-    }
-
-    private static WorkerStatus status(RoleType role, String group, int port) {
-        return RunnerTestSupport.discovered(role, group, "127.0.0.1", port, port + 1, "test-site");
-    }
-
     @Test
     void role_status_maps_are_independent_and_counted_once() {
         WorkerStatus prefill = status(RoleType.PREFILL, "group1", 8201);
@@ -197,6 +173,32 @@ class EndpointDiscoveryTest {
         assertThrows(
                 UnsupportedOperationException.class,
                 () -> registry.statusSnapshot(RoleType.VIT).clear());
+    }
+
+    private List<String> decodeAddresses(String group) {
+        return decodeRoutingSnapshot(registry, group).stream()
+                .map(DecodeResources.DecodeRoutingView::address)
+                .toList();
+    }
+
+    private void assertRoleEndpoint(RoleType role, int port) {
+        WorkerStatus status = status(role, null, port);
+        WorkerEndpoint registered =
+                RunnerTestSupport.publishEndpoint(
+                        registry, role, status.getLogicalIpPort(), status);
+
+        assertEquals(List.of(status.getLogicalIpPort()), registry.endpointAddressSnapshot(role));
+        {
+            WorkerEndpoint selectedEndpoint =
+                    registry.selectEndpoint(role, status.getLogicalIpPort());
+
+            assertNotNull(selectedEndpoint);
+            assertSame(registered, selectedEndpoint);
+        }
+    }
+
+    private static WorkerStatus status(RoleType role, String group, int port) {
+        return RunnerTestSupport.discovered(role, group, "127.0.0.1", port, port + 1, "test-site");
     }
 
     private void discover(WorkerStatus status) {

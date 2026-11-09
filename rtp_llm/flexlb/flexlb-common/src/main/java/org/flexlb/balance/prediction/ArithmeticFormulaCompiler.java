@@ -55,13 +55,18 @@ import static org.objectweb.asm.Opcodes.IRETURN;
 import static org.objectweb.asm.Opcodes.RETURN;
 import static org.objectweb.asm.Opcodes.V17;
 
-/** JVM backend: fused aggregates and scoped common subexpressions, without reassociation. */
+/**
+ * JVM backend: fused aggregates and scoped common subexpressions, without reassociation.
+ */
 final class ArithmeticFormulaCompiler {
     private static final String CLASS_NAME =
             "org/flexlb/balance/prediction/ArithmeticFormula$Generated";
     private static final String SIGNATURE = "([DLjava/util/List;)D";
+
     private final MethodVisitor method;
+
     private final boolean objectBindings;
+
     private int nextLocal = 3; // this, scalar variables, batch items
 
     private ArithmeticFormulaCompiler(MethodVisitor method, boolean objectBindings) {
@@ -106,14 +111,6 @@ final class ArithmeticFormulaCompiler {
             if (failure instanceof Error error) throw error;
             throw new IllegalStateException("Cannot compile arithmetic formula", failure);
         }
-    }
-
-    interface Incremental {
-        int aggregateCount();
-
-        void append(double[] item, double[] sums);
-
-        double evaluate(double[] batch, double[] sums);
     }
 
     /** Same AST and ordered additions as full evaluation; only the lifetime of sums changes. */
@@ -336,6 +333,11 @@ final class ArithmeticFormulaCompiler {
         scope.locals.put(node, slot);
     }
 
+    private void math(String name, int arity) {
+        method.visitMethodInsn(
+                INVOKESTATIC, "java/lang/Math", name, arity == 1 ? "(D)D" : "(DD)D", false);
+    }
+
     private void sum(Node item, Scope outer) {
         if (outer.items < 0) {
             // Nested sum sees a scalar item, exactly like the interpreter.
@@ -349,9 +351,15 @@ final class ArithmeticFormulaCompiler {
         method.visitVarInsn(DLOAD, aggregates.get(aggregate));
     }
 
-    private void math(String name, int arity) {
-        method.visitMethodInsn(
-                INVOKESTATIC, "java/lang/Math", name, arity == 1 ? "(D)D" : "(DD)D", false);
+    /**
+     * Separates per-item accumulation from evaluation of the completed batch variables.
+     */
+    interface Incremental {
+        int aggregateCount();
+
+        void append(double[] item, double[] sums);
+
+        double evaluate(double[] batch, double[] sums);
     }
 
     private static final class Scope {

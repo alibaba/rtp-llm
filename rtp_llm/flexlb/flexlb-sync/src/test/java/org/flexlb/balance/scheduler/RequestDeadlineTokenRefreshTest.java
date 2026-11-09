@@ -19,7 +19,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** An exact early wake refreshes scheduling identity without acquiring any termination authority. */
+/**
+ * An exact early wake refreshes scheduling identity without acquiring any termination authority.
+ */
 class RequestDeadlineTokenRefreshTest {
     @ParameterizedTest
     @EnumSource(ExpirationTimer.Kind.class)
@@ -113,10 +115,14 @@ class RequestDeadlineTokenRefreshTest {
                 observedRequest -> observedRequest.recordDeadline(current, current.atMs(), null));
         if (kind == ExpirationTimer.Kind.REQUEST) {
             assertNull(context.snapshot().deadlines().request());
-            org.junit.jupiter.api.Assertions.assertEquals(
-                    RequestContext.SendResult.CANCELLED,
-                    context.beginSend(fixture.delivery(), current.atMs()),
-                    "consuming the refreshed request timer cannot remove the original absolute send deadline");
+            assertEquals(
+                    ContextResult.SendState.SENDING,
+                    context.snapshot().delivery().send(),
+                    "a refreshed scheduling deadline cannot revoke an already committed send");
+            assertFalse(
+                    context.validateDelivery(fixture.route(), current.atMs()),
+                    "the committed delivery still forbids duplicate submission");
+            assertFalse(context.snapshot().deliveryReleasable());
         } else if (kind == ExpirationTimer.Kind.VISIBILITY) {
             assertNull(context.snapshot().deadlines().visibility());
             assertTrue(context.snapshot().engine().visibilityOverdue());

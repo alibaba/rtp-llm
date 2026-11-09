@@ -1,5 +1,6 @@
 package org.flexlb.service.grace;
 
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.httpserver.FlexlbGrpcServer;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -20,7 +21,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -28,7 +28,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks application readiness and orderly shutdown of its registered resources.
+ * Verifies Spring lifecycle wiring and that serving shutdown drains transport before releasing resources.
  */
 class ApplicationLifecycleTest {
     @Test
@@ -55,11 +55,11 @@ class ApplicationLifecycleTest {
                         mock(EngineHealthReporter.class),
                         context.getEnvironment(),
                         new org.flexlb.listener.ApplicationWarmupState(),
+                        mock(AbstractRequestScheduler.class),
                         0L);
         context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
         context.registerBean(
                 "servingResource", DisposableBean.class, () -> () -> destroyed.set(true));
-        SchedulingShutdownTest.registerComponents(context);
         context.refresh();
         var closing = CompletableFuture.runAsync(context::close);
         try {
@@ -87,9 +87,9 @@ class ApplicationLifecycleTest {
                             mock(EngineHealthReporter.class),
                             context.getEnvironment(),
                             new org.flexlb.listener.ApplicationWarmupState(),
+                            mock(AbstractRequestScheduler.class),
                             0L);
             context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
-            SchedulingShutdownTest.registerComponents(context);
             context.refresh();
             context.publishEvent(new ContextClosedEvent(child));
             verifyNoInteractions(consistency, grpc);
@@ -107,14 +107,10 @@ class ApplicationLifecycleTest {
                     EngineHealthReporter.class, () -> mock(EngineHealthReporter.class));
             context.registerBean(org.flexlb.listener.ApplicationWarmupState.class);
             context.register(ApplicationLifecycle.class);
-            SchedulingShutdownTest.registerComponents(context);
+            context.getBeanFactory()
+                    .registerSingleton("scheduler", mock(AbstractRequestScheduler.class));
             context.refresh();
             assertNotNull(context.getBean(ApplicationLifecycle.class));
-            var scheduler = context.getBean(org.flexlb.balance.scheduler.RequestScheduler.class);
-            var lifecycle =
-                    context.getBean(org.flexlb.balance.scheduler.AbstractRequestScheduler.class);
-            org.junit.jupiter.api.Assertions.assertSame(scheduler, lifecycle);
-            verify(scheduler).start();
         }
     }
 
@@ -132,6 +128,7 @@ class ApplicationLifecycleTest {
                         reporter,
                         environment,
                         new org.flexlb.listener.ApplicationWarmupState(),
+                        mock(AbstractRequestScheduler.class),
                         0L);
         lifecycle.online();
         assertTrue(lifecycle.isHealthy());

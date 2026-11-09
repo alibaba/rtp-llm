@@ -56,7 +56,7 @@ class RequestAdmissionResourceLeakTest {
 
     @AfterEach
     void tearDown() {
-        if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(lifecycle)) {
+        if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(lifecycle)) {
             lifecycle.closeOutstandingAndTerminalize();
             SchedulerTestSupport.timer(
                             org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle))
@@ -69,9 +69,9 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void declinedPublicationLeavesNoCanonicalItem() {
         Registered registered = registerItem(1L);
-        try (PlacementOperation admission =
-                        SchedulerTestSupport.claim(lifecycle, "1", registered.future());
-                var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
+        PlacementOperation admission =
+                SchedulerTestSupport.claim(lifecycle, "1", registered.future());
+        try (var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
                     PlacementResult.Status.BLOCKED,
@@ -90,9 +90,9 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void throwingPublicationLeavesTheExactRegistrationRetryable() {
         Registered registered = registerItem(2L);
-        try (PlacementOperation admission =
-                        SchedulerTestSupport.claim(lifecycle, "2", registered.future());
-                var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
+        PlacementOperation admission =
+                SchedulerTestSupport.claim(lifecycle, "2", registered.future());
+        try (var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertThrows(
                     IllegalStateException.class,
@@ -208,7 +208,7 @@ class RequestAdmissionResourceLeakTest {
     void shutdownReleasesQueuedReservationsOnce() {
         Registered registered = registerItem(51L);
         RequestProtocolTestSupport.beginRoutePublication(lifecycle, registered);
-        assertTrue(RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(lifecycle));
+        assertTrue(RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(lifecycle));
         lifecycle.closeOutstandingAndTerminalize();
         verify(registered.item().decodeEndpoint(), times(1))
                 .release(
@@ -289,16 +289,11 @@ class RequestAdmissionResourceLeakTest {
                                         lifecycle, registered.item(), publication));
             } else {
                 assertEquals(
-                        publicationOutcome.equals("SUCCESS")
-                                ? PlacementResult.Status.SUCCESS
-                                : PlacementResult.Status.BLOCKED,
+                        PlacementResult.Status.CLOSED,
                         RequestProtocolTestSupport.commitRoute(
                                 lifecycle, registered.item(), publication));
             }
         } finally {
-            if (!publicationOutcome.equals("SUCCESS")) {
-                rollbackUnpublished(admission, registered);
-            }
             AbstractRequestScheduler.finishPlacement(admission);
         }
         var response = registered.future().get(5, TimeUnit.SECONDS);
@@ -310,19 +305,13 @@ class RequestAdmissionResourceLeakTest {
                 response.getCode());
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
-        assertEquals(0, lifecycle.requests.liveRequestCount());
+        assertEquals(0, lifecycle.repository.liveRequestCount());
         org.junit.jupiter.api.Assertions.assertFalse(
                 lifecycle.isAdmissionOpen(registered.item().ctx()));
-        // A scheduling deadline is canceled by the published Prefill queue owner;
-        // an actual inactivity expiry retains separate EXPIRED cleanup proof.
-        verify(
-                        registered.item().decodeEndpoint(),
-                        times(publicationOutcome.equals("SUCCESS") ? 1 : 0))
+        verify(registered.item().decodeEndpoint())
                 .release(
                         registered.item().decodeReservation(),
-                        inactivityExpired
-                                ? DecodeResources.ReleaseReason.EXPIRED
-                                : DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
+                        DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         lifecycle.cancel("71", 0L, CancelReason.SHUTDOWN);
         assertSame(response, registered.future().join());
     }
@@ -361,17 +350,10 @@ class RequestAdmissionResourceLeakTest {
         assertTrue(
                 released == DecodeResources.ReservationReleaseResult.RELEASED
                         || released == DecodeResources.ReservationReleaseResult.STALE);
-        registered
-                .item()
-                .ctx()
-                .bindPlacement(
-                        admission,
-                        registered.item(),
-                        ContextResult.PublicationResult.ROLLBACK_COMPLETED);
     }
 
-    private RouteExecution activeRoute(long requestId) {
-        RequestContext requestContext = lifecycle.requests.findActive(String.valueOf(requestId));
+    private RouteResult activeRoute(long requestId) {
+        RequestContext requestContext = lifecycle.repository.findActive(String.valueOf(requestId));
         synchronized (requestContext) {
             return requestContext.snapshot().route();
         }

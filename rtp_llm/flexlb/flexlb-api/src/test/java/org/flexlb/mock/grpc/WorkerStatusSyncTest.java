@@ -54,15 +54,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * statusCheckExecutor, EngineHealthReporter, etc.).
  */
 class WorkerStatusSyncTest extends FlexLBMockTestBase {
-
     private static final long SYNC_TIMEOUT_MS = 5000;
-
-    @Test
-    void nonNumericRoutingIdDoesNotInventAnEngineInputId() {
-        var context = createRequestContext("request-a");
-        assertEquals("request-a", context.data().getRequestId());
-        assertEquals(0, context.data().getGenerateInputSize());
-    }
 
     @Override
     protected MockWorkerBehavior createPrefillBehavior() {
@@ -72,6 +64,13 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
     @Override
     protected FlexlbConfig createConfig() {
         return super.createConfig();
+    }
+
+    @Test
+    void nonNumericRoutingIdDoesNotInventAnEngineInputId() {
+        var context = createRequestContext("request-a");
+        assertEquals("request-a", context.data().getRequestId());
+        assertEquals(0, context.data().getGenerateInputSize());
     }
 
     @Test

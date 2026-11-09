@@ -7,7 +7,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementAvailability;
-import org.flexlb.balance.scheduler.RouteExecution;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.CacheStatus;
@@ -21,142 +21,45 @@ import org.mockito.Mockito;
 import java.util.List;
 import java.util.Map;
 
-import static org.flexlb.balance.endpoint.EndpointTestSupport.withStateLock;
-
 /**
  * Package-local fixtures built only from the frozen endpoint-facing ports.
  */
 final class StrategyTestSupport {
-    /**
-     * Exercise the real routing owner together with its policy, including exact selectedEndpoint handoff.
-     */
-    static final class PrefillRoutingFixture {
-        final CostBasedPrefillStrategy policy;
-        final org.flexlb.balance.scheduler.RequestRouteSelector routing;
-
-        PrefillRoutingFixture(
-                EndpointRegistry registry,
-                org.flexlb.cache.match.CacheAwareService cache,
-                org.flexlb.service.monitor.EngineHealthReporter health,
-                org.flexlb.cache.telemetry.CacheMetricsReporter metrics,
-                ConfigService config) {
-            policy = new CostBasedPrefillStrategy(cache, config);
-            routing =
-                    new org.flexlb.balance.scheduler.RequestRouteSelector(
-                            registry,
-                            policy,
-                            Mockito.mock(DecodeSelector.class),
-                            Mockito.mock(VitWorkerSelector.class),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.balance.strategy.EncoderSelectionStrategy.class),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.cache.match.CacheAwareService.class),
-                            null,
-                            health,
-                            metrics,
-                            config,
-                            Mockito.mock(org.flexlb.config.ModelMetaConfig.class));
-        }
-
-        org.flexlb.balance.PlacementResult<
-                        org.flexlb.dao.loadbalance.ServerStatus,
-                        org.flexlb.balance.scheduler.PlacementKey>
-                select(
-                        org.flexlb.dao.loadbalance.Request request,
-                        org.flexlb.dao.SchedulingMetadata metadata,
-                        RoleType role,
-                        String group,
-                        Selection route) {
-            return org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                    routing, "selectPrefill", request, metadata, role, group, route.builder());
-        }
-
-        int selectBestCandidate(
-                PrefillCandidateSet candidates,
-                long minimum,
-                RoleType role,
-                String group,
-                long tokens) {
-            return policy.selectBestCandidate(candidates, minimum, role, group, tokens);
-        }
-    }
-
-    static final class DecodeRoutingFixture {
-        final org.flexlb.balance.scheduler.RequestRouteSelector routing;
-
-        DecodeRoutingFixture(
-                EndpointRegistry registry,
-                ConfigService config,
-                org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity capacity) {
-            routing =
-                    new org.flexlb.balance.scheduler.RequestRouteSelector(
-                            registry,
-                            Mockito.mock(CostBasedPrefillStrategy.class),
-                            new DecodeSelector(config, capacity),
-                            Mockito.mock(VitWorkerSelector.class),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.balance.strategy.EncoderSelectionStrategy.class),
-                            org.mockito.Mockito.mock(
-                                    org.flexlb.cache.match.CacheAwareService.class),
-                            null,
-                            Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class),
-                            Mockito.mock(org.flexlb.cache.telemetry.CacheMetricsReporter.class),
-                            config,
-                            Mockito.mock(org.flexlb.config.ModelMetaConfig.class));
-        }
-
-        org.flexlb.balance.PlacementResult<org.flexlb.dao.loadbalance.ServerStatus, RoleType>
-                select(
-                        org.flexlb.dao.loadbalance.Request request,
-                        org.flexlb.dao.SchedulingMetadata metadata,
-                        String group,
-                        Selection route) {
-            org.flexlb.balance.PlacementResult<
-                            org.flexlb.dao.loadbalance.ServerStatus,
-                            org.flexlb.balance.scheduler.PlacementKey>
-                    result =
-                            org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                                    routing,
-                                    "selectDecode",
-                                    request,
-                                    metadata,
-                                    group,
-                                    route.builder());
-            return new org.flexlb.balance.PlacementResult<>(
-                    result.status(),
-                    result.value(),
-                    result.failure(),
-                    result.blocker() == null ? null : result.blocker().role(),
-                    result.diagnostics(),
-                    result.selection() == null
-                            ? null
-                            : org.flexlb.balance.PlacementResult.success(
-                                    result.selection().value()));
-        }
-    }
+    private static final CapacityBoundary PARKED_BOUNDARY =
+            CapacityBoundary.unavailable(CapacityBoundary.Resource.PREFILL_BATCH);
+    private static final DeliveryMetricsReporter NOOP_METRICS =
+            Mockito.mock(DeliveryMetricsReporter.class);
 
     private StrategyTestSupport() {}
-
-    static Selection scope(org.flexlb.dao.loadbalance.Request request) {
-        var context = new org.flexlb.balance.scheduler.RequestContext(config());
-        context.data().setRequest(request);
-        return new Selection(
-                new org.flexlb.balance.scheduler.RouteResult.Builder(context),
-                request.getRequestId());
-    }
 
     static <B> org.flexlb.balance.PlacementResult<Selection, B> select(
             org.flexlb.dao.loadbalance.Request request,
             java.util.function.Function<
                             Selection,
                             org.flexlb.balance.PlacementResult<
-                                    org.flexlb.dao.loadbalance.ServerStatus, B>>
+                                    org.flexlb.balance.scheduler.RoleSelection, B>>
                     action) {
         var route = scope(request);
         var result = action.apply(route);
         return result.status() == PlacementResult.Status.SUCCESS
                 ? PlacementResult.success(route)
                 : result.asFailure();
+    }
+
+    static Selection scope(org.flexlb.dao.loadbalance.Request request) {
+        var context = new org.flexlb.balance.scheduler.RequestContext(config());
+        context.data().setRequest(request);
+        context.data()
+                .setSchedulingMetadata(
+                        org.flexlb.dao.SchedulingMetadata.explicit(50, Long.MAX_VALUE));
+        return new Selection(context, new java.util.ArrayList<>());
+    }
+
+    static FlexlbConfig config() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
+        config.getRequestLifecycle().getDecision().setLifetime(2.0);
+        return config;
     }
 
     static org.flexlb.balance.PlacementResult<Selection, RoleType> select(
@@ -194,8 +97,12 @@ final class StrategyTestSupport {
         var router =
                 new org.flexlb.balance.scheduler.RequestRouteSelector(
                         endpoints,
-                        Mockito.mock(PrefillSelectionStrategy.class),
-                        Mockito.mock(DecodeSelectionStrategy.class),
+                        Mockito.mock(
+                                PrefillSelectionStrategy.class,
+                                org.mockito.Mockito.CALLS_REAL_METHODS),
+                        Mockito.mock(
+                                DecodeSelectionStrategy.class,
+                                org.mockito.Mockito.CALLS_REAL_METHODS),
                         selector,
                         org.mockito.Mockito.mock(
                                 org.flexlb.balance.strategy.EncoderSelectionStrategy.class),
@@ -207,51 +114,17 @@ final class StrategyTestSupport {
                         Mockito.mock(org.flexlb.config.ModelMetaConfig.class));
         PlacementResult<?, ?> result =
                 org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                        router, "selectVit", String.valueOf(id), group, route.builder());
+                        router, "selectVit", String.valueOf(id), group, route.roles());
         return result.status() == PlacementResult.Status.SUCCESS ? route : null;
     }
 
     static org.flexlb.dao.loadbalance.ServerStatus vit(Selection route) {
-        org.flexlb.balance.scheduler.RoleSelection selected =
-                org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                        route.builder(), "selection", RoleType.VIT);
+        var selected = route.role(RoleType.VIT);
         return selected == null ? null : selected.toServerStatus(route.requestId());
     }
 
     static WorkerEndpoint decodeEndpoint(Selection route) {
         return route.role(RoleType.DECODE).endpoint();
-    }
-
-    record Selection(org.flexlb.balance.scheduler.RouteResult.Builder builder, String requestId) {
-        org.flexlb.balance.scheduler.RoleSelection role(RoleType role) {
-            return org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                    builder, "selection", role);
-        }
-
-        long prefillWorkMs() {
-            return ((org.flexlb.balance.scheduler.RoleSelection.Prefill) role(RoleType.PREFILL))
-                    .workMs();
-        }
-
-        org.flexlb.dao.loadbalance.ServerStatus prefill() {
-            return status(RoleType.PREFILL);
-        }
-
-        org.flexlb.dao.loadbalance.ServerStatus decode() {
-            return status(RoleType.DECODE);
-        }
-
-        private org.flexlb.dao.loadbalance.ServerStatus status(RoleType role) {
-            var selected = role(role);
-            return selected == null ? null : selected.toServerStatus(requestId);
-        }
-    }
-
-    static FlexlbConfig config() {
-        FlexlbConfig config = new FlexlbConfig();
-        config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
-        config.getRequestLifecycle().getDecision().setLifetime(2.0);
-        return config;
     }
 
     static EndpointRegistry endpointRegistry(ConfigService configService) {
@@ -266,6 +139,13 @@ final class StrategyTestSupport {
                 org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                         configService.loadBalanceConfig()),
                 order -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(16, order));
+    }
+
+    /**
+     * Keep selection-owned queues parked without replacing admission internals.
+     */
+    static DeliveryDispatcher parkedDelivery() {
+        return org.flexlb.balance.scheduler.DeliveryTestSupport.parked(PARKED_BOUNDARY);
     }
 
     static WorkerStatus workerStatus(
@@ -337,12 +217,15 @@ final class StrategyTestSupport {
         }
     }
 
-    static boolean offer(PrefillEndpoint endpoint, RouteExecution exactItem) {
+    static boolean offer(PrefillEndpoint endpoint, RouteResult exactItem) {
         org.flexlb.balance.scheduler.SchedulerTestSupport.bindEndpointOwner(endpoint, exactItem);
         {
             WorkerEndpoint selectedEndpoint = endpoint;
 
             return selectedEndpoint != null
+                    && org.flexlb.balance.scheduler.SelectionTestSupport.registerPrefill(
+                                    endpoint, exactItem, exactItem.prefillWorkMs(), true)
+                            .accepted()
                     && endpoint.enqueueRoute(
                             exactItem,
                             org.flexlb.balance.scheduler.QueueExecutionSettings.capture(
@@ -356,34 +239,20 @@ final class StrategyTestSupport {
             PrefillEndpoint endpoint,
             long batchId,
             long predictedMs,
-            List<? extends RouteExecution> exactItems) {
+            List<? extends RouteResult> exactItems) {
         if (exactItems.isEmpty()) {
             throw new IllegalArgumentException("committed batch requires at least one item");
         }
-        List<RouteExecution> items = List.copyOf(exactItems);
-        CapacityBoundary.Attempt<PrefillEndpoint.BatchRecord> result =
-                endpoint.reserveBatch(batchId, Integer.MAX_VALUE);
-        if (!result.accepted()) {
-            throw new IllegalStateException("batch reservation rejected: " + result.boundary());
-        }
-        {
-            PrefillEndpoint.BatchRecord reservation = result.value();
-            try (var preparationReservation =
-                    org.flexlb.balance.endpoint.EndpointTestSupport.preparation(reservation)) {
-                PrefillEndpoint state = (PrefillEndpoint) endpoint;
-                return withStateLock(
-                        org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(state),
-                        () -> {
-                            return state.commitDelivery(
-                                    org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
-                                            items,
-                                            reservation,
-                                            new long[] {predictedMs},
-                                            null,
-                                            System.currentTimeMillis()));
-                        });
-            }
-        }
+        List<RouteResult> items = List.copyOf(exactItems);
+        var delivery =
+                org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
+                        items,
+                        new org.flexlb.balance.scheduler.DeliveryTestSupport.BatchInput(
+                                batchId, Integer.MAX_VALUE),
+                        new long[] {predictedMs},
+                        null,
+                        System.currentTimeMillis());
+        return endpoint.commitDelivery(delivery);
     }
 
     static void setCacheStatus(WorkerStatus status, long blockSize, long availableKv) {
@@ -402,15 +271,233 @@ final class StrategyTestSupport {
     }
 
     /**
-     * Keep selection-owned queues parked without replacing admission internals.
+     * Exercise the real routing owner together with its policy, including exact selectedEndpoint handoff.
      */
-    static DeliveryDispatcher parkedDelivery() {
-        return org.flexlb.balance.scheduler.DeliveryTestSupport.parked(PARKED_BOUNDARY);
+    static final class PrefillRoutingFixture {
+        final CostBasedPrefillStrategy policy;
+        final org.flexlb.balance.scheduler.RequestRouteSelector routing;
+
+        PrefillRoutingFixture(
+                EndpointRegistry registry,
+                org.flexlb.cache.match.CacheAwareService cache,
+                org.flexlb.service.monitor.EngineHealthReporter health,
+                org.flexlb.cache.telemetry.CacheMetricsReporter metrics,
+                ConfigService config) {
+            policy = new CostBasedPrefillStrategy(cache, config);
+            var model = Mockito.mock(org.flexlb.config.ModelMetaConfig.class);
+            Mockito.when(model.requiredRoles())
+                    .thenReturn(List.of(RoleType.PREFILL, RoleType.PDFUSION));
+            routing =
+                    new org.flexlb.balance.scheduler.RequestRouteSelector(
+                            registry,
+                            policy,
+                            Mockito.mock(DecodeSelector.class),
+                            Mockito.mock(VitWorkerSelector.class),
+                            org.mockito.Mockito.mock(
+                                    org.flexlb.balance.strategy.EncoderSelectionStrategy.class),
+                            org.mockito.Mockito.mock(
+                                    org.flexlb.cache.match.CacheAwareService.class),
+                            null,
+                            health,
+                            metrics,
+                            config,
+                            model);
+        }
+
+        org.flexlb.balance.PlacementResult<
+                        org.flexlb.balance.scheduler.RoleSelection,
+                        org.flexlb.balance.scheduler.PlacementKey>
+                select(
+                        org.flexlb.dao.loadbalance.Request request,
+                        org.flexlb.dao.SchedulingMetadata metadata,
+                        RoleType role,
+                        String group,
+                        Selection route) {
+            var ctx = route.context();
+            ctx.data().setSchedulingMetadata(metadata);
+            ctx.data().setRequestedRoles(List.of(role));
+            var result = routing.select(ctx, group);
+            if (result.status() != PlacementResult.Status.SUCCESS) return result.asFailure();
+            var execution = result.value();
+            route.roles().addAll(execution.roles());
+            route.cleanup.add(
+                    () -> execution.prefillEndpoint().rollback(execution.prefillReservation()));
+            return PlacementResult.success(execution.role(role));
+        }
+
+        int selectBestCandidate(
+                PrefillCandidateSet candidates,
+                long minimum,
+                RoleType role,
+                String group,
+                long tokens) {
+            return policy.selectBestCandidate(candidates, minimum, role, group, tokens);
+        }
     }
 
-    private static final CapacityBoundary PARKED_BOUNDARY =
-            CapacityBoundary.unavailable(CapacityBoundary.Resource.PREFILL_BATCH);
+    /**
+     * Runs the Decode policy against real endpoint views and registration callbacks, recording acquired resources for test cleanup.
+     */
+    static final class DecodeRoutingFixture {
+        final EndpointRegistry registry;
+        final DecodeSelector policy;
+        final org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity capacity;
 
-    private static final DeliveryMetricsReporter NOOP_METRICS =
-            Mockito.mock(DeliveryMetricsReporter.class);
+        DecodeRoutingFixture(
+                EndpointRegistry registry,
+                ConfigService config,
+                org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity capacity) {
+            this.registry = registry;
+            this.capacity = capacity;
+            policy = new DecodeSelector(config, capacity);
+        }
+
+        org.flexlb.balance.PlacementResult<org.flexlb.balance.scheduler.RoleSelection, RoleType>
+                select(
+                        org.flexlb.dao.loadbalance.Request request,
+                        org.flexlb.dao.SchedulingMetadata metadata,
+                        String group,
+                        Selection route) {
+            var inputs =
+                    new java.util.ArrayList<
+                            org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView>();
+            registry.decodeRoutingSnapshot(group, inputs);
+            var result =
+                    policy.selectAndRegister(
+                            request,
+                            metadata,
+                            group,
+                            List.copyOf(inputs),
+                            view -> {
+                                var endpoint = registry.selectDecodeEndpoint(view);
+                                return endpoint == null
+                                        ? null
+                                        : ((org.flexlb.balance.endpoint.DecodeEndpoint) endpoint)
+                                                .admissionSummary();
+                            },
+                            view -> {
+                                var endpoint = registry.selectDecodeEndpoint(view);
+                                return endpoint == null
+                                        ? null
+                                        : ((org.flexlb.balance.endpoint.DecodeEndpoint) endpoint)
+                                                .routingView();
+                            },
+                            view -> {
+                                var endpoint =
+                                        (org.flexlb.balance.endpoint.DecodeEndpoint)
+                                                registry.selectDecodeEndpoint(view);
+                                if (endpoint == null)
+                                    return PlacementResult.Registration.UNAVAILABLE;
+                                var acquired =
+                                        endpoint.tryRegisterSelection(
+                                                view,
+                                                request.getRequestId(),
+                                                request.getHardKvTokens(),
+                                                request.getExpectedKvTokens(),
+                                                metadata.priority(),
+                                                capacity);
+                                return switch (acquired.status()) {
+                                    case VERSION_CONFLICT -> PlacementResult.Registration.CONFLICT;
+                                    case ENDPOINT_RETIRED ->
+                                            PlacementResult.Registration.UNAVAILABLE;
+                                    case CAPACITY_FULL, ALREADY_OWNED ->
+                                            PlacementResult.Registration.BLOCKED;
+                                    case ACQUIRED -> {
+                                        var status =
+                                                org.flexlb.dao.loadbalance.ServerStatus.forWorker(
+                                                        RoleType.DECODE,
+                                                        request.getRequestId(),
+                                                        view.topology(),
+                                                        view.workerStatus().fields());
+                                        route.roles()
+                                                .add(
+                                                        org.flexlb.balance.scheduler
+                                                                .SelectionTestSupport
+                                                                .registeredDecode(
+                                                                        endpoint,
+                                                                        status,
+                                                                        acquired.value()));
+                                        route.cleanup.add(
+                                                () ->
+                                                        endpoint.release(
+                                                                acquired.value(),
+                                                                org.flexlb.balance.endpoint
+                                                                        .DecodeResources
+                                                                        .ReleaseReason
+                                                                        .LOCAL_ROLLBACK));
+                                        yield PlacementResult.Registration.REGISTERED;
+                                    }
+                                };
+                            });
+            return new PlacementResult<>(
+                    result.status(),
+                    result.status() == PlacementResult.Status.SUCCESS
+                            ? route.role(RoleType.DECODE)
+                            : null,
+                    result.failure(),
+                    result.blocker() == null ? null : result.blocker().role(),
+                    result.diagnostics());
+        }
+    }
+
+    /**
+     * Holds selected roles for strategy assertions and releases the resources acquired by the fixture when closed.
+     */
+    static final class Selection implements AutoCloseable {
+        private final org.flexlb.balance.scheduler.RequestContext context;
+        private final java.util.List<org.flexlb.balance.scheduler.RoleSelection> roles;
+        private final java.util.List<Runnable> cleanup = new java.util.ArrayList<>();
+
+        Selection(
+                org.flexlb.balance.scheduler.RequestContext context,
+                java.util.List<org.flexlb.balance.scheduler.RoleSelection> roles) {
+            this.context = context;
+            this.roles = roles;
+        }
+
+        public void close() {
+            for (var release : cleanup) release.run();
+            cleanup.clear();
+        }
+
+        org.flexlb.balance.scheduler.RequestContext context() {
+            return context;
+        }
+
+        java.util.List<org.flexlb.balance.scheduler.RoleSelection> roles() {
+            return roles;
+        }
+
+        String requestId() {
+            return context.data().getRequestId();
+        }
+
+        long prefillWorkMs() {
+            return ((org.flexlb.balance.scheduler.RoleSelection.Prefill) role(RoleType.PREFILL))
+                    .workMs();
+        }
+
+        org.flexlb.balance.scheduler.RoleSelection role(RoleType role) {
+            return roles.stream()
+                    .filter(
+                            r ->
+                                    r.role() == role
+                                            || role.supportsPrefill() && r.role().supportsPrefill())
+                    .findFirst()
+                    .orElse(null);
+        }
+
+        org.flexlb.dao.loadbalance.ServerStatus prefill() {
+            return status(RoleType.PREFILL);
+        }
+
+        org.flexlb.dao.loadbalance.ServerStatus decode() {
+            return status(RoleType.DECODE);
+        }
+
+        private org.flexlb.dao.loadbalance.ServerStatus status(RoleType role) {
+            var selected = role(role);
+            return selected == null ? null : selected.toServerStatus(requestId());
+        }
+    }
 }

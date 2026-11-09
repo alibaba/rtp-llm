@@ -10,11 +10,31 @@ import java.util.OptionalDouble;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.math.LongMath.saturatedAdd;
 
-/** Ordered-prefix grouping shared by execution and prediction; implementations do not mutate queues. */
+/**
+ * Pure fixed-window decision-group planning.
+ *
+ * <p>The planner consumes an already ordered, immutable point-in-time view. It
+ * performs no queue mutation, capacity reservation, clock read, or delivery.
+ * The real batcher supplies live items through an {@link ItemAccess}; a
+ * route-time projection instead uses {@link Item}s, including a
+ * virtual incoming probe that has never entered the live queue.
+ */
 public interface GroupPlanner {
     String PREDICTED_EXECUTION_CAP = "predicted_execution_cap";
     String BATCH_FULL = "batch_full";
     String FIXED_WINDOW_TIMEOUT = "fixed_window_timeout";
+
+    public static boolean windowElapsed(
+            long windowOpenedAtMs, long nowMs, long collectionWindowMs) {
+        long boundedWindowMs = Math.max(0L, collectionWindowMs);
+        return windowOpenedAtMs != Long.MAX_VALUE
+                && nowMs >= windowOpenedAtMs
+                && nowMs - windowOpenedAtMs >= boundedWindowMs;
+    }
+
+    public static long collectionDeadlineMs(long windowOpenedAtMs, long collectionWindowMs) {
+        return saturatedAdd(windowOpenedAtMs, Math.max(0L, collectionWindowMs));
+    }
 
     <T extends Input> Selection<T> select(
             Iterable<T> ordered, Constraints constraints, PrefixPrediction<T> predictor);
@@ -24,6 +44,23 @@ public interface GroupPlanner {
     long nextCheckAtMs(Selection<?> selection, Constraints constraints);
 
     void validateConstraints(Constraints constraints);
+
+    static double requireValidPrediction(double predictedMs) {
+        checkArgument(
+                Double.isFinite(predictedMs) && !(predictedMs < 0.0d),
+                "group prediction must be finite and non-negative");
+        return predictedMs;
+    }
+
+    private static void validateSelectedPrediction(
+            List<?> items, OptionalDouble selectedPredictionMs) {
+        checkArgument(
+                !items.isEmpty() || !selectedPredictionMs.isPresent(),
+                "empty decision group cannot carry a prediction");
+        if (selectedPredictionMs.isPresent()) {
+            requireValidPrediction(selectedPredictionMs.getAsDouble());
+        }
+    }
 
     /**
      * Immutable input suitable for route-time projection. Ordering fields are
@@ -70,14 +107,18 @@ public interface GroupPlanner {
         }
     }
 
-    /** Read-only request fields consumed by both live and projected planning. */
+    /**
+     * Read-only request fields consumed by both live and projected planning.
+     */
     public interface Input {
         long enqueuedAtMs();
 
         long seqLen();
     }
 
-    /** Frozen policy and resource bounds for one planning operation. */
+    /**
+     * Frozen policy and resource bounds for one planning operation.
+     */
     public record Constraints(
             int maxRequests,
             long batchTokenCapacity,
@@ -90,7 +131,9 @@ public interface GroupPlanner {
         }
     }
 
-    /** Group selection before readiness is evaluated against a clock value. */
+    /**
+     * Group selection before readiness is evaluated against a clock value.
+     */
     public record Selection<T>(
             List<T> items,
             long paddedTokens,
@@ -121,34 +164,5 @@ public interface GroupPlanner {
     @FunctionalInterface
     public interface PrefixPrediction<T> {
         double append(T added, List<T> prefix);
-    }
-
-    public static boolean windowElapsed(
-            long windowOpenedAtMs, long nowMs, long collectionWindowMs) {
-        long boundedWindowMs = Math.max(0L, collectionWindowMs);
-        return windowOpenedAtMs != Long.MAX_VALUE
-                && nowMs >= windowOpenedAtMs
-                && nowMs - windowOpenedAtMs >= boundedWindowMs;
-    }
-
-    public static long collectionDeadlineMs(long windowOpenedAtMs, long collectionWindowMs) {
-        return saturatedAdd(windowOpenedAtMs, Math.max(0L, collectionWindowMs));
-    }
-
-    private static void validateSelectedPrediction(
-            List<?> items, OptionalDouble selectedPredictionMs) {
-        checkArgument(
-                !items.isEmpty() || !selectedPredictionMs.isPresent(),
-                "empty decision group cannot carry a prediction");
-        if (selectedPredictionMs.isPresent()) {
-            requireValidPrediction(selectedPredictionMs.getAsDouble());
-        }
-    }
-
-    static double requireValidPrediction(double predictedMs) {
-        checkArgument(
-                Double.isFinite(predictedMs) && !(predictedMs < 0.0d),
-                "group prediction must be finite and non-negative");
-        return predictedMs;
     }
 }

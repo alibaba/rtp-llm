@@ -21,22 +21,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Checks request log data construction and serialized fields.
  */
 class PvLogDataTest {
-
-    private static PvLogData pv(RequestData data) {
-        var response = data.getResponse();
-        return new PvLogData(
-                data,
-                response != null && response.isSuccess(),
-                response == null ? null : response.getErrorMessage(),
-                response == null ? 0 : response.getCode(),
-                null,
-                "LOCAL_MASTER",
-                0,
-                null,
-                null,
-                System.currentTimeMillis());
-    }
-
     @Test
     void keepsCacheSelectionWhenSelectedCandidateHasNoEndpoint() {
         RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
@@ -507,5 +491,20 @@ class PvLogDataTest {
                                         java.util.List.of(),
                                         null)));
         assertEquals("BEST_ONLY", pv(context).getRoutingDecisions().getFirst().selectionReason());
+    }
+
+    private static PvLogData pv(RequestData data) {
+        var response = data.getResponse();
+        return new PvLogData(
+                data,
+                response != null && response.isSuccess(),
+                response == null ? null : response.getErrorMessage(),
+                response == null ? 0 : response.getCode(),
+                null,
+                "LOCAL_MASTER",
+                0,
+                null,
+                null,
+                System.currentTimeMillis());
     }
 }

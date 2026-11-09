@@ -50,7 +50,6 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_KV_TOKENS;
 @Slf4j
 @Component
 public class RequestSchedulerReporter {
-
     /**
      * Priority is a normalized level, so its single-tag set is shared per
      * level instead of being rebuilt on every report.
@@ -62,20 +61,6 @@ public class RequestSchedulerReporter {
     @Autowired
     public RequestSchedulerReporter(FlexMonitor monitor) {
         this.monitor = SafeFlexMonitor.wrap(monitor);
-    }
-
-    private static FlexMetricTags[] buildPriorityTags() {
-        FlexMetricTags[] tags = new FlexMetricTags[PriorityNormalizer.MAX_PRIORITY + 1];
-        for (int priority = 0; priority < tags.length; priority++) {
-            tags[priority] = FlexMetricTags.of("priority", String.valueOf(priority));
-        }
-        return tags;
-    }
-
-    private static FlexMetricTags priorityTags(int priority) {
-        return priority >= 0 && priority <= PriorityNormalizer.MAX_PRIORITY
-                ? PRIORITY_TAGS[priority]
-                : FlexMetricTags.of("priority", String.valueOf(priority));
     }
 
     @PostConstruct
@@ -125,91 +110,14 @@ public class RequestSchedulerReporter {
                 latencyMs);
     }
 
-    public enum EvictionEvent {
-        PLAN(AUTO_TPM_EVICTION_PLAN_COUNT),
-        COMMIT(AUTO_TPM_EVICTION_COMMIT_COUNT);
-
-        private final String metric;
-
-        EvictionEvent(String metric) {
-            this.metric = metric;
-        }
-    }
-
-    /** Planning and commit outcomes share incoming priority, eviction case and result tags. */
-    public void reportEviction(EvictionEvent event, int priority, String evCase, String result) {
-        monitor.report(
-                event.metric,
-                FlexMetricTags.of(
-                        "priority", String.valueOf(priority), "case", evCase, "result", result),
-                1.0);
-    }
-
-    /** Report the victim and its priority-preemption event. */
-    public void reportVictim(
-            int victimPriority, int incomingPriority, String stage, String evCase) {
-        monitor.report(
-                AUTO_TPM_VICTIM_COUNT,
-                FlexMetricTags.of(
-                        "victim_priority",
-                        String.valueOf(victimPriority),
-                        "incoming_priority",
-                        String.valueOf(incomingPriority),
-                        "stage",
-                        stage,
-                        "case",
-                        evCase),
-                1.0);
-        monitor.report(AUTO_TPM_PRIORITY_PREEMPT_COUNT, FlexMetricTags.of("stage", stage), 1.0);
-    }
-
     public void reportPrefillQueueDepth(String endpoint, int depth) {
         monitor.report(
                 AUTO_TPM_PREFILL_QUEUE_DEPTH, FlexMetricTags.of("endpoint", endpoint), depth);
     }
 
-    /** Hard KV tokens actually released by one victim. */
-    public void reportVictimKvTokens(int victimPriority, String stage, long kvTokens) {
-        monitor.report(
-                AUTO_TPM_VICTIM_KV_TOKENS,
-                FlexMetricTags.of(
-                        "victim_priority", String.valueOf(victimPriority), "stage", stage),
-                kvTokens);
-    }
-
     /** Master arrival-to-response latency: a lower bound of actual Engine TTFT. */
     public void reportTtft(int priority, long latencyMs) {
         monitor.report(AUTO_TPM_TTFT_MS, priorityTags(priority), latencyMs);
-    }
-
-    /** Count one Engine Cancel intent by victim priority and cancellation reason. */
-    public void reportCancel(int priority, String reason) {
-        monitor.report(
-                AUTO_TPM_CANCEL_QPS,
-                FlexMetricTags.of("priority", String.valueOf(priority), "reason", reason),
-                1.0);
-    }
-
-    public enum CancelEvent {
-        /** One issued cancel, tagged with the victim's priority. */
-        REQUEST(AUTO_TPM_CANCEL_REQUEST_COUNT),
-        /** Release confirmation, including after a timed-out wait; uses victim priority. */
-        CONFIRM(AUTO_TPM_CANCEL_CONFIRM_COUNT),
-        /** Failed plan wait; uses incoming priority and does not release the victim. */
-        TIMEOUT(AUTO_TPM_CANCEL_TIMEOUT_COUNT);
-
-        private final String metric;
-
-        CancelEvent(String metric) {
-            this.metric = metric;
-        }
-    }
-
-    public void reportEngineCancel(CancelEvent event, String endpoint, int priority) {
-        monitor.report(
-                event.metric,
-                FlexMetricTags.of("endpoint", endpoint, "priority", String.valueOf(priority)),
-                1.0);
     }
 
     /** Report one snapshot: local reservations, accepted/running Engine tasks and Engine-facing load. */
@@ -255,11 +163,62 @@ public class RequestSchedulerReporter {
         reportEviction(EvictionEvent.COMMIT, incomingPriority, evictionCase, "success");
     }
 
+    /** Report the victim and its priority-preemption event. */
+    public void reportVictim(
+            int victimPriority, int incomingPriority, String stage, String evCase) {
+        monitor.report(
+                AUTO_TPM_VICTIM_COUNT,
+                FlexMetricTags.of(
+                        "victim_priority",
+                        String.valueOf(victimPriority),
+                        "incoming_priority",
+                        String.valueOf(incomingPriority),
+                        "stage",
+                        stage,
+                        "case",
+                        evCase),
+                1.0);
+        monitor.report(AUTO_TPM_PRIORITY_PREEMPT_COUNT, FlexMetricTags.of("stage", stage), 1.0);
+    }
+
+    /** Hard KV tokens actually released by one victim. */
+    public void reportVictimKvTokens(int victimPriority, String stage, long kvTokens) {
+        monitor.report(
+                AUTO_TPM_VICTIM_KV_TOKENS,
+                FlexMetricTags.of(
+                        "victim_priority", String.valueOf(victimPriority), "stage", stage),
+                kvTokens);
+    }
+
+    public void reportEngineCancel(CancelEvent event, String endpoint, int priority) {
+        monitor.report(
+                event.metric,
+                FlexMetricTags.of("endpoint", endpoint, "priority", String.valueOf(priority)),
+                1.0);
+    }
+
+    /** Planning and commit outcomes share incoming priority, eviction case and result tags. */
+    public void reportEviction(EvictionEvent event, int priority, String evCase, String result) {
+        monitor.report(
+                event.metric,
+                FlexMetricTags.of(
+                        "priority", String.valueOf(priority), "case", evCase, "result", result),
+                1.0);
+    }
+
     public void reportPreemptionCancelRequests(String endpoint, List<DecodeRequestView> victims) {
         for (var victim : victims) {
             reportEngineCancel(CancelEvent.REQUEST, endpoint, victim.priority());
             reportCancel(victim.priority(), "PRIORITY_PREEMPTED");
         }
+    }
+
+    /** Count one Engine Cancel intent by victim priority and cancellation reason. */
+    public void reportCancel(int priority, String reason) {
+        monitor.report(
+                AUTO_TPM_CANCEL_QPS,
+                FlexMetricTags.of("priority", String.valueOf(priority), "reason", reason),
+                1.0);
     }
 
     public void reportDecodePreemption(String endpoint, ResourceSnapshot view) {
@@ -291,6 +250,20 @@ public class RequestSchedulerReporter {
         return Collections.unmodifiableMap(details);
     }
 
+    private static FlexMetricTags[] buildPriorityTags() {
+        FlexMetricTags[] tags = new FlexMetricTags[PriorityNormalizer.MAX_PRIORITY + 1];
+        for (int priority = 0; priority < tags.length; priority++) {
+            tags[priority] = FlexMetricTags.of("priority", String.valueOf(priority));
+        }
+        return tags;
+    }
+
+    private static FlexMetricTags priorityTags(int priority) {
+        return priority >= 0 && priority <= PriorityNormalizer.MAX_PRIORITY
+                ? PRIORITY_TAGS[priority]
+                : FlexMetricTags.of("priority", String.valueOf(priority));
+    }
+
     private static Map<Integer, Integer> priorityCounts(int[] counts) {
         Map<Integer, Integer> values = new LinkedHashMap<>();
         for (int priority = 0; priority < counts.length; priority++) {
@@ -299,7 +272,41 @@ public class RequestSchedulerReporter {
         return Collections.unmodifiableMap(values);
     }
 
-    /** Frozen decision evidence; the log representation is materialized only on failure. */
+    /**
+     * Maps eviction planning and commit events to their exported counters.
+     */
+    public enum EvictionEvent {
+        PLAN(AUTO_TPM_EVICTION_PLAN_COUNT),
+        COMMIT(AUTO_TPM_EVICTION_COMMIT_COUNT);
+
+        private final String metric;
+
+        EvictionEvent(String metric) {
+            this.metric = metric;
+        }
+    }
+
+    /**
+     * Maps cancellation requests, confirmations and timeouts to their exported counters.
+     */
+    public enum CancelEvent {
+        /** One issued cancel, tagged with the victim's priority. */
+        REQUEST(AUTO_TPM_CANCEL_REQUEST_COUNT),
+        /** Release confirmation, including after a timed-out wait; uses victim priority. */
+        CONFIRM(AUTO_TPM_CANCEL_CONFIRM_COUNT),
+        /** Failed plan wait; uses incoming priority and does not release the victim. */
+        TIMEOUT(AUTO_TPM_CANCEL_TIMEOUT_COUNT);
+
+        private final String metric;
+
+        CancelEvent(String metric) {
+            this.metric = metric;
+        }
+    }
+
+    /**
+     * Frozen decision evidence; the log representation is materialized only on failure.
+     */
     @lombok.RequiredArgsConstructor(access = lombok.AccessLevel.PUBLIC)
     public static final class QueueWaitSnapshot {
         private final String endpoint;
