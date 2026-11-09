@@ -86,6 +86,15 @@ pip_deps()
 
 load("@rules_python//python:pip.bzl", "pip_parse")
 
+pip_parse(
+    name = "pip_glm53_deepgemm",
+    requirements_lock = "@rtp_pip_deps//:glm53_deepgemm_lock.txt",
+    python_interpreter = "/opt/conda310/bin/python3",
+)
+
+load("@pip_glm53_deepgemm//:requirements.bzl", pip_glm53_install_deps = "install_deps")
+pip_glm53_install_deps()
+
 # Test-only, platform-independent pytest closure; do not alter runtime locks.
 pip_parse(
     name = "pip_dsv4_test",

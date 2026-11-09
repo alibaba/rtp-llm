@@ -77,6 +77,16 @@ config_setting(
 )
 
 config_setting(
+    name = "using_glm53_cuda13_x86",
+    define_values = {
+        "using_cuda": "true",
+        "using_cuda12": "true",
+        "using_cuda13_x86": "true",
+        "using_glm53": "true",
+    },
+)
+
+config_setting(
     name = "using_cuda12_x86",
     values = {"define": "using_cuda12_x86=true"},
 )
