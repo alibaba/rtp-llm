@@ -29,6 +29,7 @@ Sampler::Sampler(const SamplerInitParams& params): copy_stream_(cuda_graph::grap
             force_topk_ = static_cast<int>(parsed);
         }
     }
+    initializeSamplingRuntime(params.vocab_size);
 }
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
@@ -106,6 +107,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
     size_t from_batch_idx_in = 0, to_batch_idx_in = 0;
     size_t from_batch_idx_out = 0;
+    bool   deferred_token_sampling = false;
 
     while (from_batch_idx_in < inputs.batch_size) {
         auto cur_num_beams_in  = num_beams_in[from_batch_idx_in];
@@ -181,7 +183,10 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  force_topk_,
                  use_optimized_sampling_,
                  mayOptNarrow(inputs.all_probs_indices, from_batch_idx_in, batch_size_in),
-                 use_optimized_sampling_ && inputs.skip_logits_probs_restore});
+                 use_optimized_sampling_ && inputs.skip_logits_probs_restore,
+                 inputs.defer_token_sampling,
+                 inputs.phase == LogitsProcessorPhase::MTP_VERIFY});
+            deferred_token_sampling = greedy_output.deferred_token_sampling;
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
                 // TODO(zhangjianning.zjn): would be better to eliminate the copy
@@ -259,7 +264,10 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                           inputs.raw_logprobs_logits,
                           inputs.raw_logprobs_row_indices,
                           false,
-                          std::move(inputs.all_probs_indices)});
+                          std::move(inputs.all_probs_indices),
+                          deferred_token_sampling,
+                          deferred_token_sampling ? inputs.logits : torch::Tensor(),
+                          inputs.spec_cap_gpu});
 }
 
 void Sampler::preprocessLogits(const SamplerInputs& inputs) {

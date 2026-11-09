@@ -14,9 +14,14 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "pybind11/pybind11.h"
+#include "pybind11/stl.h"
 #include <cstddef>
+#include <cstdlib>
+#include <cstring>
 #include <random>
 #include <memory>
+#include <map>
+#include <mutex>
 #endif
 
 using namespace std;
@@ -29,6 +34,59 @@ using SamplerT = float;
 
 namespace {
 
+bool samplingEnabled(bool rejection) {
+    const char* value = rejection ? std::getenv("RTP_LLM_USE_VLLM_REJECTION_SAMPLING") : nullptr;
+    if (value == nullptr) {
+        value = std::getenv("RTP_LLM_USE_GUMBEL_SAMPLING");
+    }
+    return value == nullptr || std::strcmp(value, "0") != 0;
+}
+
+struct SamplingRouteState {
+    bool    initialized  = false;
+    bool    ready        = false;
+    int64_t warmed_vocab = 0;
+};
+
+bool samplingRuntimeReady(bool rejection, int64_t vocab_size = 0) {
+    if (!Py_IsInitialized() || !samplingEnabled(rejection)) {
+        return false;
+    }
+    pybind11::gil_scoped_acquire                              gil;
+    static std::mutex                                         mutex;
+    static std::map<std::pair<int, bool>, SamplingRouteState> states;
+    std::unique_lock<std::mutex>                              guard(mutex, std::defer_lock);
+    {
+        pybind11::gil_scoped_release release;
+        guard.lock();
+    }
+    auto& state = states[{at::cuda::current_device(), rejection}];
+    if (!state.initialized || (state.ready && vocab_size > 0 && vocab_size != state.warmed_vocab)) {
+        const int64_t requested_vocab = vocab_size > 0 ? vocab_size : 8193;
+        std::string   failure;
+        try {
+            failure = pybind11::module_::import("rtp_llm.models_py.sampling.runtime")
+                          .attr("warmup")(requested_vocab, rejection)
+                          .cast<std::string>();
+        } catch (pybind11::error_already_set& error) {
+            if (!error.matches(PyExc_ImportError)) {
+                throw;
+            }
+            failure = error.what();
+        }
+        state.ready       = failure.empty();
+        state.initialized = true;
+        if (state.ready) {
+            state.warmed_vocab = requested_vocab;
+        }
+        RTP_LLM_LOG_INFO("sampling route=%s backend=%s warmup=%s",
+                         rejection ? "mtp_rejection" : "ordinary_random",
+                         state.ready ? "vllm" : "legacy",
+                         state.ready ? "passed" : failure.c_str());
+    }
+    return state.ready;
+}
+
 // Cached handles to flashinfer.sampling Python entry points. The static
 // initialization is guarded by C++17 thread-safe statics + GIL, and the
 // caller must hold the GIL when invoking these helpers.
@@ -39,6 +97,18 @@ pybind11::object& pyTopKRenormFn() {
 
 pybind11::object& pyTopPRenormFn() {
     static pybind11::object fn = pybind11::module_::import("flashinfer.sampling").attr("top_p_renorm_probs");
+    return fn;
+}
+
+pybind11::object& pyGumbelSampleFn() {
+    static pybind11::object fn =
+        pybind11::module_::import("rtp_llm.models_py.sampling.adapter").attr("sample");
+    return fn;
+}
+
+pybind11::object& pyDeferredRejectionFn() {
+    static pybind11::object fn =
+        pybind11::module_::import("rtp_llm.models_py.sampling.adapter").attr("rejection_sample_logits");
     return fn;
 }
 
@@ -166,6 +236,10 @@ void processLogits(const GreedyParams&  params,
             auto output_ids_ptrs_gpu  = output_ids_ptrs.to(torch::kCUDA, true);
             auto sequence_lengths_gpu = params.sequence_lengths.to(torch::kCUDA, true);
 
+            if (params.sequence_lengths_are_token_counts) {
+                sequence_lengths_gpu = sequence_lengths_gpu - 1;
+            }
+
             tensorrt_llm::kernels::invokeBanRepeatNgram(params.logits.data_ptr<float>(),
                                                         (int32_t const**)(output_ids_ptrs_gpu.data_ptr()),
                                                         nullptr,  // finished_buf
@@ -194,6 +268,43 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
     // [batch_size, vocab_size] — compute softmax probabilities.
     // Copy result back to logits to preserve the in-place behavior of the original kernel,
     // since callers may reuse the logits tensor across iterations.
+    if (params.defer_token_sampling && Py_IsInitialized()) {
+        auto top_k = params.top_k.clone();
+        auto top_p = params.top_p.clone();
+        auto k     = top_k.data_ptr<int32_t>();
+        auto p     = top_p.data_ptr<float>();
+        for (int64_t row = 0; row < batch_size; ++row) {
+            if (k[row] == 1) {
+                k[row] = 0;
+                p[row] = 1.0f;
+            }
+        }
+        std::transform(p, p + batch_size, p, [](float value) { return std::abs(value) < 1e-7f ? 1.0f : value; });
+        const auto vocab = params.logits.size(1);
+        const bool no_k =
+            std::all_of(k, k + batch_size, [vocab](int32_t value) { return value <= 0 || value >= vocab; });
+        const bool no_p = std::all_of(p, p + batch_size, [](float value) { return std::abs(value - 1.0f) < 1e-7f; });
+        if (no_k && no_p) {
+            return GreedyOutput{torch::Tensor(), true};
+        }
+        auto probs_t = torch::softmax(params.logits, -1);
+        auto output  = torch::empty_like(probs_t);
+        if (no_k) {
+            top_p_renorm_probs(probs_t, output, top_p, 1.0, (int64_t)cur_stream);
+        } else {
+            std::transform(k, k + batch_size, k, [](int32_t value) { return value <= 0 ? 1 << 30 : value; });
+            if (no_p) {
+                top_k_renorm_probs(probs_t, output, top_k, 0, (int64_t)cur_stream);
+            } else {
+                auto temporary = torch::empty_like(probs_t);
+                top_k_renorm_probs(probs_t, temporary, top_k, 0, (int64_t)cur_stream);
+                top_p_renorm_probs(temporary, output, top_p, 1.0, (int64_t)cur_stream);
+            }
+        }
+        params.logits.copy_(output.log(), true);
+        check_cuda_error();
+        return GreedyOutput{torch::Tensor(), true};
+    }
     const auto* requested_k  = params.top_k.data_ptr<int32_t>();
     const auto* requested_p  = params.top_p.data_ptr<float>();
     const bool  greedy_batch = std::all_of(requested_k, requested_k + batch_size, [](int32_t k) { return k == 1; });
@@ -425,6 +536,10 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         }
     }
 
+    if (params.defer_token_sampling && Py_IsInitialized()) {
+        return flashinferSampleGreedy(params, transposed_tokens);
+    }
+
     const auto* top_p_ptr = params.top_p.data_ptr<float>();
     if (params.use_optimized_sampling && std::any_of(top_p_ptr, top_p_ptr + batch_size, [](float p) {
             return !std::isfinite(p) || (p < 0 && std::abs(p) >= 1e-7f) || p > 1;
@@ -525,6 +640,37 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         return {success};
     }
 
+    // Ordinary categorical sampling needs only a token ID. Keep probability
+    // consumers (including stochastic speculative verification) and truncated
+    // distributions on the existing FlashInfer path.
+    const bool use_gumbel = samplingEnabled(false);
+    const auto vocab_size = params.logits.size(1);
+
+    const bool unfiltered =
+        std::all_of(top_k_ptr, top_k_ptr + batch_size, [vocab_size](auto k) {
+            return static_cast<int32_t>(k) <= 0 || k >= vocab_size;
+        })
+        && std::all_of(top_p_ptr, top_p_ptr + batch_size, [](float p) {
+               // top_p=0 is the existing RTP "no cutoff" convention.
+               return std::abs(p) < 1e-7f || std::abs(p - 1.0f) < 1e-7f;
+           });
+    if (use_gumbel && batch_size > 0 && unfiltered && !has_not_do_sample && !params.output_all_probs.has_value()
+        && !params.cum_log_probs.has_value() && !params.output_log_probs.has_value()
+        && params.logits.scalar_type() == torch::kFloat32 && params.logits.is_contiguous()
+        && samplingRuntimeReady(false)) {
+        auto samples = transposed_tokens.select(0, transposed_tokens.size(0) - 1);
+        // Reserve a fresh generator offset on every call, as for FlashInfer.
+        auto [seeds, offsets] = makeSamplingSeedOffsetTensors(params.generator, batch_size, 32, params.buffer_holder);
+        {
+            pybind11::gil_scoped_acquire gil;
+            auto selected = pyGumbelSampleFn()(params.logits, seeds, offsets).cast<torch::Tensor>();
+            samples.copy_(selected, true);
+        }
+        params.token_ids.copy_(transposed_tokens.transpose(0, 1).contiguous(), true);
+        check_cuda_error();
+        return GreedyOutput{};
+    }
+
     return flashinferSampleGreedy(params, transposed_tokens);
 }
 
@@ -542,6 +688,32 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
 }
 
 void rejectionSampling(const RejectionSamplingParams& params) {
+    if (params.deferred_token_sampling) {
+        TORCH_CHECK(Py_IsInitialized(), "deferred verification requires the Python Gumbel runtime");
+        const int64_t batch_size = params.target_logits_d.size(0);
+        const int64_t rows       = params.target_logits_d.size(1);
+        auto [seeds, positions]  = makeSamplingSeedOffsetTensors(
+            params.generator, batch_size, std::max<int64_t>(32, ((rows + 3) / 4) * 4), params.buffer_holder);
+        pybind11::gil_scoped_acquire gil;
+        pybind11::object draft = params.draft_point_mass ? pybind11::none() : pybind11::cast(params.draft_probs_d);
+        pybind11::object cap =
+            params.acceptance_cap.defined() ? pybind11::cast(params.acceptance_cap) : pybind11::none();
+        pybind11::object cumulative =
+            params.cum_log_probs.defined() ? pybind11::cast(params.cum_log_probs) : pybind11::none();
+        pyDeferredRejectionFn()(params.target_logits_d,
+                                draft,
+                                params.draft_token_ids_d,
+                                seeds,
+                                positions,
+                                params.do_sample_d,
+                                params.force_accept,
+                                cap,
+                                cumulative,
+                                params.output_token_ids_d,
+                                params.output_accepted_token_num_d);
+        check_cuda_error();
+        return;
+    }
     RTP_LLM_CHECK(params.draft_probs_d.is_cuda());
     RTP_LLM_CHECK(params.draft_token_ids_d.is_cuda());
     RTP_LLM_CHECK(params.target_probs_d.is_cuda());
@@ -997,5 +1169,21 @@ void mappingDraft2Target(const MappingDraft2TargetParams& params) {
 }
 
 #endif  // USING_CUDA
+
+bool supportsDeferredRejectionSampling() {
+#if USING_CUDA
+    return samplingRuntimeReady(true);
+#else
+    return false;
+#endif
+}
+
+void initializeSamplingRuntime(int64_t vocab_size) {
+#if USING_CUDA
+    const bool ordinary  = samplingRuntimeReady(false, vocab_size);
+    const bool rejection = samplingRuntimeReady(true, vocab_size);
+    RTP_LLM_LOG_INFO("sampling selection ordinary_vllm=%d rejection_vllm=%d", ordinary, rejection);
+#endif
+}
 
 }  // namespace rtp_llm

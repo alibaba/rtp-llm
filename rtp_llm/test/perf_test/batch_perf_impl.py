@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -8,6 +9,8 @@ from typing import Any, Dict, List, Optional, Union
 import requests
 
 from rtp_llm.test.perf_test.dataclass import (
+    E2ECohortMetrics,
+    E2ERequestMetrics,
     ResponseInfo,
     TestResultMetrics,
     analyze_results,
@@ -49,6 +52,11 @@ def _curl_server_single_worker(
         if "top_p" in generate_config:
             req["top_p"] = generate_config["top_p"]
 
+    if os.environ.get(
+        "PERF_USE_BATCH_DECODE_SCHEDULER", "1"
+    ) == "0" and "force_sp_accept" not in (generate_config or {}):
+        req["generate_config"]["force_sp_accept"] = False
+
     if "top_k" not in req:
         req["top_k"] = 1
 
@@ -61,18 +69,45 @@ def _curl_server_single_worker(
         if profile_trace_name:
             req["profile_trace_name"] = profile_trace_name
             req["generate_config"]["profile_trace_name"] = profile_trace_name
+    measure_e2e = os.environ.get("PERF_MEASURE_E2E", "0") == "1"
+    started = time.perf_counter() if measure_e2e else 0.0
+    result = ResponseInfo({}, False)
     try:
         response = requests.post(
             f"http://127.0.0.1:{base_port}", json=req, timeout=wait_time
         )
         if response.status_code != 200:
             logging.warning(f"request failed: {response.content}")
-            return ResponseInfo({}, False)
-        logging.debug(response.text)
-        return ResponseInfo(response.json())
+        else:
+            logging.debug(response.text)
+            response_data = response.json()
+            result = ResponseInfo(response_data)
+            if measure_e2e and (
+                not isinstance(result.output_len, int)
+                or isinstance(result.output_len, bool)
+                or result.output_len <= 0
+            ):
+                raise ValueError(
+                    "E2E response must report a positive output token count"
+                )
+            if measure_e2e and response_data.get("response") is not None:
+                result.response_sha256 = hashlib.sha256(
+                    json.dumps(
+                        response_data["response"],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
     except Exception as e:
         logging.warning(f" request exception: {e}")
-        return ResponseInfo({}, False)
+        result = ResponseInfo({}, False)
+    if measure_e2e:
+        result.wall_seconds = time.perf_counter() - started
+        result.input_query_sha256 = hashlib.sha256(
+            input_query.encode("utf-8")
+        ).hexdigest()
+    return result
 
 
 def _curl_server_batch_worker(
@@ -252,7 +287,7 @@ class BatchPerfImpl(object):
                 json={
                     "gen_timeline": True,
                     "trace_name": self.profile_trace_name or "perf_prearm",
-                    "start_step": 0,
+                    "start_step": int(os.environ.get("PERF_PROFILE_START_STEP", "0")),
                     "num_steps": num_steps,
                     "enable_all_rank": True,
                 },
@@ -280,11 +315,38 @@ class BatchPerfImpl(object):
             _ = self._curl_server(input_queries=self._next_input_queries())
 
         all_measure_responses: List[ResponseInfo] = []
+        e2e_cohorts: List[E2ECohortMetrics] = []
+        measure_e2e = os.environ.get("PERF_MEASURE_E2E", "0") == "1"
         for i in range(self.measure_runs):
             self._seed_reuse_cache()
-            responses = self._curl_server_responses(
-                input_queries=self._next_input_queries()
-            )
+            input_queries = self._next_input_queries()
+            started = time.perf_counter() if measure_e2e else 0.0
+            responses = self._curl_server_responses(input_queries=input_queries)
+            if measure_e2e:
+                wall_seconds = time.perf_counter() - started
+                output_tokens = sum(r.output_len for r in responses if r.success)
+                cohort = E2ECohortMetrics(
+                    wall_seconds=wall_seconds,
+                    output_tokens=output_tokens,
+                    output_tokens_per_second=output_tokens / wall_seconds,
+                    requests=[
+                        E2ERequestMetrics(
+                            success=r.success,
+                            wall_seconds=r.wall_seconds,
+                            input_tokens=r.input_len,
+                            output_tokens=r.output_len,
+                            input_query_sha256=r.input_query_sha256,
+                            response_sha256=r.response_sha256,
+                            speculative_verify_rounds=r.speculative_verify_rounds,
+                            speculative_accepted_token_num=r.speculative_accepted_token_num,
+                            speculative_proposed_draft_tokens=r.speculative_proposed_draft_tokens,
+                        )
+                        for r in responses
+                    ],
+                )
+                e2e_cohorts.append(cohort)
+                logging.info("[PERF_E2E_COHORT] %s", cohort)
+
             metric = analyze_results(responses)
             self._validate_reuse_metric(metric)
             logging.info(
@@ -304,6 +366,7 @@ class BatchPerfImpl(object):
             )
             all_measure_responses.extend(responses)
         results = analyze_results(all_measure_responses)
+        results.e2e_cohorts = e2e_cohorts
         self._validate_reuse_metric(results)
 
         if self.profile and self.profile_runs > 0:
@@ -324,6 +387,8 @@ class BatchPerfImpl(object):
         return results
 
     def _set_concurrency(self):
+        if os.environ.get("PERF_USE_BATCH_DECODE_SCHEDULER", "1") == "0":
+            return
         check_with_info(
             self.batch_size % self.dp_size == 0,
             f"concurrency {self.batch_size} must be divisible by dp_size {self.dp_size}",
@@ -392,7 +457,10 @@ class BatchPerfImpl(object):
         for future in futures:
             all_responses.extend(future.result())
 
-        if os.environ.get("PERF_REQUIRE_ALL_REQUESTS_SUCCESS", "0") == "1":
+        if (
+            os.environ.get("PERF_REQUIRE_ALL_REQUESTS_SUCCESS", "0") == "1"
+            or os.environ.get("PERF_USE_BATCH_DECODE_SCHEDULER", "1") == "0"
+        ):
             successes = sum(response.success for response in all_responses)
             check_with_info(
                 len(all_responses) == self.batch_size and successes == self.batch_size,

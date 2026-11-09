@@ -344,10 +344,13 @@ struct GreedyParams {
     bool                         use_optimized_sampling = true;
     std::optional<torch::Tensor> output_all_probs_indices;
     bool                         skip_logits_probs_restore = false;
+    bool                       defer_token_sampling              = false;
+    bool                       sequence_lengths_are_token_counts = false;
 };
 
 struct GreedyOutput {
     torch::Tensor success;
+    bool          deferred_token_sampling = false;
 };
 
 struct BeamSearchParams {
@@ -421,6 +424,14 @@ struct RejectionSamplingParams {
     torch::Tensor output_token_ids_d;
     torch::Tensor output_accepted_token_num_d;
     torch::Tensor do_sample_d;
+    bool                       deferred_token_sampling = false;
+    bool                       draft_point_mass        = false;
+    std::vector<at::Generator> generator;
+    TensorHolder*              buffer_holder   = nullptr;
+    torch::Tensor              target_logits_d = {};
+    torch::Tensor              acceptance_cap  = {};
+    std::vector<bool>          force_accept    = {};
+    torch::Tensor              cum_log_probs   = {};
 };
 
 struct MappingDraft2TargetParams {

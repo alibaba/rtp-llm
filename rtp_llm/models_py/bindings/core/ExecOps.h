@@ -18,6 +18,9 @@
 
 namespace rtp_llm {
 
+bool supportsDeferredRejectionSampling();
+void initializeSamplingRuntime(int64_t vocab_size);
+
 class CacheStore;
 
 // ===================================================================

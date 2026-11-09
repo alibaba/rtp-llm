@@ -1,6 +1,6 @@
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -8,6 +8,12 @@ from prettytable import PrettyTable
 
 
 class ResponseInfo:
+    input_query_sha256: Optional[str] = None
+    response_sha256: Optional[str] = None
+    speculative_verify_rounds: Optional[int] = None
+    speculative_accepted_token_num: Optional[int] = None
+    speculative_proposed_draft_tokens: Optional[int] = None
+    wall_seconds: float = 0.0
     success: bool = False
     input_len: int = 0
     output_len: int = 0
@@ -51,6 +57,13 @@ class ResponseInfo:
             return
         self.success = success
         aux_info = response.get("aux_info", {})
+        self.speculative_verify_rounds = aux_info.get("speculative_verify_rounds")
+        self.speculative_accepted_token_num = aux_info.get(
+            "speculative_accepted_token_num"
+        )
+        self.speculative_proposed_draft_tokens = aux_info.get(
+            "speculative_proposed_draft_tokens"
+        )
         self.input_len = aux_info.get("input_len", 0)
         self.output_len = aux_info.get("output_len", 0)
         self.wait_time = aux_info.get("wait_time", 0.0)
@@ -65,6 +78,27 @@ class ResponseInfo:
             aux_info.get("prefill_total_reuse_len", 0),
             aux_info.get("decode_total_reuse_len", 0),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class E2ERequestMetrics:
+    success: bool
+    wall_seconds: float
+    input_tokens: int
+    output_tokens: int
+    input_query_sha256: Optional[str] = None
+    response_sha256: Optional[str] = None
+    speculative_verify_rounds: Optional[int] = None
+    speculative_accepted_token_num: Optional[int] = None
+    speculative_proposed_draft_tokens: Optional[int] = None
+
+
+@dataclass(frozen=True, slots=True)
+class E2ECohortMetrics:
+    wall_seconds: float
+    output_tokens: int
+    output_tokens_per_second: float
+    requests: List[E2ERequestMetrics]
 
 
 @dataclass
@@ -87,6 +121,7 @@ class TestResultMetrics:
     avg_reuse_len: float = 0.0
     max_reuse_len: int = 0
     avg_reuse_hit_rate: float = 0.0
+    e2e_cohorts: List[E2ECohortMetrics] = field(default_factory=list)
 
 
 def analyze_results(responses: List[ResponseInfo]) -> TestResultMetrics:
@@ -176,6 +211,20 @@ class TableType(Enum):
     Decode = "decode"
 
 
+def _e2e_json(metrics: TestResultMetrics):
+    """Keep HTTP cohort throughput separate from engine decode TPOT."""
+    if not metrics.e2e_cohorts:
+        return {}
+    wall_seconds = sum(c.wall_seconds for c in metrics.e2e_cohorts)
+    output_tokens = sum(c.output_tokens for c in metrics.e2e_cohorts)
+    return {
+        "e2e_wall_seconds": wall_seconds,
+        "e2e_output_tokens": output_tokens,
+        "e2e_output_tokens_per_second": output_tokens / wall_seconds,
+        "e2e_cohorts": [asdict(c) for c in metrics.e2e_cohorts],
+    }
+
+
 def create_metrics_table(
     table_type: TableType,
     metrics_list: List[MetricState],
@@ -230,6 +279,7 @@ def create_metrics_table(
                     "avg_reuse_len": metrics.avg_reuse_len,
                     "max_reuse_len": metrics.max_reuse_len,
                     "avg_reuse_hit_rate": metrics.avg_reuse_hit_rate,
+                    **_e2e_json(metrics),
                 }
             )
         else:
@@ -294,6 +344,7 @@ def create_distribution_metrics_table(
                     "avg_decode_time_per_token": m.avg_decode_time,
                     "max_decode_time_per_token": m.max_decode_time,
                     "avg_wait_time": m.avg_wait_time,
+                    **_e2e_json(m),
                 }
             )
         else:

@@ -14,6 +14,7 @@ typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
 struct SamplerInitParams {
     std::string model_type;
+    int64_t vocab_size = 8193;
 };
 
 enum class LogitsProcessorPhase {
@@ -87,6 +88,7 @@ public:
     mutable torch::Tensor              all_probs_indices;
     bool                               allow_compact_target_probs = false;
     bool                               skip_logits_probs_restore  = false;
+    bool                               defer_token_sampling = false;
 };
 
 struct SamplerOutput {
@@ -102,6 +104,9 @@ public:
     // probability tensor is required when this explicit representation is set.
     bool draft_point_mass = false;
     torch::Tensor all_probs_indices;
+    bool          deferred_token_sampling = false;
+    torch::Tensor verify_logits           = {};
+    torch::Tensor acceptance_cap          = {};
 };
 
 struct MergedOutput {

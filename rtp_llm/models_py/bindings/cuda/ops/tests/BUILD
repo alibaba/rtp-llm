@@ -55,7 +55,7 @@ cc_test(
     srcs = [
         "CudaSamplerTest.cc",
     ],
-    data = [],
+    data = ["//rtp_llm/models_py/sampling:sampling"],
     copts = copts(),
     deps = test_deps + [
         "//3rdparty/flashinfer:flashinfer",

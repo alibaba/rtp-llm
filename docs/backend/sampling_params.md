@@ -49,6 +49,20 @@ The raw protocol specifies sampling parameters through **generate_config**. Exam
 
 ## Advanced Control Parameters
 
+### CUDA categorical sampling backend
+
+Ordinary random sampling uses logits-domain Gumbel-max by default when there is
+no TopK/TopP truncation and no probability output is requested. Temperature and
+penalties are applied before sampling. This preserves the categorical distribution,
+but a fixed seed can produce different tokens from the previous backend.
+
+Requests requiring full probabilities,
+log probabilities, truncated sampling, or mixed `do_sample` values retain the existing
+backend. Greedy sampling retains its argmax path. Set
+`RTP_LLM_USE_GUMBEL_SAMPLING=0` before starting the service to use the previous
+random sampling backend. Sampling throughput depends on the batch and vocabulary
+size; this switch does not change request sampling parameters.
+
 | Parameter Name         | Function Description                                                     |
 |------------------------|--------------------------------------------------------------------------|
 | repetition_penalty     | Repetition suppression factor:<br>→ >1.0 suppresses repetition<br>→ <1.0 encourages repetition |default = 1.0 |
@@ -149,3 +163,59 @@ export FORCE_STOP_WORDS=false  # union of environment variables, model defaults,
 4. **Streaming Output Limitations**
    - Need to enable `yield_generator=True` simultaneously
    - `return_logits` only returns complete data in non-streaming mode
+
+### Deferred random MTP verification
+
+On CUDA with FP32 logits, MTP verification uses the vLLM V2 rejection kernels.
+After RTP applies logits processors, penalties and temperature, the verifier
+computes blockwise normalization statistics and checks the draft prefix. It draws
+only the first rejected token from the residual distribution, or one bonus token
+when the entire prefix is accepted. It does not sample every verification row.
+Unfiltered verification does not materialize target softmax probabilities.
+TopK/TopP filtering retains RTP's renormalization helpers, using temporary
+probabilities and returning filtered logits to the verifier.
+
+Dense draft probabilities are read directly by the verifier and converted to log
+values inside its kernels, without a full temporary log-probability tensor.
+Set `RTP_LLM_FUSE_DRAFT_PROBS_LOG=0` to restore the materialized conversion for
+comparison or rollback; the default is enabled. This switch is independent of
+adaptive verification and does not modify the caller's probabilities. Unsupported
+input dtypes retain materialized conversion. Point-mass drafts need no dense
+draft tensor. Random, greedy and mixed batches are supported.
+Forced acceptance uses synthetic acceptance rates. A speculative acceptance cap
+inserts an invalid draft placeholder so the capped position samples the target
+directly. Invalid output tails are initialized before RTP's existing cleanup.
+
+The route requires the Python sampling runtime. Set the following environment
+variables before starting the service (only the literal value `0` disables):
+
+| Ordinary Gumbel | MTP V2 rejection | Environment |
+|---|---|---|
+| Off | Off | `RTP_LLM_USE_GUMBEL_SAMPLING=0 RTP_LLM_USE_VLLM_REJECTION_SAMPLING=0` |
+| Off | On | `RTP_LLM_USE_GUMBEL_SAMPLING=0 RTP_LLM_USE_VLLM_REJECTION_SAMPLING=1` |
+| On | Off | `RTP_LLM_USE_GUMBEL_SAMPLING=1 RTP_LLM_USE_VLLM_REJECTION_SAMPLING=0` |
+| On | On | `RTP_LLM_USE_GUMBEL_SAMPLING=1 RTP_LLM_USE_VLLM_REJECTION_SAMPLING=1` |
+
+When the rejection variable is absent it inherits the ordinary variable, preserving
+the existing disable-all switch. Both routes default to enabled. Each enabled route
+prewarms at startup for the model vocabulary. Dependency/import or Triton compiler
+failures select the legacy backend for that route and are logged. This is startup
+selection, not retry after a request has consumed RNG or modified logits. CUDA
+execution failures propagate. Other backends and unavailable Python runtimes
+retain the existing path. Temperature remains before RTP penalties. Seeds remain reproducible within the selected route;
+switching routes changes random-number consumption and does not preserve exact
+generated text. RTP reserves generator offsets rather than using vLLM absolute
+token positions. Optional vLLM block verification, FLy and watermarking are not
+exposed as RTP request options by this integration.
+
+HY4 uses the same deferred verification route as GLM5 when V2 rejection is
+enabled. Its point-mass draft tokens do not require dense draft probabilities.
+On this route, filtering follows the request's TopK/TopP parameters; the legacy
+HY4 forced candidate limit is not applied implicitly.
+
+To select HY4's alternative compact probability verifier, set
+`RTP_LLM_USE_VLLM_REJECTION_SAMPLING=0`. The HY4 sampler then uses its existing
+compact candidate eligibility checks and `RTP_LLM_HY4_FORCE_TOPK` (default 4096).
+Setting that limit to `0` disables forced truncation. A forced limit can change
+the sampling distribution, so comparisons of backend correctness must use the
+same candidate policy. Ordinary sampling has its own independent switch above.

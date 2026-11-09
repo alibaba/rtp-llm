@@ -60,6 +60,7 @@ py_library(
         ":utils",
         ":optimization_settings",
         ":tile_kernels_mhc",
+        "//rtp_llm/models_py/sampling:sampling",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",

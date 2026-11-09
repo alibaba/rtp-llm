@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <limits>
 
 namespace rtp_llm {
 namespace {
@@ -757,7 +758,9 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                                                 const GptModelInputs&                       model_inputs,
                                                 const GptModelOutputs&                      model_output,
                                                 const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
-                                                bool compact_target_capable) const {
+                                                bool compact_target_capable,
+                                                const torch::Tensor& draft_token_ids,
+                                                bool allow_deferred_sampling) const {
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
     (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
@@ -785,6 +788,25 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         sampler_inputs.spec_propose_step        = propose_step_;
     }
 
+    const bool needs_draft_history =
+        propose_step_ > 0 && std::any_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+            const auto& config = *stream->generateConfig();
+            return config.do_sample
+                   && (config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f
+                       || config.frequency_penalty != 0.0f || config.no_repeat_ngram_size.value_or(0) > 0);
+        });
+    torch::Tensor suffix_positions;
+    torch::Tensor source_rows;
+    if (needs_draft_history) {
+        RTP_LLM_CHECK_WITH_INFO(draft_token_ids.defined() && draft_token_ids.dim() == 2
+                                    && draft_token_ids.size(0) == static_cast<int64_t>(stream_groups.size())
+                                    && draft_token_ids.size(1) == static_cast<int64_t>(propose_step_),
+                                "MTP history penalties require the current batch draft token IDs");
+        auto options = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
+        suffix_positions =
+            torch::empty({static_cast<int64_t>(total_batch_size), static_cast<int64_t>(propose_step_)}, options);
+        source_rows = torch::empty({static_cast<int64_t>(total_batch_size)}, options);
+    }
     int64_t batch_idx = 0;
     for (auto& stream : all_streams) {
         auto complete_token_ids = stream->completeTokenIds();
@@ -792,22 +814,57 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
         copyScoreSamplerTokenIds(
             sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
+        for (int64_t position = 0; position < static_cast<int64_t>(score_len); ++position) {
+            const int64_t row                                        = batch_idx + position;
+            sampler_inputs.sequence_lengths.data_ptr<int32_t>()[row] = seq_len + position;
+            if (needs_draft_history) {
+                source_rows.data_ptr<int64_t>()[row] = batch_idx / score_len;
+                auto begin                           = suffix_positions.data_ptr<int64_t>() + row * propose_step_;
+                std::iota(begin, begin + propose_step_, seq_len);
+            }
+        }
         batch_idx += static_cast<int64_t>(score_len);
         RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
                           stream->streamLogTag().c_str(),
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
     }
 
+    if (needs_draft_history) {
+        auto device              = model_output.logits.device();
+        auto drafts              = draft_token_ids.to(device, torch::kInt32, true);
+        sampler_inputs.token_ids = sampler_inputs.token_ids.to(device, true);
+        sampler_inputs.token_ids.scatter_(
+            1, suffix_positions.to(device, true), drafts.index_select(0, source_rows.to(device, true)));
+    }
+
     auto vocab_size           = (size_t)model_output.logits.size(1);
-    sampler_inputs.vocab_size                 = vocab_size;
-    sampler_inputs.allow_compact_target_probs = return_all_probs && compact_target_capable;
-    sampler_inputs.skip_logits_probs_restore  = true;
-    if (return_all_probs && !compact_target_capable) {
+    sampler_inputs.vocab_size = vocab_size;
+    sampler_inputs.logits     = model_output.logits.clone();
+
+#if USING_CUDA
+    sampler_inputs.defer_token_sampling =
+        allow_deferred_sampling && supportsDeferredRejectionSampling()
+        && sampler_inputs.logits.scalar_type() == torch::kFloat32;
+#endif
+    sampler_inputs.allow_compact_target_probs =
+        return_all_probs && compact_target_capable && !sampler_inputs.defer_token_sampling;
+    sampler_inputs.skip_logits_probs_restore = true;
+    if (return_all_probs && !compact_target_capable && !sampler_inputs.defer_token_sampling) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     }
-
-    sampler_inputs.logits = model_output.logits.clone();
+    if (sampler_inputs.defer_token_sampling) {
+        int64_t row = 0;
+        for (const auto& stream : all_streams) {
+            const int64_t real_vocab = stream->vocabSize();
+            if (real_vocab > 0 && real_vocab < sampler_inputs.logits.size(1)) {
+                sampler_inputs.logits.narrow(0, row, score_len)
+                    .narrow(1, real_vocab, sampler_inputs.logits.size(1) - real_vocab)
+                    .fill_(-std::numeric_limits<float>::infinity());
+            }
+            row += score_len;
+        }
+    }
 
     // TODO(async): debug formatting is CPU-only. Keep the .cpu() explicit
     // and do not route this through the model-input fast path.

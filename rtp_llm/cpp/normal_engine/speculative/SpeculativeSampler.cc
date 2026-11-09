@@ -144,7 +144,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     auto target_token_ids = target_sampler_output.token_ids;
 
     auto draft_token_probs  = draft_sampler_output.all_probs;
-    auto target_token_probs = target_sampler_output.all_probs;
+    auto target_token_probs = target_sampler_output.deferred_token_sampling ? target_sampler_output.verify_logits :
+                                                                              target_sampler_output.all_probs;
     const auto& target_candidate_ids = target_sampler_output.all_probs_indices;
     if (target_candidate_ids.defined()) {
         RTP_LLM_CHECK(draft_sampler_output.draft_point_mass);
@@ -168,7 +169,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     [[maybe_unused]] bool all_greedy = true;
     [[maybe_unused]] bool has_forced_accept = false;
     for (const GenerateStreamPtr& stream : streams) {
-        const bool sample                      = !stream->generateConfig()->top1();
+        const auto& config                     = *stream->generateConfig();
+        const bool  sample                     = config.do_sample && config.top_k != 1;
         do_sample.data_ptr<bool>()[stream_idx] = sample;
         all_greedy                             = all_greedy && !sample;
         has_forced_accept                      = has_forced_accept || stream->forceSpAccept();
@@ -178,7 +180,10 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     auto do_sample_d = do_sample.to(target_device, true);
 
     auto          rand_options      = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
-    torch::Tensor uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
+    torch::Tensor uniform_samples_d;
+    if (!target_sampler_output.deferred_token_sampling) {
+        uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
+    }
 
     // Override per-stream uniform samples with seeded generator when random_seed is set,
     // ensuring deterministic acceptance for reproducible iter_count.
@@ -186,7 +191,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         int idx = 0;
         for (const auto& stream : streams) {
             auto gen = stream->getGenerator();
-            if (gen.defined()) {
+            if (gen.defined() && !target_sampler_output.deferred_token_sampling) {
                 uniform_samples_d[idx] = torch::rand({(long)propose_step_ + 1}, gen, std::nullopt, rand_options);
             }
             idx++;
@@ -237,16 +242,38 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     {
         RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.execRejectionSampling");
 #if USING_CUDA
-        if (mtpFusionEnabled() && draft_sampler_output.draft_point_mass && all_greedy && !has_forced_accept) {
+        if (target_sampler_output.deferred_token_sampling) {
+            std::vector<at::Generator> generators;
+            std::vector<bool>          force_accept;
+            for (const auto& stream : streams) {
+                generators.push_back(stream->getGenerator());
+                force_accept.push_back(stream->forceSpAccept());
+            }
+            execRejectionSampling({draft_token_probs_d_t,
+                                   draft_token_ids_d_t,
+                                   uniform_samples_d,
+                                   torch::Tensor(),
+                                   target_token_ids_d_t,
+                                   output_token_ids_d,
+                                   output_accepted_token_num_d,
+                                   do_sample_d,
+                                   true,
+                                   draft_sampler_output.draft_point_mass,
+                                   generators,
+                                   &buffer_holder_,
+                                   target_token_probs_d_t,
+                                   target_sampler_output.acceptance_cap,
+                                   force_accept,
+                                   target_sampler_output.cum_log_probs});
+        } else if (mtpFusionEnabled() && draft_sampler_output.draft_point_mass && all_greedy && !has_forced_accept) {
             greedy_finalized = tryMtpGreedyFinalize(draft_token_ids_d_t, target_token_ids_d_t,
                                                    output_token_ids_d, output_accepted_token_num_d,
                                                    sample_output.accept_metric_rows,
                                                    sample_output.accept_metric_total,
                                                    cuda_graph::graphGetCurrentStream().stream());
         }
-        if (greedy_finalized) {
-            // Uniform draws above are retained, preserving generator advancement.
-        } else if (draft_sampler_output.draft_point_mass) {
+        if (!target_sampler_output.deferred_token_sampling && !greedy_finalized
+            && draft_sampler_output.draft_point_mass) {
             RTP_LLM_CHECK(!draft_token_probs_d_t.defined());
             RTP_LLM_CHECK(target_token_probs_d_t.scalar_type() == torch::kFloat32
                           && target_token_probs_d_t.is_contiguous());
@@ -267,7 +294,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                               cuda_graph::graphGetCurrentStream().stream(),
                               target_candidate_ids.defined() ? target_candidate_ids.data_ptr<int32_t>() : nullptr)
                           == cudaSuccess);
-        } else
+        } else if (!target_sampler_output.deferred_token_sampling && !greedy_finalized)
 #endif
             execRejectionSampling({
                 draft_token_probs_d_t,
@@ -285,7 +312,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     // forceSpAccept: override rejection sampling results for streams that requested
     // forced acceptance — accept all draft tokens plus the target bonus token.
-    {
+    if (!target_sampler_output.deferred_token_sampling) {
         bool has_force = false;
         if (mtpFusionEnabled()) {
             has_force =
@@ -337,7 +364,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
 
-    if (debugMtpAcceptEnabled()) {
+    if (debugMtpAcceptEnabled() && !target_sampler_output.deferred_token_sampling) {
         static std::atomic<int> log_budget{32};
         if (log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
             torch::Tensor target_sampled_ids_debug;

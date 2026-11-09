@@ -255,7 +255,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                        params.eplb_config);
     }
 
-    sampler_.reset(new Sampler(SamplerInitParams{params.model_config_.model_type}));
+    sampler_.reset(new Sampler(SamplerInitParams{params.model_config_.model_type, params.model_config_.vocab_size}));
 
     // CacheConfig is the single source of truth for tokens_per_block /
     // kernel_tokens_per_block. DSV4 promotes seq_size_per_block to a 256-token

@@ -463,6 +463,12 @@ void applySpecLogitsAcceptLenCap(const SamplerInputs&                   sampler_
     if (!sampler_input.spec_cap_gpu.defined()) {
         return;
     }
+    if (target_sampler_output.deferred_token_sampling) {
+        if (sampler_input.spec_mask_consumed_event) {
+            sampler_input.spec_mask_consumed_event->record(cuda_graph::graphGetCurrentStream());
+        }
+        return;
+    }
     RTP_LLM_CHECK_WITH_INFO(output.accept_len.defined() && output.accept_len.is_cuda(),
                             "spec logits cap requires CUDA accept_len");
 
@@ -1491,7 +1497,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              params.eplb_config);
     }
 
-    sampler_.reset(new Sampler(SamplerInitParams{params.model_config_.model_type}));
+    sampler_.reset(new Sampler(SamplerInitParams{params.model_config_.model_type, params.model_config_.vocab_size}));
 
     // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
     std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;
@@ -2510,19 +2516,33 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                                 model_output,
                                                                 *spec_logits_result,
                                                                 sampler_->optimizedSamplingEnabled()
-                                                                    && draft_sampler_output.draft_point_mass));
+                                                                    && draft_sampler_output.draft_point_mass,
+                                                                draft_sampler_output.token_ids));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
             sampler_output           = std::move(sampler_->forward(sampler_input));
-            sampler_output.all_probs = reshapeMtpTargetAllProbs(sampler_output.all_probs,
+            if (!sampler_output.deferred_token_sampling) {
+                sampler_output.all_probs = reshapeMtpTargetAllProbs(sampler_output.all_probs,
                                                                 static_cast<int64_t>(batch_size),
                                                                 static_cast<int64_t>(propose_step_ + 1),
                                                                 sampler_output.all_probs.size(-1));
-            if (sampler_output.all_probs_indices.defined()) {
-                sampler_output.all_probs_indices =
-                    sampler_output.all_probs_indices.reshape_as(sampler_output.all_probs);
+                if (sampler_output.all_probs_indices.defined()) {
+                    sampler_output.all_probs_indices =
+                        sampler_output.all_probs_indices.reshape_as(sampler_output.all_probs);
+                }
+            } else {
+                sampler_output.verify_logits =
+                    sampler_output.verify_logits.reshape({static_cast<int64_t>(batch_size),
+                                                          static_cast<int64_t>(propose_step_ + 1),
+                                                          sampler_input.logits.size(1)});
             }
 
             // rejection sampling
+            if (sampler_output.deferred_token_sampling && sampler_input.spec_cap_gpu.defined()) {
+                if (sampler_input.spec_mask_ready_event) {
+                    sampler_input.spec_mask_ready_event->block(cuda_graph::graphGetCurrentStream());
+                }
+                recordSpecTensorUseOnCurrentStream(sampler_input.spec_cap_gpu);
+            }
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
             applySpecLogitsAcceptLenCap(
                 sampler_input, sampler_output, speculative_sampler_output, batch_size, propose_step_);

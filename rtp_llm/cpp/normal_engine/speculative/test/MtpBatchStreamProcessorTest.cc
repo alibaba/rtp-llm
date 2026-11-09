@@ -1,8 +1,12 @@
 #include <chrono>
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <limits>
 #include <thread>
+#include <cstdlib>
+#include "pybind11/embed.h"
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
@@ -18,8 +22,11 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/models/Sampler.h"
+#include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
@@ -78,6 +85,20 @@ double benchmarkUs(Func&& func, int iterations) {
 
 class MtpBatchStreamProcessorTest: public DeviceTestBase {
 public:
+    void initializeSamplingPython() {
+        static auto interpreter = Py_IsInitialized() ? nullptr : std::make_unique<pybind11::scoped_interpreter>();
+        pybind11::exec(R"(
+import os
+import sys
+from pathlib import Path
+runfiles = Path(os.environ["TEST_SRCDIR"])
+sys.path[:0] = [str(runfiles), str(runfiles / os.environ["TEST_WORKSPACE"])] + [
+    str(path) for path in sorted(runfiles.glob("pip*/site-packages"))
+]
+import torch
+)");
+    }
+
     void setSpOutputTokens(const SpeculativeExecutorStreamOutputPtr& sp_output_buffer, const vector<int>& token_ids) {
         std::vector<int32_t> token_ids_i32(token_ids.begin(), token_ids.end());
         sp_output_buffer->tokens = torch::tensor(token_ids_i32, torch::TensorOptions().dtype(torch::kInt32))
@@ -1148,6 +1169,368 @@ TEST_F(MtpBatchStreamProcessorTest, DISABLED_benchmarkScoreTokenIdsTorchCopyVsMe
               << " torch_copy_us=" << torch_us << " speedup=" << (memcpy_us / torch_us) << std::endl;
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testDeferredTargetSamplingEligibility) {
+    const bool python_runtime = std::getenv("RTP_LLM_TEST_PYTHON_SAMPLING") != nullptr;
+    if (python_runtime) {
+        static pybind11::scoped_interpreter interpreter{};
+        pybind11::exec(R"(
+import os
+import sys
+from pathlib import Path
+runfiles = Path(os.environ["TEST_SRCDIR"])
+sys.path[:0] = [str(runfiles), str(runfiles / os.environ["TEST_WORKSPACE"])] + [
+    str(path) for path in sorted(runfiles.glob("pip*/site-packages"))
+]
+import torch
+)");
+        ASSERT_TRUE(supportsDeferredRejectionSampling());
+    }
+    ModelConfig model_config;
+    model_config.max_seq_len = 32;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 1;
+    RuntimeConfig   runtime_config;
+    ResourceContext resources;
+    auto            stream          = createContextStream(model_config, runtime_config, resources, {1}, 1);
+    stream->generateConfig()->top_k = 0;
+    stream->setScoreLen(2);
+    StreamGroups               streams({stream});
+    SpeculativeExecutionConfig spec_config;
+    spec_config.gen_num_per_cycle = 1;
+    CacheConfig cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig(), ProfilingDebugLoggingConfig(), cache_config, spec_config, false);
+    GptModelInputs  inputs;
+    GptModelOutputs outputs;
+    outputs.logits = torch::ones({2, 4}, torch::TensorOptions().device(torch::kCUDA));
+    auto prepare   = [&]() { return processor.gatherSpecSamplerInput(streams, inputs, outputs); };
+    auto random    = prepare();
+    ASSERT_TRUE(random.ok());
+    EXPECT_EQ(random.value().defer_token_sampling, supportsDeferredRejectionSampling());
+    stream->generateConfig()->force_sp_accept = true;
+    EXPECT_EQ(prepare().value().defer_token_sampling, supportsDeferredRejectionSampling());
+    stream->generateConfig()->force_sp_accept = false;
+    stream->generateConfig()->top_k           = 1;
+    EXPECT_EQ(prepare().value().defer_token_sampling, supportsDeferredRejectionSampling());
+    stream->generateConfig()->top_k = 0;
+    SpecLogitsVerifyRunner::LaunchResult cap;
+    cap.has_active_processor = true;
+    cap.spec_cap_gpu         = torch::zeros({1}, torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32));
+    auto capped              = processor.gatherSpecSamplerInput(streams, inputs, outputs, cap);
+    ASSERT_TRUE(capped.ok());
+    EXPECT_EQ(capped.value().defer_token_sampling, supportsDeferredRejectionSampling());
+    if (python_runtime) {
+        const auto cuda_i32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+        outputs.logits = torch::full({2, 6}, -std::numeric_limits<float>::infinity(), cuda_i32.dtype(torch::kFloat32));
+        outputs.logits[0][1] = 0;
+        outputs.logits[1][2] = 0;
+        outputs.logits.narrow(1, 4, 2).fill_(100);
+        Sampler                         sampler(SamplerInitParams{});
+        speculative::SpeculativeSampler verifier(torch::Tensor(), 1);
+        SamplerOutput                   draft;
+        draft.token_ids        = torch::zeros({1, 1}, cuda_i32);
+        draft.draft_point_mass = true;
+        for (bool greedy : {false, true}) {
+            stream->generateConfig()->top_k = greedy ? 1 : 0;
+            for (bool force : {false, true}) {
+                stream->generateConfig()->force_sp_accept = force;
+                for (int limit : {0, 1}) {
+                    cap.spec_cap_gpu.fill_(limit);
+                    auto gathered = processor.gatherSpecSamplerInput(streams, inputs, outputs, cap);
+                    ASSERT_TRUE(gathered.ok());
+                    EXPECT_FALSE(gathered.value().all_probs.defined());
+                    auto target = sampler.forward(gathered.value());
+                    ASSERT_TRUE(target.deferred_token_sampling);
+                    EXPECT_FALSE(target.all_probs.defined());
+                    target.verify_logits = target.verify_logits.reshape({1, 2, 6});
+                    auto accepted        = verifier.forward({stream}, draft, target);
+                    auto expected        = force && limit == 1 ? torch::tensor({{0, 2}}, torch::kInt32) :
+                                                                 torch::tensor({{1, 0}}, torch::kInt32);
+                    EXPECT_TRUE(torch::equal(accepted.accept_tokens.cpu(), expected));
+                    EXPECT_EQ(accepted.accept_len.cpu().item<int>(), force && limit == 1 ? 2 : 1);
+                }
+            }
+        }
+        const char*       current         = std::getenv("RTP_LLM_USE_GUMBEL_SAMPLING");
+        const std::string previous        = current ? current : "";
+        const char*       reject_current  = std::getenv("RTP_LLM_USE_VLLM_REJECTION_SAMPLING");
+        const std::string reject_previous = reject_current ? reject_current : "";
+        setenv("RTP_LLM_USE_GUMBEL_SAMPLING", "1", 1);
+        setenv("RTP_LLM_USE_VLLM_REJECTION_SAMPLING", "0", 1);
+        EXPECT_FALSE(prepare().value().defer_token_sampling);
+        setenv("RTP_LLM_USE_GUMBEL_SAMPLING", "0", 1);
+        setenv("RTP_LLM_USE_VLLM_REJECTION_SAMPLING", "1", 1);
+        EXPECT_TRUE(prepare().value().defer_token_sampling);
+        unsetenv("RTP_LLM_USE_VLLM_REJECTION_SAMPLING");
+        auto fallback = processor.gatherSpecSamplerInput(streams, inputs, outputs);
+        if (current) {
+            setenv("RTP_LLM_USE_GUMBEL_SAMPLING", previous.c_str(), 1);
+        } else {
+            unsetenv("RTP_LLM_USE_GUMBEL_SAMPLING");
+        }
+        if (reject_current) {
+            setenv("RTP_LLM_USE_VLLM_REJECTION_SAMPLING", reject_previous.c_str(), 1);
+        } else {
+            unsetenv("RTP_LLM_USE_VLLM_REJECTION_SAMPLING");
+        }
+        ASSERT_TRUE(fallback.ok());
+        EXPECT_FALSE(fallback.value().defer_token_sampling);
+        EXPECT_EQ(fallback.value().all_probs.sizes(), (torch::IntArrayRef{2, 6}));
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDoSampleFalseDeferredTargetSamplingEligibility) {
+    if (std::getenv("RTP_LLM_TEST_PYTHON_SAMPLING") == nullptr) {
+        GTEST_SKIP() << "Requires the deferred sampler Python runtime";
+    }
+    static auto interpreter = Py_IsInitialized() ? nullptr : std::make_unique<pybind11::scoped_interpreter>();
+    pybind11::exec(R"(
+import os
+import sys
+from pathlib import Path
+runfiles = Path(os.environ["TEST_SRCDIR"])
+sys.path[:0] = [str(runfiles), str(runfiles / os.environ["TEST_WORKSPACE"])] + [
+    str(path) for path in sorted(runfiles.glob("pip*/site-packages"))
+]
+import torch
+)");
+    ASSERT_TRUE(supportsDeferredRejectionSampling());
+    torch::manual_seed(12345);
+    ModelConfig model_config;
+    model_config.max_seq_len = 32;
+    model_config.vocab_size  = 3;
+    model_config.num_layers  = 1;
+    RuntimeConfig                runtime_config;
+    ResourceContext              resources;
+    std::list<GenerateStreamPtr> requests;
+    constexpr int64_t            batch = 32;
+    std::vector<int32_t>         proposal_ids;
+    for (int64_t row = 0; row < batch; ++row) {
+        auto stream = createContextStream(model_config, runtime_config, resources, {2}, row + 1);
+        stream->setScoreLen(2);
+        stream->generateConfig()->do_sample = row % 4 >= 2;
+        stream->generateConfig()->top_k     = row % 4 == 1 ? 3 : (row % 4 == 2 ? 1 : 0);
+        requests.push_back(stream);
+        proposal_ids.push_back((row / 4) % 2 == 0 ? 0 : 2);
+    }
+    StreamGroups               streams(requests);
+    SpeculativeExecutionConfig spec_config;
+    spec_config.gen_num_per_cycle = 1;
+    CacheConfig cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig(), ProfilingDebugLoggingConfig(), cache_config, spec_config, false);
+    Sampler                         sampler(SamplerInitParams{});
+    speculative::SpeculativeSampler verifier(torch::Tensor(), 1);
+    const auto                      cuda_i32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    SamplerOutput                   draft;
+    draft.token_ids        = torch::tensor(proposal_ids, torch::kInt32).to(cuda_i32).reshape({batch, 1});
+    draft.draft_point_mass = true;
+    GptModelInputs  inputs;
+    GptModelOutputs outputs;
+    outputs.logits = torch::tensor({6.0f, 3.0f, 1.0f, 1.0f, 6.0f, 3.0f}, torch::kFloat32)
+                         .log()
+                         .reshape({2, 3})
+                         .repeat({batch, 1})
+                         .to(torch::kCUDA);
+    SpecLogitsVerifyRunner::LaunchResult cap;
+    cap.has_active_processor = true;
+    cap.spec_cap_gpu         = torch::empty({batch}, cuda_i32);
+    for (bool force : {false, true}) {
+        for (auto& stream : requests) {
+            stream->generateConfig()->force_sp_accept = force;
+        }
+        for (int limit : {0, 1}) {
+            SCOPED_TRACE("force=" + std::to_string(force) + " cap=" + std::to_string(limit));
+            cap.spec_cap_gpu.fill_(limit);
+            auto gathered = processor.gatherSpecSamplerInput(streams, inputs, outputs, cap);
+            ASSERT_TRUE(gathered.ok());
+            auto target = sampler.forward(gathered.value());
+            ASSERT_TRUE(target.deferred_token_sampling);
+            target.verify_logits = target.verify_logits.reshape({batch, 2, 3});
+            auto accepted        = verifier.forward(requests, draft, target);
+            auto tokens          = toVec<int32_t>(accepted.accept_tokens);
+            auto lengths         = toVec<int32_t>(accepted.accept_len);
+            for (int64_t row = 0; row < batch; ++row) {
+                if (row % 4 == 3) {
+                    continue;
+                }
+                const bool accepts_draft = limit == 1 && (force || proposal_ids[row] == 0);
+                EXPECT_EQ(lengths[row], accepts_draft ? 2 : 1) << "row=" << row;
+                EXPECT_EQ(tokens[row * 2], accepts_draft ? proposal_ids[row] : 0) << "row=" << row;
+                EXPECT_EQ(tokens[row * 2 + 1], accepts_draft ? 1 : 0) << "row=" << row;
+            }
+        }
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDraftPrefixPenaltiesDeferredTargetSamplingEligibility) {
+    if (std::getenv("RTP_LLM_TEST_PYTHON_SAMPLING") != nullptr) {
+        initializeSamplingPython();
+    }
+    ModelConfig model_config;
+    model_config.max_seq_len = 32;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 1;
+    RuntimeConfig                       runtime_config;
+    ResourceContext                     resources;
+    const std::vector<std::vector<int>> histories{{0, 2}, {1}};
+    const std::vector<std::vector<int>> proposals{{1, 1, 2}, {2, 0, 2}};
+    std::list<GenerateStreamPtr>        requests;
+    for (int row = 0; row < 2; ++row) {
+        auto stream = createContextStream(model_config, runtime_config, resources, histories[row], row + 1);
+        stream->setScoreLen(4);
+        auto& config              = *stream->generateConfig();
+        config.do_sample          = true;
+        config.top_k              = 0;
+        config.top_p              = 1;
+        config.temperature        = 1;
+        config.repetition_penalty = 2;
+        config.presence_penalty   = 0.3f;
+        config.frequency_penalty  = 0.2f;
+        requests.push_back(stream);
+    }
+    StreamGroups               streams(requests);
+    SpeculativeExecutionConfig spec_config;
+    spec_config.gen_num_per_cycle = 3;
+    CacheConfig cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig(), ProfilingDebugLoggingConfig(), cache_config, spec_config, false);
+    GptModelInputs           inputs;
+    GptModelOutputs          outputs;
+    const std::vector<float> raw{4, 3, -2, 1};
+    outputs.logits = torch::tensor(raw).repeat({8, 1}).to(torch::kCUDA);
+    auto drafts    = torch::tensor({1, 1, 2, 2, 0, 2}, torch::kInt32).reshape({2, 3}).to(torch::kCUDA);
+    auto gathered  = processor.gatherSpecSamplerInput(streams, inputs, outputs, {}, false, drafts);
+    ASSERT_TRUE(gathered.ok());
+    auto& batch = gathered.value();
+    EXPECT_EQ(toVec<int32_t>(batch.sequence_lengths), (std::vector<int32_t>{2, 3, 4, 5, 1, 2, 3, 4}));
+    auto               token_rows = batch.token_ids.cpu();
+    std::vector<float> expected;
+    for (int request = 0; request < 2; ++request) {
+        for (int position = 0; position < 4; ++position) {
+            auto history = histories[request];
+            history.insert(history.end(), proposals[request].begin(), proposals[request].begin() + position);
+            EXPECT_EQ(toVec<int32_t>(token_rows[request * 4 + position].narrow(0, 0, history.size())),
+                      (std::vector<int32_t>(history.begin(), history.end())));
+            for (int token = 0; token < 4; ++token) {
+                const auto count = std::count(history.begin(), history.end(), token);
+                float      value = raw[token];
+                if (count > 0) {
+                    value = (value < 0 ? value * 2 : value / 2) - 0.3f - 0.2f * count;
+                }
+                expected.push_back(value);
+            }
+        }
+    }
+    Sampler sampler(SamplerInitParams{});
+    auto    target          = sampler.forward(batch);
+    auto    expected_logits = torch::tensor(expected).reshape({8, 4}).to(torch::kCUDA);
+    if (target.deferred_token_sampling) {
+        EXPECT_TRUE(torch::allclose(target.verify_logits, expected_logits, 1e-5, 1e-6));
+    } else {
+        EXPECT_TRUE(torch::allclose(target.all_probs, torch::softmax(expected_logits, -1), 1e-5, 1e-6));
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDraftPrefixNgramDeferredTargetSamplingEligibility) {
+    if (std::getenv("RTP_LLM_TEST_PYTHON_SAMPLING") != nullptr) {
+        initializeSamplingPython();
+    }
+    ModelConfig model_config;
+    model_config.max_seq_len = 32;
+    model_config.vocab_size  = 3;
+    model_config.num_layers  = 1;
+    RuntimeConfig   runtime_config;
+    ResourceContext resources;
+    auto            stream = createContextStream(model_config, runtime_config, resources, {0, 1, 0}, 1);
+    stream->setScoreLen(4);
+    stream->generateConfig()->top_k                = 0;
+    stream->generateConfig()->top_p                = 1;
+    stream->generateConfig()->temperature          = 1;
+    stream->generateConfig()->do_sample            = true;
+    stream->generateConfig()->no_repeat_ngram_size = 2;
+    StreamGroups               streams({stream});
+    SpeculativeExecutionConfig spec_config;
+    spec_config.gen_num_per_cycle = 3;
+    CacheConfig cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig(), ProfilingDebugLoggingConfig(), cache_config, spec_config, false);
+    GptModelInputs  inputs;
+    GptModelOutputs outputs;
+    outputs.logits = torch::tensor({2.0f, 1.0f, 0.0f}).repeat({4, 1}).to(torch::kCUDA);
+    auto drafts    = torch::tensor({1, 0, 1}, torch::kInt32).reshape({1, 3}).to(torch::kCUDA);
+    auto gathered  = processor.gatherSpecSamplerInput(streams, inputs, outputs, {}, false, drafts);
+    ASSERT_TRUE(gathered.ok());
+    Sampler sampler(SamplerInitParams{});
+    auto    target = sampler.forward(gathered.value());
+    auto    values = (target.deferred_token_sampling ? target.verify_logits : target.all_probs).cpu();
+    for (int row = 0; row < 4; ++row) {
+        const int   banned = row % 2 == 0 ? 1 : 0;
+        const float value  = values[row][banned].item<float>();
+        if (target.deferred_token_sampling) {
+            EXPECT_TRUE(std::isinf(value) && value < 0) << "row=" << row;
+        } else {
+            EXPECT_EQ(value, 0) << "row=" << row;
+        }
+        EXPECT_TRUE(torch::isfinite(values[row][2]).item<bool>());
+    }
+}
+
+#ifdef RTP_TEST_DEFERRED_SAMPLING
+TEST_F(MtpBatchStreamProcessorTest, testHy4DeferredTargetSamplingEligibility) {
+    initializeSamplingPython();
+    ModelConfig model_config;
+    model_config.model_type  = "hy_v4";
+    model_config.max_seq_len = 32;
+    model_config.vocab_size  = 8193;
+    model_config.num_layers  = 1;
+    RuntimeConfig runtime_config;
+    ResourceContext resources;
+    auto stream = createContextStream(model_config, runtime_config, resources, {0, 1}, 1);
+    stream->setScoreLen(4);
+    stream->generateConfig()->do_sample   = true;
+    stream->generateConfig()->top_k       = 0;
+    stream->generateConfig()->top_p       = 0.9f;
+    stream->generateConfig()->temperature = 1.0f;
+    StreamGroups streams({stream});
+    SpeculativeExecutionConfig spec_config;
+    spec_config.gen_num_per_cycle = 3;
+    CacheConfig cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig(), ProfilingDebugLoggingConfig(), cache_config, spec_config, false);
+    Sampler sampler(SamplerInitParams{"hy_v4", 8193});
+    ASSERT_TRUE(supportsDeferredRejectionSampling());
+    GptModelInputs inputs;
+    GptModelOutputs outputs;
+    outputs.logits = torch::linspace(-1, 1, 8193, torch::TensorOptions().device(torch::kCUDA)).repeat({4, 1});
+    auto drafts = torch::tensor({2, 3, 4}, torch::kInt32).reshape({1, 3}).to(torch::kCUDA);
+
+    auto current = processor.gatherSpecSamplerInput(streams, inputs, outputs, {}, true, drafts);
+    ASSERT_TRUE(current.ok());
+    EXPECT_TRUE(current->defer_token_sampling);
+    EXPECT_FALSE(current->allow_compact_target_probs);
+    auto target = sampler.forward(current.value());
+    EXPECT_TRUE(target.deferred_token_sampling);
+    EXPECT_EQ(target.verify_logits.size(1), 8193);
+    EXPECT_FALSE(target.all_probs.defined());
+    EXPECT_FALSE(target.all_probs_indices.defined());
+
+    auto fallback = processor.gatherSpecSamplerInput(streams, inputs, outputs, {}, true, drafts, false);
+    ASSERT_TRUE(fallback.ok());
+    EXPECT_FALSE(fallback->defer_token_sampling);
+    EXPECT_TRUE(fallback->allow_compact_target_probs);
+    auto legacy = sampler.forward(fallback.value());
+    EXPECT_FALSE(legacy.deferred_token_sampling);
+    EXPECT_EQ(legacy.all_probs.size(1), 4096);
+    EXPECT_EQ(legacy.all_probs_indices.sizes(), legacy.all_probs.sizes());
+}
+#endif
+
 TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTokenIds) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
@@ -1265,9 +1648,19 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputPreservesPaddedLog
     ASSERT_TRUE(sampler_inputs_status.ok());
     const auto& sampler_inputs = sampler_inputs_status.value();
     ASSERT_EQ(sampler_inputs.logits.sizes(), (torch::IntArrayRef{4, 8}));
-    ASSERT_EQ(sampler_inputs.all_probs.sizes(), (torch::IntArrayRef{4, 8}));
     EXPECT_TRUE(torch::equal(model_output.logits, original_logits));
-    EXPECT_TRUE(torch::equal(sampler_inputs.logits, original_logits));
+    if (sampler_inputs.defer_token_sampling) {
+        EXPECT_FALSE(sampler_inputs.all_probs.defined());
+        EXPECT_TRUE(torch::equal(sampler_inputs.logits.narrow(0, 0, 2).narrow(1, 0, 3),
+                                 original_logits.narrow(0, 0, 2).narrow(1, 0, 3)));
+        EXPECT_TRUE(torch::equal(sampler_inputs.logits.narrow(0, 2, 2).narrow(1, 0, 5),
+                                 original_logits.narrow(0, 2, 2).narrow(1, 0, 5)));
+        EXPECT_TRUE(torch::isneginf(sampler_inputs.logits.narrow(0, 0, 2).narrow(1, 3, 5)).all().item<bool>());
+        EXPECT_TRUE(torch::isneginf(sampler_inputs.logits.narrow(0, 2, 2).narrow(1, 5, 3)).all().item<bool>());
+    } else {
+        ASSERT_EQ(sampler_inputs.all_probs.sizes(), (torch::IntArrayRef{4, 8}));
+        EXPECT_TRUE(torch::equal(sampler_inputs.logits, original_logits));
+    }
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testSpecMaskExcludesPaddedSamplerLogitsWithoutLogprobs) {
