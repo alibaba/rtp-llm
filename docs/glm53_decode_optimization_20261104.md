@@ -47,6 +47,14 @@ KDA的形状dispatch覆盖T1～7、batch1/47/48/49/64/96和SM89/100/103，
 SM103测试仅模拟SM100的Python调度选择，实际编译仍用CUDA Runtime识别到的SM103；
 整机性能来自真实L20C/SM100。本轮验收的是MTP4，不保证换batch、卡型、MTP长度后仍有同样收益。
 
+## 11 月 9 日补充：KDA verify 的 T=2/6/8 快路径
+
+`GLM53_KDA_WIDE_VERIFY` 默认是 `1`；设为 `0` 后重启 Decode，只回退本次新增形状，保留已有 MTP4 和 B48 快路径。`GLM53_KDA_FAST_VERIFY=0` 仍关闭多 token verify 优化的总分派。
+
+新增路径限于 SM100、每卡 8–64 个请求、固定 T=2/6/8（MTP1/5/7）、H/HV=64、K/V=128、128-token page、FP32 K-first paged state、原地写回。使用可用的 block map 和 sequence lengths；不接管 ragged verify、无状态写回的 replay 或未验证的设备和布局。调度选择 BV16、单 warp、3 stages，保留现有显式 launch 配置。
+
+状态页、checkpoint 位置和写回语义保持不变；规约顺序会改变有限精度舍入。L20C 的 15 个算子对照中，13 组快约 1.33–2.03 倍，原有 B48×T2/T6 持平。端到端收益须按相同 batch、上下文和实际 MTP 接受数比较。不要从小上下文外推到容量不够的长上下文：MTP7 的 FP32 SSM checkpoint 池比 MTP4 大，本次调度改动不改变池的分配。
+
 ## 需要随部署匹配的参数
 
 这些参数保持显式配置，不把全局服务默认改成只适用于当前8卡集群的值。
