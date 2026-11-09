@@ -20,6 +20,14 @@ dsv4_sm100_py_test(
     deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py:tile_kernels_mhc"],
 )
 
+# Preserve the source deferred GLM53 post/pre transition separately from
+# initial-pre coverage, including owned inputs and changed-input graph replay.
+dsv4_sm100_py_test(
+    name = "test_glm53_mhc_fused_batch_invariance",
+    tags = ["manual"],
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py:tile_kernels_mhc"],
+)
+
 # CPU math and mocked transport tests still need the CUDA13 Python import
 # closure. Run them alongside GPU tests, with one isolated process per file.
 _CP_HELPER_TESTS = [
