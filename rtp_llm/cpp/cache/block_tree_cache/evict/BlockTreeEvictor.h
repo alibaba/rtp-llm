@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -135,6 +136,7 @@ private:
         std::array<bool, 3>                                   watermark_triggered{};
         std::array<WatermarkEvictionRound, 3>                 watermark_rounds{};
         std::unordered_map<TreeNode*, EvictionTimingSnapshot> pending_timings;
+        std::vector<std::chrono::steady_clock::time_point>    next_device_reclaim_log;
     };
 
     struct CandidateKey {
@@ -180,6 +182,10 @@ private:
                                                    EvictionBatchContext*  eviction_batch_context = nullptr,
                                                    VictimSelectionTrigger trigger = VictimSelectionTrigger::WATERMARK);
     bool canReclaimDeviceDrop(const TransferDescriptor& desc, EvictionBatchContext* eviction_batch_context) const;
+    void logZeroDeviceReclaimLocked(size_t group_set_id,
+                                    size_t member_group_id,
+                                    size_t required_blocks,
+                                    size_t rejected_candidates);
 
     // Direct DEVICE drops require the primary resource to be immediately reclaimable.
     // Non-FULL candidates additionally check every DEVICE resource in their drop plan.
