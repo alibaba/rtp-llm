@@ -33,7 +33,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_actual_owned_kv_lens,
     cp_padded_local_kv_lens,
 )
-from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
+from rtp_llm.models_py.modules.dsv4.fp8 import _glm53_indexer_cp_assembler as asm
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_q_indices,
@@ -813,7 +813,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         """CP: topk rows align with total_local_ids; req_id is precomputed_req_ids
         (= mla_params.batch_indice_d[total_global_ids]) so row i maps to the
         request id of the i-th GLOBAL q token. Returns [T, 1, topk]."""
-        from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
+        from rtp_llm.models_py.triton_kernels.sparse_mla.glm53_block_index_to_global import (
             triton_convert_req_index_to_global_index,
         )
 

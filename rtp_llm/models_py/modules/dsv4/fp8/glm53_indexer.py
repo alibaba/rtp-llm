@@ -42,7 +42,7 @@ from rtp_llm.models_py.modules.dsv4.forward_metadata import (
     score_workspace_budget,
     score_workspace_fits,
 )
-from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
+from rtp_llm.models_py.modules.dsv4.fp8._glm53_indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
@@ -61,7 +61,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.glm53_indexer_score import (
     has_fp8_mqa_logits,
     has_fp8_paged_mqa_logits,
 )
-from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.modules.dsv4.glm53_prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.indexer_grouping import completed_group_lengths_i32
 
 
@@ -783,7 +783,7 @@ class IndexerFP8(PoolBackedModule):
             )
             return
 
-        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
+        from rtp_llm.models_py.modules.dsv4.fp8 import _glm53_indexer_cp_assembler as asm
 
         plan = attention_inputs.indexer_cp_plan
         actual_cu = attention_inputs.indexer_cp_local_cu
@@ -1283,7 +1283,7 @@ class IndexerFP8(PoolBackedModule):
             and kv_eb > 0
             and T > 0
         ):
-            from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
+            from rtp_llm.models_py.modules.dsv4.fp8 import _glm53_indexer_cp_assembler as asm
 
             with record_function_range("dsv4.fp8.indexer.prepare.cp_gather_plan"):
                 cu = cu_kv_seqlens.to(torch.int64)

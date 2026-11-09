@@ -14,7 +14,7 @@ import torch
 import triton
 import triton.language as tl
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
-from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
+from rtp_llm.models_py.triton_kernels.glm53_kda.l2norm import l2norm_fwd
 from rtp_llm.models_py.triton_kernels.glm53_kda.chunk_fwd import chunk_kda_fwd
 
 _SUPPORTED_KDA_CHUNK_SIZES = (64, 128, 256)

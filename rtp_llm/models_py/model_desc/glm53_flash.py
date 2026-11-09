@@ -57,7 +57,7 @@ from rtp_llm.models_py.modules.glm53_mega_mhc import (
     fused_post_pre_rms,
 )
 from rtp_llm.models_py.modules.hybrid.glm53_mla_attention import MlaAttention
-from rtp_llm.models_py.triton_kernels.causal_conv1d import (
+from rtp_llm.models_py.triton_kernels.causal_conv1d.glm53_causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
     causal_conv1d_update,

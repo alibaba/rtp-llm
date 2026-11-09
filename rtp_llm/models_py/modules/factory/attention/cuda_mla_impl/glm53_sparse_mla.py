@@ -48,7 +48,7 @@ from rtp_llm.models_py.modules.indexer_grouping import (
 from rtp_llm.models_py.triton_kernels.common.strided_slice_copy import (
     strided_slice_copy_,
 )
-from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
+from rtp_llm.models_py.triton_kernels.sparse_mla.glm53_block_index_to_global import (
     triton_convert_req_index_to_global_index,
 )
 from rtp_llm.models_py.triton_kernels.sparse_mla.cache_view import (

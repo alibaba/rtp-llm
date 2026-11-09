@@ -15,7 +15,7 @@ from rtp_llm.models_py.modules.dsv4.forward_metadata import (
     metadata_cache,
     tensor_key,
 )
-from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
+from rtp_llm.models_py.triton_kernels.glm53_kda.l2norm import l2norm_fwd
 from rtp_llm.models_py.triton_kernels.glm53_kda.chunk_delta_h import (
     _sequence_boundaries,
 )
