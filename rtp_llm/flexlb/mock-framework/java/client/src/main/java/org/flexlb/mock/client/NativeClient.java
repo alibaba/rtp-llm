@@ -22,6 +22,7 @@ public final class NativeClient implements AutoCloseable {
     private final java.util.function.Consumer<ObjectNode> events;
     private final VitClient vision;
     private final long cacheKeySeed;
+    private final int prefillCpSize;
     private final Map<String, ManagedChannel> channels = new HashMap<>();
     private final Map<Long, Call> active = new HashMap<>();
     private final ScheduledThreadPoolExecutor timers = new ScheduledThreadPoolExecutor(1,
@@ -43,7 +44,11 @@ public final class NativeClient implements AutoCloseable {
         this(masters, events, imageToken, 0L);
     }
     NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events, int imageToken, long seed) {
+        this(masters, events, imageToken, seed, 1);
+    }
+    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events, int imageToken, long seed, int prefillCpSize) {
         cacheKeySeed = seed;
+        this.prefillCpSize = prefillCpSize;
         vision = new VitClient(imageToken);
         this.masters = Objects.requireNonNull(masters); this.events = Objects.requireNonNull(events);
         timers.setRemoveOnCancelPolicy(true);
@@ -51,6 +56,11 @@ public final class NativeClient implements AutoCloseable {
     private synchronized ManagedChannel channel(String target) {
         if (closed) throw new IllegalStateException("Client closed");
         return channels.computeIfAbsent(target, t -> ManagedChannelBuilder.forTarget(t).usePlaintext().build());
+    }
+
+    private List<Long> routingKeys(MediaInput.Prepared input, long baseBlockSize) {
+        if (baseBlockSize <= 0) return List.of();
+        return MediaInput.sequence(input, Math.toIntExact(baseBlockSize), cacheKeySeed, prefillCpSize).keys();
     }
 
     public Call send(FlexlbScheduleRequestPB request, Duration timeout) {
@@ -66,14 +76,19 @@ public final class NativeClient implements AutoCloseable {
                 || input.getGenerateConfig().getNumBeams() > 1 || input.getGenerateConfig().getNumReturnSequences() > 1)
             throw new IllegalArgumentException("Client currently requires matching single-sequence request metadata");
         if (input.getGenerateConfig().getTimeoutMs() > 0) budget = Math.min(budget, TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs()));
-        if (input.getMultimodalInputsCount() == 0 && request.getCacheKeyBlockSize() > 0)
-            request = request.toBuilder().clearBlockCacheKeys().addAllBlockCacheKeys(
-                MediaInput.sequence(MediaInput.text(input), Math.toIntExact(request.getCacheKeyBlockSize()), cacheKeySeed).keys()).build();
+        long baseBlockSize = request.getCacheKeyBlockSize();
+        if (baseBlockSize > 0) {
+            var routed = request.toBuilder().setCacheKeyBlockSize(Math.multiplyExact(Math.toIntExact(baseBlockSize), prefillCpSize));
+            if (input.getMultimodalInputsCount() == 0) {
+                routed.clearBlockCacheKeys().addAllBlockCacheKeys(routingKeys(MediaInput.text(input), baseBlockSize));
+            }
+            request = routed.build();
+        }
         Call call;
         synchronized (this) {
             if (closed || closing) throw new IllegalStateException("Client closed");
             if (active.containsKey(request.getRequestId())) throw new IllegalArgumentException("Active request_id already exists");
-            call = new Call(request, input, budget);
+            call = new Call(request, input, budget, baseBlockSize);
             events.accept(call.event("ISSUED").put("epoch_ms", Long.toString(call.sentAt.toEpochMilli())));
             active.put(request.getRequestId(), call);
         }
@@ -104,8 +119,10 @@ public final class NativeClient implements AutoCloseable {
         private int outputTokens, scheduleAttempt;
         private boolean pendingSchedule;
         private boolean terminal, finalFrame, scheduleStarted, routeRejected;
-        private Call(FlexlbScheduleRequestPB request, GenerateInputPB input, long budget) {
+        private final long baseBlockSize;
+        private Call(FlexlbScheduleRequestPB request, GenerateInputPB input, long budget, long baseBlockSize) {
             this.request = request; this.input = input;
+            this.baseBlockSize = baseBlockSize;
             routes = List.copyOf(masters.get());
             if (routes.size() > 2 || new HashSet<>(routes).size() != routes.size() || routes.stream().anyMatch(String::isBlank))
                 throw new IllegalArgumentException("Expected distinct primary and optional backup Master");
@@ -198,8 +215,8 @@ public final class NativeClient implements AutoCloseable {
                             if (terminal) return;
                             visionPrepared = true;
                             request = request.toBuilder().setGenerateInput(media.toByteString()).setSeqLen(prepared.input().getTokenIdsCount())
-                                .setSelectedVit(selected).clearBlockCacheKeys().addAllBlockCacheKeys(
-                                    request.getCacheKeyBlockSize() > 0 ? MediaInput.sequence(prepared, Math.toIntExact(request.getCacheKeyBlockSize()), cacheKeySeed).keys() : java.util.List.of()).build();
+                                .setSelectedVit(selected).clearBlockCacheKeys()
+                                .addAllBlockCacheKeys(routingKeys(prepared, baseBlockSize)).build();
                             schedule(0);
                         }
                     } catch (RuntimeException error) { fail(error); }

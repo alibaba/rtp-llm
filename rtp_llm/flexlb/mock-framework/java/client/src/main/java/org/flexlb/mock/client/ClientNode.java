@@ -17,6 +17,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     private final String id;
     private final int imageToken;
     private final int blockSize;
+    private final int prefillCpSize;
     private final long cacheKeySeed;
     private final Path topology, directory;
     private final ClientMetrics metrics = new ClientMetrics();
@@ -29,10 +30,11 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
     private volatile boolean closed;
 
     public ClientNode(String id, Path topology, Path directory) throws IOException {
-        this(id, topology, directory, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN, 0, 0L);
+        this(id, topology, directory, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN, 0, 0L, 1);
     }
-    private ClientNode(String id, Path topology, Path directory, int imageToken, int blockSize, long seed) throws IOException {
+    private ClientNode(String id, Path topology, Path directory, int imageToken, int blockSize, long seed, int prefillCpSize) throws IOException {
         this.imageToken = imageToken; this.blockSize = blockSize; this.cacheKeySeed = seed;
+        this.prefillCpSize = prefillCpSize;
         this.id = id; this.topology = topology; this.directory = directory;
         api = new ControlServer(new InetSocketAddress("127.0.0.1", 0)).route("client/start", Start.class, Ack.class, this::start)
             .route("client/stop", Empty.class, Summary.class, this::stop)
@@ -69,7 +71,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         Files.createDirectories(playback.getParent()); Files.createDirectory(playback);
         save(playback.resolve("plan.json"), args);
         if (worker != null) worker.close();
-        worker = new LoadClient(args, metrics, topology, playback.resolve("requests.jsonl"), id, imageToken, blockSize, cacheKeySeed);
+        worker = new LoadClient(args, metrics, topology, playback.resolve("requests.jsonl"), id, imageToken, blockSize, cacheKeySeed, prefillCpSize);
         workerSequence = args.sequence();
         return new Ack(true);
     }
@@ -213,7 +215,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         var config = JSON.readTree(Path.of(required("MOCK_CONFIG_FILE")).toFile());
         var settings = config.path("component").path("config");
         settings.fieldNames().forEachRemaining(name -> {
-            if (!java.util.Set.of("image_token_id", "cache_key_hash_seed", "seq_size_per_block").contains(name)) throw new IllegalArgumentException("Unknown Client setting: " + name);
+            if (!java.util.Set.of("image_token_id", "cache_key_hash_seed", "seq_size_per_block", "prefill_cp_size").contains(name)) throw new IllegalArgumentException("Unknown Client setting: " + name);
         });
         var configuredImageToken = settings.get("image_token_id");
         if (configuredImageToken != null && (!configuredImageToken.isIntegralNumber()
@@ -223,11 +225,19 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         int blockSize = settings.path("seq_size_per_block").asInt(0);
         if (settings.has("seq_size_per_block") && (!settings.path("seq_size_per_block").isIntegralNumber() || !settings.path("seq_size_per_block").canConvertToInt() || blockSize < 1))
             throw new IllegalArgumentException("Client seq_size_per_block must be positive int32");
+        var configuredCp = settings.get("prefill_cp_size");
+        if (configuredCp != null && (!configuredCp.isIntegralNumber() || !configuredCp.canConvertToInt() || configuredCp.intValue() < 0))
+            throw new IllegalArgumentException("Client prefill_cp_size must be nonnegative int32");
+        int prefillCpSize = Math.max(1, settings.path("prefill_cp_size").asInt(1));
+        if (prefillCpSize > 1 && blockSize == 0)
+            throw new IllegalArgumentException("Client prefill_cp_size requires seq_size_per_block");
+        int routeBlockSize = Math.multiplyExact(blockSize, prefillCpSize);
         long seed = org.flexlb.mock.protocol.ConfigInput.signedLong(settings, "cache_key_hash_seed", 0);
         var directory = Path.of(required("MOCK_OUTPUT_DIR"));
-        try (var node = new ClientNode(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory, imageToken, blockSize, seed)) {
+        try (var node = new ClientNode(required("MOCK_NODE_ID"), Path.of(required("MOCK_TOPOLOGY_FILE")), directory, imageToken, blockSize, seed, prefillCpSize)) {
             var hook = new Thread(node::close, "client-shutdown"); Runtime.getRuntime().addShutdownHook(hook);
-            var effective = JSON.createObjectNode().put("id", node.id).put("seq_size_per_block", blockSize).put("cache_key_hash_seed", seed);
+            var effective = JSON.createObjectNode().put("id", node.id).put("seq_size_per_block", blockSize).put("cache_key_hash_seed", seed)
+                .put("prefill_cp_size", prefillCpSize).put("cache_key_block_size", routeBlockSize);
             if (configuredImageToken != null) effective.put("image_token_id", imageToken);
             save(directory.resolve("effective-config.json"), effective);
             save(directory.resolve("endpoints.json"), Map.of("id", node.id, "role", "client", "control", node.url(),
