@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
-#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -51,7 +50,7 @@ public:
 
     void waitDone() override {
         try {
-            broadcast_result_->waitDone();
+            broadcast_result_->waitDone(/*timeout_ms=*/0, /*fatal_on_error=*/false);
         } catch (const std::exception& error) {
             RTP_LLM_LOG_WARNING("multi-rank transfer broadcast wait failed: %s", error.what());
         } catch (...) {
@@ -330,7 +329,8 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
             return stub->AsyncExecuteFunction(context.get(), rpc_request, completion_queue);
         },
         task.requestId(),
-        MemoryOperationRequestPB_CopyDirection_Name(request.copy_direction()));
+        MemoryOperationRequestPB_CopyDirection_Name(request.copy_direction()),
+        /*fatal_on_error=*/false);
     if (broadcast_result == nullptr) {
         RTP_LLM_LOG_WARNING("failed to start broadcast");
         return std::make_shared<CompletedTransferAsyncContext>(

@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <csignal>
 #include <condition_variable>
 #include <cstdio>
 #include <future>
@@ -955,6 +954,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferReportsWorkerRpcError)
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferReportsRpcDeadline) {
+
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK, nullptr, /*sleep_millis=*/500},
@@ -1066,28 +1066,56 @@ INSTANTIATE_TEST_SUITE_P(InvalidWorkerResponses,
                                            InvalidWorkerResponse{true,
                                                                  static_cast<MemoryOperationResponsePB::Code>(42)}));
 
-class MultiRankBlockTransferGrpcStatusTest: public ::testing::TestWithParam<grpc::StatusCode> {};
+class MultiRankBlockTransferGrpcStatusTest: public ::testing::TestWithParam<grpc::StatusCode> {
+protected:
+    void expectRpcFailure(bool callback_only) {
+        std::promise<void> release;
+        auto               released = release.get_future().share();
+        const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+            {true, MemoryOperationResponsePB::OK, grpc::Status::OK, nullptr, 0, released},
+            {true, MemoryOperationResponsePB::OK, grpc::Status(GetParam(), "worker failed"), nullptr, 0, released},
+        };
+        std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+        auto broadcast_manager = makeBroadcastManager(configs, servers);
+        ASSERT_NE(broadcast_manager, nullptr);
+        auto cache = makeBroadcastCache(broadcast_manager);
 
-TEST_P(MultiRankBlockTransferGrpcStatusTest, BroadcastTransferReportsAnyNonOkStatus) {
-    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
-        {true, MemoryOperationResponsePB::OK, grpc::Status(GetParam(), "worker failed")},
-    };
-    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
-    std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
-    ASSERT_NE(broadcast_manager, nullptr);
-    std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
+        block_tree_cache_detail::ScopeRollback release_response([&release] { release.set_value(); });
 
-    auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
-        TransferTask(makeBroadcastDescriptors(), std::chrono::milliseconds(500)));
-    context->waitDone();
-    EXPECT_FALSE(context->success());
-    EXPECT_EQ(context->errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+        auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
+            TransferTask(makeBroadcastDescriptors(), std::chrono::seconds(5)));
+        TransferResult result;
+        if (callback_only) {
+            auto completion = std::make_shared<std::promise<TransferResult>>();
+            auto finished = completion->get_future();
+            context->onDone([completion](TransferResult result) { completion->set_value(std::move(result)); });
+            release_response.run();
+            ASSERT_EQ(finished.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+            result = finished.get();
+        } else {
+            release_response.run();
+            context->waitDone();
+            result = context->result();
+        }
+        EXPECT_TRUE(context->done());
+        EXPECT_FALSE(context->success());
+        EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+        EXPECT_EQ(result.copy_error, CacheCopyError::RPC_FAILED);
+    }
+};
+
+TEST_P(MultiRankBlockTransferGrpcStatusTest, WaitDoneReturnsRpcFailure) {
+    expectRpcFailure(/*callback_only=*/false);
+}
+
+TEST_P(MultiRankBlockTransferGrpcStatusTest, CallbackReturnsRpcFailure) {
+    expectRpcFailure(/*callback_only=*/true);
 }
 
 INSTANTIATE_TEST_SUITE_P(NonOkWorkerStatuses,
                          MultiRankBlockTransferGrpcStatusTest,
                          ::testing::Values(grpc::StatusCode::CANCELLED,
+                                           grpc::StatusCode::DEADLINE_EXCEEDED,
                                            grpc::StatusCode::INTERNAL,
                                            grpc::StatusCode::UNAVAILABLE,
                                            grpc::StatusCode::RESOURCE_EXHAUSTED));
@@ -1223,6 +1251,7 @@ TEST_F(MultiRankBlockTransferEngineTest, HostLoadRpcFailureFreezesBothEndsBefore
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
+
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     auto                                                          broadcast_manager = makeBroadcastManager(
         {{true, MemoryOperationResponsePB::COPY_FAILED, grpc::Status::OK},
@@ -1271,6 +1300,7 @@ TEST_F(MultiRankBlockTransferEngineTest, EvictionRpcFailureFreezesBothEndsAndPre
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
+
     auto state = std::make_shared<MultiRankBlockTransferRpcState>();
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     auto                                                          broadcast_manager = makeBroadcastManager(

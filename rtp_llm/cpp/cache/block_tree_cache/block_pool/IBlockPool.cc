@@ -2,14 +2,42 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
+#include <random>
 #include <sstream>
 
 namespace rtp_llm {
+namespace {
+
+double jitteredFrozenBlockAbortRatio(double configured_ratio) {
+    if (configured_ratio == 0.0 || configured_ratio == 1.0) {
+        return configured_ratio;
+    }
+    static const double jitter_fraction = [] {
+        std::random_device random;
+        return std::uniform_real_distribution<double>(0.0, 1.0)(random);
+    }();
+    const double jitter_range = std::min(0.10, 1.0 - configured_ratio);
+    return std::min(configured_ratio + jitter_fraction * jitter_range, std::nextafter(1.0, 0.0));
+}
+
+}
 
 IBlockPool::IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config): config_(std::move(config)) {
     RTP_LLM_CHECK(config_ != nullptr);
     RTP_LLM_CHECK(config_->physical_block_count > 1);
+    RTP_LLM_CHECK_WITH_INFO(std::isfinite(config_->frozen_block_abort_ratio)
+                               && config_->frozen_block_abort_ratio >= 0.0
+                               && config_->frozen_block_abort_ratio <= 1.0,
+                           "frozen_block_abort_ratio must be a finite number in [0, 1]");
+    effective_frozen_block_abort_ratio_ = jitteredFrozenBlockAbortRatio(config_->frozen_block_abort_ratio);
+    RTP_LLM_LOG_INFO("pool [%s] frozen block abort ratio: configured=%.17g effective=%.17g",
+                     config_->pool_name.c_str(),
+                     config_->frozen_block_abort_ratio,
+                     effective_frozen_block_abort_ratio_);
     allocated_.assign(config_->physical_block_count, 0);
     tree_refcounts_.assign(config_->physical_block_count, 0);
     for (std::vector<uint32_t>& typed_refcounts : tree_refcounts_by_type_) {
@@ -34,6 +62,7 @@ const std::string& IBlockPool::poolName() const {
 std::string IBlockPool::debugString() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::ostringstream          oss;
+    oss.precision(std::numeric_limits<double>::max_digits10);
     const size_t                free_blocks = availableFreeBlocksNoLock();
     const size_t                used_blocks = totalBlocksNumNoLock() - free_blocks;
     oss << "IBlockPool{name=" << config_->pool_name << ", total=" << totalBlocksNumNoLock() << ", used=" << used_blocks
@@ -43,7 +72,9 @@ std::string IBlockPool::debugString() const {
         << ", eviction_target_ref_blocks="
         << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::EVICTION)]
         << ", store_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::STORE)]
-        << ", frozen_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::FROZEN)] << "}";
+        << ", frozen_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::FROZEN)]
+        << ", configured_frozen_abort_ratio=" << config_->frozen_block_abort_ratio
+        << ", effective_frozen_abort_ratio=" << effective_frozen_block_abort_ratio_ << "}";
     return oss.str();
 }
 
@@ -120,6 +151,23 @@ void IBlockPool::incTreeRefNoLock(BlockIdxType block, size_t ref_type_index) {
     ++typed_refcount;
     updateActiveBlocksNumNoLock(block, was_active);
     updateAvailableBlocksNumNoLock(block, was_available);
+    if (ref_type_index == treeRefTypeIndex(BlockTreeRefType::FROZEN) && typed_refcount == 1
+        && effective_frozen_block_abort_ratio_ > 0.0) {
+        const size_t frozen_blocks = tree_referenced_block_counts_[ref_type_index];
+        const size_t total_blocks  = totalBlocksNumNoLock();
+        const double frozen_ratio  = static_cast<double>(frozen_blocks) / static_cast<double>(total_blocks);
+        if (frozen_ratio > effective_frozen_block_abort_ratio_) {
+            RTP_LLM_LOG_ERROR("pool [%s] frozen blocks exceed abort ratio %.17g (configured=%.17g): frozen=%zu total=%zu",
+                              config_->pool_name.c_str(),
+                              effective_frozen_block_abort_ratio_,
+                              config_->frozen_block_abort_ratio,
+                              frozen_blocks,
+                              total_blocks);
+            fflush(stdout);
+            fflush(stderr);
+            std::abort();
+        }
+    }
 }
 
 void IBlockPool::freezeBlock(BlockIdxType block) noexcept {
