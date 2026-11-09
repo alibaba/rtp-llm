@@ -18,6 +18,9 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks endpoint generation publication, retirement and stale-reference handling.
+ */
 class EndpointGenerationLifecycleTest {
 
     @Test

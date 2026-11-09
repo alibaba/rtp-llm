@@ -30,9 +30,10 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 @Component
 public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
-
     private final CacheMetricsReporter cacheMetricsReporter;
+
     private final boolean enabled;
+
     private final LocalStandbyCacheManager cacheManager;
     private final ThreadPoolExecutor asyncMatchExecutor;
     private final ThreadPoolExecutor updateExecutor;
@@ -62,18 +63,6 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
     @Override
     public CacheMatchSource source() {
         return CacheMatchSource.LOCAL_STANDBY;
-    }
-
-    @Override
-    public Map<String, HostCacheMatch> findMatchingEngines(
-            String requestId,
-            List<Long> blockCacheKeys,
-            long blockSize,
-            RoleType roleType,
-            String group) {
-        cacheMetricsReporter.reportLocalStandbyBlockSize(roleType, blockSize);
-        return HostCacheMatch.fromLocalMatches(
-                cacheManager.findMatchingEngines(blockCacheKeys, roleType, group));
     }
 
     public CompletableFuture<CacheMatchResult> asyncLocalStandbyMatch(CacheMatchQuery query) {
@@ -118,6 +107,18 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
         }
     }
 
+    @Override
+    public Map<String, HostCacheMatch> findMatchingEngines(
+            String requestId,
+            List<Long> blockCacheKeys,
+            long blockSize,
+            RoleType roleType,
+            String group) {
+        cacheMetricsReporter.reportLocalStandbyBlockSize(roleType, blockSize);
+        return HostCacheMatch.fromLocalMatches(
+                cacheManager.findMatchingEngines(blockCacheKeys, roleType, group));
+    }
+
     public void updateFromRoutedRequest(Request request, List<ServerStatus> selectedWorkers) {
         if (!enabled
                 || request == null
@@ -148,6 +149,14 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
         }
     }
 
+    @PreDestroy
+    public void shutdown() {
+        if (asyncMatchExecutor != null) {
+            asyncMatchExecutor.shutdown();
+            updateExecutor.shutdown();
+        }
+    }
+
     private void updateCacheMetadataNow(
             List<Long> blockCacheKeys, List<ServerStatus> selectedWorkers) {
         for (ServerStatus selectedWorker : selectedWorkers) {
@@ -175,13 +184,5 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
                     return thread;
                 },
                 new ThreadPoolExecutor.AbortPolicy());
-    }
-
-    @PreDestroy
-    public void shutdown() {
-        if (asyncMatchExecutor != null) {
-            asyncMatchExecutor.shutdown();
-            updateExecutor.shutdown();
-        }
     }
 }

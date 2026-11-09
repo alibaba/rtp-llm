@@ -128,6 +128,12 @@ JVM args required for Java 21 module system（见 pom.xml spring-boot-maven-plug
 
 ## Git Conventions
 
+提交 FlexLB 改动前必须从仓库根目录运行并通过
+`python3 -m pre_commit run --hook-stage pre-commit`，检查本次暂存内容。
+首次使用时安装 pre-commit 并执行 `git config --local core.hooksPath .githooks`。
+普通 `git commit` 会检查成员排序、变更类的多行用途/流程说明及全量 Spotless 格式；
+不得通过 `--no-verify`、`SKIP` 或停用钩子绕过失败。流程描述准确性和简洁性仍须审核。
+
 Commit message 遵循 Conventional Commits：
 
 ```
@@ -142,7 +148,42 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 - `fix(grpc): handle connection timeout gracefully`
 - `refactor(LoadBalancer): rename method getLoadBalanceStrategy to getLoadBalancer`
 
+## Java 成员组织顺序
+
+类流程说明应来自实际实现和调用方，说明入口、主要处理步骤、异步交接及结束条件。
+按该流程审核成员布局，不根据 `start`、`stop` 等名字猜测行为。
+
+使用 `tools/order_java_members.py` 统一整个 FlexLB 项目的 Java 成员顺序：
+
+- 静态字段及初始化块在前，实例字段及初始化块随后，构造器放在方法之前。
+- 方法按 `public → protected → 包级 → private` 分组；组内依据源码调用关系先放入口，
+  再放它调用的方法。独立入口保留原有相对顺序；业务重要性由开发者结合流程说明审核。
+- 内部类型放在方法之后并递归整理。字段按静态/实例、final/可变、基本/引用类型留白，
+  保留静态和实例初始化操作各自的顺序，以及 Lombok 构造器依赖的实例字段顺序。
+- 注释随对应成员移动。脚本不解析自然语言流程或 `MemberOrder` 声明；Spotless 负责换行和缩进。
+
+从本目录运行，默认覆盖所有模块、测试及工具中的 Java 文件，跳过 `target`：
+
+```bash
+python3 -m pip install -r tools/java-member-order-requirements.txt
+python3 tools/order_java_members.py --check
+python3 tools/order_java_members.py --apply
+./mvnw spotless:apply -Pspotless-check
+./mvnw spotless:check -Pspotless-check
+```
+
+可传文件或目录缩小范围；`--diff` 预览差异，`--patch` 输出补丁。
+检查发现待排序文件返回 1，解析或内容校验失败返回 2。应用前先完成整批校验；
+不得把成员排序或语法树校验当作完整的业务正确性证明。
+
 ## Java Javadoc 格式
+
+创建或修改类之前，先判断是否需要类说明；流程类需补齐简短说明，已有准确说明则保留。
+先读实现和调用方确认流程，再据此组织成员或修改实现，完成后核对说明与代码一致。
+类说明默认 1–3 句话，概括职责、主流程和必要边界。
+自解释且无自定义行为的简单 record、纯字段 DTO 和枚举可以不写类注释；
+有单位、特殊值、身份、校验或生命周期约束时需说明，局部含义优先写在字段或方法旁。
+不罗列全部方法、状态或实现细节，局部约束放在对应代码附近，避免注释盖过主体逻辑。
 
 新增或修改 Javadoc 时，统一使用多行格式，即使只有一句说明也不压缩成单行。
 `/**` 和 `*/` 各自独占一行，说明文字放在中间以 `*` 开头的行上。

@@ -8,6 +8,9 @@ import org.flexlb.enums.KvCacheGroupMode;
 
 import java.util.Map;
 
+/**
+ * Creates worker status fixtures with explicit topology and engine observations.
+ */
 public final class WorkerStatusTestSupport {
 
     private WorkerStatusTestSupport() {}

@@ -32,6 +32,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks worker status projection, distinct step observations and generation-safe publication.
+ */
 class GrpcWorkerStatusRunnerTest {
 
     @ParameterizedTest

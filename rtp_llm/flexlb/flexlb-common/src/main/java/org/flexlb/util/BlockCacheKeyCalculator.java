@@ -21,7 +21,6 @@ import java.util.List;
  * {@code hash_block_tokens}) and {@code vllm/utils/hashing.py} ({@code sha256_cbor}).
  */
 public final class BlockCacheKeyCalculator {
-
     private static final String HASH_SEED = "0";
     // vLLM's canonical CBOR uses the shortest representation for every integer.
     private static final CBORFactory CBOR_FACTORY =
@@ -47,6 +46,33 @@ public final class BlockCacheKeyCalculator {
         }
 
         return calculateBlockCacheKeys(inputIds, (int) blockSize, lookaheadTokens);
+    }
+
+    static CBORGenerator newCborGenerator(OutputStream output) throws IOException {
+        return CBOR_FACTORY.createGenerator(output);
+    }
+
+    static void writeHashSeed(CBORGenerator generator) throws IOException {
+        generator.writeString(HASH_SEED);
+    }
+
+    static void writeBlock(
+            CBORGenerator generator,
+            byte[] parentHash,
+            TokenIds inputIds,
+            int tokenOffset,
+            int blockSize)
+            throws IOException {
+        // Supplying array sizes forces definite-length arrays, as required by canonical CBOR.
+        generator.writeStartArray(null, 3);
+        generator.writeBinary(parentHash);
+        generator.writeStartArray(null, blockSize);
+        for (int tokenIndex = tokenOffset; tokenIndex < tokenOffset + blockSize; tokenIndex++) {
+            generator.writeNumber(inputIds.getInt(tokenIndex));
+        }
+        generator.writeEndArray();
+        generator.writeNull();
+        generator.writeEndArray();
     }
 
     private static List<Long> calculateBlockCacheKeys(
@@ -77,6 +103,14 @@ public final class BlockCacheKeyCalculator {
         return blockCacheKeys;
     }
 
+    private static long low64Bits(byte[] hash) {
+        long value = 0;
+        for (int index = hash.length - Long.BYTES; index < hash.length; index++) {
+            value = (value << Byte.SIZE) | (hash[index] & 0xffL);
+        }
+        return value;
+    }
+
     private static byte[] calculateNoneHash() {
         MessageDigest digest = SHA_256.get();
         digest.reset();
@@ -88,41 +122,6 @@ public final class BlockCacheKeyCalculator {
             throw new IllegalStateException("Failed to encode the vLLM hash seed as CBOR", e);
         }
         return digest.digest();
-    }
-
-    static CBORGenerator newCborGenerator(OutputStream output) throws IOException {
-        return CBOR_FACTORY.createGenerator(output);
-    }
-
-    static void writeHashSeed(CBORGenerator generator) throws IOException {
-        generator.writeString(HASH_SEED);
-    }
-
-    static void writeBlock(
-            CBORGenerator generator,
-            byte[] parentHash,
-            TokenIds inputIds,
-            int tokenOffset,
-            int blockSize)
-            throws IOException {
-        // Supplying array sizes forces definite-length arrays, as required by canonical CBOR.
-        generator.writeStartArray(null, 3);
-        generator.writeBinary(parentHash);
-        generator.writeStartArray(null, blockSize);
-        for (int tokenIndex = tokenOffset; tokenIndex < tokenOffset + blockSize; tokenIndex++) {
-            generator.writeNumber(inputIds.getInt(tokenIndex));
-        }
-        generator.writeEndArray();
-        generator.writeNull();
-        generator.writeEndArray();
-    }
-
-    private static long low64Bits(byte[] hash) {
-        long value = 0;
-        for (int index = hash.length - Long.BYTES; index < hash.length; index++) {
-            value = (value << Byte.SIZE) | (hash[index] & 0xffL);
-        }
-        return value;
     }
 
     private static MessageDigest newSha256Digest() {

@@ -5,6 +5,9 @@ import lombok.Getter;
 
 import static org.flexlb.constant.NacosConfigConstants.DEFAULT_NACOS_GROUP;
 
+/**
+ * Resolves the data ID, group and namespace used to subscribe to Nacos configuration.
+ */
 @Getter
 @EqualsAndHashCode
 public class NacosConfig {

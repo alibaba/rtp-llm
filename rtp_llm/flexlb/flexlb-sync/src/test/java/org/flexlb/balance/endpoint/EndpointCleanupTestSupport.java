@@ -19,7 +19,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Real endpoint ledgers for scheduler-directory cleanup tests across package boundaries. */
+/**
+ * Real endpoint ledgers for scheduler-directory cleanup tests across package boundaries.
+ */
 public final class EndpointCleanupTestSupport {
     private EndpointCleanupTestSupport() {}
 
@@ -35,8 +37,12 @@ public final class EndpointCleanupTestSupport {
         EndpointTestSupport.applyStatus(endpoint, response).run();
     }
 
+    /**
+     * Records Prefill cleanup operations so tests can check exact release behavior.
+     */
     public static final class PrefillLedger {
         private final boolean batch;
+
         private final AtomicLong clock = new AtomicLong(100);
         private final ReentrantLock lock = new ReentrantLock();
         private final PrefillState state =
@@ -52,8 +58,6 @@ public final class EndpointCleanupTestSupport {
         public PrefillLedger(boolean batch) {
             this.batch = batch;
         }
-
-        public record Owner(ScheduledRequest item, PrefillState.Reservation reservation) {}
 
         public Owner commit(String requestId, long batchId, long predictedMs) {
             ScheduledRequest item = mock(ScheduledRequest.class);
@@ -142,5 +146,7 @@ public final class EndpointCleanupTestSupport {
             assertEquals(0L, state.committedSnapshot().totalRemainingWorkMs().orElseThrow());
             assertTrue(state.batchAvailability(1).isAvailable());
         }
+
+        public record Owner(ScheduledRequest item, PrefillState.Reservation reservation) {}
     }
 }

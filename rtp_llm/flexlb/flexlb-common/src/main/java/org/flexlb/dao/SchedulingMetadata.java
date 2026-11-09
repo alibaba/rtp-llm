@@ -66,7 +66,9 @@ public final class SchedulingMetadata {
         return nowMs >= expiresAtMs;
     }
 
-    /** Priority origin is observability metadata, not an ordering dimension. */
+    /**
+     * Priority origin is observability metadata, not an ordering dimension.
+     */
     public enum PrioritySource {
         EXPLICIT,
         DEFAULT

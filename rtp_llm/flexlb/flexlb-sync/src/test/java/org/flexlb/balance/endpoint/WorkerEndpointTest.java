@@ -23,8 +23,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks endpoint committed-work accounting and reconciliation with worker reports.
+ */
 class WorkerEndpointTest {
-
     private WorkerStatus status;
     private PrefillEndpoint endpoint;
 
@@ -93,13 +95,6 @@ class WorkerEndpointTest {
         assertTrue(endpoint.releaseCommittedItem(item));
         assertTrue(!endpoint.releaseCommittedItem(item));
         assertEquals(0, endpoint.getLoadMetric().orElseThrow());
-    }
-
-    private void assertCommittedWorkNear(long expectedMs) {
-        long actualMs = endpoint.getLoadMetric().orElseThrow();
-        assertTrue(
-                actualMs <= expectedMs && actualMs >= expectedMs - 50,
-                "Expected committed work near " + expectedMs + "ms but got " + actualMs + "ms");
     }
 
     @Test
@@ -317,6 +312,13 @@ class WorkerEndpointTest {
         assertEquals("group-x", endpoint.getStatus().getGroup());
         assertEquals(5L, endpoint.getStatus().getDpRank());
         assertTrue(endpoint.getStatus().pollHealth().reportedAlive());
+    }
+
+    private void assertCommittedWorkNear(long expectedMs) {
+        long actualMs = endpoint.getLoadMetric().orElseThrow();
+        assertTrue(
+                actualMs <= expectedMs && actualMs >= expectedMs - 50,
+                "Expected committed work near " + expectedMs + "ms but got " + actualMs + "ms");
     }
 
     private void calibrate(Map<String, TaskInfo> finished, Map<String, TaskInfo> running) {

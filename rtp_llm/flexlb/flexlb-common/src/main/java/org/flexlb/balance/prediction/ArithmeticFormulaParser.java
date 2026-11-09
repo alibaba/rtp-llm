@@ -16,15 +16,19 @@ import static org.flexlb.balance.prediction.ArithmeticFormulaAst.evaluate;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.function;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.unary;
 
-/** Recursive-descent grammar and binding/aggregate validation. */
+/**
+ * Recursive-descent grammar and binding/aggregate validation.
+ */
 final class ArithmeticFormulaParser {
     private final String input;
     private final Map<String, ConstantNode> parameters = new LinkedHashMap<>();
     private final Map<String, Integer> variables;
     private final Set<String> aggregateExcludedVariables;
     private final Set<String> referencedVariables = new HashSet<>();
+
     private final boolean allowAggregates;
     private final int variableCount;
+
     private int pos;
     private int aggregateDepth;
 
@@ -59,6 +63,31 @@ final class ArithmeticFormulaParser {
 
     Set<String> referencedVariables() {
         return Set.copyOf(referencedVariables);
+    }
+
+    private void expectEnd() {
+        skipWs();
+        if (hasNext()) {
+            throw error("Unexpected token");
+        }
+    }
+
+    private void skipWs() {
+        while (hasNext() && Character.isWhitespace(peek())) {
+            pos++;
+        }
+    }
+
+    private boolean hasNext() {
+        return pos < input.length();
+    }
+
+    private char peek() {
+        return input.charAt(pos);
+    }
+
+    private IllegalArgumentException error(String msg) {
+        return new IllegalArgumentException(msg + " at pos " + pos + " in: " + input);
     }
 
     // expression → term (('+' | '-') term)*
@@ -110,6 +139,16 @@ final class ArithmeticFormulaParser {
         return parsePrimary();
     }
 
+    // ---- helpers ----
+
+    private boolean match(char expected) {
+        if (hasNext() && peek() == expected) {
+            pos++;
+            return true;
+        }
+        return false;
+    }
+
     // primary → '(' expression ')' | function_call | param_call | number | variable
     private Node parsePrimary() {
         skipWs();
@@ -147,6 +186,14 @@ final class ArithmeticFormulaParser {
             return parseNumber();
         }
         throw error("Expected number, variable, or '('");
+    }
+
+    private String parseIdentifier() {
+        int start = pos;
+        while (hasNext() && (Character.isLetterOrDigit(peek()) || peek() == '_')) {
+            pos++;
+        }
+        return input.substring(start, pos);
     }
 
     // Parameters become constants while their initializer variable references are retained.
@@ -249,48 +296,5 @@ final class ArithmeticFormulaParser {
         } catch (NumberFormatException e) {
             throw error("Invalid number");
         }
-    }
-
-    private String parseIdentifier() {
-        int start = pos;
-        while (hasNext() && (Character.isLetterOrDigit(peek()) || peek() == '_')) {
-            pos++;
-        }
-        return input.substring(start, pos);
-    }
-
-    private void expectEnd() {
-        skipWs();
-        if (hasNext()) {
-            throw error("Unexpected token");
-        }
-    }
-
-    // ---- helpers ----
-
-    private boolean match(char expected) {
-        if (hasNext() && peek() == expected) {
-            pos++;
-            return true;
-        }
-        return false;
-    }
-
-    private char peek() {
-        return input.charAt(pos);
-    }
-
-    private boolean hasNext() {
-        return pos < input.length();
-    }
-
-    private void skipWs() {
-        while (hasNext() && Character.isWhitespace(peek())) {
-            pos++;
-        }
-    }
-
-    private IllegalArgumentException error(String msg) {
-        return new IllegalArgumentException(msg + " at pos " + pos + " in: " + input);
     }
 }

@@ -14,6 +14,9 @@ import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+/**
+ * Checks cache-key calculation under concurrent calls.
+ */
 class BlockCacheKeyCalculatorConcurrencyTest {
 
     private static final int THREAD_COUNT = 16;

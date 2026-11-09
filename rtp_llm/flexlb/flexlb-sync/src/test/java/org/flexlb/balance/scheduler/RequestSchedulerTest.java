@@ -55,8 +55,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks request scheduling priority, capacity waiting and progress across blocked placements.
+ */
 class RequestSchedulerTest {
-
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void vitOnlyDoesNotRegisterOrQueueAndSameIdCanLaterSchedulePd(boolean queue) {
@@ -113,11 +115,6 @@ class RequestSchedulerTest {
         } finally {
             scheduler.closePlacement();
         }
-    }
-
-    private static DefaultRouter mockRouter() {
-        DefaultRouter router = mock(DefaultRouter.class);
-        return router;
     }
 
     @ParameterizedTest
@@ -765,18 +762,6 @@ class RequestSchedulerTest {
         }
     }
 
-    private void assertReleasedCapacityAdmitsWaiters(
-            int initiallyReleasedSlots, int slotsReleasedDuringPublication) throws Exception {
-        try (CapacityFixture fixture = new CapacityFixture(slotsReleasedDuringPublication, false)) {
-            fixture.submitBlockedRequests();
-            fixture.releaseSlots(initiallyReleasedSlots);
-            fixture.awaitAllPublished();
-
-            assertEquals(List.of("820", "821", "822"), fixture.admitted);
-            assertEquals(0, fixture.availableSlots.get());
-        }
-    }
-
     @Test
     void staleEndpointConflictReplansWithoutFixedRetryBudget() {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
@@ -903,6 +888,23 @@ class RequestSchedulerTest {
         fixture.scheduler.closePlacement();
     }
 
+    private static DefaultRouter mockRouter() {
+        DefaultRouter router = mock(DefaultRouter.class);
+        return router;
+    }
+
+    private void assertReleasedCapacityAdmitsWaiters(
+            int initiallyReleasedSlots, int slotsReleasedDuringPublication) throws Exception {
+        try (CapacityFixture fixture = new CapacityFixture(slotsReleasedDuringPublication, false)) {
+            fixture.submitBlockedRequests();
+            fixture.releaseSlots(initiallyReleasedSlots);
+            fixture.awaitAllPublished();
+
+            assertEquals(List.of("820", "821", "822"), fixture.admitted);
+            assertEquals(0, fixture.availableSlots.get());
+        }
+    }
+
     private static PrefillEndpoint mockPrefillEndpoint(String ip, int port) {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         WorkerStatus status =
@@ -928,7 +930,9 @@ class RequestSchedulerTest {
         return context;
     }
 
-    /** Real ordered scheduler with an exact endpoint whose free slots are explicitly controlled. */
+    /**
+     * Real ordered scheduler with an exact endpoint whose free slots are explicitly controlled.
+     */
     private static final class CapacityFixture implements AutoCloseable {
         private final ConcurrentMap<String, CapacityRequest> requestsById =
                 new ConcurrentHashMap<>();
@@ -946,11 +950,14 @@ class RequestSchedulerTest {
         private final CountDownLatch allPublished = new CountDownLatch(3);
         private final CountDownLatch headRetryStarted = new CountDownLatch(1);
         private final CountDownLatch allowHeadRetry = new CountDownLatch(1);
+
         private final int slotsReleasedDuringPublication;
         private final boolean pauseHeadRetry;
+
         private final CompletableFuture<Response> headFuture;
         private final RequestScheduler scheduler;
         private final FlexlbConfig config;
+
         private long nextIndependentId = 830L;
 
         private CapacityFixture(int slotsReleasedDuringPublication, boolean pauseHeadRetry) {
@@ -1034,6 +1041,37 @@ class RequestSchedulerTest {
                             availability);
         }
 
+        @Override
+        public void close() {
+            allowHeadRetry.countDown();
+            scheduler.closePlacement();
+        }
+
+        private void submitBlockedRequests() throws InterruptedException {
+            for (CapacityRequest request : requests) {
+                scheduler.submit(request.context);
+            }
+            RequestLifecycleTestSupport.awaitGlobalCapacityWaiters(scheduler, requests.size());
+        }
+
+        private void awaitAllPublished() throws InterruptedException {
+            assertTrue(
+                    allPublished.await(5, TimeUnit.SECONDS),
+                    () ->
+                            "released slots must be consumed without another event; admitted="
+                                    + admitted
+                                    + ", freeSlots="
+                                    + availableSlots.get());
+        }
+
+        private void awaitIndependentCommit() throws Exception {
+            long requestId = nextIndependentId++;
+            PrefillEndpoint independent = mockPrefillEndpoint("independent-" + requestId, 8080);
+            CapacityRequest request = createRequest(requestId, independent);
+            scheduler.submit(request.context);
+            request.future.get(5, TimeUnit.SECONDS);
+        }
+
         private CapacityRequest createRequest(long requestId, PrefillEndpoint target) {
             CapacityRequest request =
                     new CapacityRequest(
@@ -1083,43 +1121,15 @@ class RequestSchedulerTest {
             return request;
         }
 
-        private void submitBlockedRequests() throws InterruptedException {
-            for (CapacityRequest request : requests) {
-                scheduler.submit(request.context);
-            }
-            RequestLifecycleTestSupport.awaitGlobalCapacityWaiters(scheduler, requests.size());
-        }
-
         private void releaseSlots(int count) {
             availableSlots.addAndGet(count);
             availability.capacityChanged(key);
         }
-
-        private void awaitAllPublished() throws InterruptedException {
-            assertTrue(
-                    allPublished.await(5, TimeUnit.SECONDS),
-                    () ->
-                            "released slots must be consumed without another event; admitted="
-                                    + admitted
-                                    + ", freeSlots="
-                                    + availableSlots.get());
-        }
-
-        private void awaitIndependentCommit() throws Exception {
-            long requestId = nextIndependentId++;
-            PrefillEndpoint independent = mockPrefillEndpoint("independent-" + requestId, 8080);
-            CapacityRequest request = createRequest(requestId, independent);
-            scheduler.submit(request.context);
-            request.future.get(5, TimeUnit.SECONDS);
-        }
-
-        @Override
-        public void close() {
-            allowHeadRetry.countDown();
-            scheduler.closePlacement();
-        }
     }
 
+    /**
+     * Constructs a request with controlled capacity requirements for scheduler tests.
+     */
     private static final class CapacityRequest {
         private final AtomicInteger plans = new AtomicInteger();
         private final BalanceContext context;
@@ -1142,6 +1152,9 @@ class RequestSchedulerTest {
         }
     }
 
+    /**
+     * Provides scheduler dependencies for request-capacity scenarios.
+     */
     private static final class Fixture {
         private final long requestId = 701L;
         private final FlexlbConfig config = SchedulingTestConfig.batchConfig();

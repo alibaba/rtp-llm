@@ -31,7 +31,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Prefill status must carry stage completion through the real endpoint and slot reducers. */
+/**
+ * Prefill status must carry stage completion through the real endpoint and slot reducers.
+ */
 class PrefillCompletionProjectionTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -199,6 +201,14 @@ class PrefillCompletionProjectionTest {
         }
     }
 
+    private static WorkerStatusResponse decodeStatus(long version, Map<String, TaskInfo> running) {
+        var response = status(version, running, Map.of());
+        response.setRole(RoleType.DECODE);
+        response.setTotalKvCacheTokens(10_000L);
+        response.setAvailableKvCacheTokens(9_000L);
+        return response;
+    }
+
     private static WorkerStatusResponse status(
             long version, Map<String, TaskInfo> running, Map<String, TaskInfo> finished) {
         var response = new WorkerStatusResponse();
@@ -209,14 +219,6 @@ class PrefillCompletionProjectionTest {
         response.setRunningTaskInfo(running);
         response.setRunningQueryLen((long) running.size());
         response.setFinishedTaskInfo(finished);
-        return response;
-    }
-
-    private static WorkerStatusResponse decodeStatus(long version, Map<String, TaskInfo> running) {
-        var response = status(version, running, Map.of());
-        response.setRole(RoleType.DECODE);
-        response.setTotalKvCacheTokens(10_000L);
-        response.setAvailableKvCacheTokens(9_000L);
         return response;
     }
 

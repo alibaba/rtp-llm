@@ -21,8 +21,12 @@ import java.util.concurrent.atomic.LongAdder;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
+/**
+ * <p>One cache poll lease fetches metadata for its captured worker generation. The callback checks
+ * identity before updating local metadata and acknowledging progress; failed updates must remain
+ * retryable rather than acknowledging an unapplied payload.
+ */
 public class GrpcCacheStatusCheckRunner implements Runnable {
-
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final String ipPort;
@@ -32,17 +36,23 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final WorkerStatus workerStatus;
     private final WorkerDirectory workerDirectory;
     private final WorkerStatus.PollLease pollLease;
+
     private final long generationId;
+
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService cacheAwareService;
     private final DynamicCacheIntervalService cacheIntervalService;
     private final String ip;
+
     private final int grpcPort;
     private final long startTime = System.nanoTime() / 1000;
+
     private final String id = IdUtils.fastUuid();
+
     private final boolean debug;
     private final long requestTimeoutMs;
+
     private final LongAdder syncCount;
     private final Long syncEngineStatusInterval;
     private final Executor callbackExecutor;
@@ -308,22 +318,6 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         return true;
     }
 
-    private void logCacheStatusUpdate(CacheStatus cacheStatus, long startTime) {
-
-        logger.debug(
-                "gRPC Cache Status - {}, role:{}, block_size:{}, version:{}, cacheKeySize:{},"
-                        + " available_kv_cache:{}, total_kv_cache:{}, cost_us:{}, syncIntervalMs:{}",
-                ipPort,
-                roleType.name(),
-                cacheStatus.getBlockSize(),
-                cacheStatus.getVersion(),
-                cacheStatus.getCacheKeySize(),
-                cacheStatus.getAvailableKvCache(),
-                cacheStatus.getTotalKvCache(),
-                (System.nanoTime() / 1000) - startTime,
-                cacheIntervalService.getCurrentIntervalMs());
-    }
-
     private WorkerCacheUpdateResult updateLocalKvCache() {
         try {
             WorkerCacheUpdateResult result = cacheAwareService.updateFromWorkerStatus(workerStatus);
@@ -354,6 +348,22 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                     workerStatus, BalanceStatusEnum.CACHE_UPDATE_FAILED);
             return null;
         }
+    }
+
+    private void logCacheStatusUpdate(CacheStatus cacheStatus, long startTime) {
+
+        logger.debug(
+                "gRPC Cache Status - {}, role:{}, block_size:{}, version:{}, cacheKeySize:{},"
+                        + " available_kv_cache:{}, total_kv_cache:{}, cost_us:{}, syncIntervalMs:{}",
+                ipPort,
+                roleType.name(),
+                cacheStatus.getBlockSize(),
+                cacheStatus.getVersion(),
+                cacheStatus.getCacheKeySize(),
+                cacheStatus.getAvailableKvCache(),
+                cacheStatus.getTotalKvCache(),
+                (System.nanoTime() / 1000) - startTime,
+                cacheIntervalService.getCurrentIntervalMs());
     }
 
     private void log(String msg) {

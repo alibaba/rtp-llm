@@ -9,6 +9,9 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks lifecycle metric registration and readiness tags.
+ */
 class GracefulLifecycleReporterTest {
 
     @Test
@@ -28,6 +31,9 @@ class GracefulLifecycleReporterTest {
         assertTrue(monitor.reportedValue <= afterReport);
     }
 
+    /**
+     * Captures registered metric names and reported values for lifecycle assertions.
+     */
     private static final class CapturingFlexMonitor implements FlexMonitor {
         private FlexMetricType registeredMetricType;
         private FlexPriorityType registeredPriorityType;

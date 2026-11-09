@@ -37,6 +37,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks selection of the configured configuration source.
+ */
 class ConfigSourceSelectionTest {
 
     @ParameterizedTest

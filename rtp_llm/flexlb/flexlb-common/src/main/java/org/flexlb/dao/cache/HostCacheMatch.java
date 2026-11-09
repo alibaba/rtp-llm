@@ -11,16 +11,15 @@ import java.util.stream.Collectors;
  * their own remote policy when scoring a worker.
  */
 public record HostCacheMatch(long localMatchBlocks, long globalMatchBlocks) {
-
-    public static HostCacheMatch local(long matchBlocks) {
-        return new HostCacheMatch(matchBlocks, matchBlocks);
-    }
-
     /**
      * Converts local match counts while preserving logical {@code ip:port@engineIndex} keys.
      */
     public static Map<String, HostCacheMatch> fromLocalMatches(Map<String, Integer> localMatches) {
         return localMatches.entrySet().stream()
                 .collect(Collectors.toMap(Map.Entry::getKey, entry -> local(entry.getValue())));
+    }
+
+    public static HostCacheMatch local(long matchBlocks) {
+        return new HostCacheMatch(matchBlocks, matchBlocks);
     }
 }

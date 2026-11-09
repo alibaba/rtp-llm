@@ -17,6 +17,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks request log data construction and serialized fields.
+ */
 class PvLogDataTest {
 
     @Test

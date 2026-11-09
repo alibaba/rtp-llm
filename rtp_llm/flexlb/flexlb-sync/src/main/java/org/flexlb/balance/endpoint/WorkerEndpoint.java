@@ -16,11 +16,13 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p>Callers read dynamic engine state via {@link #getStatus()} and
  * operate on it directly.
+ *
+ * <p>Callers pin the exact generation before handing off work. Retirement closes new handoffs,
+ * waits for accepted handoffs, and invokes role-specific cleanup. Pins and callbacks must not
+ * silently follow a replacement endpoint at the same address.
  */
 public class WorkerEndpoint {
-
     private static final Runnable NO_STATUS_PROJECTION = () -> {};
-
     private static final AtomicLong RETIREMENT_THREAD_SEQUENCE = new AtomicLong();
     private static final ExecutorService RETIREMENT_EXECUTOR =
             Executors.newFixedThreadPool(
@@ -113,13 +115,6 @@ public class WorkerEndpoint {
         return NO_STATUS_PROJECTION;
     }
 
-    protected final void requireStatusGeneration(WorkerStatus ws) {
-        if (status != ws) {
-            throw new IllegalArgumentException(
-                    "WorkerStatus generation does not belong to this endpoint");
-        }
-    }
-
     /**
      * Pin this exact endpoint generation for one admission handoff.
      *
@@ -145,16 +140,63 @@ public class WorkerEndpoint {
     }
 
     /**
+     * Initiate exact-generation drain and cleanup after the admission gate has
+     * closed. This method never waits for cleanup already owned by another
+     * caller; use {@link #awaitRetirement()} at a composition shutdown barrier.
+     */
+    public final void close() {
+        retireInternal(false);
+    }
+
+    /**
+     * Wait until this exact endpoint generation has completed all local cleanup
+     * and retirement callbacks, then rethrow its recorded terminal failure.
+     * {@link #close()} must have initiated cleanup first.
+     */
+    public final void awaitRetirement() {
+        generationLifecycle.awaitRetirement();
+    }
+
+    // ==================== monitoring (EP-authoritative) ====================
+
+    /**
+     * Role-specific observable load metric for monitoring.
+     * <p>Prefill: identity-backed committed work (ms), absent while the
+     * endpoint cannot publish a coherent complete work view.
+     * <p>Decode: total active task count (confirmed running + inflight).
+     */
+    public OptionalLong getLoadMetric() {
+        WorkerStatus.EngineObservation engine = status.committedEngineObservation();
+        return OptionalLong.of(
+                engine.runningTaskList() == null ? 0L : engine.runningTaskList().size());
+    }
+
+    protected final void requireStatusGeneration(WorkerStatus ws) {
+        if (status != ws) {
+            throw new IllegalArgumentException(
+                    "WorkerStatus generation does not belong to this endpoint");
+        }
+    }
+
+    protected final boolean isGenerationRetiringOrRetired() {
+        return generationLifecycle.isRetiringOrRetired();
+    }
+
+    /**
+     * Release subclass resources after the shared generation gate has drained.
+     * This is invoked exactly once by the retirement owner.
+     */
+    protected void closeEndpoint() {
+        // Stateless roles own no endpoint-local resources.
+    }
+
+    /**
      * Internal generation handoff used by existing batch/route leases whose
      * terminal callback may run on a different thread. It shares the one gate
      * with public route pins but deliberately is not exposed as a route API.
      */
     final EndpointGenerationLifecycle.HandoffPermit tryAcquireGenerationHandoff() {
         return generationLifecycle.tryAcquireHandoff();
-    }
-
-    protected final boolean isGenerationRetiringOrRetired() {
-        return generationLifecycle.isRetiringOrRetired();
     }
 
     /**
@@ -168,15 +210,6 @@ public class WorkerEndpoint {
      */
     final void beginRetirement() {
         generationLifecycle.beginRetirement();
-    }
-
-    /**
-     * Initiate exact-generation drain and cleanup after the admission gate has
-     * closed. This method never waits for cleanup already owned by another
-     * caller; use {@link #awaitRetirement()} at a composition shutdown barrier.
-     */
-    public final void close() {
-        retireInternal(false);
     }
 
     /** Initiate unpublished-candidate cleanup without blocking its status lock. */
@@ -206,28 +239,6 @@ public class WorkerEndpoint {
         }
     }
 
-    /**
-     * Wait until this exact endpoint generation has completed all local cleanup
-     * and retirement callbacks, then rethrow its recorded terminal failure.
-     * {@link #close()} must have initiated cleanup first.
-     */
-    public final void awaitRetirement() {
-        generationLifecycle.awaitRetirement();
-    }
-
-    private void finishRetirement() {
-        generationLifecycle.beginCleanup();
-        Throwable retirementFailure = null;
-        try {
-            closeEndpoint();
-        } catch (Throwable failure) {
-            retirementFailure = failure;
-        } finally {
-            generationLifecycle.completeRetirement(retirementFailure);
-        }
-        rethrowRetirementFailure(retirementFailure);
-    }
-
     private void continueRetirementAfterHandoff() {
         RETIREMENT_EXECUTOR.execute(
                 () -> {
@@ -243,12 +254,17 @@ public class WorkerEndpoint {
                 });
     }
 
-    /**
-     * Release subclass resources after the shared generation gate has drained.
-     * This is invoked exactly once by the retirement owner.
-     */
-    protected void closeEndpoint() {
-        // Stateless roles own no endpoint-local resources.
+    private void finishRetirement() {
+        generationLifecycle.beginCleanup();
+        Throwable retirementFailure = null;
+        try {
+            closeEndpoint();
+        } catch (Throwable failure) {
+            retirementFailure = failure;
+        } finally {
+            generationLifecycle.completeRetirement(retirementFailure);
+        }
+        rethrowRetirementFailure(retirementFailure);
     }
 
     private static void rethrowRetirementFailure(Throwable failure) {
@@ -295,19 +311,5 @@ public class WorkerEndpoint {
         public void close() {
             permit.close();
         }
-    }
-
-    // ==================== monitoring (EP-authoritative) ====================
-
-    /**
-     * Role-specific observable load metric for monitoring.
-     * <p>Prefill: identity-backed committed work (ms), absent while the
-     * endpoint cannot publish a coherent complete work view.
-     * <p>Decode: total active task count (confirmed running + inflight).
-     */
-    public OptionalLong getLoadMetric() {
-        WorkerStatus.EngineObservation engine = status.committedEngineObservation();
-        return OptionalLong.of(
-                engine.runningTaskList() == null ? 0L : engine.runningTaskList().size());
     }
 }

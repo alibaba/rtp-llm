@@ -25,15 +25,20 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *
  * @author saichen.sm
  * date: 2025/9/19
+ *
+ * <p>Initialization resolves configured service endpoints and installs discovery listeners.
+ * Periodic refresh updates the domain hosts, then subscriptions receive immutable host lists
+ * through the resolver callbacks.
  */
 @Slf4j
 @Component
 public class EngineAddressResolver {
-
     private final Map<Endpoint, List<WorkerHost>> domainHostsMap = new ConcurrentHashMap<>();
     private final ServiceDiscovery serviceDiscovery;
     private final CopyOnWriteArrayList<Listener> listeners = new CopyOnWriteArrayList<>();
+
     private volatile List<WorkerHost> allHosts = List.of();
+
     private final List<Endpoint> serviceEndpoints;
 
     public EngineAddressResolver(
@@ -53,10 +58,53 @@ public class EngineAddressResolver {
         fetchAllDomainsHosts();
     }
 
+    public void subscribe(Listener listener) {
+        if (listener == null || !listeners.addIfAbsent(listener)) {
+            return;
+        }
+        notifyListener(listener, allHosts);
+    }
+
     private void setupListeners(ServiceDiscovery serviceDiscovery, List<Endpoint> endpoints) {
         for (Endpoint endpoint : endpoints) {
             ServiceHostListener addressListener = hosts -> updateEndpointHosts(endpoint, hosts);
             serviceDiscovery.listen(endpoint, addressListener);
+        }
+    }
+
+    /**
+     * Update host list for specified address and aggregate all address host lists
+     *
+     * @param endpoint Service endpoint
+     * @param hostList Host list
+     */
+    private void updateEndpointHosts(Endpoint endpoint, List<WorkerHost> hostList) {
+        if (hostList == null || hostList.isEmpty()) {
+            // Empty discovery must not retire existing channels or worker caches.
+            return;
+        }
+        domainHostsMap.put(endpoint, List.copyOf(hostList));
+        // Aggregate host lists from all addresses
+        List<WorkerHost> aggregatedHosts = new ArrayList<>();
+        for (List<WorkerHost> hosts : domainHostsMap.values()) {
+            aggregatedHosts.addAll(hosts);
+        }
+        Logger.info(
+                "Address {} hosts updated, total aggregated hosts: {}",
+                endpoint.getAddress(),
+                aggregatedHosts.size());
+        // Update global host list and notify listener
+        this.allHosts = List.copyOf(aggregatedHosts);
+        for (Listener listener : listeners) {
+            notifyListener(listener, allHosts);
+        }
+    }
+
+    private void notifyListener(Listener listener, List<WorkerHost> hosts) {
+        try {
+            listener.onAddressUpdate(hosts);
+        } catch (Exception e) {
+            Logger.error("Failed to notify engine address listener", e);
         }
     }
 
@@ -116,6 +164,9 @@ public class EngineAddressResolver {
         return endpoints;
     }
 
+    /**
+     * Freezes discovery-provider inputs so equivalent sources share endpoint resolution.
+     */
     private record DiscoverySource(ServiceDiscoveryType type, String baseUrl, List<String> hosts) {
         private static DiscoverySource from(DiscoveryConfig discovery) {
             return discovery == null
@@ -129,6 +180,9 @@ public class EngineAddressResolver {
         }
     }
 
+    /**
+     * Defines the endpoint fields that distinguish independent discovery subscriptions.
+     */
     private record AddressSource(
             String address,
             String protocol,
@@ -147,49 +201,9 @@ public class EngineAddressResolver {
         }
     }
 
-    public void subscribe(Listener listener) {
-        if (listener == null || !listeners.addIfAbsent(listener)) {
-            return;
-        }
-        notifyListener(listener, allHosts);
-    }
-
     /**
-     * Update host list for specified address and aggregate all address host lists
-     *
-     * @param endpoint Service endpoint
-     * @param hostList Host list
+     * Receives a complete current host list after discovery changes.
      */
-    private void updateEndpointHosts(Endpoint endpoint, List<WorkerHost> hostList) {
-        if (hostList == null || hostList.isEmpty()) {
-            // Empty discovery must not retire existing channels or worker caches.
-            return;
-        }
-        domainHostsMap.put(endpoint, List.copyOf(hostList));
-        // Aggregate host lists from all addresses
-        List<WorkerHost> aggregatedHosts = new ArrayList<>();
-        for (List<WorkerHost> hosts : domainHostsMap.values()) {
-            aggregatedHosts.addAll(hosts);
-        }
-        Logger.info(
-                "Address {} hosts updated, total aggregated hosts: {}",
-                endpoint.getAddress(),
-                aggregatedHosts.size());
-        // Update global host list and notify listener
-        this.allHosts = List.copyOf(aggregatedHosts);
-        for (Listener listener : listeners) {
-            notifyListener(listener, allHosts);
-        }
-    }
-
-    private void notifyListener(Listener listener, List<WorkerHost> hosts) {
-        try {
-            listener.onAddressUpdate(hosts);
-        } catch (Exception e) {
-            Logger.error("Failed to notify engine address listener", e);
-        }
-    }
-
     public interface Listener {
 
         void onAddressUpdate(List<WorkerHost> hosts);

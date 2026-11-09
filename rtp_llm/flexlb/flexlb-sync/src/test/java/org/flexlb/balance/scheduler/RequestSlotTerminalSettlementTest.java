@@ -32,6 +32,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks request result publication and exact endpoint cleanup across cancellation and late worker
+ * feedback.
+ */
 class RequestSlotTerminalSettlementTest {
     private static final DecodeEndpoint.ReservationHandle RESERVATION =
             new DecodeEndpoint.ReservationHandle(1L, "2", 3L);

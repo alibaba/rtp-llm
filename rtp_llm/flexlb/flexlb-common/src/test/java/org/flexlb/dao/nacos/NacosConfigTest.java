@@ -4,6 +4,9 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Checks Nacos configuration defaults and validation.
+ */
 class NacosConfigTest {
 
     @Test

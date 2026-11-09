@@ -23,16 +23,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Ranks current Decode generations by admission feasibility and configured cost. Selection returns
+ * an exact pin; capacity rejection does not itself reserve or release a request.
+ */
 @Component
 public class DecodeSelector {
-
     private static final int MAX_SELECTION_ATTEMPTS = 2;
-
-    private enum Availability {
-        READY,
-        BUSY,
-        IMPOSSIBLE
-    }
 
     private final WorkerDirectory workerDirectory;
     private final EndpointRoundRobin rotation = new EndpointRoundRobin();
@@ -143,6 +140,65 @@ public class DecodeSelector {
         return PlacementResult.blocked(RoleType.DECODE);
     }
 
+    /** Classify only the dimensions that prevent this request from fitting. */
+    static Response classifyCapacityFailure(
+            DecodeBinding request, DecodeEndpoint.AdmissionSummary snapshot) {
+        boolean dispatch = request.mode() == DecodeMode.IMMEDIATE;
+        var routing = snapshot.routing();
+        var usage = dispatch ? routing.dispatchUsage() : routing.placementUsage();
+        if (usage.totalKvTokens() > 0
+                && request.inputAndMaxOutputKvTokens()
+                        > request.capacity().kvBudget(usage.totalKvTokens())) {
+            return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+        }
+        CapacityRelease lower = CapacityRelease.NONE;
+        CapacityRelease higher = CapacityRelease.NONE;
+        CapacityRelease same = CapacityRelease.NONE;
+        for (int priority = 1; priority <= PriorityNormalizer.MAX_PRIORITY; priority++) {
+            CapacityRelease occupied =
+                    dispatch
+                            ? snapshot.engineOccupancy(priority)
+                            : snapshot.placementOccupancy(priority);
+            if (occupied == CapacityRelease.NONE) {
+                continue;
+            }
+            if (priority < request.priority()) {
+                lower = lower.plus(occupied);
+            } else if (priority == request.priority()) {
+                same = occupied;
+            } else {
+                higher = higher.plus(occupied);
+            }
+        }
+        // Removing lower-priority occupancy is a counterfactual for attribution,
+        // not an authorization to preempt its owners.
+        var residual =
+                request.capacity()
+                        .evaluate(
+                                usage,
+                                request.inputKvTokens(),
+                                request.inputAndMaxOutputKvTokens(),
+                                lower);
+        if (residual.fits()) {
+            return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+        }
+        CapacityRelease attributed = higher.plus(same);
+        if (residual.requests() > attributed.requests()
+                || residual.requiredKvTokens() > attributed.requiredKvTokens()
+                || residual.kvBudgetTokens() > attributed.kvBudgetTokens()) {
+            return Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
+        }
+        boolean higherBlocks =
+                residual.requests() > 0 && higher.requests() > 0
+                        || residual.requiredKvTokens() > 0 && higher.requiredKvTokens() > 0
+                        || residual.kvBudgetTokens() > 0 && higher.kvBudgetTokens() > 0;
+        return Response.error(
+                StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                higherBlocks
+                        ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
+                        : AdmissionRejectReason.SAME_PRIORITY_AHEAD);
+    }
+
     private PlacementResult<SelectedRole, RoleType> classifyCapacityFailure(
             DecodeBinding request, List<DecodeRoutingView> views) {
         Response failure = null;
@@ -201,65 +257,6 @@ public class DecodeSelector {
                         System.currentTimeMillis(),
                         "decode",
                         List.copyOf(evidence)));
-    }
-
-    /** Classify only the dimensions that prevent this request from fitting. */
-    static Response classifyCapacityFailure(
-            DecodeBinding request, DecodeEndpoint.AdmissionSummary snapshot) {
-        boolean dispatch = request.mode() == DecodeMode.IMMEDIATE;
-        var routing = snapshot.routing();
-        var usage = dispatch ? routing.dispatchUsage() : routing.placementUsage();
-        if (usage.totalKvTokens() > 0
-                && request.inputAndMaxOutputKvTokens()
-                        > request.capacity().kvBudget(usage.totalKvTokens())) {
-            return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
-        }
-        CapacityRelease lower = CapacityRelease.NONE;
-        CapacityRelease higher = CapacityRelease.NONE;
-        CapacityRelease same = CapacityRelease.NONE;
-        for (int priority = 1; priority <= PriorityNormalizer.MAX_PRIORITY; priority++) {
-            CapacityRelease occupied =
-                    dispatch
-                            ? snapshot.engineOccupancy(priority)
-                            : snapshot.placementOccupancy(priority);
-            if (occupied == CapacityRelease.NONE) {
-                continue;
-            }
-            if (priority < request.priority()) {
-                lower = lower.plus(occupied);
-            } else if (priority == request.priority()) {
-                same = occupied;
-            } else {
-                higher = higher.plus(occupied);
-            }
-        }
-        // Removing lower-priority occupancy is a counterfactual for attribution,
-        // not an authorization to preempt its owners.
-        var residual =
-                request.capacity()
-                        .evaluate(
-                                usage,
-                                request.inputKvTokens(),
-                                request.inputAndMaxOutputKvTokens(),
-                                lower);
-        if (residual.fits()) {
-            return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
-        }
-        CapacityRelease attributed = higher.plus(same);
-        if (residual.requests() > attributed.requests()
-                || residual.requiredKvTokens() > attributed.requiredKvTokens()
-                || residual.kvBudgetTokens() > attributed.kvBudgetTokens()) {
-            return Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
-        }
-        boolean higherBlocks =
-                residual.requests() > 0 && higher.requests() > 0
-                        || residual.requiredKvTokens() > 0 && higher.requiredKvTokens() > 0
-                        || residual.kvBudgetTokens() > 0 && higher.kvBudgetTokens() > 0;
-        return Response.error(
-                StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
-                higherBlocks
-                        ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
-                        : AdmissionRejectReason.SAME_PRIORITY_AHEAD);
     }
 
     private static Availability availability(DecodeBinding request, DecodeRoutingView view) {
@@ -323,5 +320,11 @@ public class DecodeSelector {
                 selectedPin.close();
             }
         }
+    }
+
+    private enum Availability {
+        READY,
+        BUSY,
+        IMPOSSIBLE
     }
 }

@@ -18,25 +18,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * (--total-kv-tokens, --block-size, --decode-max-concurrency).
  */
 class ClusterConfigParamTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @TempDir Path tempDir;
-
-    private String[] baseArgs() {
-        return new String[] {
-            "--endpoint-file", tempDir.resolve("endpoint.json").toString(),
-            "--performance", tempDir.resolve("performance.json").toString(),
-            "--master-config", tempDir.resolve("master.json").toString(),
-        };
-    }
-
-    private static String[] with(String[] base, String... extra) {
-        String[] args = new String[base.length + extra.length];
-        System.arraycopy(base, 0, args, 0, base.length);
-        System.arraycopy(extra, 0, args, base.length, extra.length);
-        return args;
-    }
 
     // ──────────── Single-role validation relaxation ────────────
 
@@ -255,5 +239,20 @@ class ClusterConfigParamTest {
                 64000,
                 decodePayload.get("engines").get(0).get("grpc_port").asInt(),
                 "decode ports start at base when there are no prefill engines");
+    }
+
+    private String[] baseArgs() {
+        return new String[] {
+            "--endpoint-file", tempDir.resolve("endpoint.json").toString(),
+            "--performance", tempDir.resolve("performance.json").toString(),
+            "--master-config", tempDir.resolve("master.json").toString(),
+        };
+    }
+
+    private static String[] with(String[] base, String... extra) {
+        String[] args = new String[base.length + extra.length];
+        System.arraycopy(base, 0, args, 0, base.length);
+        System.arraycopy(extra, 0, args, base.length, extra.length);
+        return args;
     }
 }

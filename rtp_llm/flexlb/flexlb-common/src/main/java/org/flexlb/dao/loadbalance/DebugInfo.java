@@ -4,6 +4,9 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
+/**
+ * Collects optional scheduling diagnostics for the frontend response.
+ */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class DebugInfo {

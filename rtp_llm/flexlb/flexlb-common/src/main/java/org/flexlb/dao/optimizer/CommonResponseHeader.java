@@ -4,6 +4,9 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
+/**
+ * Carries the optimizer response's error code and diagnostic message.
+ */
 @Data
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class CommonResponseHeader {

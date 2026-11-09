@@ -7,6 +7,9 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 
+/**
+ * Provides separate scheduled executors for synchronization work and monitoring tasks.
+ */
 @Configuration
 @EnableScheduling
 public class SyncSchedulerConfig {

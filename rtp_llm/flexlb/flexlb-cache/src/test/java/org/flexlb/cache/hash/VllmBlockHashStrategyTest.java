@@ -9,6 +9,9 @@ import java.util.stream.IntStream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Checks vLLM-compatible block hashing against the expected cache-key contract.
+ */
 class VllmBlockHashStrategyTest {
 
     private final BlockHashStrategy strategy = new VllmBlockHashStrategy();

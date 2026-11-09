@@ -8,6 +8,9 @@ import org.springframework.stereotype.Component;
 
 import static org.flexlb.constant.MetricConstant.GRACEFUL_LIFECYCLE_EVENT;
 
+/**
+ * Publishes online, health-offline and shutdown timing observations through the shared monitor.
+ */
 @Component
 public class GracefulLifecycleReporter {
 

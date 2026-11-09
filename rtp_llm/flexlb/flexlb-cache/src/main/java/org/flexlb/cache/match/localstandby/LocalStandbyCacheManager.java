@@ -32,15 +32,18 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 @Slf4j
 public class LocalStandbyCacheManager {
-
     private static final long CAPACITY_REFRESH_INTERVAL_MS = 60_000;
     private static final long CAPACITY_WARNING_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
+
     private final boolean enabled;
+
     private final WorkerStatusProvider workerStatusProvider;
     private final CacheMetricsReporter cacheMetricsReporter;
     private final Collection<ServiceRoute> serviceRoutes;
+
     private final long configuredMaximumEntries;
     private final double capacityMultiplier;
+
     private final LocalStandbyCacheIndex cacheIndex;
     private final AtomicLong nextCapacityWarningNanos = new AtomicLong(Long.MIN_VALUE);
 
@@ -94,6 +97,89 @@ public class LocalStandbyCacheManager {
                 calculatePrefixMatchBlockCounts(blockCacheKeys, workerStatuses);
         applyCacheMatchRollback(prefixMatches, workerStatuses);
         return prefixMatches;
+    }
+
+    /**
+     * Records predicted block ownership for a routed logical worker.
+     *
+     * @param workerIpPort logical worker identity in {@code ip:port@engineIndex} format; the
+     *                     index identifies one independently routable engine behind the physical
+     *                     frontend
+     * @param blockCacheKeys routed request block hashes
+     */
+    public void addRoutedRequestBlocks(String workerIpPort, List<Long> blockCacheKeys) {
+        int rejectedMappings = cacheIndex.addWorkerBlockMappings(workerIpPort, blockCacheKeys);
+        if (rejectedMappings <= 0) {
+            return;
+        }
+
+        cacheMetricsReporter.reportLocalStandbyCapacityRejected();
+        long now = System.nanoTime();
+        long nextWarning = nextCapacityWarningNanos.get();
+        if (now >= nextWarning
+                && nextCapacityWarningNanos.compareAndSet(
+                        nextWarning, now + CAPACITY_WARNING_INTERVAL_NANOS)) {
+            log.warn(
+                    "Local Standby cache reached its capacity limit; rejected {} new "
+                            + "mappings while existing mappings remain refreshable, "
+                            + "currentMappings={}, maximumEntries={}",
+                    rejectedMappings,
+                    cacheIndex.mappingCount(),
+                    cacheIndex.maximumEntryCount());
+        }
+    }
+
+    public long mappingCount() {
+        return cacheIndex.mappingCount();
+    }
+
+    public long maximumEntryCount() {
+        return cacheIndex.maximumEntryCount();
+    }
+
+    @Scheduled(fixedRate = 20_000)
+    public void reportMappingCount() {
+        if (enabled) {
+            cacheMetricsReporter.reportLocalStandbyMappingCount(cacheIndex.mappingCount());
+        }
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        cacheIndex.shutdown();
+    }
+
+    @Scheduled(fixedDelay = CAPACITY_REFRESH_INTERVAL_MS)
+    void refreshCapacityLimits() {
+        if (!enabled) {
+            return;
+        }
+
+        try {
+            long estimatedHbmBlockCapacity = estimateHbmBlockCapacity();
+            if (estimatedHbmBlockCapacity <= 0) {
+                return;
+            }
+
+            long newMaximumEntries = calculateMaximumEntries(estimatedHbmBlockCapacity);
+            long previousMaximum = cacheIndex.maximumEntryCount();
+            cacheIndex.updateMaximumEntries(newMaximumEntries);
+            if (newMaximumEntries != previousMaximum) {
+                log.info(
+                        "Updated Local Standby cache capacity from {} to {} entries "
+                                + "(estimatedHbmBlocks={}, multiplier={}, configuredMaximum={})",
+                        previousMaximum,
+                        newMaximumEntries,
+                        estimatedHbmBlockCapacity,
+                        capacityMultiplier,
+                        configuredMaximumEntries);
+            }
+        } catch (RuntimeException e) {
+            log.warn(
+                    "Failed to update local standby cache capacity; keeping {} entries",
+                    cacheIndex.maximumEntryCount(),
+                    e);
+        }
     }
 
     private Map<String, Integer> calculatePrefixMatchBlockCounts(
@@ -168,84 +254,6 @@ public class LocalStandbyCacheManager {
         }
     }
 
-    /**
-     * Records predicted block ownership for a routed logical worker.
-     *
-     * @param workerIpPort logical worker identity in {@code ip:port@engineIndex} format; the
-     *                     index identifies one independently routable engine behind the physical
-     *                     frontend
-     * @param blockCacheKeys routed request block hashes
-     */
-    public void addRoutedRequestBlocks(String workerIpPort, List<Long> blockCacheKeys) {
-        int rejectedMappings = cacheIndex.addWorkerBlockMappings(workerIpPort, blockCacheKeys);
-        if (rejectedMappings <= 0) {
-            return;
-        }
-
-        cacheMetricsReporter.reportLocalStandbyCapacityRejected();
-        long now = System.nanoTime();
-        long nextWarning = nextCapacityWarningNanos.get();
-        if (now >= nextWarning
-                && nextCapacityWarningNanos.compareAndSet(
-                        nextWarning, now + CAPACITY_WARNING_INTERVAL_NANOS)) {
-            log.warn(
-                    "Local Standby cache reached its capacity limit; rejected {} new "
-                            + "mappings while existing mappings remain refreshable, "
-                            + "currentMappings={}, maximumEntries={}",
-                    rejectedMappings,
-                    cacheIndex.mappingCount(),
-                    cacheIndex.maximumEntryCount());
-        }
-    }
-
-    public long mappingCount() {
-        return cacheIndex.mappingCount();
-    }
-
-    public long maximumEntryCount() {
-        return cacheIndex.maximumEntryCount();
-    }
-
-    @Scheduled(fixedRate = 20_000)
-    public void reportMappingCount() {
-        if (enabled) {
-            cacheMetricsReporter.reportLocalStandbyMappingCount(cacheIndex.mappingCount());
-        }
-    }
-
-    @Scheduled(fixedDelay = CAPACITY_REFRESH_INTERVAL_MS)
-    void refreshCapacityLimits() {
-        if (!enabled) {
-            return;
-        }
-
-        try {
-            long estimatedHbmBlockCapacity = estimateHbmBlockCapacity();
-            if (estimatedHbmBlockCapacity <= 0) {
-                return;
-            }
-
-            long newMaximumEntries = calculateMaximumEntries(estimatedHbmBlockCapacity);
-            long previousMaximum = cacheIndex.maximumEntryCount();
-            cacheIndex.updateMaximumEntries(newMaximumEntries);
-            if (newMaximumEntries != previousMaximum) {
-                log.info(
-                        "Updated Local Standby cache capacity from {} to {} entries "
-                                + "(estimatedHbmBlocks={}, multiplier={}, configuredMaximum={})",
-                        previousMaximum,
-                        newMaximumEntries,
-                        estimatedHbmBlockCapacity,
-                        capacityMultiplier,
-                        configuredMaximumEntries);
-            }
-        } catch (RuntimeException e) {
-            log.warn(
-                    "Failed to update local standby cache capacity; keeping {} entries",
-                    cacheIndex.maximumEntryCount(),
-                    e);
-        }
-    }
-
     private long estimateHbmBlockCapacity() {
         long totalCapacity = 0;
         for (ServiceRoute serviceRoute : serviceRoutes) {
@@ -279,15 +287,6 @@ public class LocalStandbyCacheManager {
         return roleCapacity;
     }
 
-    private long calculateMaximumEntries(long estimatedHbmBlockCapacity) {
-        // KVS can retain substantially more metadata than HBM. The multiplier adds that
-        // headroom without claiming to model the engine's actual multi-tier eviction policy.
-        double capacityWithHeadroom = estimatedHbmBlockCapacity * capacityMultiplier;
-        return capacityWithHeadroom >= configuredMaximumEntries
-                ? configuredMaximumEntries
-                : (long) Math.ceil(capacityWithHeadroom);
-    }
-
     private long calculateWorkerBlockCapacity(WorkerStatus workerStatus) {
         if (workerStatus == null
                 || !workerStatus.isAlive()
@@ -307,8 +306,12 @@ public class LocalStandbyCacheManager {
         return value / divisor + (value % divisor == 0 ? 0 : 1);
     }
 
-    @PreDestroy
-    public void shutdown() {
-        cacheIndex.shutdown();
+    private long calculateMaximumEntries(long estimatedHbmBlockCapacity) {
+        // KVS can retain substantially more metadata than HBM. The multiplier adds that
+        // headroom without claiming to model the engine's actual multi-tier eviction policy.
+        double capacityWithHeadroom = estimatedHbmBlockCapacity * capacityMultiplier;
+        return capacityWithHeadroom >= configuredMaximumEntries
+                ? configuredMaximumEntries
+                : (long) Math.ceil(capacityWithHeadroom);
     }
 }

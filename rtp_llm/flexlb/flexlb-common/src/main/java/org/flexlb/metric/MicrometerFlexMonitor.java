@@ -16,26 +16,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
- * MicrometerFlexMonitor - bridges FlexMonitor interface to micrometer MeterRegistry.
- *
- * <p>This implementation allows FlexLB business metrics to be exposed via the
- * Spring Boot Actuator {@code /prometheus} endpoint in environments where
- * kmonitor is not available (e.g. 110 test environment built with {@code -P '!internal'}).
- *
- * <p>Metric type mapping:
- * <ul>
- *   <li>{@link FlexMetricType#QPS} / {@link FlexMetricType#COUNTER} → micrometer Counter (increment)</li>
- *   <li>{@link FlexMetricType#GAUGE} → micrometer Gauge (absolute value via AtomicDouble)</li>
- *   <li>{@link FlexMetricType#TIMER} → micrometer Timer (duration distribution with p50/p90/p95/p99)</li>
- *   <li>Unknown types default to Gauge</li>
- * </ul>
- *
- * <p>All metric names are prefixed with {@code flexlb.} to avoid conflicts with
- * Spring Boot's built-in metrics.
+ * Registers FlexLB metrics in a Micrometer registry and reports counters, gauges and timer samples.
+ * Metric names use the {@code flexlb.} prefix and can be restricted by the configured allowlist.
  */
 @Slf4j
 public class MicrometerFlexMonitor implements FlexMonitor {
-
     private static final String METRIC_PREFIX = "flexlb.";
 
     /**
@@ -44,17 +29,6 @@ public class MicrometerFlexMonitor implements FlexMonitor {
      * {@code flexlb.monitor.metric-whitelist} property.
      */
     private static volatile Set<String> ALLOWED_METRICS = null;
-
-    /**
-     * Sets the allowlist of metric names (without the {@code flexlb.} prefix).
-     * Pass {@code null} to disable filtering (allow all metrics).
-     */
-    public static void setAllowedMetrics(Set<String> metrics) {
-        ALLOWED_METRICS = metrics;
-        log.info(
-                "MicrometerFlexMonitor allowlist set: {} metrics",
-                metrics == null ? "unlimited" : metrics.size());
-    }
 
     private final MeterRegistry meterRegistry;
     private final ConcurrentHashMap<String, FlexMetricType> metricTypes = new ConcurrentHashMap<>();
@@ -73,6 +47,17 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         log.debug(
                 "MicrometerFlexMonitor initialized with MeterRegistry: {}",
                 meterRegistry.getClass().getSimpleName());
+    }
+
+    /**
+     * Sets the allowlist of metric names (without the {@code flexlb.} prefix).
+     * Pass {@code null} to disable filtering (allow all metrics).
+     */
+    public static void setAllowedMetrics(Set<String> metrics) {
+        ALLOWED_METRICS = metrics;
+        log.info(
+                "MicrometerFlexMonitor allowlist set: {} metrics",
+                metrics == null ? "unlimited" : metrics.size());
     }
 
     @Override
@@ -161,10 +146,11 @@ public class MicrometerFlexMonitor implements FlexMonitor {
         }
     }
 
-    private Tags resolveTags(FlexMetricTags metricsTags) {
-        return (metricsTags == null || metricsTags.isEmpty())
-                ? Tags.empty()
-                : tagsCache.computeIfAbsent(metricsTags, this::toMicrometerTags);
+    @Override
+    public String toString() {
+        return "MicrometerFlexMonitor{meterRegistry="
+                + meterRegistry.getClass().getSimpleName()
+                + "}";
     }
 
     private Counter counter(MetricKey key) {
@@ -174,6 +160,12 @@ public class MicrometerFlexMonitor implements FlexMonitor {
                         Counter.builder(key.name())
                                 .tags(resolveTags(key.metricsTags()))
                                 .register(meterRegistry));
+    }
+
+    private Tags resolveTags(FlexMetricTags metricsTags) {
+        return (metricsTags == null || metricsTags.isEmpty())
+                ? Tags.empty()
+                : tagsCache.computeIfAbsent(metricsTags, this::toMicrometerTags);
     }
 
     private Timer timer(MetricKey key) {
@@ -233,11 +225,4 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     private record MetricKey(String name, FlexMetricTags metricsTags) {}
 
     private record GaugeEntry(AtomicDouble value, Gauge gauge) {}
-
-    @Override
-    public String toString() {
-        return "MicrometerFlexMonitor{meterRegistry="
-                + meterRegistry.getClass().getSimpleName()
-                + "}";
-    }
 }

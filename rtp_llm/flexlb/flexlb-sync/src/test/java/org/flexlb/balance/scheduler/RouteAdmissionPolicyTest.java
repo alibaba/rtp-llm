@@ -21,7 +21,9 @@ import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.queue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
-/** Exact observed-head admission policy on top of the pure route timeline. */
+/**
+ * Exact observed-head admission policy on top of the pure route timeline.
+ */
 class RouteAdmissionPolicyTest {
 
     @Test

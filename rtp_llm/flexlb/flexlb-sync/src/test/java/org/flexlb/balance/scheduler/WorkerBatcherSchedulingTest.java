@@ -44,9 +44,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
-/** Concurrency contracts at the final, threaded Prefill scheduling boundary. */
+/**
+ * Concurrency contracts at the final, threaded Prefill scheduling boundary.
+ */
 class WorkerBatcherSchedulingTest {
-
     private final List<WorkerBatcher> runtimes = new ArrayList<>();
 
     @AfterEach
@@ -570,22 +571,6 @@ class WorkerBatcherSchedulingTest {
         return status;
     }
 
-    private static WorkerStatus gatedFirstStatusRead(
-            CountDownLatch entered, CountDownLatch proceed) {
-        WorkerStatus status = mock(WorkerStatus.class);
-        AtomicBoolean first = new AtomicBoolean(true);
-        when(status.committedEngineObservation())
-                .thenAnswer(
-                        ignored -> {
-                            if (first.compareAndSet(true, false)) {
-                                entered.countDown();
-                                await(proceed);
-                            }
-                            return capacity();
-                        });
-        return status;
-    }
-
     private static WorkerStatus.EngineObservation capacity() {
         return new WorkerStatus.EngineObservation(
                 RoleType.PREFILL,
@@ -602,6 +587,22 @@ class WorkerBatcherSchedulingTest {
                 1_000_000L,
                 0L,
                 0L);
+    }
+
+    private static WorkerStatus gatedFirstStatusRead(
+            CountDownLatch entered, CountDownLatch proceed) {
+        WorkerStatus status = mock(WorkerStatus.class);
+        AtomicBoolean first = new AtomicBoolean(true);
+        when(status.committedEngineObservation())
+                .thenAnswer(
+                        ignored -> {
+                            if (first.compareAndSet(true, false)) {
+                                entered.countDown();
+                                await(proceed);
+                            }
+                            return capacity();
+                        });
+        return status;
     }
 
     private static void await(CountDownLatch latch) {
@@ -624,6 +625,9 @@ class WorkerBatcherSchedulingTest {
                         RoleType.PREFILL));
     }
 
+    /**
+     * Exposes delivery capacity boundaries to batcher scheduling tests.
+     */
     private abstract static class BoundaryDelivery implements DeliveryStrategy {
 
         @Override
@@ -638,9 +642,12 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
+    /**
+     * Blocks preparation until a test-controlled availability event occurs.
+     */
     private static final class EventDrivenBlock extends BoundaryDelivery {
-
         private final boolean deliveryOnly;
+
         private final TestAvailability firstCapacity = new TestAvailability();
         private final TestAvailability parkedCapacity = new TestAvailability();
         private final AtomicInteger attempts = new AtomicInteger();
@@ -653,12 +660,6 @@ class WorkerBatcherSchedulingTest {
 
         private EventDrivenBlock(boolean deliveryOnly) {
             this.deliveryOnly = deliveryOnly;
-        }
-
-        private CapacityBoundary boundary(TestAvailability availability) {
-            return deliveryOnly
-                    ? CapacityBoundary.deliveryUnavailable(availability)
-                    : unavailable(availability);
         }
 
         @Override
@@ -676,8 +677,17 @@ class WorkerBatcherSchedulingTest {
             return WorkerBatcherTestSupport.boundaryOnly(
                     candidates.getFirst(), boundary(parkedCapacity));
         }
+
+        private CapacityBoundary boundary(TestAvailability availability) {
+            return deliveryOnly
+                    ? CapacityBoundary.deliveryUnavailable(availability)
+                    : unavailable(availability);
+        }
     }
 
+    /**
+     * Controls preparation outcomes used to check projection-cache reuse.
+     */
     private static final class ProjectionCacheBlock extends BoundaryDelivery {
 
         private final TestAvailability firstCapacity = new TestAvailability();
@@ -706,6 +716,9 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
+    /**
+     * Pauses execution prediction so tests can interleave batcher changes.
+     */
     private static final class PredictionGate extends BoundaryDelivery {
 
         private final CountDownLatch groupPredictionEntered = new CountDownLatch(1);
@@ -739,6 +752,9 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
+    /**
+     * Publishes test-controlled availability changes to registered listeners.
+     */
     private static final class TestAvailability implements CapacityBoundary.Availability {
 
         private final AtomicBoolean available = new AtomicBoolean();

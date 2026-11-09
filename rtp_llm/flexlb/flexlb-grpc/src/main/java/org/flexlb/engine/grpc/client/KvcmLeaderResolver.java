@@ -23,6 +23,10 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Discovers and caches the current KVCM leader endpoint.
+ *
+ * <p>Resolve reads the currently known metadata-service target. Refresh consults service discovery
+ * and metadata responses to update that target; callers can retry against the refreshed leader
+ * without owning discovery state themselves.
  */
 @Slf4j
 @Component

@@ -31,6 +31,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks provider selection and fallback when cache-match queries succeed or fail.
+ */
 class CacheMatchQueryOrchestratorTest {
 
     private final LocalSyncCacheMatchProvider localSyncProvider =

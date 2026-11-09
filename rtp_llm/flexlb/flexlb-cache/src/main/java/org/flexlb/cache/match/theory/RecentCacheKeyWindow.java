@@ -14,7 +14,6 @@ import java.util.function.LongSupplier;
  */
 @Slf4j
 public class RecentCacheKeyWindow {
-
     private static final int MIN_HASH_TABLE_SIZE = 16;
     private static final double HASH_LOAD_FACTOR = 0.67D;
     private static final byte EMPTY = 0;
@@ -22,12 +21,14 @@ public class RecentCacheKeyWindow {
 
     private final long timeWindowMs;
     private final int maxCacheKeys;
+
     private final LongSupplier nowSupplier;
     private final long[] tableKeys;
     private final long[] tableLastSeenTimestampMs;
     private final int[] tableHeapIndexes;
     private final byte[] tableStates;
     private final int[] expirationHeapSlots;
+
     private final int tableMask;
 
     private int uniqueSize;
@@ -109,51 +110,25 @@ public class RecentCacheKeyWindow {
         uniqueSize++;
     }
 
-    private void evictExpired(long nowMs) {
-        long expireBeforeOrAt = nowMs - timeWindowMs;
-        while (uniqueSize > 0 && oldestTimestampMs() <= expireBeforeOrAt) {
-            evictOldestCacheKey();
-        }
-    }
-
-    private long oldestTimestampMs() {
-        return tableLastSeenTimestampMs[expirationHeapSlots[0]];
-    }
-
-    private void evictOldestCacheKey() {
-        int oldestSlot = expirationHeapSlots[0];
-        removeFromExpirationHeap(0);
-        removeFromHashTable(oldestSlot);
-        uniqueSize--;
-    }
-
-    private void addToExpirationHeap(int tableSlot) {
-        int heapIndex = uniqueSize;
-        expirationHeapSlots[heapIndex] = tableSlot;
-        tableHeapIndexes[tableSlot] = heapIndex;
-        siftExpirationHeapUp(heapIndex);
-    }
-
-    private void removeFromExpirationHeap(int heapIndex) {
-        int lastHeapIndex = uniqueSize - 1;
-        int lastTableSlot = expirationHeapSlots[lastHeapIndex];
-        if (heapIndex < lastHeapIndex) {
-            expirationHeapSlots[heapIndex] = lastTableSlot;
-            tableHeapIndexes[lastTableSlot] = heapIndex;
-            siftExpirationHeapDown(heapIndex);
-        }
-    }
-
-    private void siftExpirationHeapUp(int heapIndex) {
-        int currentIndex = heapIndex;
-        while (currentIndex > 0) {
-            int parentIndex = (currentIndex - 1) >>> 1;
-            if (timestampAtHeapIndex(parentIndex) <= timestampAtHeapIndex(currentIndex)) {
-                return;
+    private int findSlot(long cacheKey) {
+        int index = hashIndex(cacheKey, tableMask);
+        while (tableStates[index] == USED) {
+            if (tableKeys[index] == cacheKey) {
+                return index;
             }
-            swapHeapEntries(parentIndex, currentIndex);
-            currentIndex = parentIndex;
+            index = (index + 1) & tableMask;
         }
+        return -1;
+    }
+
+    private static int hashIndex(long value, int mask) {
+        long mixed = value;
+        mixed ^= mixed >>> 33;
+        mixed *= 0xff51afd7ed558ccdL;
+        mixed ^= mixed >>> 33;
+        mixed *= 0xc4ceb9fe1a85ec53L;
+        mixed ^= mixed >>> 33;
+        return (int) mixed & mask;
     }
 
     private void siftExpirationHeapDown(int heapIndex) {
@@ -191,6 +166,23 @@ public class RecentCacheKeyWindow {
         tableHeapIndexes[secondTableSlot] = firstHeapIndex;
     }
 
+    private void evictOldestCacheKey() {
+        int oldestSlot = expirationHeapSlots[0];
+        removeFromExpirationHeap(0);
+        removeFromHashTable(oldestSlot);
+        uniqueSize--;
+    }
+
+    private void removeFromExpirationHeap(int heapIndex) {
+        int lastHeapIndex = uniqueSize - 1;
+        int lastTableSlot = expirationHeapSlots[lastHeapIndex];
+        if (heapIndex < lastHeapIndex) {
+            expirationHeapSlots[heapIndex] = lastTableSlot;
+            tableHeapIndexes[lastTableSlot] = heapIndex;
+            siftExpirationHeapDown(heapIndex);
+        }
+    }
+
     private void removeFromHashTable(int tableSlotToRemove) {
         int vacantSlot = tableSlotToRemove;
         int nextSlot = (vacantSlot + 1) & tableMask;
@@ -213,23 +205,42 @@ public class RecentCacheKeyWindow {
         tableHeapIndexes[vacantSlot] = 0;
     }
 
-    private int findSlot(long cacheKey) {
-        int index = hashIndex(cacheKey, tableMask);
-        while (tableStates[index] == USED) {
-            if (tableKeys[index] == cacheKey) {
-                return index;
-            }
-            index = (index + 1) & tableMask;
-        }
-        return -1;
-    }
-
     private int findEmptySlot(long cacheKey) {
         int index = hashIndex(cacheKey, tableMask);
         while (tableStates[index] == USED) {
             index = (index + 1) & tableMask;
         }
         return index;
+    }
+
+    private void addToExpirationHeap(int tableSlot) {
+        int heapIndex = uniqueSize;
+        expirationHeapSlots[heapIndex] = tableSlot;
+        tableHeapIndexes[tableSlot] = heapIndex;
+        siftExpirationHeapUp(heapIndex);
+    }
+
+    private void siftExpirationHeapUp(int heapIndex) {
+        int currentIndex = heapIndex;
+        while (currentIndex > 0) {
+            int parentIndex = (currentIndex - 1) >>> 1;
+            if (timestampAtHeapIndex(parentIndex) <= timestampAtHeapIndex(currentIndex)) {
+                return;
+            }
+            swapHeapEntries(parentIndex, currentIndex);
+            currentIndex = parentIndex;
+        }
+    }
+
+    private void evictExpired(long nowMs) {
+        long expireBeforeOrAt = nowMs - timeWindowMs;
+        while (uniqueSize > 0 && oldestTimestampMs() <= expireBeforeOrAt) {
+            evictOldestCacheKey();
+        }
+    }
+
+    private long oldestTimestampMs() {
+        return tableLastSeenTimestampMs[expirationHeapSlots[0]];
     }
 
     private void logRequest(long nowMs, long requestOccurrences, long requestHitOccurrences) {
@@ -259,16 +270,9 @@ public class RecentCacheKeyWindow {
         return capacity;
     }
 
-    private static int hashIndex(long value, int mask) {
-        long mixed = value;
-        mixed ^= mixed >>> 33;
-        mixed *= 0xff51afd7ed558ccdL;
-        mixed ^= mixed >>> 33;
-        mixed *= 0xc4ceb9fe1a85ec53L;
-        mixed ^= mixed >>> 33;
-        return (int) mixed & mask;
-    }
-
+    /**
+     * Captures request and hit occurrences for one recent-key time window.
+     */
     @Getter
     public static class Snapshot {
         private final long timeWindowMs;

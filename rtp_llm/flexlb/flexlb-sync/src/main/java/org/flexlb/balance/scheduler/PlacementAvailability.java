@@ -19,28 +19,27 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 @Component
 public final class PlacementAvailability {
-
-    enum ChangeKind {
-        CAPACITY,
-        TOPOLOGY
-    }
-
-    record Event(PlacementKey key, ChangeKind kind) {
-
-        Event {
-            Objects.requireNonNull(key, "key");
-            Objects.requireNonNull(kind, "kind");
-        }
-    }
-
-    @FunctionalInterface
-    interface Listener {
-        void onAvailabilityChanged(Event event);
-    }
-
     private final AtomicLong sequence = new AtomicLong();
     private final ConcurrentMap<PlacementKey, Long> lastChanged = new ConcurrentHashMap<>();
     private final ConcurrentMap<Listener, Boolean> listeners = new ConcurrentHashMap<>();
+
+    /** Notify that a fresh placement in this domain may now succeed. */
+    public void capacityChanged(PlacementKey key) {
+        publish(key, ChangeKind.CAPACITY);
+    }
+
+    /** Notify that an endpoint generation was published, replaced, or removed. */
+    public void topologyChanged(PlacementKey key) {
+        publish(key, ChangeKind.TOPOLOGY);
+    }
+
+    public void capacityChanged(RoleType role, String group, String endpoint) {
+        capacityChanged(PlacementKey.exact(role, group, endpoint));
+    }
+
+    public void topologyChanged(RoleType role, String group, String endpoint) {
+        topologyChanged(PlacementKey.exact(role, group, endpoint));
+    }
 
     void addListener(Listener candidate) {
         Objects.requireNonNull(candidate, "listener");
@@ -53,14 +52,12 @@ public final class PlacementAvailability {
         }
     }
 
-    /** Notify that a fresh placement in this domain may now succeed. */
-    public void capacityChanged(PlacementKey key) {
-        publish(key, ChangeKind.CAPACITY);
+    long sequence() {
+        return sequence.get();
     }
 
-    /** Notify that an endpoint generation was published, replaced, or removed. */
-    public void topologyChanged(PlacementKey key) {
-        publish(key, ChangeKind.TOPOLOGY);
+    long lastChangedSequence(PlacementKey key) {
+        return lastChanged.getOrDefault(key, 0L);
     }
 
     private void publish(PlacementKey key, ChangeKind kind) {
@@ -91,19 +88,27 @@ public final class PlacementAvailability {
         }
     }
 
-    public void capacityChanged(RoleType role, String group, String endpoint) {
-        capacityChanged(PlacementKey.exact(role, group, endpoint));
+    enum ChangeKind {
+        CAPACITY,
+        TOPOLOGY
     }
 
-    public void topologyChanged(RoleType role, String group, String endpoint) {
-        topologyChanged(PlacementKey.exact(role, group, endpoint));
+    /**
+     * Identifies the capacity or topology edge whose version changed.
+     */
+    record Event(PlacementKey key, ChangeKind kind) {
+
+        Event {
+            Objects.requireNonNull(key, "key");
+            Objects.requireNonNull(kind, "kind");
+        }
     }
 
-    long sequence() {
-        return sequence.get();
-    }
-
-    long lastChangedSequence(PlacementKey key) {
-        return lastChanged.getOrDefault(key, 0L);
+    /**
+     * Receives a capacity-change edge that may make blocked placement work retryable.
+     */
+    @FunctionalInterface
+    interface Listener {
+        void onAvailabilityChanged(Event event);
     }
 }

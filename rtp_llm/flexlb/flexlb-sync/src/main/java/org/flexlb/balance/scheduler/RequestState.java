@@ -2,7 +2,9 @@ package org.flexlb.balance.scheduler;
 
 import java.util.Objects;
 
-/** Immutable public view of one canonical request generation. */
+/**
+ * Immutable public view of one canonical request generation.
+ */
 public record RequestState(
         String requestId,
         long originalNumericRequestId,
@@ -31,6 +33,10 @@ public record RequestState(
         return expectedBatchId == 0L || batchId == expectedBatchId;
     }
 
+    /**
+     * Names the externally observable request phases, including completed, cancelled and failed
+     * outcomes.
+     */
     public enum Phase {
         QUEUED,
         DISPATCHING,
@@ -40,6 +46,10 @@ public record RequestState(
         TIMED_OUT,
         FAILED,
         COMPLETED;
+
+        public boolean isTerminal() {
+            return this == CANCELLED || this == TIMED_OUT || this == FAILED || this == COMPLETED;
+        }
 
         boolean canTransitionTo(Phase next) {
             if (this == next) {
@@ -69,10 +79,6 @@ public record RequestState(
                                 || next == COMPLETED;
                 case CANCELLED, TIMED_OUT, FAILED, COMPLETED -> false;
             };
-        }
-
-        public boolean isTerminal() {
-            return this == CANCELLED || this == TIMED_OUT || this == FAILED || this == COMPLETED;
         }
     }
 }

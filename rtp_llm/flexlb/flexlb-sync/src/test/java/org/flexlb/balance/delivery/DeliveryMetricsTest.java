@@ -16,6 +16,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks delivery metric registration and reporting.
+ */
 class DeliveryMetricsTest {
 
     @ParameterizedTest

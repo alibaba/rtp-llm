@@ -24,20 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Regression tests for the unconditional decode hard admission gate
- * (production waiting_streams_ semantics, no configuration key):
- *
- * <ol>
- *   <li>{@link #hardGateParksExcessInUnboundedQueue} — decodeMaxConcurrency
- *       is a hard cap: excess requests park in the (unbounded) pending queue,
- *       activeDecodeRequests never exceeds the cap, nothing is ever rejected
- *       on the decode side, and queued requests keep their runningTasks
- *       claim (dedup guard) while counting as in flight.</li>
- *   <li>{@link #queuedRequestsDrainThroughCompletionChain} — completions
- *       hand freed slots to queued requests one-for-one until the queue is
- *       fully drained; every accepted request completes, all counters settle
- *       at zero and checkLeakDrain flags nothing.</li>
- * </ol>
+ * Checks that the Decode concurrency limit always parks excess requests in the pending queue.
  */
 class DecodePendingQueueHardGateTest {
 
