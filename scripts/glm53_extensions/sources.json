@@ -1,0 +1,51 @@
+{
+  "deep_gemm": {
+    "repository": "deepseek-ai/DeepGEMM",
+    "commit": "5081f8513af57e61696de4f4f04b0e707ffb503e",
+    "url": "https://codeload.github.com/deepseek-ai/DeepGEMM/tar.gz/5081f8513af57e61696de4f4f04b0e707ffb503e",
+    "sha256": "4f2c4d851bda66e4e4c76df57cee6ece5d569e8a2614ffe2167b8f00518131f3",
+    "bytes": 336397
+  },
+  "deep_jit": {
+    "repository": "deepseek-ai/DeepJIT",
+    "commit": "2efdab421e1cfb17fe8bc20e11ca72aa6d0e6c43",
+    "url": "https://codeload.github.com/deepseek-ai/DeepJIT/tar.gz/2efdab421e1cfb17fe8bc20e11ca72aa6d0e6c43",
+    "sha256": "e90e7a7d7643fee5514cf2efa73d96b1d104f87993266ea74d1205859e70c0c0",
+    "bytes": 94727
+  },
+  "cutlass_mhc": {
+    "repository": "NVIDIA/cutlass",
+    "commit": "f3fde58372d33e9a5650ba7b80fc48b3b49d40c8",
+    "url": "https://codeload.github.com/NVIDIA/cutlass/tar.gz/f3fde58372d33e9a5650ba7b80fc48b3b49d40c8",
+    "sha256": "2e5890306557bd87136e1d6914e4ee42536050b9116433848175520fd15991f2",
+    "bytes": 33354210
+  },
+  "flash_mla": {
+    "repository": "deepseek-ai/FlashMLA",
+    "commit": "0f11e178da1f67becb087a324b400854931ec3e3",
+    "url": "https://codeload.github.com/deepseek-ai/FlashMLA/tar.gz/0f11e178da1f67becb087a324b400854931ec3e3",
+    "sha256": "e94fe4a1844d8f6a551d78ce390de51c95e2b4e3e2d5d690c3e49dde9d6baa10",
+    "bytes": 303165
+  },
+  "cutlass_mla": {
+    "repository": "NVIDIA/cutlass",
+    "commit": "4faf1a1568cf1e4ad8ff71846a13e16f2a6a6f6b",
+    "url": "https://codeload.github.com/NVIDIA/cutlass/tar.gz/4faf1a1568cf1e4ad8ff71846a13e16f2a6a6f6b",
+    "sha256": "50a017597cb76ab5dfe15a2419dd445010aef731b5ff9354e8da6543de204b23",
+    "bytes": 33885810
+  },
+  "fmt": {
+    "repository": "fmtlib/fmt",
+    "commit": "553ec11ec06fbe0beebfbb45f9dc3c9eabd83d28",
+    "url": "https://codeload.github.com/fmtlib/fmt/tar.gz/553ec11ec06fbe0beebfbb45f9dc3c9eabd83d28",
+    "sha256": "c314292789d28c3c3b420e75a7b2d1706f685f7fb63289128d46aeaea2c6be71",
+    "bytes": 707710
+  },
+  "deep_gemm_mqa": {
+    "repository": "deepseek-ai/DeepGEMM",
+    "commit": "559d79fb6994a58b8a15b4b93bf13ccc16edf247",
+    "url": "https://codeload.github.com/deepseek-ai/DeepGEMM/tar.gz/559d79fb6994a58b8a15b4b93bf13ccc16edf247",
+    "sha256": "8a6c67b6f74d4a3a242c4dad7714d147797b2ecc5d55c52925bbdf6155207d2c",
+    "bytes": 235641
+  }
+}

@@ -86,7 +86,7 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
     Requires BLOCK_N >= H. Handles non-power-of-2 H via masking.
     """
     token_id = tl.program_id(0).to(tl.int64)
-    offs = tl.arange(0, BLOCK_N)
+    offs = tl.arange(0, BLOCK_N).to(tl.int64)
     mask = offs < H
 
     h = tl.load(hidden_ptr + token_id * stride_h_t + offs, mask=mask, other=0.0).to(
@@ -149,12 +149,12 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
 
         num_packed: tl.constexpr = num_groups // 4
         actual_packed: tl.constexpr = actual_num_groups // 4
-        g_idx = tl.arange(0, num_groups)
+        g_idx = tl.arange(0, num_groups).to(tl.int64)
         shift_amt = (g_idx % 4) * 8
         shifted = tl.where(g_idx < actual_num_groups, exp_field << shift_amt, 0)
         shifted_2d = tl.reshape(shifted, (num_packed, 4))
         packed = tl.sum(shifted_2d, axis=1)
-        pack_offs = tl.arange(0, num_packed)
+        pack_offs = tl.arange(0, num_packed).to(tl.int64)
         pack_mask = pack_offs < actual_packed
         tl.store(
             scale_out_ptr + token_id * stride_scale_t + pack_offs * stride_scale_g,
@@ -174,7 +174,7 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
         ).to(fp8_out_ptr.dtype.element_ty)
         fp8_flat = tl.reshape(fp8_2d, (BLOCK_N,))
         tl.store(fp8_out_ptr + token_id * stride_o_t + offs, fp8_flat, mask=mask)
-        g_offs = tl.arange(0, num_groups)
+        g_offs = tl.arange(0, num_groups).to(tl.int64)
         g_mask = g_offs < actual_num_groups
         tl.store(
             scale_out_ptr + token_id * stride_scale_t + g_offs * stride_scale_g,
@@ -210,7 +210,7 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
     Handles non-power-of-2 H via masking.
     """
     token_id = tl.program_id(0).to(tl.int64)
-    offs = tl.arange(0, BLOCK_N)
+    offs = tl.arange(0, BLOCK_N).to(tl.int64)
     mask = offs < H
 
     h = tl.load(hidden_ptr + token_id * stride_h_t + offs, mask=mask, other=0.0).to(
@@ -281,12 +281,12 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
 
         num_packed: tl.constexpr = num_groups // 4
         actual_packed: tl.constexpr = actual_num_groups // 4
-        g_idx = tl.arange(0, num_groups)
+        g_idx = tl.arange(0, num_groups).to(tl.int64)
         shift_amt = (g_idx % 4) * 8
         shifted = tl.where(g_idx < actual_num_groups, exp_field << shift_amt, 0)
         shifted_2d = tl.reshape(shifted, (num_packed, 4))
         packed = tl.sum(shifted_2d, axis=1)
-        pack_offs = tl.arange(0, num_packed)
+        pack_offs = tl.arange(0, num_packed).to(tl.int64)
         pack_mask = pack_offs < actual_packed
         tl.store(
             scale_out_ptr + token_id * stride_scale_t + pack_offs * stride_scale_g,
@@ -306,7 +306,7 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
         ).to(fp8_out_ptr.dtype.element_ty)
         fp8_flat = tl.reshape(fp8_2d, (BLOCK_N,))
         tl.store(fp8_out_ptr + token_id * stride_o_t + offs, fp8_flat, mask=mask)
-        g_offs = tl.arange(0, num_groups)
+        g_offs = tl.arange(0, num_groups).to(tl.int64)
         g_mask = g_offs < actual_num_groups
         tl.store(
             scale_out_ptr + token_id * stride_scale_t + g_offs * stride_scale_g,
