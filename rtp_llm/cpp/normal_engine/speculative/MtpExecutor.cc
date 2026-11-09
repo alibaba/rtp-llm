@@ -735,8 +735,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 static_cast<int>(role_type_));
         // DSpARK commit handles both replicated and byte-sharded prefill-CP
         // cache layouts after gathering the rank-local target features.
-        RTP_LLM_CHECK_WITH_INFO(params.device_resource_config.enable_layer_micro_batch == 0,
-                                "block draft fixed-gamma v1 does not support layer micro-batching");
+        // (A fixed-gamma block draft cannot layer-micro-batch; main retired
+        // that switch surface entirely, so no guard is needed here.)
         RTP_LLM_CHECK_WITH_INFO(params.sp_config.sp_dspark_mask_token_id >= 0,
                                 "block draft requires sp_dspark_mask_token_id, got %ld",
                                 params.sp_config.sp_dspark_mask_token_id);
