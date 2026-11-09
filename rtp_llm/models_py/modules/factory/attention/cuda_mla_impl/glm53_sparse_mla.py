@@ -866,9 +866,13 @@ class SparseMlaImpl(MlaImplBase):
             indexer_group_size=geometry.group_size,
         )
 
-        self.rope_impl = NewMlaRotaryEmbeddingOp(
-            cos_sin_cache=cos_sin_cache,
-            is_neox_style=self.attn_configs.rope_config.is_neox_style,
+        self.rope_impl = (
+            NewMlaRotaryEmbeddingOp(
+                cos_sin_cache=cos_sin_cache,
+                is_neox_style=self.attn_configs.rope_config.is_neox_style,
+            )
+            if self.rope_head_dim
+            else None
         )
         self.kv_cache_write_op = MlaKVCacheWriteOp(
             kv_cache_dtype=attn_configs.kv_cache_dtype,
@@ -1126,7 +1130,8 @@ class SparseMlaImpl(MlaImplBase):
                 kv_cache_type=self._kv_cache_type,
             )
         else:
-            self.rope_impl.forward(q_pe, k_pe, self.rope_params)
+            if self.rope_impl is not None:
+                self.rope_impl.forward(q_pe, k_pe, self.rope_params)
             self.kv_cache_write_op.forward(
                 compressed_kv,
                 k_pe,
