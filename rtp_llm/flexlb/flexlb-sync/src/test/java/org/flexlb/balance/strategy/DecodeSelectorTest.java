@@ -14,11 +14,11 @@ import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.TaskInfo;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -802,7 +802,9 @@ class DecodeSelectorTest {
         return createDecodeRegistry(decodeStatuses);
     }
 
-    /** Create an EndpointRegistry with DecodeEndpoints registered for each WorkerStatus entry. */
+    /**
+     * Create an EndpointRegistry with DecodeEndpoints registered for each WorkerStatus entry.
+     */
     private EndpointRegistry createDecodeRegistry(Map<String, WorkerStatus> workerMap) {
         EndpointRegistry registry = StrategyTestSupport.endpointRegistry(configService);
         for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
@@ -873,7 +875,9 @@ class DecodeSelectorTest {
         return (DecodeEndpoint) registry.get(RoleType.DECODE, address);
     }
 
-    /** Non-queued inflight reservation: each call raises engineLoad by one. */
+    /**
+     * Non-queued inflight reservation: each call raises engineLoad by one.
+     */
     private static void reservePinned(
             DecodeEndpoint endpoint,
             long requestId,

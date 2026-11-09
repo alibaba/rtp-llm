@@ -31,6 +31,8 @@ public final class FlexlbConfig {
     private boolean enableFallback;
     private long fallbackBatchTokenCapacity = 1_048_576L;
 
+    private EngineGrpcConfig engineGrpc = new EngineGrpcConfig();
+
     @JsonIgnore
     private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();
 
@@ -109,7 +111,9 @@ public final class FlexlbConfig {
         throw new IllegalStateException("fixed-window decision configuration is not active");
     }
 
-    /** Resolve the QUEUE decision policy from its single configuration owner. */
+    /**
+     * Resolve the QUEUE decision policy from its single configuration owner.
+     */
     @JsonIgnore
     public DecisionPolicyConfig decisionPolicy() {
         return queueScheduler().getDecision();
@@ -125,6 +129,18 @@ public final class FlexlbConfig {
     }
 
     /**
+     * Configures Engine gRPC callback and I/O pools and the maximum received KVCM message size.
+     */
+    @Getter
+    @Setter
+    public static final class EngineGrpcConfig {
+        private int kvCacheMaxInboundMessageBytes = 128 * 1024 * 1024;
+        private int executorThreads = 32;
+        private int executorQueueCapacity = 10_000;
+        private int eventLoopThreads = 8;
+    }
+
+    /**
      * Sets serving executor capacities and the quiet-period duration in milliseconds used during
      * shutdown.
      */
@@ -135,7 +151,9 @@ public final class FlexlbConfig {
         private int executorMaxSize = 1000;
         private int executorQueueSize = 1000;
 
-        /** 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。 */
+        /**
+         * 静默时间：下线后每次 Schedule 到达重新计时，期满后等待已接收 RPC 完成。
+         */
         private long shutdownQuietPeriodMs = 5_000L;
     }
 }

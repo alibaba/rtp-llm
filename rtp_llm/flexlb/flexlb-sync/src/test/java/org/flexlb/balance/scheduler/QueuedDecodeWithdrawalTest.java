@@ -8,13 +8,14 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -71,8 +72,9 @@ class QueuedDecodeWithdrawalTest {
         registry.attachGlobalQueue(queue);
         decode =
                 new DecodeEndpoint(
-                        WorkerStatus.createDiscovered(
-                                RoleType.DECODE, null, "127.0.0.1", 8000, 8001, null),
+                        WorkerStatusTestFixtures.readyForScheduling(
+                                WorkerStatus.createDiscovered(
+                                        RoleType.DECODE, null, "127.0.0.1", 8000, 8001, null)),
                         mock(EndpointEventProjector.class));
     }
 
@@ -362,7 +364,10 @@ class QueuedDecodeWithdrawalTest {
         try {
             projection =
                     decode.applyPreparedStatus(
-                            status, status.prepareNewStatus(status.freezeStatusResponse(response)));
+                            status,
+                            WorkerStatusTestFixtures.prepare(
+                                    status,
+                                    WorkerStatusTestFixtures.observation(status, response)));
         } finally {
             status.lock.unlock();
         }

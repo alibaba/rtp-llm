@@ -13,9 +13,6 @@ public final class InternalRuntimeSettings {
 
     private final int nettySelectThreadMultiplier = 1;
     private final int nettyWorkerThreadMultiplier = 2;
-    private final int grpcClientExecutorThreads = 32;
-    private final int grpcClientExecutorQueueCapacity = 10_000;
-    private final int grpcClientEventLoopThreads = 8;
     private final int grpcServerWorkerEventLoopThreads = 4;
     private final int httpNettyEventLoopThreads = 4;
     private final int httpNettyEventExecutorThreads = 16;
@@ -28,12 +25,16 @@ public final class InternalRuntimeSettings {
     private final int batchDispatchThreads = 64;
     private final int batchDispatchQueueCapacity = 256;
 
-    /** Number of parallel route planners owned by the model queue by default. */
+    /**
+     * Number of parallel route planners owned by the model queue by default.
+     */
     private final int queuePlannerThreads = resolveQueuePlannerThreads();
 
     private final long queueDecisionThreadJoinTimeoutMs = 5_000L;
 
-    /** Completion callbacks must not contend with the dispatch handoff pool. */
+    /**
+     * Completion callbacks must not contend with the dispatch handoff pool.
+     */
     private final int batchDispatchCompletionThreads = 8;
 
     private final long masterForwardRpcTimeoutMs = 5000;

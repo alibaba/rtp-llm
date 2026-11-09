@@ -39,26 +39,36 @@ import java.util.function.ToLongFunction;
 public final class PrefillState {
     private final ReentrantLock lock;
 
-    /** Non-owning index containing only ACTIVE ScheduledRequest identities. */
+    /**
+     * Non-owning index containing only ACTIVE ScheduledRequest identities.
+     */
     private final PrefillActiveIndex activeIndex;
 
-    /** Canonical request ownership, changed only under the endpoint lock. */
+    /**
+     * Canonical request ownership, changed only under the endpoint lock.
+     */
     private Map<String, RequestEntry> requests = new HashMap<>();
 
     private final LongSupplier clock;
     private final Runnable capacityAvailable;
 
-    /** Monotonic ownership/work revision used by projection snapshots. */
+    /**
+     * Monotonic ownership/work revision used by projection snapshots.
+     */
     private volatile long mutationVersion;
 
-    /** Published at ownership mutation boundaries; admission still checks under the lock. */
+    /**
+     * Published at ownership mutation boundaries; admission still checks under the lock.
+     */
     private volatile long outstandingRequestCount;
 
     private long requestCountsVersion = -1;
 
     private long[] requestCountsByPriority;
 
-    /** Derived immutable work; ACTIVE queue mutations leave committed work unchanged. */
+    /**
+     * Derived immutable work; ACTIVE queue mutations leave committed work unchanged.
+     */
     private WorkCapture committedWorkCapture;
 
     private long unknownEngineRequestCount;
@@ -80,13 +90,17 @@ public final class PrefillState {
         this.capacityAvailable = Objects.requireNonNull(capacityAvailable, "capacityAvailable");
     }
 
-    /** Caller must hold the ownership lock. */
+    /**
+     * Caller must hold the ownership lock.
+     */
     public long mutationVersionUnderLock() {
         requireLock();
         return mutationVersion;
     }
 
-    /** Advisory revision read for the lock-free projection-cache fast path. */
+    /**
+     * Advisory revision read for the lock-free projection-cache fast path.
+     */
     public long mutationVersion() {
         return mutationVersion;
     }
@@ -129,7 +143,9 @@ public final class PrefillState {
         return true;
     }
 
-    /** Only failed admission needs priority provenance; reuse one summary per revision. */
+    /**
+     * Only failed admission needs priority provenance; reuse one summary per revision.
+     */
     public AdmissionRejectReason admissionRejectReason(int priority, long requestLimit) {
         long[] counts;
         long occupiedRequests;
@@ -198,7 +214,9 @@ public final class PrefillState {
         }
     }
 
-    /** Select only uncommitted requests; Engine work cannot release a local queue seat. */
+    /**
+     * Select only uncommitted requests; Engine work cannot release a local queue seat.
+     */
     public List<ScheduledRequest> queuedPreemptionVictimsUnderLock(
             int priority, long requestLimit) {
         requireLock();
@@ -224,7 +242,9 @@ public final class PrefillState {
         return candidates.subList(0, (int) required);
     }
 
-    /** Transfer exact queued request seats and OPEN route reservations in one ownership transaction. */
+    /**
+     * Transfer exact queued request seats and OPEN route reservations in one ownership transaction.
+     */
     public RouteReservation replaceQueuedRoutesUnderLock(
             List<ScheduledRequest> victims,
             List<RouteReservation> reservations,
@@ -340,7 +360,9 @@ public final class PrefillState {
         return item;
     }
 
-    /** Remove only the exact stop-pending owner whose callback completed. */
+    /**
+     * Remove only the exact stop-pending owner whose callback completed.
+     */
     public boolean acknowledgeStopTerminalUnderLock(ScheduledRequest item) {
         requireLock();
         RequestEntry entry = requests.get(item.requestId());
@@ -362,9 +384,9 @@ public final class PrefillState {
         return batchLeasesInUse;
     }
 
-    public CapacityBoundary.Availability batchAvailability(int maximum) {
+    public CapacityBoundary.Availability batchAvailability(int maximum, WorkerStatus workerStatus) {
         requirePositiveBatchLimit(maximum);
-        return new CapacityAvailability(maximum);
+        return new CapacityAvailability(maximum, workerStatus);
     }
 
     /**
@@ -759,7 +781,9 @@ public final class PrefillState {
         }
     }
 
-    /** Advisory selection check; a positive result does not reserve capacity. */
+    /**
+     * Advisory selection check; a positive result does not reserve capacity.
+     */
     public boolean canAcceptRequest(long requestLimit) {
         return outstandingRequestCount < requestLimit;
     }
@@ -1066,7 +1090,9 @@ public final class PrefillState {
                 removed, "validated ACTIVE queue index disappeared request_id=" + item.requestId());
     }
 
-    /** Publish the capacity summary before readers observe a new ownership revision. */
+    /**
+     * Publish the capacity summary before readers observe a new ownership revision.
+     */
     private void recordMutationUnderLock() {
         publishRequestCountUnderLock();
         mutationVersion++;
@@ -1159,7 +1185,9 @@ public final class PrefillState {
         return null;
     }
 
-    /** Move the exact handoff out of the OPEN admission before commit publishes. */
+    /**
+     * Move the exact handoff out of the OPEN admission before commit publishes.
+     */
     private void moveGenerationHandoffToOwnedUnderLock(
             BatchReservation lease, CommittedHandoff committedHandoff) {
         requireLock();
@@ -1450,7 +1478,9 @@ public final class PrefillState {
         return WorkerStatusFact.terminal(entry.committedItem, kind, terminal.errorCode);
     }
 
-    /** Resolve activity only through the exact committed ledger identity. */
+    /**
+     * Resolve activity only through the exact committed ledger identity.
+     */
     private WorkerStatusFact activeStatusFactUnderLock(WorkerStatus.TaskObservation task) {
         requireLock();
         RequestEntry entry = requests.get(task.requestId());
@@ -1530,7 +1560,9 @@ public final class PrefillState {
         return true;
     }
 
-    /** Close exact ownership and return a batch slot when this is the last member. */
+    /**
+     * Close exact ownership and return a batch slot when this is the last member.
+     */
     private void closeOwnedLeaseUnderLock(Reservation lease) {
         requireLock();
         if (lease.state != LeaseState.OWNED
@@ -1608,7 +1640,9 @@ public final class PrefillState {
                 : Phase.ENGINE_QUEUED;
     }
 
-    /** Build only the exact batch needed by a single-item terminal path. */
+    /**
+     * Build only the exact batch needed by a single-item terminal path.
+     */
     private BatchReduction batchReductionUnderLock(BatchWork exactBatch) {
         requireLock();
         BatchReduction reduction = new BatchReduction(exactBatch);
@@ -1668,7 +1702,9 @@ public final class PrefillState {
         rethrowCleanupFailure(failure);
     }
 
-    /** OPEN rollback closes quota and any batch-owned generation handoff. */
+    /**
+     * OPEN rollback closes quota and any batch-owned generation handoff.
+     */
     private EndpointGenerationLifecycle.HandoffPermit closeOpenLeaseUnderLock(Reservation lease) {
         requireLock();
         if (lease.state != LeaseState.OPEN) {
@@ -1875,7 +1911,9 @@ public final class PrefillState {
             this.precedingWork = Objects.requireNonNull(precedingWork, "precedingWork");
         }
 
-        /** Other reserved work at the same ownership boundary that committed this admission. */
+        /**
+         * Other reserved work at the same ownership boundary that committed this admission.
+         */
         public WorkSnapshot precedingWork() {
             return precedingWork;
         }
@@ -1902,7 +1940,9 @@ public final class PrefillState {
             this.originalOwner = Objects.requireNonNull(originalOwner, "originalOwner");
         }
 
-        /** Roll back an OPEN lease. Committed capacity stays Registry-owned. */
+        /**
+         * Roll back an OPEN lease. Committed capacity stays Registry-owned.
+         */
         @Override
         public final void close() {
             releaseOpenLease(this);
@@ -1925,7 +1965,9 @@ public final class PrefillState {
             this.predictedWorkMs = boundedPrediction(predictedWorkMs);
         }
 
-        /** Bind the fresh delivery prediction to this exact OPEN reservation. */
+        /**
+         * Bind the fresh delivery prediction to this exact OPEN reservation.
+         */
         public void updatePrediction(ScheduledRequest exactItem, long predictedMs) {
             lock.lock();
             try {
@@ -1974,7 +2016,9 @@ public final class PrefillState {
             return batchId;
         }
 
-        /** Atomically commit this exact batch lease. */
+        /**
+         * Atomically commit this exact batch lease.
+         */
         public CommittedHandoff commit(List<ScheduledRequest> items, long predictedMs) {
             lock.lock();
             try {
@@ -1999,7 +2043,9 @@ public final class PrefillState {
 
         private Phase servicePhase = Phase.COMMITTED;
 
-        /** A later queued observation cannot make started batch work repackable. */
+        /**
+         * A later queued observation cannot make started batch work repackable.
+         */
         private boolean executionStarted;
 
         private long phaseBaseMs;
@@ -2069,7 +2115,9 @@ public final class PrefillState {
                     learningEligible);
         }
 
-        /** Retirement is external termination and must never train prediction. */
+        /**
+         * Retirement is external termination and must never train prediction.
+         */
         private BatchCompletion retirementCompletion() {
             return new BatchCompletion(
                     lease.batchId,
@@ -2105,7 +2153,9 @@ public final class PrefillState {
             }
         }
 
-        /** Simulate terminal metrics without mutating canonical batch work. */
+        /**
+         * Simulate terminal metrics without mutating canonical batch work.
+         */
         private BatchCompletion projectedCompletion(Map<String, TerminalObservation> terminals) {
             long maxExecutionTimeMs = batch.maxExecutionTimeMs;
             boolean successfulCompletion = batch.successfulCompletion;
@@ -2156,7 +2206,9 @@ public final class PrefillState {
 
         private BatchWork batchWork;
 
-        /** Canonical callback identity after admission commits. */
+        /**
+         * Canonical callback identity after admission commits.
+         */
         private ScheduledRequest committedItem;
 
         private Reservation reservation;
@@ -2259,7 +2311,9 @@ public final class PrefillState {
             this.unknownRequestCount = unknownRequestCount;
         }
 
-        /** Shared lazy projection; callers never hold the endpoint ownership lock. */
+        /**
+         * Shared lazy projection; callers never hold the endpoint ownership lock.
+         */
         public WorkSnapshot materialize() {
             WorkSnapshot snapshot = materialized;
             if (snapshot != null) {
@@ -2349,15 +2403,17 @@ public final class PrefillState {
      */
     private final class CapacityAvailability implements CapacityBoundary.Availability {
         private final int maximum;
+        private final WorkerStatus workerStatus;
         private Runnable subscribed;
 
-        private CapacityAvailability(int maximum) {
+        private CapacityAvailability(int maximum, WorkerStatus workerStatus) {
             this.maximum = maximum;
+            this.workerStatus = Objects.requireNonNull(workerStatus, "workerStatus");
         }
 
         @Override
         public boolean isAvailable() {
-            return batchCapacityAvailable(maximum);
+            return workerStatus.isAvailableForScheduling() && batchCapacityAvailable(maximum);
         }
 
         @Override

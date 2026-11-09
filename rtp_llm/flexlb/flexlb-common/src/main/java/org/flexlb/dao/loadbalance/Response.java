@@ -1,6 +1,7 @@
 package org.flexlb.dao.loadbalance;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
@@ -36,6 +37,10 @@ public class Response {
     @JsonProperty("enqueued_by_master")
     private boolean enqueuedByMaster = false;
 
+    @JsonProperty("requires_generate_input")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Boolean requiresGenerateInput;
+
     @JsonProperty("worker_summary")
     private Map<String, WorkerRoleSummary> workerSummary;
 
@@ -45,7 +50,9 @@ public class Response {
     @JsonProperty("admission_reject_reason")
     private AdmissionRejectReason admissionRejectReason = AdmissionRejectReason.UNSPECIFIED;
 
-    /** Build a successful delivery response without mutating the original route response. */
+    /**
+     * Build a successful delivery response without mutating the original route response.
+     */
     public static Response buildSuccessResponse(Response routeResponse, boolean enqueuedByMaster) {
         Response success = copyOf(java.util.Objects.requireNonNull(routeResponse, "routeResponse"));
         success.success = true;
@@ -54,7 +61,9 @@ public class Response {
         return success;
     }
 
-    /** Deep-copy all response data, preserving null collections and entries. */
+    /**
+     * Deep-copy all response data, preserving null collections and entries.
+     */
     public static Response copyOf(Response source) {
         if (source == null) {
             return null;
@@ -72,6 +81,7 @@ public class Response {
         copy.realMasterHost = source.realMasterHost;
         copy.queueLength = source.queueLength;
         copy.enqueuedByMaster = source.enqueuedByMaster;
+        copy.requiresGenerateInput = source.requiresGenerateInput;
         if (source.workerSummary != null) {
             copy.workerSummary = new LinkedHashMap<>();
             source.workerSummary.forEach(

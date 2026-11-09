@@ -77,7 +77,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 requestId, inputKvTokens, inputAndMaxOutputKvTokens, priority, true, capacity);
     }
 
-    /** An engine-facing shadow for work already outside the local queue. */
+    /**
+     * An engine-facing shadow for work already outside the local queue.
+     */
     public ReservationHandle reserveUnqueued(
             GenerationPin pin,
             String requestId,
@@ -94,7 +96,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return reservation;
     }
 
-    /** Select no user outcome here: Prefill rejection alone cannot release Decode ownership. */
+    /**
+     * Select no user outcome here: Prefill rejection alone cannot release Decode ownership.
+     */
     public boolean settleFailedRequest(
             ReservationHandle reservation, DeliveryResult.Status source) {
         if (source != DeliveryResult.Status.NOT_SENT
@@ -110,7 +114,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return !state.hasOwnedResources(reservation);
     }
 
-    /** LOCAL_ROLLBACK requires local ownership; other evidence may leave Engine/protocol ownership intact. */
+    /**
+     * LOCAL_ROLLBACK requires local ownership; other evidence may leave Engine/protocol ownership intact.
+     */
     public ReservationReleaseResult release(ReservationHandle reservation, ReleaseReason reason) {
         ReservationReleaseResult result = state.release(reservation, reason);
         if (result == ReservationReleaseResult.RELEASED) {
@@ -148,10 +154,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
             ReservationHandle reservation, AdmissionCapacity capacity) {
         java.util.Objects.requireNonNull(reservation, "reservation");
         java.util.Objects.requireNonNull(capacity, "capacity");
+        if (!hasAvailableSchedulingStatus() && !isRetired()) {
+            return new EngineDispatchPermitAcquisition(
+                    EngineDispatchPermitAcquireStatus.CAPACITY_FULL, null);
+        }
         GenerationPin pin = tryPinGeneration();
         if (pin == null) {
             return new EngineDispatchPermitAcquisition(
-                    EngineDispatchPermitAcquireStatus.ENDPOINT_RETIRED, null);
+                    isRetired()
+                            ? EngineDispatchPermitAcquireStatus.ENDPOINT_RETIRED
+                            : EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
+                    null);
         }
         try (pin) {
             DecodeState.DispatchAcquisition acquired =
@@ -165,7 +178,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    /** Resolve a permit once. ENGINE_OWNED means handoff, not Worker acceptance. */
+    /**
+     * Resolve a permit once. ENGINE_OWNED means handoff, not Worker acceptance.
+     */
     public EngineDispatchPermitTransferStatus dispatch(
             EngineDispatchPermit permit, DispatchOutcome outcome) {
         java.util.Objects.requireNonNull(permit, "permit");
@@ -176,9 +191,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return permit.resolve(outcome);
     }
 
-    /** Lock-free waiter hint, including retirement or lost ownership. Acquisition still rechecks capacity. */
+    /**
+     * Retry available capacity, or finish waiting after retirement or lost ownership.
+     */
     public boolean shouldRetryDispatch(String requestId, AdmissionCapacity capacity) {
-        return isRetired() || state.shouldRetryDispatch(requestId, capacity);
+        return isRetired()
+                || state.shouldRetryDispatch(requestId, capacity, hasAvailableSchedulingStatus());
     }
 
     public void addEngineDispatchCapacityListener(Runnable listener) {
@@ -249,7 +267,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    /** Atomically reserve an instruction-bearing route without issuing Cancel RPCs. */
+    /**
+     * Atomically reserve an instruction-bearing route without issuing Cancel RPCs.
+     */
     public PreemptionBeginResult beginReturnedPreemption(
             long attemptToken,
             List<ReservationHandle> victims,
@@ -562,25 +582,40 @@ public class DecodeEndpoint extends WorkerEndpoint {
                             || status == EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED;
             if (ownsHandoff != (permit != null)) {
                 throw new IllegalArgumentException(
-                        "only ACQUIRED or ALREADY_ACCEPTED results carry an engine dispatch permit");
+                        "only ACQUIRED or ALREADY_ACCEPTED results carry an engine dispatch"
+                                + " permit");
             }
         }
     }
 
     public enum EngineDispatchPermitAcquireStatus {
-        /** An exact-reservation permit now owns one Decode hard-gate slot. */
+        /**
+         * An exact-reservation permit now owns one Decode hard-gate slot.
+         */
         ACQUIRED,
-        /** Engine already owns this reservation; the permit carries identity without charging capacity. */
+        /**
+         * Engine already owns this reservation; the permit carries identity without charging capacity.
+         */
         ALREADY_ACCEPTED,
-        /** Concurrency or Decode KV has no unreserved hard capacity. */
+        /**
+         * Concurrency or Decode KV has no unreserved hard capacity.
+         */
         CAPACITY_FULL,
-        /** The request no longer owns a live shadow reservation. */
+        /**
+         * The request no longer owns a live shadow reservation.
+         */
         NOT_OWNED,
-        /** The reservation is already engine-facing rather than Prefill-queued. */
+        /**
+         * The reservation is already engine-facing rather than Prefill-queued.
+         */
         NOT_QUEUED,
-        /** Another pre-delivery attempt already owns this request's permit. */
+        /**
+         * Another pre-delivery attempt already owns this request's permit.
+         */
         ALREADY_ACQUIRED,
-        /** This exact Decode endpoint generation no longer accepts delivery. */
+        /**
+         * This exact Decode endpoint generation no longer accepts delivery.
+         */
         ENDPOINT_RETIRED
     }
 
@@ -874,7 +909,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return evaluate(usage, requiredKvTokens, kvBudgetTokens, CapacityRelease.NONE);
         }
 
-        /** Use the same occupancy scope for the observation and every exact victim release. */
+        /**
+         * Use the same occupancy scope for the observation and every exact victim release.
+         */
         public CapacityDeficit evaluate(
                 CapacityUsage usage,
                 long requiredKvTokens,
@@ -911,7 +948,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                             0L));
         }
 
-        /** Integer arithmetic never rounds the configured KV budget up. */
+        /**
+         * Integer arithmetic never rounds the configured KV budget up.
+         */
         public long kvBudget(long totalKv) {
             if (totalKv < 0L) {
                 throw new IllegalArgumentException("negative KV capacity");

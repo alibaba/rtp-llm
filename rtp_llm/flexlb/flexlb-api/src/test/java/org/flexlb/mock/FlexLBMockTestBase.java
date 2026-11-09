@@ -16,13 +16,11 @@ import org.flexlb.balance.scheduler.RouteAdmission;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.InternalRuntimeSettings;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RequestId;
@@ -34,6 +32,8 @@ import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.slf4j.Logger;
@@ -59,7 +59,9 @@ import static org.mockito.Mockito.withSettings;
 public abstract class FlexLBMockTestBase {
     private static final Logger log = LoggerFactory.getLogger(FlexLBMockTestBase.class);
 
-    /** Addressable logical endpoints: one subnet per 254 endpoints. */
+    /**
+     * Addressable logical endpoints: one subnet per 254 endpoints.
+     */
     private static final int LOGICAL_WORKER_INDEX_LIMIT = 254 * 254;
 
     // ==================== Managed resources ====================
@@ -137,15 +139,15 @@ public abstract class FlexLBMockTestBase {
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         // 3. Create gRPC infrastructure
-        InternalRuntimeSettings runtime = config.getInternalRuntime();
-        eventLoopGroup = new NioEventLoopGroup(runtime.getGrpcClientEventLoopThreads());
+        var engineGrpc = config.getEngineGrpc();
+        eventLoopGroup = new NioEventLoopGroup(engineGrpc.getEventLoopThreads());
         grpcExecutor =
                 new ThreadPoolExecutor(
-                        runtime.getGrpcClientExecutorThreads(),
-                        runtime.getGrpcClientExecutorThreads(),
+                        engineGrpc.getExecutorThreads(),
+                        engineGrpc.getExecutorThreads(),
                         60L,
                         TimeUnit.SECONDS,
-                        new LinkedBlockingQueue<>(runtime.getGrpcClientExecutorQueueCapacity()));
+                        new LinkedBlockingQueue<>(engineGrpc.getExecutorQueueCapacity()));
 
         GrpcReporter grpcReporter = new GrpcReporter(new NoOpFlexMonitor());
         grpcClient =
@@ -289,7 +291,9 @@ public abstract class FlexLBMockTestBase {
         return fixedRouter;
     }
 
-    /** Build the exact pinned queue admission for a fixture response. */
+    /**
+     * Build the exact pinned queue admission for a fixture response.
+     */
     protected final PlacementResult<RouteAdmission, PlacementKey> admittedRoute(
             BalanceContext context, Response response) {
         return schedulerRuntime.admittedRoute(context, response);
@@ -303,7 +307,9 @@ public abstract class FlexLBMockTestBase {
         return mock(RequestSchedulerReporter.class);
     }
 
-    /** Override when an integration fixture needs deterministic dispatcher sizing. */
+    /**
+     * Override when an integration fixture needs deterministic dispatcher sizing.
+     */
     protected DefaultBatchDispatcher createDispatcher() {
         return new DefaultBatchDispatcher(grpcClient, configService, NoOpFlexMonitor.getInstance());
     }
@@ -409,7 +415,9 @@ public abstract class FlexLBMockTestBase {
         return addPrefillWorker(behavior, 0);
     }
 
-    /** Start an additional Prefill worker; port 0 asks the OS to allocate its gRPC port. */
+    /**
+     * Start an additional Prefill worker; port 0 asks the OS to allocate its gRPC port.
+     */
     protected MockPrefillWorker addPrefillWorker(MockWorkerBehavior behavior, int grpcPort)
             throws IOException {
         MockPrefillWorker worker = new MockPrefillWorker(behavior);
@@ -447,7 +455,9 @@ public abstract class FlexLBMockTestBase {
         return "127.0.0.1:" + worker.getHttpPort();
     }
 
-    /** Get a physical frontend address from its independent host and port fields. */
+    /**
+     * Get a physical frontend address from its independent host and port fields.
+     */
     protected static String physicalIpPort(String ip, int httpPort) {
         return ip + ":" + httpPort;
     }
@@ -535,19 +545,25 @@ public abstract class FlexLBMockTestBase {
         return endpoint;
     }
 
-    /** Apply one strictly newer response through the production transaction. */
+    /**
+     * Apply one strictly newer response through the production transaction.
+     */
     protected final void applyWorkerStatusResponse(
             WorkerStatus status, WorkerStatusResponse response) {
         schedulerRuntime.applyStatus(status, response);
     }
 
-    /** Apply one already immutable gRPC status observation. */
+    /**
+     * Apply one already immutable gRPC status observation.
+     */
     protected final void applyWorkerStatusObservation(
             WorkerStatus status, WorkerStatus.StatusObservation observation) {
         schedulerRuntime.applyStatus(status, observation);
     }
 
-    /** Publish a synthetic Decode capacity observation for integration setup. */
+    /**
+     * Publish a synthetic Decode capacity observation for integration setup.
+     */
     protected final void publishDecodeCapacity(long available, long total) {
         WorkerStatus status = getDecodeEndpoint().getStatus();
         WorkerStatusResponse response =
@@ -599,13 +615,11 @@ public abstract class FlexLBMockTestBase {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(initial));
-            WorkerEndpoint endpoint =
-                    endpointRegistry
-                            .publishPreparedEndpoint(status.getLogicalIpPort(), status, prepared)
-                            .endpoint();
-            status.recordSuccessfulPoll(initial.isAlive());
-            return endpoint;
+                    WorkerStatusTestFixtures.prepare(
+                            status, WorkerStatusTestFixtures.observation(status, initial));
+            return endpointRegistry
+                    .publishPreparedEndpoint(status.getLogicalIpPort(), status, prepared)
+                    .endpoint();
         } finally {
             status.lock.unlock();
         }

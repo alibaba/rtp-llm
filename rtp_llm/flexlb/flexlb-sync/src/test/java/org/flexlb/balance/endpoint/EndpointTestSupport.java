@@ -11,8 +11,9 @@ import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -50,12 +51,14 @@ public final class EndpointTestSupport {
     }
 
     static WorkerStatus workerStatus(RoleType role, String ip, int port, int grpcPort) {
-        return WorkerStatus.createDiscovered(role, null, ip, port, grpcPort, null);
+        return WorkerStatusTestFixtures.readyForScheduling(
+                WorkerStatus.createDiscovered(role, null, ip, port, grpcPort, null));
     }
 
     static WorkerStatus workerStatus(
             RoleType role, String group, String ip, int port, int grpcPort, String site) {
-        return WorkerStatus.createDiscovered(role, group, ip, port, grpcPort, site);
+        return WorkerStatusTestFixtures.readyForScheduling(
+                WorkerStatus.createDiscovered(role, group, ip, port, grpcPort, site));
     }
 
     static Runnable applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
@@ -64,9 +67,9 @@ public final class EndpointTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
+                    WorkerStatusTestFixtures.prepare(
+                            status, WorkerStatusTestFixtures.observation(status, response));
             Runnable projection = endpoint.applyPreparedStatus(status, prepared);
-            status.recordSuccessfulPoll(response.isAlive());
             return projection;
         } finally {
             status.lock.unlock();
@@ -78,9 +81,9 @@ public final class EndpointTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
+                    WorkerStatusTestFixtures.prepare(
+                            status, WorkerStatusTestFixtures.observation(status, response));
             status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive());
         } finally {
             status.lock.unlock();
         }
@@ -106,7 +109,8 @@ public final class EndpointTestSupport {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(response));
+                    WorkerStatusTestFixtures.prepare(
+                            status, WorkerStatusTestFixtures.observation(status, response));
             return registry.publishPreparedEndpoint(address, status, prepared).endpoint();
         } finally {
             status.lock.unlock();

@@ -16,6 +16,13 @@ public class MetricConstant {
      */
     public static final String JVM_GC_PAUSE_TOTAL_MS = "app.jvm.gc.pause.total.ms";
 
+    public static final String NETTY_DIRECT_RESERVED_BYTES = "app.netty.direct.reserved.bytes";
+    public static final String NETTY_DIRECT_PINNED_BYTES = "app.netty.direct.pinned.bytes";
+    public static final String NETTY_MEMORY_SAMPLE_DURATION_MS =
+            "app.netty.memory.sample.duration.ms";
+    public static final String NETTY_MEMORY_SAMPLE_TIMESTAMP_MS =
+            "app.netty.memory.sample.timestamp.ms";
+
     /* ------------------------ Engine Status Metrics -------------------------- */
 
     /**
@@ -46,12 +53,18 @@ public class MetricConstant {
      */
     public static final String ENGINE_STATUS_CHECK_FAIL = "app.engine.health.check.fail";
 
-    /** Cumulative engine-status check failure count for the process lifetime. */
+    /**
+     * Cumulative engine-status check failure count for the process lifetime.
+     */
     public static final String ENGINE_STATUS_CHECK_FAIL_TOTAL =
             "app.engine.health.check.fail.total";
 
-    /** Failed WorkerStatus gRPC check latency in microseconds. */
+    /**
+     * Failed WorkerStatus gRPC check latency in microseconds.
+     */
     public static final String ENGINE_STATUS_CHECK_FAIL_RT = "app.engine.health.check.fail.rt";
+
+    public static final String STATUS_FAILURE_DETAIL = "app.status.failure.detail";
 
     /**
      * Master load balancing service total QPS
@@ -152,11 +165,15 @@ public class MetricConstant {
      */
     public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";
 
-    /** Selection-time first-token readiness estimate, including outstanding work. */
+    /**
+     * Selection-time first-token readiness estimate, including outstanding work.
+     */
     public static final String PREFILL_SELECTED_ESTIMATED_TTFT_MS =
             "app.flexlb.prefill.selected.estimated_ttft_ms";
 
-    /** Selection-time predictor execution estimate, excluding queueing. */
+    /**
+     * Selection-time predictor execution estimate, excluding queueing.
+     */
     public static final String PREFILL_SELECTED_EXECUTION_TIME_MS =
             "app.flexlb.prefill.selected.execution_time_ms";
 
@@ -301,17 +318,25 @@ public class MetricConstant {
 
     /* ------------------------ Routing Observability -------------------------- */
 
-    /** Failed KVCM query attempts after the configured retry budget is exhausted. */
+    /**
+     * Failed KVCM query attempts after the configured retry budget is exhausted.
+     */
     public static final String KVCM_QUERY_FAILURE_QPS = "app.cache.kvcm.query.failure.qps";
 
-    /** KVCM retry attempts issued after an initial query failure. */
+    /**
+     * KVCM retry attempts issued after an initial query failure.
+     */
     public static final String KVCM_QUERY_RETRY_QPS = "app.cache.kvcm.query.retry.qps";
 
-    /** Optimizer trace queries that could not be dispatched or returned an error. */
+    /**
+     * Optimizer trace queries that could not be dispatched or returned an error.
+     */
     public static final String OPTIMIZER_TRACE_QUERY_FAILED_QPS =
             "app.optimizer.trace.query.failed.qps";
 
-    /** Optimizer trace queries intentionally skipped because prerequisites were unavailable. */
+    /**
+     * Optimizer trace queries intentionally skipped because prerequisites were unavailable.
+     */
     public static final String OPTIMIZER_TRACE_QUERY_SKIPPED_QPS =
             "app.optimizer.trace.query.skipped.qps";
 
@@ -448,7 +473,9 @@ public class MetricConstant {
     public static final String CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS =
             "app.cache.routing.candidate.max.hit.tokens";
 
-    /** Cache-affinity routing decisions, tagged by role, engineIp, and decision. */
+    /**
+     * Cache-affinity routing decisions, tagged by role, engineIp, and decision.
+     */
     public static final String CACHE_AFFINITY_DECISION = "app.cache.affinity.decision.qps";
 
     /**
@@ -547,14 +574,12 @@ public class MetricConstant {
     public static final String GRPC_CALL_DURATION = "app.grpc.call.duration";
 
     /**
-     * gRPC response body size in bytes
-     */
-    public static final String GRPC_RESPONSE_SIZE = "app.grpc.response.size";
-
-    /**
      * gRPC call count
      */
     public static final String GRPC_CALL_COUNT = "app.grpc.call.count";
+
+    public static final String GRPC_CALL_FAILURE = "app.grpc.call.failure";
+    public static final String GRPC_DELIVERY_DELAY = "app.grpc.delivery.delay_ms";
 
     /**
      * gRPC connection duration in microseconds
@@ -628,7 +653,9 @@ public class MetricConstant {
      */
     public static final String GRPC_SERVER_PROCESS_MS = "app.grpc.server.process.ms";
 
-    /** Request sequence length observed at the Master request boundary. */
+    /**
+     * Request sequence length observed at the Master request boundary.
+     */
     public static final String REQUEST_SEQ_LEN = "app.request.seq.len";
 
     /**
@@ -636,7 +663,9 @@ public class MetricConstant {
      */
     public static final String REQUEST_BLOCK_SIZE = "app.request.block.size";
 
-    /** Protobuf message size excluding gRPC framing and compression. */
+    /**
+     * Protobuf message size excluding gRPC framing and compression.
+     */
     public static final String REQUEST_MESSAGE_BYTES = "app.request.message.bytes";
 
     /**
@@ -664,6 +693,9 @@ public class MetricConstant {
      */
     public static final String GRPC_SERVER_EXECUTOR_QUEUE_SIZE = "grpc.server.executor.queue.size";
 
+    public static final String GRPC_SERVER_EXECUTOR_REJECTED_TASKS =
+            "grpc.server.executor.caller.runs";
+
     /**
      * gRPC server executor current pool size (gauge)
      */
@@ -676,9 +708,9 @@ public class MetricConstant {
             "grpc.server.executor.max.pool.size";
 
     /**
-     * gRPC server executor rejected task counter. Rejection uses AbortPolicy.
+     * gRPC server callbacks executed by the caller when the executor is saturated or closed.
      */
-    public static final String GRPC_SERVER_EXECUTOR_REJECTED_TASKS =
+    public static final String GRPC_SERVER_EXECUTOR_CALLER_RUNS =
             "grpc.server.executor.caller.runs";
 
     /* ------------------------ Dispatch Executor Monitoring ---------------------------- */

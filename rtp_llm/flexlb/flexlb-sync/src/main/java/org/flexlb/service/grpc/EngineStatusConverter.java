@@ -1,5 +1,6 @@
 package org.flexlb.service.grpc;
 
+import org.flexlb.cache.primitive.LongKeySet;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatus.EngineObservation;
@@ -13,7 +14,6 @@ import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -65,18 +65,28 @@ public class EngineStatusConverter {
      * Convert CacheStatusPB to CacheStatus
      */
     public static CacheStatus convertToCacheStatus(EngineRpcService.CacheStatusPB cacheStatusPB) {
+        // Own the key set independently from the protobuf message graph.
+        return convertToCacheStatus(
+                cacheStatusPB,
+                new LongKeySet(
+                        cacheStatusPB.getCacheKeyListCount() > 0
+                                ? cacheStatusPB.getCacheKeyListList()
+                                : cacheStatusPB.getCacheKeysMap().keySet()));
+    }
+
+    /**
+     * Reuse an already owned key set for an acknowledged, unchanged version.
+     */
+    public static CacheStatus convertToCacheStatus(
+            EngineRpcService.CacheStatusPB cacheStatusPB, Set<Long> cachedKeysSet) {
         CacheStatus cacheStatus = new CacheStatus();
         cacheStatus.setAvailableKvCache(cacheStatusPB.getAvailableKvCache());
         cacheStatus.setTotalKvCache(cacheStatusPB.getTotalKvCache());
         cacheStatus.setBlockSize(cacheStatusPB.getBlockSize());
         cacheStatus.setVersion(cacheStatusPB.getVersion());
 
-        Map<Long, Boolean> cacheKeysMap = cacheStatusPB.getCacheKeysMap();
-        // Copy the keySet: protobuf MapField#keySet() returns a VIEW that keeps
-        // the whole WorkerStatusPB message graph reachable until the next sync.
-        Set<Long> cachedKeysSet = new HashSet<>(cacheKeysMap.keySet());
         cacheStatus.setCachedKeys(cachedKeysSet);
-        cacheStatus.setCacheKeySize(cacheKeysMap.size());
+        cacheStatus.setCacheKeySize(cachedKeysSet.size());
         return cacheStatus;
     }
 
