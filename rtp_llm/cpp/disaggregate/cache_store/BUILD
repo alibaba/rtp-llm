@@ -75,6 +75,7 @@ cc_library(
         "//:rtp_compute_ops",
         ":arpc_dep",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "@havenask//aios/autil:env_util",
     ],
     visibility=['//visibility:public'],
     alwayslink = True,

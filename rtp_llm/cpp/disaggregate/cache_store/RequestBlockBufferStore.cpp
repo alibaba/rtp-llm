@@ -2,6 +2,9 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "autil/EnvUtil.h"
+#include <algorithm>
+#include <limits>
 #include <torch/torch.h>
 
 namespace rtp_llm {
@@ -145,24 +148,43 @@ std::shared_ptr<BlockBuffer> RequestBlockBufferStore::makeValidBlock(const std::
         return nullptr;
     }
 
-    auto tensor = torch::empty({(int64_t)block->len}, torch::TensorOptions().dtype(torch::kUInt8)).pin_memory();
+    const bool   rdma = memory_util_->isRdmaMode();
+    const size_t min_registration_bytes =
+        rdma ? autil::EnvUtil::getEnv("CACHE_STORE_MIN_REG_MEM_SIZE", size_t{1024}) : 0;
+    const size_t staging_bytes = std::max<size_t>(block->len, min_registration_bytes);
+    if (staging_bytes > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+        RTP_LLM_LOG_WARNING("cache store staging size is out of range: %zu", staging_bytes);
+        return nullptr;
+    }
+
+    auto tensor =
+        torch::empty({static_cast<int64_t>(staging_bytes)}, torch::TensorOptions().dtype(torch::kUInt8)).pin_memory();
     if (!tensor.defined()) {
         RTP_LLM_LOG_WARNING("make valid block failed, alloc buffer failed, block %s", block->key.c_str());
         return nullptr;
     }
 
-    auto malloc_ptr = tensor.data_ptr();
-    auto addr       = std::shared_ptr<void>(malloc_ptr, [tensor](void* p) { /* tensor destructor handles cleanup */ });
-
-    if (!memory_util_->isMemoryMr(addr.get(), block->len, false, false)) {
-        const auto reg_success = memory_util_->regUserMr(addr.get(), block->len, false);
-        if (!reg_success) {
-            RTP_LLM_LOG_WARNING("malloc valid block mr failed, block %s", block->key.c_str());
-            return nullptr;
-        }
+    void*      ptr                = tensor.data_ptr();
+    const bool needs_registration = !memory_util_->isMemoryMr(ptr, block->len, false, false);
+    // Register the staging buffer as one MR. The default registration granularity
+    // can leave an unregistrable tail for sizes like the 4,224-byte Indexer KV block.
+    if (needs_registration && !memory_util_->regUserMr(ptr, staging_bytes, false, rdma ? staging_bytes : 0)) {
+        RTP_LLM_LOG_WARNING("malloc valid block mr failed, block %s, payload %u, staging %zu",
+                            block->key.c_str(),
+                            block->len,
+                            staging_bytes);
+        return nullptr;
     }
 
-    auto new_block = std::make_shared<BlockBuffer>(block->key, addr, block->len, false, true);
+    // The transport can retain the block after the request drops its reference.
+    // Deregister before releasing the pinned tensor, on the last owner.
+    auto addr =
+        std::shared_ptr<void>(ptr, [tensor, registration = needs_registration ? memory_util_ : nullptr](void* p) {
+            if (registration) {
+                registration->deregUserMr(p, false);
+            }
+        });
+    auto new_block = std::make_shared<BlockBuffer>(block->key, addr, block->len, false, needs_registration);
 
     if (!copyBlock(new_block, block)) {
         return nullptr;

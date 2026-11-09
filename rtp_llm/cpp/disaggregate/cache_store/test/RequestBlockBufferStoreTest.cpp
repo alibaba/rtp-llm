@@ -1,5 +1,8 @@
 #include "gtest/gtest.h"
+#include <algorithm>
+#include <cstring>
 
+#include "rtp_llm/cpp/disaggregate/cache_store/NoRdmaMemoryUtilImpl.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/test/CacheStoreTestBase.h"
@@ -10,6 +13,65 @@
 namespace rtp_llm {
 
 class RequestBlockBufferStoreTest: public CacheStoreTestBase {};
+
+namespace {
+
+class StrictStagingMemoryUtil: public NoRdmaMemoryUtilImpl {
+public:
+    bool isRdmaMode() override {
+        return true;
+    }
+    bool isMemoryMr(void* ptr, uint64_t bytes, bool gpu, bool adopted) override {
+        return ptr == registered && bytes <= registered_bytes && !gpu && adopted;
+    }
+    bool regUserMr(void* ptr, uint64_t bytes, bool gpu, uint64_t alignment) override {
+        // Model an RDMA provider requiring one registration with no tail.
+        if (gpu || alignment != bytes || bytes < 1024 || registered != nullptr) {
+            return false;
+        }
+        registered       = ptr;
+        registered_bytes = bytes;
+        return true;
+    }
+    bool deregUserMr(void* ptr, bool gpu) override {
+        EXPECT_EQ(ptr, registered);
+        EXPECT_FALSE(gpu);
+        registered = nullptr;
+        ++deregistrations;
+        return true;
+    }
+    void*    registered       = nullptr;
+    uint64_t registered_bytes = 0;
+    int      deregistrations  = 0;
+};
+
+}  // namespace
+
+TEST_F(RequestBlockBufferStoreTest, StagesIndexerBlockInOneMrAndKeepsRegistrationUntilLastOwner) {
+    for (uint32_t payload_bytes : {4224u, 128u}) {
+        auto memory  = std::make_shared<StrictStagingMemoryUtil>();
+        auto store   = std::make_shared<RequestBlockBufferStore>(memory);
+        auto request = std::make_shared<RequestBlockBuffer>("rdma-boundary");
+        auto payload = std::make_shared<std::vector<uint8_t>>(payload_bytes, 0x5a);
+        auto source  = std::shared_ptr<void>(payload, payload->data());
+        request->addBlock("indexer", source, payload_bytes, false, true);
+
+        ASSERT_TRUE(store->setRequestBlockBuffer(request));
+        auto reader = store->getBlockBuffer("rdma-boundary", "indexer");
+        ASSERT_NE(reader, nullptr);
+        EXPECT_NE(reader->addr.get(), source.get());
+        EXPECT_EQ(reader->len, payload_bytes);
+        EXPECT_EQ(memory->registered_bytes, std::max<uint64_t>(payload_bytes, 1024));
+        EXPECT_TRUE(memory->isMemoryMr(reader->addr.get(), reader->len, reader->gpu_mem, reader->adopted));
+        EXPECT_EQ(std::memcmp(reader->addr.get(), payload->data(), payload_bytes), 0);
+
+        store->delRequestBlockBuffer("rdma-boundary");
+        EXPECT_EQ(memory->deregistrations, 0);
+        reader.reset();
+        EXPECT_EQ(memory->deregistrations, 1);
+        EXPECT_EQ(memory->registered, nullptr);
+    }
+}
 
 TEST_F(RequestBlockBufferStoreTest, testBlocksOps) {
     auto request_block = std::make_shared<RequestBlockBuffer>("request-1");
