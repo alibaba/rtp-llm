@@ -125,15 +125,77 @@ def _kernels():
         value = tl.load(rows + source * WIDTH + column)
         tl.store(pool + target + column, value)
 
+    @triton.jit
+    def assemble_cp_prefill_indices(
+        metadata, positions, selected, indices, lengths, position_stride,
+        selected_row_stride, selected_col_stride,
+        TOPK: tl.constexpr, RATIO: tl.constexpr, WINDOW: tl.constexpr,
+        WIDTH: tl.constexpr, BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0).to(tl.int64)
+        column = tl.arange(0, BLOCK)
+        position = tl.load(positions + row * position_stride)
+        swa_base = tl.load(metadata + row * 4 + 2)
+        swa_first = tl.load(metadata + row * 4 + 3)
+        swa_position = position - WINDOW + 1 + column - TOPK
+        swa_live = (column >= TOPK) & (column < TOPK + WINDOW) & (swa_position >= swa_first)
+        values = tl.where(swa_live, swa_base + swa_position - swa_first, -1)
+        if TOPK:
+            global_base = tl.load(metadata + row * 4)
+            count = tl.load(metadata + row * 4 + 1)
+            entry = tl.load(selected + row * selected_row_stride + column * selected_col_stride,
+                            column < TOPK, other=-1)
+            global_live = (column < TOPK) & (column < (position + 1) // RATIO) & (entry >= 0) & (entry < count)
+            values = tl.where(global_live, global_base + entry, values)
+        values = values.to(tl.int32)
+        live = values >= 0
+        rank = tl.cumsum(live.to(tl.int32))
+        length = tl.sum(live.to(tl.int32), 0)
+        destination = tl.where(live, rank - 1, length + column - rank)
+        tl.store(indices + row * WIDTH + destination, values, column < TOPK + WINDOW)
+        tl.store(indices + row * WIDTH + column, -1, (column >= TOPK + WINDOW) & (column < WIDTH))
+        tl.store(lengths + row, length)
+
     return SimpleNamespace(
         triton=triton, position_slots=position_slots, packed_rows=packed_rows,
         store_cp_prefill_rows=store_cp_prefill_rows, store_prefill_csa=store_prefill_csa,
+        assemble_cp_prefill_indices=assemble_cp_prefill_indices,
     )
 
 
 def _owned_before(end, span, owned_start, owned_count):
     cycles, tail = divmod(end, span)
     return cycles * owned_count + min(max(tail - owned_start, 0), owned_count)
+
+
+def try_assemble_cp_prefill_indices(metadata, positions, selected, ratio, window, width):
+    """Assemble and compact the stable global-then-SWA sparse row in one launch."""
+    rows = positions.numel()
+    if not (
+        positions.is_cuda and positions.ndim == 1 and positions.dtype == torch.int64
+        and metadata.shape == (rows, 4) and metadata.is_contiguous()
+        and metadata.dtype == torch.int64 and metadata.device == positions.device
+    ):
+        return None
+    topk = 0
+    selected_strides = (0, 0)
+    if selected is not None:
+        if not (selected.ndim == 2 and selected.shape[0] == rows and ratio > 0
+                and selected.device == positions.device and selected.dtype in (torch.int32, torch.int64)):
+            return None
+        topk = selected.shape[1]
+        selected_strides = selected.stride()
+    if not 0 < window <= topk + window <= width:
+        return None
+    indices = torch.empty((rows, 1, width), dtype=torch.int32, device=positions.device)
+    lengths = torch.empty(rows, dtype=torch.int32, device=positions.device)
+    if rows:
+        kernels = _kernels()
+        kernels.assemble_cp_prefill_indices[(rows,)](
+            metadata, positions, selected, indices, lengths, positions.stride(0),
+            *selected_strides, topk, ratio, window, width, kernels.triton.next_power_of_2(width),
+        )
+    return indices, lengths
 
 
 def try_write_cp_prefill_rows(pool, placement, host_table, request, start, rows, *, planar):

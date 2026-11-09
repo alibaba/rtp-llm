@@ -708,6 +708,9 @@ def _triton_kernels():
         return tl.where(scale_u8 == 255, float("nan"), scale)
 
     ns.ue8m0_to_fp32 = _ue8m0_to_fp32
+    from rtp_llm.models_py.modules.dsv41.ppu.fused_ops import _complex_multiply
+
+    complex_multiply = _complex_multiply()
 
     @triton.jit
     def _pack_v41_swa_row(kv, payload, packed):
@@ -741,8 +744,7 @@ def _triton_kernels():
         real = tl.load(kv + row * DIM + 2 * pair).to(tl.float32)
         imag = tl.load(kv + row * DIM + 2 * pair + 1).to(tl.float32)
         # Preserve the PPU complex multiply and round to BF16 before quantizing.
-        rotated_real = tl.fma(real, cosine, -(imag * sine))
-        rotated_imag = tl.fma(imag, cosine, real * sine)
+        rotated_real, rotated_imag = complex_multiply(real, imag, cosine, sine)
         real = tl.where(rotates, rotated_real, real).to(tl.bfloat16).to(tl.float32)
         imag = tl.where(rotates, rotated_imag, imag).to(tl.bfloat16).to(tl.float32)
         real = real.reshape((DIM // GROUP, GROUP // 2))
@@ -750,6 +752,8 @@ def _triton_kernels():
         maximum = tl.max(tl.maximum(tl.abs(real), tl.abs(imag)), 1)
         poison = tl.sum(((real != real) | (imag != imag)).to(tl.int32), 1) > 0
         maximum = tl.where(poison, float("nan"), maximum)
+        real_sign = ((real.to(tl.int32, bitcast=True) >> 28) & 8).to(tl.uint8)
+        imag_sign = ((imag.to(tl.int32, bitcast=True) >> 28) & 8).to(tl.uint8)
         base = row * (DIM // 2 + DIM // GROUP)
         groups = tl.arange(0, DIM // GROUP)
         if GLOBAL:
@@ -770,6 +774,8 @@ def _triton_kernels():
             tl.store(packed + base + DIM // 2 + groups, exponent.to(tl.uint8))
         low = _fp4_e2m1_code_rne(real)
         high = _fp4_e2m1_code_rne(imag)
+        low = tl.where(real == 0, real_sign, low)
+        high = tl.where(imag == 0, imag_sign, high)
         low = tl.where(real == real, low, ((real.to(tl.int32, bitcast=True) >> 28) & 8).to(tl.uint8))
         high = tl.where(imag == imag, high, ((imag.to(tl.int32, bitcast=True) >> 28) & 8).to(tl.uint8))
         tl.store(packed + base + pair, (low | (high << 4)).reshape((DIM // 2,)))

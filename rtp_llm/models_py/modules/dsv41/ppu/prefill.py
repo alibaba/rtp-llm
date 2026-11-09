@@ -46,6 +46,12 @@ def _rope_tail(x: torch.Tensor, freqs: torch.Tensor, inverse: bool = False):
     tokens = x.shape[0]
     if freqs.shape[0] != tokens:
         raise ValueError(f"freqs rows {freqs.shape[0]} != token rows {tokens}")
+    if os.environ.get("RTP_V41_PPU_FUSED_BF16_ROPE", "0") == "1":
+        from rtp_llm.models_py.modules.dsv41.ppu.fused_ops import try_rope_tail
+
+        out = try_rope_tail(x, freqs, inverse)
+        if out is not None:
+            return out
     tail = x[..., -rope_dim:].float()
     tail = tail.reshape(tokens, *x.shape[1:-1], half, 2)
     complex_tail = torch.view_as_complex(tail)  # [T, ..., half]
@@ -212,37 +218,41 @@ class _CPPrefillWorkspace:
 
     def __init__(self, ops, cache, geometry, context, cp, source, ratio, window, starts):
         positions = context.positions
-        chunks = positions.split(cp.chunk_lengths_per_req)
-        active = [rid for rid, chunk in enumerate(chunks) if chunk.numel()]
-        bounds = torch.stack([
-            torch.stack((chunks[rid].min(), chunks[rid].max())) for rid in active
-        ]).tolist() if active else []
+        cp8 = isinstance(cache, SharedNativeCache) and cache.cp8_row_prep_enabled()
+        self.fused_dequant = cp8 and os.environ.get(CP8_WORKSPACE_DEQUANT_ENV, "1") == "1"
+        self.fused_indices = cp8 and os.environ.get("RTP_V41_PPU_CP8_FUSED_WORKSPACE_INDICES", "0") == "1"
+        bounds = _full_cp_workspace_bounds(cp, positions) if self.fused_indices else None
+        if bounds is None:
+            chunks = positions.split(cp.chunk_lengths_per_req)
+            active = [rid for rid, chunk in enumerate(chunks) if chunk.numel()]
+            limits = torch.stack([
+                torch.stack((chunks[rid].min(), chunks[rid].max())) for rid in active
+            ]).tolist() if active else []
+            bounds = [(rid, first, last) for rid, (first, last) in zip(active, limits)]
 
-        layout = [(0, 0, 0, 0)] * len(chunks)
+        layout = [(0, 0, 0, 0)] * len(cp.chunk_lengths_per_req)
         self.swa_ranges = []
         self.global_ranges = []
         offset = 0
-        for rid, (first, last) in zip(active, bounds):
+        for rid, first, last in bounds:
             count = cache.request_length(rid) // ratio if ratio else 0
             swa_first = max(0, starts.get(rid, 0), first - window + 1)
-            swa_rows = torch.arange(swa_first, max(swa_first, last + 1), device=positions.device)
+            swa_count = max(0, last + 1 - swa_first)
             swa_offset = offset + count
             layout[rid] = (offset, count, swa_offset, swa_first)
             if count:
                 self.global_ranges.append((rid, offset, count))
-            self.swa_ranges.append((rid, swa_offset, swa_first, swa_rows))
-            offset = swa_offset + swa_rows.numel()
+            swa_rows = None if self.fused_indices else torch.arange(
+                swa_first, swa_first + swa_count, device=positions.device,
+            )
+            self.swa_ranges.append((rid, swa_offset, swa_first, swa_count, swa_rows))
+            offset = swa_offset + swa_count
 
         self.kv = torch.empty((offset, geometry.head_dim), dtype=torch.bfloat16, device=positions.device)
         meta = torch.tensor(layout, dtype=torch.int64, device=positions.device).reshape(-1, 4)
         self.row_meta = meta.index_select(0, context.request_ids.long())
         self.selection = None
         self.index_plan = None
-        self.fused_dequant = (
-            isinstance(cache, SharedNativeCache)
-            and cache.cp8_row_prep_enabled()
-            and os.environ.get(CP8_WORKSPACE_DEQUANT_ENV, "1") == "1"
-        )
         if source is not None:
             cache.prepare_source(source)
             tag = "global_kv_2" if ratio == 2 else "global_kv_1"
@@ -255,6 +265,15 @@ class _CPPrefillWorkspace:
 
     def indices(self, positions, selected, ratio, window):
         if self.index_plan is None or self.selection is not selected:
+            if self.fused_indices:
+                from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import try_assemble_cp_prefill_indices
+
+                result = try_assemble_cp_prefill_indices(
+                    self.row_meta, positions, selected, ratio, window, COMBINED_WIDTH,
+                )
+                if result is not None:
+                    self.index_plan, self.selection = result, selected
+                    return result
             gbase, count, sbase, swa_first = self.row_meta.unbind(dim=1)
             swpos = positions[:, None] - window + 1 + torch.arange(window, device=positions.device)
             swa = torch.where(swpos >= swa_first[:, None], sbase[:, None] + swpos - swa_first[:, None], -1)
@@ -271,13 +290,41 @@ class _CPPrefillWorkspace:
 
     def refresh_swa(self, ops, cache, layer_id):
         descriptor = cache.descriptors(layer_id)["swa_kv"]
-        for rid, begin, first, positions in self.swa_ranges:
-            out = self.kv[begin:begin + positions.numel()]
+        for index, (rid, begin, first, count, positions) in enumerate(self.swa_ranges):
+            out = self.kv[begin:begin + count]
             if self.fused_dequant and cache.try_decode_swa_range(layer_id, rid, first, out):
                 continue
+            if positions is None:
+                positions = torch.arange(first, first + count, device=out.device)
+                self.swa_ranges[index] = (rid, begin, first, count, positions)
             packed = cache.read_swa(layer_id, rid, positions)
             if not (self.fused_dequant and _quant.try_dequantize_prefill_rows(packed, out, global_pool=False)):
                 ops.decode_kv(packed, pool_tag="swa_kv", descriptor=descriptor, out=out)
+
+
+def _full_cp_workspace_bounds(cp, positions):
+    """Reuse the full zigzag split's host geometry to size its SWA intervals."""
+    chunks = cp.chunk_lengths_per_req
+    lengths = cp.input_lengths_global_host
+    prefixes = cp.prefix_lengths_host
+    if (
+        cp.gather_restore_positions is not None
+        or lengths is None or prefixes is None
+        or len(chunks) != len(lengths) or len(chunks) != len(prefixes)
+        or any(chunk % 2 for chunk in chunks)
+        or not positions.is_contiguous()
+        or positions.numel() != cp.global_positions.numel()
+        or positions.data_ptr() != cp.global_positions.data_ptr()
+    ):
+        return None
+    bounds = []
+    for rid, (chunk, length, prefix) in enumerate(zip(chunks, lengths, prefixes)):
+        if chunk:
+            first = cp.cp_rank * (chunk // 2)
+            last = (2 * cp.cp_size - cp.cp_rank) * (chunk // 2) - 1
+            last_real = max(0, length - 1)
+            bounds.append((rid, prefix + min(first, last_real), prefix + min(last, last_real)))
+    return bounds
 
 
 def build_cp_prefill_workspace(

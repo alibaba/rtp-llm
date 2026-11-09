@@ -1,4 +1,4 @@
-"""Experimental PPU horizontal fusion of the shared Attention Q/K RoPE.
+"""Fused BF16 rotary embedding for shared PPU Attention.
 
 The inputs have already landed in BF16 after Q-b and KV normalization. This
 kernel intentionally has no normalization, quantization, or cache side effects.
@@ -41,9 +41,38 @@ def is_supported(q, kv, freqs):
 
 
 @lru_cache(maxsize=1)
+def _complex_multiply():
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def multiply(real, imag, cosine, sine):
+        # PPU Torch rounds the sine products before the explicit FP32 FMAs.
+        rotated_real = tl.fma(real, cosine, -(imag * sine))
+        rotated_imag = tl.fma(imag, cosine, real * sine)
+        # Preserve the IEEE sign of zero when both products are zero. The PPU
+        # lowering of the multiply/add chain can otherwise canonicalize it.
+        r = real.to(tl.int32, bitcast=True)
+        i = imag.to(tl.int32, bitcast=True)
+        c = cosine.to(tl.int32, bitcast=True)
+        s = sine.to(tl.int32, bitcast=True)
+        real_zero = ((real == 0) | (cosine == 0)) & ((imag == 0) | (sine == 0))
+        imag_zero = ((imag == 0) | (cosine == 0)) & ((real == 0) | (sine == 0))
+        real_sign = (r ^ c) & ~(i ^ s) & -2147483648
+        imag_sign = (i ^ c) & (r ^ s) & -2147483648
+        real_bits = tl.where(real_zero & (rotated_real == 0), real_sign, rotated_real.to(tl.int32, bitcast=True))
+        imag_bits = tl.where(imag_zero & (rotated_imag == 0), imag_sign, rotated_imag.to(tl.int32, bitcast=True))
+        return real_bits.to(tl.float32, bitcast=True), imag_bits.to(tl.float32, bitcast=True)
+
+    return multiply
+
+
+@lru_cache(maxsize=1)
 def _kernel():
     import triton
     import triton.language as tl
+
+    complex_multiply = _complex_multiply()
 
     @triton.jit
     def rotate_row(
@@ -51,23 +80,22 @@ def _kernel():
         destination,
         frequencies,
         TOKEN,
+        DIM: tl.constexpr,
         HALF_ROPE: tl.constexpr,
+        INVERSE: tl.constexpr,
     ):
-        # All 256 complex pairs cover both unchanged NoPE and the RoPE tail.
-        # NoPE is copied inside this same launch, not through a clone kernel.
-        pair = tl.arange(0, 256)
+        # Copy the NoPE channels along with the rotated tail.
+        pair = tl.arange(0, DIM // 2)
         real = tl.load(source + pair * 2).to(tl.float32)
         imag = tl.load(source + pair * 2 + 1).to(tl.float32)
-        frequency_pair = pair - (256 - HALF_ROPE)
+        frequency_pair = pair - (DIM // 2 - HALF_ROPE)
         rotates = frequency_pair >= 0
         address = frequencies + TOKEN * (2 * HALF_ROPE) + frequency_pair * 2
         cosine = tl.load(address, mask=rotates, other=1.0)
         sine = tl.load(address + 1, mask=rotates, other=0.0)
-        # Match accepted PPU Torch complex multiply: round the sine products,
-        # then contract the cosine products independently for real and imag.
-        # Keep implicit contraction disabled around these explicit FP32 FMAs.
-        rotated_real = tl.fma(real, cosine, -(imag * sine))
-        rotated_imag = tl.fma(imag, cosine, real * sine)
+        if INVERSE:
+            sine = -sine
+        rotated_real, rotated_imag = complex_multiply(real, imag, cosine, sine)
         tl.store(destination + pair * 2, tl.where(rotates, rotated_real, real))
         tl.store(destination + pair * 2 + 1, tl.where(rotates, rotated_imag, imag))
 
@@ -85,12 +113,20 @@ def _kernel():
         head = tl.program_id(1).to(tl.int64)
         if head < HEADS:
             offset = (token * HEADS + head) * 512
-            rotate_row(Q + offset, QOut + offset, Frequencies, token, HALF_ROPE)
+            rotate_row(Q + offset, QOut + offset, Frequencies, token, 512, HALF_ROPE, False)
         else:
             offset = token * 512
-            rotate_row(KV + offset, KVOut + offset, Frequencies, token, HALF_ROPE)
+            rotate_row(KV + offset, KVOut + offset, Frequencies, token, 512, HALF_ROPE, False)
 
-    return fused_qk_rope
+    @triton.jit
+    def fused_rope_tail(
+        source, frequencies, out,
+        HEADS: tl.constexpr, DIM: tl.constexpr, HALF_ROPE: tl.constexpr, INVERSE: tl.constexpr,
+    ):
+        row = tl.program_id(0).to(tl.int64)
+        rotate_row(source + row * DIM, out + row * DIM, frequencies, row // HEADS, DIM, HALF_ROPE, INVERSE)
+
+    return fused_qk_rope, fused_rope_tail
 
 
 def qk_rope(q, kv, freqs):
@@ -108,7 +144,8 @@ def qk_rope(q, kv, freqs):
         return q_out, kv_out
     # view_as_real is a zero-copy view of the existing complex64 frequency
     # rows. Both outputs are fresh and disjoint from all completed inputs.
-    _kernel()[(q.shape[0], q.shape[1] + 1)](
+    qk_kernel, _ = _kernel()
+    qk_kernel[(q.shape[0], q.shape[1] + 1)](
         q,
         kv,
         torch.view_as_real(freqs),
@@ -120,3 +157,26 @@ def qk_rope(q, kv, freqs):
         enable_fp_fusion=False,
     )
     return q_out, kv_out
+
+
+def try_rope_tail(x, freqs, inverse):
+    """Return the fused nonaliasing BF16 result for supported row layouts."""
+    if not (
+        x.is_cuda and x.dtype == torch.bfloat16 and x.ndim in (2, 3)
+        and x.shape[-1] in (128, 512) and x.is_contiguous()
+        and freqs.dtype == torch.complex64 and freqs.ndim == 2
+        and freqs.shape[0] == x.shape[0] and 0 < freqs.shape[1] <= x.shape[-1] // 2
+        and freqs.is_contiguous() and not freqs.is_conj() and freqs.device == x.device
+        and not x.requires_grad and not freqs.requires_grad
+    ):
+        return None
+    out = torch.empty_like(x)
+    if x.numel():
+        heads = x.shape[1] if x.ndim == 3 else 1
+        _, rope_kernel = _kernel()
+        rope_kernel[(x.shape[0] * heads,)](
+            x, torch.view_as_real(freqs), out,
+            heads, x.shape[-1], freqs.shape[1], inverse,
+            num_warps=4, enable_fp_fusion=False,
+        )
+    return out
