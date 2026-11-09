@@ -7,11 +7,10 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Checks that simulated Forward returns its output and measured timing.
+ */
 class SimulatedComputeTest {
-    private static NoiseModel.Sample sample(long nanos) {
-        return new NoiseModel.Sample(Duration.ofNanos(nanos), 0, Duration.ofNanos(nanos));
-    }
-
     @Test void waitsForPlannedTimeAndReportsActualElapsed() throws Exception {
         try (var compute = new SimulatedCompute()) {
             var execution = compute.submit(sample(5_000_000));
@@ -85,4 +84,28 @@ class SimulatedComputeTest {
             assertNotNull(execution.completion().toCompletableFuture().get(2, TimeUnit.SECONDS));
         }
     }
+
+    @Test void elapsedStopsBeforeNotificationQueueDelay() throws Exception {
+        var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
+        var notifications = Executors.newSingleThreadExecutor();
+        notifications.execute(() -> {
+            entered.countDown();
+            try { release.await(); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+        });
+        try (var compute = new SimulatedCompute(notifications)) {
+            assertTrue(entered.await(1, TimeUnit.SECONDS));
+            long before = System.nanoTime();
+            var execution = compute.submit(sample(Duration.ofHours(1).toNanos())); execution.cancel();
+            long upperBound = System.nanoTime() - before;
+            Thread.sleep(30);
+            release.countDown();
+            var outcome = execution.completion().toCompletableFuture().get(1, TimeUnit.SECONDS);
+            assertTrue(outcome.elapsedNanos() <= upperBound);
+        } finally { release.countDown(); notifications.shutdownNow(); }
+    }
+
+    private static NoiseModel.Sample sample(long nanos) {
+        return new NoiseModel.Sample(Duration.ofNanos(nanos), 0, Duration.ofNanos(nanos));
+    }
+
 }

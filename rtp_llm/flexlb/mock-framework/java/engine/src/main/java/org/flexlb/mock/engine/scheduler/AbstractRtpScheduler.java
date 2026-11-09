@@ -11,29 +11,10 @@ import org.flexlb.mock.engine.forward.*;
 import static org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure.Reason.*;
 import static org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.Phase.*;
 
-/** Shared RTP request, KV, PD and Forward lifecycle; admission policies own their queues. */
+/**
+ * Shared RTP request, KV, PD and Forward lifecycle; admission policies own their queues.
+ */
 public abstract class AbstractRtpScheduler implements EngineScheduler {
-    public static Supplier<List<Collector.MetricFamilySamples>> metricsFor(EngineScheduler scheduler) {
-        return scheduler instanceof AbstractRtpScheduler rtp ? rtp.metrics()::collect : null;
-    }
-
-    public static EngineScheduler.Factory factory(RtpConfig config) {
-        Objects.requireNonNull(config);
-        return (lock, cache, finished) -> config.groupScheduling()
-            ? new RtpPrefillGroupScheduler(lock, config, cache, finished) : new RtpFifoScheduler(lock, config, cache, finished);
-    }
-
-    /** Native P/D handoff events carried across the engine loop. */
-    public enum RtpControl implements Control {
-        TRANSFER_ACKNOWLEDGED, PREFILL_COMPLETE;
-
-        /** The first sampled token is also the repeated synthetic Decode output. */
-        public record Generate(int tokenId) implements Control {}
-    }
-    public record RtpTransferResult(boolean prefillFinished, RequestFailure failure) implements TransferResult {}
-
-
-    enum Phase { QUEUED, CAPACITY, KV_PREPARING, WAITING_LOAD, TRANSFERRING, TRANSFERRED, RUNNING, FORWARD, READY }
     private final TaskHistory history;
     private final Object lock;
     protected final RtpConfig config;
@@ -43,49 +24,11 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     protected final ArrayDeque<Entry> waiting = new ArrayDeque<>();
     private final Set<Entry> running = new LinkedHashSet<>();
     private final Set<Entry> notifications = new LinkedHashSet<>();
+
     private Work executing;
+
     private long batchSequence;
     protected boolean closed;
-
-    protected final class Entry implements Request {
-        final Input input;
-        final Listener listener;
-        final RequestState state;
-        final ArrayDeque<Notice> notices = new ArrayDeque<>();
-        KvCache.Lease lease;
-        KvCache.Preparation preparation;
-        long preparationStarted;
-        boolean cacheMatchRequested;
-
-        int reused, remoteReused, outputToken;
-        boolean prefillFinished;
-        final long begun = System.nanoTime();
-        long enqueuedAt = begun, waitNanos, firstToken;
-        long timingStarted, canRun, firstRunning;
-        Phase phase = QUEUED;
-        ReportedPhase finalPhase;
-        boolean loaded, generating, notifying, transferBegun;
-        Progress progress = new Progress(0, 0, false);
-        volatile RequestFailure terminalFailure;
-        ComputeModel.Plan nextStep;
-
-        Entry(Input input, Listener listener) {
-            this.input = input;
-            timingStarted = input.started();
-            this.listener = listener;
-            this.state = new RequestState(input.deadline(), failure -> terminal(this, failure));
-        }
-        AbstractRtpScheduler owner() { return AbstractRtpScheduler.this; }
-        @Override public Input input() { return input; }
-        @Override public RequestState.Snapshot snapshot() { synchronized (lock) { return state.snapshot(); } }
-        @Override public Progress progress() { synchronized (lock) { return progress; } }
-        @Override public int reused() { synchronized (lock) { return reused; } }
-        @Override public int remoteReused() { synchronized (lock) { return remoteReused; } }
-
-    }
-    private record Member(Entry request, RequestState.Use use, ComputeModel.Plan step) {}
-    private record Batch(List<Member> members, long scheduleStarted, long stepStarted, long inputStarted) {}
-    private record Notice(Runnable action, boolean terminal, boolean progress) {}
 
     AbstractRtpScheduler(Object lock, RtpConfig config, KvCache cache, TaskHistory history) {
         this.history = Objects.requireNonNull(history);
@@ -94,6 +37,16 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         this.cache = Objects.requireNonNull(cache);
         this.metrics = new RtpMetrics(config.role().name(), this::metricState, System::nanoTime, cache::itemCount);
         cache.onEvictionLifetime(metrics::blockEvicted);
+    }
+
+    public static Supplier<List<Collector.MetricFamilySamples>> metricsFor(EngineScheduler scheduler) {
+        return scheduler instanceof AbstractRtpScheduler rtp ? rtp.metrics()::collect : null;
+    }
+
+    public static EngineScheduler.Factory factory(RtpConfig config) {
+        Objects.requireNonNull(config);
+        return (lock, cache, finished) -> config.groupScheduling()
+            ? new RtpPrefillGroupScheduler(lock, config, cache, finished) : new RtpFifoScheduler(lock, config, cache, finished);
     }
 
     @Override public Request input(Input input, Listener listener) {
@@ -143,6 +96,20 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
                 finish(entry, null);
             }
         }
+    }
+
+    @Override public void finish(Request request, RequestFailure failure) {
+        var entry = entry(request);
+        if (entry.state.terminating()) return;
+        entry.finalPhase = reportedPhase(entry);
+        long now = System.nanoTime();
+        if (waitingEntries().contains(entry) || entry.phase == Phase.CAPACITY)
+            entry.waitNanos = Math.max(0, now - entry.timingStarted);
+        removeWaiting(entry);
+        running.remove(entry);
+        if (entry.preparation instanceof KvCache.Loading loading) loading.close();
+        entry.preparation = null;
+        entry.state.finish(failure);
     }
 
     @Override public void maintain() {
@@ -211,78 +178,6 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         return executing;
     }
 
-    protected abstract void selectPrefill(List<Entry> selected);
-
-    protected final void admitPrefill(ArrayDeque<Entry> queue, List<Entry> selected, int uncachedLimit) {
-        long uncached = 0;
-        var admitted = new ArrayList<Entry>();
-        for (var entry : List.copyOf(queue)) {
-            if (!live(entry) || entry.preparation instanceof KvCache.Loading) continue;
-            if (admitted.size() >= config.maxGenerateBatchSize() || config.forceSinglePrefill() && !admitted.isEmpty()) break;
-            if (uncachedLimit > 0 && uncached >= uncachedLimit) continue;
-            if (entry.lease == null && config.maxInitedKvStreams() > 0
-                    && active.values().stream().filter(e -> e.lease != null || e.preparation instanceof KvCache.Loading).count() >= config.maxInitedKvStreams()) continue;
-            if (workTokens(entry) <= 0 || !fitsPrefill(admitted, entry)) continue;
-            if (!reserve(entry)) continue;
-            admitted.add(entry);
-            queue.remove(entry); running.add(entry); selected.add(entry);
-            uncached += uncachedTokens(entry);
-        }
-    }
-    protected void removeWaiting(Entry entry) { waiting.remove(entry); }
-
-    protected Set<Entry> waitingEntries() { return new HashSet<>(waiting); }
-
-    private long uncachedTokens(Entry entry) {
-        long tokens = entry.input.tokens() - entry.reused;
-        long alignment = 2L * config.cpSize();
-        return config.cpSize() > 1 ? (tokens + alignment - 1) / alignment * alignment : tokens;
-    }
-
-    private boolean fitsPrefill(List<Entry> selected, Entry candidate) {
-        if (selected.isEmpty()) return candidate.input.tokens() < config.maxSeqLen();
-        long sum = candidate.input.tokens(), longest = candidate.input.tokens();
-        for (var entry : selected) {
-            sum += entry.input.tokens(); longest = Math.max(longest, entry.input.tokens());
-        }
-        // Native prefill-only means max_new_tokens == 0; this Mock currently accepts positive output lengths only.
-        long budget = (long) config.maxBatchTokens() - 1;
-        return sum <= budget && longest * (selected.size() + 1L) <= budget;
-    }
-
-    private int outputLimit(Entry entry) {
-        return Math.min(entry.input.maxNewTokens(),
-            config.maxSeqLen() - entry.input.tokens());
-    }
-
-    private int workTokens(Entry entry) {
-        if (!live(entry)) return 0;
-        var progress = entry.state.snapshot();
-        if (entry.nextStep == null)
-            entry.nextStep = config.compute().prepare(config.role(), new ComputeModel.Request(
-                Long.toString(entry.input.requestId()), progress.iterations(), entry.input.tokens(), progress.generated(),
-                entry.input.minNewTokens(), entry.input.maxNewTokens(),
-                config.maxSeqLen(), entry.input.ignoreEos()));
-        if (prefill()) return entry.input.tokens();
-        return 1;
-    }
-
-    private boolean reserve(Entry entry) {
-        if (entry.canRun == 0) entry.canRun = System.nanoTime();
-        if (prefill()) {
-            return prepare(entry);
-        }
-        long tokens = (long) entry.input.tokens() + entry.state.snapshot().generated() + entry.nextStep.additionalKvTokens();
-        var failure = entry.lease.ensureCapacity(tokens);
-        if (failure != null) {
-            // RTP running streams fail KV growth; only admission waits for capacity.
-            finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode KV growth failed: " + failure));
-            return false;
-        }
-        entry.phase = RUNNING;
-        return true;
-    }
-
     @Override public void computeCompleted(Work work, SimulatedCompute.Outcome outcome) {
         var batch = completedBatch(work);
         long input = 0, computed = 0, output = 0, maxSequence = 0;
@@ -332,25 +227,9 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         try { batch.members().forEach(member -> finish(member.request(), failure)); }
         finally { metrics.computeFinished(); batch.members().forEach(member -> member.use().close()); }
     }
+
     @Override public boolean cancelled(Work work) {
         return work == executing && ((Batch) work.owner()).members().stream().allMatch(member -> member.request().state.terminating());
-    }
-    private Batch completedBatch(Work work) {
-        if (work != executing) throw new IllegalStateException("Stale/foreign Forward completion");
-        executing = null;
-        return (Batch) work.owner();
-    }
-
-    private void emit(Entry entry, boolean done) {
-        var snapshot = entry.state.snapshot();
-        entry.progress = new Progress(snapshot.generated(), snapshot.iterations(), done);
-        // A notification carries no token data. A slow consumer sees the latest cumulative progress.
-        entry.notices.removeIf(Notice::progress);
-        entry.notices.addLast(new Notice(() -> {
-            if (entry.terminalFailure == null) entry.listener.progressed(entry);
-        }, false, true));
-        notifications.add(entry);
-        if ((prefill() || done) && !entry.input.retained()) finish(entry, null);
     }
 
     @Override public RequestState.Use beginTransfer(Request request) {
@@ -361,6 +240,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         entry.phase = TRANSFERRING;
         return entry.state.pin();
     }
+
     @Override public void transferCompleted(Request request, TransferResult result) {
         var entry = entry(request);
         if (!live(entry)) return;
@@ -374,46 +254,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         entry.prefillFinished = transferred.prefillFinished();
         entry.phase = TRANSFERRED;
     }
-    @Override public void finish(Request request, RequestFailure failure) {
-        var entry = entry(request);
-        if (entry.state.terminating()) return;
-        entry.finalPhase = reportedPhase(entry);
-        long now = System.nanoTime();
-        if (waitingEntries().contains(entry) || entry.phase == Phase.CAPACITY)
-            entry.waitNanos = Math.max(0, now - entry.timingStarted);
-        removeWaiting(entry);
-        running.remove(entry);
-        if (entry.preparation instanceof KvCache.Loading loading) loading.close();
-        entry.preparation = null;
-        entry.state.finish(failure);
-    }
-    private void terminal(Entry entry, RequestFailure failure) {
-        entry.terminalFailure = failure;
-        long now = System.nanoTime();
-        history.add(task(entry, now, System.currentTimeMillis(), failure));
-        var outcome = failure == null ? RtpMetrics.Outcome.success : switch (failure.reason()) {
-            case CANCELLED -> RtpMetrics.Outcome.cancelled;
-            case TIMEOUT -> RtpMetrics.Outcome.timeout;
-            default -> RtpMetrics.Outcome.error;
-        };
-        var progress = entry.state.snapshot();
-        metrics.requestFinished(outcome, new RtpMetrics.RequestStats(
-            Math.max(0, now - entry.timingStarted), entry.waitNanos,
-            entry.canRun == 0 ? 0 : Math.max(0, entry.canRun - entry.enqueuedAt),
-            entry.canRun == 0 || entry.firstRunning == 0 ? 0 : Math.max(0, entry.firstRunning - entry.canRun),
-            entry.firstToken == 0 ? -1 : entry.firstToken - entry.begun,
-            entry.input.tokens(), progress.generated(), progress.iterations(), entry.reused),
-            prefill() || canReuseLocalKv(entry));
-        metrics.streamingFinished(entry.input.streaming());
-        active.remove(entry.input.identity(), entry);
-        enqueue(entry, () -> entry.listener.terminal(entry, failure), true);
-    }
-    private void enqueue(Entry entry, Runnable notification, boolean terminal) {
-        // At most admission, one coalesced progress signal, and terminal per request.
-        if (entry.notices.size() >= 3) throw new IllegalStateException("Request notification overflow");
-        entry.notices.addLast(new Notice(notification, terminal, false));
-        notifications.add(entry);
-    }
+
     @Override public List<Runnable> takeNotifications() {
         var result = new ArrayList<Runnable>();
         for (var entry : List.copyOf(notifications)) {
@@ -439,21 +280,129 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         return result;
     }
 
-    private boolean liveForDelivery(Entry entry) { synchronized (lock) { return live(entry); } }
+    @Override public List<Request> requests() { return new ArrayList<>(active.values()); }
+
+    @Override public QueueSnapshot queues() {
+        int queued = 0, executing = 0, loading = 0, ready = 0;
+        var waitingMembers = waitingEntries();
+        for (var entry : active.values()) {
+            if (entry.state.terminating()) continue;
+            if (running.contains(entry)) executing++;
+            else if (entry.phase == KV_PREPARING) loading++;
+            else if (waitingMembers.contains(entry) || entry.phase == Phase.CAPACITY) queued++;
+            else if (entry.phase == READY || entry.phase == TRANSFERRING || entry.phase == TRANSFERRED) ready++;
+            else loading++;
+        }
+        return new QueueSnapshot(queued, executing, loading, ready);
+    }
+
+    @Override public long nextDeadline() {
+        return active.values().stream().filter(entry -> !entry.state.terminating())
+            .mapToLong(entry -> entry.input.deadline()).min().orElse(Long.MAX_VALUE);
+    }
+
+    @Override public List<Task> tasks() {
+        long now = System.nanoTime();
+        return active.values().stream().map(entry -> task(entry, now, -1, null)).toList();
+    }
+
+    @Override public void close() {
+        if (closed) return;
+        closed = true;
+        for (var entry : List.copyOf(active.values())) finish(entry, new RequestFailure(CLOSED, "Engine closed"));
+    }
+
+    protected abstract void selectPrefill(List<Entry> selected);
+
+    protected final void admitPrefill(ArrayDeque<Entry> queue, List<Entry> selected, int uncachedLimit) {
+        long uncached = 0;
+        var admitted = new ArrayList<Entry>();
+        boolean capped = config.maxInitedKvStreams() > 0;
+        long initialized = capped ? active.values().stream().filter(this::ownsKv).count() : 0;
+        for (var entry : List.copyOf(queue)) {
+            boolean ownedBefore = capped && ownsKv(entry);
+            try {
+                if (!live(entry) || entry.preparation instanceof KvCache.Loading) continue;
+                if (admitted.size() >= config.maxGenerateBatchSize() || config.forceSinglePrefill() && !admitted.isEmpty()) break;
+                if (uncachedLimit > 0 && uncached >= uncachedLimit) continue;
+                if (entry.lease == null && capped && initialized >= config.maxInitedKvStreams()) continue;
+                if (workTokens(entry) <= 0 || !fitsPrefill(admitted, entry)) continue;
+                if (!reserve(entry)) continue;
+                admitted.add(entry);
+                queue.remove(entry); running.add(entry); selected.add(entry);
+                uncached += uncachedTokens(entry);
+            } finally {
+                if (capped) initialized += (ownsKv(entry) ? 1 : 0) - (ownedBefore ? 1 : 0);
+            }
+        }
+    }
+
     protected final boolean live(Entry entry) {
         if (entry.state.terminating()) return false;
         if (entry.state.expired()) finish(entry, new RequestFailure(TIMEOUT, "Request budget expired"));
         return !entry.state.terminating();
     }
-    private Entry entry(Request request) {
-        if (!(request instanceof AbstractRtpScheduler.Entry entry) || entry.owner() != this)
-            throw new IllegalArgumentException("Foreign request handle");
-        return entry;
-    }
+
+    protected void removeWaiting(Entry entry) { waiting.remove(entry); }
+
+    protected Set<Entry> waitingEntries() { return new HashSet<>(waiting); }
+
     protected final boolean prefill() { return config.role() == Role.prefill; }
-    private boolean canReuseLocalKv(Entry entry) {
-        return config.reuseCache() && config.deviceCache() && entry.input.reuse()
-            && (prefill() || !config.disableDecodeFirstReuse());
+
+    RtpMetrics metrics() { return metrics; }
+
+    private boolean ownsKv(Entry entry) {
+        return active.get(entry.input.identity()) == entry && (entry.lease != null || entry.preparation instanceof KvCache.Loading);
+    }
+
+    private long uncachedTokens(Entry entry) {
+        long tokens = entry.input.tokens() - entry.reused;
+        long alignment = 2L * config.cpSize();
+        return config.cpSize() > 1 ? (tokens + alignment - 1) / alignment * alignment : tokens;
+    }
+
+    private boolean fitsPrefill(List<Entry> selected, Entry candidate) {
+        if (selected.isEmpty()) return candidate.input.tokens() < config.maxSeqLen();
+        long sum = candidate.input.tokens(), longest = candidate.input.tokens();
+        for (var entry : selected) {
+            sum += entry.input.tokens(); longest = Math.max(longest, entry.input.tokens());
+        }
+        // Native prefill-only means max_new_tokens == 0; this Mock currently accepts positive output lengths only.
+        long budget = (long) config.maxBatchTokens() - 1;
+        return sum <= budget && longest * (selected.size() + 1L) <= budget;
+    }
+
+    private int outputLimit(Entry entry) {
+        return Math.min(entry.input.maxNewTokens(),
+            config.maxSeqLen() - entry.input.tokens());
+    }
+
+    private int workTokens(Entry entry) {
+        if (!live(entry)) return 0;
+        var progress = entry.state.snapshot();
+        if (entry.nextStep == null)
+            entry.nextStep = config.compute().prepare(config.role(), new ComputeModel.Request(
+                Long.toString(entry.input.requestId()), progress.iterations(), entry.input.tokens(), progress.generated(),
+                entry.input.minNewTokens(), entry.input.maxNewTokens(),
+                config.maxSeqLen(), entry.input.ignoreEos()));
+        if (prefill()) return entry.input.tokens();
+        return 1;
+    }
+
+    private boolean reserve(Entry entry) {
+        if (entry.canRun == 0) entry.canRun = System.nanoTime();
+        if (prefill()) {
+            return prepare(entry);
+        }
+        long tokens = (long) entry.input.tokens() + entry.state.snapshot().generated() + entry.nextStep.additionalKvTokens();
+        var failure = entry.lease.ensureCapacity(tokens);
+        if (failure != null) {
+            // RTP running streams fail KV growth; only admission waits for capacity.
+            finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode KV growth failed: " + failure));
+            return false;
+        }
+        entry.phase = RUNNING;
+        return true;
     }
 
     private boolean prepare(Entry entry) {
@@ -508,28 +457,61 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         }
         return true;
     }
-    @Override public List<Request> requests() { return new ArrayList<>(active.values()); }
-    @Override public QueueSnapshot queues() {
-        int queued = 0, executing = 0, loading = 0, ready = 0;
-        var waitingMembers = waitingEntries();
-        for (var entry : active.values()) {
-            if (entry.state.terminating()) continue;
-            if (running.contains(entry)) executing++;
-            else if (entry.phase == KV_PREPARING) loading++;
-            else if (waitingMembers.contains(entry) || entry.phase == Phase.CAPACITY) queued++;
-            else if (entry.phase == READY || entry.phase == TRANSFERRING || entry.phase == TRANSFERRED) ready++;
-            else loading++;
-        }
-        return new QueueSnapshot(queued, executing, loading, ready);
+
+    private void enqueue(Entry entry, Runnable notification, boolean terminal) {
+        // At most admission, one coalesced progress signal, and terminal per request.
+        if (entry.notices.size() >= 3) throw new IllegalStateException("Request notification overflow");
+        entry.notices.addLast(new Notice(notification, terminal, false));
+        notifications.add(entry);
     }
-    @Override public long nextDeadline() {
-        return active.values().stream().filter(entry -> !entry.state.terminating())
-            .mapToLong(entry -> entry.input.deadline()).min().orElse(Long.MAX_VALUE);
+
+    private boolean liveForDelivery(Entry entry) { synchronized (lock) { return live(entry); } }
+
+    private boolean canReuseLocalKv(Entry entry) {
+        return config.reuseCache() && config.deviceCache() && entry.input.reuse()
+            && (prefill() || !config.disableDecodeFirstReuse());
     }
-    @Override public List<Task> tasks() {
+
+    private Batch completedBatch(Work work) {
+        if (work != executing) throw new IllegalStateException("Stale/foreign Forward completion");
+        executing = null;
+        return (Batch) work.owner();
+    }
+
+    private void emit(Entry entry, boolean done) {
+        var snapshot = entry.state.snapshot();
+        entry.progress = new Progress(snapshot.generated(), snapshot.iterations(), done);
+        // A notification carries no token data. A slow consumer sees the latest cumulative progress.
+        entry.notices.removeIf(Notice::progress);
+        entry.notices.addLast(new Notice(() -> {
+            if (entry.terminalFailure == null) entry.listener.progressed(entry);
+        }, false, true));
+        notifications.add(entry);
+        if ((prefill() || done) && !entry.input.retained()) finish(entry, null);
+    }
+
+    private void terminal(Entry entry, RequestFailure failure) {
+        entry.terminalFailure = failure;
         long now = System.nanoTime();
-        return active.values().stream().map(entry -> task(entry, now, -1, null)).toList();
+        history.add(task(entry, now, System.currentTimeMillis(), failure));
+        var outcome = failure == null ? RtpMetrics.Outcome.success : switch (failure.reason()) {
+            case CANCELLED -> RtpMetrics.Outcome.cancelled;
+            case TIMEOUT -> RtpMetrics.Outcome.timeout;
+            default -> RtpMetrics.Outcome.error;
+        };
+        var progress = entry.state.snapshot();
+        metrics.requestFinished(outcome, new RtpMetrics.RequestStats(
+            Math.max(0, now - entry.timingStarted), entry.waitNanos,
+            entry.canRun == 0 ? 0 : Math.max(0, entry.canRun - entry.enqueuedAt),
+            entry.canRun == 0 || entry.firstRunning == 0 ? 0 : Math.max(0, entry.firstRunning - entry.canRun),
+            entry.firstToken == 0 ? -1 : entry.firstToken - entry.begun,
+            entry.input.tokens(), progress.generated(), progress.iterations(), entry.reused),
+            prefill() || canReuseLocalKv(entry));
+        metrics.streamingFinished(entry.input.streaming());
+        active.remove(entry.input.identity(), entry);
+        enqueue(entry, () -> entry.listener.terminal(entry, failure), true);
     }
+
     private Task task(Entry entry, long now, long endTimeMillis, RequestFailure failure) {
         var progress = entry.state.snapshot();
         var phase = endTimeMillis >= 0 && entry.finalPhase != null ? entry.finalPhase : reportedPhase(entry);
@@ -541,11 +523,19 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             entry.input.priority(), phase, progress.iterations(), waitMillis, executionMillis,
             endTimeMillis, failure, entry.lease != null);
     }
+
     private ReportedPhase reportedPhase(Entry entry) {
         return entry.phase == FORWARD || entry.phase == RUNNING
             ? ReportedPhase.RUNNING : entry.lease != null
                 ? ReportedPhase.KV_ALLOCATED : ReportedPhase.RECEIVED;
     }
+
+    private Entry entry(Request request) {
+        if (!(request instanceof AbstractRtpScheduler.Entry entry) || entry.owner() != this)
+            throw new IllegalArgumentException("Foreign request handle");
+        return entry;
+    }
+
     private RtpMetrics.State metricState() {
         synchronized (lock) {
             var counts = queues();
@@ -555,10 +545,78 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
                 kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, config.blockSize());
         }
     }
-    RtpMetrics metrics() { return metrics; }
-    @Override public void close() {
-        if (closed) return;
-        closed = true;
-        for (var entry : List.copyOf(active.values())) finish(entry, new RequestFailure(CLOSED, "Engine closed"));
+
+    /**
+     * Native P/D handoff events carried across the engine loop.
+     */
+    public enum RtpControl implements Control {
+        TRANSFER_ACKNOWLEDGED, PREFILL_COMPLETE;
+
+        /**
+         * The first sampled token is also the repeated synthetic Decode output.
+         */
+        public record Generate(int tokenId) implements Control {}
     }
+
+    public record RtpTransferResult(boolean prefillFinished, RequestFailure failure) implements TransferResult {}
+
+    enum Phase { QUEUED, CAPACITY, KV_PREPARING, WAITING_LOAD, TRANSFERRING, TRANSFERRED, RUNNING, FORWARD, READY }
+
+    /**
+     * Tracks a generation request through admission, Forward, and cache lease release.
+     */
+    protected final class Entry implements Request {
+        final Input input;
+        final Listener listener;
+        final RequestState state;
+        final ArrayDeque<Notice> notices = new ArrayDeque<>();
+
+        KvCache.Lease lease;
+        KvCache.Preparation preparation;
+
+        long preparationStarted;
+        boolean cacheMatchRequested;
+        int reused, remoteReused, outputToken;
+        boolean prefillFinished;
+
+        final long begun = System.nanoTime();
+
+        long enqueuedAt = begun, waitNanos, firstToken;
+        long timingStarted, canRun, firstRunning;
+
+        Phase phase = QUEUED;
+        ReportedPhase finalPhase;
+
+        boolean loaded, generating, notifying, transferBegun;
+
+        Progress progress = new Progress(0, 0, false);
+        volatile RequestFailure terminalFailure;
+        ComputeModel.Plan nextStep;
+
+        Entry(Input input, Listener listener) {
+            this.input = input;
+            timingStarted = input.started();
+            this.listener = listener;
+            this.state = new RequestState(input.deadline(), failure -> terminal(this, failure));
+        }
+
+        @Override public Input input() { return input; }
+
+        @Override public RequestState.Snapshot snapshot() { synchronized (lock) { return state.snapshot(); } }
+
+        @Override public Progress progress() { synchronized (lock) { return progress; } }
+
+        @Override public int reused() { synchronized (lock) { return reused; } }
+
+        @Override public int remoteReused() { synchronized (lock) { return remoteReused; } }
+
+        AbstractRtpScheduler owner() { return AbstractRtpScheduler.this; }
+
+    }
+
+    private record Member(Entry request, RequestState.Use use, ComputeModel.Plan step) {}
+
+    private record Batch(List<Member> members, long scheduleStarted, long stepStarted, long inputStarted) {}
+
+    private record Notice(Runnable action, boolean terminal, boolean progress) {}
 }

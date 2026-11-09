@@ -6,110 +6,27 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CancellationException;
 import static org.flexlb.mock.engine.cache.BlockPool.Kind.*;
 
-/** One logical KV pool with synchronous LRU and a separate device residency bound. */
+/**
+ * One logical KV pool with synchronous LRU and a separate device residency bound.
+ */
 public final class KvCache implements AutoCloseable {
-    public enum Failure { PERMANENT, RETRYABLE }
-    /** A Mock restore source reports the number of consecutive suffix blocks read successfully.
-     * The future must be returned without blocking and never owns local block references. */
-    @FunctionalInterface
-    public interface RemotePrefixLoader {
-        CompletableFuture<Integer> load(List<Long> suffixKeys);
-    }
-
-    public sealed interface Preparation permits Ready, Loading, Failed {}
-    public record Ready(Lease lease, long matchNanos, int remoteReusedTokens) implements Preparation {}
-    public final class Failed implements Preparation {
-        private final Failure failure;
-        private final long generation, requiredTokens;
-        private final List<Long> keys;
-
-        private Failed(Failure failure, long requiredTokens, List<Long> keys) {
-            this.failure = failure;
-            this.requiredTokens = requiredTokens;
-            this.keys = List.copyOf(keys);
-            generation = allocationGeneration();
-        }
-
-        public Failure failure() { return failure; }
-
-        /** Retry only when capacity or the reusable index has changed. */
-        public Preparation retry() {
-            synchronized (KvCache.this) {
-                if (failure == Failure.PERMANENT || generation == allocationGeneration()) return this;
-                return prepare(requiredTokens, keys);
-            }
-        }
-    }
-
-    public final class Loading implements Preparation, AutoCloseable {
-        private final Ready local;
-        private final CompletableFuture<Integer> restore;
-        private final int suffixSize;
-        private boolean settled;
-
-        private Loading(Ready local, CompletableFuture<Integer> restore, int suffixSize) {
-            this.local = local;
-            this.restore = restore;
-            this.suffixSize = suffixSize;
-        }
-
-        /** Returns this handle while pending, or transfers ownership of the ready lease once. */
-        public Preparation poll() {
-            synchronized (KvCache.this) {
-                if (settled) throw new IllegalStateException("KV preparation already settled");
-                if (!restore.isDone()) return this;
-                settled = true;
-                pending.remove(this);
-                try {
-                    Integer restored = restore.join();
-                    if (restored != null && restored > 0 && restored <= suffixSize) {
-                        local.lease().reused += restored;
-                        return new Ready(local.lease(), local.matchNanos(), restored * blockSize);
-                    }
-                } catch (CompletionException | CancellationException failure) {
-                    // The original allocation still holds a valid local prefix and writable suffix.
-                }
-                return local;
-            }
-        }
-
-        @Override public void close() {
-            synchronized (KvCache.this) {
-                if (settled) return;
-                settled = true;
-                pending.remove(this);
-                local.lease().close();
-                restore.cancel(false);
-            }
-        }
-    }
-
     private static final long[] EMPTY_KEYS = new long[0];
 
-    public record Admission(Lease lease, Failure failure, long matchNanos) {}
-    /** Keys are a detached copy, safe to encode after releasing the cache monitor. */
-    public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
-                           int referencedBlocks, long version, long[] keys) {}
     private final BlockPool pool;
     private final BlockTree tree = new BlockTree();
+
     private final int blockSize, deviceBlocks, reserve;
     private final boolean deviceCache;
+
     private final RemotePrefixLoader remote;
     private final Set<Loading> pending = new HashSet<>();
     private final Set<Lease> active = Collections.newSetFromMap(new IdentityHashMap<>());
+
     private boolean closed;
+
     private java.util.function.Consumer<CacheMetadata.Change> metadataObserver;
     private java.util.function.LongConsumer evictionLifetime = nanos -> {};
     private Runnable changed = () -> {};
-
-    /** The observer must only signal; it must never acquire an Engine scheduling lock. */
-    public synchronized void onChange(Runnable observer) { changed = Objects.requireNonNull(observer); }
-
-    public synchronized void onEvictionLifetime(java.util.function.LongConsumer observer) {
-        evictionLifetime = Objects.requireNonNull(observer);
-    }
-
-    public synchronized int itemCount() { return tree.size(); }
 
     public KvCache(int blockSize, int blocks, int reserve) {
         this(blockSize, blocks, reserve, true);
@@ -135,8 +52,14 @@ public final class KvCache implements AutoCloseable {
         this.remote = remote;
     }
 
-    /** Maximum size of one request, independent of current leases and evictable cache entries. */
-    public synchronized long maxRequestTokens() { return (long) (deviceBlocks - reserve) * blockSize; }
+    /** The observer must only signal; it must never acquire an Engine scheduling lock. */
+    public synchronized void onChange(Runnable observer) { changed = Objects.requireNonNull(observer); }
+
+    public synchronized void onEvictionLifetime(java.util.function.LongConsumer observer) {
+        evictionLifetime = Objects.requireNonNull(observer);
+    }
+
+    public synchronized int itemCount() { return tree.size(); }
 
     public synchronized Preparation prepare(long requiredTokens, List<Long> keys) {
         var admission = acquire(requiredTokens, keys);
@@ -186,8 +109,12 @@ public final class KvCache implements AutoCloseable {
         return new Admission(lease, null, matchNanos);
     }
 
+    /** Maximum size of one request, independent of current leases and evictable cache entries. */
+    public synchronized long maxRequestTokens() { return (long) (deviceBlocks - reserve) * blockSize; }
+
     /** Snapshot and subscription share the cache monitor. Observers must only enqueue, never block. */
     public synchronized CacheMetadata.SnapshotKeys metadataKeys() { return tree.metadataKeys(); }
+
     public synchronized AutoCloseable observeMetadata(java.util.function.Consumer<CacheMetadata.Change> observer) {
         if (closed) throw new IllegalStateException("Cache is closed");
         if (metadataObserver != null) throw new IllegalStateException("Cache metadata already has a reporter");
@@ -197,9 +124,7 @@ public final class KvCache implements AutoCloseable {
             if (metadataObserver == observer) { metadataObserver = null; tree.observe(change -> {}); }
         } };
     }
-    private Admission rejected(Failure failure) { return new Admission(null, failure, 0); }
-    /** Both freed capacity and newly reusable prefixes can make a rejected request admissible. */
-    private long allocationGeneration() { return pool.generation() + tree.version(); }
+
     public synchronized Snapshot snapshot(long latestVersion, boolean needKeys) {
         var state = pool.snapshot();
         int indexed = pool.cachedActiveBlocks();
@@ -208,6 +133,139 @@ public final class KvCache implements AutoCloseable {
         return new Snapshot(deviceBlocks, deviceAvailable(), free, state.active() - indexed, indexed,
             needKeys ? tree.version() : latestVersion, needKeys && latestVersion != tree.version() ? tree.keys() : EMPTY_KEYS);
     }
+
+    @Override public void close() {
+        synchronized (this) {
+            if (closed) return;
+            closed = true;
+            for (var load : List.copyOf(pending)) load.close();
+            for (var lease : List.copyOf(active)) lease.close();
+            tree.clear();
+        }
+    }
+
+    private Admission rejected(Failure failure) { return new Admission(null, failure, 0); }
+
+    /** Both freed capacity and newly reusable prefixes can make a rejected request admissible. */
+    private long allocationGeneration() { return pool.generation() + tree.version(); }
+
+    private int deviceAvailable() { return deviceBlocks - pool.snapshot().active(); }
+
+    private boolean makePoolFree(int count) {
+        int missing = count - pool.snapshot().free();
+        if (missing > 0)
+            for (var evicted : tree.evict(missing))
+                evictionLifetime.accept(System.nanoTime() - evicted.insertedNanos);
+        return pool.snapshot().free() >= count;
+    }
+
+    private long blocksFor(long tokens) {
+        if (tokens < 0) throw new IllegalArgumentException("Negative Token capacity");
+        return tokens / blockSize + (tokens % blockSize == 0 ? 0 : 1);
+    }
+
+    private static void validate(List<Long> keys) {
+        if (keys == null || keys.stream().anyMatch(Objects::isNull) || new HashSet<>(keys).size() != keys.size())
+            throw new IllegalArgumentException("Cache keys must be distinct, non-null prefix identities");
+    }
+
+    public enum Failure { PERMANENT, RETRYABLE }
+
+    /**
+     * A Mock restore source reports the number of consecutive suffix blocks read successfully.
+     * The future must be returned without blocking and never owns local block references.
+     */
+    @FunctionalInterface
+    public interface RemotePrefixLoader {
+        CompletableFuture<Integer> load(List<Long> suffixKeys);
+    }
+
+    /**
+     * Describes whether cache preparation is ready, loading remotely, or unable to proceed.
+     */
+    public sealed interface Preparation permits Ready, Loading, Failed {}
+
+    public record Ready(Lease lease, long matchNanos, int remoteReusedTokens) implements Preparation {}
+
+    /**
+     * Reports why cache preparation stopped and which cache state a retry depends on.
+     */
+    public final class Failed implements Preparation {
+        private final Failure failure;
+        private final long generation, requiredTokens;
+        private final List<Long> keys;
+
+        private Failed(Failure failure, long requiredTokens, List<Long> keys) {
+            this.failure = failure;
+            this.requiredTokens = requiredTokens;
+            this.keys = List.copyOf(keys);
+            generation = allocationGeneration();
+        }
+
+        public Failure failure() { return failure; }
+
+        /** Retry only when capacity or the reusable index has changed. */
+        public Preparation retry() {
+            synchronized (KvCache.this) {
+                if (failure == Failure.PERMANENT || generation == allocationGeneration()) return this;
+                return prepare(requiredTokens, keys);
+            }
+        }
+    }
+
+    /**
+     * Holds the cache lease while a remote prefix is loading and releases it on cancellation.
+     */
+    public final class Loading implements Preparation, AutoCloseable {
+        private final Ready local;
+        private final CompletableFuture<Integer> restore;
+        private final int suffixSize;
+        private boolean settled;
+
+        private Loading(Ready local, CompletableFuture<Integer> restore, int suffixSize) {
+            this.local = local;
+            this.restore = restore;
+            this.suffixSize = suffixSize;
+        }
+
+        /** Returns this handle while pending, or transfers ownership of the ready lease once. */
+        public Preparation poll() {
+            synchronized (KvCache.this) {
+                if (settled) throw new IllegalStateException("KV preparation already settled");
+                if (!restore.isDone()) return this;
+                settled = true;
+                pending.remove(this);
+                try {
+                    Integer restored = restore.join();
+                    if (restored != null && restored > 0 && restored <= suffixSize) {
+                        local.lease().reused += restored;
+                        return new Ready(local.lease(), local.matchNanos(), restored * blockSize);
+                    }
+                } catch (CompletionException | CancellationException failure) {
+                    // The original allocation still holds a valid local prefix and writable suffix.
+                }
+                return local;
+            }
+        }
+
+        @Override public void close() {
+            synchronized (KvCache.this) {
+                if (settled) return;
+                settled = true;
+                pending.remove(this);
+                local.lease().close();
+                restore.cancel(false);
+            }
+        }
+    }
+
+    public record Admission(Lease lease, Failure failure, long matchNanos) {}
+
+    /**
+     * Keys are a detached copy, safe to encode after releasing the cache monitor.
+     */
+    public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
+                           int referencedBlocks, long version, long[] keys) {}
 
     public final class Lease implements AutoCloseable {
         private final List<Slot> slots;
@@ -269,35 +327,13 @@ public final class KvCache implements AutoCloseable {
         }
         private void requireOpen() { if (terminal) throw new IllegalStateException("Lease is closed"); }
     }
-    @Override public void close() {
-        synchronized (this) {
-            if (closed) return;
-            closed = true;
-            for (var load : List.copyOf(pending)) load.close();
-            for (var lease : List.copyOf(active)) lease.close();
-            tree.clear();
-        }
-    }
-    private int deviceAvailable() { return deviceBlocks - pool.snapshot().active(); }
-    private boolean makePoolFree(int count) {
-        while (pool.snapshot().free() < count) {
-            var evicted = tree.evict();
-            if (evicted == null) return false;
-            evictionLifetime.accept(System.nanoTime() - evicted.insertedNanos);
-        }
-        return true;
-    }
-    private long blocksFor(long tokens) {
-        if (tokens < 0) throw new IllegalArgumentException("Negative Token capacity");
-        return tokens / blockSize + (tokens % blockSize == 0 ? 0 : 1);
-    }
+
+    /**
+     * Pairs an allocated block reference with its cache key once the block is published.
+     */
     private static final class Slot {
         final BlockPool.Reference reference;
         Long key;
         Slot(BlockPool.Reference reference, BlockTree.Node node) { this.reference = reference; key = node == null ? null : node.key; }
-    }
-    private static void validate(List<Long> keys) {
-        if (keys == null || keys.stream().anyMatch(Objects::isNull) || new HashSet<>(keys).size() != keys.size())
-            throw new IllegalArgumentException("Cache keys must be distinct, non-null prefix identities");
     }
 }

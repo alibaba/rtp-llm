@@ -14,32 +14,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Exercises ViT admission, scheduling, cache reuse and cancellation.
+ */
 class VitTest {
     @TempDir Path directory;
-    VitConfig config(String expression,long device,long host,long hashes,int wait) throws Exception {
-        return config(expression,device,host,hashes,wait,Map.of());
-    }
-    VitConfig config(String expression,long device,long host,long hashes,int wait,Map<String,Object> overrides) throws Exception {
-        var path=directory.resolve(UUID.randomUUID()+".json");
-        var settings=new HashMap<String,Object>(Map.of("mock.vit.skip.download",true,
-            "mm_cache_gpu_max_bytes",device,"mm_cache_cpu_max_bytes",host,"mm_hash_key_cache_max_bytes",hashes,
-            "gpu_max_batch_size",8,"gpu_batch_wait_ms",wait,"mock.compute",Map.of("forward",Map.of("expression",expression))));
-        settings.putAll(Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4));
-        settings.putAll(overrides);
-        new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",settings)));
-        return VitConfig.load(path);
-    }
-    static MultimodalInputsPB input(String key) {
-        return MultimodalInputsPB.newBuilder().setRequestId(1).addMultimodalInputs(MultimodalInputPB.newBuilder()
-            .setMultimodalType(1).setMultimodalUrl(key).setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(56).setHeight(28))).build();
-    }
-    static double sample(String text, String name) {
-        return text.lines().filter(line -> line.startsWith(name + "{") && line.contains("role=\"vit\""))
-            .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).findFirst().orElseThrow();
-    }
-    static ManagedChannel channel(VitNode node) {
-        return ManagedChannelBuilder.forTarget((String)node.endpoints().get("rpc")).usePlaintext().build();
-    }
+
     @Test void acceptsNativeFrontendTwoHourRpcBudgetForEmbeddingAndHashRequests() throws Exception {
         try (var node=VitNode.start(config("1",1024,1024,1024,0),0,0)) {
             var channel=channel(node);
@@ -55,12 +35,38 @@ class VitTest {
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }
+
+    VitConfig config(String expression,long device,long host,long hashes,int wait) throws Exception {
+        return config(expression,device,host,hashes,wait,Map.of());
+    }
+
+    VitConfig config(String expression,long device,long host,long hashes,int wait,Map<String,Object> overrides) throws Exception {
+        var path=directory.resolve(UUID.randomUUID()+".json");
+        var settings=new HashMap<String,Object>(Map.of("mock.vit.skip.download",true,
+            "mm_cache_gpu_max_bytes",device,"mm_cache_cpu_max_bytes",host,"mm_hash_key_cache_max_bytes",hashes,
+            "gpu_max_batch_size",8,"gpu_batch_wait_ms",wait,"mock.compute",Map.of("forward",Map.of("expression",expression))));
+        settings.putAll(Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4));
+        settings.putAll(overrides);
+        new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",settings)));
+        return VitConfig.load(path);
+    }
+
+    static ManagedChannel channel(VitNode node) {
+        return ManagedChannelBuilder.forTarget((String)node.endpoints().get("rpc")).usePlaintext().build();
+    }
+
+    static MultimodalInputsPB input(String key) {
+        return MultimodalInputsPB.newBuilder().setRequestId(1).addMultimodalInputs(MultimodalInputPB.newBuilder()
+            .setMultimodalType(1).setMultimodalUrl(key).setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(56).setHeight(28))).build();
+    }
+
     @Test void geometryMatchesNativeDsv41PlannerAtPinnedSource() {
         // Values evaluated from ba26ddf1dd plan_image_grid/num_image_tokens, not this Java implementation.
         int[][] vectors = {{1,1,184},{56,28,202},{512,512,184},{1024,1024,652},{1920,1080,968},
             {32768,1,1024},{1,32768,1024},{3840,2160,968},{513,777,268}};
         for (int[] v : vectors) assertEquals(v[2],VitGeometry.rows(v[0],v[1],14,3,295936,1024));
     }
+
     @Test void statusCountsUniqueMediaUntilPublicationCompletes() throws Exception {
         try (var node=VitNode.start(config("200",1024,1024,1024,0),0,0)) {
             var channel=channel(node);
@@ -77,6 +83,7 @@ class VitTest {
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }
+
     @Test void mergesRequestsIntoOneForwardAndReturnsOnlyMetadata() throws Exception {
         try(var node=VitNode.start(config("2 + batchSize",1024,1024,1024,150),0,0);
             var threads=Executors.newVirtualThreadPerTaskExecutor()) {
@@ -105,6 +112,12 @@ class VitTest {
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }
+
+    static double sample(String text, String name) {
+        return text.lines().filter(line -> line.startsWith(name + "{") && line.contains("role=\"vit\""))
+            .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).findFirst().orElseThrow();
+    }
+
     @Test void logicalByteBudgetsMoveEmbeddingsIndependentlyOfHashResidency() throws Exception {
         var config=config("1",16,16,1024,0);
         try(var cache=new VitCache(config)) {
@@ -117,6 +130,7 @@ class VitTest {
             assertTrue(cache.snapshot().get("py_rtp_vit_embedding_cache_bytes") == 32.0);
         }
     }
+
     @Test void failedProducerReleasesTheClaimAndOldCompletionCannotPublishANewGeneration() throws Exception {
         try(var cache=new VitCache(config("1",16,16,1024,0))) {
             var image=new VitGeometry.Image("a",56,28,2);var first=cache.acquire(List.of(image.key())).getFirst();var joined=cache.acquire(List.of(image.key())).getFirst();
@@ -126,6 +140,7 @@ class VitTest {
             cache.publish(fresh,image,null);assertEquals(image,fresh.result().join());
         }
     }
+
     @Test void oneWaiterDeadlineDoesNotCancelAnotherWaiterOrTheSharedForward() throws Exception {
         try(var node=VitNode.start(config("150",16,16,1024,0),0,0);var threads=Executors.newVirtualThreadPerTaskExecutor()) {
             var channel=channel(node);
@@ -137,6 +152,7 @@ class VitTest {
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }
+
     @Test void malformedMetadataAndSpanMismatchAreRejectedBeforePAllocation() throws Exception {
         var nativeInput=GenerateInputPB.newBuilder().setRequestId(1).addAllTokenIds(List.of(10,-200,20))
             .addAllMultimodalInputs(input("x").getMultimodalInputsList())
@@ -151,6 +167,7 @@ class VitTest {
         assertThrows(StatusRuntimeException.class,()->MediaInput.apply(nativeInput,output.toBuilder().clearMultimodalFeatureHash().build(),MediaInput.IMAGE_TOKEN));
         assertThrows(StatusRuntimeException.class,()->VitGeometry.validate(MultimodalInputsPB.getDefaultInstance(),true));
     }
+
     @Test void cacheKeyUsesLinuxNativeIdentityAndExcludesTimeout() {
         String[] values={"https://example.com/image.png","中文url"};
         String[] expected={"2000644620635833837","18006779371473338865"};
@@ -159,6 +176,7 @@ class VitTest {
         var changed=media.toBuilder().setMmPreprocessConfig(media.getMmPreprocessConfig().toBuilder().setMmTimeoutMs(2)).build();
         assertEquals(MediaInput.key(media),MediaInput.key(changed));
     }
+
     @Test void queueOverflowRejectsWorkAndStopCompletesEveryStageWaiter() throws Exception {
         var path=directory.resolve("bounded.json");
         new ObjectMapper().writeValue(path.toFile(),Map.of("id","vit-0","component_role","vit","component",Map.of("config",Map.of(
@@ -256,6 +274,17 @@ class VitTest {
             "component",Map.of("engine","rtp","config",Map.of("mock.compute",Map.of("forward",Map.of("expression","1"))))));
         assertTrue(assertThrows(IllegalArgumentException.class,()->VitConfig.load(path)).getMessage().contains("shared implementation"));
         assertEquals("vit",config.effective().path("role").asText());
+    }
+
+    @Test void healthDoesNotWaitForVisionSchedulingLock() throws Exception {
+        try (var scheduler = new VitScheduler(config("1",1024,1024,1024,0));
+             var readers = Executors.newVirtualThreadPerTaskExecutor()) {
+            synchronized (scheduler) {
+                readers.submit(scheduler::checkHealthy).get(1, TimeUnit.SECONDS);
+            }
+            scheduler.close();
+            assertThrows(IllegalStateException.class, scheduler::checkHealthy);
+        }
     }
 
 }

@@ -12,7 +12,9 @@ import org.flexlb.mock.engine.scheduler.RequestState;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 
-/** Event/deadline driven execution. Only short state transitions hold the scheduling lock. */
+/**
+ * Event/deadline driven execution. Only short state transitions hold the scheduling lock.
+ */
 public final class RtpEngineLoop implements AutoCloseable {
     private final Object lock;
     private final java.util.concurrent.locks.ReentrantLock signal = new java.util.concurrent.locks.ReentrantLock();
@@ -25,17 +27,14 @@ public final class RtpEngineLoop implements AutoCloseable {
     private final String identity;
     private final SimulatedCompute compute = new SimulatedCompute();
     private final ExecutorService notifications = Executors.newVirtualThreadPerTaskExecutor();
+
     private Pending pending;
+
     private volatile boolean closed;
     private boolean dirty;
     private int notifying;
-    private RuntimeException failure;
 
-    private static final class Pending {
-        final EngineScheduler.Work work;
-        SimulatedCompute.Execution execution;
-        Pending(EngineScheduler.Work work) { this.work = work; }
-    }
+    private volatile RuntimeException failure;
 
     public RtpEngineLoop(Object lock, EngineScheduler.Factory schedulers, TaskHistory finished, KvCache cache, ComputeModel model, Role role, String identity) {
         this(lock, schedulers.create(lock, cache, finished), finished, cache, model, role, identity);
@@ -57,22 +56,28 @@ public final class RtpEngineLoop implements AutoCloseable {
     public EngineScheduler.Request input(EngineScheduler.Input input, EngineScheduler.Listener listener) {
         return change(() -> { ensureOpen(); return scheduler.input(input, listener); });
     }
+
     public List<EngineScheduler.InputResult> input(List<EngineScheduler.InputItem> batch) {
         return change(() -> { ensureOpen(); return scheduler.input(List.copyOf(batch)); });
     }
+
     public void control(EngineScheduler.Request request, EngineScheduler.Control event) {
         change(() -> { scheduler.control(request, event); return null; });
     }
+
     public void transferCompleted(EngineScheduler.Request request, EngineScheduler.TransferResult result) {
         change(() -> { scheduler.transferCompleted(request, result); return null; });
     }
+
     public void finish(EngineScheduler.Request request, RequestFailure failure) {
         change(() -> { scheduler.finish(request, failure); return null; });
     }
+
     public RequestState.Use beginTransfer(EngineScheduler.Request request) {
         var use = change(() -> { ensureOpen(); return scheduler.beginTransfer(request); });
         return () -> change(() -> { use.close(); return null; });
     }
+
     public EngineScheduler.Status status(long latestFinishedVersion) {
         synchronized (lock) {
             checkFailure();
@@ -81,7 +86,16 @@ public final class RtpEngineLoop implements AutoCloseable {
             return finished.snapshot(latestFinishedVersion, tasks, counts.waiting(), counts.running());
         }
     }
-    public void checkHealthy() { synchronized (lock) { ensureOpen(); } }
+
+    public void checkHealthy() { ensureOpen(); }
+
+    /** A signal is retained even if it arrives before the worker starts waiting. */
+    public void wake() {
+        signal.lock();
+        try { dirty = true; changed.signal(); } finally { signal.unlock(); }
+    }
+
+    @Override public void close() { synchronized (lock) { stop(); dispatch(); } }
 
     private <T> T change(Supplier<T> operation) {
         try { synchronized (lock) { return operation.get(); } }
@@ -91,10 +105,39 @@ public final class RtpEngineLoop implements AutoCloseable {
         }
     }
 
-    /** A signal is retained even if it arrives before the worker starts waiting. */
-    public void wake() {
-        signal.lock();
-        try { dirty = true; changed.signal(); } finally { signal.unlock(); }
+    private void dispatch() {
+        for (var notification : scheduler.takeNotifications()) {
+            notifying++;
+            notifications.execute(() -> {
+                try { notification.run(); }
+                catch (RuntimeException error) { synchronized (lock) { fail(error); } }
+                finally {
+                    synchronized (lock) { notifying--; if (closed) dispatch(); }
+                    wake();
+                }
+            });
+        }
+        if (closed && notifying == 0 && scheduler.requests().isEmpty()) notifications.shutdown();
+    }
+
+    private void fail(RuntimeException error) {
+        if (failure == null) failure = error;
+        stop();
+    }
+
+    private void stop() {
+        if (closed) return;
+        closed = true;
+        cache.onChange(() -> {});
+        scheduler.close();
+        if (pending != null) {
+            var current = pending;
+            pending = null;
+            if (current.execution != null) current.execution.cancel();
+            scheduler.failed(current.work, new RequestFailure(RequestFailure.Reason.CLOSED, "Engine closed during Forward"));
+        }
+        compute.close();
+        wake();
     }
 
     private void run() {
@@ -166,44 +209,19 @@ public final class RtpEngineLoop implements AutoCloseable {
         wake();
     }
 
-    private void dispatch() {
-        for (var notification : scheduler.takeNotifications()) {
-            notifying++;
-            notifications.execute(() -> {
-                try { notification.run(); }
-                catch (RuntimeException error) { synchronized (lock) { fail(error); } }
-                finally {
-                    synchronized (lock) { notifying--; if (closed) dispatch(); }
-                    wake();
-                }
-            });
-        }
-        if (closed && notifying == 0 && scheduler.requests().isEmpty()) notifications.shutdown();
-    }
-
     private void ensureOpen() {
         checkFailure();
         if (closed) throw new RequestFailure(RequestFailure.Reason.CLOSED, "Engine is closed");
     }
-    private void checkFailure() { if (failure != null) throw failure; }
-    private void fail(RuntimeException error) {
-        if (failure == null) failure = error;
-        stop();
-    }
-    private void stop() {
-        if (closed) return;
-        closed = true;
-        cache.onChange(() -> {});
-        scheduler.close();
-        if (pending != null) {
-            var current = pending;
-            pending = null;
-            if (current.execution != null) current.execution.cancel();
-            scheduler.failed(current.work, new RequestFailure(RequestFailure.Reason.CLOSED, "Engine closed during Forward"));
-        }
-        compute.close();
-        wake();
-    }
 
-    @Override public void close() { synchronized (lock) { stop(); dispatch(); } }
+    private void checkFailure() { if (failure != null) throw failure; }
+
+    /**
+     * Keeps the scheduled batch and its compute completion together until the loop resumes.
+     */
+    private static final class Pending {
+        final EngineScheduler.Work work;
+        SimulatedCompute.Execution execution;
+        Pending(EngineScheduler.Work work) { this.work = work; }
+    }
 }

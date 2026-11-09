@@ -5,13 +5,43 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
 
-/** Selects the event backend once; state and precomputed rate snapshots retain one periodic reader. */
+/**
+ * Selects the event backend once; state and precomputed rate snapshots retain one periodic reader.
+ */
 public final class MetricsOutput implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(MetricsOutput.class.getName());
-    private static final class Provider {
-        static final MetricReporter INSTANCE = discover(ServiceLoader.load(MetricReporter.class), System.getenv());
-    }
+
     private final ScheduledExecutorService worker;
+    private final Sender sender;
+
+    MetricsOutput(MetricReporter reporter, Supplier<List<MetricFamilySamples>> snapshot) {
+        Objects.requireNonNull(snapshot);
+        if (reporter == null) { sender = null; worker = null; return; }
+        sender = reporter instanceof Sender existing ? existing : new Sender(reporter, 65536);
+        worker = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon(true).name("mock-metrics").factory());
+        worker.scheduleWithFixedDelay(() -> {
+            try { sender.checkHealthy(); sender.report(snapshot.get()); }
+            catch (RuntimeException error) { LOG.log(System.Logger.Level.ERROR, "Engine metric reporting failed", error); }
+        }, reporter.intervalMillis(), reporter.intervalMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    public static MetricsOutput start(Supplier<List<MetricFamilySamples>> snapshot) {
+        return new MetricsOutput(Provider.INSTANCE, snapshot);
+    }
+
+    public boolean prometheus() { return worker == null; }
+
+    @Override public void close() {
+        if (worker == null) return;
+        worker.shutdownNow();
+        try {
+            if (!worker.awaitTermination(3, TimeUnit.SECONDS))
+                throw new IllegalStateException("Engine metric reporter did not stop");
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted stopping Engine metric reporter", error);
+        } finally { sender.close(); }
+    }
 
     static MetricReporter eventReporter() { return Provider.INSTANCE; }
 
@@ -26,31 +56,71 @@ public final class MetricsOutput implements AutoCloseable {
         return provider;
     }
 
-    public static MetricsOutput start(Supplier<List<MetricFamilySamples>> snapshot) {
-        return new MetricsOutput(Provider.INSTANCE, snapshot);
+    /**
+     * Binds a metrics reporter to the transport selected for this Engine.
+     */
+    private static final class Provider {
+        static final MetricReporter RAW = discover(ServiceLoader.load(MetricReporter.class), System.getenv());
+        static final Sender INSTANCE = RAW == null ? null : new Sender(RAW, 65536);
     }
 
-    MetricsOutput(MetricReporter reporter, Supplier<List<MetricFamilySamples>> snapshot) {
-        Objects.requireNonNull(snapshot);
-        if (reporter == null) { worker = null; return; }
-        worker = Executors.newSingleThreadScheduledExecutor(Thread.ofPlatform().daemon(true).name("mock-metrics").factory());
-        worker.scheduleWithFixedDelay(() -> {
-            try { reporter.report(snapshot.get()); }
-            catch (RuntimeException error) { LOG.log(System.Logger.Level.ERROR, "Engine metric reporting failed", error); }
-        }, reporter.intervalMillis(), reporter.intervalMillis(), TimeUnit.MILLISECONDS);
-    }
+    /**
+     * One SDK owner; business threads only offer original observations to its bounded queue.
+     */
+    static final class Sender implements MetricReporter, AutoCloseable {
+        private final MetricReporter delegate;
+        private final ThreadPoolExecutor executor;
+        private final java.util.concurrent.atomic.AtomicReference<RuntimeException> failure = new java.util.concurrent.atomic.AtomicReference<>();
 
-    public boolean prometheus() { return worker == null; }
+        Sender(MetricReporter delegate, int capacity) {
+            this.delegate = Objects.requireNonNull(delegate);
+            executor = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(capacity),
+                Thread.ofPlatform().daemon().name("mock-metric-sender").factory());
+        }
 
-    @Override public void close() {
-        if (worker == null) return;
-        worker.shutdownNow();
-        try {
-            if (!worker.awaitTermination(3, TimeUnit.SECONDS))
-                throw new IllegalStateException("Engine metric reporter did not stop");
-        } catch (InterruptedException error) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted stopping Engine metric reporter", error);
+        @Override public void initialize(Map<String, String> env) { throw new IllegalStateException("Reporter is already initialized"); }
+
+        @Override public long intervalMillis() { return delegate.intervalMillis(); }
+
+        @Override public void observe(String name, Map<String, String> tags, double value) {
+            var copiedTags = Map.copyOf(tags);
+            send(() -> delegate.observe(name, copiedTags, value));
+        }
+
+        @Override public void report(List<MetricFamilySamples> snapshot) {
+            var copied = List.copyOf(snapshot);
+            send(() -> delegate.report(copied));
+        }
+
+        @Override public void close() {
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(3, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                    throw new IllegalStateException("Metric stream incomplete: sender did not drain");
+                }
+            } catch (InterruptedException error) {
+                executor.shutdownNow(); Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted draining metric sender", error);
+            }
+            checkHealthy();
+        }
+
+        void checkHealthy() {
+            var error = failure.get();
+            if (error != null) throw new IllegalStateException("Metric stream incomplete", error);
+        }
+
+        private void send(Runnable operation) {
+            if (failure.get() != null) return;
+            try {
+                executor.execute(() -> {
+                    try { operation.run(); }
+                    catch (RuntimeException error) { failure.compareAndSet(null, error); }
+                });
+            } catch (RejectedExecutionException error) {
+                failure.compareAndSet(null, new IllegalStateException("Metric stream incomplete: sender queue full or closed", error));
+            }
         }
     }
 }

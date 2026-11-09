@@ -4,10 +4,12 @@ import io.prometheus.client.*;
 import java.util.*;
 import java.util.function.LongSupplier;
 
-/** One event API: Prometheus retains sum/count; an installed SDK receives original observations. */
+/**
+ * One event API: Prometheus retains sum/count; an installed SDK receives original observations.
+ */
 public final class EventMetrics extends Collector {
     private static final System.Logger LOG = System.getLogger(EventMetrics.class.getName());
-    private record Series(String name, Map<String, String> tags) {}
+
     private final String role;
     private final LongSupplier clock;
     private final MetricReporter reporter;
@@ -16,15 +18,19 @@ public final class EventMetrics extends Collector {
     private final Map<String, Set<String>> labelNames = new HashMap<>();
     private final Map<String, Summary> summaries = new LinkedHashMap<>();
     private final Map<Series, Double> qps = new LinkedHashMap<>();
+
     private long started;
 
     public EventMetrics(String role) { this(role, System::nanoTime); }
+
     public EventMetrics(String role, LongSupplier clock) {
         this(role, clock, MetricTags.fromEnvironment(System.getenv()));
     }
+
     public EventMetrics(String role, LongSupplier clock, Map<String, String> identityTags) {
         this(role, clock, MetricsOutput.eventReporter(), identityTags);
     }
+
     EventMetrics(String role, LongSupplier clock, MetricReporter reporter, Map<String, String> identityTags) {
         this.role = Objects.requireNonNull(role);
         this.clock = Objects.requireNonNull(clock);
@@ -33,7 +39,10 @@ public final class EventMetrics extends Collector {
         started = clock.getAsLong();
     }
 
+    public void increment(String name) { observe(name, 1); }
+
     public void observe(String name, double value) { observe(name, value, Map.of()); }
+
     public synchronized void observe(String name, double value, Map<String, String> tags) {
         if (!Double.isFinite(value) || value < 0 || tags.containsKey("role"))
             throw new IllegalArgumentException("Invalid metric observation");
@@ -60,29 +69,31 @@ public final class EventMetrics extends Collector {
             .labels(labels.toArray(String[]::new)).observe(value);
     }
 
+    @Override public List<MetricFamilySamples> collect() {
+        if (reporter != null) return List.of();
+        Map<Series, Double> counts;
+        long elapsed;
+        synchronized (this) {
+            long now = clock.getAsLong(); elapsed = now - started;
+            counts = elapsed > 0 ? new LinkedHashMap<>(qps) : Map.of();
+            if (elapsed > 0) { qps.replaceAll((key, value) -> 0.0); started = now; }
+        }
+        var result = new ArrayList<MetricFamilySamples>();
+        registry.metricFamilySamples().asIterator().forEachRemaining(result::add);
+        var rates = new LinkedHashMap<String, GaugeMetricFamily>();
+        for (var entry : counts.entrySet()) {
+            var tags = new TreeMap<>(entry.getKey().tags());
+            var names = new ArrayList<>(List.of("role")); names.addAll(tags.keySet());
+            var labels = new ArrayList<>(List.of(role)); labels.addAll(tags.values());
+            rates.computeIfAbsent(entry.getKey().name(), name -> new GaugeMetricFamily(name,
+                "Events per wall second.", names)).addMetric(labels, entry.getValue() * 1e9 / elapsed);
+        }
+        result.addAll(rates.values());
+        return result;
+    }
+
     // Native ViT embedding TPS is an accumulating token metric, just like event QPS.
     static boolean isRate(String name) { return name.endsWith("_qps") || name.equals("py_rtp_vit_embedding_tps"); }
 
-    public void increment(String name) { observe(name, 1); }
-
-    @Override public synchronized List<MetricFamilySamples> collect() {
-        if (reporter != null) return List.of();
-        var result = new ArrayList<MetricFamilySamples>();
-        registry.metricFamilySamples().asIterator().forEachRemaining(result::add);
-        long now = clock.getAsLong(), elapsed = now - started;
-        if (elapsed > 0) {
-            var rates = new LinkedHashMap<String, GaugeMetricFamily>();
-            for (var entry : qps.entrySet()) {
-                var tags = new TreeMap<>(entry.getKey().tags());
-                var names = new ArrayList<>(List.of("role")); names.addAll(tags.keySet());
-                var labels = new ArrayList<>(List.of(role)); labels.addAll(tags.values());
-                rates.computeIfAbsent(entry.getKey().name(), name -> new GaugeMetricFamily(name,
-                    "Events per wall second.", names)).addMetric(labels, entry.getValue() * 1e9 / elapsed);
-                entry.setValue(0.0);
-            }
-            result.addAll(rates.values());
-            started = now;
-        }
-        return result;
-    }
+    private record Series(String name, Map<String, String> tags) {}
 }

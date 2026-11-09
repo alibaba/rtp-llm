@@ -17,7 +17,9 @@ import org.flexlb.mock.engine.service.RtpRpcService;
 import org.flexlb.mock.metrics.MetricTags;
 import org.flexlb.mock.protocol.ControlServer;
 
-/** One owned RTP P/D object with independent listeners and resources. Does not contain the case runner or a cluster controller. */
+/**
+ * One owned RTP P/D object with independent listeners and resources. Does not contain the case runner or a cluster controller.
+ */
 public final class RtpNode implements AutoCloseable {
     private final RtpConfig config;
     private final KvCache cache;
@@ -25,13 +27,12 @@ public final class RtpNode implements AutoCloseable {
     private final RtpEngineLoop engine;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final org.flexlb.mock.engine.EngineMain.Address address = org.flexlb.mock.engine.EngineMain.Address.local();
+
     private Server rpc;
     private ControlServer api;
     private org.flexlb.mock.metrics.MetricsOutput metrics;
     private KvcmReporter publisher;
-    private MetricSource metricSource;
-
-    private record MetricSource(Object lock, java.util.function.Supplier<List<MetricFamilySamples>> metrics) {}
+    private java.util.function.Supplier<List<MetricFamilySamples>> metricSource;
 
     private RtpNode(RtpConfig config, EngineScheduler.Factory schedulers, KvCache.RemotePrefixLoader remote) {
         this.config = Objects.requireNonNull(config);
@@ -43,7 +44,7 @@ public final class RtpNode implements AutoCloseable {
         try {
             var scheduler = schedulers.create(lock, cache, finished);
             var samples = AbstractRtpScheduler.metricsFor(scheduler);
-            if (samples != null) metricSource = new MetricSource(lock, samples);
+            if (samples != null) metricSource = samples;
             engine = new RtpEngineLoop(lock, scheduler, finished, cache, config.compute(), config.role(), config.id());
             try {
                 service = new RtpRpcService(RtpRpcService.Config.from(config), cache, lock, finished, engine, config.groupScheduling());
@@ -91,14 +92,74 @@ public final class RtpNode implements AutoCloseable {
         }
     }
 
+    public void checkHealthy() {
+        if (closed.get()) throw new IllegalStateException("Engine closed");
+        if (rpc == null || rpc.isShutdown()) throw new IllegalStateException("Engine RPC stopped");
+        service.checkHealthy();
+    }
+
+    public KvCache cache() { return cache; }
+
+    public Map<String, Object> endpoints() {
+        boolean prefill = config.role() == org.flexlb.mock.protocol.Role.prefill;
+        var result = new LinkedHashMap<String, Object>();
+        result.put("id", config.id()); result.put("role", config.role().name()); result.put("engine", "rtp");
+        result.put("rpc", rpcAddress()); result.put("control", address.http(api.port()));
+        result.put("metrics", metrics.prometheus() ? address.http(api.port()) + "/metrics" : "");
+        result.put("metrics_backend", metrics.prometheus() ? "prometheus" : "kmonitor");
+        var supported = new ArrayList<>(List.of("ExecuteFunction", "CheckHealth", "GetWorkerStatus", "GetCacheStatus"));
+        if (prefill) {
+            supported.addAll(List.of("GenerateStreamCall", "FetchResponse", "Cancel"));
+            if (config.groupScheduling()) supported.addAll(List.of("EnqueueBatch", "EnqueueGroup"));
+        } else supported.add("RemoteGenerate");
+        result.put("supported_rpc", List.copyOf(supported));
+        if (publisher != null) result.put("kvcm",publisher.status());
+        result.put("local_generation", prefill ? Map.of("max_new_tokens", 1, "multimodal", true) : Map.of());
+        result.put("pd_generation", prefill ? Map.of("rpc", "GenerateStreamCall", "decode_target", "role_addrs", "multimodal", true) : Map.of());
+        result.put("remote_generation", prefill ? Map.of() : Map.of("stages", List.of("ALLOCATE", "LOAD", "GENERATE", "PREFILL_COMPLETE"), "multimodal", true, "load", true));
+        return Map.copyOf(result);
+    }
+
+    public String rpcAddress() { return address.rpc(rpc.getPort()); }
+
+    @Override public void close() {
+        if (!closed.compareAndSet(false, true)) return;
+        RuntimeException failure = null;
+        try { service.close(); } catch (RuntimeException error) {
+            if (failure == null) failure = error; else failure.addSuppressed(error);
+        }
+        try {
+            if (rpc != null) {
+                rpc.shutdown();
+                if (!rpc.awaitTermination(3, TimeUnit.SECONDS)) {
+                    rpc.shutdownNow();
+                    if (!rpc.awaitTermination(3, TimeUnit.SECONDS)) throw new IllegalStateException("Engine RPC did not terminate");
+                }
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            if (failure == null) failure = new IllegalStateException("Interrupted closing Engine", error);
+            else failure.addSuppressed(error);
+        } catch (RuntimeException error) {
+            if (failure == null) failure = error; else failure.addSuppressed(error);
+        } finally {
+            try { if (metrics != null) metrics.close(); }
+            catch (RuntimeException error) { if (failure == null) failure = error; else failure.addSuppressed(error); }
+            try { engine.close(); } finally {
+                try { if (publisher != null) publisher.close(); } finally {
+                    try { if (api != null) api.close(); } finally { cache.close(); }
+                }
+            }
+        }
+        if (failure != null) throw failure;
+    }
+
     private List<MetricFamilySamples> collectMetrics() {
         if (metricSource == null) return service.collectMetrics();
-        synchronized (metricSource.lock()) {
-            service.checkHealthy();
-            var samples = new java.util.ArrayList<>(metricSource.metrics().get());
-            samples.addAll(service.collectMetrics());
-            return samples;
-        }
+        service.checkHealthy();
+        var samples = new java.util.ArrayList<>(metricSource.get());
+        samples.addAll(service.collectMetrics());
+        return samples;
     }
 
     private KvcmReporter startMetadataReporter() {
@@ -126,64 +187,6 @@ public final class RtpNode implements AutoCloseable {
         var settings = new KvcmReporter.Configuration(endpoint, type.equals("kvcm") && snapshotMillis > 0,
             snapshotMillis);
         return new KvcmReporter(settings, identity, cache);
-    }
-
-    public String rpcAddress() { return address.rpc(rpc.getPort()); }
-    public void checkHealthy() {
-        if (closed.get()) throw new IllegalStateException("Engine closed");
-        if (rpc == null || rpc.isShutdown()) throw new IllegalStateException("Engine RPC stopped");
-        service.checkHealthy();
-    }
-    public KvCache cache() { return cache; }
-    public Map<String, Object> endpoints() {
-        boolean prefill = config.role() == org.flexlb.mock.protocol.Role.prefill;
-        var result = new LinkedHashMap<String, Object>();
-        result.put("id", config.id()); result.put("role", config.role().name()); result.put("engine", "rtp");
-        result.put("rpc", rpcAddress()); result.put("control", address.http(api.port()));
-        result.put("metrics", metrics.prometheus() ? address.http(api.port()) + "/metrics" : "");
-        result.put("metrics_backend", metrics.prometheus() ? "prometheus" : "kmonitor");
-        var supported = new ArrayList<>(List.of("ExecuteFunction", "CheckHealth", "GetWorkerStatus", "GetCacheStatus"));
-        if (prefill) {
-            supported.addAll(List.of("GenerateStreamCall", "FetchResponse", "Cancel"));
-            if (config.groupScheduling()) supported.addAll(List.of("EnqueueBatch", "EnqueueGroup"));
-        } else supported.add("RemoteGenerate");
-        result.put("supported_rpc", List.copyOf(supported));
-        if (publisher != null) result.put("kvcm",publisher.status());
-        result.put("local_generation", prefill ? Map.of("max_new_tokens", 1, "multimodal", true) : Map.of());
-        result.put("pd_generation", prefill ? Map.of("rpc", "GenerateStreamCall", "decode_target", "role_addrs", "multimodal", true) : Map.of());
-        result.put("remote_generation", prefill ? Map.of() : Map.of("stages", List.of("ALLOCATE", "LOAD", "GENERATE", "PREFILL_COMPLETE"), "multimodal", true, "load", true));
-        return Map.copyOf(result);
-    }
-
-    @Override public void close() {
-        if (!closed.compareAndSet(false, true)) return;
-        RuntimeException failure = null;
-        try { if (metrics != null) metrics.close(); } catch (RuntimeException error) { failure = error; }
-        try { service.close(); } catch (RuntimeException error) {
-            if (failure == null) failure = error; else failure.addSuppressed(error);
-        }
-        try {
-            if (rpc != null) {
-                rpc.shutdown();
-                if (!rpc.awaitTermination(3, TimeUnit.SECONDS)) {
-                    rpc.shutdownNow();
-                    if (!rpc.awaitTermination(3, TimeUnit.SECONDS)) throw new IllegalStateException("Engine RPC did not terminate");
-                }
-            }
-        } catch (InterruptedException error) {
-            Thread.currentThread().interrupt();
-            if (failure == null) failure = new IllegalStateException("Interrupted closing Engine", error);
-            else failure.addSuppressed(error);
-        } catch (RuntimeException error) {
-            if (failure == null) failure = error; else failure.addSuppressed(error);
-        } finally {
-            try { engine.close(); } finally {
-                try { if (publisher != null) publisher.close(); } finally {
-                    try { if (api != null) api.close(); } finally { cache.close(); }
-                }
-            }
-        }
-        if (failure != null) throw failure;
     }
 
 }

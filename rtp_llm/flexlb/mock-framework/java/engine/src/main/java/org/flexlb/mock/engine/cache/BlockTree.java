@@ -2,32 +2,19 @@ package org.flexlb.mock.engine.cache;
 
 import java.util.*;
 
-/** RTP Full-KV prefix index. Every mutation runs under KvCache's monitor. */
+/**
+ * RTP Full-KV prefix index. Every mutation runs under KvCache's monitor.
+ */
 final class BlockTree {
-    static final class Node {
-        final long key, admission, insertedNanos = System.nanoTime();
-        final Node parent;
-        final BlockPool.Reference cache;
-        final Map<Long, Node> children = new HashMap<>();
-        long access;
-
-        Node(long key, Node parent, BlockPool.Reference cache, long sequence) {
-            this.key = key;
-            this.parent = parent;
-            this.cache = cache;
-            admission = access = sequence;
-        }
-    }
-
     private final Map<Long, Node> nodes = new HashMap<>(), roots = new HashMap<>();
     private final NavigableSet<Node> leaves = new TreeSet<>(Comparator
         .comparingLong((Node node) -> node.access).thenComparingLong(node -> node.admission));
+
     private long sequence, version;
+
     private java.util.function.Consumer<CacheMetadata.Change> observer = change -> {};
+
     void observe(java.util.function.Consumer<CacheMetadata.Change> observer) { this.observer = observer; }
-    private void changed(long key, boolean added) {
-        observer.accept(new CacheMetadata.Change(++version, key, added));
-    }
 
     List<Node> match(List<Long> keys) {
         var result = new ArrayList<Node>();
@@ -42,6 +29,7 @@ final class BlockTree {
         }
         return result;
     }
+
     void validatePath(List<Long> keys) {
         Long parent = null;
         for (long key : keys) {
@@ -51,7 +39,9 @@ final class BlockTree {
             parent = key;
         }
     }
+
     Node find(long key) { return nodes.get(key); }
+
     Node insert(long key, Node parent, BlockPool.Reference cache) {
         if (parent != null) leaves.remove(parent);
         var node = new Node(key, parent, cache, ++sequence);
@@ -63,35 +53,70 @@ final class BlockTree {
     }
 
     Node evict() {
-        for (var iterator = leaves.iterator(); iterator.hasNext();) {
-            var node = iterator.next();
-            if (node.cache.inUse()) continue;
-            iterator.remove();
-            nodes.remove(node.key);
-            (node.parent == null ? roots : node.parent.children).remove(node.key);
-            node.cache.close();
-            if (node.parent != null && node.parent.children.isEmpty()) leaves.add(node.parent);
-            changed(node.key, false);
-            return node;
-        }
-        return null;
+        var evicted = evict(1);
+        return evicted.isEmpty() ? null : evicted.getFirst();
+    }
+
+    List<Node> evict(int count) {
+        var evicted = new ArrayList<Node>();
+        var pinned = new ArrayList<Node>();
+        try {
+            while (evicted.size() < count && !leaves.isEmpty()) {
+                var node = leaves.pollFirst();
+                // Pins cannot change under KvCache's monitor. Skip each pinned leaf once per reclamation.
+                if (node.cache.inUse()) { pinned.add(node); continue; }
+                nodes.remove(node.key);
+                (node.parent == null ? roots : node.parent.children).remove(node.key);
+                node.cache.close();
+                if (node.parent != null && node.parent.children.isEmpty()) leaves.add(node.parent);
+                changed(node.key, false);
+                evicted.add(node);
+            }
+        } finally { leaves.addAll(pinned); }
+        return evicted;
     }
 
     int size() { return nodes.size(); }
+
     long version() { return version; }
+
     CacheMetadata.SnapshotKeys metadataKeys() {
         return new CacheMetadata.SnapshotKeys(version, keys());
     }
+
     long[] keys() {
         var keys = new long[nodes.size()];
         int index = 0;
         for (long key : nodes.keySet()) keys[index++] = key;
         return keys;
     }
+
     void clear() {
         for (var node : nodes.values()) {
             node.cache.close(); changed(node.key, false);
         }
         nodes.clear(); roots.clear(); leaves.clear();
+    }
+
+    private void changed(long key, boolean added) {
+        observer.accept(new CacheMetadata.Change(++version, key, added));
+    }
+
+    /**
+     * Tracks one cached block and its links to the prefix tree and eviction order.
+     */
+    static final class Node {
+        final long key, admission, insertedNanos = System.nanoTime();
+        final Node parent;
+        final BlockPool.Reference cache;
+        final Map<Long, Node> children = new HashMap<>();
+        long access;
+
+        Node(long key, Node parent, BlockPool.Reference cache, long sequence) {
+            this.key = key;
+            this.parent = parent;
+            this.cache = cache;
+            admission = access = sequence;
+        }
     }
 }

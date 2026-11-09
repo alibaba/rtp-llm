@@ -7,7 +7,9 @@ import java.util.concurrent.TimeUnit;
 import org.flexlb.mock.protocol.*;
 import org.flexlb.mock.engine.EngineMain.Address;
 
-/** Backend-independent V instance. The same listeners serve shared JVM and remote P. */
+/**
+ * Backend-independent V instance. The same listeners serve shared JVM and remote P.
+ */
 public final class VitNode implements AutoCloseable {
     private final VitConfig config;
     private final VitService service;
@@ -37,9 +39,9 @@ public final class VitNode implements AutoCloseable {
     public void checkHealthy() { if(closed || rpc == null || rpc.isShutdown()) throw new IllegalStateException("V stopped");service.checkHealthy(); }
     @Override public synchronized void close() {
         if(closed) return;closed=true;
-        try { if(metrics!=null) metrics.close(); }
+        try { service.close(); }
         finally {
-            try { service.close(); }
+            try { if(metrics!=null) metrics.close(); }
             finally {
                 try { if(api!=null) api.close(); }
                 finally {
