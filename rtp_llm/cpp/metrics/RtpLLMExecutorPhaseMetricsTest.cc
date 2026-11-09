@@ -24,12 +24,16 @@ namespace {
 //   gather/tp_sync/forward/sample gauges.
 class RtpLLMExecutorPhaseMetricsTest: public ::testing::Test {
 protected:
-    using Samples = std::map<std::string, double>;
+    // KMonitor snapshots encode every metric through MinMaxCalculator, so the
+    // expected value must be encoded the same way (the pattern proven by
+    // RtpLLMEplbMetricsTest / RtpLLMTokenPSMetricsCollectorTest).
+    using Samples = std::map<std::string, std::string>;
 
     void SetUp() override {
         monitor_ = std::make_shared<kmonitor::KMonitor>("executor_phase_report_test");
         monitor_->SetServiceName("");
         reporter_ = std::make_shared<kmonitor::MetricsReporter>(monitor_, "", kmonitor::MetricsTags("dp_rank", "0"));
+        ASSERT_NE(reporter_->getMetricsGroup<RtpLLMExecutorMetrics>(), nullptr);
     }
 
     void report(RtpLLMExecutorMetricsCollector& collector) {
@@ -50,9 +54,18 @@ protected:
         return actual;
     }
 
-    std::shared_ptr<kmonitor::KMonitor>      monitor_;
+    void expectMetric(const Samples& actual, const std::string& name, double sample) {
+        SCOPED_TRACE(name);
+        const auto metric = actual.find(name);
+        ASSERT_NE(metric, actual.end()) << "metric missing from snapshot: " << name;
+        kmonitor::MinMaxCalculator expected;
+        expected.Add(sample);
+        EXPECT_EQ(metric->second, expected.ToString());
+    }
+
+    std::shared_ptr<kmonitor::KMonitor>        monitor_;
     std::shared_ptr<kmonitor::MetricsReporter> reporter_;
-    int64_t                                  snapshot_time_ms_ = 0;
+    int64_t                                    snapshot_time_ms_ = 0;
 };
 
 TEST_F(RtpLLMExecutorPhaseMetricsTest, ReportsAllRoundPhaseGauges) {
@@ -74,27 +87,15 @@ TEST_F(RtpLLMExecutorPhaseMetricsTest, ReportsAllRoundPhaseGauges) {
     report(collector);
     const auto actual = snapshot();
 
-    struct Expectation {
-        std::string name;
-        double      value;
-    };
-    const std::vector<Expectation> expected = {
-        {"rtp_llm_gather_model_input_us", 300},
-        {"rtp_llm_tp_sync_input_us", 550},
-        {"rtp_llm_kv_cache_update_us", 2100},
-        {"rtp_llm_model_forward_us", 159000},
-        {"rtp_llm_sample_input_us", 0},
-        {"rtp_llm_dispatch_output_us", 4200},
-        {"rtp_llm_round_end_sync_us", 96000},
-        {"rtp_llm_execute_token_size", 28000},
-        {"rtp_llm_max_seq_len", 290000},
-    };
-    for (const auto& [name, value] : expected) {
-        SCOPED_TRACE(name);
-        const auto metric = actual.find(name);
-        ASSERT_NE(metric, actual.end());
-        EXPECT_DOUBLE_EQ(metric->second, value);
-    }
+    expectMetric(actual, "rtp_llm_gather_model_input_us", 300);
+    expectMetric(actual, "rtp_llm_tp_sync_input_us", 550);
+    expectMetric(actual, "rtp_llm_kv_cache_update_us", 2100);
+    expectMetric(actual, "rtp_llm_model_forward_us", 159000);
+    expectMetric(actual, "rtp_llm_sample_input_us", 0);
+    expectMetric(actual, "rtp_llm_dispatch_output_us", 4200);
+    expectMetric(actual, "rtp_llm_round_end_sync_us", 96000);
+    expectMetric(actual, "rtp_llm_execute_token_size", 28000);
+    expectMetric(actual, "rtp_llm_max_seq_len", 290000);
     // The legacy misregistered name must be gone: the dispatch gauge is only
     // published under the corrected name.
     EXPECT_EQ(actual.count("rtp_llm_dispatch_output_us_metric"), 0u);
@@ -108,10 +109,8 @@ TEST_F(RtpLLMExecutorPhaseMetricsTest, ZeroRoundStillReportsPhaseGauges) {
     report(collector);
     const auto actual = snapshot();
     for (const char* const name : {"rtp_llm_kv_cache_update_us", "rtp_llm_round_end_sync_us",
-                             "rtp_llm_dispatch_output_us", "rtp_llm_sample_input_us"}) {
-        SCOPED_TRACE(name);
-        ASSERT_NE(actual.find(name), actual.end());
-        EXPECT_DOUBLE_EQ(actual.find(name)->second, 0.0);
+                                   "rtp_llm_dispatch_output_us", "rtp_llm_sample_input_us"}) {
+        expectMetric(actual, name, 0.0);
     }
 }
 
