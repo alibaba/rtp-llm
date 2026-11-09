@@ -72,6 +72,9 @@ class EngramPrefetchTest(unittest.TestCase):
             _lookup_done=self.event,
             _lookup_work=None,
         )
+        self.module._submit_lookup = lambda ids: engram.Engram._submit_lookup(
+            self.module, ids
+        )
         self.module.prefetch_lookup = lambda ids: engram.Engram.prefetch_lookup(
             self.module, ids
         )
@@ -172,6 +175,83 @@ class EngramPrefetchTest(unittest.TestCase):
         self.assertIsNone(self.module.prefetch_lookup(ids))
         self.embedding.assert_called_once()
         self.module.clear_lookup_prefetch()
+
+    def test_external_long_lookup_queues_next_chunk_before_current_projection(self):
+        class SlicedTensor(Tensor):
+            def __getitem__(self, item):
+                return SlicedTensor(len(range(*item.indices(self.shape[0]))))
+
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                actions = []
+                gathered = []
+                ids, hidden = SlicedTensor(9), SlicedTensor(9)
+                self.embedding._uses_external_storage = True
+
+                def lookup(ids, device, *, prefetch):
+                    self.assertTrue(prefetch)
+                    actions.append(("lookup", ids.shape[0]))
+                    rows = SlicedTensor(ids.shape[0])
+                    gathered.append(rows)
+                    return rows, SlicedTensor(ids.shape[0])
+
+                def project(hidden, ids, mask, *, out, lookup_rows):
+                    self.assertEqual(lookup_rows[0].shape[0], hidden.shape[0])
+                    actions.append(("project", hidden.shape[0]))
+                    if fail:
+                        raise RuntimeError("projection failed")
+
+                self.embedding.side_effect = lookup
+                self.module._forward_rows = project
+                self.side.wait_stream.side_effect = lambda _: actions.append("join")
+                self.current.wait_event.side_effect = lambda _: actions.append("ready")
+                self.event.synchronize.reset_mock()
+                with patch.object(engram, "_ENGRAM_CHUNK_ROWS", 4):
+                    work = self.module.prefetch_lookup(ids)
+                    self.assertTrue(work.matches(ids, hidden))
+                    self.assertFalse(work.matches(SlicedTensor(9), hidden))
+                    if fail:
+                        with self.assertRaisesRegex(RuntimeError, "projection failed"):
+                            engram.Engram._forward_prefetched_chunks(
+                                self.module, hidden, ids, None, True, work
+                            )
+                    else:
+                        self.assertIs(
+                            engram.Engram._forward_prefetched_chunks(
+                                self.module, hidden, ids, None, True, work
+                            ),
+                            hidden,
+                        )
+                    self.module.clear_lookup_prefetch()
+                prefix = [
+                    "join",
+                    ("lookup", 4),
+                    "ready",
+                    ("lookup", 4),
+                    ("project", 4),
+                    "join",
+                ]
+                self.assertEqual(
+                    actions,
+                    (
+                        prefix
+                        if fail
+                        else prefix
+                        + [
+                            "ready",
+                            ("lookup", 1),
+                            ("project", 4),
+                            "join",
+                            "ready",
+                            ("project", 1),
+                            "join",
+                        ]
+                    ),
+                )
+                self.assertEqual(self.event.synchronize.call_count, int(fail))
+                self.assertIsNone(work.ids)
+                for rows in gathered:
+                    rows.record_stream.assert_not_called()
 
     def test_launch_error_is_drained_and_propagated(self):
         self.embedding.side_effect = RuntimeError("launch failed")

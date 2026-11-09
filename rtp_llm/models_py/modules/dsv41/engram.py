@@ -1811,6 +1811,9 @@ def _tensor_version(tensor):
     return tensor._version
 
 
+_ENGRAM_CHUNK_ROWS = 32768
+
+
 def _lookup_tensors(rows):
     return rows if isinstance(rows, tuple) else (rows,)
 
@@ -1839,7 +1842,7 @@ class _EngramLookupWork:
         self.rows = rows
         self.done = done
 
-    def consume(self, ids, hidden):
+    def consume(self, ids, hidden, *, record_consumer=True):
         outputs = _lookup_tensors(self.rows) if self.rows is not None else ()
         valid = (
             bool(outputs)
@@ -1858,8 +1861,9 @@ class _EngramLookupWork:
         current = torch.cuda.current_stream(hidden.device)
         current.wait_event(self.done)
         rows = self.rows
-        for tensor in outputs:
-            tensor.record_stream(current)
+        if record_consumer:
+            for tensor in outputs:
+                tensor.record_stream(current)
         self.rows = self.ids = self.embedding = None
         return rows
 
@@ -1869,6 +1873,34 @@ class _EngramLookupWork:
             # joins on its stream and record_stream covers the output allocator.
             self.done.synchronize()
         self.rows = self.ids = self.embedding = None
+
+
+class _EngramChunkLookup:
+    """First prefetched chunk and its original request identity."""
+
+    def __init__(self, ids, first):
+        self.ids = ids
+        self.signature = (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
+        self.version = _tensor_version(ids)
+        self.first = first
+
+    @property
+    def rows(self):
+        return self.first.rows
+
+    def matches(self, ids, hidden):
+        return (
+            self.ids is ids
+            and self.signature
+            == (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
+            and self.version == _tensor_version(ids)
+            and ids.shape[0] == hidden.shape[0]
+            and ids.device == hidden.device
+        )
+
+    def clear(self):
+        self.first.clear()
+        self.ids = None
 
 
 class EngramLookupPrefetch:
@@ -1997,13 +2029,25 @@ class Engram(nn.Module):
             or hash_ids.dtype != torch.int64
             or hash_ids.ndim != 2
             or hash_ids.shape[1] != self.layout.n_hash_cols
-            or not 0 < hash_ids.shape[0] <= 32768
+            or hash_ids.shape[0] == 0
             or not hash_ids.is_contiguous()
             or torch.cuda.is_current_stream_capturing()
         ):
             return None
+        chunked = hash_ids.shape[0] > _ENGRAM_CHUNK_ROWS
+        if chunked and self.embed_tokens._uses_external_storage is not True:
+            return None
+        self._lookup_stream.wait_stream(torch.cuda.current_stream(hash_ids.device))
+        if chunked:
+            first = self._submit_lookup(hash_ids[:_ENGRAM_CHUNK_ROWS])
+            work = _EngramChunkLookup(hash_ids, first)
+        else:
+            work = self._submit_lookup(hash_ids)
+        self._lookup_work = work
+        return work
+
+    def _submit_lookup(self, hash_ids):
         stream = self._lookup_stream
-        stream.wait_stream(torch.cuda.current_stream(hash_ids.device))
         hash_ids.record_stream(stream)
         with self.embed_tokens.lookup_guard(), torch.cuda.stream(stream):
             try:
@@ -2015,9 +2059,7 @@ class Engram(nn.Module):
                 # Keep the backing admitted until any queued reads finish.
                 stream.synchronize()
                 raise
-        work = _EngramLookupWork(self.embed_tokens, hash_ids, rows, self._lookup_done)
-        self._lookup_work = work
-        return work
+        return _EngramLookupWork(self.embed_tokens, hash_ids, rows, self._lookup_done)
 
     def clear_lookup_prefetch(self):
         work = self._lookup_work
@@ -2156,11 +2198,19 @@ class Engram(nn.Module):
             return hidden
         # Engram is token-local after hashing. Bound lookup/projection/gate
         # temporaries for packed long prompts without changing the decode path.
-        chunk_rows = 32768
+        chunk_rows = _ENGRAM_CHUNK_ROWS
         inplace = _engram_inject_supported(
             hidden, self.q_weight, self.k_weight, token_mask
         )
         if hidden.shape[0] > chunk_rows:
+            work = self._lookup_work
+            if isinstance(work, _EngramChunkLookup):
+                self._lookup_work = None
+                if work.matches(hash_ids, hidden):
+                    return self._forward_prefetched_chunks(
+                        hidden, hash_ids, token_mask, inplace, work
+                    )
+                work.clear()
             # Validate the original request IDs exactly once, before creating
             # chunk views. Identity/version/stream checks must remain strict.
             rows = None
@@ -2186,6 +2236,53 @@ class Engram(nn.Module):
         return self._forward_rows(
             hidden, hash_ids, token_mask, out=hidden if inplace else None
         )
+
+    def _forward_prefetched_chunks(self, hidden, ids, mask, inplace, work):
+        output = (
+            hidden
+            if inplace
+            else torch.empty_like(hidden, memory_format=torch.contiguous_format)
+        )
+        stream = self._lookup_stream
+        current = torch.cuda.current_stream(hidden.device)
+        pending = work.first
+        try:
+            for begin in range(0, hidden.shape[0], _ENGRAM_CHUNK_ROWS):
+                end = min(begin + _ENGRAM_CHUNK_ROWS, hidden.shape[0])
+                rows = pending.consume(
+                    pending.ids, hidden[begin:end], record_consumer=False
+                )
+                pending = None
+                try:
+                    if end < hidden.shape[0]:
+                        pending = self._submit_lookup(
+                            ids[end : end + _ENGRAM_CHUNK_ROWS]
+                        )
+                    self._forward_rows(
+                        hidden[begin:end],
+                        ids[begin:end],
+                        None if mask is None else mask[begin:end],
+                        out=output[begin:end],
+                        lookup_rows=rows,
+                    )
+                finally:
+                    if rows is not None:
+                        # The result was allocated on the lookup stream. Join
+                        # its last reader before returning the allocation so
+                        # the next chunk can reuse it on that same stream.
+                        try:
+                            stream.wait_stream(current)
+                        except BaseException:
+                            for tensor in _lookup_tensors(rows):
+                                tensor.record_stream(current)
+                            raise
+                        finally:
+                            del rows
+        finally:
+            work.ids = None
+            if pending is not None:
+                pending.clear()
+        return output
 
     def projection_input(self, hidden, hash_ids, *, cpu_rows=None):
         """Consume this forward's lookup once, preserving packed FP8 inputs."""
@@ -2213,13 +2310,26 @@ class Engram(nn.Module):
         rows = None
         if work is not None:
             self._lookup_work = None
-            rows = work.consume(hash_ids, hidden)
+            if isinstance(work, _EngramChunkLookup):
+                work.clear()
+            else:
+                rows = work.consume(hash_ids, hidden)
         if rows is None:
             rows = _lookup_for_projection(self, hash_ids, hidden.device)
         return rows if isinstance(rows, tuple) else rows.flatten(-2)
 
-    def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None, cpu_rows=None):
-        rows = Engram.projection_input(self, hidden, hash_ids, cpu_rows=cpu_rows)
+    def _forward_rows(
+        self, hidden, hash_ids, token_mask, *, out=None, cpu_rows=None, lookup_rows=None
+    ):
+        if lookup_rows is None:
+            rows = Engram.projection_input(self, hidden, hash_ids, cpu_rows=cpu_rows)
+        else:
+            rows = (
+                lookup_rows
+                if isinstance(lookup_rows, tuple)
+                else lookup_rows.flatten(-2)
+            )
+            del lookup_rows
         if isinstance(rows, tuple):
             kv = self.wkv.forward_quantized(*rows)
         else:
