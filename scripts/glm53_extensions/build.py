@@ -266,6 +266,9 @@ def build_sparse(sources, output, work, cuda):
         + ")],cmdclass={'build_ext':BuildExtension})\n"
     )
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="", TORCH_CUDA_ARCH_LIST="10.0a")
+    # The setuptools child must see the same Bazel-provided PyTorch and
+    # setuptools packages as this process.
+    env["PYTHONPATH"] = os.pathsep.join(sys.path)
     env.setdefault("MAX_JOBS", "4")
     run(
         [
