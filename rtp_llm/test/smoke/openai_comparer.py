@@ -1,21 +1,21 @@
 import copy
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional, Union
 
 import torch
 from pydantic import BaseModel
-from smoke.base_comparer import BaseComparer
-from smoke.common_def import REL_PATH, QueryStatus, SmokeException
-from smoke.grammar_constraint_validator import validate_constraint
-from smoke.utils import create_temporary_copy
-
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionStreamResponse,
 )
 from rtp_llm.utils.base_model_datatypes import AuxInfo
+from smoke.base_comparer import BaseComparer
+from smoke.common_def import REL_PATH, QueryStatus, SmokeException
+from smoke.grammar_constraint_validator import validate_constraint
+from smoke.utils import create_temporary_copy
 
 
 class OpenaiComparer(BaseComparer):
@@ -469,12 +469,45 @@ class OpenaiComparer(BaseComparer):
                 )
 
         self._compare_required_json_content(actual_result, compare_config, diffs)
+        self._compare_completed_content(actual_result, compare_config, diffs)
 
         if diffs:
             raise SmokeException(
                 QueryStatus.COMPARE_FAILED,
                 self._format_all_diffs(diffs),
             )
+
+    def _compare_completed_content(self, actual_result, compare_config, diffs):
+        """Check usable answers even when the fixture allows wording to change."""
+        check = compare_config.get("completed_content")
+        if check is None:
+            return
+        choices = actual_result.choices
+        if len(choices) != check.get("count", 1):
+            diffs.append(
+                f"expected {check.get('count', 1)} choices, got {len(choices)}"
+            )
+        for i, choice in enumerate(choices):
+            payload = choice.delta if self.is_stream else choice.message
+            content = (payload.content or "").strip()
+            finish_reason = check.get("finish_reason", "stop")
+            if choice.finish_reason != finish_reason:
+                diffs.append(
+                    f"choice {i}: expected finish_reason {finish_reason}, "
+                    f"got {choice.finish_reason}"
+                )
+            if not content:
+                diffs.append(f"choice {i}: empty final answer")
+                continue
+            if re.search(r"</?think>", content):
+                diffs.append(f"choice {i}: reasoning delimiter leaked into the answer")
+            pattern = check.get("pattern")
+            if pattern and not re.search(pattern, content, flags=re.IGNORECASE):
+                diffs.append(f"choice {i}: final answer does not match {pattern!r}")
+        if check.get("require_usage"):
+            usage = actual_result.usage
+            if not usage or usage.prompt_tokens < 1 or usage.completion_tokens < 1:
+                diffs.append("response does not report prompt and completion tokens")
 
     def _compare_extra_outputs(
         self,
