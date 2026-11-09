@@ -395,12 +395,20 @@ class NativeClientTest {
             }
         }).build().start();
         long seed = 0x4453563431494631L;
-        try (var client = new NativeClient(() -> List.of("127.0.0.1:" + server.getPort()), e -> {}, -200, seed)) {
-            client.send(request(987).toBuilder().setCacheKeyBlockSize(2).build(), Duration.ofSeconds(3))
-                    .completion().toCompletableFuture().get(4, TimeUnit.SECONDS);
-            assertNotNull(observed.get());
-            assertEquals(new org.flexlb.mock.protocol.CacheSequence(2, List.of(1, 2, 3), List.of(), seed).keys(),
-                    observed.get().getBlockCacheKeysList());
+        var tokens = java.util.stream.IntStream.rangeClosed(1, 1025).boxed().toList();
+        var input = input(987).toBuilder().clearTokenIds().addAllTokenIds(tokens).build();
+        var baseKeys = new org.flexlb.mock.protocol.CacheSequence(128, tokens, List.of(), seed).keys();
+        try {
+            for (int cpSize : List.of(1, 4)) {
+                try (var client = new NativeClient(() -> List.of("127.0.0.1:" + server.getPort()), e -> {}, -200, seed, cpSize)) {
+                    client.send(request(987).toBuilder().setGenerateInput(input.toByteString())
+                            .setSeqLen(tokens.size()).setCacheKeyBlockSize(128).build(), Duration.ofSeconds(3))
+                        .completion().toCompletableFuture().get(4, TimeUnit.SECONDS);
+                    assertEquals(128L * cpSize, observed.get().getCacheKeyBlockSize());
+                    assertEquals(cpSize == 1 ? baseKeys : List.of(baseKeys.get(3), baseKeys.get(7)),
+                        observed.get().getBlockCacheKeysList());
+                }
+            }
         } finally { server.shutdownNow().awaitTermination(2, TimeUnit.SECONDS); }
     }
     @Test void emptyTerminalAfterFirstTokenIsValidButEmptyNonterminalIsNot() throws Exception {

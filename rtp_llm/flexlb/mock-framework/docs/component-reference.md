@@ -200,7 +200,7 @@ Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.express
 
 | 参数 | 默认值/约束 | 行为 |
 | --- | --- | --- |
-| seq_size_per_block / max_seq_len / test_block_num | 64 / 8192 / 必填；前两者为 0 时用默认值，test_block_num ≥ 2 | 基础哈希/物理块 token 数、单请求序列上限、每 rank 的 Device 物理块数（含 null block）。P 开启 CP KV 分片时逻辑分配粒度乘 TP，不能把基础哈希块改大。 |
+| seq_size_per_block / max_seq_len / test_block_num | 64 / 8192 / 必填；前两者为 0 时用默认值，test_block_num ≥ 2 | 基础哈希/物理块 token 数、单请求序列上限、每 rank 的 Device 物理块数（含 null block）。P 的逻辑分配粒度为基础块大小乘 prefill_cp_size。 |
 | concurrency_limit | 32，正整数 | P/D 每轮请求数上限；real 的 ConcurrencyConfig 输入经 engine_config.py 写入内部 max_generate_batch_size。 |
 | reserve_block_ratio | 5，0–100 | 首次分配预留百分比。 |
 | reuse_cache / enable_device_cache | false / true | 前缀复用和 Device 索引。 |
@@ -477,7 +477,7 @@ ViT Cache Claim 和 Forward Work 只提供只读 CompletionStage；调用方转�
 
 ### CP：只模拟缓存布局，不模拟 rank 通信
 
-数据集只提供语义 token、媒体信息和期望输出，不知道 CP。Mock Client 保持普通布局，不增加 CP 参数；本地 Case 默认使用 `prefill_cp_size=1`，Client 与 Engine 使用相同基础块。`cp_rotate_method` 和 `tp_size` 仍用于已有的计算模型和 Prefill 准入。
+数据集只提供语义 token、媒体信息和期望输出，不知道 CP。本地回放用 Client 和 Mock P 的启动配置指定相同的 `seq_size_per_block`、`cache_key_hash_seed` 和 `prefill_cp_size`。例如基础块 128、CP4 时，Client 发 K4、K8，并将请求的 `cache_key_block_size` 设为 512。CP size 缺省时按 1，Client 缺省基础块大小时不生成路由键。`cp_rotate_method` 和 `tp_size` 仍用于已有的计算模型和 Prefill 准入。
 
 Whale 使用真实 Frontend 时，需要让 Mock P 遵守真实 Frontend 的缓存路由合同：相同 `cache_key_hash_seed` 和基础 `seq_size_per_block`，并对齐 CP 分片配置。基础块为 128 时，Mock P 设置 `prefill_cp_size=4`，按 128-token 块滚动哈希并保留 K4、K8。媒体身份也在基础块边界参与哈希。P 的 KV 分配、复用、完整块提交、CacheStatus.block_size 和 token 容量统一使用 512 的逻辑边界；`test_block_num` 仍是每 rank 物理块数（含 null block）。有效配置额外显示只读的 `cache_key_block_size`。
 

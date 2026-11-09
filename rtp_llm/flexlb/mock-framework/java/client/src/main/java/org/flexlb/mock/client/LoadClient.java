@@ -36,9 +36,9 @@ final class LoadClient implements AutoCloseable {
         this(plan, metrics, topology, evidence, id, org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN);
     }
     LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id, int imageToken) throws Exception {
-        this(plan, metrics, topology, evidence, id, imageToken, 0, 0L);
+        this(plan, metrics, topology, evidence, id, imageToken, 0, 0L, 1);
     }
-    LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id, int imageToken, int blockSize, long seed) throws Exception {
+    LoadClient(Shard plan, ClientMetrics metrics, java.nio.file.Path topology, java.nio.file.Path evidence, String id, int imageToken, int blockSize, long seed, int prefillCpSize) throws Exception {
         this.imageToken = imageToken; this.blockSize = blockSize;
         this.plan = plan; this.metrics = metrics;
         queue = new ArrayBlockingQueue<>(plan.queue_capacity());
@@ -46,7 +46,7 @@ final class LoadClient implements AutoCloseable {
         discovery = new MasterDiscovery(topology, plan.masters());
         try { journal = new RequestJournal(evidence, id, plan); }
         catch (Exception error) { discovery.close(); throw error; }
-        client = new NativeClient(discovery::routes, journal::record, imageToken, seed);
+        client = new NativeClient(discovery::routes, journal::record, imageToken, seed, prefillCpSize);
         // A lost begin command must not leave a prepared worker alive forever.
         dispatcher = Thread.ofVirtual().name("client-dispatch").start(this::dispatch);
     }
