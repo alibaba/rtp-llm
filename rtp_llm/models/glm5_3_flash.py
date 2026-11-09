@@ -127,9 +127,6 @@ def _configure_glm53_mtp_attention_layout(
     ] * num_mtp_layers
     config.attn_config.indexer_layer_ids = list(range(num_mtp_layers))
     config.indexer_types = ["full"] * num_mtp_layers
-    config.index_share_for_mtp_iteration = bool(
-        text_config.get("index_share_for_mtp_iteration", False)
-    )
 
 
 def _glm53_indexer_compressor_weight_info() -> List[WeightModule]:
@@ -160,6 +157,13 @@ def _glm53_indexer_compressor_weight_info() -> List[WeightModule]:
 
 class Glm53FlashModelConfig(ModelConfig):
     """Model config with checkpoint-mandated KDA cache precision."""
+
+    _python_fields = ModelConfig._python_fields | {
+        "indexer_types",
+        "is_glm53_mtp",
+        "kda_gate_lower_bound",
+        "mtp_layer_offset",
+    }
 
 
 def parse_glm53_flash_config(
@@ -257,9 +261,6 @@ def parse_glm53_flash_config(
     attn_config.indexer_head_num = int(text_config["index_n_heads"])
     _configure_glm53_indexer_compression(attn_config, text_config)
     config.indexer_types = list(text_config.get("indexer_types", []))
-    config.index_share_for_mtp_iteration = bool(
-        text_config.get("index_share_for_mtp_iteration", False)
-    )
 
     config.hybrid_attention_config.enable_hybrid_attention = True
     config.hybrid_attention_config.hybrid_attention_types = hybrid_types
@@ -293,9 +294,11 @@ def parse_glm53_flash_config(
     config.moe_n_group = int(text_config.get("n_group", 1))
     config.moe_topk_group = int(text_config.get("topk_group", 1))
     config.has_moe_norm = bool(text_config.get("norm_topk_prob", False))
-    config.moe_style = 2
-    config.inter_size = int(text_config["intermediate_size"])
+    config.n_shared_experts = int(text_config.get("n_shared_experts", 0))
+    config.moe_style = 2 if config.n_shared_experts else 1
+    config.dense_inter_size = int(text_config["intermediate_size"])
     config.moe_inter_size = int(text_config["moe_intermediate_size"])
+    config.inter_size = config.n_shared_experts * config.moe_inter_size
     config.moe_layer_index = [
         i for i, layer_type in enumerate(mlp_layer_types) if layer_type == "sparse"
     ]
