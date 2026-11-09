@@ -74,13 +74,12 @@ TEST_F(RtpLLMExecutorPhaseMetricsTest, ReportsAllRoundPhaseGauges) {
     collector.generate_batch_size = 0;
     collector.execute_token_size  = 28000;
     collector.max_seq_len         = 290000;
-    // One instrumented prefill-only round: the phases that were previously
-    // invisible or misnamed.
+    // One instrumented prefill round: every phase took measurable time.
     collector.gather_model_input_us = 300;
     collector.tp_sync_input_us      = 550;
     collector.kv_cache_update_us    = 2100;
     collector.model_forward_us      = 159000;
-    collector.sample_input_us       = 0;  // prefill-only rounds skip the sampler
+    collector.sample_input_us       = 1200;
     collector.dispatch_output_us    = 4200;
     collector.round_end_sync_us     = 96000;
 
@@ -91,7 +90,7 @@ TEST_F(RtpLLMExecutorPhaseMetricsTest, ReportsAllRoundPhaseGauges) {
     expectMetric(actual, "rtp_llm_tp_sync_input_us", 550);
     expectMetric(actual, "rtp_llm_kv_cache_update_us", 2100);
     expectMetric(actual, "rtp_llm_model_forward_us", 159000);
-    expectMetric(actual, "rtp_llm_sample_input_us", 0);
+    expectMetric(actual, "rtp_llm_sample_input_us", 1200);
     expectMetric(actual, "rtp_llm_dispatch_output_us", 4200);
     expectMetric(actual, "rtp_llm_round_end_sync_us", 96000);
     expectMetric(actual, "rtp_llm_execute_token_size", 28000);
@@ -99,19 +98,26 @@ TEST_F(RtpLLMExecutorPhaseMetricsTest, ReportsAllRoundPhaseGauges) {
     // The legacy misregistered name must be gone: the dispatch gauge is only
     // published under the corrected name.
     EXPECT_EQ(actual.count("rtp_llm_dispatch_output_us_metric"), 0u);
+    // REPORT_GAUGE semantics: zero-valued gauges are skipped (generate_batch_size
+    // stayed 0), so the series only appears once the phase reports a real value.
+    EXPECT_EQ(actual.count("rtp_llm_generate_batch_size"), 0u);
 }
 
-TEST_F(RtpLLMExecutorPhaseMetricsTest, ZeroRoundStillReportsPhaseGauges) {
-    // A default-constructed collector (e.g. skip_run or warmup rounds) must
-    // still publish every phase gauge so the series never disappear between
-    // reporting windows.
+TEST_F(RtpLLMExecutorPhaseMetricsTest, ZeroValuedPhaseGaugesAreSkipped) {
+    // A default-constructed collector leaves every phase at 0 and REPORT_GAUGE
+    // skips zero values (run 88019569 proved this on CI: the non-zero gauges
+    // appeared, the zero-valued ones did not). Consistent with the live
+    // observation that prefill-only rounds leave sample_input at 0, which is
+    // exactly why rtp_llm_sample_input_us shows NO_DATA on the deployment.
     RtpLLMExecutorMetricsCollector collector;
     report(collector);
     const auto actual = snapshot();
     for (const char* const name : {"rtp_llm_kv_cache_update_us", "rtp_llm_round_end_sync_us",
                                    "rtp_llm_dispatch_output_us", "rtp_llm_sample_input_us"}) {
-        expectMetric(actual, name, 0.0);
+        SCOPED_TRACE(name);
+        EXPECT_EQ(actual.count(name), 0u) << "zero-valued gauge must be skipped: " << name;
     }
+    EXPECT_EQ(actual.count("rtp_llm_dispatch_output_us_metric"), 0u);
 }
 
 }  // namespace
