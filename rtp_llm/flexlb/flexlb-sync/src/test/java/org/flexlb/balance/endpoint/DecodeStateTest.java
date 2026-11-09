@@ -166,7 +166,7 @@ class DecodeStateTest {
 
         var finished = calibrate(state, status, Map.of(), Map.of("2", task));
         assertAdmissionMetricsMatch(state);
-        assertEquals(DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL, finished.facts().getFirst().kind());
+        assertEquals(WorkerStatusFact.Kind.TERMINAL, finished.facts().getFirst().kind());
         assertEquals(reservation, finished.facts().getFirst().reservation());
         assertFalse(state.hasOwnedResources(reservation));
         assertEquals(0, state.routingView().engineCapacityUsed());
@@ -211,7 +211,7 @@ class DecodeStateTest {
         assertEquals(1, state.routingView().engineCapacityUsed());
         var terminal = calibrate(state, status, Map.of(), Map.of("10", task(10, TaskPhase.RECEIVED)));
         assertEquals(reservation, terminal.facts().getFirst().reservation());
-        assertEquals(DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL, terminal.facts().getFirst().kind());
+        assertEquals(WorkerStatusFact.Kind.TERMINAL, terminal.facts().getFirst().kind());
         assertFalse(state.hasOwnedResources(reservation));
         assertEquals(0, state.routingView().engineCapacityUsed());
     }
@@ -251,7 +251,7 @@ class DecodeStateTest {
         var terminal = calibrate(state, status, Map.of("10", task(10, TaskPhase.RECEIVED)),
                 Map.of("10", task(10, TaskPhase.RECEIVED)));
         assertEquals(1, terminal.facts().size());
-        assertEquals(DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL, terminal.facts().getFirst().kind());
+        assertEquals(WorkerStatusFact.Kind.TERMINAL, terminal.facts().getFirst().kind());
         assertEquals(victim, terminal.facts().getFirst().reservation());
         assertFalse(state.hasOwnedResources(victim));
         assertTrue(state.finishPreemption(1, DecodeEndpoint.PreemptionDecision.COMMIT));
@@ -288,7 +288,7 @@ class DecodeStateTest {
         var terminal = calibrate(state, status, Map.of("11", task(11, TaskPhase.RUNNING)),
                 Map.of("10", task(10, TaskPhase.RUNNING)));
         var terminals = terminal.facts().stream()
-                .filter(fact -> fact.kind() == DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL).toList();
+                .filter(fact -> fact.kind() == WorkerStatusFact.Kind.TERMINAL).toList();
         assertEquals(1, terminals.size());
         assertEquals(reservation, terminals.getFirst().reservation());
         assertFalse(state.hasOwnedResources(reservation));
@@ -297,7 +297,7 @@ class DecodeStateTest {
         var duplicate = calibrate(state, status, Map.of("11", task(11, TaskPhase.RUNNING)),
                 Map.of("10", task(10, TaskPhase.RUNNING)));
         assertTrue(duplicate.facts().stream()
-                .noneMatch(fact -> fact.kind() == DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL));
+                .noneMatch(fact -> fact.kind() == WorkerStatusFact.Kind.TERMINAL));
         assertEquals(1, state.routingView().engineCapacityUsed());
     }
 
@@ -320,7 +320,7 @@ class DecodeStateTest {
         var late = calibrate(state, status, Map.of("11", task(11, TaskPhase.RUNNING)),
                 Map.of("10", task(10, TaskPhase.RUNNING)));
         assertTrue(late.facts().stream()
-                .noneMatch(fact -> fact.kind() == DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL));
+                .noneMatch(fact -> fact.kind() == WorkerStatusFact.Kind.TERMINAL));
     }
 
     @Test
@@ -439,7 +439,7 @@ class DecodeStateTest {
                 Map.of("11", task(11, TaskPhase.RUNNING)));
 
         assertTrue(finished.facts().stream().anyMatch(fact ->
-                fact.kind() == DecodeEndpoint.WorkerStatusFact.Kind.TERMINAL
+                fact.kind() == WorkerStatusFact.Kind.TERMINAL
                         && fact.reservation().equals(incoming)));
         assertFalse(state.hasOwnedResources(incoming));
         assertTrue(state.hasOwnedResources(victim));

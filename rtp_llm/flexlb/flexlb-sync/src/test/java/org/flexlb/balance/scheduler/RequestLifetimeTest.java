@@ -355,7 +355,7 @@ class RequestLifetimeTest {
                         org.flexlb.balance.endpoint.EndpointTestSupport.statusObservation(RoleType.PREFILL),
                         List.of(WorkerStatusFact.active(item)));
             } else {
-                eventHandler.onDecodeStatus(decode, List.of(DecodeEndpoint.WorkerStatusFact.active(reservation)));
+                eventHandler.onDecodeStatus(decode, List.of(org.flexlb.balance.endpoint.WorkerStatusFact.active(reservation)));
             }
 
             if (!ackBeforeEvidence) {

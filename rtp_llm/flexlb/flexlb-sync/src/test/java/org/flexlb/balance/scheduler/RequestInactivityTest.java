@@ -118,8 +118,8 @@ class RequestInactivityTest {
 
         // A delayed status or timer callback cannot reopen or double-release this generation.
         registry.processPrefillStatus(prefill, RoleType.PREFILL, WorkerStatusFact.active(item));
-        registry.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()));
-        registry.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0L));
+        registry.processDecodeStatus(decode, org.flexlb.balance.endpoint.WorkerStatusFact.active(item.decodeReservation()));
+        registry.processDecodeStatus(decode, org.flexlb.balance.endpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0L));
         registry.expireInactiveRequest(slot, lastStatusAt + 2L * TIMEOUT_MS);
         assertExpiredAndReleased(RequestState.Phase.TIMED_OUT);
     }
@@ -178,10 +178,10 @@ class RequestInactivityTest {
                                 item.routeResponse(), item.prefill(), null, prefill, decode,
                                 item.decodeReservation(), registeredAtMs)), lateStatusAt);
                 case DECODE_ENDPOINT -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", mock(DecodeEndpoint.class),
-                        DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()), lateStatusAt);
-                case DECODE_GENERATION -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode, DecodeEndpoint.WorkerStatusFact.active(
+                        org.flexlb.balance.endpoint.WorkerStatusFact.active(item.decodeReservation()), lateStatusAt);
+                case DECODE_GENERATION -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode, org.flexlb.balance.endpoint.WorkerStatusFact.active(
                         new DecodeEndpoint.ReservationHandle(2L, Long.toString(REQUEST_ID), 1L)), lateStatusAt);
-                case DECODE_RESERVATION -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode, DecodeEndpoint.WorkerStatusFact.active(
+                case DECODE_RESERVATION -> org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode, org.flexlb.balance.endpoint.WorkerStatusFact.active(
                         new DecodeEndpoint.ReservationHandle(1L, Long.toString(REQUEST_ID), 2L)), lateStatusAt);
             };
             assertSame(RequestSlot.EngineObservation.STALE, observation);
@@ -247,7 +247,7 @@ class RequestInactivityTest {
                         WorkerStatusFact.active(item), nowMs);
             } else {
                 org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode,
-                        DecodeEndpoint.WorkerStatusFact.active(item.decodeReservation()), nowMs);
+                        org.flexlb.balance.endpoint.WorkerStatusFact.active(item.decodeReservation()), nowMs);
             }
         }
     }

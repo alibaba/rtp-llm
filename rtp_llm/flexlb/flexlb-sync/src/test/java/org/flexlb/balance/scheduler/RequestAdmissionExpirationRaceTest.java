@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerStatusFact;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -121,9 +122,9 @@ class RequestAdmissionExpirationRaceTest {
                             "the fired deadline stays disarmed until the admission is completed");
                 }
                 registry.processDecodeStatus(decode,
-                        DecodeEndpoint.WorkerStatusFact.accepted(reservation));
+                        WorkerStatusFact.accepted(reservation));
                 synchronized (slot) {
-                    org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode, DecodeEndpoint.WorkerStatusFact.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
+                    org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyDecodeStatusLocked", decode, WorkerStatusFact.active(reservation), System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1L));
                 }
             }
 

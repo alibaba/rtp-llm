@@ -460,38 +460,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return () -> endpointEvents.onDecodeStatus(this, facts);
     }
 
-    public record WorkerStatusFact(
-            Kind kind,
-            ReservationHandle reservation,
-            long errorCode) {
-        public WorkerStatusFact {
-            java.util.Objects.requireNonNull(kind, "kind");
-            if (kind != Kind.TERMINAL && errorCode != 0L) {
-                throw new IllegalArgumentException(
-                        "only a terminal Decode fact may carry an error code");
-            }
-        }
-
-        public static WorkerStatusFact active(ReservationHandle reservation) {
-            return new WorkerStatusFact(Kind.ACTIVE, reservation, 0L);
-        }
-
-        public static WorkerStatusFact accepted(ReservationHandle reservation) {
-            return new WorkerStatusFact(Kind.ACCEPTED, reservation, 0L);
-        }
-
-        public static WorkerStatusFact terminal(
-                ReservationHandle reservation, long errorCode) {
-            return new WorkerStatusFact(Kind.TERMINAL, reservation, errorCode);
-        }
-
-        public enum Kind {
-            ACTIVE,
-            ACCEPTED,
-            TERMINAL
-        }
-    }
-
     // Read-only resource and capacity views.
 
     public AdmissionSummary admissionSummary() {

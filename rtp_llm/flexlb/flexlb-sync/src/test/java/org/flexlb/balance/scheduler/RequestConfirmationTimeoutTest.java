@@ -156,7 +156,7 @@ class RequestConfirmationTimeoutTest {
                 decode.release(next, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }
             requests.processPrefillStatus(prefill, RoleType.PREFILL, WorkerStatusFact.active(item));
-            requests.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(reservation));
+            requests.processDecodeStatus(decode, org.flexlb.balance.endpoint.WorkerStatusFact.active(reservation));
             assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(Long.toString(REQUEST_ID), 0L).state());
             assertEquals(0, requests.trackedRequestCount());
             assertEquals(0L, prefill.observedRequestCount());

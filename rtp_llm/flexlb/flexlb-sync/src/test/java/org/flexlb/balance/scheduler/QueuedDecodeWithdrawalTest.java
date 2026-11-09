@@ -4,6 +4,7 @@ import org.flexlb.balance.delivery.DeliveryBlockReason;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerStatusFact;
 import org.flexlb.balance.endpoint.prefill.ReservationResult;
 import org.flexlb.balance.estimate.WorkView;
 import org.flexlb.balance.schedulev2.prefill.PrefillQueueRegistry;
@@ -428,7 +429,7 @@ class QueuedDecodeWithdrawalTest {
             assertNotNull(admission);
             assertTrue(registry.commitItemForPublication(next, () -> true));
         }
-        registry.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0));
+        registry.processDecodeStatus(decode, WorkerStatusFact.terminal(item.decodeReservation(), 0));
         assertSame(next, registry.requestSlot("1").activeItem());
         assertFalse(item.future().isDone(), "old reservation evidence must not terminate the new route");
     }

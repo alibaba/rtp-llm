@@ -93,8 +93,8 @@ class DeliverySettlementTest {
         Member member = member(1L, 11L);
         ledger.commit(11L, List.of(member.item()));
         member.slot().processDecodeStatus(member.item().decodeEp(), accepted
-                ? DecodeEndpoint.WorkerStatusFact.accepted(member.item().decodeReservation())
-                : DecodeEndpoint.WorkerStatusFact.active(member.item().decodeReservation()));
+                ? org.flexlb.balance.endpoint.WorkerStatusFact.accepted(member.item().decodeReservation())
+                : org.flexlb.balance.endpoint.WorkerStatusFact.active(member.item().decodeReservation()));
 
         reject(member);
 
@@ -377,7 +377,7 @@ class DeliverySettlementTest {
         assertFalse(claim.terminalObservation().toCompletableFuture().isDone());
         assertFalse(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
         member.slot().processDecodeStatus(member.item().decodeEp(),
-                DecodeEndpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 0L));
+                org.flexlb.balance.endpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 0L));
         assertSame(failure, member.item().future().join());
         assertTrue(claim.terminalObservation().toCompletableFuture().isDone());
         assertTrue(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
@@ -408,7 +408,7 @@ class DeliverySettlementTest {
                 Response failure = member.item().future().get(1, TimeUnit.SECONDS);
                 assertFalse(failure.isSuccess());
                 member.slot().processDecodeStatus(member.item().decodeEp(),
-                        DecodeEndpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 0L));
+                        org.flexlb.balance.endpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 0L));
                 assertFalse(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
             } finally {
                 resume.countDown();
@@ -468,7 +468,7 @@ class DeliverySettlementTest {
                     member.slot().expireInactiveRequest(expiredAt);
                     synchronized (member.slot()) {
                         org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(member.slot(), "applyDecodeStatusLocked", member.item().decodeEp(),
-                                DecodeEndpoint.WorkerStatusFact.active(member.item().decodeReservation()), expiredAt + 1L);
+                                org.flexlb.balance.endpoint.WorkerStatusFact.active(member.item().decodeReservation()), expiredAt + 1L);
                     }
                     assertFalse(registry.removeExactTerminalRecord(member.slot(), Long.MAX_VALUE));
                     return false;
@@ -551,7 +551,7 @@ class DeliverySettlementTest {
                 member.item().decodeReservation(), DeliveryResult.Status.PREFILL_REJECTED))
                 .thenAnswer(invocation -> {
                     member.slot().processDecodeStatus(member.item().decodeEp(),
-                            DecodeEndpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 0L));
+                            org.flexlb.balance.endpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 0L));
                     assertFalse(claim.terminalObservation().toCompletableFuture().isDone(),
                             "cleanup is still executing outside the Slot lock");
                     return false; // Snapshot taken before the above completion.
@@ -619,7 +619,7 @@ class DeliverySettlementTest {
 
     private void decodeFinished(Member member) {
         member.slot().processDecodeStatus(member.item().decodeEp(),
-                DecodeEndpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 601L));
+                org.flexlb.balance.endpoint.WorkerStatusFact.terminal(member.item().decodeReservation(), 601L));
     }
 
     private void assertOccupancy(int batches, int members) {

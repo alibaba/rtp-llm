@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillCleanupDeadlockFixture;
+import org.flexlb.balance.endpoint.WorkerStatusFact;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -207,7 +208,7 @@ class EndpointCleanupDeadlockTest {
                     case "decode-rejection" -> () -> claim.complete(
                             org.flexlb.balance.delivery.DeliveryResult.notSent(new IllegalStateException("not sent")));
                     case "decode-terminal" -> () -> slot.processDecodeStatus(endpoint,
-                            DecodeEndpoint.WorkerStatusFact.terminal(reservation, 0L));
+                            WorkerStatusFact.terminal(reservation, 0L));
                     default -> () -> registry.setDeliveryPrediction(claim,
                             new org.flexlb.balance.estimate.WorkView(
                                     System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);

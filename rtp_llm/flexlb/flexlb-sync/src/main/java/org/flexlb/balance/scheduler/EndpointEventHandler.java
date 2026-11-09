@@ -41,7 +41,7 @@ public final class EndpointEventHandler {
 
     public void onDecodeStatus(
             DecodeEndpoint source,
-            List<DecodeEndpoint.WorkerStatusFact> facts) {
+            List<org.flexlb.balance.endpoint.WorkerStatusFact> facts) {
         handleDecodeStatus(source, facts);
     }
 
@@ -160,8 +160,8 @@ public final class EndpointEventHandler {
 
     private void handleDecodeStatus(
             DecodeEndpoint source,
-            List<DecodeEndpoint.WorkerStatusFact> facts) {
-        for (DecodeEndpoint.WorkerStatusFact fact : facts) {
+            List<org.flexlb.balance.endpoint.WorkerStatusFact> facts) {
+        for (org.flexlb.balance.endpoint.WorkerStatusFact fact : facts) {
             try {
                 scheduler.processDecodeStatus(source, fact);
             } catch (Throwable failure) {

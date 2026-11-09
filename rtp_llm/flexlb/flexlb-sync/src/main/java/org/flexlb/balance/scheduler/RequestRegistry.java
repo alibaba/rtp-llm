@@ -285,7 +285,7 @@ public class RequestRegistry {
         if (slot != null) { slot.processPrefillStatus(source, role, fact); }
     }
 
-    void processDecodeStatus(DecodeEndpoint source, DecodeEndpoint.WorkerStatusFact fact) {
+    void processDecodeStatus(DecodeEndpoint source, org.flexlb.balance.endpoint.WorkerStatusFact fact) {
         RequestSlot slot = requestSlot(fact.reservation().requestId());
         if (slot != null) { slot.processDecodeStatus(source, fact); }
     }
@@ -301,7 +301,7 @@ public class RequestRegistry {
     }
 
     void confirmDecodeAcceptance(DecodeEndpoint source, DecodeEndpoint.ReservationHandle reservation) {
-        processDecodeStatus(source, DecodeEndpoint.WorkerStatusFact.accepted(reservation));
+        processDecodeStatus(source, org.flexlb.balance.endpoint.WorkerStatusFact.accepted(reservation));
     }
 
     void applyPrefillRetirementItem(PrefillEndpoint source, ScheduledRequest exact) {

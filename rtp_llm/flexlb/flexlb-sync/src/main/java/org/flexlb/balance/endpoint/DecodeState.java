@@ -15,7 +15,6 @@ import org.flexlb.balance.endpoint.DecodeEndpoint.PreemptionUpdate;
 import org.flexlb.balance.endpoint.DecodeEndpoint.ReleaseReason;
 import org.flexlb.balance.endpoint.DecodeEndpoint.ReservationHandle;
 import org.flexlb.balance.endpoint.DecodeEndpoint.ReservationReleaseResult;
-import org.flexlb.balance.endpoint.DecodeEndpoint.WorkerStatusFact;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.DecodeTaskPhase;
@@ -1410,6 +1409,7 @@ final class DecodeState {
 
     private List<WorkerStatusFact> doCalibrate(WorkerStatus.EngineObservation engine,
                                                Map<String, WorkerStatus.TaskObservation> finishedTasks) {
+
         admissionVersion.incrementAndGet();
         List<WorkerStatusFact> facts = new ArrayList<>();
 
@@ -1426,13 +1426,11 @@ final class DecodeState {
         int actualConfirmed = 0;
         int retainedConfirmed = 0;
         long now = System.currentTimeMillis();
-        for (WorkerStatus.TaskObservation task
-                : engine.runningTaskList().values()) {
+        for (WorkerStatus.TaskObservation task : engine.runningTaskList().values()) {
             TaskPhase phase = task.phase();
             String requestId = task.requestId();
             DecodeRequestState current = requestState(requestId);
-            if (terminalNow.contains(requestId)
-                    || current != null && current.settledAtMs != 0L) {
+            if (terminalNow.contains(requestId) || current != null && current.settledAtMs != 0L) {
                 continue;
             }
             // Membership, allocation/running evidence and terminal evidence are distinct.
@@ -1483,8 +1481,7 @@ final class DecodeState {
 
         // Explicit terminal evidence settles the exact request identity and
         // notifies the scheduler independently of active-snapshot membership.
-        for (WorkerStatus.TaskObservation task
-                : finishedTasks.values()) {
+        for (WorkerStatus.TaskObservation task : finishedTasks.values()) {
             String requestId = task.requestId();
             DecodeRequestState current = requestState(requestId);
             if (current != null && current.settledAtMs != 0L) {
