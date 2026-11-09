@@ -10,7 +10,10 @@ import torch
 
 from rtp_llm.models_py.modules.dsv41.cp import CPContext
 from rtp_llm.models_py.modules.dsv41.ppu.ced import bounded_plan
-from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import CP8_ROW_PREP_ENV
+from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
+    CP8_ROW_PREP_ENV,
+    SharedNativeCache,
+)
 from rtp_llm.models_py.modules.dsv41.prefill.ced import permits_ced
 from rtp_llm.models_py.modules.dsv41.prefill.ced import CEDPlan, _MIN_TOKENS
 
@@ -130,6 +133,15 @@ class SharedForwardState:
                 if layer.engram is not None and layer.engram_token_mask is not None:
                     layer.engram_token_mask = layer.engram_token_mask & context.local_is_real
         self.context = context
+        if isinstance(self.cache, SharedNativeCache):
+            full_cp8 = (
+                self.prefill
+                and context is not None
+                and context.cp_size == 8
+                and context.kv_cache_sharded
+                and context.gather_restore_positions is None
+            )
+            self.cache.bind_swa_fresh_lengths(self.lengths if full_cp8 else None)
         if context is not None and context.gather_restore_positions is not None and self.runtime.policy.mode == "exact":
             self.exact_context = context
             self.plan_reason = "public_exact_compaction"

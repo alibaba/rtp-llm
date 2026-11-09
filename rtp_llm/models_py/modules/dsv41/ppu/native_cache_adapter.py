@@ -51,6 +51,7 @@ class SharedNativeCache(NativeCacheBridge):
         self.lengths = tuple(map(int, lengths))
         self.pools = {}
         self._fresh_swa = {}
+        self._swa_fresh_lengths = None
         self._source_reads = {}
         self.placements = {}
         self.pool_gathers = []
@@ -282,6 +283,10 @@ class SharedNativeCache(NativeCacheBridge):
             and self.cp["size"] == 8
         )
 
+    def bind_swa_fresh_lengths(self, lengths):
+        """Describe the full CP gather's request-major rows, or clear on compaction."""
+        self._swa_fresh_lengths = lengths
+
     def stage_swa(
         self, layer, positions, requests, packed, prefixes, *, retain_rows=True, retain_prefix_tail=True
     ):
@@ -295,13 +300,36 @@ class SharedNativeCache(NativeCacheBridge):
             and packed.is_cuda
         )
         pool = self.pools[layer, "swa_kv"]
+        fresh_lengths = None
+        host_table = None
         if batch_swa:
             from rtp_llm.models_py.modules.dsv41.ppu.prefill_swa import (
                 gather_tails,
+                write_prefill_range,
                 write_rows,
             )
 
             placement = self.placements[layer, "swa_kv"]
+            lengths = getattr(self, "_swa_fresh_lengths", None)
+            if (
+                lengths is not None
+                and os.environ.get("RTP_V41_PPU_CP8_FUSED_SWA_WRITE", "1") == "1"
+                and len(lengths) == len(prefixes) == len(self.lengths)
+                and sum(lengths) == positions.numel() == requests.numel() == packed.shape[0]
+                and all(start + size == end for start, size, end in zip(prefixes, lengths, self.lengths))
+            ):
+                fresh_lengths = lengths
+                # Native eager metadata keeps the original host page table
+                # alongside its device copy. Read it without synchronizing PPU.
+                table = getattr(self.inputs[pool.framework_tag], "kv_cache_block_id", None)
+                if (
+                    table is not None
+                    and table.device.type == "cpu"
+                    and table.shape == pool.table.shape
+                    and table.shape[0] >= len(lengths)
+                    and packed.is_contiguous()
+                ):
+                    host_table = table
             old_tails = gather_tails(pool, placement, prefixes, self.geometry.window)
             logical_rows = sum(tail.shape[0] for tail in old_tails)
             if logical_rows:
@@ -316,9 +344,15 @@ class SharedNativeCache(NativeCacheBridge):
                         "cp_size": placement.size,
                     }
                 )
+        offset = 0
         for rid in range(len(self.lengths)):
             key = layer, rid
-            chosen = requests == rid
+            if fresh_lengths is None:
+                chosen = requests == rid
+            else:
+                stop = offset + fresh_lengths[rid]
+                chosen = slice(offset, stop)
+                offset = stop
             fresh_pos, fresh = positions[chosen], packed[chosen]
             if retain_rows:
                 prefix = int(prefixes[rid])
@@ -336,41 +370,48 @@ class SharedNativeCache(NativeCacheBridge):
                     self._fresh_swa[key] = (fresh_pos_and_tail, fresh_and_tail)
                 else:
                     self._fresh_swa[key] = (fresh_pos, fresh)
-            # One write per ring slot; retain each allocated block's checkpoint.
-            column_end = ((fresh_pos // pool.span + 1) * pool.span).clamp_max(self.lengths[rid])
-            keep = fresh_pos >= column_end - pool.entries
-            if getattr(self, "_is_prefill", False):
-                # The scheduler leaves historical SWA columns at -1. Those
-                # rows remain available to this call through _fresh_swa.
-                keep &= self._prefill_ring_keep(
-                    pool, rid, fresh_pos, self.lengths[rid] - self.geometry.window,
+            written = None
+            if host_table is not None:
+                written = write_prefill_range(
+                    pool, placement, host_table, rid, int(prefixes[rid]),
+                    self.lengths[rid], self.geometry.window, fresh,
                 )
-            if batch_swa:
+            if written is None:
+                # One write per ring slot; retain each allocated block's checkpoint.
+                column_end = ((fresh_pos // pool.span + 1) * pool.span).clamp_max(self.lengths[rid])
+                keep = fresh_pos >= column_end - pool.entries
+                if getattr(self, "_is_prefill", False):
+                    # Historical SWA columns at -1 stay available in _fresh_swa.
+                    keep &= self._prefill_ring_keep(
+                        pool, rid, fresh_pos, self.lengths[rid] - self.geometry.window,
+                    )
+                if not batch_swa:
+                    self._copy_rows((layer, "swa_kv"), rid, fresh_pos[keep], fresh[keep])
+                    self.writes.append({"layer": layer, "tag": pool.framework_tag, "request": rid,
+                                        "rows": int(keep.sum()), "absolute_positions": fresh_pos[keep].tolist(),
+                                        "owned_rows": int(self.owned_positions((layer, "swa_kv"), fresh_pos[keep]).sum())})
+                    continue
                 retained = fresh_pos[keep]
                 write_rows(pool, placement, rid, retained, fresh[keep])
                 written = retained.tolist()
-                owned_start = placement.rank * placement.slice_elements
-                owned_end = owned_start + placement.slice_elements
-                width = _WIDTH["swa_kv"]
-                byte_starts = (pos % placement.full_entries * width for pos in written)
-                owned_count = sum(
-                    start < owned_end and start + width > owned_start for start in byte_starts
-                )
-                self.writes.append(
-                    {
-                        "layer": layer,
-                        "tag": pool.framework_tag,
-                        "request": rid,
-                        "rows": len(written),
-                        "absolute_positions": written,
-                        "owned_rows": owned_count,
-                    }
-                )
-                continue
-            self._copy_rows((layer, "swa_kv"), rid, fresh_pos[keep], fresh[keep])
-            self.writes.append({"layer": layer, "tag": pool.framework_tag, "request": rid,
-                                "rows": int(keep.sum()), "absolute_positions": fresh_pos[keep].tolist(),
-                                "owned_rows": int(self.owned_positions((layer, "swa_kv"), fresh_pos[keep]).sum())})
+
+            owned_start = placement.rank * placement.slice_elements
+            owned_end = owned_start + placement.slice_elements
+            width = _WIDTH["swa_kv"]
+            byte_starts = (pos % placement.full_entries * width for pos in written)
+            owned_count = sum(
+                start < owned_end and start + width > owned_start for start in byte_starts
+            )
+            self.writes.append(
+                {
+                    "layer": layer,
+                    "tag": pool.framework_tag,
+                    "request": rid,
+                    "rows": len(written),
+                    "absolute_positions": written,
+                    "owned_rows": owned_count,
+                }
+            )
 
     def read_swa(self, layer, request, positions):
         saved = self._fresh_swa.get((layer, int(request)))

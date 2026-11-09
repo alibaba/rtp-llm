@@ -62,6 +62,42 @@ def _write_slice(
 
 
 @jit
+def _write_prefill_ring_range(
+    pool,
+    table,
+    packed,
+    start,
+    end,
+    block_count,
+    TABLE_STRIDE: tl.constexpr,
+    SPAN: tl.constexpr,
+    ENTRIES: tl.constexpr,
+    RANK: tl.constexpr,
+    SLICE: tl.constexpr,
+    WIDTH: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    column = start // SPAN + tl.program_id(0)
+    block = tl.load(table + column * TABLE_STRIDE).to(tl.int64)
+    local_byte = tl.program_id(1) * TILE + tl.arange(0, TILE)
+    logical_byte = RANK * SLICE + local_byte
+    ring_row = logical_byte // WIDTH
+    last = tl.minimum(end, (column + 1) * SPAN) - 1
+    # Each ring offset maps to its newest position in this page checkpoint.
+    position = last - (last % ENTRIES + ENTRIES - ring_row) % ENTRIES
+    valid = (
+        (local_byte < SLICE)
+        & (ring_row < ENTRIES)
+        & (position >= tl.maximum(start, column * SPAN))
+        & (block >= 0)
+        & (block < block_count)
+    )
+    source_byte = (position - start).to(tl.int64) * WIDTH + logical_byte % WIDTH
+    value = tl.load(packed + source_byte, valid, other=0)
+    tl.store(pool + block * SLICE + local_byte, value, valid)
+
+
+@jit
 def _read_staged(
     domain,
     packed,
@@ -151,6 +187,50 @@ def write_rows(pool, placement, request, positions, packed):
         width,
         512,
     )
+
+
+def write_prefill_range(pool, placement, host_table, request, start, end, window, packed):
+    """Store a request slice and return its old-path absolute-position receipt."""
+    if start == end:
+        return []
+    first = start // pool.span
+    stop = (end - 1) // pool.span + 1
+    if start < 0 or stop > host_table.shape[1]:
+        raise ValueError(f"native Prefill {pool.framework_tag} position outside block table")
+
+    written = []
+    blocks = set()
+    for column, block in enumerate(host_table[request, first:stop].tolist(), first):
+        column_end = min(end, (column + 1) * pool.span)
+        if block == -1:
+            if column_end > end - window:
+                raise ValueError(f"native Prefill {pool.framework_tag} is missing a live ring block")
+            continue
+        if not 0 <= block < pool.tensor.shape[0] or block in blocks:
+            # Keep the old validation and write order for aliased columns.
+            return None
+        blocks.add(block)
+        begin = max(start, column * pool.span, column_end - pool.entries)
+        written.extend(range(begin, column_end))
+
+    if written:
+        width = _WIDTH["swa_kv"]
+        _write_prefill_ring_range[(stop - first, cdiv(placement.slice_elements, 512))](
+            pool.tensor,
+            pool.table[request],
+            packed,
+            start,
+            end,
+            pool.tensor.shape[0],
+            pool.table.stride(1),
+            pool.span,
+            placement.full_entries,
+            placement.rank,
+            placement.slice_elements,
+            width,
+            512,
+        )
+    return written
 
 
 def read_staged_rows(domain, packed, positions):
