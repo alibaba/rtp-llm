@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton import (
-    _norm_fp8_scale,
+    norm_fp8_scale,
 )
 
 
@@ -57,7 +57,7 @@ def _inject_grouped_norm(x, sublayer, gates, gamma, eps=1e-6):
     rows = x.numel() // 10240
     residual = torch.empty_like(x)
     norm = torch.empty_like(x)
-    collect = 7 <= rows <= 32 or 4093 <= rows <= 4096 or 8192 <= rows <= 16384
+    collect = 7 <= rows <= 32 or 4093 <= rows <= 4096 or 8192 <= rows <= 49152
     partial = (
         torch.empty(rows * 4, device=x.device, dtype=torch.float32)
         if collect
@@ -79,14 +79,7 @@ def _inject_grouped_norm(x, sublayer, gates, gamma, eps=1e-6):
     )
     scale = None
     if collect:
-        scale = torch.empty(1, device=x.device, dtype=torch.float32)
-        _norm_fp8_scale[(1,)](
-            partial,
-            scale,
-            N=rows * 4,
-            BLOCK=triton.next_power_of_2(rows * 4),
-            num_warps=4 if rows < 4096 else 16,
-        )
+        scale = norm_fp8_scale(partial)
     return residual, norm, scale
 
 
@@ -99,7 +92,7 @@ def try_inject_grouped_norm(x, sublayer, gates, gamma, eps):
         and sublayer.shape == (*x.shape[:-1], 2560)
         and gates.shape == (*x.shape[:-1], 4)
         and gamma.shape == (10240,)
-        and (1 <= x.numel() // 10240 <= 32 or 4093 <= x.numel() // 10240 <= 16384)
+        and (1 <= x.numel() // 10240 <= 32 or 4093 <= x.numel() // 10240 <= 49152)
         and all(
             t.dtype == torch.bfloat16
             and t.device == x.device

@@ -41,9 +41,37 @@ class ResidualPrefillUpMixTest(unittest.TestCase):
                 self.assertIsNotNone(actual)
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
+    def test_business_prefill_up_mix_preserves_fp8_boundaries(self):
+        for rows in (6144, 8192, 16384, 24576, 32768, 49152):
+            with self.subTest(rows=rows):
+                x = torch.randn(rows, 320, device="cuda", dtype=torch.bfloat16)
+                w = (torch.randn(10240, 320, device="cuda") * 0.1).to(
+                    torch.float8_e4m3fn
+                )
+                scale = torch.tensor([0.119713], device="cuda")
+                norm = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
+                expected = fused_mix_reduce(
+                    Fp8Linear(w, scale, role="PREFILL")(x), norm, 4
+                )
+                actual = try_fp8_prefill_up_mix(x, w, scale, norm, 4)
+                self.assertIsNotNone(actual)
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
     def test_complete_consumer_with_and_without_write_gate(self):
         oracle = ResidualFp8Fixture()
-        for rows in (4093, 4094, 4095, 4096, 12288):
+        for rows in (
+            4093,
+            4094,
+            4095,
+            4096,
+            6144,
+            8192,
+            12288,
+            16384,
+            24576,
+            32768,
+            49152,
+        ):
             for inject in (False, True):
                 model = oracle.module(inject)
                 model.up_projection.role = "PREFILL"
@@ -80,7 +108,7 @@ class ResidualPrefillUpMixTest(unittest.TestCase):
     def test_unmeasured_shapes_and_gradients_decline_before_writes(self):
         w = torch.empty(10240, 320, device="cuda", dtype=torch.float8_e4m3fn)
         scale = torch.ones(1, device="cuda")
-        for rows in (1, 3, 4, 8, 16, 32, 33, 4092, 4097, 8192, 12287, 12289):
+        for rows in (1, 3, 4, 8, 16, 32, 33, 4092, 4097, 12287, 12289, 49153):
             x = torch.empty(rows, 320, device="cuda", dtype=torch.bfloat16)
             norm = torch.empty(rows, 10240, device="cuda", dtype=torch.bfloat16)
             self.assertIsNone(try_fp8_prefill_up_mix(x, w, scale, norm, 4))
