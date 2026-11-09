@@ -119,7 +119,12 @@ def new_loader_unsupported_reason(
 
     tp_size = int(parallelism_config.tp_size)
     vocab_size = int(model_config.vocab_size)
-    if tp_size > 1 and vocab_size > 0 and vocab_size % tp_size != 0:
+    if (
+        model_config.model_type not in ("bert", "roberta")
+        and tp_size > 1
+        and vocab_size > 0
+        and vocab_size % tp_size != 0
+    ):
         return (
             f"vocabulary size {vocab_size} is not divisible by tensor-parallel "
             f"size {tp_size}; NewLoader does not yet implement legacy vocabulary "

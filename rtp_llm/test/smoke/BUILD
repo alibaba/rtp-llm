@@ -68,6 +68,129 @@ exports_files([
     "data/prompt_candidates.json",
 ])
 
+# Checkpoint-backed feature contracts. Explicit opt-in suite until the CUDA
+# cases are validated on their required hardware; no open_skip/SkipTest.
+custom_smoke_test(
+    name = "newloader_bert_roberta_tp1_rocm",
+    main = "newloader_embedding_contract_test.py",
+    args = [
+        "BertDeploymentSmoke.test_short_positions_tp1_matches_reference_http",
+        "RobertaDeploymentSmoke.test_short_positions_tp1_matches_reference_http",
+    ],
+    smoke_args = "--world_size 1",
+    gpu_type = ["MI308X-ROCM7"],
+    tags = ["model_contract"],
+    data = ["//rtp_llm:sdk"],
+)
+
+custom_smoke_test(
+    name = "newloader_bert_roberta_tp2_rocm",
+    main = "newloader_embedding_contract_test.py",
+    args = [
+        "BertDeploymentSmoke.test_short_positions_tp1_tp2_match_reference_http",
+        "RobertaDeploymentSmoke.test_short_positions_tp1_tp2_match_reference_http",
+    ],
+    smoke_args = "--world_size 2",
+    gpu_type = ["MI308X-ROCM7"],
+    tags = ["model_contract"],
+    data = ["//rtp_llm:sdk"],
+)
+
+custom_smoke_test(
+    name = "newloader_bert_roberta_tp2_h20",
+    main = "newloader_embedding_contract_test.py",
+    args = [
+        "BertDeploymentSmoke.test_short_positions_tp1_tp2_match_reference_http",
+        "RobertaDeploymentSmoke.test_short_positions_tp1_tp2_match_reference_http",
+    ],
+    smoke_args = "--world_size 2",
+    gpu_type = ["H20"],
+    tags = ["model_contract"],
+    data = ["//rtp_llm:sdk"],
+)
+
+custom_smoke_test(
+    name = "newloader_sparse_mla_pd_contract_h20",
+    main = "newloader_generation_contract_test.py",
+    args = ["SparseMlaPDSmoke"],
+    smoke_args = "--world_size 2",
+    gpu_type = ["H20_CU13"],
+    tags = ["model_contract", "pd_contract"],
+    data = ["//rtp_llm:sdk"],
+)
+
+custom_smoke_test(
+    name = "newloader_mla_graph_shrink_contract_h20",
+    main = "newloader_generation_contract_test.py",
+    args = ["MlaGraphShrinkSmoke"],
+    smoke_args = "--world_size 1",
+    gpu_type = ["H20_CU13"],
+    tags = ["model_contract", "graph_contract"],
+    data = ["//rtp_llm:sdk"],
+)
+
+custom_smoke_test(
+    name = "deepseek_v41_group32_contract_sm100_arm",
+    main = "deepseek_v41_group32_contract_test.py",
+    smoke_args = "--tp_size 4 --ep_size 4 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --enable_cuda_graph 1 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 32768",
+    gpu_type = ["SM100_ARM_CU13"],
+    tags = ["dsv41_cuda13", "model_contract"],
+    data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
+)
+
+custom_smoke_test(
+    name = "newloader_qwen35_dense_eagle_rocm",
+    main = "newloader_generation_contract_test.py",
+    args = ["Qwen35DenseEagleSmoke"],
+    smoke_args = "--world_size 1",
+    gpu_type = ["ROCM"],
+    tags = ["model_contract", "eagle_contract"],
+    data = ["//rtp_llm:sdk"],
+)
+
+[
+    custom_smoke_test(
+        name = name,
+        main = "newloader_generation_contract_test.py",
+        args = [test_class],
+        smoke_args = "--world_size 1",
+        gpu_type = ["H20"],
+        tags = ["model_contract", "eagle_contract"],
+        data = ["//rtp_llm:sdk"],
+    )
+    for name, test_class in [
+        ("newloader_qwen2_eagle_h20", "Qwen2EagleSmoke"),
+        ("newloader_qwen3next_eagle_h20", "Qwen3NextEagleSmoke"),
+        ("newloader_qwen35_moe_eagle_h20", "Qwen35MoeEagleSmoke"),
+        ("newloader_qwen35_dense_eagle_h20", "Qwen35DenseEagleSmoke"),
+    ]
+]
+
+test_suite(
+    name = "smoke_newloader_eagle_contracts",
+    tests = [
+        ":newloader_qwen2_eagle_h20",
+        ":newloader_qwen3next_eagle_h20",
+        ":newloader_qwen35_moe_eagle_h20",
+        ":newloader_qwen35_dense_eagle_h20",
+        ":newloader_qwen35_dense_eagle_rocm",
+    ],
+    tags = ["manual"],
+)
+
+test_suite(
+    name = "smoke_newloader_feature_contracts",
+    tests = [
+        ":newloader_bert_roberta_tp1_rocm",
+        ":newloader_bert_roberta_tp2_rocm",
+        ":newloader_bert_roberta_tp2_h20",
+        ":newloader_sparse_mla_pd_contract_h20",
+        ":newloader_mla_graph_shrink_contract_h20",
+        ":deepseek_v41_group32_contract_sm100_arm",
+    ],
+    tags = ["manual"],
+)
+
 filegroup(
     name = "smoke_model_configs",
     srcs = glob(["data/model/**/*.json"]),

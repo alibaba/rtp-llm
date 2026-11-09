@@ -135,6 +135,16 @@ register_lazy_model(
     "Qwen35MoeForCausalLM",
 )
 register_lazy_model(
+    "qwen35_dense",
+    "rtp_llm.models_py.new_models.qwen3_next.language",
+    "Qwen35DenseForCausalLM",
+)
+register_lazy_model(
+    "qwen35_dense_mtp",
+    "rtp_llm.models_py.new_models.qwen3_next.language",
+    "Qwen35DenseMTPForCausalLM",
+)
+register_lazy_model(
     "qwen3_next_mtp",
     "rtp_llm.models_py.new_models.qwen3_next",
     "Qwen3NextMTPForCausalLM",
@@ -143,6 +153,11 @@ register_lazy_model(
     "qwen35_moe_mtp",
     "rtp_llm.models_py.new_models.qwen3_next",
     "Qwen35MoeMTPForCausalLM",
+)
+register_lazy_model(
+    "qwen_2-mtp",
+    "rtp_llm.models_py.new_models.qwen2.mtp",
+    "Qwen2MTPForCausalLM",
 )
 register_lazy_model(
     "qwen_2",

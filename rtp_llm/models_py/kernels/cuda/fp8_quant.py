@@ -136,10 +136,8 @@ def create_per_token_group_quant_fp8_output_scale(
             raise ValueError(
                 "UE8M0 scales require column_major_scales and scale_tma_aligned"
             )
-        if group_size != 128:
-            raise ValueError(
-                f"UE8M0 scale packing requires group_size=128, got {group_size}"
-            )
+        # Packing is four exponent bytes per int32, independent of the GEMM
+        # recipe. In particular DSv4.1 uses group-32 MXFP8, not group-128.
         *x_batch, x_q_mn, x_q_k = x_shape
         x_s_mn, x_s_k = x_q_mn, x_q_k // group_size
         aligned_mn = ceil_align(x_s_mn, 4)

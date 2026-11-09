@@ -3,10 +3,20 @@ import logging
 import os
 import weakref
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import torch
+
+
+def _checkpoint_quant_method(config: Any, key: str) -> str:
+    if not isinstance(config, Mapping):
+        raise ValueError("checkpoint quantization config must be an object")
+    value = config.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} must be a non-empty string, got {value!r}")
+    return value.lower()
 
 
 def _validate_compressed_targets(group_name: str, group_config: Dict[str, Any]) -> None:
@@ -257,11 +267,11 @@ class QuantizationConfig(ABC):
         quant_method = None
         if config_json.get("quantization_config", None):
             quant_config = config_json["quantization_config"]
-            quant_method = quant_config["quant_method"].lower()
+            quant_method = _checkpoint_quant_method(quant_config, "quant_method")
 
         if config_json.get("quantization", None):
             quant_config = config_json["quantization"]
-            quant_method = quant_config["quant_algo"].lower()
+            quant_method = _checkpoint_quant_method(quant_config, "quant_algo")
 
         # Kimi-K2.5 nests `text_config.quantization_config` (compressed-tensors).
         # Promote it so the unified parsing path below applies.
@@ -271,7 +281,7 @@ class QuantizationConfig(ABC):
                 "quantization_config", None
             ):
                 quant_config = text_config["quantization_config"]
-                quant_method = quant_config["quant_method"].lower()
+                quant_method = _checkpoint_quant_method(quant_config, "quant_method")
 
         if quant_config is None:
             return None
@@ -413,38 +423,63 @@ class QuantizationConfig(ABC):
                 group_size = quark_weights_config["group_size"]
 
         if quant_method == "modelopt":
-            config_groups = quant_config["config_groups"]
-            weights_config = config_groups["group_0"]["weights"]
-            activation_config = config_groups["group_0"]["input_activations"]
-            bits = weights_config["num_bits"]
-            activation_bits = activation_config["num_bits"]
-            group_size = weights_config["group_size"]
+            # Legacy FP4 consumers read exclude_modules; NewLoader consumers
+            # read the unified aliases. Preserve the same exclusion in both.
+            exclude_modules = _merge_module_patterns(
+                "exclude_modules", exclude_modules, ignored_layers
+            )
+            text_config = config_json.get("text_config")
             if (
-                weights_config["type"] == "float"
-                and bits == 4
-                and activation_bits == 4
-                and group_size == 16
+                isinstance(text_config, dict)
+                and "full_attention_interval" in text_config
             ):
-                quant_method = ModelOptFp4Config.get_method()
-                mixed_attention = False
-                text_config = config_json.get("text_config", None)
-                if text_config is not None:
-                    full_attention_interval = text_config.get(
-                        "full_attention_interval", 0
+                full_attention_interval = text_config["full_attention_interval"]
+            else:
+                full_attention_interval = config_json.get("full_attention_interval", 0)
+
+            if "config_groups" in quant_config:
+                config_groups = quant_config["config_groups"]
+                weights_config = config_groups["group_0"]["weights"]
+                activation_config = config_groups["group_0"]["input_activations"]
+                bits = weights_config["num_bits"]
+                activation_bits = activation_config["num_bits"]
+                group_size = weights_config["group_size"]
+                if not (
+                    weights_config["type"] == "float"
+                    and bits == 4
+                    and activation_bits == 4
+                    and group_size == 16
+                ):
+                    raise ValueError("unsupported grouped ModelOpt quantization config")
+            else:
+                quant_algo = quant_config.get("quant_algo")
+                if not isinstance(quant_algo, str) or quant_algo.lower() != "nvfp4":
+                    raise ValueError(
+                        "invalid flat ModelOpt quantization config: "
+                        f"quant_algo must be 'NVFP4', got {quant_algo!r}"
                     )
-                    if full_attention_interval != 0:
-                        mixed_attention = True
-                return ModelOptFp4Config.from_config(
-                    {
-                        "bits": bits,
-                        "method": quant_method,
-                        "group_size": group_size,
-                        "is_quanted": True,
-                        "mixed_attention": mixed_attention,
-                        "ignored_layers": ignored_layers,
-                        "exclude_modules": exclude_modules,
-                    }
-                )
+                if type(group_size) is not int or group_size != 16:
+                    raise ValueError(
+                        "invalid flat ModelOpt quantization config: "
+                        f"group_size must be integer 16, got {group_size!r}"
+                    )
+                if quant_config.get("with_input_scale") is not True:
+                    raise ValueError(
+                        "invalid flat ModelOpt quantization config: "
+                        "with_input_scale must be true"
+                    )
+                bits = 4
+            return ModelOptFp4Config.from_config(
+                {
+                    "bits": bits,
+                    "method": ModelOptFp4Config.get_method(),
+                    "group_size": group_size,
+                    "is_quanted": True,
+                    "mixed_attention": full_attention_interval != 0,
+                    "ignored_layers": ignored_layers,
+                    "exclude_modules": exclude_modules,
+                }
+            )
 
         result = cls.from_config(
             {

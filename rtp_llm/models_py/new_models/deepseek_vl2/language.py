@@ -584,6 +584,7 @@ class DeepSeekVLV2ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
                 rope_config,
                 cfg["max_seq_len"],
                 device,
+                model_config=model_config,
             )
             self.register_buffer("cos_sin_cache", cos_sin_cache, persistent=False)
         else:

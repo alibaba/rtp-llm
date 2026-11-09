@@ -569,5 +569,120 @@ class Qwen2LoadTest(unittest.TestCase):
         self.assertEqual(model.layers[0].self_attn.qkv_proj.weight.shape, (8, 4))
 
 
+class Qwen2EagleLoadTest(unittest.TestCase):
+    def _fixture(self):
+        base = Qwen2LoadTest()
+        config = base._config()
+        config.model_type = "qwen_2-mtp"
+        config.is_mtp = True
+        weights = base._weights()
+        weights["model.layers.0.final_head.norm.weight"] = weights.pop(
+            "model.norm.weight"
+        )
+        weights["model.layers.0.e_norm.weight"] = torch.tensor([1.0, 2.0, 3.0, 4.0])
+        weights["model.layers.0.h_norm.weight"] = torch.tensor([4.0, 3.0, 2.0, 1.0])
+        weights["model.layers.0.eh_proj.weight"] = torch.arange(
+            32, dtype=torch.float32
+        ).reshape(8, 4)
+        return config, base._load_config(), weights
+
+    def test_eagle_loads_safetensors_and_preserves_legacy_projection(self):
+        from rtp_llm.models_py.new_models.qwen2.mtp import Qwen2MTPForCausalLM
+
+        config, load_config, weights = self._fixture()
+        weights["model.norm.weight"] = torch.full((4,), 99.0)
+        with tempfile.TemporaryDirectory() as path:
+            save_file(weights, f"{path}/model.safetensors")
+            model = NewModelLoader(config, load_config, model_path=path).load()
+        self.assertIsInstance(model, Qwen2MTPForCausalLM)
+        _validate(model)
+        self.assertIs(model.norm, model.layers[0].final_head.norm)
+        torch.testing.assert_close(
+            model.norm.weight, weights["model.layers.0.final_head.norm.weight"]
+        )
+        inputs = types.SimpleNamespace(
+            input_ids=torch.tensor([1, 3]),
+            input_hiddens=torch.tensor(
+                [[1.0, -2.0, 3.0, -4.0], [4.0, 3.0, -2.0, -1.0]]
+            ),
+        )
+        embedding = weights["model.embed_tokens.weight"][inputs.input_ids]
+
+        def rms(value, weight):
+            return (
+                value
+                * torch.rsqrt(value.square().mean(-1, keepdim=True) + 1e-6)
+                * weight
+            )
+
+        expected = (
+            torch.cat(
+                (
+                    rms(inputs.input_hiddens, weights["model.layers.0.h_norm.weight"]),
+                    rms(embedding, weights["model.layers.0.e_norm.weight"]),
+                ),
+                dim=-1,
+            )
+            @ weights["model.layers.0.eh_proj.weight"]
+        )
+        torch.testing.assert_close(model.word_embedding(inputs), expected)
+        inputs.input_hiddens = None
+        with self.assertRaisesRegex(ValueError, "input_hiddens"):
+            model.word_embedding(inputs)
+
+    def test_eagle_vocabulary_maps_reach_runtime_weight_view(self):
+        config, load_config, weights = self._fixture()
+        weights["model.d2t"] = torch.arange(8, dtype=torch.int64)
+        weights["model.t2d"] = torch.ones(8, dtype=torch.bool)
+        with tempfile.TemporaryDirectory() as path:
+            save_file(weights, f"{path}/model.safetensors")
+            model = NewModelLoader(config, load_config, model_path=path).load()
+        _validate(model)
+        view = model.runtime_weight_view()
+        torch.testing.assert_close(
+            view["multi_tokens_predict_d2t_map"], weights["model.d2t"]
+        )
+        self.assertEqual(view["multi_tokens_predict_t2d_map"].dtype, torch.int64)
+        model.to(dtype=torch.float64)
+        self.assertEqual(model.d2t.dtype, torch.int64)
+
+    def test_eagle_tp2_load_keeps_projection_and_maps_replicated(self):
+        config, _, weights = self._fixture()
+        weights["model.d2t"] = torch.arange(8, dtype=torch.int64)
+        weights["model.t2d"] = torch.ones(8, dtype=torch.bool)
+        with tempfile.TemporaryDirectory() as path:
+            save_file(weights, f"{path}/model.safetensors")
+            for rank in range(2):
+                with self.subTest(rank=rank):
+                    load = Qwen2LoadTest()._load_config(tp_size=2, tp_rank=rank)
+                    model = NewModelLoader(config, load, model_path=path).load()
+                    _validate(model)
+                    torch.testing.assert_close(
+                        model.layers[0].eh_proj.weight,
+                        weights["model.layers.0.eh_proj.weight"].t(),
+                    )
+                    torch.testing.assert_close(
+                        model.embed_tokens.weight,
+                        weights["model.embed_tokens.weight"][rank * 4 : (rank + 1) * 4],
+                    )
+                    torch.testing.assert_close(model.d2t, weights["model.d2t"])
+
+    def test_eagle_rejects_incomplete_maps_and_wrong_projection_layout(self):
+        from rtp_llm.models_py.new_models.qwen2.mtp import Qwen2MTPForCausalLM
+
+        for invalid in ("map", "projection"):
+            config, load_config, weights = self._fixture()
+            if invalid == "map":
+                weights["model.d2t"] = torch.arange(8)
+                error = "both model.d2t"
+            else:
+                weights["model.layers.0.eh_proj.weight"] = torch.ones(4, 8)
+                error = "legacy"
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError, error
+            ):
+                Qwen2MTPForCausalLM(config, load_config).load_weights(weights)
+
+
 if __name__ == "__main__":
     unittest.main()

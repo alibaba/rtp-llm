@@ -236,6 +236,50 @@ def _mtp_weights(embedding_prefix="model.language_model."):
 
 
 class Qwen3NextLoadTest(unittest.TestCase):
+    def test_qwen35_dense_main_and_eagle_draft_load_without_moe(self):
+        from rtp_llm.models_py.new_models.qwen3_next.language import (
+            Qwen35DenseForCausalLM,
+            Qwen35DenseMTPForCausalLM,
+            Qwen3NextMLP,
+        )
+
+        for draft, model_class in (
+            (False, Qwen35DenseForCausalLM),
+            (True, Qwen35DenseMTPForCausalLM),
+        ):
+            config = _config(tie=False)
+            config.model_type = "qwen35_dense_mtp" if draft else "qwen35_dense"
+            config.is_mtp = draft
+            config.expert_num = config.moe_k = config.moe_inter_size = (
+                config.moe_style
+            ) = 0
+            weights = {}
+            for name, tensor in _dense_weights(include_lm_head=True).items():
+                if name == "model.embed_tokens.weight":
+                    name = "model.language_model.embed_tokens.weight"
+                elif name.startswith("model."):
+                    name = (
+                        "mtp." if draft else "model.language_model."
+                    ) + name.removeprefix("model.")
+                weights[name] = tensor
+            if draft:
+                weights.update(
+                    {
+                        "mtp.pre_fc_norm_embedding.weight": torch.ones(4),
+                        "mtp.pre_fc_norm_hidden.weight": torch.ones(4),
+                        "mtp.fc.weight": torch.arange(32, dtype=torch.float32).reshape(
+                            4, 8
+                        ),
+                    }
+                )
+            with self.subTest(draft=draft), tempfile.TemporaryDirectory() as path:
+                save_file(weights, f"{path}/model.safetensors")
+                model = NewModelLoader(config, _load_config(), model_path=path).load()
+                self.assertIsInstance(model, model_class)
+                self.assertIsInstance(model.layers[0].mlp, Qwen3NextMLP)
+                NewModelLoader._validate_loaded_weights(model)
+                torch.testing.assert_close(model.norm.weight, torch.full((4,), 2.0))
+
     def test_production_model_type_alias_uses_qwen3_next_newloader(self):
         self.assertIs(get_model_class("qwen35_moe"), Qwen35MoeForCausalLM)
 
@@ -308,6 +352,66 @@ class Qwen3NextLoadTest(unittest.TestCase):
                         attention_inputs=attention_inputs,
                     )
                 )
+
+    def test_target_forward_captures_dspark_layer_boundaries(self):
+        class IncrementLayer(torch.nn.Module):
+            layer_type = HybridAttentionType.NONE
+
+            def forward(self, hidden_states, residual, fmha_impl, **kwargs):
+                return hidden_states + 1, residual + 2
+
+        class PassNorm(torch.nn.Module):
+            def forward(self, hidden_states, residual):
+                return hidden_states + residual, residual
+
+        for model_cls in (Qwen3NextForCausalLM, Qwen35MoeForCausalLM):
+            with self.subTest(model_cls=model_cls.__name__):
+                config = _config()
+                config.num_layers = 2
+                config.hybrid_attention_config.hybrid_attention_types = [
+                    HybridAttentionType.NONE
+                ] * 2
+                config.capture_aux_hidden_layer_ids = [0, 1]
+                model = model_cls(config, _load_config())
+                model.embed_tokens.weight.data.fill_(1)
+                model.layers = torch.nn.ModuleList([IncrementLayer(), IncrementLayer()])
+                model.norm = PassNorm()
+                model.kv_cache = None
+                pointer = None
+                # Full-size capture followed by a smaller replay: every layer
+                # contributes hidden+residual and decode storage stays stable.
+                for tokens, verify in ((3, False), (3, True), (1, True)):
+                    attention_inputs = PyAttentionInputs()
+                    attention_inputs.is_prefill = False
+                    attention_inputs.is_target_verify = verify
+                    inputs = types.SimpleNamespace(
+                        input_ids=torch.zeros(tokens, dtype=torch.int64),
+                        attention_inputs=attention_inputs,
+                        multimodal_features=[],
+                    )
+                    with mock.patch(
+                        "rtp_llm.models_py.new_models.qwen3_next.language.select_fmha_impl_for_layer",
+                        return_value=object(),
+                    ), mock.patch(
+                        "rtp_llm.models_py.new_models.qwen3_next.language.select_attention_inputs_for_layer",
+                        return_value=inputs.attention_inputs,
+                    ):
+                        outputs = model.forward(inputs, fmha_impl=object())
+                    expected = torch.cat(
+                        (torch.full((tokens, 4), 4.0), torch.full((tokens, 4), 7.0)),
+                        dim=-1,
+                    )
+                    torch.testing.assert_close(
+                        outputs.mtp_target_hidden_states.float(), expected
+                    )
+                    torch.testing.assert_close(
+                        model.get_mtp_target_hidden_states(tokens).float(), expected
+                    )
+                    if verify:
+                        current = outputs.mtp_target_hidden_states.data_ptr()
+                        if pointer is not None:
+                            self.assertEqual(current, pointer)
+                        pointer = current
 
     def test_mtp_forward_projects_normalized_embedding_and_hidden_state(self):
         class PassLayer(torch.nn.Module):

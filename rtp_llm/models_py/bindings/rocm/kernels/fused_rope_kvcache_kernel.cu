@@ -102,6 +102,15 @@ inline __device__ type_out* reinterpret_ptr(void* ptr, size_t offset) {
 }
 
 __device__ __forceinline__ int get_mrope_position_dim(const RopeConfig& rope_config, const int tidx) {
+    // RotaryHalfRead pairs the two rotary halves, so tidx indexes a frequency
+    // pair, not an element of the interleaved input vector. Qwen2/2.5-VL use
+    // contiguous temporal, height and width sections in each rotary half.
+    if (!rope_config.mrope_interleaved) {
+        if (tidx < rope_config.mrope_dim1) {
+            return 0;
+        }
+        return tidx < rope_config.mrope_dim1 + rope_config.mrope_dim2 ? 1 : 2;
+    }
     // Vec_t<T> contains one rotary pair after RotaryHalfRead, so tidx is
     // the frequency-pair index. Qwen3/3.5 assigns H/W to interleaved slots
     // and keeps all remaining slots on the temporal axis. The host validates

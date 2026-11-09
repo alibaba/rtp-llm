@@ -9,7 +9,9 @@ from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.bert import BertForEmbedding, RobertaForEmbedding
 from rtp_llm.models_py.new_models.bert.language import CUSTOM_WEIGHT_PREFIX
 from rtp_llm.models_py.registry import get_model_class
+from rtp_llm.ops import ParallelismConfig
 from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.new_loader import new_loader_unsupported_reason
 from safetensors.torch import save_file
 
 
@@ -381,9 +383,42 @@ class BertNewloaderTest(unittest.TestCase):
             )
         self.assertTrue(torch.allclose(result, expected))
 
-    def test_ep_is_rejected(self):
-        with self.assertRaisesRegex(NotImplementedError, "ep_size must be 1"):
-            BertForEmbedding(_config(), NewLoaderConfig(device="cpu", ep_size=2))
+    def test_dense_models_ignore_service_derived_ep_size(self):
+        for model_type in ("bert", "roberta"):
+            config = _config(model_type)
+            config.require_weight_update = False
+            parallelism = ParallelismConfig()
+            parallelism.tp_size = 2
+            parallelism.ep_size = 2
+            parallelism.ffn_tp_size = 2
+            self.assertIsNone(
+                new_loader_unsupported_reason(config, parallelism_config=parallelism)
+            )
+            for rank in (0, 1):
+                with self.subTest(model_type=model_type, rank=rank):
+                    model = self._load(
+                        _config(model_type), _weights(model_type),
+                        tp_size=2, tp_rank=rank, ep_size=2, ep_rank=rank,
+                    )
+                    self.assertEqual(model.embeddings.word_embeddings.weight.shape, (7, 4))
+
+    def test_position_embeddings_allow_shorter_deployment(self):
+        for model_type in ("bert", "roberta"):
+            with self.subTest(model_type=model_type):
+                config = _config(model_type)
+                config.max_seq_len = 3
+                weights = _weights(model_type)
+                model = self._load(config, weights)
+                torch.testing.assert_close(
+                    model.embeddings.position_embeddings.weight,
+                    weights[f"{model_type}.embeddings.position_embeddings.weight"][:3].half(),
+                )
+
+    def test_position_embeddings_reject_short_checkpoint(self):
+        config = _config()
+        config.max_seq_len = 7
+        with self.assertRaisesRegex(ValueError, "at least 7 rows"):
+            self._load(config, _weights())
 
 
 if __name__ == "__main__":

@@ -25,6 +25,8 @@ py_test(
         "BertNewloaderTest.test_registry_resolves_bert_and_roberta",
         "BertNewloaderTest.test_roberta_and_layernorm_gamma_beta_are_supported",
         "BertNewloaderTest.test_tp2_loads_rank_local_attention_and_ffn_shards",
+        "BertNewloaderTest.test_dense_models_ignore_service_derived_ep_size",
+        "BertNewloaderTest.test_position_embeddings_allow_shorter_deployment",
     ],
     tags = ["H20"],
     deps = bert_newloader_test_deps,
@@ -45,10 +47,27 @@ py_test(
         "BertNewloaderTest.test_invalid_runtime_config_values_fail_fast",
         "BertNewloaderTest.test_missing_required_weight_fails_before_postprocess",
         "BertNewloaderTest.test_quantized_checkpoints_are_rejected_until_adapted",
-        "BertNewloaderTest.test_ep_is_rejected",
+        "BertNewloaderTest.test_position_embeddings_reject_short_checkpoint",
         "BertNewloaderTest.test_unknown_floating_tensor_is_not_silently_accepted",
         "BertNewloaderTest.test_wrong_model_prefix_is_rejected",
     ],
+    tags = ["H20"],
+    deps = bert_newloader_test_deps,
+)
+
+# Uses real two-process Gloo reductions with CPU tensors, not two GPUs.
+# Like the tests above, importing the CUDA build still needs NVML.
+py_test(
+    name = "bert_newloader_tp2_arithmetic_test",
+    srcs = [
+        "bert_newloader_test.py",
+        "bert_tp2_test.py",
+    ],
+    main = "bert_tp2_test.py",
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
     tags = ["H20"],
     deps = bert_newloader_test_deps,
 )
@@ -58,5 +77,6 @@ test_suite(
     tests = [
         ":bert_newloader_integration_test",
         ":bert_newloader_integrity_test",
+        ":bert_newloader_tp2_arithmetic_test",
     ],
 )

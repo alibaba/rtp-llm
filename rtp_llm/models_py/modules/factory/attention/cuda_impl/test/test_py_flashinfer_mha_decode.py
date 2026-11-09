@@ -749,6 +749,49 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             params.slot_mapping.cpu().tolist(), [10 * 64 + 63, 21 * 64 + 63]
         )
 
+    def test_host_decode_graph_clears_captured_token_buffer_tail(self):
+        """Shrinking views must also refresh memory read by captured kernels."""
+        for capacity_inputs in (False, True):
+            with self.subTest(capacity_inputs=capacity_inputs):
+                params = rtp_llm_ops.FlashInferMlaAttnParams()
+                empty = torch.empty(0, dtype=torch.int32)
+                lengths = torch.tensor([3, 5, 7, 9], dtype=torch.int32)
+                blocks = torch.tensor([[10], [20], [30], [40]], dtype=torch.int32)
+
+                def fill(active, forbid_realloc):
+                    inputs = torch.zeros(4, dtype=torch.int32)
+                    inputs[:active] = 1
+                    count = 4 if capacity_inputs else active
+                    params.fill_params(
+                        empty, lengths[:count], inputs[:count], blocks[:count], 64,
+                        forbid_realloc=forbid_realloc, planned_batch_size=4,
+                    )
+
+                fill(4, False)
+                # Separate TensorImpls retain capture-size views after params
+                # updates its public tensors to the current active length.
+                slots = params.slot_mapping.view(4)
+                positions = params.positions_d.view(4)
+                batch_indices = params.batch_indice_d.view(4)
+                addresses = [value.data_ptr() for value in (slots, positions, batch_indices)]
+                torch.cuda.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    observed_slots = slots.clone()
+                    observed_positions = positions.clone()
+                    observed_batches = batch_indices.clone()
+
+                for active in (2, 0, 3, 4):
+                    fill(active, True)
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    expected_slots = [10 * (i + 1) * 64 + lengths[i].item() for i in range(active)]
+                    self.assertEqual(observed_slots.cpu().tolist(), expected_slots + [-1] * (4 - active))
+                    self.assertEqual(observed_positions.cpu().tolist(), lengths[:active].tolist() + [0] * (4 - active))
+                    self.assertEqual(observed_batches.cpu().tolist(), list(range(active)) + [0] * (4 - active))
+                    self.assertEqual(params.slot_mapping.numel(), active)
+                    self.assertEqual([value.data_ptr() for value in (slots, positions, batch_indices)], addresses)
+
     def test_device_decode_graph_tracks_active_slots_with_stale_tail(self):
         """A capacity-sized input is not an all-active batch on graph replay."""
         params = rtp_llm_ops.FlashInferMlaAttnParams()

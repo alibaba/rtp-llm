@@ -612,7 +612,7 @@ class DeepSeekV32MlaAttention(RtpModule):
         if self.indexer is None or kv_cache is None:
             return None
         q_for_indexer = q_c if self.q_lora_rank > 0 else q_view
-        return self.indexer(
+        topk_indices = self.indexer(
             hidden_states,
             q_for_indexer,
             kv_cache,
@@ -621,6 +621,16 @@ class DeepSeekV32MlaAttention(RtpModule):
             use_fast_path=not fmha_impl.is_sparse(),
             cp_params=fmha_impl.cp_params,
         )
+        # The indexer has its own cache group. Its attention implementation is
+        # not executed below, so publish the freshly written K cache here.
+        attn_inputs = fmha_impl.attn_inputs
+        if (
+            attn_inputs.is_prefill
+            and attn_inputs.cache_store_inputs is not None
+            and attn_inputs.cache_store_writer is not None
+        ):
+            attn_inputs.cache_store_writer.write(attn_inputs.cache_store_inputs, kv_cache)
+        return topk_indices
 
     def forward(
         self,

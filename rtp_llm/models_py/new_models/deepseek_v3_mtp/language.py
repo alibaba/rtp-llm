@@ -199,6 +199,7 @@ class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
             config_json if config_json else cfg,
             cfg["max_seq_len"],
             device,
+            model_config=model_config,
         )
         self.register_buffer("cos_sin_cache", cos_sin_cache, persistent=False)
 

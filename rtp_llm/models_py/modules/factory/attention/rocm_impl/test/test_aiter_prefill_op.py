@@ -142,6 +142,7 @@ def _make_mrope_attn_configs(
     rope_dim: int = 64,
     mrope_sections: Sequence[int] = (11, 11, 10),
     tokens_per_block: int = 16,
+    interleaved: bool = True,
 ):
     cfg = _make_rope_attn_configs(
         head_num, head_num_kv, head_dim, dtype, tokens_per_block
@@ -152,7 +153,7 @@ def _make_mrope_attn_configs(
     cfg.rope_config.mrope_dim1 = mrope_sections[0]
     cfg.rope_config.mrope_dim2 = mrope_sections[1]
     cfg.rope_config.mrope_dim3 = mrope_sections[2]
-    cfg.rope_config.mrope_interleaved = True
+    cfg.rope_config.mrope_interleaved = interleaved
     return cfg
 
 
@@ -343,19 +344,28 @@ def _apply_mrope(
     position_ids: torch.Tensor,
     mrope_sections: Sequence[int],
     rope_dim: int,
+    interleaved: bool = True,
 ):
-    """Independent Qwen3/3.5 interleaved-MRoPE reference."""
+    """Independent contiguous (Qwen2/2.5-VL) and interleaved MRoPE reference."""
     head_dim = q.shape[-1]
     assert 0 < rope_dim <= head_dim and rope_dim % 2 == 0
     rotary_pairs = rope_dim // 2
     assert len(mrope_sections) == 3
     assert sum(mrope_sections) == rotary_pairs
 
-    # Match the model contract: start with temporal frequencies, then replace
-    # H/W slots at offsets 1/2 in the THW interleaving.
-    axes = torch.zeros(rotary_pairs, dtype=torch.long, device=q.device)
-    axes[1 : 3 * mrope_sections[1] : 3] = 1
-    axes[2 : 3 * mrope_sections[2] : 3] = 2
+    if interleaved:
+        # Start with temporal frequencies, then replace H/W slots at offsets
+        # 1/2 in the THW interleaving.
+        axes = torch.zeros(rotary_pairs, dtype=torch.long, device=q.device)
+        axes[1 : 3 * mrope_sections[1] : 3] = 1
+        axes[2 : 3 * mrope_sections[2] : 3] = 2
+    else:
+        axes = torch.cat(
+            [
+                torch.full((size,), axis, dtype=torch.long, device=q.device)
+                for axis, size in enumerate(mrope_sections)
+            ]
+        )
     assert int((axes == 1).sum()) == mrope_sections[1]
     assert int((axes == 2).sum()) == mrope_sections[2]
     positions = position_ids[:, axes].to(torch.float32)
@@ -698,9 +708,9 @@ class TestAiterPrefillImplPagedSupport(unittest.TestCase):
             )
         )
 
-    def test_support_false_for_non_interleaved_mrope(self):
+    def test_support_true_for_non_interleaved_mrope(self):
         pl = torch.tensor([128], dtype=torch.int32)
-        self.assertFalse(
+        self.assertTrue(
             AiterPrefillImplPaged.support(
                 self._make_attn_configs(mrope=True, interleaved=False),
                 self._make_attn_inputs(pl),
@@ -2872,15 +2882,17 @@ class TestAiterPrefillImplNoKvRopeRealOp(unittest.TestCase):
 @unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
 class TestFusedRopeKVCacheMropeContract(unittest.TestCase):
+    interleaved = True
+    head_dim = 256
+    rope_dim = 64
+    sections = (11, 11, 10)
+    dtype = torch.bfloat16
+
     def setUp(self):
         torch.manual_seed(2)
         self.device = torch.device("cuda")
-        self.dtype = torch.bfloat16
         self.head_num = 4
         self.head_num_kv = 2
-        self.head_dim = 256
-        self.rope_dim = 64
-        self.sections = (11, 11, 10)
         self.tokens_per_block = 16
 
     def _make_config(self):
@@ -2892,6 +2904,7 @@ class TestFusedRopeKVCacheMropeContract(unittest.TestCase):
             rope_dim=self.rope_dim,
             mrope_sections=self.sections,
             tokens_per_block=self.tokens_per_block,
+            interleaved=self.interleaved,
         )
 
     def test_prefill_and_decode_reject_section_sum_mismatch(self):
@@ -2922,7 +2935,7 @@ class TestFusedRopeKVCacheMropeContract(unittest.TestCase):
             self.head_num_kv,
             self.head_dim,
             self.dtype,
-            rope_dim=self.rope_dim,
+            rope_dim=64,
             mrope_sections=(12, 12, 8),
         )
         with self.assertRaisesRegex(RuntimeError, "interleaved H/W capacity"):
@@ -3000,6 +3013,7 @@ class TestFusedRopeKVCacheMropeContract(unittest.TestCase):
             attn_inputs.combo_position_ids,
             self.sections,
             self.rope_dim,
+            interleaved=self.interleaved,
         )
         actual_k = _read_decode_k_from_pool(
             pool,
@@ -3087,6 +3101,7 @@ class TestFusedRopeKVCacheMropeContract(unittest.TestCase):
             replay_position_ids,
             self.sections,
             self.rope_dim,
+            interleaved=self.interleaved,
         )
         actual_k = _read_decode_k_from_pool(
             pool,
@@ -3108,6 +3123,26 @@ class TestFusedRopeKVCacheMropeContract(unittest.TestCase):
         self._assert_cuda_graph_replay_uses_new_position_ids(
             FusedRopeKVCacheDecodeOpNonAsm
         )
+
+
+class TestFusedRopeKVCacheNonInterleavedMrope(TestFusedRopeKVCacheMropeContract):
+    """Run the same native ASM/NonAsm and graph contracts for Qwen2-VL."""
+
+    interleaved = False
+    head_dim = 128
+    rope_dim = 128
+    sections = (16, 24, 24)
+
+
+class TestFusedRopeKVCacheNonInterleavedPartialMrope(
+    TestFusedRopeKVCacheNonInterleavedMrope
+):
+    """Exercise FP16, zero-length axes and an unchanged non-rotary tail."""
+
+    head_dim = 256
+    rope_dim = 64
+    sections = (0, 32, 0)
+    dtype = torch.float16
 
 
 @unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
@@ -3287,18 +3322,23 @@ class TestAiterDecodeTritonNumerics(unittest.TestCase):
 @unittest.skipUnless(_AITER_AVAILABLE, "Requires aiter")
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
 class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
+    interleaved = True
+    head_dim = 256
+    rope_dim = 64
+    sections = (11, 11, 10)
+    dtype = torch.bfloat16
+
     def setUp(self):
         torch.manual_seed(1)
         self.device = torch.device("cuda")
-        self.dtype = torch.bfloat16
 
     def _check_mrope_matches_reference(self, impl_cls):
         input_lengths = [5, 3]
         head_num = 4
         head_num_kv = 2
-        head_dim = 256
-        rope_dim = 64
-        mrope_sections = (11, 11, 10)
+        head_dim = self.head_dim
+        rope_dim = self.rope_dim
+        mrope_sections = self.sections
         cfg = _make_mrope_attn_configs(
             head_num=head_num,
             head_num_kv=head_num_kv,
@@ -3306,6 +3346,7 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
             dtype=self.dtype,
             rope_dim=rope_dim,
             mrope_sections=mrope_sections,
+            interleaved=self.interleaved,
         )
         attn_inputs = _make_mrope_prefill_inputs(input_lengths, self.device, self.dtype)
 
@@ -3328,6 +3369,7 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
             attn_inputs.combo_position_ids,
             mrope_sections,
             rope_dim,
+            interleaved=self.interleaved,
         )
         ref = _sdpa_reference(
             q_rope,
@@ -3353,9 +3395,9 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
         input_lengths = [2, 1]
         head_num = 4
         head_num_kv = 2
-        head_dim = 256
-        rope_dim = 64
-        mrope_sections = (11, 11, 10)
+        head_dim = self.head_dim
+        rope_dim = self.rope_dim
+        mrope_sections = self.sections
         cfg = _make_mrope_attn_configs(
             head_num=head_num,
             head_num_kv=head_num_kv,
@@ -3363,6 +3405,7 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
             dtype=self.dtype,
             rope_dim=rope_dim,
             mrope_sections=mrope_sections,
+            interleaved=self.interleaved,
         )
         attn_inputs = _make_mrope_prefill_inputs(input_lengths, self.device, self.dtype)
         active_position_ids = attn_inputs.combo_position_ids.clone()
@@ -3420,7 +3463,12 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
         torch.cuda.synchronize()
 
         expected_q, _ = _apply_mrope(
-            q, k, replay_position_ids, mrope_sections, rope_dim
+            q,
+            k,
+            replay_position_ids,
+            mrope_sections,
+            rope_dim,
+            interleaved=self.interleaved,
         )
         active_padded_rows = torch.tensor([0, 1, 3], device=self.device)
         torch.testing.assert_close(
@@ -3434,6 +3482,22 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
         attn_inputs.combo_position_ids = replay_position_id_capacity[:-1]
         with self.assertRaisesRegex(RuntimeError, "combo_position_ids"):
             params.prepare_in_place(attn_inputs)
+
+
+class TestAiterPrefillImplNonInterleavedMrope(TestAiterPrefillImplMropePositionIds):
+    interleaved = False
+    head_dim = 128
+    rope_dim = 128
+    sections = (16, 24, 24)
+
+
+class TestAiterPrefillImplNonInterleavedPartialMrope(
+    TestAiterPrefillImplNonInterleavedMrope
+):
+    head_dim = 256
+    rope_dim = 64
+    sections = (0, 32, 0)
+    dtype = torch.float16
 
 
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrappers")

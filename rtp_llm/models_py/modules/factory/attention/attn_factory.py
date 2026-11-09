@@ -17,7 +17,6 @@ from rtp_llm.ops import (
     FMHAConfig,
     KvCacheDataType,
     ParallelismConfig,
-    RopeStyle,
 )
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.ops.fused_rope_kvcache_op import DecodeRopeContractError
@@ -303,16 +302,6 @@ def get_fmha_impl(
             return instance
         if _matches_cuda_graph_selection_mode(instance, selection_mode):
             return instance
-    if (
-        attn_configs.rope_config.style == RopeStyle.Mrope
-        and not attn_configs.rope_config.mrope_interleaved
-    ):
-        raise ValueError(
-            "No registered attention implementation supports non-interleaved MRoPE "
-            "on this backend. Qwen2-VL/Qwen2.5-VL checkpoints use the "
-            "non-interleaved layout by default; do not flip mrope_interleaved because "
-            "that changes RoPE semantics. Use a CUDA backend for these checkpoints."
-        )
     if selection_mode == CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH:
         raise GenerationPrefillCudaGraphUnsupportedBackend(
             "no generation-prefill CUDA Graph attention implementation "

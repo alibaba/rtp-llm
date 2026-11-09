@@ -5,8 +5,8 @@
 
 namespace rtp_llm {
 
-inline std::string validateInterleavedMropeConfig(
-    int index_factor, int rope_dim, int size_per_head, int mrope_dim1, int mrope_dim2, int mrope_dim3) {
+inline std::string validateMropeLayout(
+    int index_factor, int rope_dim, int size_per_head, int mrope_dim1, int mrope_dim2, int mrope_dim3, bool interleaved) {
     if (index_factor != 3) {
         return "requires index_factor=3, got " + std::to_string(index_factor);
     }
@@ -29,6 +29,11 @@ inline std::string validateInterleavedMropeConfig(
                + std::to_string(rotary_pair_count);
     }
 
+    // Contiguous sections partition the rotary half directly. Only the
+    // interleaved layout is constrained by the number of H/W slots.
+    if (!interleaved) {
+        return {};
+    }
     const int max_height_pairs = (rotary_pair_count + 1) / 3;
     const int max_width_pairs  = rotary_pair_count / 3;
     if (mrope_dim2 > max_height_pairs || mrope_dim3 > max_width_pairs) {

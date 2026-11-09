@@ -437,11 +437,8 @@ class _BertNewLoaderBase(GptModelBase):
             ),
             device_resource_config=getattr(load_config, "device_resource_config", None),
         )
-        if load_config.ep_size != 1:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} does not use expert parallelism; "
-                "ep_size must be 1"
-            )
+        # The service derives ep_size=tp_size*dp_size even for dense models.
+        # BERT has no expert weights or EP collectives; only TP shards apply.
         if (load_config.attn_tp_size, load_config.attn_tp_rank) != (
             load_config.tp_size,
             load_config.tp_rank,
@@ -574,6 +571,20 @@ class _BertNewLoaderBase(GptModelBase):
                 f"Duplicate BERT checkpoint tensor for {target!r}: "
                 f"latest source={checkpoint_name!r}"
             )
+        if target == "embeddings.position_embeddings.weight":
+            expected = self.embeddings.position_embeddings.weight.shape
+            if (
+                tensor.ndim != 2
+                or tensor.shape[1] != expected[1]
+                or tensor.shape[0] < expected[0]
+            ):
+                raise ValueError(
+                    f"BERT position embeddings require at least {expected[0]} rows "
+                    f"and width {expected[1]}, got {tuple(tensor.shape)}"
+                )
+            # Match legacy loading: a deployment can shorten MAX_SEQ_LEN
+            # without rewriting the checkpoint's absolute position table.
+            tensor = tensor[: expected[0]]
         if not self._dispatch(
             self,
             target,

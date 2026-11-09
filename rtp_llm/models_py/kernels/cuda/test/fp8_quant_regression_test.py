@@ -6,12 +6,30 @@ import torch
 import rtp_llm.ops  # isort: skip
 from rtp_llm.models_py.kernels.cuda.fp8_quant import (  # isort: skip
     _transform_scale_ue8m0,
+    create_per_token_group_quant_fp8_output_scale,
     per_block_cast_to_fp8,
     quant_weight_ue8m0,
     scaled_fp8_per_tensor_quant,
     scaled_fp8_per_token_quant,
     sgl_per_token_group_quant_fp8,
 )
+
+
+class Fp8ScaleAllocationTest(TestCase):
+    def test_ue8m0_group32_and_group128_packed_layout(self):
+        for group_size in (32, 128):
+            for tokens in (0, 1, 5, 8):
+                for groups in (1, 3, 4, 5):
+                    with self.subTest(group_size=group_size, tokens=tokens, groups=groups):
+                        scale = create_per_token_group_quant_fp8_output_scale(
+                            (tokens, groups * group_size), "cpu", group_size,
+                            column_major_scales=True,
+                            scale_tma_aligned=True,
+                            scale_ue8m0=True,
+                        )
+                        self.assertEqual(scale.dtype, torch.int32)
+                        self.assertEqual(scale.shape, (tokens, (groups + 3) // 4))
+                        self.assertEqual(scale.stride(), (1, max(1, (tokens + 3) // 4 * 4)))
 
 
 class Fp8QuantRegressionTest(TestCase):

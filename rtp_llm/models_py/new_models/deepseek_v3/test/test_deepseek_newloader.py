@@ -426,7 +426,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         dense = types.SimpleNamespace(forward=mock.Mock(return_value=torch.zeros(1, 4)))
         index = types.SimpleNamespace(
             fmha_params=object(),
-            attn_inputs=object(),
+            attn_inputs=PyAttentionInputs(),
             cp_params=None,
             is_sparse=lambda: True,
         )
@@ -512,6 +512,33 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         indexer_op_module._resolve_flashinfer_rope.cache_clear()
         indexer_op_module._resolve_fast_hadamard_transform.cache_clear()
         indexer_op_module.validate_indexer_runtime_dependencies.cache_clear()
+
+    def test_rope_cache_honors_effective_service_config(self):
+        config = _model_config()
+        rope = config.attn_config.rope_config
+        rope.dim = 8
+        rope.base = 50000.0
+        rope.scale = 4.0
+        rope.factor1 = 1.0
+        rope.factor2 = 32.0
+        config.deepseek_rope_mscale = 1.0
+        config.deepseek_mscale_all_dim = 0.0
+        disk_config = {"qk_rope_head_dim": 8, "rope_theta": 10000.0}
+        for original_max in (0, 16):
+            with self.subTest(original_max=original_max):
+                rope.max_pos = original_max
+                expected_config = {"qk_rope_head_dim": 8, "rope_theta": 50000.0}
+                if original_max:
+                    expected_config["rope_scaling"] = {
+                        "type": "yarn", "factor": 4.0,
+                        "original_max_position_embeddings": 16,
+                        "beta_fast": 32.0, "beta_slow": 1.0,
+                        "mscale": 1.0, "mscale_all_dim": 0.0,
+                    }
+                actual = build_rope_cache(disk_config, 32, torch.device("cpu"), model_config=config)
+                expected = build_rope_cache(expected_config, 32, torch.device("cpu"))
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                self.assertFalse(torch.equal(actual, build_rope_cache(disk_config, 32, torch.device("cpu"))))
 
     def test_local_rope_cache_preserves_reference_numerics(self):
         max_seq_len = 32
@@ -1613,9 +1640,43 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             self.assertFalse(model._use_new_loader())
 
             config.use_new_loader = True
-            self.assertTrue(model._use_new_loader())
             with self.assertRaisesRegex(ValueError, "expanded-MHA fallback"):
-                model._load_with_new_loader()
+                model._use_new_loader()
+
+    def test_sparse_indexer_publishes_its_own_prefill_cache_group(self):
+        attention = object.__new__(DeepSeekV32MlaAttention)
+        torch.nn.Module.__init__(attention)
+        attention.q_lora_rank = 1
+        expected_topk = torch.tensor([[0]], dtype=torch.int32)
+        attention.indexer = mock.Mock(return_value=expected_topk)
+        hidden = torch.ones(1, 2)
+        indexer_cache = object()
+        for is_prefill, has_inputs, has_writer in (
+            (True, True, True),
+            (False, True, True),
+            (True, False, True),
+            (True, True, False),
+        ):
+            with self.subTest(is_prefill=is_prefill, has_inputs=has_inputs, has_writer=has_writer):
+                writer = mock.Mock()
+                store_inputs = object() if has_inputs else None
+                inputs = types.SimpleNamespace(
+                    is_prefill=is_prefill,
+                    cache_store_inputs=store_inputs,
+                    cache_store_writer=writer if has_writer else None,
+                )
+                impl = types.SimpleNamespace(
+                    fmha_params=object(), attn_inputs=inputs, cp_params=None,
+                    is_sparse=lambda: True,
+                )
+                result = attention._run_sparse_indexer(
+                    hidden, hidden, hidden, indexer_cache, impl
+                )
+                self.assertIs(result, expected_topk)
+                if is_prefill and has_inputs and has_writer:
+                    writer.write.assert_called_once_with(store_inputs, indexer_cache)
+                else:
+                    writer.write.assert_not_called()
 
     def test_sparse_indexer_fast_and_sparse_call_sequences(self):
         class FakeIndexerOp(torch.nn.Module):
@@ -3575,8 +3636,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         expected_down[:, 0] = down[:, -1]
         self.assertTrue(torch.equal(mlp.down_proj.weight, expected_down))
 
-        expected_gate_scale = torch.tensor([[3.0], [0.0]])
-        expected_up_scale = torch.tensor([[13.0], [0.0]])
+        expected_gate_scale = torch.tensor([[3.0], [1.0]])
+        expected_up_scale = torch.tensor([[13.0], [1.0]])
         self.assertTrue(
             torch.equal(
                 mlp.gate_up_proj.weight_scale_inv[:2],
@@ -3592,9 +3653,15 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertTrue(
             torch.equal(
                 mlp.down_proj.weight_scale_inv,
-                torch.tensor([[23.0, 0.0]]),
+                torch.tensor([[23.0, 1.0]]),
             )
         )
+
+        # Exercise the production post-load contract as well as raw copying:
+        # padded weights are zero but their scales must remain positive.
+        mlp.to(device="cuda")
+        mlp.gate_up_proj.process_weights_after_loading()
+        mlp.down_proj.process_weights_after_loading()
 
     def test_runtime_weight_view_exports_only_runtime_globals(self):
         for model_type in (DeepSeekV32ForCausalLM, DeepSeekV32MTPForCausalLM):

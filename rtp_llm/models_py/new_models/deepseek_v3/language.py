@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
 from rtp_llm.models_py.layers.norm import RMSResNorm
 from rtp_llm.models_py.model_desc.block_map import (
@@ -323,11 +324,35 @@ def build_rope_cache(
     config_json: dict,
     max_seq_len: int,
     device: torch.device,
+    *,
+    model_config: Optional[ModelConfig | Mapping[str, Any]] = None,
 ) -> torch.Tensor:
     """Build RoPE cos/sin cache from config.json + max_seq_len.
 
     Returns [cos|sin] concatenated, shape [max_seq_len, rope_head_dim], float32.
     """
+    # Service configuration already includes CLI/JSON overrides. Use it as
+    # the authority, just like legacy _create_rope_w. Standalone callers that
+    # have no initialized runtime RoPE config can still use checkpoint JSON.
+    if (
+        isinstance(model_config, ModelConfig)
+        and model_config.attn_config.rope_config.dim > 0
+    ):
+        rope = model_config.attn_config.rope_config
+        config_json = {
+            "qk_rope_head_dim": rope.dim,
+            "rope_theta": rope.base,
+        }
+        if rope.max_pos > 0:
+            config_json["rope_scaling"] = {
+                "type": "yarn",
+                "factor": rope.scale,
+                "original_max_position_embeddings": rope.max_pos,
+                "beta_fast": rope.factor2,
+                "beta_slow": rope.factor1,
+                "mscale": model_config.deepseek_rope_mscale,
+                "mscale_all_dim": model_config.deepseek_mscale_all_dim,
+            }
     rope_parameters = config_json.get("rope_parameters", {})
     if not isinstance(rope_parameters, dict):
         raise TypeError("DeepSeek rope_parameters must be a dictionary")
@@ -963,9 +988,11 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
         self._is_sparse_mla = cfg["is_sparse"]
         self.tie_word_embeddings = cfg["tie_word_embeddings"]
 
-        # --- RoPE cache: read config.json directly for full rope fields ---
+        # --- RoPE cache: preserve effective service overrides ---
         device = torch.device(load_config.device)
-        cos_sin_cache = build_rope_cache(config_json, cfg["max_seq_len"], device)
+        cos_sin_cache = build_rope_cache(
+            config_json, cfg["max_seq_len"], device, model_config=model_config
+        )
         self.register_buffer("cos_sin_cache", cos_sin_cache, persistent=False)
 
         # --- Embedding ---

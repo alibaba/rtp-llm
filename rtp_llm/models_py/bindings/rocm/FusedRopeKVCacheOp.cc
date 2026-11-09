@@ -23,17 +23,13 @@ void validateMropeConfig(const AttentionConfigs& attn_configs) {
     if (rope_config.style != RopeStyle::Mrope) {
         return;
     }
-    if (!rope_config.mrope_interleaved) {
-        throw std::runtime_error("ROCm FusedRopeKVCache does not support MRoPE with mrope_interleaved=false. "
-                                 "Qwen2-VL/Qwen2.5-VL use this layout by default; do not flip the flag because "
-                                 "that changes RoPE semantics. Use a CUDA backend for these checkpoints.");
-    }
-    const std::string validation_error = validateInterleavedMropeConfig(rope_config.index_factor,
-                                                                        rope_config.dim,
-                                                                        attn_configs.size_per_head,
-                                                                        rope_config.mrope_dim1,
-                                                                        rope_config.mrope_dim2,
-                                                                        rope_config.mrope_dim3);
+    const std::string validation_error = validateMropeLayout(rope_config.index_factor,
+                                                            rope_config.dim,
+                                                            attn_configs.size_per_head,
+                                                            rope_config.mrope_dim1,
+                                                            rope_config.mrope_dim2,
+                                                            rope_config.mrope_dim3,
+                                                            rope_config.mrope_interleaved);
     if (!validation_error.empty()) {
         throw std::runtime_error("ROCm FusedRopeKVCache MRoPE " + validation_error);
     }

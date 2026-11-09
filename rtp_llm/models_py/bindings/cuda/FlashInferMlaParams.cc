@@ -294,6 +294,12 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
     prefill_ragged_kv_len_indptr_ptr[0] = 0;
     qo_indptr_ptr[0]                    = 0;
 
+    if (!prefix_lengths) {
+        // Captured kernels keep the original launch width even when the
+        // tensor views below shrink. Initialize the entire decode bucket.
+        std::fill_n(batch_indice_ptr, batch_size, 0);
+        std::fill_n(positions_ptr, batch_size, 0);
+    }
     for (int i = 0; i < batch_size; i++) {
         int seq_len = 0;
         if (prefix_lengths) {
@@ -499,7 +505,8 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     }
 
     // Ensure tensors are allocated with sufficient size
-    ensureTensorSize(batch_size, input_token_num, page_num, reuse_page_num, batch_reuse_info_size, forbid_realloc);
+    const int token_buffer_size = prefix_lengths_ptr ? input_token_num : batch_size;
+    ensureTensorSize(batch_size, token_buffer_size, page_num, reuse_page_num, batch_reuse_info_size, forbid_realloc);
 
     // Fill params directly into HOST tensors
     fillParamsInternal(t_prefix_lengths_host,
@@ -529,16 +536,20 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     batch_reuse_info_vec         = batch_size > 0 ? batch_reuse_info_vec_d : torch::Tensor();
 
     // Calculate slot_mapping
-    if (t_kv_cache_block_id_host.defined() && t_kv_cache_block_id_host.numel() > 0 && input_token_num > 0) {
-        const int64_t max_blocks       = t_kv_cache_block_id_host.size(1);
-        auto          block_table_ptr  = t_kv_cache_block_id_host.data_ptr<int32_t>();
+    const bool has_block_table = t_kv_cache_block_id_host.defined() && t_kv_cache_block_id_host.numel() > 0;
+    if (token_buffer_size > 0 && (has_block_table || (!prefix_lengths_ptr && input_token_num == 0))) {
+        const int64_t max_blocks       = has_block_table ? t_kv_cache_block_id_host.size(1) : 0;
+        auto          block_table_ptr  = has_block_table ? t_kv_cache_block_id_host.data_ptr<int32_t>() : nullptr;
         auto          batch_indice_ptr = batch_indice_h.data_ptr<int32_t>();
         auto          positions_ptr    = positions_h.data_ptr<int32_t>();
 
-        slot_mapping_h_       = buf_h_i64_.slice(0, 0, input_token_num).reshape({input_token_num});
+        slot_mapping_h_       = buf_h_i64_.slice(0, 0, token_buffer_size).reshape({token_buffer_size});
         auto slot_mapping_ptr = slot_mapping_h_.data_ptr<int64_t>();
+        // concat_and_cache_mla skips negative slots. Do not let a smaller
+        // replay write padding K/V into slots retained from a previous batch.
+        std::fill_n(slot_mapping_ptr, token_buffer_size, int64_t{-1});
 
-        for (int64_t i = 0; i < input_token_num; ++i) {
+        for (int64_t i = 0; has_block_table && i < input_token_num; ++i) {
             const int32_t batch_id     = batch_indice_ptr[i];
             const int32_t position     = positions_ptr[i];
             const int32_t block_index  = position / seq_size_per_block;
@@ -548,7 +559,7 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
         }
 
         cudaStream_t stream      = GET_CURRENT_STREAM();
-        size_t       total_bytes = static_cast<size_t>(input_token_num) * sizeof(int64_t);
+        size_t       total_bytes = static_cast<size_t>(token_buffer_size) * sizeof(int64_t);
         cudaMemcpyAsync(
             slot_mapping_d_.data_ptr(), slot_mapping_h_.data_ptr(), total_bytes, cudaMemcpyHostToDevice, stream);
 

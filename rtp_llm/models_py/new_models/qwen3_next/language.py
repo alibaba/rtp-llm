@@ -248,6 +248,7 @@ def _extract_config_values(
     load_config: Any,
     *,
     expects_mtp: bool = False,
+    dense_model: bool = False,
 ) -> Dict[str, Any]:
     """Validate the typed runtime configuration used by Qwen3-Next."""
     if not isinstance(model_config, ModelConfig):
@@ -332,17 +333,22 @@ def _extract_config_values(
     if invalid_types:
         raise ValueError(f"Unsupported Qwen3-Next attention types: {invalid_types}")
 
-    expert_num = _positive_int(
-        required_config_value(model_config, "expert_num"), "expert_num"
-    )
-    moe_k = _positive_int(required_config_value(model_config, "moe_k"), "moe_k")
-    if moe_k > expert_num:
-        raise ValueError(f"moe_k={moe_k} cannot exceed expert_num={expert_num}")
-    moe_inter_size = _positive_int(
-        required_config_value(model_config, "moe_inter_size"), "moe_inter_size"
-    )
-    if required_config_value(model_config, "moe_style") != 2:
-        raise ValueError("Qwen3-Next newloader requires shared+routed MoE style 2")
+    if dense_model:
+        if model_config.expert_num != 0 or model_config.moe_layer_index:
+            raise ValueError("Qwen3.5 Dense requires no experts or MoE layers")
+        expert_num = moe_k = moe_inter_size = 0
+    else:
+        expert_num = _positive_int(
+            required_config_value(model_config, "expert_num"), "expert_num"
+        )
+        moe_k = _positive_int(required_config_value(model_config, "moe_k"), "moe_k")
+        if moe_k > expert_num:
+            raise ValueError(f"moe_k={moe_k} cannot exceed expert_num={expert_num}")
+        moe_inter_size = _positive_int(
+            required_config_value(model_config, "moe_inter_size"), "moe_inter_size"
+        )
+        if required_config_value(model_config, "moe_style") != 2:
+            raise ValueError("Qwen3-Next newloader requires shared+routed MoE style 2")
     moe_layer_index = list(required_config_value(model_config, "moe_layer_index"))
     if len(set(moe_layer_index)) != len(moe_layer_index):
         raise ValueError("moe_layer_index contains duplicate layers")
@@ -403,6 +409,8 @@ def _extract_config_values(
         raise ValueError(
             f"expert_num={expert_num} must be divisible by ep_size={ep_size}"
         )
+    if dense_model and ep_size != 1:
+        raise ValueError("Qwen3.5 Dense requires EP size 1")
     if linear_values["linear_num_key_heads"] % attn_tp_size != 0:
         raise ValueError("linear_num_key_heads must be divisible by attention TP")
     if linear_values["linear_num_value_heads"] % attn_tp_size != 0:
@@ -1756,6 +1764,7 @@ class Qwen3NextForCausalLM(GptModelBase):
     """Qwen3-Next Dense + Linear Attention (prefix model.)."""
 
     _expects_mtp = False
+    _dense_model = False
 
     WEIGHTS_MAPPER = WeightsMapper(
         prefix_mapping={
@@ -1890,7 +1899,10 @@ class Qwen3NextForCausalLM(GptModelBase):
 
     def __init__(self, model_config: ModelConfig, load_config: Any):
         cfg = _extract_config_values(
-            model_config, load_config, expects_mtp=self._expects_mtp
+            model_config,
+            load_config,
+            expects_mtp=self._expects_mtp,
+            dense_model=self._dense_model,
         )
         parallelism_config = cfg["parallelism_config"]
         fmha_config = getattr(load_config, "fmha_config", None)
@@ -1960,6 +1972,9 @@ class Qwen3NextForCausalLM(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(inputs)
         attn_meta = _build_qwen3_next_metadata(inputs, hidden_states)
         residual = torch.zeros_like(hidden_states)
+        capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
+        if capture_aux_hidden:
+            self.begin_aux_hidden_capture(hidden_states, attn_meta.is_target_verify)
         for i, layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
                 inputs, self.kv_cache, i
@@ -1977,8 +1992,15 @@ class Qwen3NextForCausalLM(GptModelBase):
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
+            if capture_aux_hidden:
+                self.capture_aux_hidden(i, hidden_states, residual)
+        if capture_aux_hidden:
+            self.finish_aux_hidden_capture()
         hidden_states, residual = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states)
+        outputs = PyModelOutputs(hidden_states)
+        if capture_aux_hidden:
+            outputs.mtp_target_hidden_states = self._mtp_target_hidden_states
+        return outputs
 
 
 class Qwen35MoeForCausalLM(Qwen3NextForCausalLM):
@@ -1997,9 +2019,7 @@ class Qwen35MoeForCausalLM(Qwen3NextForCausalLM):
         if text_tokens_mask is None:
             hidden_states = self.embed_tokens(input_ids)
         else:
-            text_mask = text_tokens_mask.to(
-                device=input_ids.device, dtype=torch.bool
-            )
+            text_mask = text_tokens_mask.to(device=input_ids.device, dtype=torch.bool)
             safe_input_ids = torch.where(text_mask, input_ids, 0)
             hidden_states = self.embed_tokens(safe_input_ids)
             hidden_states = hidden_states * text_mask.unsqueeze(-1)
@@ -2012,6 +2032,12 @@ class Qwen35MoeForCausalLM(Qwen3NextForCausalLM):
         if not features or locations is None:
             return hidden_states
         return self.multimodal_embedding_injector(hidden_states, features, locations)
+
+
+class Qwen35DenseForCausalLM(Qwen35MoeForCausalLM):
+    """Dense Qwen3.5 language backbone, including visual feature injection."""
+
+    _dense_model = True
 
 
 class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):
@@ -2052,7 +2078,7 @@ class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):
             )
         if cfg["hybrid_types"] != [HybridAttentionType.NONE]:
             raise ValueError("Qwen3-Next MTP requires one standard-attention layer")
-        if cfg["moe_layer_index"] != [0]:
+        if not self._dense_model and cfg["moe_layer_index"] != [0]:
             raise ValueError("Qwen3-Next MTP requires MoE layer index [0]")
 
         self.pre_fc_norm_embedding = RMSNorm(
@@ -2129,3 +2155,9 @@ class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):
 
 class Qwen35MoeMTPForCausalLM(Qwen3NextMTPForCausalLM):
     """Qwen3.5 MoE MTP alias with the same runtime layout."""
+
+
+class Qwen35DenseMTPForCausalLM(Qwen3NextMTPForCausalLM):
+    """Qwen3.5 dense EAGLE draft with a standard-attention dense decoder."""
+
+    _dense_model = True
