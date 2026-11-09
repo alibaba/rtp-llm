@@ -14,14 +14,14 @@ import org.flexlb.mock.engine.forward.DecodeSpec;
 /** Native RTP names/units stay native; resolved pool capacity excludes the native null block. */
 public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int totalCacheBlocks, int reserveBlocks,
                         boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
-                        int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize, boolean cpEnabled, int tpSize, int dpSize,
+                        int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize,
                         JsonNode business, ComputeModel compute, int imageToken, long cacheKeySeed) {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     public RtpConfig {
         if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
                 || blockSize < 1 || deviceBlocks < 1 || totalCacheBlocks < deviceBlocks || reserveBlocks < 0 || reserveBlocks > deviceBlocks
-                || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || maxInitedKvStreams < 0 || maxUncachedBatchTokens < 0 || cpSize < 1 || tpSize < 1 || dpSize < 1)
+                || maxSeqLen < 1 || maxBatchTokens < 0 || maxGenerateBatchSize < 1 || maxInitedKvStreams < 0 || maxUncachedBatchTokens < 0 || cpSize < 1)
             throw new IllegalArgumentException("Invalid RTP node configuration");
         business = business.deepCopy();
         Objects.requireNonNull(compute);
@@ -68,29 +68,13 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         int ratio = nativeInt(config, "reserve_block_ratio", 5, 0, 100);
         int reserve = (int) ((long) blocks * ratio / 100);
         int totalBlocks = nativeInt(config, "mock.cache.total.blocks", blocks, blocks, Integer.MAX_VALUE);
-        int tpSize = nativeInt(config, "tp_size", 1, 1, Integer.MAX_VALUE);
-        int dpSize = nativeInt(config, "dp_size", 1, 1, Integer.MAX_VALUE);
-        String cpMethod = cpMethod(config);
-        int prefillCpSize = nativeInt(config, "prefill_cp_size", 0, 0, Integer.MAX_VALUE);
-        // Normalize legacy configurations at load time.
-        if (config.has("prefill_cp_kv_cache_sharded")) {
-            if (!nativeBool(config, "prefill_cp_kv_cache_sharded", false)) {
-                prefillCpSize = 1;
-            } else if (prefillCpSize == 0) {
-                prefillCpSize = tpSize;
-            }
-        }
-        prefillCpSize = Math.max(1, prefillCpSize);
-        if (role == Role.prefill) Math.multiplyExact(blockSize, prefillCpSize);
-        var normalized = (ObjectNode) config;
-        normalized.remove("prefill_cp_kv_cache_sharded");
-        normalized.put("prefill_cp_size", prefillCpSize);
-        // PrefillCPConfig.is_enabled(): general CP uses the TP group.
-        boolean cpEnabled = Set.of("ALL_GATHER", "ALL_GATHER_WITH_OVERLAP", "ALLTOALL").contains(cpMethod);
-        int cpSize = cpEnabled ? tpSize : 1;
+        int prefillCpSize = nativeInt(config, "prefill_cp_size", 1, 0, Integer.MAX_VALUE);
+        int cpSize = role == Role.prefill ? Math.max(1, prefillCpSize) : 1;
+        Math.multiplyExact(blockSize, cpSize);
+        ((ObjectNode) config).put("prefill_cp_size", cpSize);
         if (root.path("environment").has("compute")) throw new IllegalArgumentException("Removed environment.compute: use component.config.compute");
         var compute = ComputeModel.fromSettings(config, Map.of(
-            "cpSize", (double) cpSize, "cpEnabled", cpEnabled ? 1.0 : 0.0, "tpSize", (double) tpSize, "dpSize", (double) dpSize));
+            "cpSize", (double) cpSize, "cpEnabled", cpSize > 1 ? 1.0 : 0.0));
         if (role == Role.prefill && !compute.configuration().decode().equals(new DecodeSpec(null)))
             throw new IllegalArgumentException("Decode progress settings belong in Decode compute");
         if (!root.path("id").isTextual()) throw new IllegalArgumentException("Node id must be a string");
@@ -102,17 +86,14 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             nativeInt(config, "concurrency_limit", 32, 1, Integer.MAX_VALUE),
             nativeInt(config, "max_inited_kv_cache_streams", 0, 0, Integer.MAX_VALUE),
             nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
-            cpSize, cpEnabled, tpSize, dpSize,
+            cpSize,
             config, compute, nativeInt(config, "image_token_id", org.flexlb.mock.protocol.MediaInput.IMAGE_TOKEN, 0, Integer.MAX_VALUE),
             ConfigInput.signedLong(config, "cache_key_hash_seed", 0));
     }
 
-    public int cacheKeyStride() {
-        return role == Role.prefill ? business.path("prefill_cp_size").asInt(1) : 1;
-    }
-    public int cacheBlockSize() { return Math.multiplyExact(blockSize,cacheKeyStride()); }
+    public int cacheBlockSize() { return Math.multiplyExact(blockSize, cpSize); }
 
-    public boolean forceSinglePrefill() { return cpEnabled && business.path("cp_force_single_prefill").asBoolean(true); }
+    public boolean forceSinglePrefill() { return cpSize > 1 && business.path("cp_force_single_prefill").asBoolean(true); }
 
     public boolean groupScheduling() {
         return role == Role.prefill && business.path("mock.scheduler.mode").asText("fifo").equals("group");
@@ -129,9 +110,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
             .put("max_context_batch_size", business.path("max_context_batch_size").asInt())
             .put("cp_force_single_prefill", business.path("cp_force_single_prefill").asBoolean())
-            .put("prefill_cp_size",business.path("prefill_cp_size").asInt())
-            .put("cache_key_block_size",cacheBlockSize())
-            .put("dp_size", dpSize).put("tp_size", tpSize).put("cp_rotate_method", cpMethod(business));
+            .put("prefill_cp_size", cpSize)
+            .put("cache_key_block_size", cacheBlockSize());
         if (role == Role.prefill) {
             result.put("max_inited_kv_cache_streams", maxInitedKvStreams).put("max_batch_tokens_without_cache", maxUncachedBatchTokens); }
         if (business.has("image_token_id")) result.put("image_token_id", imageToken);
@@ -167,16 +147,6 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("cp_force_single_prefill", nativeBool(config, "cp_force_single_prefill", true));
     }
 
-    private static String cpMethod(JsonNode config) {
-        var value = config.get("cp_rotate_method");
-        if (value == null) return "DISABLED";
-        if (value.isTextual()) {
-            String method = value.textValue().toUpperCase(Locale.ROOT);
-            if (Set.of("DISABLED", "UNKNOWN", "ALL_GATHER", "ALL_GATHER_WITH_OVERLAP", "ALLTOALL", "PREFILL_CP").contains(method)) return method;
-        }
-        throw new IllegalArgumentException("Invalid cp_rotate_method");
-    }
-
     public static int nativeInt(JsonNode config, String key, Integer fallback, int min, int max) {
         var value = config.get(key);
         if (value == null && fallback != null) return fallback;
@@ -208,12 +178,12 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         "RECO_VIPSERVER_DOMAIN", "kvcm_vipserver_domain",
         "RECO_SERVER_ADDRESS", "kvcm_server_address");
     private static final Set<String> COMMON = Set.of(
-        "prefill_cp_kv_cache_sharded", "prefill_cp_size", "image_token_id", "cache_key_hash_seed", "test_block_num", "reserve_block_ratio", "seq_size_per_block", "reuse_cache",
+        "prefill_cp_size", "image_token_id", "cache_key_hash_seed", "test_block_num", "reserve_block_ratio", "seq_size_per_block", "reuse_cache",
         "enable_device_cache", "disable_decode_first_malloc_device_reuse", "max_seq_len", "max_batch_tokens_size", "max_context_batch_size", "cp_force_single_prefill",
         "kv_cache_event_publisher_type", "kv_cache_event_manager_endpoint", "kv_cache_event_instance_id",
         "kv_cache_event_instance_group", "kv_cache_event_host_ip_port", "kv_cache_event_snapshot_interval_ms",
         "kvcm_enable_vipserver", "kvcm_vipserver_domain", "kvcm_server_address",
-        "enable_remote_cache", "model_name", "concurrency_limit", "tp_size", "dp_size", "cp_rotate_method", "enable_memory_cache");
+        "enable_remote_cache", "model_name", "concurrency_limit", "enable_memory_cache");
 
     static Set<String> nativeNames(Role role) {
         var names = new HashSet<>(COMMON);

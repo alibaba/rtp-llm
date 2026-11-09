@@ -3,17 +3,10 @@ package org.flexlb.mock.engine.forward;
 import java.util.*;
 
 /** Engine supplies the chosen batch and already-resolved cache hits. No cache or scheduling happens here. */
-public record ForwardBatch(String id, List<Partition> dps) {
+public record ForwardBatch(String id, List<Request> requests) {
     public ForwardBatch {
-        nonblank(id); dps = List.copyOf(dps);
-        if (dps.isEmpty() || dps.stream().map(Partition::rank).distinct().count() != dps.size())
-            throw new IllegalArgumentException("Batch needs distinct DP ranks");
-    }
-    public record Partition(int rank, List<Request> requests) {
-        public Partition {
-            if (rank < 0) throw new IllegalArgumentException("DP rank must be nonnegative");
-            requests = List.copyOf(requests);
-        }
+        nonblank(id);
+        requests = List.copyOf(requests);
     }
     public record Request(String id, long inputTokens, long hitCacheTokens, long outputTokens,
                           long generatedTokens, long stepTokens, int priority, List<Image> images) {

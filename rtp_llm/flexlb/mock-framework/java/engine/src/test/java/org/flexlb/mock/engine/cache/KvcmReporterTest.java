@@ -62,7 +62,7 @@ class KvcmReporterTest {
             server.start();
             try (var reporter = new KvcmReporter(new KvcmReporter.Configuration(
                     URI.create("http://127.0.0.1:" + server.getAddress().getPort()), true, 600000),
-                    new KvcmReporter.Identity("instance", "group", "127.0.0.1:9000", "model", "FP16", false, 1, 1, 1, "full"), cache)) {
+                    new KvcmReporter.Identity("instance", "group", "127.0.0.1:9000", "model", "FP16", false, 1, 1, "full"), cache)) {
                 assertTrue(entered.await(5, TimeUnit.SECONDS));
                 int before = heartbeats.get(); await(() -> heartbeats.get() > before);
                 if (registrationLost) {
@@ -112,7 +112,7 @@ class KvcmReporterTest {
         KvcmReporter reporter(KvCacheManager cache, boolean events, java.util.function.LongSupplier clock) {
             return new KvcmReporter(new KvcmReporter.Configuration(
                 URI.create("http://127.0.0.1:" + server.getAddress().getPort()), events, 600000),
-                new KvcmReporter.Identity("instance", "group", "127.0.0.1:9000", "model", "FP16", false, 1, 1, 1, "full"), cache, clock);
+                new KvcmReporter.Identity("instance", "group", "127.0.0.1:9000", "model", "FP16", false, 1, 1, "full"), cache, clock);
         }
         @Override public void close() { server.stop(0); threads.close(); }
     }

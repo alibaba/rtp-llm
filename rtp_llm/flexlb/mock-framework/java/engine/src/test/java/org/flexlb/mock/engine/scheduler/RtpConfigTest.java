@@ -39,12 +39,12 @@ class RtpConfigTest {
     @Test void normalizesRecognizedNativeEnvValuesAndKeepsAnImmutableRequestedConfiguration() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.remove("seq_size_per_block"); config.put("SEQ_SIZE_PER_BLOCK", "32").put("REUSE_CACHE", "on")
-            .put("TP_SIZE", "2").put("DISABLE_DECODE_FIRST_MALLOC_DEVICE_REUSE", "true");
+            .put("PREFILL_CP_SIZE", "2").put("DISABLE_DECODE_FIRST_MALLOC_DEVICE_REUSE", "true");
         var parsed = load(root);
-        assertEquals(32, parsed.blockSize()); assertTrue(parsed.reuseCache()); assertEquals(2, parsed.tpSize());
+        assertEquals(32, parsed.blockSize()); assertTrue(parsed.reuseCache()); assertEquals(2, parsed.cpSize());
         assertTrue(parsed.disableDecodeFirstReuse());
-        assertEquals("2", parsed.business().path("tp_size").textValue());
-        assertFalse(parsed.business().has("TP_SIZE"));
+        assertEquals(2, parsed.business().path("prefill_cp_size").intValue());
+        assertFalse(parsed.business().has("PREFILL_CP_SIZE"));
         ((ObjectNode) parsed.business()).removeAll(); assertFalse(parsed.business().isEmpty());
     }
 
@@ -126,64 +126,56 @@ class RtpConfigTest {
         assertFalse(load(root).effective().has("device_eviction_policy"));
     }
 
-    @Test void bindsParallelismToTheFormulaWithoutImplicitScaling() throws Exception {
+    @Test void bindsCpToTheFormulaWithoutImplicitScaling() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
-        config.put("cp_rotate_method", "ALL_GATHER").put("tp_size", 4).put("dp_size", 1);
-        config.putObject("mock.compute").putObject("forward").put("expression", "cpSize + tpSize + dpSize + cpEnabled");
+        config.put("prefill_cp_size", 4);
+        config.putObject("mock.compute").putObject("forward").put("expression", "cpSize + cpEnabled");
         var parsed = load(root);
         var request = new org.flexlb.mock.engine.forward.ForwardBatch.Request("r", 2, 0, 1, 0, 1, 50, java.util.List.of());
-        var batch = new org.flexlb.mock.engine.forward.ForwardBatch("b", java.util.List.of(
-            new org.flexlb.mock.engine.forward.ForwardBatch.Partition(0, java.util.List.of(request))));
-        assertEquals(java.time.Duration.ofMillis(10), parsed.compute().plan(parsed.role(), parsed.id(), batch).planned());
-        assertEquals(4, parsed.cpSize()); assertTrue(parsed.cpEnabled());
-        assertEquals("ALL_GATHER", parsed.effective().path("cp_rotate_method").asText());
+        var batch = new org.flexlb.mock.engine.forward.ForwardBatch("b", java.util.List.of(request));
+        assertEquals(java.time.Duration.ofMillis(5), parsed.compute().plan(parsed.role(), parsed.id(), batch).planned());
+        assertEquals(4, parsed.cpSize()); assertTrue(parsed.forceSinglePrefill());
         config.putObject("mock.compute").putObject("forward").put("expression", "2");
         assertEquals(java.time.Duration.ofMillis(2), load(root).compute().plan(parsed.role(), parsed.id(), batch).planned());
     }
 
-    @Test void nativeParallelismSelectsFormulaConstantsWithoutSpawningRanks() throws Exception {
+    @Test void legacyParallelismSettingsDoNotEnableCp() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
-        config.put("tp_size", 4).put("dp_size", 3);
-        assertEquals(3, load(root).dpSize());
-        assertFalse(load(root).cpEnabled()); assertEquals(1, load(root).cpSize());
-        for (String method : java.util.List.of("ALL_GATHER", "ALL_GATHER_WITH_OVERLAP", "alltoall")) {
-            config.put("cp_rotate_method", method);
-            assertTrue(load(root).cpEnabled()); assertEquals(4, load(root).cpSize());
+        config.put("tp_size", 4).put("dp_size", 3).put("cp_rotate_method", "ALL_GATHER")
+            .put("prefill_cp_kv_cache_sharded", true);
+        var parsed = load(root);
+        assertEquals(1, parsed.cpSize());
+        assertFalse(parsed.forceSinglePrefill());
+        for (String name : java.util.List.of("tp_size", "dp_size", "cp_rotate_method", "prefill_cp_kv_cache_sharded")) {
+            assertFalse(parsed.business().has(name));
+            assertFalse(parsed.effective().has(name));
         }
-        // The special PREFILL_CP path is distinct from general CP in real PrefillCPConfig.
-        config.put("cp_rotate_method", "PREFILL_CP").put("prefill_cp_size", 2);
-        assertFalse(load(root).cpEnabled()); assertEquals(1, load(root).cpSize());
-        assertEquals(2,load(root).effective().path("prefill_cp_size").asInt());
-        config.put("cp_rotate_method", "misspelled");
-        assertThrows(IllegalArgumentException.class, () -> load(root));
     }
 
-    @Test void shardedCacheGeometryIsSeparateFromComputeCpAndDecodeUpstreamCp() throws Exception {
-        var root=root();var config=(ObjectNode)root.path("component").path("config");
-        config.put("seq_size_per_block",128).put("tp_size",4).put("cp_rotate_method","ALL_GATHER");
-        assertEquals(1,load(root).cacheKeyStride());
-        config.put("prefill_cp_size",4);
-        assertEquals(4,load(root).cacheKeyStride());assertEquals(512,load(root).cacheBlockSize());
-        assertEquals(128,load(root).effective().path("seq_size_per_block").asInt());
-        var env=RtpConfig.fromEnvironment("whale-p",org.flexlb.mock.protocol.Role.prefill,java.util.Map.of(
-            "SEQ_SIZE_PER_BLOCK","128","TEST_BLOCK_NUM","17",
-            "PREFILL_CP_SIZE","4","MOCK_COMPUTE_FORWARD_EXPRESSION","1"));
-        assertEquals(512,env.cacheBlockSize());assertEquals(128,env.blockSize());
-        config.put("prefill_cp_size",2);
-        assertEquals(256,load(root).cacheBlockSize());
-        config.put("prefill_cp_size",4).put("cp_rotate_method","DISABLED");
-        assertEquals(512,load(root).cacheBlockSize());
-        config.put("prefill_cp_kv_cache_sharded",false);
-        assertEquals(128,load(root).cacheBlockSize());
-        config.put("cp_rotate_method","ALL_GATHER").put("prefill_cp_kv_cache_sharded",true).remove("prefill_cp_size");
-        assertEquals(512,load(root).cacheBlockSize());
-        assertFalse(load(root).effective().has("prefill_cp_kv_cache_sharded"));
-        config.remove("prefill_cp_kv_cache_sharded");
-        config.put("prefill_cp_size",4);
-        root.put("component_role","decode");
-        assertEquals(1,load(root).cacheKeyStride());assertEquals(128,load(root).cacheBlockSize());
-        config.put("prefill_cp_kv_cache_sharded","not-a-bool");
-        assertThrows(IllegalArgumentException.class,()->load(root));
+    @Test void cpControlsPrefillCacheGeometryAndDecodeKeepsBaseBlocks() throws Exception {
+        var root = root(); var config = (ObjectNode) root.path("component").path("config");
+        config.put("seq_size_per_block", 128).put("prefill_cp_size", 4);
+        var parsed = load(root);
+        assertEquals(4, parsed.cpSize());
+        assertEquals(512, parsed.cacheBlockSize());
+        assertEquals(128, parsed.effective().path("seq_size_per_block").asInt());
+        var env = RtpConfig.fromEnvironment("whale-p", org.flexlb.mock.protocol.Role.prefill, java.util.Map.of(
+            "SEQ_SIZE_PER_BLOCK", "128", "TEST_BLOCK_NUM", "17",
+            "PREFILL_CP_SIZE", "4", "MOCK_COMPUTE_FORWARD_EXPRESSION", "1"));
+        assertEquals(512, env.cacheBlockSize());
+        assertEquals(128, env.blockSize());
+        config.put("prefill_cp_size", 2);
+        assertEquals(256, load(root).cacheBlockSize());
+        config.put("prefill_cp_size", 0);
+        assertEquals(128, load(root).cacheBlockSize());
+        config.put("prefill_cp_size", -1);
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+        config.put("prefill_cp_size", 4);
+        root.put("component_role", "decode");
+        var decode = load(root);
+        assertEquals(1, decode.cpSize());
+        assertEquals(128, decode.cacheBlockSize());
+        assertFalse(decode.forceSinglePrefill());
     }
 
     @Test void implementedSettingsValidateWhileUnsupportedSettingsDoNotBecomeEffective() throws Exception {
@@ -226,7 +218,7 @@ class RtpConfigTest {
         for (String role : java.util.List.of("prefill", "decode")) {
             var root = JSON.<ObjectNode>valueToTree(LLMMockEngineTest.configuration(role));
             var config = (ObjectNode) root.path("component").path("config");
-            config.put("cp_rotate_method", "ALL_GATHER").put("tp_size", 4).put("dp_size", 3);
+            config.put("prefill_cp_size", 4);
             config.put("mock.scheduler.mode", "fifo");
             var parsed = load(root);
             var env = new java.util.HashMap<String, String>();

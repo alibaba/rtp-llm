@@ -22,7 +22,7 @@ public final class ComputeProbe {
         }
         var models = ComputeModel.fromSettings(settings, Map.of());
         var request = new ForwardBatch.Request("request", 10, 2, 32, 0, 8, 0, List.of());
-        var batch = new ForwardBatch("batch", List.of(new ForwardBatch.Partition(0, List.of(request))));
+        var batch = new ForwardBatch("batch", List.of(request));
         var sample = models.plan(Role.prefill, "prefill-0", batch);
         try (var timer = new SimulatedCompute()) {
             var outcome = timer.submit(sample).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);

@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class EngineLoopTest {
     private static EngineScheduler.Work work(String id) {
         var item = new ForwardBatch.Request(id, 4, 0, 8, 0, 4, 0, List.of());
-        return new EngineScheduler.Work(new Object(), new ForwardBatch(id, List.of(new ForwardBatch.Partition(0, List.of(item)))));
+        return new EngineScheduler.Work(new Object(), new ForwardBatch(id, List.of(item)));
     }
 
     /** Two policies with different queue order exercise the same execution loop. */

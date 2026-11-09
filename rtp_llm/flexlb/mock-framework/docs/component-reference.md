@@ -178,7 +178,7 @@ P 每轮只产首 token，finished 表示整个请求是否结束，不表示 Pr
 
 ForwardBatch 保留请求长度、实际缓存命中、已生成长度、stepTokens、优先级和图片 shape。FormulaForward 只计算 Duration，不保留没有实际替换入口的 ForwardModel 接口；SimulatedCompute 只执行可取消等待；公共 Compute 的产出计算不修改请求或队列。一个 Engine 同时至多一个 Forward，完成结果只提交一次。
 
-公式复用生产 ArithmeticFormula 的 param(name, value)、sum 等函数，单位 ms，保留到 ns；非法变量、负值、非有限值和溢出拒绝。逐请求变量只在 sum 中使用：inputTokens/hitCacheTokens/computeTokens/hasHitCache/outputTokens/generatedTokens/contextTokens/stepTokens/priority/imageCount/imagePixels；batch 使用 batchSize、dpRank、total/max 派生变量。RTP 额外绑定 cpSize、cpEnabled（0/1）、tpSize、dpSize，只有显式引用才参与计算，不自动缩放已有拟合公式。默认 FormulaForward 不猜测多个 DP 的组合方式。
+公式复用生产 ArithmeticFormula 的 param(name, value)、sum 等函数，结果以 ms 为单位，保留到 ns。非法变量、负值、非有限值和溢出都会被拒绝。逐请求变量 inputTokens/hitCacheTokens/computeTokens/hasHitCache/outputTokens/generatedTokens/contextTokens/stepTokens/priority/imageCount/imagePixels 只在 sum 中使用。Batch 使用 batchSize 和 total/max 派生变量。RTP 额外绑定 cpSize 和 cpEnabled（0/1）。公式显式引用时才使用这两个变量。
 
 倍率直接乘入 forward.expression，不提供独立 scale/noise.scale。噪声位于 forward.noise，默认 stddev.ms/stddev.ratio=0；启用时要求 seed 和正 max.deviation.ms，扰动有界、最终耗时不小于 0。seed、Engine 身份、角色和 batch 身份固定一次耗时样本，取消批次不补完成指标。当前 DeepSeek Case 不启用噪声。
 
@@ -204,9 +204,8 @@ Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.express
 | concurrency_limit | 32，正整数 | P/D 每轮请求数上限；real 的 ConcurrencyConfig 输入经 engine_config.py 写入内部 max_generate_batch_size。 |
 | reserve_block_ratio | 5，0–100 | 首次分配预留百分比。 |
 | reuse_cache / enable_device_cache | false / true | 前缀复用和 Device 索引。 |
-| tp_size / dp_size | 1 / 1，正整数 | real 并行配置；tp_size 用于原生状态/接入元数据，二者分别绑定公式 tpSize/dpSize，不模拟 rank 间执行。 |
-| prefill_cp_size | 1（0 视为默认） | Mock P 每组包含的基础缓存块数。大于 1 时只取每组末尾的键，逻辑块大小为基础块大小乘该值。D 的本地 FULL KV 始终按基础块管理。 |
-| cp_rotate_method | DISABLED | 沿用 real PrefillCPConfig；ALL_GATHER、ALL_GATHER_WITH_OVERLAP、ALLTOALL 开启通用 CP，cpSize=tp_size、cpEnabled=1，否则为 1/0。PREFILL_CP 的计算策略不模拟；它与通用 CP 都可启用下述 P KV 分片布局。 |
+| prefill_cp_size | 1（0 视为默认） | Mock P 每组包含的基础缓存块数。大于 1 时只取每组末尾的键，逻辑块大小为基础块大小乘该值，未命中 token 的准入预算按 2 × CP size 对齐。D 的本地 FULL KV 始终按基础块管理。 |
+| cp_force_single_prefill | true | 仅在 P 的 CP size 大于 1 时生效。设为 false 可在同轮接纳多个 Prefill。 |
 | max_batch_tokens_size | 0，启动时解析为 max_context_batch_size × max_seq_len | P 的 batch token/矩形准入；合法 singleton 可超过预算。D 不使用该预算选批，仍通过 WorkerStatus 报告。 |
 | max_context_batch_size | 1，正整数 | 只在 max_batch_tokens_size 缺省或为 0 时参与预算推导，不直接限制 batch 请求数。 |
 | max_batch_tokens_without_cache / max_inited_kv_cache_streams | 0 / 0 | 仅 P 生效；0 不启用对应限制。 |
@@ -232,7 +231,7 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 
 ### ENV 输入
 
-real 公开参数按其 server_args 声明读取 ENV。P/D 上表的公开项对应大写下划线名，例如 `CONCURRENCY_LIMIT`、`SEQ_SIZE_PER_BLOCK`、`TP_SIZE`、`DP_SIZE`、`CP_ROTATE_METHOD`。V 的 batch 参数分别使用 `VIT_GPU_MAX_BATCH_SIZE`、`VIT_GPU_BATCH_WAIT_MS`，队列参数为 `VIT_CONCURRENCY`、`VIT_MAX_QUEUE_SIZE`；缓存参数为 `MM_CACHE_GPU_MAX_BYTES`、`MM_CACHE_CPU_MAX_BYTES`、`MM_HASH_KEY_CACHE_MAX_BYTES`。不会从这些 ENV 名反推另一套默认值。
+real 公开参数按其 server_args 声明读取 ENV。P/D 上表的公开项对应大写下划线名，例如 `CONCURRENCY_LIMIT`、`SEQ_SIZE_PER_BLOCK`、`PREFILL_CP_SIZE`、`CP_FORCE_SINGLE_PREFILL`。V 的 batch 参数分别使用 `VIT_GPU_MAX_BATCH_SIZE`、`VIT_GPU_BATCH_WAIT_MS`，队列参数为 `VIT_CONCURRENCY`、`VIT_MAX_QUEUE_SIZE`；缓存参数为 `MM_CACHE_GPU_MAX_BYTES`、`MM_CACHE_CPU_MAX_BYTES`、`MM_HASH_KEY_CACHE_MAX_BYTES`。不会从这些 ENV 名反推另一套默认值。
 
 Mock 名称的点号转换为下划线并大写，例如 `mock.compute.decode.tokens.per.step` → `MOCK_COMPUTE_DECODE_TOKENS_PER_STEP`。`MOCK_COMPUTE_*`、`MOCK_CACHE_*`、`MOCK_VIT_*` 是严格校验的业务命名空间；框架启动变量另行处理。只读取已声明的业务字段，其他进程 ENV 不写入配置产物。
 
@@ -475,9 +474,9 @@ Scheduler/EngineLoop 的外部终止入口为 `abort` / `abortRequest`，必须�
 ViT Cache Claim 和 Forward Work 只提供只读 CompletionStage；调用方转换得到的 CompletableFuture 是独立副本，完成或取消副本不会修改共享结果。Claim.close() 幂等，每个消费者只归还自己的引用，最后一个消费者离开才触发放弃处理。
 
 
-### CP：只模拟缓存布局，不模拟 rank 通信
+### Prefill CP
 
-采集数据用最终共享前缀跨度描述前缀关系，展开后的回放数据保存 token 和请求信息。见[标准压缩输入与分片](architecture.md#标准压缩输入与分片)。本地回放用 Client 和 Mock P 的启动配置指定相同的 `seq_size_per_block`、`cache_key_hash_seed` 和 `prefill_cp_size`。例如基础块 128、CP4 时，Client 发 K4、K8，并将请求的 `cache_key_block_size` 设为 512。CP size 缺省时按 1，Client 缺省基础块大小时不生成路由键。`cp_rotate_method` 和 `tp_size` 仍用于已有的计算模型和 Prefill 准入。
+采集数据用最终共享前缀跨度描述前缀关系，展开后的回放数据保存 token 和请求信息。见[标准压缩输入与分片](architecture.md#标准压缩输入与分片)。本地回放用 Client 和 Mock P 的启动配置指定相同的 `seq_size_per_block`、`cache_key_hash_seed` 和 `prefill_cp_size`。例如基础块 128、CP4 时，Client 发 K4、K8，并将请求的 `cache_key_block_size` 设为 512。CP size 缺省时按 1，Client 缺省基础块大小时不生成路由键。
 
 Whale 使用真实 Frontend 时，需要让 Mock P 遵守真实 Frontend 的缓存路由合同：相同 `cache_key_hash_seed` 和基础 `seq_size_per_block`，并对齐 CP 分片配置。基础块为 128 时，Mock P 设置 `prefill_cp_size=4`，按 128-token 块滚动哈希并保留 K4、K8。媒体身份也在基础块边界参与哈希。P 的 KV 分配、复用、完整块提交、CacheStatus.block_size 和 token 容量统一使用 512 的逻辑边界；`test_block_num` 仍是每 rank 物理块数（含 null block）。有效配置额外显示只读的 `cache_key_block_size`。
 
