@@ -79,11 +79,7 @@ def is_supported(a, weight):
 
 
 def _legacy(m, mode):
-    mode = (
-        (os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto") if mode is None else mode)
-        .strip()
-        .lower()
-    )
+    mode = ("auto" if mode is None else mode).strip().lower()
     return mode == "legacy" or (mode == "auto" and m * 8192 < 4 * 1024 * 1024)
 
 

@@ -31,11 +31,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Route-time queue capture regression on the final Prefill runtime boundary. */
+/**
+ * Route-time queue capture regression on the final Prefill runtime boundary.
+ */
 @Tag("performance-regression")
 class WorkerBatcherPerformanceTest {
-
     private static final int[] QUEUE_DEPTHS = {0, 1, 32, 128, 512};
+
     private static final int MEASUREMENT_ROUNDS = 5;
 
     @Test
@@ -282,6 +284,19 @@ class WorkerBatcherPerformanceTest {
         return runtime;
     }
 
+    private static PrefillEndpoint stablePrefillEndpoint() {
+        PrefillTimePredictor.Evaluator evaluator = mock(PrefillTimePredictor.Evaluator.class);
+        PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
+        when(predictor.evaluator()).thenReturn(evaluator);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getPredictor()).thenReturn(predictor);
+        WorkerStatus status =
+                WorkerStatus.createDiscovered(
+                        RoleType.PREFILL, "perf", "127.0.0.1", 8080, 8090, "perf-site");
+        when(endpoint.getStatus()).thenReturn(status);
+        return endpoint;
+    }
+
     private static ScheduledRequest item(
             FlexlbConfig config,
             PrefillEndpoint endpoint,
@@ -308,19 +323,9 @@ class WorkerBatcherPerformanceTest {
                 enqueuedAtMs);
     }
 
-    private static PrefillEndpoint stablePrefillEndpoint() {
-        PrefillTimePredictor.Evaluator evaluator = mock(PrefillTimePredictor.Evaluator.class);
-        PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
-        when(predictor.evaluator()).thenReturn(evaluator);
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        when(endpoint.getPredictor()).thenReturn(predictor);
-        WorkerStatus status =
-                WorkerStatus.createDiscovered(
-                        RoleType.PREFILL, "perf", "127.0.0.1", 8080, 8090, "perf-site");
-        when(endpoint.getStatus()).thenReturn(status);
-        return endpoint;
-    }
-
+    /**
+     * Blocks delivery preparation to measure batcher progress under contention.
+     */
     private static final class BlockingDeliveryStrategy implements DeliveryStrategy {
 
         private final CapacityBoundary.Availability availability =

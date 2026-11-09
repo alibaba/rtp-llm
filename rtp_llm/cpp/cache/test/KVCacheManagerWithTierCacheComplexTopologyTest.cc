@@ -493,13 +493,12 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
             runtime_config.fifo_scheduler_config.max_batch_tokens_size = 2048;
             PDSepConfig pd_sep_config;
             pd_sep_config.role_type = RoleType::PREFILL;
-            ParallelismConfig   parallelism_config;
-            ModelSpecificConfig model_specific_config;
+            ParallelismConfig parallelism_config;
 
             auto prefill_stream = std::make_shared<NormalGenerateStream>(
                 generate_input, model_config, runtime_config, resource_context, nullptr);
             auto scheduler = std::make_shared<FIFOScheduler>(
-                runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, manager_);
+                runtime_config, model_config, pd_sep_config, parallelism_config, manager_);
             ASSERT_TRUE(scheduler->enqueue(prefill_stream).ok());
             auto first_schedule = scheduler->schedule();
             ASSERT_TRUE(first_schedule.ok());

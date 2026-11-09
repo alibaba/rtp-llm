@@ -17,6 +17,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks Encoder load selection across health, cache estimates and scheduling modes.
+ */
 class EncoderStrategyTest {
     private final WorkerDirectory directory = mock(WorkerDirectory.class);
     private final EncoderStrategy strategy = new EncoderStrategy(directory);

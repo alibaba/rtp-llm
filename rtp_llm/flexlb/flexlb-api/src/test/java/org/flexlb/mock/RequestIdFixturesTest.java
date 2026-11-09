@@ -6,6 +6,9 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Checks canonical engine request IDs and rejects values outside the supported representation.
+ */
 class RequestIdFixturesTest {
 
     @Test

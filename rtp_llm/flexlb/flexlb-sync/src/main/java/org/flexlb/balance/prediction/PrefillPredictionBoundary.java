@@ -1,8 +1,9 @@
 package org.flexlb.balance.prediction;
 
-/** Sole validation boundary for values returned by Prefill predictors. */
+/**
+ * Sole validation boundary for values returned by Prefill predictors.
+ */
 public final class PrefillPredictionBoundary {
-
     private PrefillPredictionBoundary() {}
 
     /** Evaluate one request and require a non-negative duration. */
@@ -13,12 +14,6 @@ public final class PrefillPredictionBoundary {
             throw new InvalidPrefillPredictionException("SINGLE_REQUEST", predictedMs);
         }
         return predictedMs;
-    }
-
-    /** Evaluate a group while retaining fractional milliseconds for planning. */
-    public static double predictDecisionGroupMs(
-            PrefillTimePredictor.Evaluator evaluator, PrefillBatchFeatures features) {
-        return requireValidDecisionGroupMs(evaluator.predictBatchMs(features));
     }
 
     /** Evaluate committed work and convert it to lifecycle milliseconds. */
@@ -39,5 +34,11 @@ public final class PrefillPredictionBoundary {
             throw new InvalidPrefillPredictionException("DECISION_GROUP", predictedMs);
         }
         return predictedMs;
+    }
+
+    /** Evaluate a group while retaining fractional milliseconds for planning. */
+    public static double predictDecisionGroupMs(
+            PrefillTimePredictor.Evaluator evaluator, PrefillBatchFeatures features) {
+        return requireValidDecisionGroupMs(evaluator.predictBatchMs(features));
     }
 }

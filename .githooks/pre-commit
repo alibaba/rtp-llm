@@ -1,3 +1,9 @@
 #!/bin/sh
 
-pre-commit run
+set -eu
+
+if command -v pre-commit >/dev/null 2>&1; then
+    exec pre-commit run
+fi
+
+exec python3 -m pre_commit run

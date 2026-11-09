@@ -3,7 +3,7 @@
 MegaMoE consumes a symmetric-memory dispatch buffer.  The original path builds
 temporary FP8 activation and UE8M0 scale tensors, then copies four tensors into
 that buffer.  This module centralizes the implementation choice so Triton/CUDA
-packers can coexist with the exact torch implementation for explicit debug use.
+packer below is the reference oracle for tests; the runtime always uses the fused packer.
 """
 
 from __future__ import annotations

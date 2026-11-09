@@ -8,10 +8,19 @@ package org.flexlb.balance.prediction;
  * change an evaluation already in progress.
  */
 public interface PrefillTimePredictor {
-
     /** Capture the immutable model used by one scheduling operation. */
     Evaluator evaluator();
 
+    /**
+     * Publish learning from one completed batch when applicable.
+     *
+     * @return whether a replacement evaluator was published
+     */
+    LearningResult learn(PrefillBatchFeatures features, long predictedMs, long actualMs);
+
+    /**
+     * Captures one predictor model for consistent scalar and batch estimates during a decision.
+     */
     interface Evaluator {
         /**
          * Identity of the immutable model snapshot behind this evaluator.
@@ -41,7 +50,9 @@ public interface PrefillTimePredictor {
         double predictBatchMs(PrefillBatchFeatures features);
     }
 
-    /** Not shared or reused after a membership/model change; result retains fractional milliseconds. */
+    /**
+     * Not shared or reused after a membership/model change; result retains fractional milliseconds.
+     */
     @FunctionalInterface
     interface BatchPrediction {
         double append(long seqLen, long hitCache);
@@ -51,11 +62,4 @@ public interface PrefillTimePredictor {
         MODEL_UNCHANGED,
         MODEL_UPDATED
     }
-
-    /**
-     * Publish learning from one completed batch when applicable.
-     *
-     * @return whether a replacement evaluator was published
-     */
-    LearningResult learn(PrefillBatchFeatures features, long predictedMs, long actualMs);
 }

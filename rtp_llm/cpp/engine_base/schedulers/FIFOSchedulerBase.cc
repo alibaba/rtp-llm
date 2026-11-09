@@ -28,11 +28,9 @@ FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runt
                                      const ModelConfig&                     model_config,
                                      const PDSepConfig&                     pd_sep_config,
                                      const ParallelismConfig&               parallelism_config,
-                                     const ModelSpecificConfig&             model_specific_config,
                                      const std::shared_ptr<KVCacheManager>& cache_manager,
                                      const kmonitor::MetricsReporterPtr     metrics_reporter):
     pd_sep_config_(pd_sep_config),
-    model_specific_config_(model_specific_config),
     cache_manager_(cache_manager),
     max_seq_len_(model_config.max_seq_len),
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),

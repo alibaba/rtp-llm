@@ -40,21 +40,27 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.flexlb.consistency.LBStatusConsistencyService.MASTER_CHANGE_NOTIFY_PATH;
 
+/**
+ * <p>Initialization prepares the ZooKeeper client and leader selector; start joins election.
+ * Leadership and connection callbacks update the advertised master. Offline and destroy withdraw
+ * participation and close the owned election resources.
+ */
 @Slf4j
 @Component
 public class ZookeeperMasterElectService implements LeaderSelectorListener {
-
     private static final org.slf4j.Logger LOGGER = LoggerFactory.getLogger("syncConsistencyLogger");
-
     private static final String MASTER_NAMESPACE = "whale-master";
     private static final String MASTER_LEADER_PATH = "/master_lb_leader/";
+
     private final ZookeeperConsistencyConfig consistencyConfig;
     private final GeneralHttpNettyService generalHttpNettyService;
     private final EngineHealthReporter engineHealthReporter;
     private final Environment environment;
     private final DeploymentIdentity deploymentIdentity;
+
     @Setter private String roleId;
     @Setter private String localIp;
+
     @Setter private int port;
 
     @Setter(AccessLevel.PACKAGE)
@@ -66,6 +72,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     @Getter private volatile boolean isMaster;
     private volatile boolean markOffline;
     private volatile boolean autoRejoin = true;
+
     private volatile String cachedMasterHostIp;
 
     private final AtomicReference<CountDownLatch> leaderCloseLatchRef = new AtomicReference<>();
@@ -103,52 +110,6 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         reportMasterEvent(ZkMasterEvent.LB_SERVICE_INIT);
     }
 
-    private void initializeRoleId() {
-        roleId = deploymentIdentity.getDeploymentId();
-    }
-
-    private void initializeIpAndPort() {
-        try {
-            localIp = InetAddress.getLocalHost().getHostAddress();
-        } catch (UnknownHostException e) {
-            throw new RuntimeException("Failed to retrieve local host address", e);
-        }
-        // Read from Spring Environment to respect --server.port= CLI args;
-        // fall back to JVM system property.
-        String portStr = environment.getProperty("server.port");
-        if (portStr == null) {
-            portStr = System.getProperty("server.port", "7001");
-        }
-        port = Integer.parseInt(portStr);
-    }
-
-    private void initializeZookeeperClient() {
-        try {
-            client =
-                    CuratorFrameworkFactory.builder()
-                            .namespace(MASTER_NAMESPACE)
-                            .connectString(consistencyConfig.getConnectString())
-                            .sessionTimeoutMs(consistencyConfig.getSessionTimeoutMs())
-                            .connectionTimeoutMs(consistencyConfig.getConnectionTimeoutMs())
-                            .retryPolicy(new ExponentialBackoffRetry(1000, 3))
-                            .build();
-            client.start();
-            leaderSelector = new LeaderSelector(client, MASTER_LEADER_PATH + roleId, this);
-            leaderSelector.setId(localIp);
-            // Automatically rejoin election after master task completes
-            leaderSelector.autoRequeue();
-        } catch (Exception e) {
-            LOGGER.warn(
-                    "Failed to initialize Zookeeper client and leader selector for roleId: {}, currentHost: {}",
-                    roleId,
-                    localIp,
-                    e);
-            closeClient();
-            closeLeaderSelector();
-            throw new RuntimeException("Initialization failed", e);
-        }
-    }
-
     /**
      * Start election process
      */
@@ -158,117 +119,6 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         leaderSelector.start();
         reportMasterEvent(ZkMasterEvent.LB_SERVICE_START);
         log.warn("ZKMasterElector roleId:{} currentHost:{} doStart finished.", roleId, localIp);
-    }
-
-    /**
-     * Close election selector
-     */
-    public void offline() {
-        log.warn("ZKMasterElector roleId:{} currentHost:{} offline start.", roleId, localIp);
-
-        markOffline = true;
-        autoRejoin = false;
-        reportMasterEvent(ZkMasterEvent.LB_SERVICE_OFFLINE);
-
-        if (!isMaster) {
-            closeLeaderSelector();
-        } else {
-            handleMasterOffline();
-        }
-
-        log.warn("ZKMasterElector roleId:{} currentHost:{} offline finished.", roleId, localIp);
-    }
-
-    private void handleMasterOffline() {
-        trySignalCloseLatch();
-
-        if (isSingleNodeCluster()) {
-            LOGGER.warn(
-                    "ZKMasterElector roleId:{} currentHost:{} single node cluster, skip leadership transfer wait.",
-                    roleId,
-                    localIp);
-            return;
-        }
-
-        waitForLeadershipTransfer();
-    }
-
-    private boolean isSingleNodeCluster() {
-        try {
-            return leaderSelector.getParticipants().size() <= 1;
-        } catch (Exception e) {
-            LOGGER.warn(
-                    "ZKMasterElector roleId:{} currentHost:{} error while checking participants, assume single node.",
-                    roleId,
-                    localIp,
-                    e);
-            return true;
-        }
-    }
-
-    @SuppressWarnings("BusyWait")
-    private void waitForLeadershipTransfer() {
-        LOGGER.warn(
-                "ZKMasterElector roleId:{} currentHost:{} waiting for leadership transfer to complete.",
-                roleId,
-                localIp);
-
-        int waitCount = 0;
-        final int MAX_WAIT_COUNT = 30; // 30 seconds max
-        while (waitCount < MAX_WAIT_COUNT) {
-            try {
-                if (!isStillMaster()) {
-                    LOGGER.warn(
-                            "ZKMasterElector roleId:{} currentHost:{} leadership transferred to {}, waitCount: {}.",
-                            roleId,
-                            localIp,
-                            cachedMasterHostIp,
-                            waitCount);
-                    return;
-                }
-
-                waitCount++;
-                LOGGER.warn(
-                        "ZKMasterElector roleId:{} currentHost:{} still waiting for leadership transfer, waitCount: {}, currentMaster: {}.",
-                        roleId,
-                        localIp,
-                        waitCount,
-                        cachedMasterHostIp);
-                Thread.sleep(1000);
-
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                LOGGER.warn(
-                        "ZKMasterElector roleId:{} currentHost:{} wait interrupted, waitCount: {}.",
-                        roleId,
-                        localIp,
-                        waitCount);
-                return;
-            } catch (Exception e) {
-                LOGGER.warn(
-                        "ZKMasterElector roleId:{} currentHost:{} error while waiting for leadership transfer, waitCount: {}.",
-                        roleId,
-                        localIp,
-                        waitCount,
-                        e);
-                try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-            }
-        }
-        LOGGER.warn(
-                "ZKMasterElector roleId:{} currentHost:{} leadership transfer timeout after {} seconds, forcing exit.",
-                roleId,
-                localIp,
-                MAX_WAIT_COUNT);
-    }
-
-    private boolean isStillMaster() {
-        updateLatestMaster();
-        return localIp.equals(cachedMasterHostIp);
     }
 
     public String getMasterHostIp(boolean forceSync) {
@@ -282,6 +132,34 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             return cachedMasterHostIp;
         }
         return null;
+    }
+
+    /**
+     * Update and retrieve latest master node
+     */
+    public void updateLatestMaster() {
+        synchronized (this) {
+            try {
+                String leaderId = leaderSelector.getLeader().getId();
+                if (StringUtils.isNotBlank(leaderId)) {
+                    if (!leaderId.equals(cachedMasterHostIp)) {
+                        LOGGER.warn(
+                                "ZKMasterElector roleId:{} currentHost:{} leaderId change from {} to {}.",
+                                roleId,
+                                localIp,
+                                cachedMasterHostIp,
+                                leaderId);
+                    }
+                    cachedMasterHostIp = leaderId;
+                }
+            } catch (Exception e) {
+                LOGGER.warn(
+                        "ZKMasterElector roleId:{} currentHost:{} getLeaderID error.",
+                        roleId,
+                        localIp,
+                        e);
+            }
+        }
     }
 
     /**
@@ -372,32 +250,204 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         }
     }
 
+    public void destroy() {
+        LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} destroy start.", roleId, localIp);
+        offline();
+        closeClient();
+        reportMasterEvent(ZkMasterEvent.SERVICE_DESTROY);
+        LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} destroy finished.", roleId, localIp);
+    }
+
     /**
-     * Update and retrieve latest master node
+     * Close election selector
      */
-    public void updateLatestMaster() {
-        synchronized (this) {
+    public void offline() {
+        log.warn("ZKMasterElector roleId:{} currentHost:{} offline start.", roleId, localIp);
+
+        markOffline = true;
+        autoRejoin = false;
+        reportMasterEvent(ZkMasterEvent.LB_SERVICE_OFFLINE);
+
+        if (!isMaster) {
+            closeLeaderSelector();
+        } else {
+            handleMasterOffline();
+        }
+
+        log.warn("ZKMasterElector roleId:{} currentHost:{} offline finished.", roleId, localIp);
+    }
+
+    private void initializeRoleId() {
+        roleId = deploymentIdentity.getDeploymentId();
+    }
+
+    private void initializeIpAndPort() {
+        try {
+            localIp = InetAddress.getLocalHost().getHostAddress();
+        } catch (UnknownHostException e) {
+            throw new RuntimeException("Failed to retrieve local host address", e);
+        }
+        // Read from Spring Environment to respect --server.port= CLI args;
+        // fall back to JVM system property.
+        String portStr = environment.getProperty("server.port");
+        if (portStr == null) {
+            portStr = System.getProperty("server.port", "7001");
+        }
+        port = Integer.parseInt(portStr);
+    }
+
+    private void initializeZookeeperClient() {
+        try {
+            client =
+                    CuratorFrameworkFactory.builder()
+                            .namespace(MASTER_NAMESPACE)
+                            .connectString(consistencyConfig.getConnectString())
+                            .sessionTimeoutMs(consistencyConfig.getSessionTimeoutMs())
+                            .connectionTimeoutMs(consistencyConfig.getConnectionTimeoutMs())
+                            .retryPolicy(new ExponentialBackoffRetry(1000, 3))
+                            .build();
+            client.start();
+            leaderSelector = new LeaderSelector(client, MASTER_LEADER_PATH + roleId, this);
+            leaderSelector.setId(localIp);
+            // Automatically rejoin election after master task completes
+            leaderSelector.autoRequeue();
+        } catch (Exception e) {
+            LOGGER.warn(
+                    "Failed to initialize Zookeeper client and leader selector for roleId: {}, currentHost: {}",
+                    roleId,
+                    localIp,
+                    e);
+            closeClient();
+            closeLeaderSelector();
+            throw new RuntimeException("Initialization failed", e);
+        }
+    }
+
+    private void closeClient() {
+        if (client != null) {
             try {
-                String leaderId = leaderSelector.getLeader().getId();
-                if (StringUtils.isNotBlank(leaderId)) {
-                    if (!leaderId.equals(cachedMasterHostIp)) {
-                        LOGGER.warn(
-                                "ZKMasterElector roleId:{} currentHost:{} leaderId change from {} to {}.",
-                                roleId,
-                                localIp,
-                                cachedMasterHostIp,
-                                leaderId);
-                    }
-                    cachedMasterHostIp = leaderId;
-                }
+                CloseableUtils.closeQuietly(client);
             } catch (Exception e) {
                 LOGGER.warn(
-                        "ZKMasterElector roleId:{} currentHost:{} getLeaderID error.",
+                        "ZKMasterElector roleId:{} currentHost:{} closeClient error.",
                         roleId,
                         localIp,
                         e);
             }
         }
+    }
+
+    private void closeLeaderSelector() {
+        if (leaderSelector != null) {
+            try {
+                CloseableUtils.closeQuietly(leaderSelector);
+            } catch (Exception e) {
+                LOGGER.warn(
+                        "ZKMasterElector roleId:{} currentHost:{} closeLeaderSelector error.",
+                        roleId,
+                        localIp,
+                        e);
+            }
+        }
+    }
+
+    private void handleMasterOffline() {
+        trySignalCloseLatch();
+
+        if (isSingleNodeCluster()) {
+            LOGGER.warn(
+                    "ZKMasterElector roleId:{} currentHost:{} single node cluster, skip leadership transfer wait.",
+                    roleId,
+                    localIp);
+            return;
+        }
+
+        waitForLeadershipTransfer();
+    }
+
+    private void trySignalCloseLatch() {
+        CountDownLatch latch = leaderCloseLatchRef.get();
+        if (latch != null) {
+            latch.countDown();
+        }
+    }
+
+    private boolean isSingleNodeCluster() {
+        try {
+            return leaderSelector.getParticipants().size() <= 1;
+        } catch (Exception e) {
+            LOGGER.warn(
+                    "ZKMasterElector roleId:{} currentHost:{} error while checking participants, assume single node.",
+                    roleId,
+                    localIp,
+                    e);
+            return true;
+        }
+    }
+
+    @SuppressWarnings("BusyWait")
+    private void waitForLeadershipTransfer() {
+        LOGGER.warn(
+                "ZKMasterElector roleId:{} currentHost:{} waiting for leadership transfer to complete.",
+                roleId,
+                localIp);
+
+        int waitCount = 0;
+        final int MAX_WAIT_COUNT = 30; // 30 seconds max
+        while (waitCount < MAX_WAIT_COUNT) {
+            try {
+                if (!isStillMaster()) {
+                    LOGGER.warn(
+                            "ZKMasterElector roleId:{} currentHost:{} leadership transferred to {}, waitCount: {}.",
+                            roleId,
+                            localIp,
+                            cachedMasterHostIp,
+                            waitCount);
+                    return;
+                }
+
+                waitCount++;
+                LOGGER.warn(
+                        "ZKMasterElector roleId:{} currentHost:{} still waiting for leadership transfer, waitCount: {}, currentMaster: {}.",
+                        roleId,
+                        localIp,
+                        waitCount,
+                        cachedMasterHostIp);
+                Thread.sleep(1000);
+
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                LOGGER.warn(
+                        "ZKMasterElector roleId:{} currentHost:{} wait interrupted, waitCount: {}.",
+                        roleId,
+                        localIp,
+                        waitCount);
+                return;
+            } catch (Exception e) {
+                LOGGER.warn(
+                        "ZKMasterElector roleId:{} currentHost:{} error while waiting for leadership transfer, waitCount: {}.",
+                        roleId,
+                        localIp,
+                        waitCount,
+                        e);
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }
+        LOGGER.warn(
+                "ZKMasterElector roleId:{} currentHost:{} leadership transfer timeout after {} seconds, forcing exit.",
+                roleId,
+                localIp,
+                MAX_WAIT_COUNT);
+    }
+
+    private boolean isStillMaster() {
+        updateLatestMaster();
+        return localIp.equals(cachedMasterHostIp);
     }
 
     @Scheduled(fixedDelay = 5000L)
@@ -496,48 +546,5 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
                     roleId,
                     localIp);
         }
-    }
-
-    private void closeClient() {
-        if (client != null) {
-            try {
-                CloseableUtils.closeQuietly(client);
-            } catch (Exception e) {
-                LOGGER.warn(
-                        "ZKMasterElector roleId:{} currentHost:{} closeClient error.",
-                        roleId,
-                        localIp,
-                        e);
-            }
-        }
-    }
-
-    private void closeLeaderSelector() {
-        if (leaderSelector != null) {
-            try {
-                CloseableUtils.closeQuietly(leaderSelector);
-            } catch (Exception e) {
-                LOGGER.warn(
-                        "ZKMasterElector roleId:{} currentHost:{} closeLeaderSelector error.",
-                        roleId,
-                        localIp,
-                        e);
-            }
-        }
-    }
-
-    private void trySignalCloseLatch() {
-        CountDownLatch latch = leaderCloseLatchRef.get();
-        if (latch != null) {
-            latch.countDown();
-        }
-    }
-
-    public void destroy() {
-        LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} destroy start.", roleId, localIp);
-        offline();
-        closeClient();
-        reportMasterEvent(ZkMasterEvent.SERVICE_DESTROY);
-        LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} destroy finished.", roleId, localIp);
     }
 }

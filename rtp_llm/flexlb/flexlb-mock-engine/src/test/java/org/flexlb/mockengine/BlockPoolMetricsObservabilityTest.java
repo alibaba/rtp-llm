@@ -35,33 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Block-pool observability series (KV capacity model v2) the mock reports on
- * {@code /metrics} in BOTH emission modes (per-engine and role-aggregated):
- *
- * <ul>
- *   <li>{@code mock_engine_cache_blocks} / {@code available_blocks} /
- *       {@code held_blocks} / {@code referenced_blocks} — the three-state block
- *       decomposition as per-scrape GAUGES (prefill leases hold keyless blocks
- *       mid-flight; completion hands them to the LRU restoring availability;
- *       decode reuse pins hit keys as references).</li>
- *   <li>{@code mock_engine_lack_mem_rejects_total} — the PERMANENT-family
- *       LACK_MEM surface: prefill requests synchronously rejected with 602
- *       (the enqueue-batch Phase-1.5 P-pool gate) AND decode-side failures
- *       whose demand can NEVER fit (required + reserve > physical total —
- *       the production KVCacheAllocator PERMANENT verdict), whether rejected
- *       by the P-pool gate or by an ALLOCATE retry window exhausted on D.
- *       Distinct from {@code mock_engine_kv_admission_fails_total}, which
- *       counts the RETRYABLE-family DECODE-side REQUEST TERMINAL LACK_MEM
- *       failures (admission / growth / reservation rejects — pool total
- *       sufficient, temporarily short; production-aligned 20260903 — the
- *       former un-pooled degradation era is retired): prefill REJECTS,
- *       decode TERMINATES — the healthy-run contract is both stay 0, only
- *       overload runs light them up, and each on its own role.</li>
- *   <li>{@code mock_engine_decode_reuse_blocks_total} — cumulative counter of
- *       the fix #5 net-demand deduction (acquireWithReuse hit keys against the
- *       engine's OWN LRU): a CUMULATIVE counter, never drained (unlike the
- *       rtp_llm_* window series) — the reuse savings only ever add up.</li>
- * </ul>
+ * Checks block-pool metrics in per-engine and role-aggregated emission modes against snapshot state.
  */
 class BlockPoolMetricsObservabilityTest {
 

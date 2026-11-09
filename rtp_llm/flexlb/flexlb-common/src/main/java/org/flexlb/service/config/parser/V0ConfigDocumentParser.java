@@ -23,16 +23,10 @@ import java.util.List;
 @Slf4j
 @Component
 public final class V0ConfigDocumentParser implements ConfigDocumentParser {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     public V0ConfigDocumentParser() {
         ConfigDocumentParserResolver.register(this);
-    }
-
-    @Override
-    public int schemaVersion() {
-        return ConfigSchemaVersion.V0_COMPATIBILITY;
     }
 
     @Override
@@ -51,6 +45,11 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
         } catch (JsonProcessingException error) {
             throw new IllegalArgumentException("Invalid V0 configuration document", error);
         }
+    }
+
+    @Override
+    public int schemaVersion() {
+        return ConfigSchemaVersion.V0_COMPATIBILITY;
     }
 
     private static ObjectNode parseV0Document(String v0ConfigDocument)
@@ -89,6 +88,17 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
         configureConsistency(v0Config, flexlbConfig);
         configureKvcmAndOptimizer(v0Config, flexlbConfig);
         return flexlbConfig;
+    }
+
+    private static void copyField(ObjectNode source, ObjectNode target, String fieldName) {
+        copyField(source, target, fieldName, fieldName);
+    }
+
+    private static void copyField(
+            ObjectNode source, ObjectNode target, String sourceFieldName, String targetFieldName) {
+        if (source.has(sourceFieldName)) {
+            target.set(targetFieldName, source.get(sourceFieldName).deepCopy());
+        }
     }
 
     private static void configureScheduling(ObjectNode v0Config, ObjectNode flexlbConfig) {
@@ -164,6 +174,11 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
         copyField(zookeeperConfig, consistency, "zkTimeoutMs", "connectionTimeoutMs");
     }
 
+    private static ObjectNode objectAt(ObjectNode parent, String fieldName) {
+        JsonNode value = parent.get(fieldName);
+        return value instanceof ObjectNode object ? object : null;
+    }
+
     private static void configureKvcmAndOptimizer(ObjectNode v0Config, ObjectNode flexlbConfig) {
         ObjectNode modelService = objectAt(v0Config, "modelServiceConfig");
         if (modelService == null) {
@@ -183,56 +198,6 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
         if (localStandby != null) {
             ObjectNode currentLocalStandby = cacheMatching.putObject("localStandby");
             copySnakeCaseFields(localStandby, currentLocalStandby);
-        }
-    }
-
-    private static void configureOptimizer(ObjectNode flexlbConfig, ObjectNode optimizerConfig) {
-        if (optimizerConfig != null && optimizerConfig.has("enabled")) {
-            flexlbConfig
-                    .putObject("optimizer")
-                    .set("enabled", optimizerConfig.get("enabled").deepCopy());
-        }
-    }
-
-    private static List<String> collectUnsupportedFields(ObjectNode v0Config) {
-        List<String> unmappedFields = new ArrayList<>();
-        if (v0Config.has("cacheAffinityFirstMaxExtraWorkTokens")) {
-            unmappedFields.add(
-                    "cacheAffinityFirstMaxExtraWorkTokens (tokens cannot be converted to cacheAffinity.maxExtraTtftMs)");
-        }
-        if (v0Config.has("scheduleWorkerSize")) {
-            unmappedFields.add(
-                    "scheduleWorkerSize (runtime worker sizing is no longer public configuration)");
-        }
-        if (v0Config.has("fixedScheduleWorkerPermits")) {
-            unmappedFields.add(
-                    "fixedScheduleWorkerPermits (no equivalent in the current scheduler)");
-        }
-        return unmappedFields;
-    }
-
-    private static String convertModelServiceConfig(ObjectNode v0Config)
-            throws JsonProcessingException {
-        ObjectNode modelService = objectAt(v0Config, "modelServiceConfig");
-        if (modelService == null) {
-            return null;
-        }
-        ObjectNode currentModelService = modelService.deepCopy();
-        removeField(currentModelService, "kvcm", "enabled");
-        removeField(currentModelService, "kvcm", "local_standby");
-        removeField(currentModelService, "optimizer", "enabled");
-        return MAPPER.writeValueAsString(currentModelService);
-    }
-
-    private static ObjectNode objectAt(ObjectNode parent, String fieldName) {
-        JsonNode value = parent.get(fieldName);
-        return value instanceof ObjectNode object ? object : null;
-    }
-
-    private static void removeField(ObjectNode parent, String childName, String fieldName) {
-        ObjectNode child = objectAt(parent, childName);
-        if (child != null) {
-            child.remove(fieldName);
         }
     }
 
@@ -261,14 +226,48 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
         return result.toString();
     }
 
-    private static void copyField(ObjectNode source, ObjectNode target, String fieldName) {
-        copyField(source, target, fieldName, fieldName);
+    private static void configureOptimizer(ObjectNode flexlbConfig, ObjectNode optimizerConfig) {
+        if (optimizerConfig != null && optimizerConfig.has("enabled")) {
+            flexlbConfig
+                    .putObject("optimizer")
+                    .set("enabled", optimizerConfig.get("enabled").deepCopy());
+        }
     }
 
-    private static void copyField(
-            ObjectNode source, ObjectNode target, String sourceFieldName, String targetFieldName) {
-        if (source.has(sourceFieldName)) {
-            target.set(targetFieldName, source.get(sourceFieldName).deepCopy());
+    private static String convertModelServiceConfig(ObjectNode v0Config)
+            throws JsonProcessingException {
+        ObjectNode modelService = objectAt(v0Config, "modelServiceConfig");
+        if (modelService == null) {
+            return null;
         }
+        ObjectNode currentModelService = modelService.deepCopy();
+        removeField(currentModelService, "kvcm", "enabled");
+        removeField(currentModelService, "kvcm", "local_standby");
+        removeField(currentModelService, "optimizer", "enabled");
+        return MAPPER.writeValueAsString(currentModelService);
+    }
+
+    private static void removeField(ObjectNode parent, String childName, String fieldName) {
+        ObjectNode child = objectAt(parent, childName);
+        if (child != null) {
+            child.remove(fieldName);
+        }
+    }
+
+    private static List<String> collectUnsupportedFields(ObjectNode v0Config) {
+        List<String> unmappedFields = new ArrayList<>();
+        if (v0Config.has("cacheAffinityFirstMaxExtraWorkTokens")) {
+            unmappedFields.add(
+                    "cacheAffinityFirstMaxExtraWorkTokens (tokens cannot be converted to cacheAffinity.maxExtraTtftMs)");
+        }
+        if (v0Config.has("scheduleWorkerSize")) {
+            unmappedFields.add(
+                    "scheduleWorkerSize (runtime worker sizing is no longer public configuration)");
+        }
+        if (v0Config.has("fixedScheduleWorkerPermits")) {
+            unmappedFields.add(
+                    "fixedScheduleWorkerPermits (no equivalent in the current scheduler)");
+        }
+        return unmappedFields;
     }
 }

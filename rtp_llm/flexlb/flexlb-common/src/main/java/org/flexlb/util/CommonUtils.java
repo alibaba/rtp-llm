@@ -4,6 +4,9 @@ import lombok.AccessLevel;
 import lombok.NoArgsConstructor;
 import org.flexlb.constant.CommonConstants;
 
+/**
+ * Provides shared value conversions and request utility operations.
+ */
 @NoArgsConstructor(access = AccessLevel.PRIVATE)
 public final class CommonUtils {
 

@@ -9,9 +9,8 @@ import org.flexlb.enums.KvCacheGroupMode;
 import java.util.Map;
 
 /**
- * @author zjw
- * description:
- * date: 2025/3/10
+ * Maps worker status JSON into engine capacity, task progress and cache observations used by status
+ * synchronization.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data

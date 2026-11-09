@@ -8,6 +8,9 @@ import java.util.Properties;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Checks the default HTTP codec buffer limit.
+ */
 class CodecDefaultConfigurationTest {
 
     @Test

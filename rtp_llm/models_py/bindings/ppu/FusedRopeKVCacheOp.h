@@ -59,15 +59,20 @@ public:
 class FusedRopeKVCacheDecodeOp {
 public:
     FusedRopeKVCacheDecodeOp(const AttentionConfigs& attn_configs, size_t max_seq_len = 0, bool use_fp8_fmha = false);
-    PpuFusedRopeParamsPtr prepare(torch_ext::PyAttentionInputs attn_inputs);
-    torch::Tensor forward(const torch::Tensor&                   qkv,
-                          std::optional<torch_ext::LayerKVCache> kv_cache,
-                          const PpuFusedRopeParamsPtr&           params);
+    PpuFusedRopeParamsPtr prepare(torch_ext::PyAttentionInputs attn_inputs, bool forbid_reallocation = false);
+    torch::Tensor         forward(const torch::Tensor&                   qkv,
+                                  std::optional<torch_ext::LayerKVCache> kv_cache,
+                                  const PpuFusedRopeParamsPtr&           params);
 
 protected:
     AttentionConfigs attn_configs_;
     size_t           max_seq_len_;
     bool             use_fp8_fmha_;
+    // PPU decode kernels read pinned host lengths directly. Graph replay keeps
+    // this allocation alive and refreshes its contents after the previous
+    // forward event completes; replacing a params tensor cannot update a
+    // pointer already captured in a kernel node.
+    torch::Tensor graph_sequence_lengths_;
 };
 
 void registerFusedRopeKVCacheOp(const py::module& m);

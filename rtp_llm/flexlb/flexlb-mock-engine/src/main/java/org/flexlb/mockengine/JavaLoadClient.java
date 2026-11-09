@@ -48,34 +48,14 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Standalone Java load client (replaces the legacy Python load client).
- *
- * <p>Replays trace JSONL files against a running FlexLB master via gRPC Schedule RPC.
- * Supports multi-shard replay, configurable speed, semaphore-based concurrency control,
- * and optional engine stream reading for TTFT/total latency. The client records raw
- * data only — client_events.jsonl rows (renamed from per_request.jsonl: the
- * client-side half of the multi-component JSONL event streams, rid-joined
- * offline against the mock engine's engine_events.jsonl), the terminal
- * server_latency.json snapshot, and pushgateway metrics; every derived
- * statistic is computed by the run-level aggregator (aggregate_canvas_run.py),
- * never here.
- *
- * <p>FETCH_OUTPUT_STREAM (default true) controls ONLY the client-side read of engine
- * output streams (phase-2 FetchResponse/GenerateStreamCall). With FETCH_OUTPUT_STREAM=0
- * the client stops after a successful Schedule RPC; the engine still executes the
- * request in full (BATCH dispatcher: master enqueued it via EnqueueBatch during the
- * Schedule RPC). This trims the client's stream-reading network cost from load tests
- * while keeping engine-side load identical to the read-stream mode.
- *
- * <p>Configuration is read exclusively from environment variables at startup (no
- * multi-layer override). Run as:
- * <pre>{@code
- *   java -cp <jar> org.flexlb.mockengine.JavaLoadClient
- * }</pre>
+ * Replays trace requests against configured master targets with bounded concurrency and optional
+ * engine-output reading. It records raw client events and final server latency; run-level
+ * aggregation computes derived statistics, and disabling output reading leaves engine execution
+ * intact.
  */
 public final class JavaLoadClient {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private static final int BLOCK_SIZE = 1024;
 
     /**
@@ -118,17 +98,22 @@ public final class JavaLoadClient {
     private final List<RequestResult> results = new ArrayList<>();
     final AtomicInteger actualSentCount = new AtomicInteger();
     private final AtomicInteger responseCount = new AtomicInteger();
+
     private volatile long replayStartedEpochMs;
     private volatile long replayStartedNanos;
     private volatile long sendStartNanos;
     private volatile long sendEndNanos;
+
     final AtomicInteger successCount = new AtomicInteger();
     final AtomicInteger errorCount = new AtomicInteger();
     final AtomicInteger inflightCount = new AtomicInteger();
     final AtomicInteger sentTotal = new AtomicInteger();
     final List<RequestResult> completedResults = Collections.synchronizedList(new ArrayList<>());
+
     private volatile ScheduledExecutorService pushgatewayExecutor;
+
     private volatile double lastGradientLogS = -10.0;
+
     final List<String> fallbackPrefillAddrs = new ArrayList<>();
     final List<String> fallbackDecodeAddrs = new ArrayList<>();
     private final AtomicInteger fallbackPrefillRR = new AtomicInteger();
@@ -497,6 +482,236 @@ public final class JavaLoadClient {
         stopPushgateway();
     }
 
+    // ---- Trace Filtering / Truncation (Python parity) ----
+
+    /**
+     * Applies duration/limit filters first, then {@code i % numShards} slicing —
+     * identical to Python load_replay_requests + shard slice order, so LIMIT is a
+     * total cap across all shards rather than a per-shard cap.
+     */
+    static List<TraceRecord> filterAndShard(
+            List<TraceRecord> records, int durationS, int limit, int numShards, int shardIndex) {
+        List<TraceRecord> out = records;
+        if (durationS > 0 && !out.isEmpty()) {
+            long firstTs = out.get(0).tsMs;
+            long endTs = firstTs + durationS * 1000L;
+            List<TraceRecord> filtered = new ArrayList<>();
+            for (TraceRecord r : out) {
+                if (r.tsMs <= endTs) {
+                    filtered.add(r);
+                }
+            }
+            out = filtered;
+        }
+        if (limit > 0) {
+            out = out.subList(0, Math.min(limit, out.size()));
+        }
+        return shardSlice(out, numShards, shardIndex);
+    }
+
+    /**
+     * Pure {@code i % numShards == shardIndex} slice with no duration/limit
+     * filtering. Used directly in loop mode, where duration is a wall-clock
+     * timeout and limit a total sent cap rather than trace filters.
+     */
+    static List<TraceRecord> shardSlice(List<TraceRecord> records, int numShards, int shardIndex) {
+        if (numShards <= 1) {
+            return new ArrayList<>(records);
+        }
+        if (shardIndex < 0 || shardIndex >= numShards) {
+            throw new IllegalArgumentException("SHARD_INDEX must be in [0, NUM_SHARDS)");
+        }
+        List<TraceRecord> sharded = new ArrayList<>();
+        for (int i = 0; i < records.size(); i++) {
+            if (i % numShards == shardIndex) {
+                sharded.add(records.get(i));
+            }
+        }
+        return sharded;
+    }
+
+    /**
+     * Caps input_len/output_len (and truncates token_ids accordingly), matching
+     * Legacy Python client truncation: block_keys are left untouched.
+     * Returns new records; counts each field truncation like Python does.
+     */
+    static List<TraceRecord> truncateRecords(
+            List<TraceRecord> records, int maxInputLen, int maxOutputLen) {
+        int truncated = 0;
+        List<TraceRecord> out = new ArrayList<>(records.size());
+        for (TraceRecord r : records) {
+            TraceRecord cur = r;
+            if (maxInputLen > 0 && cur.inputLen > maxInputLen) {
+                List<Integer> tokens = cur.tokenIds;
+                if (tokens != null && !tokens.isEmpty()) {
+                    tokens =
+                            new ArrayList<>(
+                                    tokens.subList(0, Math.min(maxInputLen, tokens.size())));
+                }
+                cur =
+                        new TraceRecord(
+                                cur.requestId,
+                                cur.sourceRid,
+                                cur.traceId,
+                                cur.tsMs,
+                                maxInputLen,
+                                cur.outputLen,
+                                cur.blockKeys,
+                                tokens,
+                                cur.priority);
+                truncated++;
+            }
+            if (maxOutputLen > 0 && cur.outputLen > maxOutputLen) {
+                cur =
+                        new TraceRecord(
+                                cur.requestId,
+                                cur.sourceRid,
+                                cur.traceId,
+                                cur.tsMs,
+                                cur.inputLen,
+                                maxOutputLen,
+                                cur.blockKeys,
+                                cur.tokenIds,
+                                cur.priority);
+                truncated++;
+            }
+            out.add(cur);
+        }
+        System.out.println(
+                "truncated "
+                        + truncated
+                        + " request length(s): "
+                        + "max_input_len="
+                        + maxInputLen
+                        + ", max_output_len="
+                        + maxOutputLen);
+        return out;
+    }
+
+    /** Loads fallback gRPC addresses from the mock cluster's endpoint records. */
+    void loadFallbackEndpoints(String path) throws IOException {
+        JsonNode data = MAPPER.readTree(Path.of(path).toFile());
+        if (fallbackPrefillAddrs.isEmpty()) {
+            for (JsonNode e : data.path("engines")) {
+                if ("prefill".equals(e.path("role").asText())
+                        && !e.path("grpc_addr").asText("").isEmpty()) {
+                    fallbackPrefillAddrs.add(e.get("grpc_addr").asText());
+                }
+            }
+        }
+        if (fallbackDecodeAddrs.isEmpty()) {
+            for (JsonNode e : data.path("engines")) {
+                if ("decode".equals(e.path("role").asText())
+                        && !e.path("grpc_addr").asText("").isEmpty()) {
+                    fallbackDecodeAddrs.add(e.get("grpc_addr").asText());
+                }
+            }
+        }
+
+        if (!fallbackPrefillAddrs.isEmpty()) {
+            System.out.println("fallback prefill addrs: " + fallbackPrefillAddrs);
+        }
+        if (!fallbackDecodeAddrs.isEmpty()) {
+            System.out.println("fallback decode addrs: " + fallbackDecodeAddrs);
+        }
+    }
+
+    /**
+     * Linear gradient replay speed (parity with Python gradient pacing): speed ramps
+     * from max(1, startSpeed) to maxSpeed as elapsed time progresses over duration.
+     */
+    static double gradientSpeed(
+            double elapsedS, int durationS, int gradientStartSpeed, int gradientMaxSpeed) {
+        double progress = Math.min(Math.max(elapsedS, 0.0) / durationS, 1.0);
+        int startSpeed = Math.max(1, gradientStartSpeed);
+        return startSpeed + (gradientMaxSpeed - startSpeed) * progress;
+    }
+
+    /**
+     * Ideal send time of the {@code index}-th request (0-based, per shard) in
+     * uniform mode with traffic ramp-up.
+     *
+     * <p>During the ramp the per-shard instantaneous rate climbs linearly,
+     * {@code q(t) = perShardQps * t / rampUpSeconds} for
+     * {@code t <= rampUpSeconds}, then holds at {@code perShardQps}.
+     * Integrating gives the cumulative send count
+     * {@code N(t) = perShardQps * t^2 / (2 * rampUpSeconds)}; inverting
+     * {@code N(t) = index} yields the ideal send time:
+     * <ul>
+     *   <li>ramp phase ({@code index < perShardQps * rampUpSeconds / 2}):
+     *       {@code t = sqrt(2 * rampUpSeconds * index / perShardQps)};</li>
+     *   <li>steady phase: {@code t = rampUpSeconds
+     *       + (index - rampCount) / perShardQps}.</li>
+     * </ul>
+     *
+     * <p>Properties: both pieces meet at {@code t = rampUpSeconds} with
+     * matching slope {@code 1 / perShardQps} (the rate reaches exactly
+     * {@code perShardQps} when the ramp ends), the send count during the
+     * ramp equals the triangle integral {@code perShardQps * rampUpSeconds / 2}
+     * (no lost or extra sends — pacing quality is conserved), and
+     * {@code rampUpSeconds <= 0} degenerates to the fixed-interval schedule
+     * {@code index / perShardQps} (legacy behavior).
+     *
+     * <p>Package-visible for the ramp-up schedule unit tests.
+     */
+    static double uniformDueSeconds(int index, double perShardQps, double rampUpSeconds) {
+        if (rampUpSeconds <= 0) {
+            return index / perShardQps;
+        }
+        double rampCount = perShardQps * rampUpSeconds / 2.0;
+        if (index < rampCount) {
+            return Math.sqrt(2.0 * rampUpSeconds * index / perShardQps);
+        }
+        return rampUpSeconds + (index - rampCount) / perShardQps;
+    }
+
+    // Package-visible for loop-mode rid disjointness assertions in tests.
+    TraceRecord makeLoopRequest(TraceRecord req, int loopIdx, int sentCount) {
+        // Suffix carries the shard index defensively: even though loop mode shards
+        // the trace, this keeps rid namespaces disjoint across shards if shard
+        // counts change or a trace contains duplicated sourceRids.
+        String loopSuffix = "_S" + config.shardIndex + "_L" + loopIdx;
+        String newSourceRid = req.sourceRid + loopSuffix;
+        String newTraceId = req.traceId.isEmpty() ? "" : req.traceId + loopSuffix;
+        long newRequestId = stableRequestId(newSourceRid);
+        // REPLAY_UNIQUE_PREFIX (default on): without re-salting, every loop
+        // round presents byte-identical block_cache_keys, so cache affinity
+        // routes each rid to the SAME prefill engine round after round and
+        // the P-side load collapses onto a handful of engines (Gini ~0.56).
+        // Re-salting only keys[0] keeps the shared suffix blocks (cross-
+        // request prefix reuse) while giving every round a unique routing
+        // prefix. The source list is shared across rounds, so it is copied
+        // here and never mutated in place.
+        List<Long> blockKeys = req.blockKeys;
+        if (config.replayUniquePrefix && !blockKeys.isEmpty()) {
+            List<Long> salted = new ArrayList<>(blockKeys);
+            salted.set(0, roundSaltedKey(blockKeys.get(0), loopIdx));
+            blockKeys = salted;
+        }
+        return new TraceRecord(
+                newRequestId,
+                newSourceRid,
+                newTraceId,
+                req.tsMs,
+                req.inputLen,
+                req.outputLen,
+                blockKeys,
+                req.tokenIds,
+                req.priority);
+    }
+
+    static long stableRequestId(String value) {
+        return Hashing.murmur3_128().hashString(value, StandardCharsets.UTF_8).asLong()
+                & 0x7FFF_FFFF_FFFF_FFFFL;
+    }
+
+    // Package-visible for loop-mode unique-prefix assertions in tests.
+    // Deterministic per-round salt: the same (key, loop) pair always maps to
+    // the same value, different loops map to different values.
+    static long roundSaltedKey(long blockKey, int loopIdx) {
+        return Hashing.murmur3_128().newHasher().putLong(blockKey).putInt(loopIdx).hash().asLong();
+    }
+
     /**
      * Collects one result row per outstanding request future without letting a
      * single slow RPC block the collection cursor.
@@ -586,6 +801,301 @@ public final class JavaLoadClient {
         return rows;
     }
 
+    // Package-visible for priority wire-format assertions in tests.
+    FlexlbScheduleProtocol.FlexlbScheduleRequestPB buildScheduleRequest(
+            TraceRecord record, EngineRpcService.GenerateInputPB inputPb) {
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB.Builder builder =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(record.requestId)
+                        .setGenerateInput(inputPb.toByteString())
+                        .addAllBlockCacheKeys(record.blockKeys)
+                        .setSeqLen(record.inputLen)
+                        .setGenerateTimeout(config.timeoutMs)
+                        .setRequestTimeMs(System.currentTimeMillis())
+                        .setMaxNewTokens(Math.max(1, record.outputLen))
+                        .setNumBeams(1)
+                        .setForceDisableSpRun(false)
+                        .setModel(config.model)
+                        .setApiKey(config.apiKey)
+                        .setCacheKeyBlockSize(BLOCK_SIZE);
+        if (record.priority > 0) {
+            builder.setPriority(record.priority);
+        }
+        return builder.build();
+    }
+
+    // Package-visible for per-record priority parsing assertions in tests.
+    TraceRecord parseTraceRecord(JsonNode raw) {
+        int inputLen =
+                raw.path("il")
+                        .asInt(
+                                raw.path("input_token_len")
+                                        .asInt(raw.path("backend_input_token_len").asInt(0)));
+        if (inputLen <= 0) {
+            return null;
+        }
+
+        int outputLen = raw.path("ol").asInt(raw.path("output_token_len").asInt(0));
+        if (outputLen <= 0) {
+            // zero-output trace rows are always filtered; 1-token/N-token
+            // behavior belongs to case tests (request params).
+            return null;
+        }
+
+        String sourceRid =
+                raw.has("request_id")
+                        ? raw.get("request_id").asText()
+                        : raw.has("rid")
+                                ? raw.get("rid").asText()
+                                : Long.toString(stableRequestId(raw.toString()));
+        String traceId = extractTraceId(raw);
+        if (traceId.isEmpty()) {
+            traceId = sourceRid;
+        }
+
+        long requestId;
+        JsonNode ridIntNode = raw.get("request_id_int");
+        if (ridIntNode != null) {
+            requestId = toSignedInt64(ridIntNode.bigIntegerValue());
+        } else {
+            requestId = stableRequestId(sourceRid);
+        }
+
+        long tsMs =
+                raw.path("ts")
+                        .asLong(
+                                raw.path("request_enter_ts_epoch_ms")
+                                        .asLong(raw.path("ts_epoch_ms").asLong(0)));
+
+        List<Integer> tokenIds = null;
+        JsonNode inputIdsNode = raw.get("input_ids");
+        if (inputIdsNode != null && inputIdsNode.isArray()) {
+            tokenIds = new ArrayList<>(inputIdsNode.size());
+            for (JsonNode token : inputIdsNode) {
+                tokenIds.add(token.asInt());
+            }
+        } else {
+            tokenIds = Collections.nCopies(inputLen, 0);
+        }
+
+        List<Long> blockKeys = new ArrayList<>();
+        JsonNode bhNode = raw.get("bh");
+        if (bhNode == null) {
+            bhNode = raw.get("block_cache_keys");
+        }
+        if (bhNode != null && bhNode.isArray()) {
+            for (JsonNode key : bhNode) {
+                blockKeys.add(toSignedInt64(key.bigIntegerValue()));
+            }
+        } else if (tokenIds != null) {
+            blockKeys = computeBlockKeys(tokenIds, BLOCK_SIZE);
+        }
+
+        // Auto-TPM QoS priority: FORCE_PRIORITY > 0 pins every replayed
+        // request to that single level (single-QoS runs); otherwise the
+        // per-record "priority" field wins, else the client-wide PRIORITY env
+        // default (50, the neutral QoS level — p0 traffic is rejected by
+        // master admission); an explicit PRIORITY=0 keeps the field unset
+        // on the wire (legacy behavior). A trace value outside 1-100 is not
+        // clamped into the QoS domain: warn and fall back to the config
+        // default so one messy line cannot skew a whole run (robustness
+        // over strictness for a load-test tool).
+        int priority;
+        if (config.forcePriority > 0) {
+            priority = config.forcePriority;
+        } else {
+            priority = raw.path("priority").asInt(config.priority);
+            if (priority != 0 && !PriorityNormalizer.isValid(priority)) {
+                System.err.println(
+                        "ignoring invalid trace priority "
+                                + priority
+                                + " (must be 1-100) for rid="
+                                + sourceRid
+                                + "; falling back to PRIORITY="
+                                + config.priority);
+                priority = config.priority;
+            }
+        }
+
+        return new TraceRecord(
+                requestId, sourceRid, traceId, tsMs, inputLen, outputLen, blockKeys, tokenIds,
+                priority);
+    }
+
+    /**
+     * Serializes one per-request row. Synthesized rows (collector timeout /
+     * dead-future exception fallbacks) omit the "priority" key entirely
+     * instead of writing a misleading 0: they never carried a request, so
+     * downstream aggregation distinguishes them by key absence rather than
+     * counting them as unset p0 traffic.
+     */
+    // Package-visible for per-request row serialization assertions in tests.
+    static ObjectNode perRequestNode(RequestResult result) {
+        ObjectNode node = MAPPER.createObjectNode();
+        node.put("rid", result.rid);
+        node.put("trace_id", result.traceId);
+        node.put("request_id", result.requestId);
+        node.put("ts", result.ts);
+        node.put("input_len", result.inputLen);
+        node.put("output_len", result.outputLen);
+        node.put("status", result.status);
+        node.put("schedule_ms", result.scheduleMs);
+        node.put("sched_done_epoch_ms", result.schedDoneEpochMs);
+        node.put("ttft_ms", result.ttftMs);
+        node.put("total_ms", result.totalMs);
+        node.put("enqueued_by_master", result.enqueuedByMaster);
+        node.put("prefill", result.prefill);
+        node.put("decode", result.decode);
+        node.put("error", result.error);
+        node.put("route_path", result.routePath);
+        // HA observability (additive — consumers keyed on the previous field
+        // set are unaffected): route_path gains the "failed" value in HA mode
+        // (no master answer, no direct fallback); master_target is the
+        // actually-served or last-attempted flexlb gRPC address; failover
+        // marks same-request retry switches; error_kind classifies the
+        // schedule-stage failure (transport|business|deadline|none — "none"
+        // also covers phase-2 stream failures, where the master leg itself
+        // succeeded).
+        node.put("master_target", result.masterTarget);
+        node.put("failover", result.failover);
+        node.put("error_kind", result.errorKind);
+        node.put("wall_clock_ts", result.wallClockTs);
+        node.put("send_due_epoch_ms", result.sendDueEpochMs);
+        node.put("send_start_epoch_ms", result.sendStartEpochMs);
+        node.put("pacing_lag_ms", result.pacingLagMs);
+        if (!result.synthetic) {
+            node.put("priority", result.priority);
+        }
+        return node;
+    }
+
+    void pushMetrics() throws IOException, InterruptedException {
+        String body = buildPushMetricsBody();
+        String hostname;
+        try {
+            hostname = InetAddress.getLocalHost().getHostName();
+        } catch (Exception e) {
+            hostname = "unknown";
+        }
+        HttpRequest request =
+                HttpRequest.newBuilder()
+                        .uri(
+                                URI.create(
+                                        config.pushgatewayUrl
+                                                + "/metrics/job/flexlb_client/instance/"
+                                                + hostname))
+                        .header("Content-Type", "text/plain; version=0.0.4")
+                        .PUT(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                        .timeout(Duration.ofSeconds(10))
+                        .build();
+        HttpResponse<String> response =
+                httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200 && response.statusCode() != 202) {
+            System.out.println(
+                    "pushgateway push failed: " + response.statusCode() + " " + response.body());
+        }
+    }
+
+    /** Builds the Prometheus text-format payload (parity with Python _push_metrics). */
+    String buildPushMetricsBody() {
+        List<String> lines = new ArrayList<>();
+        int inflight = inflightCount.get();
+        lines.add("flexlb_client_send_total{route_path=\"master\"} " + sentTotal.get());
+        lines.add(
+                "flexlb_client_actual_send_total{route_path=\"master\"} " + actualSentCount.get());
+        lines.add(
+                "flexlb_client_completed_total{route_path=\"master\"} " + completedResults.size());
+        lines.add("flexlb_client_success_total{route_path=\"master\"} " + successCount.get());
+        lines.add("flexlb_client_error_total{route_path=\"master\"} " + errorCount.get());
+        lines.add("flexlb_client_inflight_count{route_path=\"master\"} " + inflight);
+        lines.add("flexlb_client_max_concurrency{route_path=\"master\"} " + config.maxConcurrency);
+        if (config.maxConcurrency > 0) {
+            double util = inflight / (double) config.maxConcurrency;
+            lines.add(
+                    String.format(
+                            "flexlb_client_semaphore_utilization{route_path=\"master\"} %.4f",
+                            util));
+        }
+
+        List<RequestResult> snapshot;
+        synchronized (completedResults) {
+            snapshot = new ArrayList<>(completedResults);
+        }
+        if (!snapshot.isEmpty()) {
+            Map<String, Map<String, List<Double>>> groups = new LinkedHashMap<>();
+            for (RequestResult r : snapshot) {
+                String rp = r.routePath == null ? "unknown" : r.routePath;
+                Map<String, List<Double>> vals =
+                        groups.computeIfAbsent(
+                                rp,
+                                k -> {
+                                    Map<String, List<Double>> m = new LinkedHashMap<>();
+                                    m.put("schedule_ms", new ArrayList<>());
+                                    m.put("total_ms", new ArrayList<>());
+                                    m.put("ttft_ms", new ArrayList<>());
+                                    return m;
+                                });
+                if (r.scheduleMs > 0) {
+                    vals.get("schedule_ms").add(r.scheduleMs);
+                }
+                if (r.totalMs > 0) {
+                    vals.get("total_ms").add(r.totalMs);
+                }
+                if (r.ttftMs > 0) {
+                    vals.get("ttft_ms").add(r.ttftMs);
+                }
+            }
+            for (Map.Entry<String, Map<String, List<Double>>> entry : groups.entrySet()) {
+                String label = "route_path=\"" + entry.getKey() + "\"";
+                for (String metricName : List.of("schedule_ms", "total_ms", "ttft_ms")) {
+                    List<Double> values = entry.getValue().get(metricName);
+                    if (values.isEmpty()) {
+                        continue;
+                    }
+                    double sum = 0;
+                    double mx = Double.NEGATIVE_INFINITY;
+                    for (double v : values) {
+                        sum += v;
+                        mx = Math.max(mx, v);
+                    }
+                    double avg = sum / values.size();
+                    double p50 = percentileNearestRank(values, 50);
+                    double p99 = percentileNearestRank(values, 99);
+                    lines.add(
+                            String.format("flexlb_client_%s_avg{%s} %.3f", metricName, label, avg));
+                    lines.add(
+                            String.format("flexlb_client_%s_p50{%s} %.3f", metricName, label, p50));
+                    lines.add(
+                            String.format("flexlb_client_%s_p99{%s} %.3f", metricName, label, p99));
+                    lines.add(
+                            String.format("flexlb_client_%s_max{%s} %.3f", metricName, label, mx));
+                    lines.add(
+                            "flexlb_client_"
+                                    + metricName
+                                    + "_count{"
+                                    + label
+                                    + "} "
+                                    + values.size());
+                }
+            }
+        }
+        return String.join("\n", lines) + "\n";
+    }
+
+    /** Nearest-rank percentile (parity with Python LoadClient._percentile). */
+    static double percentileNearestRank(List<Double> values, double p) {
+        if (values.isEmpty()) {
+            return 0.0;
+        }
+        List<Double> sorted = new ArrayList<>(values);
+        Collections.sort(sorted);
+        int idx = (int) (sorted.size() * p / 100.0);
+        if (idx >= sorted.size()) {
+            idx = sorted.size() - 1;
+        }
+        return sorted.get(idx);
+    }
+
     /**
      * One sweep over the pending index list: harvests futures that reached a
      * terminal state since the last sweep and compacts the list in place.
@@ -625,41 +1135,6 @@ public final class JavaLoadClient {
             errorResult.synthetic = true;
             return errorResult;
         }
-    }
-
-    // Package-visible for loop-mode rid disjointness assertions in tests.
-    TraceRecord makeLoopRequest(TraceRecord req, int loopIdx, int sentCount) {
-        // Suffix carries the shard index defensively: even though loop mode shards
-        // the trace, this keeps rid namespaces disjoint across shards if shard
-        // counts change or a trace contains duplicated sourceRids.
-        String loopSuffix = "_S" + config.shardIndex + "_L" + loopIdx;
-        String newSourceRid = req.sourceRid + loopSuffix;
-        String newTraceId = req.traceId.isEmpty() ? "" : req.traceId + loopSuffix;
-        long newRequestId = stableRequestId(newSourceRid);
-        // REPLAY_UNIQUE_PREFIX (default on): without re-salting, every loop
-        // round presents byte-identical block_cache_keys, so cache affinity
-        // routes each rid to the SAME prefill engine round after round and
-        // the P-side load collapses onto a handful of engines (Gini ~0.56).
-        // Re-salting only keys[0] keeps the shared suffix blocks (cross-
-        // request prefix reuse) while giving every round a unique routing
-        // prefix. The source list is shared across rounds, so it is copied
-        // here and never mutated in place.
-        List<Long> blockKeys = req.blockKeys;
-        if (config.replayUniquePrefix && !blockKeys.isEmpty()) {
-            List<Long> salted = new ArrayList<>(blockKeys);
-            salted.set(0, roundSaltedKey(blockKeys.get(0), loopIdx));
-            blockKeys = salted;
-        }
-        return new TraceRecord(
-                newRequestId,
-                newSourceRid,
-                newTraceId,
-                req.tsMs,
-                req.inputLen,
-                req.outputLen,
-                blockKeys,
-                req.tokenIds,
-                req.priority);
     }
 
     private RequestResult handleRequest(TraceRecord record, Semaphore semaphore, double dueS) {
@@ -956,6 +1431,63 @@ public final class JavaLoadClient {
         return result;
     }
 
+    private EngineRpcService.GenerateInputPB buildGenerateInput(TraceRecord record)
+            throws IOException {
+        ObjectNode meta = MAPPER.createObjectNode();
+        meta.put("rid", record.sourceRid);
+        meta.put("trace_id", record.traceId);
+        meta.put("input_len", record.inputLen);
+        meta.put("output_len", record.outputLen);
+        ArrayNode keysArray = meta.putArray("block_cache_keys");
+        for (long key : record.blockKeys) {
+            keysArray.add(key);
+        }
+        String uniqueKey = "flexlb_eval:" + MAPPER.writeValueAsString(meta);
+
+        EngineRpcService.GenerateConfigPB.Builder genConfig =
+                EngineRpcService.GenerateConfigPB.newBuilder()
+                        .setMaxNewTokens(Math.max(1, record.outputLen))
+                        .setNumReturnSequences(1)
+                        .setTopP(1.0f)
+                        .setTopK(0)
+                        .setTemperature(1.0f)
+                        .setReturnIncremental(true)
+                        .setIsStreaming(true)
+                        .setTimeoutMs((int) Math.min(config.timeoutMs, Integer.MAX_VALUE))
+                        .setUniqueKey(uniqueKey);
+
+        EngineRpcService.RequestInfoPB.Builder info =
+                EngineRpcService.RequestInfoPB.newBuilder()
+                        .setRequestId(record.sourceRid)
+                        .setTraceId(record.traceId)
+                        .setSourceRole("flexlb_eval");
+
+        EngineRpcService.GenerateInputPB.Builder input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(record.requestId)
+                        .addAllTokenIds(record.tokenIds)
+                        .setGenerateConfig(genConfig)
+                        .setClientId("flexlb_eval_client")
+                        .setStartTime(System.currentTimeMillis())
+                        .setRequestInfo(info);
+
+        return input.build();
+    }
+
+    private FlexlbServiceGrpc.FlexlbServiceBlockingStub nextScheduleStub() {
+        int idx = scheduleStubRR.getAndIncrement() % config.nChannels;
+        return scheduleStubs[Math.floorMod(idx, config.nChannels)];
+    }
+
+    private String roleAddr(FlexlbScheduleProtocol.FlexlbScheduleResponsePB response, String role) {
+        for (FlexlbScheduleProtocol.FlexlbServerStatusPB status : response.getServerStatusList()) {
+            if (status.getRole().equals(role) && !status.getServerIp().isEmpty()) {
+                return status.getServerIp() + ":" + status.getGrpcPort();
+            }
+        }
+        return "";
+    }
+
     private void tallyResult(RequestResult result) {
         completedResults.add(result);
         if ("ok".equals(result.status) || "scheduled".equals(result.status)) {
@@ -1047,6 +1579,17 @@ public final class JavaLoadClient {
         result.status = "ok";
     }
 
+    private static String roundRobinAddr(List<String> addrs, AtomicInteger rr, String emptyError) {
+        if (addrs.isEmpty()) {
+            if (emptyError.isEmpty()) {
+                return "";
+            }
+            throw new IllegalStateException(emptyError);
+        }
+        int idx = Math.floorMod(rr.getAndIncrement(), addrs.size());
+        return addrs.get(idx);
+    }
+
     private static EngineRpcService.RoleAddrPB toRoleAddrPb(
             EngineRpcService.RoleTypePB roleType, String addr) {
         int colon = addr.lastIndexOf(':');
@@ -1071,109 +1614,31 @@ public final class JavaLoadClient {
                 .build();
     }
 
-    private static String roundRobinAddr(List<String> addrs, AtomicInteger rr, String emptyError) {
-        if (addrs.isEmpty()) {
-            if (emptyError.isEmpty()) {
-                return "";
-            }
-            throw new IllegalStateException(emptyError);
-        }
-        int idx = Math.floorMod(rr.getAndIncrement(), addrs.size());
-        return addrs.get(idx);
-    }
-
-    /** Loads fallback gRPC addresses from the mock cluster's endpoint records. */
-    void loadFallbackEndpoints(String path) throws IOException {
-        JsonNode data = MAPPER.readTree(Path.of(path).toFile());
-        if (fallbackPrefillAddrs.isEmpty()) {
-            for (JsonNode e : data.path("engines")) {
-                if ("prefill".equals(e.path("role").asText())
-                        && !e.path("grpc_addr").asText("").isEmpty()) {
-                    fallbackPrefillAddrs.add(e.get("grpc_addr").asText());
-                }
-            }
-        }
-        if (fallbackDecodeAddrs.isEmpty()) {
-            for (JsonNode e : data.path("engines")) {
-                if ("decode".equals(e.path("role").asText())
-                        && !e.path("grpc_addr").asText("").isEmpty()) {
-                    fallbackDecodeAddrs.add(e.get("grpc_addr").asText());
-                }
-            }
-        }
-
-        if (!fallbackPrefillAddrs.isEmpty()) {
-            System.out.println("fallback prefill addrs: " + fallbackPrefillAddrs);
-        }
-        if (!fallbackDecodeAddrs.isEmpty()) {
-            System.out.println("fallback decode addrs: " + fallbackDecodeAddrs);
-        }
-    }
-
-    private EngineRpcService.GenerateInputPB buildGenerateInput(TraceRecord record)
-            throws IOException {
-        ObjectNode meta = MAPPER.createObjectNode();
-        meta.put("rid", record.sourceRid);
-        meta.put("trace_id", record.traceId);
-        meta.put("input_len", record.inputLen);
-        meta.put("output_len", record.outputLen);
-        ArrayNode keysArray = meta.putArray("block_cache_keys");
-        for (long key : record.blockKeys) {
-            keysArray.add(key);
-        }
-        String uniqueKey = "flexlb_eval:" + MAPPER.writeValueAsString(meta);
-
-        EngineRpcService.GenerateConfigPB.Builder genConfig =
-                EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(Math.max(1, record.outputLen))
-                        .setNumReturnSequences(1)
-                        .setTopP(1.0f)
-                        .setTopK(0)
-                        .setTemperature(1.0f)
-                        .setReturnIncremental(true)
-                        .setIsStreaming(true)
-                        .setTimeoutMs((int) Math.min(config.timeoutMs, Integer.MAX_VALUE))
-                        .setUniqueKey(uniqueKey);
-
-        EngineRpcService.RequestInfoPB.Builder info =
-                EngineRpcService.RequestInfoPB.newBuilder()
-                        .setRequestId(record.sourceRid)
-                        .setTraceId(record.traceId)
-                        .setSourceRole("flexlb_eval");
-
-        EngineRpcService.GenerateInputPB.Builder input =
-                EngineRpcService.GenerateInputPB.newBuilder()
-                        .setRequestId(record.requestId)
-                        .addAllTokenIds(record.tokenIds)
-                        .setGenerateConfig(genConfig)
-                        .setClientId("flexlb_eval_client")
-                        .setStartTime(System.currentTimeMillis())
-                        .setRequestInfo(info);
-
-        return input.build();
-    }
-
-    // Package-visible for priority wire-format assertions in tests.
-    FlexlbScheduleProtocol.FlexlbScheduleRequestPB buildScheduleRequest(
-            TraceRecord record, EngineRpcService.GenerateInputPB inputPb) {
-        FlexlbScheduleProtocol.FlexlbScheduleRequestPB.Builder builder =
-                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                        .setRequestId(record.requestId)
-                        .setGenerateInput(inputPb.toByteString())
-                        .addAllBlockCacheKeys(record.blockKeys)
-                        .setSeqLen(record.inputLen)
-                        .setGenerateTimeout(config.timeoutMs)
-                        .setRequestTimeMs(System.currentTimeMillis())
-                        .setMaxNewTokens(Math.max(1, record.outputLen))
-                        .setNumBeams(1)
-                        .setForceDisableSpRun(false)
-                        .setModel(config.model)
-                        .setApiKey(config.apiKey)
-                        .setCacheKeyBlockSize(BLOCK_SIZE);
-        if (record.priority > 0) {
-            builder.setPriority(record.priority);
-        }
-        return builder.build();
+    private ManagedChannel getEngineChannel(String target) {
+        ManagedChannel[] pool =
+                engineChannelPools.computeIfAbsent(
+                        target,
+                        t -> {
+                            ManagedChannel[] channels = new ManagedChannel[config.nChannels];
+                            for (int i = 0; i < config.nChannels; i++) {
+                                channels[i] =
+                                        NettyChannelBuilder.forTarget(t)
+                                                .eventLoopGroup(eventLoopGroup)
+                                                .channelType(NioSocketChannel.class)
+                                                .maxInboundMessageSize(16 * 1024 * 1024)
+                                                .flowControlWindow(1024 * 1024)
+                                                .keepAliveTime(
+                                                        KEEPALIVE_TIME_MINUTES, TimeUnit.MINUTES)
+                                                .keepAliveTimeout(10, TimeUnit.SECONDS)
+                                                .usePlaintext()
+                                                .build();
+                            }
+                            engineChannelRR.put(t, new AtomicInteger());
+                            return channels;
+                        });
+        AtomicInteger rr = engineChannelRR.get(target);
+        int idx = Math.floorMod(rr.getAndIncrement(), config.nChannels);
+        return pool[idx];
     }
 
     private EngineRpcService.GenerateInputPB copyRoleAddrs(
@@ -1204,47 +1669,6 @@ public final class JavaLoadClient {
         return modified.build();
     }
 
-    private String roleAddr(FlexlbScheduleProtocol.FlexlbScheduleResponsePB response, String role) {
-        for (FlexlbScheduleProtocol.FlexlbServerStatusPB status : response.getServerStatusList()) {
-            if (status.getRole().equals(role) && !status.getServerIp().isEmpty()) {
-                return status.getServerIp() + ":" + status.getGrpcPort();
-            }
-        }
-        return "";
-    }
-
-    private FlexlbServiceGrpc.FlexlbServiceBlockingStub nextScheduleStub() {
-        int idx = scheduleStubRR.getAndIncrement() % config.nChannels;
-        return scheduleStubs[Math.floorMod(idx, config.nChannels)];
-    }
-
-    private ManagedChannel getEngineChannel(String target) {
-        ManagedChannel[] pool =
-                engineChannelPools.computeIfAbsent(
-                        target,
-                        t -> {
-                            ManagedChannel[] channels = new ManagedChannel[config.nChannels];
-                            for (int i = 0; i < config.nChannels; i++) {
-                                channels[i] =
-                                        NettyChannelBuilder.forTarget(t)
-                                                .eventLoopGroup(eventLoopGroup)
-                                                .channelType(NioSocketChannel.class)
-                                                .maxInboundMessageSize(16 * 1024 * 1024)
-                                                .flowControlWindow(1024 * 1024)
-                                                .keepAliveTime(
-                                                        KEEPALIVE_TIME_MINUTES, TimeUnit.MINUTES)
-                                                .keepAliveTimeout(10, TimeUnit.SECONDS)
-                                                .usePlaintext()
-                                                .build();
-                            }
-                            engineChannelRR.put(t, new AtomicInteger());
-                            return channels;
-                        });
-        AtomicInteger rr = engineChannelRR.get(target);
-        int idx = Math.floorMod(rr.getAndIncrement(), config.nChannels);
-        return pool[idx];
-    }
-
     // ---- Trace Loading ----
 
     private List<TraceRecord> loadTrace(String path) throws IOException {
@@ -1265,104 +1689,6 @@ public final class JavaLoadClient {
         }
         records.sort(Comparator.comparingLong(r -> r.tsMs));
         return records;
-    }
-
-    // Package-visible for per-record priority parsing assertions in tests.
-    TraceRecord parseTraceRecord(JsonNode raw) {
-        int inputLen =
-                raw.path("il")
-                        .asInt(
-                                raw.path("input_token_len")
-                                        .asInt(raw.path("backend_input_token_len").asInt(0)));
-        if (inputLen <= 0) {
-            return null;
-        }
-
-        int outputLen = raw.path("ol").asInt(raw.path("output_token_len").asInt(0));
-        if (outputLen <= 0) {
-            // zero-output trace rows are always filtered; 1-token/N-token
-            // behavior belongs to case tests (request params).
-            return null;
-        }
-
-        String sourceRid =
-                raw.has("request_id")
-                        ? raw.get("request_id").asText()
-                        : raw.has("rid")
-                                ? raw.get("rid").asText()
-                                : Long.toString(stableRequestId(raw.toString()));
-        String traceId = extractTraceId(raw);
-        if (traceId.isEmpty()) {
-            traceId = sourceRid;
-        }
-
-        long requestId;
-        JsonNode ridIntNode = raw.get("request_id_int");
-        if (ridIntNode != null) {
-            requestId = toSignedInt64(ridIntNode.bigIntegerValue());
-        } else {
-            requestId = stableRequestId(sourceRid);
-        }
-
-        long tsMs =
-                raw.path("ts")
-                        .asLong(
-                                raw.path("request_enter_ts_epoch_ms")
-                                        .asLong(raw.path("ts_epoch_ms").asLong(0)));
-
-        List<Integer> tokenIds = null;
-        JsonNode inputIdsNode = raw.get("input_ids");
-        if (inputIdsNode != null && inputIdsNode.isArray()) {
-            tokenIds = new ArrayList<>(inputIdsNode.size());
-            for (JsonNode token : inputIdsNode) {
-                tokenIds.add(token.asInt());
-            }
-        } else {
-            tokenIds = Collections.nCopies(inputLen, 0);
-        }
-
-        List<Long> blockKeys = new ArrayList<>();
-        JsonNode bhNode = raw.get("bh");
-        if (bhNode == null) {
-            bhNode = raw.get("block_cache_keys");
-        }
-        if (bhNode != null && bhNode.isArray()) {
-            for (JsonNode key : bhNode) {
-                blockKeys.add(toSignedInt64(key.bigIntegerValue()));
-            }
-        } else if (tokenIds != null) {
-            blockKeys = computeBlockKeys(tokenIds, BLOCK_SIZE);
-        }
-
-        // Auto-TPM QoS priority: FORCE_PRIORITY > 0 pins every replayed
-        // request to that single level (single-QoS runs); otherwise the
-        // per-record "priority" field wins, else the client-wide PRIORITY env
-        // default (50, the neutral QoS level — p0 traffic is rejected by
-        // master admission); an explicit PRIORITY=0 keeps the field unset
-        // on the wire (legacy behavior). A trace value outside 1-100 is not
-        // clamped into the QoS domain: warn and fall back to the config
-        // default so one messy line cannot skew a whole run (robustness
-        // over strictness for a load-test tool).
-        int priority;
-        if (config.forcePriority > 0) {
-            priority = config.forcePriority;
-        } else {
-            priority = raw.path("priority").asInt(config.priority);
-            if (priority != 0 && !PriorityNormalizer.isValid(priority)) {
-                System.err.println(
-                        "ignoring invalid trace priority "
-                                + priority
-                                + " (must be 1-100) for rid="
-                                + sourceRid
-                                + "; falling back to PRIORITY="
-                                + config.priority);
-                priority = config.priority;
-            }
-        }
-
-        return new TraceRecord(
-                requestId, sourceRid, traceId, tsMs, inputLen, outputLen, blockKeys, tokenIds,
-                priority);
     }
 
     private String extractTraceId(JsonNode raw) {
@@ -1414,18 +1740,6 @@ public final class JavaLoadClient {
             keys.add(hasher.hash().asLong());
         }
         return keys;
-    }
-
-    static long stableRequestId(String value) {
-        return Hashing.murmur3_128().hashString(value, StandardCharsets.UTF_8).asLong()
-                & 0x7FFF_FFFF_FFFF_FFFFL;
-    }
-
-    // Package-visible for loop-mode unique-prefix assertions in tests.
-    // Deterministic per-round salt: the same (key, loop) pair always maps to
-    // the same value, different loops map to different values.
-    static long roundSaltedKey(long blockKey, int loopIdx) {
-        return Hashing.murmur3_128().newHasher().putLong(blockKey).putInt(loopIdx).hash().asLong();
     }
 
     private static long toSignedInt64(BigInteger value) {
@@ -1495,53 +1809,6 @@ public final class JavaLoadClient {
     }
 
     /**
-     * Serializes one per-request row. Synthesized rows (collector timeout /
-     * dead-future exception fallbacks) omit the "priority" key entirely
-     * instead of writing a misleading 0: they never carried a request, so
-     * downstream aggregation distinguishes them by key absence rather than
-     * counting them as unset p0 traffic.
-     */
-    // Package-visible for per-request row serialization assertions in tests.
-    static ObjectNode perRequestNode(RequestResult result) {
-        ObjectNode node = MAPPER.createObjectNode();
-        node.put("rid", result.rid);
-        node.put("trace_id", result.traceId);
-        node.put("request_id", result.requestId);
-        node.put("ts", result.ts);
-        node.put("input_len", result.inputLen);
-        node.put("output_len", result.outputLen);
-        node.put("status", result.status);
-        node.put("schedule_ms", result.scheduleMs);
-        node.put("sched_done_epoch_ms", result.schedDoneEpochMs);
-        node.put("ttft_ms", result.ttftMs);
-        node.put("total_ms", result.totalMs);
-        node.put("enqueued_by_master", result.enqueuedByMaster);
-        node.put("prefill", result.prefill);
-        node.put("decode", result.decode);
-        node.put("error", result.error);
-        node.put("route_path", result.routePath);
-        // HA observability (additive — consumers keyed on the previous field
-        // set are unaffected): route_path gains the "failed" value in HA mode
-        // (no master answer, no direct fallback); master_target is the
-        // actually-served or last-attempted flexlb gRPC address; failover
-        // marks same-request retry switches; error_kind classifies the
-        // schedule-stage failure (transport|business|deadline|none — "none"
-        // also covers phase-2 stream failures, where the master leg itself
-        // succeeded).
-        node.put("master_target", result.masterTarget);
-        node.put("failover", result.failover);
-        node.put("error_kind", result.errorKind);
-        node.put("wall_clock_ts", result.wallClockTs);
-        node.put("send_due_epoch_ms", result.sendDueEpochMs);
-        node.put("send_start_epoch_ms", result.sendStartEpochMs);
-        node.put("pacing_lag_ms", result.pacingLagMs);
-        if (!result.synthetic) {
-            node.put("priority", result.priority);
-        }
-        return node;
-    }
-
-    /**
      * Persists the terminal server-side latency snapshot next to the raw
      * per-request rows. This is raw aggregation input (master arrival and
      * completion counters feed the run-level validity checks in
@@ -1556,112 +1823,6 @@ public final class JavaLoadClient {
             MAPPER.writerWithDefaultPrettyPrinter()
                     .writeValue(serverLatencyPath.toFile(), serverLatency);
         }
-    }
-
-    // ---- Trace Filtering / Truncation (Python parity) ----
-
-    /**
-     * Applies duration/limit filters first, then {@code i % numShards} slicing —
-     * identical to Python load_replay_requests + shard slice order, so LIMIT is a
-     * total cap across all shards rather than a per-shard cap.
-     */
-    static List<TraceRecord> filterAndShard(
-            List<TraceRecord> records, int durationS, int limit, int numShards, int shardIndex) {
-        List<TraceRecord> out = records;
-        if (durationS > 0 && !out.isEmpty()) {
-            long firstTs = out.get(0).tsMs;
-            long endTs = firstTs + durationS * 1000L;
-            List<TraceRecord> filtered = new ArrayList<>();
-            for (TraceRecord r : out) {
-                if (r.tsMs <= endTs) {
-                    filtered.add(r);
-                }
-            }
-            out = filtered;
-        }
-        if (limit > 0) {
-            out = out.subList(0, Math.min(limit, out.size()));
-        }
-        return shardSlice(out, numShards, shardIndex);
-    }
-
-    /**
-     * Pure {@code i % numShards == shardIndex} slice with no duration/limit
-     * filtering. Used directly in loop mode, where duration is a wall-clock
-     * timeout and limit a total sent cap rather than trace filters.
-     */
-    static List<TraceRecord> shardSlice(List<TraceRecord> records, int numShards, int shardIndex) {
-        if (numShards <= 1) {
-            return new ArrayList<>(records);
-        }
-        if (shardIndex < 0 || shardIndex >= numShards) {
-            throw new IllegalArgumentException("SHARD_INDEX must be in [0, NUM_SHARDS)");
-        }
-        List<TraceRecord> sharded = new ArrayList<>();
-        for (int i = 0; i < records.size(); i++) {
-            if (i % numShards == shardIndex) {
-                sharded.add(records.get(i));
-            }
-        }
-        return sharded;
-    }
-
-    /**
-     * Caps input_len/output_len (and truncates token_ids accordingly), matching
-     * Legacy Python client truncation: block_keys are left untouched.
-     * Returns new records; counts each field truncation like Python does.
-     */
-    static List<TraceRecord> truncateRecords(
-            List<TraceRecord> records, int maxInputLen, int maxOutputLen) {
-        int truncated = 0;
-        List<TraceRecord> out = new ArrayList<>(records.size());
-        for (TraceRecord r : records) {
-            TraceRecord cur = r;
-            if (maxInputLen > 0 && cur.inputLen > maxInputLen) {
-                List<Integer> tokens = cur.tokenIds;
-                if (tokens != null && !tokens.isEmpty()) {
-                    tokens =
-                            new ArrayList<>(
-                                    tokens.subList(0, Math.min(maxInputLen, tokens.size())));
-                }
-                cur =
-                        new TraceRecord(
-                                cur.requestId,
-                                cur.sourceRid,
-                                cur.traceId,
-                                cur.tsMs,
-                                maxInputLen,
-                                cur.outputLen,
-                                cur.blockKeys,
-                                tokens,
-                                cur.priority);
-                truncated++;
-            }
-            if (maxOutputLen > 0 && cur.outputLen > maxOutputLen) {
-                cur =
-                        new TraceRecord(
-                                cur.requestId,
-                                cur.sourceRid,
-                                cur.traceId,
-                                cur.tsMs,
-                                cur.inputLen,
-                                maxOutputLen,
-                                cur.blockKeys,
-                                cur.tokenIds,
-                                cur.priority);
-                truncated++;
-            }
-            out.add(cur);
-        }
-        System.out.println(
-                "truncated "
-                        + truncated
-                        + " request length(s): "
-                        + "max_input_len="
-                        + maxInputLen
-                        + ", max_output_len="
-                        + maxOutputLen);
-        return out;
     }
 
     // ---- Pushgateway ----
@@ -1706,182 +1867,6 @@ public final class JavaLoadClient {
         }
     }
 
-    /** Builds the Prometheus text-format payload (parity with Python _push_metrics). */
-    String buildPushMetricsBody() {
-        List<String> lines = new ArrayList<>();
-        int inflight = inflightCount.get();
-        lines.add("flexlb_client_send_total{route_path=\"master\"} " + sentTotal.get());
-        lines.add(
-                "flexlb_client_actual_send_total{route_path=\"master\"} " + actualSentCount.get());
-        lines.add(
-                "flexlb_client_completed_total{route_path=\"master\"} " + completedResults.size());
-        lines.add("flexlb_client_success_total{route_path=\"master\"} " + successCount.get());
-        lines.add("flexlb_client_error_total{route_path=\"master\"} " + errorCount.get());
-        lines.add("flexlb_client_inflight_count{route_path=\"master\"} " + inflight);
-        lines.add("flexlb_client_max_concurrency{route_path=\"master\"} " + config.maxConcurrency);
-        if (config.maxConcurrency > 0) {
-            double util = inflight / (double) config.maxConcurrency;
-            lines.add(
-                    String.format(
-                            "flexlb_client_semaphore_utilization{route_path=\"master\"} %.4f",
-                            util));
-        }
-
-        List<RequestResult> snapshot;
-        synchronized (completedResults) {
-            snapshot = new ArrayList<>(completedResults);
-        }
-        if (!snapshot.isEmpty()) {
-            Map<String, Map<String, List<Double>>> groups = new LinkedHashMap<>();
-            for (RequestResult r : snapshot) {
-                String rp = r.routePath == null ? "unknown" : r.routePath;
-                Map<String, List<Double>> vals =
-                        groups.computeIfAbsent(
-                                rp,
-                                k -> {
-                                    Map<String, List<Double>> m = new LinkedHashMap<>();
-                                    m.put("schedule_ms", new ArrayList<>());
-                                    m.put("total_ms", new ArrayList<>());
-                                    m.put("ttft_ms", new ArrayList<>());
-                                    return m;
-                                });
-                if (r.scheduleMs > 0) {
-                    vals.get("schedule_ms").add(r.scheduleMs);
-                }
-                if (r.totalMs > 0) {
-                    vals.get("total_ms").add(r.totalMs);
-                }
-                if (r.ttftMs > 0) {
-                    vals.get("ttft_ms").add(r.ttftMs);
-                }
-            }
-            for (Map.Entry<String, Map<String, List<Double>>> entry : groups.entrySet()) {
-                String label = "route_path=\"" + entry.getKey() + "\"";
-                for (String metricName : List.of("schedule_ms", "total_ms", "ttft_ms")) {
-                    List<Double> values = entry.getValue().get(metricName);
-                    if (values.isEmpty()) {
-                        continue;
-                    }
-                    double sum = 0;
-                    double mx = Double.NEGATIVE_INFINITY;
-                    for (double v : values) {
-                        sum += v;
-                        mx = Math.max(mx, v);
-                    }
-                    double avg = sum / values.size();
-                    double p50 = percentileNearestRank(values, 50);
-                    double p99 = percentileNearestRank(values, 99);
-                    lines.add(
-                            String.format("flexlb_client_%s_avg{%s} %.3f", metricName, label, avg));
-                    lines.add(
-                            String.format("flexlb_client_%s_p50{%s} %.3f", metricName, label, p50));
-                    lines.add(
-                            String.format("flexlb_client_%s_p99{%s} %.3f", metricName, label, p99));
-                    lines.add(
-                            String.format("flexlb_client_%s_max{%s} %.3f", metricName, label, mx));
-                    lines.add(
-                            "flexlb_client_"
-                                    + metricName
-                                    + "_count{"
-                                    + label
-                                    + "} "
-                                    + values.size());
-                }
-            }
-        }
-        return String.join("\n", lines) + "\n";
-    }
-
-    void pushMetrics() throws IOException, InterruptedException {
-        String body = buildPushMetricsBody();
-        String hostname;
-        try {
-            hostname = InetAddress.getLocalHost().getHostName();
-        } catch (Exception e) {
-            hostname = "unknown";
-        }
-        HttpRequest request =
-                HttpRequest.newBuilder()
-                        .uri(
-                                URI.create(
-                                        config.pushgatewayUrl
-                                                + "/metrics/job/flexlb_client/instance/"
-                                                + hostname))
-                        .header("Content-Type", "text/plain; version=0.0.4")
-                        .PUT(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-                        .timeout(Duration.ofSeconds(10))
-                        .build();
-        HttpResponse<String> response =
-                httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200 && response.statusCode() != 202) {
-            System.out.println(
-                    "pushgateway push failed: " + response.statusCode() + " " + response.body());
-        }
-    }
-
-    /**
-     * Linear gradient replay speed (parity with Python gradient pacing): speed ramps
-     * from max(1, startSpeed) to maxSpeed as elapsed time progresses over duration.
-     */
-    static double gradientSpeed(
-            double elapsedS, int durationS, int gradientStartSpeed, int gradientMaxSpeed) {
-        double progress = Math.min(Math.max(elapsedS, 0.0) / durationS, 1.0);
-        int startSpeed = Math.max(1, gradientStartSpeed);
-        return startSpeed + (gradientMaxSpeed - startSpeed) * progress;
-    }
-
-    /**
-     * Ideal send time of the {@code index}-th request (0-based, per shard) in
-     * uniform mode with traffic ramp-up.
-     *
-     * <p>During the ramp the per-shard instantaneous rate climbs linearly,
-     * {@code q(t) = perShardQps * t / rampUpSeconds} for
-     * {@code t <= rampUpSeconds}, then holds at {@code perShardQps}.
-     * Integrating gives the cumulative send count
-     * {@code N(t) = perShardQps * t^2 / (2 * rampUpSeconds)}; inverting
-     * {@code N(t) = index} yields the ideal send time:
-     * <ul>
-     *   <li>ramp phase ({@code index < perShardQps * rampUpSeconds / 2}):
-     *       {@code t = sqrt(2 * rampUpSeconds * index / perShardQps)};</li>
-     *   <li>steady phase: {@code t = rampUpSeconds
-     *       + (index - rampCount) / perShardQps}.</li>
-     * </ul>
-     *
-     * <p>Properties: both pieces meet at {@code t = rampUpSeconds} with
-     * matching slope {@code 1 / perShardQps} (the rate reaches exactly
-     * {@code perShardQps} when the ramp ends), the send count during the
-     * ramp equals the triangle integral {@code perShardQps * rampUpSeconds / 2}
-     * (no lost or extra sends — pacing quality is conserved), and
-     * {@code rampUpSeconds <= 0} degenerates to the fixed-interval schedule
-     * {@code index / perShardQps} (legacy behavior).
-     *
-     * <p>Package-visible for the ramp-up schedule unit tests.
-     */
-    static double uniformDueSeconds(int index, double perShardQps, double rampUpSeconds) {
-        if (rampUpSeconds <= 0) {
-            return index / perShardQps;
-        }
-        double rampCount = perShardQps * rampUpSeconds / 2.0;
-        if (index < rampCount) {
-            return Math.sqrt(2.0 * rampUpSeconds * index / perShardQps);
-        }
-        return rampUpSeconds + (index - rampCount) / perShardQps;
-    }
-
-    /** Nearest-rank percentile (parity with Python LoadClient._percentile). */
-    static double percentileNearestRank(List<Double> values, double p) {
-        if (values.isEmpty()) {
-            return 0.0;
-        }
-        List<Double> sorted = new ArrayList<>(values);
-        Collections.sort(sorted);
-        int idx = (int) (sorted.size() * p / 100.0);
-        if (idx >= sorted.size()) {
-            idx = sorted.size() - 1;
-        }
-        return sorted.get(idx);
-    }
-
     // ---- Cleanup ----
 
     private void close() {
@@ -1903,6 +1888,9 @@ public final class JavaLoadClient {
 
     // ---- Inner Classes ----
 
+    /**
+     * Parses the replay workload, master targets and load-generation settings.
+     */
     static final class Config {
         final String traceFile;
         final String targetAddr;
@@ -1920,7 +1908,9 @@ public final class JavaLoadClient {
         final int maxConcurrency;
         final double replaySpeed;
         final int loadClientWorkers;
+
         final String outputDir;
+
         final int numShards;
         final int shardIndex;
         final int limit;
@@ -1940,13 +1930,16 @@ public final class JavaLoadClient {
         final long startAtEpochMs;
         final int responseTimeoutSeconds;
         final boolean skipServerLatency;
+
         final String model;
         final String apiKey;
+
         final boolean gradient;
         final int gradientStartSpeed;
         final int gradientMaxSpeed;
         final int maxInputLen;
         final int maxOutputLen;
+
         final String pushgatewayUrl;
 
         /**
@@ -1963,6 +1956,7 @@ public final class JavaLoadClient {
         final boolean enableFallback;
 
         final String endpointsFile;
+
         final boolean dryRun;
 
         /** Default Auto-TPM QoS priority for all replayed requests. Defaults to
@@ -2396,53 +2390,6 @@ public final class JavaLoadClient {
             return "uniform".equals(sendMode);
         }
 
-        /** True when GRPC_TARGETS carries >= 2 addresses (HA sticky+failover mode). */
-        boolean isMultiTarget() {
-            return grpcTargets.size() >= 2;
-        }
-
-        /**
-         * Parses GRPC_TARGETS (comma-separated host:port list): segments are
-         * trimmed, empty segments ignored, order-preserving dedup. Fail-fast
-         * on any malformed entry or on zero valid addresses — this is the
-         * core HA case-test wiring, and a silently-dropped target would let
-         * the whole suite pass without ever exercising failover.
-         */
-        // Package-visible for GRPC_TARGETS parsing assertions in tests.
-        static List<String> parseGrpcTargets(String raw) {
-            List<String> out = new ArrayList<>();
-            for (String part : raw.split(",")) {
-                String addr = part.trim();
-                if (addr.isEmpty()) {
-                    continue;
-                }
-                int colon = addr.lastIndexOf(':');
-                if (colon <= 0 || colon == addr.length() - 1) {
-                    throw new IllegalArgumentException(
-                            "invalid GRPC_TARGETS entry '" + addr + "' (expected host:port)");
-                }
-                try {
-                    int port = Integer.parseInt(addr.substring(colon + 1));
-                    if (port <= 0 || port > 65535) {
-                        throw new NumberFormatException("port out of range: " + port);
-                    }
-                } catch (NumberFormatException e) {
-                    throw new IllegalArgumentException(
-                            "invalid GRPC_TARGETS entry '" + addr + "' (non-numeric port)");
-                }
-                if (!out.contains(addr)) {
-                    out.add(addr);
-                }
-            }
-            if (out.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "GRPC_TARGETS is set but contains no valid host:port address: '"
-                                + raw
-                                + "'");
-            }
-            return out;
-        }
-
         static Config fromEnv() {
             String targetAddr = env("TARGET_ADDR", "127.0.0.1:7001");
             String grpcTarget = env("GRPC_TARGET", "");
@@ -2530,6 +2477,80 @@ public final class JavaLoadClient {
                     grpcTargets);
         }
 
+        /**
+         * Parses GRPC_TARGETS (comma-separated host:port list): segments are
+         * trimmed, empty segments ignored, order-preserving dedup. Fail-fast
+         * on any malformed entry or on zero valid addresses — this is the
+         * core HA case-test wiring, and a silently-dropped target would let
+         * the whole suite pass without ever exercising failover.
+         */
+        // Package-visible for GRPC_TARGETS parsing assertions in tests.
+        static List<String> parseGrpcTargets(String raw) {
+            List<String> out = new ArrayList<>();
+            for (String part : raw.split(",")) {
+                String addr = part.trim();
+                if (addr.isEmpty()) {
+                    continue;
+                }
+                int colon = addr.lastIndexOf(':');
+                if (colon <= 0 || colon == addr.length() - 1) {
+                    throw new IllegalArgumentException(
+                            "invalid GRPC_TARGETS entry '" + addr + "' (expected host:port)");
+                }
+                try {
+                    int port = Integer.parseInt(addr.substring(colon + 1));
+                    if (port <= 0 || port > 65535) {
+                        throw new NumberFormatException("port out of range: " + port);
+                    }
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(
+                            "invalid GRPC_TARGETS entry '" + addr + "' (non-numeric port)");
+                }
+                if (!out.contains(addr)) {
+                    out.add(addr);
+                }
+            }
+            if (out.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "GRPC_TARGETS is set but contains no valid host:port address: '"
+                                + raw
+                                + "'");
+            }
+            return out;
+        }
+
+        /**
+         * PRIORITY must be a valid QoS level (1-100) or the explicit 0
+         * "leave unset on the wire" legacy value; anything else warns and
+         * falls back to the neutral default 50 — a load-test tool stays
+         * robust on config typos instead of failing the run.
+         */
+        // Package-visible for env-validation assertions in tests.
+        static int sanitizePriority(int value) {
+            if (value == PriorityNormalizer.NO_PRIORITY || PriorityNormalizer.isValid(value)) {
+                return value;
+            }
+            System.err.println(
+                    "invalid PRIORITY=" + value + " (must be 0-100); falling back to 50");
+            return PriorityNormalizer.DEFAULT_PRIORITY;
+        }
+
+        /**
+         * FORCE_PRIORITY is either disabled (0) or a valid QoS level (1-100);
+         * an invalid pin warns and disables instead of failing the run.
+         */
+        // Package-visible for env-validation assertions in tests.
+        static int sanitizeForcePriority(int value) {
+            if (value == PriorityNormalizer.NO_PRIORITY || PriorityNormalizer.isValid(value)) {
+                return value;
+            }
+            System.err.println(
+                    "invalid FORCE_PRIORITY="
+                            + value
+                            + " (must be 0-100); disabling the priority pin");
+            return PriorityNormalizer.NO_PRIORITY;
+        }
+
         void print() {
             System.out.println("=== JavaLoadClient Configuration ===");
             System.out.println("  TRACE_FILE=" + traceFile);
@@ -2575,6 +2596,11 @@ public final class JavaLoadClient {
             System.out.println("=====================================");
         }
 
+        /** True when GRPC_TARGETS carries >= 2 addresses (HA sticky+failover mode). */
+        boolean isMultiTarget() {
+            return grpcTargets.size() >= 2;
+        }
+
         private static String env(String key, String def) {
             String val = System.getenv(key);
             return val != null && !val.isEmpty() ? val : def;
@@ -2602,40 +2628,11 @@ public final class JavaLoadClient {
             }
             return val.equals("1") || val.equalsIgnoreCase("true") || val.equalsIgnoreCase("yes");
         }
-
-        /**
-         * PRIORITY must be a valid QoS level (1-100) or the explicit 0
-         * "leave unset on the wire" legacy value; anything else warns and
-         * falls back to the neutral default 50 — a load-test tool stays
-         * robust on config typos instead of failing the run.
-         */
-        // Package-visible for env-validation assertions in tests.
-        static int sanitizePriority(int value) {
-            if (value == PriorityNormalizer.NO_PRIORITY || PriorityNormalizer.isValid(value)) {
-                return value;
-            }
-            System.err.println(
-                    "invalid PRIORITY=" + value + " (must be 0-100); falling back to 50");
-            return PriorityNormalizer.DEFAULT_PRIORITY;
-        }
-
-        /**
-         * FORCE_PRIORITY is either disabled (0) or a valid QoS level (1-100);
-         * an invalid pin warns and disables instead of failing the run.
-         */
-        // Package-visible for env-validation assertions in tests.
-        static int sanitizeForcePriority(int value) {
-            if (value == PriorityNormalizer.NO_PRIORITY || PriorityNormalizer.isValid(value)) {
-                return value;
-            }
-            System.err.println(
-                    "invalid FORCE_PRIORITY="
-                            + value
-                            + " (must be 0-100); disabling the priority pin");
-            return PriorityNormalizer.NO_PRIORITY;
-        }
     }
 
+    /**
+     * Retains one replay request's token shape, cache keys and scheduling metadata.
+     */
     static final class TraceRecord {
         final long requestId;
         final String sourceRid;
@@ -2683,6 +2680,9 @@ public final class JavaLoadClient {
         }
     }
 
+    /**
+     * Collects scheduling and streaming observations for one replayed request.
+     */
     static final class RequestResult {
         String rid = "";
         String traceId = "";

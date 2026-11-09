@@ -52,7 +52,9 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
     /** Caller holds the owning PrefillState lock. Reused until membership changes. */
     Capture capture();
 
-    /** Immutable membership; prediction objects are materialized outside the owner lock. */
+    /**
+     * Immutable membership; prediction objects are materialized outside the owner lock.
+     */
     final class Capture {
         private static final Capture EMPTY = new Capture(List.of());
         private final List<Entry> entries;
@@ -98,7 +100,9 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
         }
     }
 
-    /** One identity in the active index; survives membership snapshot rebuilds. */
+    /**
+     * One identity in the active index; survives membership snapshot rebuilds.
+     */
     final class Entry {
         private final ScheduledRequest request;
         private final long sequence;
@@ -131,6 +135,9 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
         }
     }
 
+    /**
+     * Provides the no-index behavior for modes that do not retain an active Prefill queue.
+     */
     final class Disabled implements PrefillActiveIndex {
         private static final Disabled INSTANCE = new Disabled();
 
@@ -186,6 +193,10 @@ public sealed interface PrefillActiveIndex extends Iterable<ScheduledRequest>
         }
     }
 
+    /**
+     * Maintains exact queued identities in comparator order and captures stable membership
+     * snapshots.
+     */
     final class Ordered implements PrefillActiveIndex {
         private final TreeSet<Entry> queue;
         // Identity lookup is part of this index, not a second ownership ledger.

@@ -15,7 +15,10 @@ py_test(
         "//:rtp_compute_ops",
         "//:th_transformer_config",
     ],
-    deps = ["//rtp_llm:ops"],
+    deps = [
+        "//rtp_llm:device",
+        "//rtp_llm:ops",
+    ],
 )
 
 cc_library(
@@ -85,7 +88,6 @@ cc_library(
         "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:debug_utils",
-        "//rtp_llm/cpp/utils:device_perf_wrapper",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
     ] + torch_deps() + select_py_bindings() + select({

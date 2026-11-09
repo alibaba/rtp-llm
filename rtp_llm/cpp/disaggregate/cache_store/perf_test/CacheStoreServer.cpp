@@ -45,8 +45,7 @@ int main(int argc, char** argv) {
     )";
     kmonitor::KMonitorFactory::Init(kmonConf);
     kmonitor::KMonitorFactory::Start();
-    DeviceResourceConfig device_resource_config;
-    auto device_util                                   = std::make_shared<DeviceUtil>(device_resource_config);
+    auto device_util                                   = std::make_shared<DeviceUtil>();
 
     CacheStoreInitParams server_params;
     server_params.listen_port = 54321;

@@ -66,7 +66,7 @@ def init_server(
 
     py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
     set_parallelism_config(
-        py_env_configs.parallelism_config, rank, py_env_configs.ffn_disaggregate_config
+        py_env_configs.parallelism_config, rank
     )
     py_env_configs.server_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank
@@ -87,7 +87,7 @@ def regist_server(
 ):
     py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
     set_parallelism_config(
-        py_env_configs.parallelism_config, rank, py_env_configs.ffn_disaggregate_config
+        py_env_configs.parallelism_config, rank
     )
     py_env_configs.server_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank
@@ -108,7 +108,7 @@ def start_server(
 ):
     py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())
     set_parallelism_config(
-        py_env_configs.parallelism_config, rank, py_env_configs.ffn_disaggregate_config
+        py_env_configs.parallelism_config, rank
     )
     py_env_configs.server_config.set_local_rank(
         py_env_configs.parallelism_config.local_rank
@@ -369,7 +369,6 @@ class DistributedServerTest(unittest.TestCase):
             set_parallelism_config(
                 py_env_configs.parallelism_config,
                 0,
-                py_env_configs.ffn_disaggregate_config,
             )
             py_env_configs.server_config.set_local_rank(
                 py_env_configs.parallelism_config.local_rank
@@ -445,7 +444,6 @@ class DistributedServerTest(unittest.TestCase):
             set_parallelism_config(
                 py_env_configs_0.parallelism_config,
                 0,
-                py_env_configs_0.ffn_disaggregate_config,
             )
             py_env_configs_0.server_config.set_local_rank(
                 py_env_configs_0.parallelism_config.local_rank

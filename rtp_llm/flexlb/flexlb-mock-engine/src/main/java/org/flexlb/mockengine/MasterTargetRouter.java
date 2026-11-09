@@ -15,134 +15,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Sticky multi-target failover router for the Schedule RPC — the HA case-test
- * counterpart of the legacy single-address path in {@link JavaLoadClient}.
- *
- * <p>Simplified model (deliberately NOT a 1:1 port of the production Python
- * frontend's vipserver discovery layer): the client holds a static list of
- * flexlb gRPC addresses ({@code GRPC_TARGETS=A,B}), sticks to one "current"
- * target, and only reacts to <b>transport-layer</b> failures. The production
- * pull-mode equivalent — polling {@code master/info} every second for
- * {@code real_master_host} — is not implemented; the two are semantically
- * equivalent for the master-side HA contract because a request that lands on
- * the backup is forwarded by it (hop=1) and stays transparent to the client.
- *
- * <p>Per-request decision flow (brief p1 decision tree — event ① "A
- * unreachable" is decoupled from event ② "B became master"; the client never
- * waits for or probes ZK state):
- * <ol>
- *   <li>Send Schedule to the sticky target (per-target channel pool,
- *       round-robin within the pool — same pool shape as the legacy path).</li>
- *   <li>On gRPC {@code UNAVAILABLE} (connection refused/broken — the ONLY
- *       retrying error family): same-request retry on the next target in the
- *       list, wrap-around, one attempt per target. On success from a
- *       different target the sticky pointer moves there (a backup answering
- *       is good enough — whether it is already master is event ②, none of
- *       the client's business).</li>
- *   <li>Every other outcome is terminal for the request:
- *       {@code DEADLINE_EXCEEDED} → no retry/switch/direct-fallback
- *       (single-assertion caliber); any other gRPC status or non-gRPC
- *       exception → treated as "master answered at the gRPC layer" — no
- *       retry, no switch, no direct fallback (same boundary as business
- *       error codes such as 8431/8511).</li>
- *   <li>All targets {@code UNAVAILABLE} → double-connection-failure outcome
- *       ({@link ErrorKind#TRANSPORT}); the caller decides whether the
- *       ENABLE_FALLBACK direct-to-engine escape hatch applies.</li>
- *   <li>Failback is symmetric wrap-around: when the sticky target dies and a
- *       previously-dead target has recovered, the retry chain naturally lands
- *       back on it and the sticky pointer follows — no probing thread, no
- *       direction preference.</li>
- * </ol>
- *
- * <p>Error-code boundary (brief p1 "edge notes" — none of these enter the
- * retry/switch/fallback logic): business codes in the Schedule response
- * (8431 admission rejection, 8511 forwarding terminal code from the
- * split-brain window, ...) are returned to the caller as ordinary responses;
- * the router does not even look at them. Classification of those rows into
- * {@code error_kind=business} happens in the caller.
- *
- * <p>Sticky-pointer concurrency: the pointer is a plain volatile write on
- * success. Concurrent requests during a failover window may briefly diverge
- * before converging on the newly-proven target; this is best-effort by
- * design (the simplified model has no probing, so the next request simply
- * retries). Observability (per-request {@code master_target}/{@code failover}
- * fields) is stamped per request and stays exact regardless of the race.
+ * Sends Schedule calls to a sticky master target and tries each remaining target only after {@code
+ * UNAVAILABLE}. Success updates the sticky target; other transport statuses and business responses
+ * finish the attempt, while exhaustion leaves direct fallback to the caller.
  */
 final class MasterTargetRouter {
-
-    /** Coarse failure taxonomy for the per-request {@code error_kind} field. */
-    enum ErrorKind {
-        /** Schedule RPC returned a response (any code — business codes are
-         *  classified by the caller, not the router). */
-        NONE("none"),
-        /** Every target failed with gRPC UNAVAILABLE (transport layer). */
-        TRANSPORT("transport"),
-        /** gRPC DEADLINE_EXCEEDED — no retry, no switch, no fallback. */
-        DEADLINE("deadline"),
-        /** Master answered at the gRPC layer but the call failed (INTERNAL,
-         *  CANCELLED, ...) or a non-gRPC exception escaped — conservative:
-         *  same no-retry boundary as business error codes. */
-        BUSINESS("business");
-
-        final String label;
-
-        ErrorKind(String label) {
-            this.label = label;
-        }
-    }
-
-    /** Terminal outcome of one failover-aware Schedule call. */
-    static final class ScheduleOutcome {
-        /** Master response, or null when no target produced one. */
-        final FlexlbScheduleProtocol.FlexlbScheduleResponsePB response;
-
-        /** Actually-served (or last-attempted, when none served) target address. */
-        final String lastTarget;
-
-        /** True when the same request was retried on another target. */
-        final boolean failover;
-
-        final ErrorKind errorKind;
-
-        /** Transport-layer exception of the last UNAVAILABLE attempt (null otherwise). */
-        final Exception failure;
-
-        ScheduleOutcome(
-                FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
-                String lastTarget,
-                boolean failover,
-                ErrorKind errorKind,
-                Exception failure) {
-            this.response = response;
-            this.lastTarget = lastTarget;
-            this.failover = failover;
-            this.errorKind = errorKind;
-            this.failure = failure;
-        }
-    }
-
-    /** One target's channel pool — same N_CHANNELS + round-robin shape as the legacy single-target path. */
-    private static final class TargetPool {
-        final String target;
-        final ManagedChannel[] channels;
-        final FlexlbServiceGrpc.FlexlbServiceBlockingStub[] stubs;
-        final AtomicInteger rr = new AtomicInteger();
-
-        TargetPool(
-                String target,
-                ManagedChannel[] channels,
-                FlexlbServiceGrpc.FlexlbServiceBlockingStub[] stubs) {
-            this.target = target;
-            this.channels = channels;
-            this.stubs = stubs;
-        }
-
-        FlexlbServiceGrpc.FlexlbServiceBlockingStub nextStub() {
-            int idx = Math.floorMod(rr.getAndIncrement(), stubs.length);
-            return stubs[idx];
-        }
-    }
-
     private final List<TargetPool> pools;
 
     /** Index into {@link #pools} of the current sticky target. */
@@ -283,5 +160,84 @@ final class MasterTargetRouter {
             }
         }
         return ErrorKind.BUSINESS.label;
+    }
+
+    /**
+     * Coarse failure taxonomy for the per-request {@code error_kind} field.
+     */
+    enum ErrorKind {
+        /** Schedule RPC returned a response (any code — business codes are
+         *  classified by the caller, not the router). */
+        NONE("none"),
+        /** Every target failed with gRPC UNAVAILABLE (transport layer). */
+        TRANSPORT("transport"),
+        /** gRPC DEADLINE_EXCEEDED — no retry, no switch, no fallback. */
+        DEADLINE("deadline"),
+        /** Master answered at the gRPC layer but the call failed (INTERNAL,
+         *  CANCELLED, ...) or a non-gRPC exception escaped — conservative:
+         *  same no-retry boundary as business error codes. */
+        BUSINESS("business");
+
+        final String label;
+
+        ErrorKind(String label) {
+            this.label = label;
+        }
+    }
+
+    /**
+     * Terminal outcome of one failover-aware Schedule call.
+     */
+    static final class ScheduleOutcome {
+        /** Master response, or null when no target produced one. */
+        final FlexlbScheduleProtocol.FlexlbScheduleResponsePB response;
+
+        /** Actually-served (or last-attempted, when none served) target address. */
+        final String lastTarget;
+
+        /** True when the same request was retried on another target. */
+        final boolean failover;
+
+        final ErrorKind errorKind;
+
+        /** Transport-layer exception of the last UNAVAILABLE attempt (null otherwise). */
+        final Exception failure;
+
+        ScheduleOutcome(
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
+                String lastTarget,
+                boolean failover,
+                ErrorKind errorKind,
+                Exception failure) {
+            this.response = response;
+            this.lastTarget = lastTarget;
+            this.failover = failover;
+            this.errorKind = errorKind;
+            this.failure = failure;
+        }
+    }
+
+    /**
+     * One target's channel pool — same N_CHANNELS + round-robin shape as the legacy single-target path.
+     */
+    private static final class TargetPool {
+        final String target;
+        final ManagedChannel[] channels;
+        final FlexlbServiceGrpc.FlexlbServiceBlockingStub[] stubs;
+        final AtomicInteger rr = new AtomicInteger();
+
+        TargetPool(
+                String target,
+                ManagedChannel[] channels,
+                FlexlbServiceGrpc.FlexlbServiceBlockingStub[] stubs) {
+            this.target = target;
+            this.channels = channels;
+            this.stubs = stubs;
+        }
+
+        FlexlbServiceGrpc.FlexlbServiceBlockingStub nextStub() {
+            int idx = Math.floorMod(rr.getAndIncrement(), stubs.length);
+            return stubs[idx];
+        }
     }
 }

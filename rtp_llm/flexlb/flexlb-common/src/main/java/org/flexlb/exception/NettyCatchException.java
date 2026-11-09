@@ -2,6 +2,9 @@ package org.flexlb.exception;
 
 import org.flexlb.enums.StatusEnum;
 
+/**
+ * Wraps an HTTP transport failure for the calling service.
+ */
 public class NettyCatchException extends FlexLBException {
 
     public NettyCatchException(int code, String name, String message, Throwable cause) {

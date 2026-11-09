@@ -1,7 +1,6 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 
 #include <optional>
 #include <functional>
@@ -27,11 +26,6 @@ OpException::OpException(const OpStatus& status): status_(status) {
     RTP_LLM_STACKTRACE_LOG_INFO("%s", stack.c_str());
     ss << stack;
     detail_str_ = ss.str();
-    if (StaticConfig::user_ft_core_dump_on_exception) {
-        fflush(stdout);
-        fflush(stderr);
-        abort();
-    }
 }
 
 std::string GptModelInputs::debugString(bool force) const {

@@ -23,6 +23,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks deployment identity requirements and lifecycle of ZooKeeper leader election.
+ */
 class DeploymentIdentityConsistencyTest {
 
     @ParameterizedTest

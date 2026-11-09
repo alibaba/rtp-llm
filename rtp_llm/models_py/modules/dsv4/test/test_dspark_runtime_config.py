@@ -30,9 +30,7 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
     def test_gen_num_per_cycle_three_is_accepted_without_checkpoint_width(self):
         sp_config, target_config, draft_config = self._configs(gamma=3)
 
-        ModelFactory._setup_dspark_configs(
-            sp_config, target_config, draft_config
-        )
+        ModelFactory._setup_dspark_configs(sp_config, target_config, draft_config)
 
         self.assertEqual(sp_config.sp_dspark_mask_token_id, 128799)
         self.assertTrue(sp_config.sp_dspark_sample_from_anchor)
@@ -42,9 +40,7 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
         sp_config, target_config, draft_config = self._configs(gamma=7)
         draft_config.vocab_size = 20_000
 
-        ModelFactory._setup_dspark_configs(
-            sp_config, target_config, draft_config
-        )
+        ModelFactory._setup_dspark_configs(sp_config, target_config, draft_config)
 
         self.assertEqual(sp_config.sp_dspark_mask_token_id, 128799)
 
@@ -52,9 +48,7 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
         sp_config, target_config, draft_config = self._configs(gamma=3)
         draft_config.input_vocab_size = 0
 
-        ModelFactory._setup_dspark_configs(
-            sp_config, target_config, draft_config
-        )
+        ModelFactory._setup_dspark_configs(sp_config, target_config, draft_config)
 
         self.assertEqual(sp_config.sp_dspark_mask_token_id, 128799)
 
@@ -63,17 +57,13 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
         draft_config.dspark_noise_token_id = draft_config.input_vocab_size
 
         with self.assertRaisesRegex(ValueError, "input_vocab_size"):
-            ModelFactory._setup_dspark_configs(
-                sp_config, target_config, draft_config
-            )
+            ModelFactory._setup_dspark_configs(sp_config, target_config, draft_config)
 
     def test_gen_num_per_cycle_must_be_positive(self):
         sp_config, target_config, draft_config = self._configs(gamma=0)
 
         with self.assertRaisesRegex(ValueError, "positive gen_num_per_cycle"):
-            ModelFactory._setup_dspark_configs(
-                sp_config, target_config, draft_config
-            )
+            ModelFactory._setup_dspark_configs(sp_config, target_config, draft_config)
 
     def test_only_explicit_dspark_wires_dspark_runtime_config(self):
         for sp_type, model_type, should_setup_dspark in (
@@ -102,7 +92,6 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
                 model_args = SimpleNamespace(
                     tokenizer_path="/unused/tokenizer",
                     act_type=None,
-                    mla_ops_type=None,
                     enable_fp32_lm_head=False,
                 )
 

@@ -4,6 +4,40 @@ load("@arch_config//:arch_select.bzl", "requirement")
 
 requirement(["filelock"])
 
+CUDA13_X86_ONLY = select({
+    "@//:using_cuda13_x86": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+
+py_test(
+    name = "generation_prefill_rope_cache_test",
+    srcs = ["generation_prefill_rope_cache_test.py"],
+    data = ["//:th_transformer"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+        "//rtp_llm:flashinfer-python",
+    ],
+    target_compatible_with = CUDA13_X86_ONLY,
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
+
+py_test(
+    name = "test_beam_search_cascade",
+    srcs = ["test_beam_search_cascade.py"],
+    data = ["//:th_transformer"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+        "//rtp_llm:flashinfer-python",
+    ],
+    target_compatible_with = CUDA13_X86_ONLY,
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
+
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
@@ -15,10 +49,6 @@ flashinfer_deps = [
     "//rtp_llm:flashinfer-cubin",
 ]
 
-CUDA13_X86_ONLY = select({
-    "@//:using_cuda13_x86": [],
-    "//conditions:default": ["@platforms//:incompatible"],
-})
 
 CUDA13_ARM_ONLY = select({
     "@//:using_cuda13_arm": [],

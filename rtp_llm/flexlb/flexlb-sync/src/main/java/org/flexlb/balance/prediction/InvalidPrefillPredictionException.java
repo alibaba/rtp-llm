@@ -1,6 +1,8 @@
 package org.flexlb.balance.prediction;
 
-/** A predictor returned a numeric value outside the scheduling contract. */
+/**
+ * A predictor returned a numeric value outside the scheduling contract.
+ */
 public final class InvalidPrefillPredictionException extends IllegalStateException {
 
     InvalidPrefillPredictionException(String predictionKind, Number returnedValue) {

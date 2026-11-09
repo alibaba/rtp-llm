@@ -8,6 +8,8 @@
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 
 #include <iostream>
+#include <cstdlib>
+#include <cstring>
 
 namespace rtp_llm {
 namespace {
@@ -270,8 +272,48 @@ FusedRopeKVCacheDecodeOp::FusedRopeKVCacheDecodeOp(const AttentionConfigs& attn_
                                                    bool use_fp8_fmha):
     attn_configs_(attn_configs), max_seq_len_(max_seq_len), use_fp8_fmha_(use_fp8_fmha) {}
 
-PpuFusedRopeParamsPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
-    int batch_size = attn_inputs.sequence_lengths.size(0);
+PpuFusedRopeParamsPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs,
+                                                        bool                         forbid_reallocation) {
+    torch::Tensor sequence_lengths = attn_inputs.sequence_lengths;
+    if (attn_inputs.is_cuda_graph || forbid_reallocation) {
+        // CudaGraphRunner waits for forward_event_ before invoking this host
+        // preparation in the default pipeline. Standalone graph callers must
+        // likewise finish the previous replay before modifying pinned memory.
+        // The stream-async pipelines can skip that wait; their lifetime contract
+        // has not been established for kernels reading PPU host pointers.
+        for (const char* name : {"RTP_LLM_STREAM_ASYNC", "RTP_LLM_MTP_ASYNC_PREPARE"}) {
+            const char* value = std::getenv(name);
+            RTP_LLM_CHECK_WITH_INFO(
+                value == nullptr || std::strcmp(value, "1") != 0,
+                "PPU decode CUDA graph pinned sequence_lengths requires the synchronized host prepare pipeline; "
+                "%s=1 is not supported",
+                name);
+        }
+        RTP_LLM_CHECK_WITH_INFO(sequence_lengths.defined() && sequence_lengths.numel() > 0
+                                    && sequence_lengths.dim() == 1 && sequence_lengths.scalar_type() == torch::kInt32
+                                    && sequence_lengths.device().is_cpu() && sequence_lengths.is_contiguous()
+                                    && sequence_lengths.is_pinned(),
+                                "PPU decode CUDA graph sequence_lengths must be non-empty contiguous pinned CPU int32");
+        if (!graph_sequence_lengths_.defined()) {
+            RTP_LLM_CHECK_WITH_INFO(!forbid_reallocation,
+                                    "PPU decode CUDA graph sequence_lengths must be prepared before replay");
+            graph_sequence_lengths_ =
+                torch::empty(sequence_lengths.sizes(), sequence_lengths.options().pinned_memory(true));
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(graph_sequence_lengths_.sizes() == sequence_lengths.sizes(),
+                                    "PPU decode CUDA graph cannot resize the captured sequence_lengths buffer");
+        }
+        // This is deliberately synchronous H2H, not an asynchronous copy from a
+        // caller-owned temporary. The owned allocation remains pinned and keeps
+        // the same address for every capture/replay of this attention instance.
+        if (graph_sequence_lengths_.data_ptr() != sequence_lengths.data_ptr()) {
+            std::memcpy(graph_sequence_lengths_.data_ptr(),
+                        sequence_lengths.data_ptr(),
+                        sequence_lengths.numel() * sequence_lengths.element_size());
+        }
+        sequence_lengths = graph_sequence_lengths_;
+    }
+    int           batch_size = attn_inputs.sequence_lengths.size(0);
     torch::Tensor kv_cache_kernel_block_id_device;
     if (attn_inputs.kv_cache_kernel_block_id.defined() && attn_inputs.kv_cache_kernel_block_id.numel() > 0) {
         kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
@@ -280,10 +322,10 @@ PpuFusedRopeParamsPtr FusedRopeKVCacheDecodeOp::prepare(torch_ext::PyAttentionIn
     RTP_LLM_CHECK_WITH_INFO(kv_cache_kernel_block_id_device.defined(), "decode requires kv cache block ids");
     auto attn_params =
         preparePpuFusedRopeParams(attn_configs_, kv_cache_kernel_block_id_device, batch_size, use_fp8_fmha_);
-    attn_params->cu_seqlens = attn_inputs.cu_seqlens_device;
-    attn_params->cu_kv_seqlens = attn_inputs.cu_kv_seqlens_device;
-    attn_params->sequence_lengths = attn_inputs.sequence_lengths;
-    attn_params->position_ids = attn_inputs.combo_position_ids;
+    attn_params->cu_seqlens                = attn_inputs.cu_seqlens_device;
+    attn_params->cu_kv_seqlens             = attn_inputs.cu_kv_seqlens_device;
+    attn_params->sequence_lengths          = sequence_lengths;
+    attn_params->position_ids              = attn_inputs.combo_position_ids;
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     return attn_params;
 }
@@ -345,7 +387,8 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
     pybind11::class_<PpuFusedRopeParams, std::shared_ptr<PpuFusedRopeParams>, ParamsBase>(m,
                                                                                          "PpuFusedRopeParams")
         .def(pybind11::init<>())
-        .def_readwrite("kv_cache_offset", &PpuFusedRopeParams::kv_cache_offset);
+        .def_readwrite("kv_cache_offset", &PpuFusedRopeParams::kv_cache_offset)
+        .def_readwrite("sequence_lengths", &PpuFusedRopeParams::sequence_lengths);
     pybind11::class_<KVBlockArray>(m, "KVBlockArray")
         .def(pybind11::init<>())
         .def(
@@ -378,7 +421,10 @@ void registerFusedRopeKVCacheOp(const py::module& m) {
              py::arg("attn_configs"),
              py::arg("max_seq_len") = 0,
              py::arg("use_fp8_fmha") = false)
-        .def("prepare", &FusedRopeKVCacheDecodeOp::prepare, py::arg("attn_inputs"))
+        .def("prepare",
+             &FusedRopeKVCacheDecodeOp::prepare,
+             py::arg("attn_inputs"),
+             py::arg("forbid_reallocation") = false)
         .def("forward", &FusedRopeKVCacheDecodeOp::forward, py::arg("qkv"), py::arg("kv_cache"), py::arg("params"));
 }
 

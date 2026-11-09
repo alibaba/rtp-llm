@@ -5,9 +5,7 @@ import lombok.Setter;
 import lombok.ToString;
 
 /**
- * @author zjw
- * description:
- * date: 2025/3/31
+ * Carries the result of a master-change notification.
  */
 @ToString
 @Getter

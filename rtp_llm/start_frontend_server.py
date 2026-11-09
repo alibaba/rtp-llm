@@ -50,11 +50,10 @@ def start_frontend_server(
         logging.info(f"import FrontendApp took {time.time() - start_time:.2f}s")
 
     py_env_configs.server_config.frontend_server_id = server_id
-    # Sync parallelism_config (and ffn_disaggregate_config) with world_rank, same as backend
+    # Sync parallelism_config with world_rank, same as backend
     set_parallelism_config(
         py_env_configs.parallelism_config,
         rank_id,
-        py_env_configs.ffn_disaggregate_config,
         py_env_configs.prefill_cp_config,
     )
     py_env_configs.server_config.set_local_rank(

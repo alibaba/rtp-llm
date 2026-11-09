@@ -18,7 +18,6 @@ from rtp_llm.models_py.model_desc.hidden_state_capture import (
 )
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
-from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
     PyModelInitResources,
@@ -37,9 +36,6 @@ class GptModelBase(nn.Module):
         max_generate_batch_size: int,
         fmha_config=None,  # Optional FMHAConfig
         py_hw_kernel_config=None,  # Optional HWKernelConfig
-        device_resource_config: Optional[
-            DeviceResourceConfig
-        ] = None,  # Optional DeviceResourceConfig
     ) -> None:
         super().__init__()
         self.config = config
@@ -47,11 +43,11 @@ class GptModelBase(nn.Module):
         self.weight = weight
         self.fmha_config = fmha_config
         self.py_hw_kernel_config = py_hw_kernel_config
-        self.micro_batch_size: int = (
-            1
-            if device_resource_config
-            and device_resource_config.enable_layer_micro_batch == 0
-            else 2
+        self.decode_cascade_max_requests = (
+            max_generate_batch_size
+            if py_hw_kernel_config
+            and getattr(py_hw_kernel_config, "enable_decode_cascade_attention", False)
+            else 0
         )
         self.layer_num: int = config.num_layers
         self.vocab_size: int = config.vocab_size
@@ -61,9 +57,7 @@ class GptModelBase(nn.Module):
         self._mtp_aux_capture_layer_ids = tuple(
             config.capture_aux_hidden_layer_ids or ()
         )
-        self._mtp_aux_capture_layer_id_set = frozenset(
-            self._mtp_aux_capture_layer_ids
-        )
+        self._mtp_aux_capture_layer_id_set = frozenset(self._mtp_aux_capture_layer_ids)
         self._mtp_target_hidden_states: Optional[torch.Tensor] = None
         self._mtp_target_graph_buffer: Optional[torch.Tensor] = None
         self._mtp_target_prompt_buffer: Optional[torch.Tensor] = None
@@ -143,6 +137,9 @@ class GptModelBase(nn.Module):
                     fmha_config=self.fmha_config,
                     is_cuda_graph=is_cuda_graph,
                     cuda_graph_selection_mode=cuda_graph_selection_mode,
+                    decode_cascade_max_requests=getattr(
+                        self, "decode_cascade_max_requests", 0
+                    ),
                 )
                 for tag, group_inputs in selected_group_inputs
             }
@@ -154,6 +151,7 @@ class GptModelBase(nn.Module):
             fmha_config=self.fmha_config,
             is_cuda_graph=is_cuda_graph,
             cuda_graph_selection_mode=cuda_graph_selection_mode,
+            decode_cascade_max_requests=getattr(self, "decode_cascade_max_requests", 0),
         )
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
@@ -243,9 +241,7 @@ class GptModelBase(nn.Module):
             : self._mtp_aux_capture_rows
         ]
 
-    def get_mtp_target_hidden_states(
-        self, num_tokens: int
-    ) -> Optional[torch.Tensor]:
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         hidden = self._mtp_target_hidden_states
         if hidden is None:
             return None

@@ -29,6 +29,9 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks forwarding of large scheduling payloads over the gRPC transport.
+ */
 class FlexlbGrpcPayloadTest {
     @Test
     @Timeout(30)

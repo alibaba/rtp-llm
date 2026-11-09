@@ -16,7 +16,6 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/model_utils",
         "//rtp_llm/cpp/models:stats",

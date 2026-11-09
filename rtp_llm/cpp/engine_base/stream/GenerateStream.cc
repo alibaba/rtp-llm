@@ -26,6 +26,8 @@ namespace rtp_llm {
 
 namespace {
 
+constexpr size_t kSmallBeamSearchV1MaxBeamWidth = 8;  // Keep in sync with trt_beam_search kMaxBeamWidthForV1.
+
 std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, size_t output_vocab_size) {
     if (config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f || config.frequency_penalty != 0.0f) {
         return "output vocabulary pruning does not support active repetition, presence, or frequency penalties";
@@ -40,8 +42,15 @@ std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, si
         || config.calculate_loss != 0 || !config.select_tokens_id.empty() || !config.select_tokens_str.empty()) {
         return "output vocabulary pruning does not support full-vocabulary logits, probabilities, labels, or loss";
     }
-    if (config.hasNumBeams() && output_vocab_size <= 2 * static_cast<size_t>(config.maxNumBeams())) {
-        return "output vocabulary size must be greater than twice the maximum beam width";
+    if (config.hasNumBeams()) {
+        const size_t max_num_beams = static_cast<size_t>(config.maxNumBeams());
+        if (output_vocab_size < max_num_beams) {
+            return "output vocabulary size must be at least the maximum beam width";
+        }
+        if (config.variable_num_beams.empty() && max_num_beams <= kSmallBeamSearchV1MaxBeamWidth
+            && output_vocab_size <= 2 * max_num_beams) {
+            return "output vocabulary size must be greater than twice the maximum beam width for small-beam search";
+        }
     }
     return std::nullopt;
 }
@@ -1365,9 +1374,11 @@ bool GenerateStream::updateKvCacheBlocks(const torch::Tensor& src_batch_indices)
 
     // NOTE: `1` is used here as updateKvCacheBlocks is called after updateOutput,
     // in which the seqLength has already increased
-    bool is_seq_len_misaligned = seqLength() % seqSizePerBlock() != 1;
+    const int  cached_seq_len        = seqLength() - 1;
+    const int  valid_tail_tokens     = cached_seq_len % seqSizePerBlock();
+    const bool is_seq_len_misaligned = valid_tail_tokens != 0;
 
-    return stream_cache_resource_->updateKVBlock(block_src_batch, is_seq_len_misaligned);
+    return stream_cache_resource_->updateKVBlock(block_src_batch, is_seq_len_misaligned, valid_tail_tokens);
 }
 
 std::optional<ErrorInfo> GenerateStream::updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info) {

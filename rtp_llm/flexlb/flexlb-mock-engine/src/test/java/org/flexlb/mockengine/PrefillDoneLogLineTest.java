@@ -31,43 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Contract test for the per-rid prefill terminal event row
- * ({@code event=prefill_done}) written to engine_events.jsonl by the batch
- * completion callback in {@code FastRpcService.runPrefillBatch} — the
- * structured JSONL replacement of the former {@code mock_prefill_done}
- * stdout trace line.
- *
- * <p>The row is the engine-side half of the BIRTH-axis engine-exec
- * percentiles: aggregate_canvas_run.py joins {@code exec_ms} /
- * {@code prefill_done_ms} against the load client's {@code send_start_epoch_ms}
- * bucket by {@code rid} (the numeric GenerateInputPB.requestId, NOT the
- * trace-source rid string), so prefill exec lands on the same axis as
- * e2e/full_e2e. A schema drift here silently breaks that join, so the exact
- * JSON key set is asserted — if this test fails after an intentional schema
- * change, update the parser in aggregate_canvas_run.py in the same commit.
- *
- * <p>Prefill executes whole BATCHES, so the contract has two batch-shaped
- * properties beyond the schema: every member of one batch logs the SAME
- * exec_ms (the batch execution duration), the SAME prefill_done_ms (one
- * wall-clock stamp taken at batch completion) and the SAME batch_size. All
- * are asserted here via a single 3-request enqueueBatch.
- *
- * <p>Observation channel: the test injects its own response queues into the
- * service's {@code responseQueues} map (enqueueBatch's computeIfAbsent keeps
- * pre-registered entries), and the event row is written BEFORE the terminal
- * frame is offered on the same completion-callback iteration (no decode role
- * addr configured → startDecode returns false → finished=true frame offered
- * from the prefill side) — so each frame's arrival proves that member's row
- * was already written. The EngineEventLog autoflushes per row, so the file is
- * readable right after the frames land.
- *
- * <p>Regression guard: stdout must stay CLEAN of the legacy trace line —
- * per-request data flows exclusively through the JSONL file now.
- *
- * <p>The {@code cancelled=true} branch (a cancel marker landing before the
- * batch completes) is a race window that cannot be reproduced
- * deterministically; only the normal {@code cancelled=false} output is
- * asserted here.
+ * Checks per-request Prefill completion events in engine JSONL output, including timing and cache
+ * accounting.
  */
 class PrefillDoneLogLineTest {
 

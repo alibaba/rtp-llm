@@ -11,6 +11,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Optional;
 
+/**
+ * Converts Netty transport objects into the response and error forms used by callers.
+ */
 public class NettyUtils {
 
     public static <T> void cacheBuffer(HttpNettyChannelContext<T> nettyCtx, HttpObject obj) {

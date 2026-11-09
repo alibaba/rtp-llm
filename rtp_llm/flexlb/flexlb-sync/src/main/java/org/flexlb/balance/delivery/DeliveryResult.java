@@ -1,6 +1,8 @@
 package org.flexlb.balance.delivery;
 
-/** Transport result for one exact delivery claim. */
+/**
+ * Transport result for one exact delivery claim.
+ */
 public record DeliveryResult(Status status, Throwable cause) {
 
     public DeliveryResult {

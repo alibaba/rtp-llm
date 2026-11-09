@@ -11,8 +11,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
-#include "autil/StackTracer.h"
-#include "autil/EnvUtil.h"
 #include <algorithm>
 #include <cstdint>
 #include <unistd.h>
@@ -73,7 +71,6 @@ namespace {
 static std::atomic<bool> g_runtime_initialized{false};
 static std::once_flag    g_init_flag;
 
-static bool g_enable_comm_overlap = true;
 
 static int64_t g_device_id = 0;
 }  // anonymous namespace
@@ -89,10 +86,6 @@ bool isRuntimeInitialized() {
 // ============================================================
 // Config accessors
 // ============================================================
-
-bool getEnableCommOverlap() {
-    return g_enable_comm_overlap;
-}
 
 int64_t getDeviceId() {
     return g_device_id;
@@ -528,18 +521,10 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
 // ============================================================
 
 #if USING_CUDA
-torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai) {
-    return weight;
-}
-
 torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
     return weight;
 }
 #elif USING_ROCM
-torch::Tensor preprocessGemmWeightByKey(const std::string& key, torch::Tensor weight, bool user_arm_gemm_use_kai) {
-    return weight;
-}
-
 torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
     return weight;
 }
@@ -602,14 +587,6 @@ ExecStatus getGpuExecStatus() {
 
 torch::Device getTorchCudaDevice() {
     return torch::Device(torch::kCUDA);
-}
-
-namespace {
-static bool g_trace_memory = false;
-}
-
-void setTraceMemory(bool trace_memory) {
-    g_trace_memory = trace_memory;
 }
 
 // === Copy ops ===
@@ -791,38 +768,25 @@ void execSyncCommunication(ParallelMode mode, bool timeout) {
 // initRuntime — one-time runtime init (side effects only)
 // ============================================================
 
-MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_overlap, MlaOpsType mla_ops_type) {
-    MlaOpsType resolved_mla_ops_type = mla_ops_type;
-
+void initRuntime(size_t device_id) {
     // Guard against double-init
     if (g_runtime_initialized.load(std::memory_order_acquire)) {
         RTP_LLM_LOG_WARNING("Runtime is already initialized! will do nothing.");
-        return resolved_mla_ops_type;
+        return;
     }
 
     std::call_once(g_init_flag, [&]() {
         setlinebuf(stdout);
 
-        if (trace_memory) {
-            autil::EnvUtil::setEnv("STACK_TRACER_LOG", "true");
-            DECLARE_STACK_TRACER_FILE("rtp_llm_stack.log");
-        }
-
 #if USING_CUDA
         RTP_LLM_LOG_INFO("Initialize runtime. device_id=%zu", device_id);
         check_cuda_value(cudaSetDevice(device_id));
         at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream());
-
-        if (resolved_mla_ops_type == MlaOpsType::AUTO) {
-            auto* prop            = at::cuda::getCurrentDeviceProperties();
-            resolved_mla_ops_type = prop->major >= 9 ? MlaOpsType::FLASH_MLA : MlaOpsType::FLASH_INFER;
-        }
 #elif USING_ROCM
         RTP_LLM_LOG_INFO("Initialize runtime (ROCm). device_id=%zu", device_id);
         ROCM_CHECK(hipSetDevice(device_id));
 #endif
 
-        g_enable_comm_overlap = enable_comm_overlap;
         g_device_id           = device_id;
 
         g_runtime_initialized.store(true, std::memory_order_release);
@@ -830,7 +794,6 @@ MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_ove
     });
 
     RTP_LLM_LOG_INFO("init devices done");
-    return resolved_mla_ops_type;
 }
 
 // === MOE / EPLB ===
@@ -854,22 +817,14 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
 
 void registerExecCtxOps(pybind11::module& m) {
     m.def("get_device_id", &getDeviceId);
-    m.def("preprocess_gemm_weight_by_key",
-          &preprocessGemmWeightByKey,
-          py::arg("key"),
-          py::arg("weight"),
-          py::arg("user_arm_gemm_use_kai"));
     m.def("preprocess_weight_scale", &preprocessWeightScale, py::arg("weight"), py::arg("scale"));
 
     m.def(
         "init_exec_ctx",
-        [](size_t device_id, bool trace_memory, bool enable_comm_overlap, int mla_ops_type) {
-            (void)initRuntime(device_id, trace_memory, enable_comm_overlap, static_cast<MlaOpsType>(mla_ops_type));
+        [](size_t device_id) {
+            initRuntime(device_id);
         },
-        py::arg("device_id"),
-        py::arg("trace_memory"),
-        py::arg("enable_comm_overlap"),
-        py::arg("mla_ops_type"));
+        py::arg("device_id"));
 
     m.def(
         "register_comm_ops",

@@ -33,102 +33,33 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.locks.ReentrantLock;
 
-/** Same source on both revisions; includes real WorkerBatcher snapshot capture. */
+/**
+ * Same source on both revisions; includes real WorkerBatcher snapshot capture.
+ */
 public class SnapshotBench {
     static final ThreadMXBean CPU = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+
     static volatile long sink;
+
     static FormulaPredictor model;
     static BatchDeliveryStrategy strategy;
     static RequestRegistry registry;
+
     static final RouteProjection.Probe PROBE =
             new RouteProjection.Probe(Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
 
-    record Endpoint(WorkerBatcher runtime, ReentrantLock lock, ScheduledRequest member) {
-        void changeMembership() {
-            lock.lock();
-            try {
-                if (!runtime.ownedState().terminalizeActiveUnderLock(member)
-                        || !runtime.ownedState().enqueueActiveUnderLock(member, 0)) {
-                    throw new AssertionError("membership update failed");
+    public static void main(String[] args) throws Exception {
+        initialize(Path.of(args[0]));
+        for (int depth : new int[] {32, 1024}) {
+            writes(depth);
+            for (int count : new int[] {10, 100}) {
+                for (int planners : new int[] {1, 64}) {
+                    fleet(count, depth, planners, "status", false);
+                    fleet(count, depth, planners, "membership", false);
+                    fleet(count, depth, planners, "status", true);
                 }
-            } finally {
-                lock.unlock();
             }
         }
-    }
-
-    record Sample(long ns, long cpu, long bytes, long checksum) {}
-
-    static ScheduledRequest request(FlexlbConfig config, long id, int priority, long tokens) {
-        var request = new Request();
-        request.setRequestId(id);
-        request.setSeqLen(tokens);
-        request.setPriority(priority);
-        var context = new BalanceContext(config);
-        context.setRequest(request);
-        context.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
-        return new ScheduledRequest(
-                context, new CompletableFuture<>(), null, null, null, null, null, null, 1L);
-    }
-
-    static FlexlbConfig config() {
-        var config = SchedulingTestConfig.batchConfig();
-        SchedulingTestConfig.usePriorityQueue(config);
-        var decision = SchedulingTestConfig.useFixedWindowDecision(config);
-        decision.setMaxRequests(1024);
-        decision.setMaxCollectionWaitMs(0L);
-        decision.setMaxPredictedExecutionMs(700L);
-        return config;
-    }
-
-    static Endpoint endpoint(int depth, int seed) throws Exception {
-        var config = config();
-        // No scheduler thread or RPCs. Mutations still use the real ownership ledger and lock.
-        var runtime =
-                new WorkerBatcher(
-                        "bench-" + seed,
-                        null,
-                        config,
-                        strategy,
-                        new EndpointEventProjector(registry));
-        Field lockField = WorkerBatcher.class.getDeclaredField("queueLock");
-        lockField.setAccessible(true);
-        var lock = (ReentrantLock) lockField.get(runtime);
-        var random = new Random(seed);
-        ScheduledRequest last = null;
-        lock.lock();
-        try {
-            for (int i = 0; i < depth; i++) {
-                last = request(config, i, 1 + i % 4, 100 + random.nextInt(4096));
-                if (!runtime.ownedState().enqueueActiveUnderLock(last, 0))
-                    throw new AssertionError();
-            }
-        } finally {
-            lock.unlock();
-        }
-        return new Endpoint(runtime, lock, last);
-    }
-
-    static Sample read(List<Endpoint> endpoints, boolean project, int repetitions) {
-        long id = Thread.currentThread().threadId();
-        long bytes = CPU.getThreadAllocatedBytes(id), cpu = CPU.getCurrentThreadCpuTime();
-        long started = System.nanoTime(), checksum = 0;
-        for (int i = 0; i < repetitions; i++) {
-            for (var endpoint : endpoints) {
-                var inputs = endpoint.runtime.captureRouteProjectionInputs();
-                checksum += inputs.queue().activeItems().size();
-                if (project)
-                    checksum +=
-                            RouteProjection.project(
-                                            inputs, PROBE, model, strategy.projectionPolicy())
-                                    .requiredProjectedTtftMs();
-            }
-        }
-        return new Sample(
-                System.nanoTime() - started,
-                CPU.getCurrentThreadCpuTime() - cpu,
-                CPU.getThreadAllocatedBytes(id) - bytes,
-                checksum);
     }
 
     static void fleet(int count, int depth, int planners, String mode, boolean project)
@@ -196,6 +127,78 @@ public class SnapshotBench {
         }
     }
 
+    static Endpoint endpoint(int depth, int seed) throws Exception {
+        var config = config();
+        // No scheduler thread or RPCs. Mutations still use the real ownership ledger and lock.
+        var runtime =
+                new WorkerBatcher(
+                        "bench-" + seed,
+                        null,
+                        config,
+                        strategy,
+                        new EndpointEventProjector(registry));
+        Field lockField = WorkerBatcher.class.getDeclaredField("queueLock");
+        lockField.setAccessible(true);
+        var lock = (ReentrantLock) lockField.get(runtime);
+        var random = new Random(seed);
+        ScheduledRequest last = null;
+        lock.lock();
+        try {
+            for (int i = 0; i < depth; i++) {
+                last = request(config, i, 1 + i % 4, 100 + random.nextInt(4096));
+                if (!runtime.ownedState().enqueueActiveUnderLock(last, 0))
+                    throw new AssertionError();
+            }
+        } finally {
+            lock.unlock();
+        }
+        return new Endpoint(runtime, lock, last);
+    }
+
+    static FlexlbConfig config() {
+        var config = SchedulingTestConfig.batchConfig();
+        SchedulingTestConfig.usePriorityQueue(config);
+        var decision = SchedulingTestConfig.useFixedWindowDecision(config);
+        decision.setMaxRequests(1024);
+        decision.setMaxCollectionWaitMs(0L);
+        decision.setMaxPredictedExecutionMs(700L);
+        return config;
+    }
+
+    static ScheduledRequest request(FlexlbConfig config, long id, int priority, long tokens) {
+        var request = new Request();
+        request.setRequestId(id);
+        request.setSeqLen(tokens);
+        request.setPriority(priority);
+        var context = new BalanceContext(config);
+        context.setRequest(request);
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
+        return new ScheduledRequest(
+                context, new CompletableFuture<>(), null, null, null, null, null, null, 1L);
+    }
+
+    static Sample read(List<Endpoint> endpoints, boolean project, int repetitions) {
+        long id = Thread.currentThread().threadId();
+        long bytes = CPU.getThreadAllocatedBytes(id), cpu = CPU.getCurrentThreadCpuTime();
+        long started = System.nanoTime(), checksum = 0;
+        for (int i = 0; i < repetitions; i++) {
+            for (var endpoint : endpoints) {
+                var inputs = endpoint.runtime.captureRouteProjectionInputs();
+                checksum += inputs.queue().activeItems().size();
+                if (project)
+                    checksum +=
+                            RouteProjection.project(
+                                            inputs, PROBE, model, strategy.projectionPolicy())
+                                    .requiredProjectedTtftMs();
+            }
+        }
+        return new Sample(
+                System.nanoTime() - started,
+                CPU.getCurrentThreadCpuTime() - cpu,
+                CPU.getThreadAllocatedBytes(id) - bytes,
+                checksum);
+    }
+
     static void writes(int depth) {
         var config = config();
         var index =
@@ -250,17 +253,23 @@ public class SnapshotBench {
                         new DeliveryMetrics(reporter));
     }
 
-    public static void main(String[] args) throws Exception {
-        initialize(Path.of(args[0]));
-        for (int depth : new int[] {32, 1024}) {
-            writes(depth);
-            for (int count : new int[] {10, 100}) {
-                for (int planners : new int[] {1, 64}) {
-                    fleet(count, depth, planners, "status", false);
-                    fleet(count, depth, planners, "membership", false);
-                    fleet(count, depth, planners, "status", true);
+    /**
+     * Removes and re-enqueues one exact active request under the batcher lock to exercise snapshot
+     * membership changes.
+     */
+    record Endpoint(WorkerBatcher runtime, ReentrantLock lock, ScheduledRequest member) {
+        void changeMembership() {
+            lock.lock();
+            try {
+                if (!runtime.ownedState().terminalizeActiveUnderLock(member)
+                        || !runtime.ownedState().enqueueActiveUnderLock(member, 0)) {
+                    throw new AssertionError("membership update failed");
                 }
+            } finally {
+                lock.unlock();
             }
         }
     }
+
+    record Sample(long ns, long cpu, long bytes, long checksum) {}
 }

@@ -17,9 +17,10 @@ import java.util.Objects;
  * metadata and is never an ownership token.</p>
  */
 public final class SelectedRole implements AutoCloseable {
-
     private WorkerEndpoint.GenerationPin generationPin;
+
     private final ServerStatus serverStatus;
+
     private final long prefillWorkMs;
     private final long placementVersion;
 
@@ -108,6 +109,37 @@ public final class SelectedRole implements AutoCloseable {
         return createOwned(generationPin, serverStatus, -1L, 0L);
     }
 
+    public ServerStatus serverStatus() {
+        return serverStatus;
+    }
+
+    public long prefillWorkMs() {
+        if (prefillWorkMs < 0L) {
+            throw new IllegalStateException("selection does not carry Prefill work");
+        }
+        return prefillWorkMs;
+    }
+
+    public long placementVersion() {
+        return placementVersion;
+    }
+
+    /** Move the exact pin to the next domain owner. */
+    public WorkerEndpoint.GenerationPin takeGenerationPin() {
+        WorkerEndpoint.GenerationPin owned = requireOwnedPin();
+        generationPin = null;
+        return owned;
+    }
+
+    @Override
+    public void close() {
+        WorkerEndpoint.GenerationPin owned = generationPin;
+        generationPin = null;
+        if (owned != null) {
+            owned.close();
+        }
+    }
+
     /** Calling a factory consumes the pin, including every validation failure. */
     private static SelectedRole createOwned(
             WorkerEndpoint.GenerationPin generationPin,
@@ -124,21 +156,6 @@ public final class SelectedRole implements AutoCloseable {
         }
     }
 
-    public ServerStatus serverStatus() {
-        return serverStatus;
-    }
-
-    public long prefillWorkMs() {
-        if (prefillWorkMs < 0L) {
-            throw new IllegalStateException("selection does not carry Prefill work");
-        }
-        return prefillWorkMs;
-    }
-
-    public long placementVersion() {
-        return placementVersion;
-    }
-
     private static long endpointPlacementVersion(WorkerEndpoint.GenerationPin pin) {
         if (pin == null) {
             return 0L;
@@ -153,26 +170,10 @@ public final class SelectedRole implements AutoCloseable {
         return 0L;
     }
 
-    /** Move the exact pin to the next domain owner. */
-    public WorkerEndpoint.GenerationPin takeGenerationPin() {
-        WorkerEndpoint.GenerationPin owned = requireOwnedPin();
-        generationPin = null;
-        return owned;
-    }
-
     private WorkerEndpoint.GenerationPin requireOwnedPin() {
         if (generationPin == null) {
             throw new IllegalStateException("selected endpoint generation was already consumed");
         }
         return generationPin;
-    }
-
-    @Override
-    public void close() {
-        WorkerEndpoint.GenerationPin owned = generationPin;
-        generationPin = null;
-        if (owned != null) {
-            owned.close();
-        }
     }
 }

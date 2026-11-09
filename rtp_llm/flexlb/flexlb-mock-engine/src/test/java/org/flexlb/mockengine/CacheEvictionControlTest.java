@@ -31,32 +31,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * KV observation/control capabilities backing the flexlb_ft KV case family
- * (tools/online_eval/flexlb_ft/cases/kv.py):
- *
- * <p>1. per-engine key-set exposure — every /snapshot engine dict carries
- * {@code cache_key_set} (the engine's full MockLruBlockCache key list,
- * sorted) next to the {@code cache_keys} count, on prefill AND decode
- * engines;
- *
- * <p>2. {@code POST /cache_evict {"engine", "keys"}} — force-evict the
- * named keys from one engine's LRU and bump that engine's cacheVersion so
- * the master's cache-status poll propagates the eviction (idempotent:
- * unknown keys are a no-op with NO version bump, so re-evictions never
- * trigger spurious master re-syncs).
- *
- * <p>Also pins the MockLruBlockCache unit contract: forced evictions count
- * in {@code evictions}, evicted keys no longer prefix-hit (first miss
- * truncates the run), and gRPC getCacheStatus — the master-facing sync
- * surface — serves the post-eviction key set under the bumped version.
+ * Checks cache-key snapshot exposure and HTTP eviction controls for Prefill and Decode engines.
  */
 class CacheEvictionControlTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private static final int BASE_PORT = 63900;
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
     private MockControlServer controlServer;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -450,18 +432,6 @@ class CacheEvictionControlTest {
                                 observer));
     }
 
-    private JsonNode engineByName(String name) throws Exception {
-        JsonNode engines =
-                MAPPER.readTree(httpGet(controlServer.getPort(), "/snapshot")).get("engines");
-        for (JsonNode engine : engines) {
-            if (name.equals(engine.get("name").asText())) {
-                return engine;
-            }
-        }
-        fail("engine " + name + " not found in /snapshot");
-        return null;
-    }
-
     /** Poll until the engine's cache_keys count reaches expected (admits are async). */
     private void awaitEngineCacheKeys(String engineName, int expected, long timeoutMs)
             throws Exception {
@@ -479,6 +449,18 @@ class CacheEvictionControlTest {
                         + engineName
                         + ", got "
                         + engineByName(engineName).get("cache_keys").asInt());
+    }
+
+    private JsonNode engineByName(String name) throws Exception {
+        JsonNode engines =
+                MAPPER.readTree(httpGet(controlServer.getPort(), "/snapshot")).get("engines");
+        for (JsonNode engine : engines) {
+            if (name.equals(engine.get("name").asText())) {
+                return engine;
+            }
+        }
+        fail("engine " + name + " not found in /snapshot");
+        return null;
     }
 
     private void awaitCompleted(

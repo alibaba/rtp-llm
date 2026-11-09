@@ -33,7 +33,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Request TTL reclaims real endpoint capacity locally, without an Engine Cancel channel. */
+/**
+ * Request TTL reclaims real endpoint capacity locally, without an Engine Cancel channel.
+ */
 class RequestConfirmationTimeoutTest {
     private static final long REQUEST_ID = 101L;
     private static final long TIMEOUT_MS = TimeUnit.HOURS.toMillis(1L);
@@ -219,12 +221,6 @@ class RequestConfirmationTimeoutTest {
         }
     }
 
-    private enum ConfirmationWait {
-        MISSING_REPLY,
-        UNCERTAIN_REPLY,
-        AUTOMATIC_TIMER
-    }
-
     private static WorkerStatus worker(RoleType role, String ip) {
         return WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test");
     }
@@ -255,5 +251,11 @@ class RequestConfirmationTimeoutTest {
             worker.lock.unlock();
         }
         projection.run();
+    }
+
+    private enum ConfirmationWait {
+        MISSING_REPLY,
+        UNCERTAIN_REPLY,
+        AUTOMATIC_TIMER
     }
 }

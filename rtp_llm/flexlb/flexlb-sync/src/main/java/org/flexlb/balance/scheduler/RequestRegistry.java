@@ -46,33 +46,30 @@ import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
  * ID/item entry points resolve an exact slot and dispatch one event; request
  * policy is implemented by RequestSlot. Removal invalidates the slot under
  * its monitor so retained capabilities cannot operate on a replacement.
+ *
+ * <p>Registration establishes the canonical slot for one request phase. Later admission, delivery,
+ * cancellation and worker events resolve that exact slot; shutdown closes admission before waiting
+ * for mutations and terminal cleanup. A retained capability cannot act on a replacement slot.
  */
 @Component
 public class RequestRegistry {
-
     private final RequestCompletionPublisher completionPublisher;
     private final RequestTerminalCleanup terminalCleanup;
-
     private final ExpirationTimer expirationTimer;
-
     private final AtomicBoolean shuttingDown = new AtomicBoolean();
-
     private final Object admissionQuiescenceMonitor = new Object();
+
     private int inFlightAdmissionHandles;
+
     private volatile GlobalQueueCoordinator globalQueue;
     private volatile EncoderQueueCoordinator encoderQueue;
 
     private final Object registrationLock = new Object();
     private final BatchSchedulerReporter reporter;
     private final RequestSchedulerReporter requestReporter;
-
     private final ConcurrentMap<String, RequestSlot> requestSlots = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, RequestSlot> encoderRequestSlots =
             new ConcurrentHashMap<>();
-
-    private ConcurrentMap<String, RequestSlot> slots(RequestPhase phase) {
-        return phase == RequestPhase.ENCODER ? encoderRequestSlots : requestSlots;
-    }
 
     @Autowired
     public RequestRegistry(
@@ -87,29 +84,6 @@ public class RequestRegistry {
                 new RequestCompletionPublisher(completionPublisherWorkers(configService), reporter);
         this.terminalCleanup = new RequestTerminalCleanup(expirationTimer, requestReporter);
     }
-
-    synchronized void attachGlobalQueue(GlobalQueueCoordinator queue) {
-        if (globalQueue != null) {
-            throw new IllegalStateException("global queue already attached");
-        }
-        globalQueue = Objects.requireNonNull(queue, "queue");
-    }
-
-    synchronized void attachEncoderQueue(EncoderQueueCoordinator queue) {
-        if (encoderQueue != null) {
-            throw new IllegalStateException("Encoder queue already attached");
-        }
-        encoderQueue = Objects.requireNonNull(queue, "queue");
-    }
-
-    void encoderCapacityChanged() {
-        EncoderQueueCoordinator queue = encoderQueue;
-        if (queue != null) {
-            queue.capacityChanged();
-        }
-    }
-
-    private record WithdrawnRoute(RequestSlot slot, ScheduledRequest item, AdmissionHandle claim) {}
 
     /** Transfer queued Decode capacity, then return each victim to its original global queue identity. */
     public boolean replaceQueuedDecodeReservations(
@@ -202,70 +176,6 @@ public class RequestRegistry {
         }
     }
 
-    private WithdrawnRoute claimQueuedRoute(
-            DecodeEndpoint endpoint,
-            DecodeEndpoint.ReservationHandle victim,
-            int incomingPriority) {
-        if (!enterAdmissionHandleGate()) {
-            return null;
-        }
-        AdmissionHandle claim = null;
-        boolean retained = false;
-        try {
-            RequestSlot slot = requestSlots.get(victim.requestId());
-            if (slot == null) {
-                return null;
-            }
-            synchronized (slot) {
-                if (!isCurrentSlot(slot)) {
-                    return null;
-                }
-                ScheduledRequest active = slot.activeItem();
-                if (active == null || active.priority() >= incomingPriority) {
-                    return null;
-                }
-                claim = slot.tryBeginRouteWithdrawal(endpoint, victim);
-                if (claim == null) {
-                    return null;
-                }
-                WithdrawnRoute withdrawal = new WithdrawnRoute(slot, active, claim);
-                retained = true;
-                return withdrawal;
-            }
-        } finally {
-            if (!retained) {
-                if (claim == null) {
-                    exitAdmissionHandleGate();
-                } else {
-                    claim.close();
-                }
-            }
-        }
-    }
-
-    private static int completionPublisherWorkers(ConfigService configService) {
-        try {
-            FlexlbConfig config = configService.loadBalanceConfig();
-            return config == null || config.getInternalRuntime() == null
-                    ? 0
-                    : config.getInternalRuntime().getBatchDispatchCompletionThreads();
-        } catch (Throwable ignored) {
-            return 0;
-        }
-    }
-
-    boolean isCurrentSlot(RequestSlot slot) {
-        return slot != null && slots(slot.requestPhase()).get(slot.requestId()) == slot;
-    }
-
-    RequestSlot requestSlot(String requestId) {
-        return requestSlots.get(requestId);
-    }
-
-    RequestSlot requestSlot(String requestId, RequestPhase phase) {
-        return slots(phase).get(requestId);
-    }
-
     /**
      * Transfer a selected Encoder request to its endpoint before publishing the route.
      */
@@ -296,12 +206,6 @@ public class RequestRegistry {
         return shuttingDown.get();
     }
 
-    public List<RequestSlot> snapshotSlots() {
-        List<RequestSlot> result = new ArrayList<>(requestSlots.values());
-        result.addAll(encoderRequestSlots.values());
-        return List.copyOf(result);
-    }
-
     public boolean removeExactTerminalRecord(RequestSlot exactSlot, long updatedBeforeMs) {
         synchronized (exactSlot) {
             if (!exactSlot.isRemovableTerminalRecord(updatedBeforeMs)
@@ -311,6 +215,323 @@ public class RequestRegistry {
             exactSlot.detachGeneration();
             return true;
         }
+    }
+
+    /**
+     * Checks the Generation admission gate. Encoder routes use claimEncoderRoute.
+     */
+    public boolean isAdmissionOpen(String requestId, CompletableFuture<?> future) {
+        if (shuttingDown.get()) {
+            return false;
+        }
+        RequestSlot slot = requestSlots.get(requestId);
+        if (slot == null || !slot.ownsFuture(future)) {
+            return false;
+        }
+        synchronized (slot) {
+            return isCurrentSlot(slot) && slot.isOpen();
+        }
+    }
+
+    /**
+     * Claims a Generation admission handle. Encoder routes use claimEncoderRoute.
+     */
+    public AdmissionHandle claimAdmissionHandle(String requestId, CompletableFuture<?> future) {
+        if (!enterAdmissionHandleGate()) {
+            return null;
+        }
+        boolean transferred = false;
+        try {
+            RequestSlot slot = requestSlots.get(requestId);
+            if (slot == null || !slot.ownsFuture(future)) {
+                return null;
+            }
+            AdmissionHandle handle;
+            synchronized (slot) {
+                handle = isCurrentSlot(slot) ? slot.tryBeginAdmissionHandle() : null;
+            }
+            transferred = handle != null;
+            return handle;
+        } finally {
+            if (!transferred) {
+                exitAdmissionHandleGate();
+            }
+        }
+    }
+
+    public void finishYielded(ScheduledRequest victim, String detail) {
+        finishVictim(victim, StrategyErrorType.PRIORITY_PREEMPTED, detail);
+    }
+
+    public Optional<PreemptionRegistration> tryClaim(
+            String requestId, long reservationToken, long attemptToken, String detail) {
+        RequestSlot entry = requestSlots.get(requestId);
+        if (entry == null) {
+            return Optional.empty();
+        }
+        synchronized (entry) {
+            return Optional.ofNullable(
+                    entry.tryInstallPreemption(reservationToken, attemptToken, detail));
+        }
+    }
+
+    public Optional<CancelTarget> findCancelTarget(String requestId, long reservationToken) {
+        RequestSlot entry = requestSlots.get(requestId);
+        if (entry == null) {
+            return Optional.empty();
+        }
+        synchronized (entry) {
+            CancelTarget target = cancelTarget(entry.activeItemForReservation(reservationToken));
+            return target == null || !target.isRoutable() ? Optional.empty() : Optional.of(target);
+        }
+    }
+
+    public RequestState cancelRequest(String requestId, long expectedBatchId, CancelReason reason) {
+        return cancelRequest(requestId, expectedBatchId, reason, RequestPhase.GENERATION);
+    }
+
+    public RequestState cancelRequest(
+            String requestId, long expectedBatchId, CancelReason reason, RequestPhase phase) {
+        Objects.requireNonNull(reason, "reason");
+        RequestSlot slot = requestSlot(requestId, phase);
+        return slot == null ? null : slot.cancelRequest(expectedBatchId, reason);
+    }
+
+    public int trackedRequestCount() {
+        return trackedRequestCount(RequestPhase.GENERATION)
+                + trackedRequestCount(RequestPhase.ENCODER);
+    }
+
+    public int trackedRequestCount(RequestPhase phase) {
+        int live = 0;
+        for (RequestSlot slot : slots(phase).values()) {
+            synchronized (slot) {
+                if (isCurrentSlot(slot) && slot.isLiveGeneration()) {
+                    live++;
+                }
+            }
+        }
+        return live;
+    }
+
+    /**
+     * Collect both request counts and the oldest live age in one traversal.
+     */
+    public TrackedRequestStats trackedRequestStats() {
+        int generation = 0;
+        int encoder = 0;
+        long oldest = Long.MAX_VALUE;
+        long now = System.currentTimeMillis();
+        for (RequestPhase phase : RequestPhase.values()) {
+            if (phase != RequestPhase.GENERATION && phase != RequestPhase.ENCODER) {
+                continue;
+            }
+            for (RequestSlot slot : slots(phase).values()) {
+                synchronized (slot) {
+                    if (!isCurrentSlot(slot) || !slot.isLiveGeneration()) {
+                        continue;
+                    }
+                    if (phase == RequestPhase.GENERATION) {
+                        generation++;
+                    } else {
+                        encoder++;
+                    }
+                    oldest = Math.min(oldest, slot.createdAtMs());
+                }
+            }
+        }
+        return new TrackedRequestStats(
+                generation, encoder, oldest == Long.MAX_VALUE ? 0L : Math.max(0L, now - oldest));
+    }
+
+    public long oldestLiveSlotAgeMs() {
+        long oldest = Long.MAX_VALUE;
+        long now = System.currentTimeMillis();
+        for (RequestSlot slot : snapshotSlots()) {
+            synchronized (slot) {
+                if (isCurrentSlot(slot) && slot.isLiveGeneration()) {
+                    oldest = Math.min(oldest, slot.createdAtMs());
+                }
+            }
+        }
+        return oldest == Long.MAX_VALUE ? 0L : Math.max(0L, now - oldest);
+    }
+
+    public List<RequestSlot> snapshotSlots() {
+        List<RequestSlot> result = new ArrayList<>(requestSlots.values());
+        result.addAll(encoderRequestSlots.values());
+        return List.copyOf(result);
+    }
+
+    public List<RequestState> snapshotActiveRequests() {
+        List<RequestState> snapshots =
+                new ArrayList<>(requestSlots.size() + encoderRequestSlots.size());
+        for (RequestSlot entry : snapshotSlots()) {
+            synchronized (entry) {
+                if (isCurrentSlot(entry) && entry.isLiveGeneration()) {
+                    snapshots.add(entry.snapshot());
+                }
+            }
+        }
+        snapshots.sort(
+                (left, right) -> {
+                    int createdOrder = Long.compare(left.createdAtMs(), right.createdAtMs());
+                    return createdOrder != 0
+                            ? createdOrder
+                            : left.requestId().compareTo(right.requestId());
+                });
+        return List.copyOf(snapshots);
+    }
+
+    public RequestState getRequestState(String requestId, long expectedBatchId) {
+        return getRequestState(requestId, expectedBatchId, RequestPhase.GENERATION);
+    }
+
+    public RequestState getRequestState(
+            String requestId, long expectedBatchId, RequestPhase phase) {
+        RequestSlot entry = slots(phase).get(requestId);
+        if (entry == null) {
+            return null;
+        }
+        synchronized (entry) {
+            RequestState snapshot = entry.snapshot();
+            return snapshot != null && snapshot.matchesBatch(expectedBatchId) ? snapshot : null;
+        }
+    }
+
+    public void onQueuedItemExpired(ScheduledRequest exact) {
+        RequestSlot slot = entryFor(exact);
+        if (slot != null) {
+            slot.cancelRequest(0L, CancelReason.DEADLINE_EXCEEDED);
+        }
+    }
+
+    public void onQueueOfferFailure(ScheduledRequest exact, Throwable error) {
+        RequestSlot slot = entryFor(exact);
+        if (slot != null) {
+            slot.recordSchedulingFailure(
+                    StrategyErrorType.DISPATCH_FAILED,
+                    "Worker scheduling queue rejected request: "
+                            + (error == null ? "endpoint publication failed" : error.getMessage()));
+        }
+    }
+
+    public CapacityBoundary.Attempt<BatchDeliveryStrategy.BatchTransaction> prepareBatchDelivery(
+            ScheduledRequest item, BatchDeliveryStrategy strategy) {
+        RequestSlot slot = entryFor(item);
+        return slot == null
+                ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
+                : slot.prepareDispatch(item, () -> strategy.prepareAdmission(item));
+    }
+
+    public CapacityBoundary.Attempt<ScheduledRequest> prepareBatchMember(
+            ScheduledRequest item, BatchDeliveryStrategy.BatchTransaction transaction) {
+        RequestSlot slot = entryFor(item);
+        return slot == null
+                ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
+                : slot.prepareDispatch(item, () -> transaction.append(item));
+    }
+
+    public CapacityBoundary.Attempt<ScheduledRequest> prepareRouteMember(
+            ScheduledRequest item,
+            RouteDeliveryStrategy.RouteTransaction transaction,
+            PrefillTimePredictor.Evaluator evaluator) {
+        RequestSlot slot = entryFor(item);
+        return slot == null
+                ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
+                : slot.prepareDispatch(item, () -> transaction.append(item, evaluator));
+    }
+
+    public DeliveryClaim claimBatchDelivery(
+            ScheduledRequest item, BatchDeliveryStrategy.BatchTransaction transaction) {
+        RequestSlot slot = entryFor(item);
+        return slot == null
+                ? null
+                : slot.claimDelivery(
+                        item,
+                        DeliveryClaimKind.BATCH_ENQUEUE,
+                        transaction.batchId(),
+                        () -> transaction.transferToEndpoint(item));
+    }
+
+    public DeliveryClaim claimRouteDelivery(
+            ScheduledRequest item, PrefillAdmissionResources.CommittedAdmissionOwner admission) {
+        RequestSlot slot = entryFor(item);
+        return slot == null
+                ? null
+                : slot.claimDelivery(
+                        item,
+                        DeliveryClaimKind.ROUTE_DECISION,
+                        0L,
+                        () -> admission.transferToEndpoint(item));
+    }
+
+    public void setDeliveryPrediction(
+            DeliveryClaim claim, WorkSnapshot precedingWork, long predictedMs) {
+        claim.slot.setDeliveryPrediction(claim, precedingWork, predictedMs);
+    }
+
+    public void publishRoute(DeliveryClaim claim, WorkSnapshot precedingWork, long predictedMs) {
+        claim.slot.publishRoute(claim, precedingWork, predictedMs);
+    }
+
+    public void failDeliveryPreparation(ScheduledRequest exact, Throwable cause) {
+        RequestSlot slot = entryFor(exact);
+        if (slot != null) {
+            slot.failDeliveryPreparation(exact, cause);
+        }
+    }
+
+    public boolean closeAdmissionAndAwaitMutations() {
+        if (!shuttingDown.compareAndSet(false, true)) {
+            return false;
+        }
+        awaitAdmissionHandleQuiescence();
+        return true;
+    }
+
+    public void closeOutstandingAndTerminalize() {
+        if (!shuttingDown.get()) {
+            throw new IllegalStateException("admission must close before terminal shutdown");
+        }
+        completeOutstandingRequestsForShutdown();
+    }
+
+    public void maintainExpiration(BiConsumer<Long, Predicate<String>> exactSweeper) {
+        expirationTimer.maintain(exactSweeper);
+    }
+
+    public void closeExpiration() {
+        expirationTimer.close();
+    }
+
+    public void closePublisher() {
+        completionPublisher.close();
+    }
+
+    synchronized void attachGlobalQueue(GlobalQueueCoordinator queue) {
+        if (globalQueue != null) {
+            throw new IllegalStateException("global queue already attached");
+        }
+        globalQueue = Objects.requireNonNull(queue, "queue");
+    }
+
+    synchronized void attachEncoderQueue(EncoderQueueCoordinator queue) {
+        if (encoderQueue != null) {
+            throw new IllegalStateException("Encoder queue already attached");
+        }
+        encoderQueue = Objects.requireNonNull(queue, "queue");
+    }
+
+    void encoderCapacityChanged() {
+        EncoderQueueCoordinator queue = encoderQueue;
+        if (queue != null) {
+            queue.capacityChanged();
+        }
+    }
+
+    boolean isCurrentSlot(RequestSlot slot) {
+        return slot != null && slots(slot.requestPhase()).get(slot.requestId()) == slot;
     }
 
     void expireInactiveRequest(RequestSlot exactSlot, long nowMs) {
@@ -327,11 +548,12 @@ public class RequestRegistry {
         }
     }
 
-    void processDecodeStatus(DecodeEndpoint source, DecodeEndpoint.WorkerStatusFact fact) {
-        RequestSlot slot = requestSlot(fact.reservation().requestId());
-        if (slot != null) {
-            slot.processDecodeStatus(source, fact);
-        }
+    RequestSlot requestSlot(String requestId) {
+        return requestSlots.get(requestId);
+    }
+
+    RequestSlot requestSlot(String requestId, RequestPhase phase) {
+        return slots(phase).get(requestId);
     }
 
     void processEncoderStatus(
@@ -352,6 +574,13 @@ public class RequestRegistry {
     void confirmDecodeAcceptance(
             DecodeEndpoint source, DecodeEndpoint.ReservationHandle reservation) {
         processDecodeStatus(source, DecodeEndpoint.WorkerStatusFact.accepted(reservation));
+    }
+
+    void processDecodeStatus(DecodeEndpoint source, DecodeEndpoint.WorkerStatusFact fact) {
+        RequestSlot slot = requestSlot(fact.reservation().requestId());
+        if (slot != null) {
+            slot.processDecodeStatus(source, fact);
+        }
     }
 
     void projectPrefillRetirementItem(PrefillEndpoint source, ScheduledRequest exact) {
@@ -492,44 +721,94 @@ public class RequestRegistry {
                 : slot.commitRoute(item, publication);
     }
 
-    /**
-     * Checks the Generation admission gate. Encoder routes use claimEncoderRoute.
-     */
-    public boolean isAdmissionOpen(String requestId, CompletableFuture<?> future) {
-        if (shuttingDown.get()) {
-            return false;
-        }
-        RequestSlot slot = requestSlots.get(requestId);
-        if (slot == null || !slot.ownsFuture(future)) {
-            return false;
-        }
-        synchronized (slot) {
-            return isCurrentSlot(slot) && slot.isOpen();
+    void exitAdmissionHandleGate() {
+        synchronized (admissionQuiescenceMonitor) {
+            if (inFlightAdmissionHandles <= 0) {
+                throw new IllegalStateException("admission handle counter underflow");
+            }
+            inFlightAdmissionHandles--;
+            if (inFlightAdmissionHandles == 0) {
+                admissionQuiescenceMonitor.notifyAll();
+            }
         }
     }
 
+    void onQueuedItemPreempted(ScheduledRequest victim, ScheduledRequest incoming) {
+        finishYielded(victim, "preempted by higher-priority request " + incoming.requestId());
+        requestReporter.reportVictim(
+                victim.priority(),
+                incoming.priority(),
+                "prefill_queued",
+                "prefill_inflight_requests");
+        requestReporter.reportPriorityPreempt("prefill_queued");
+    }
+
     /**
-     * Claims a Generation admission handle. Encoder routes use claimEncoderRoute.
+     * Retain registered IDs, including terminal records, during endpoint orphan cleanup.
+     * Called under endpoint locks: never acquire a Slot lock here. Read the current
+     * directory rather than a snapshot, which could miss a newly registered request.
      */
-    public AdmissionHandle claimAdmissionHandle(String requestId, CompletableFuture<?> future) {
+    boolean retainForSchedulerCleanup(String requestId) {
+        return requestSlots.containsKey(requestId);
+    }
+
+    boolean publishDecisionResponseAsync(
+            String requestId, CompletableFuture<Response> future, Response response) {
+        return publishDecisionResponseAsync(requestId, future, response, RequestPhase.GENERATION);
+    }
+
+    boolean publishDecisionResponseAsync(
+            String requestId,
+            CompletableFuture<Response> future,
+            Response response,
+            RequestPhase phase) {
+        RequestSlot slot = slots(phase).get(requestId);
+        return slot != null
+                && slot.ownsFuture(future)
+                && slot.terminateLocallyAndPublishResponse(response);
+    }
+
+    private ConcurrentMap<String, RequestSlot> slots(RequestPhase phase) {
+        return phase == RequestPhase.ENCODER ? encoderRequestSlots : requestSlots;
+    }
+
+    private WithdrawnRoute claimQueuedRoute(
+            DecodeEndpoint endpoint,
+            DecodeEndpoint.ReservationHandle victim,
+            int incomingPriority) {
         if (!enterAdmissionHandleGate()) {
             return null;
         }
-        boolean transferred = false;
+        AdmissionHandle claim = null;
+        boolean retained = false;
         try {
-            RequestSlot slot = requestSlots.get(requestId);
-            if (slot == null || !slot.ownsFuture(future)) {
+            RequestSlot slot = requestSlots.get(victim.requestId());
+            if (slot == null) {
                 return null;
             }
-            AdmissionHandle handle;
             synchronized (slot) {
-                handle = isCurrentSlot(slot) ? slot.tryBeginAdmissionHandle() : null;
+                if (!isCurrentSlot(slot)) {
+                    return null;
+                }
+                ScheduledRequest active = slot.activeItem();
+                if (active == null || active.priority() >= incomingPriority) {
+                    return null;
+                }
+                claim = slot.tryBeginRouteWithdrawal(endpoint, victim);
+                if (claim == null) {
+                    return null;
+                }
+                WithdrawnRoute withdrawal = new WithdrawnRoute(slot, active, claim);
+                retained = true;
+                return withdrawal;
             }
-            transferred = handle != null;
-            return handle;
         } finally {
-            if (!transferred) {
-                exitAdmissionHandleGate();
+            if (!retained) {
+                if (claim == null) {
+                    exitAdmissionHandleGate();
+                } else {
+                    claim.close();
+                }
             }
         }
     }
@@ -547,15 +826,14 @@ public class RequestRegistry {
         }
     }
 
-    void exitAdmissionHandleGate() {
-        synchronized (admissionQuiescenceMonitor) {
-            if (inFlightAdmissionHandles <= 0) {
-                throw new IllegalStateException("admission handle counter underflow");
-            }
-            inFlightAdmissionHandles--;
-            if (inFlightAdmissionHandles == 0) {
-                admissionQuiescenceMonitor.notifyAll();
-            }
+    private static int completionPublisherWorkers(ConfigService configService) {
+        try {
+            FlexlbConfig config = configService.loadBalanceConfig();
+            return config == null || config.getInternalRuntime() == null
+                    ? 0
+                    : config.getInternalRuntime().getBatchDispatchCompletionThreads();
+        } catch (Throwable ignored) {
+            return 0;
         }
     }
 
@@ -575,256 +853,10 @@ public class RequestRegistry {
         }
     }
 
-    public void finishYielded(ScheduledRequest victim, String detail) {
-        finishVictim(victim, StrategyErrorType.PRIORITY_PREEMPTED, detail);
-    }
-
-    void onQueuedItemPreempted(ScheduledRequest victim, ScheduledRequest incoming) {
-        finishYielded(victim, "preempted by higher-priority request " + incoming.requestId());
-        requestReporter.reportVictim(
-                victim.priority(),
-                incoming.priority(),
-                "prefill_queued",
-                "prefill_inflight_requests");
-        requestReporter.reportPriorityPreempt("prefill_queued");
-    }
-
     private void finishVictim(ScheduledRequest item, StrategyErrorType error, String detail) {
         RequestSlot slot = entryFor(item);
         if (slot != null) {
             slot.recordSchedulingFailure(error, detail);
-        }
-    }
-
-    public Optional<PreemptionRegistration> tryClaim(
-            String requestId, long reservationToken, long attemptToken, String detail) {
-        RequestSlot entry = requestSlots.get(requestId);
-        if (entry == null) {
-            return Optional.empty();
-        }
-        synchronized (entry) {
-            return Optional.ofNullable(
-                    entry.tryInstallPreemption(reservationToken, attemptToken, detail));
-        }
-    }
-
-    public Optional<CancelTarget> findCancelTarget(String requestId, long reservationToken) {
-        RequestSlot entry = requestSlots.get(requestId);
-        if (entry == null) {
-            return Optional.empty();
-        }
-        synchronized (entry) {
-            CancelTarget target = cancelTarget(entry.activeItemForReservation(reservationToken));
-            return target == null || !target.isRoutable() ? Optional.empty() : Optional.of(target);
-        }
-    }
-
-    public RequestState cancelRequest(String requestId, long expectedBatchId, CancelReason reason) {
-        return cancelRequest(requestId, expectedBatchId, reason, RequestPhase.GENERATION);
-    }
-
-    public RequestState cancelRequest(
-            String requestId, long expectedBatchId, CancelReason reason, RequestPhase phase) {
-        Objects.requireNonNull(reason, "reason");
-        RequestSlot slot = requestSlot(requestId, phase);
-        return slot == null ? null : slot.cancelRequest(expectedBatchId, reason);
-    }
-
-    private static CancelTarget cancelTarget(ScheduledRequest item) {
-        ServerStatus prefill = item == null ? null : item.prefill();
-        return prefill == null
-                ? null
-                : new CancelTarget(prefill.getServerIp(), prefill.getGrpcPort());
-    }
-
-    public int trackedRequestCount() {
-        return trackedRequestCount(RequestPhase.GENERATION)
-                + trackedRequestCount(RequestPhase.ENCODER);
-    }
-
-    public int trackedRequestCount(RequestPhase phase) {
-        int live = 0;
-        for (RequestSlot slot : slots(phase).values()) {
-            synchronized (slot) {
-                if (isCurrentSlot(slot) && slot.isLiveGeneration()) {
-                    live++;
-                }
-            }
-        }
-        return live;
-    }
-
-    /**
-     * Collect both request counts and the oldest live age in one traversal.
-     */
-    public TrackedRequestStats trackedRequestStats() {
-        int generation = 0;
-        int encoder = 0;
-        long oldest = Long.MAX_VALUE;
-        long now = System.currentTimeMillis();
-        for (RequestPhase phase : RequestPhase.values()) {
-            if (phase != RequestPhase.GENERATION && phase != RequestPhase.ENCODER) {
-                continue;
-            }
-            for (RequestSlot slot : slots(phase).values()) {
-                synchronized (slot) {
-                    if (!isCurrentSlot(slot) || !slot.isLiveGeneration()) {
-                        continue;
-                    }
-                    if (phase == RequestPhase.GENERATION) {
-                        generation++;
-                    } else {
-                        encoder++;
-                    }
-                    oldest = Math.min(oldest, slot.createdAtMs());
-                }
-            }
-        }
-        return new TrackedRequestStats(
-                generation, encoder, oldest == Long.MAX_VALUE ? 0L : Math.max(0L, now - oldest));
-    }
-
-    public record TrackedRequestStats(
-            int generationRequests, int encoderRequests, long oldestAgeMs) {}
-
-    public long oldestLiveSlotAgeMs() {
-        long oldest = Long.MAX_VALUE;
-        long now = System.currentTimeMillis();
-        for (RequestSlot slot : snapshotSlots()) {
-            synchronized (slot) {
-                if (isCurrentSlot(slot) && slot.isLiveGeneration()) {
-                    oldest = Math.min(oldest, slot.createdAtMs());
-                }
-            }
-        }
-        return oldest == Long.MAX_VALUE ? 0L : Math.max(0L, now - oldest);
-    }
-
-    public List<RequestState> snapshotActiveRequests() {
-        List<RequestState> snapshots =
-                new ArrayList<>(requestSlots.size() + encoderRequestSlots.size());
-        for (RequestSlot entry : snapshotSlots()) {
-            synchronized (entry) {
-                if (isCurrentSlot(entry) && entry.isLiveGeneration()) {
-                    snapshots.add(entry.snapshot());
-                }
-            }
-        }
-        snapshots.sort(
-                (left, right) -> {
-                    int createdOrder = Long.compare(left.createdAtMs(), right.createdAtMs());
-                    return createdOrder != 0
-                            ? createdOrder
-                            : left.requestId().compareTo(right.requestId());
-                });
-        return List.copyOf(snapshots);
-    }
-
-    public RequestState getRequestState(String requestId, long expectedBatchId) {
-        return getRequestState(requestId, expectedBatchId, RequestPhase.GENERATION);
-    }
-
-    public RequestState getRequestState(
-            String requestId, long expectedBatchId, RequestPhase phase) {
-        RequestSlot entry = slots(phase).get(requestId);
-        if (entry == null) {
-            return null;
-        }
-        synchronized (entry) {
-            RequestState snapshot = entry.snapshot();
-            return snapshot != null && snapshot.matchesBatch(expectedBatchId) ? snapshot : null;
-        }
-    }
-
-    /**
-     * Retain registered IDs, including terminal records, during endpoint orphan cleanup.
-     * Called under endpoint locks: never acquire a Slot lock here. Read the current
-     * directory rather than a snapshot, which could miss a newly registered request.
-     */
-    boolean retainForSchedulerCleanup(String requestId) {
-        return requestSlots.containsKey(requestId);
-    }
-
-    public void onQueuedItemExpired(ScheduledRequest exact) {
-        RequestSlot slot = entryFor(exact);
-        if (slot != null) {
-            slot.cancelRequest(0L, CancelReason.DEADLINE_EXCEEDED);
-        }
-    }
-
-    public void onQueueOfferFailure(ScheduledRequest exact, Throwable error) {
-        RequestSlot slot = entryFor(exact);
-        if (slot != null) {
-            slot.recordSchedulingFailure(
-                    StrategyErrorType.DISPATCH_FAILED,
-                    "Worker scheduling queue rejected request: "
-                            + (error == null ? "endpoint publication failed" : error.getMessage()));
-        }
-    }
-
-    public CapacityBoundary.Attempt<BatchDeliveryStrategy.BatchTransaction> prepareBatchDelivery(
-            ScheduledRequest item, BatchDeliveryStrategy strategy) {
-        RequestSlot slot = entryFor(item);
-        return slot == null
-                ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
-                : slot.prepareDispatch(item, () -> strategy.prepareAdmission(item));
-    }
-
-    public CapacityBoundary.Attempt<ScheduledRequest> prepareBatchMember(
-            ScheduledRequest item, BatchDeliveryStrategy.BatchTransaction transaction) {
-        RequestSlot slot = entryFor(item);
-        return slot == null
-                ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
-                : slot.prepareDispatch(item, () -> transaction.append(item));
-    }
-
-    public CapacityBoundary.Attempt<ScheduledRequest> prepareRouteMember(
-            ScheduledRequest item,
-            RouteDeliveryStrategy.RouteTransaction transaction,
-            PrefillTimePredictor.Evaluator evaluator) {
-        RequestSlot slot = entryFor(item);
-        return slot == null
-                ? CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST)
-                : slot.prepareDispatch(item, () -> transaction.append(item, evaluator));
-    }
-
-    public DeliveryClaim claimBatchDelivery(
-            ScheduledRequest item, BatchDeliveryStrategy.BatchTransaction transaction) {
-        RequestSlot slot = entryFor(item);
-        return slot == null
-                ? null
-                : slot.claimDelivery(
-                        item,
-                        DeliveryClaimKind.BATCH_ENQUEUE,
-                        transaction.batchId(),
-                        () -> transaction.transferToEndpoint(item));
-    }
-
-    public DeliveryClaim claimRouteDelivery(
-            ScheduledRequest item, PrefillAdmissionResources.CommittedAdmissionOwner admission) {
-        RequestSlot slot = entryFor(item);
-        return slot == null
-                ? null
-                : slot.claimDelivery(
-                        item,
-                        DeliveryClaimKind.ROUTE_DECISION,
-                        0L,
-                        () -> admission.transferToEndpoint(item));
-    }
-
-    public void setDeliveryPrediction(
-            DeliveryClaim claim, WorkSnapshot precedingWork, long predictedMs) {
-        claim.slot.setDeliveryPrediction(claim, precedingWork, predictedMs);
-    }
-
-    public void publishRoute(DeliveryClaim claim, WorkSnapshot precedingWork, long predictedMs) {
-        claim.slot.publishRoute(claim, precedingWork, predictedMs);
-    }
-
-    public void failDeliveryPreparation(ScheduledRequest exact, Throwable cause) {
-        RequestSlot slot = entryFor(exact);
-        if (slot != null) {
-            slot.failDeliveryPreparation(exact, cause);
         }
     }
 
@@ -840,55 +872,19 @@ public class RequestRegistry {
         }
     }
 
+    private static CancelTarget cancelTarget(ScheduledRequest item) {
+        ServerStatus prefill = item == null ? null : item.prefill();
+        return prefill == null
+                ? null
+                : new CancelTarget(prefill.getServerIp(), prefill.getGrpcPort());
+    }
+
     private static void completeError(
             CompletableFuture<Response> future, StrategyErrorType errorType, String message) {
         if (future.isDone()) {
             return;
         }
         future.complete(buildErrorResponse(errorType, message));
-    }
-
-    boolean publishDecisionResponseAsync(
-            String requestId, CompletableFuture<Response> future, Response response) {
-        return publishDecisionResponseAsync(requestId, future, response, RequestPhase.GENERATION);
-    }
-
-    boolean publishDecisionResponseAsync(
-            String requestId,
-            CompletableFuture<Response> future,
-            Response response,
-            RequestPhase phase) {
-        RequestSlot slot = slots(phase).get(requestId);
-        return slot != null
-                && slot.ownsFuture(future)
-                && slot.terminateLocallyAndPublishResponse(response);
-    }
-
-    public boolean closeAdmissionAndAwaitMutations() {
-        if (!shuttingDown.compareAndSet(false, true)) {
-            return false;
-        }
-        awaitAdmissionHandleQuiescence();
-        return true;
-    }
-
-    public void closeOutstandingAndTerminalize() {
-        if (!shuttingDown.get()) {
-            throw new IllegalStateException("admission must close before terminal shutdown");
-        }
-        completeOutstandingRequestsForShutdown();
-    }
-
-    public void maintainExpiration(BiConsumer<Long, Predicate<String>> exactSweeper) {
-        expirationTimer.maintain(exactSweeper);
-    }
-
-    public void closeExpiration() {
-        expirationTimer.close();
-    }
-
-    public void closePublisher() {
-        completionPublisher.close();
     }
 
     private void completeOutstandingRequestsForShutdown() {
@@ -901,4 +897,9 @@ public class RequestRegistry {
         }
         actions.forEach(terminalCleanup::submitTerminal);
     }
+
+    private record WithdrawnRoute(RequestSlot slot, ScheduledRequest item, AdmissionHandle claim) {}
+
+    public record TrackedRequestStats(
+            int generationRequests, int encoderRequests, long oldestAgeMs) {}
 }

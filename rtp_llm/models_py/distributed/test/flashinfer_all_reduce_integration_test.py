@@ -4,10 +4,12 @@ import multiprocessing as mp
 import os
 import time
 import unittest
+from unittest import mock
 
 import torch
 import torch.distributed as dist
 
+from rtp_llm.models_py.distributed import flashinfer_all_reduce as flashinfer_ar_module
 from rtp_llm.models_py.distributed.flashinfer_all_reduce import FlashInferAllReduce
 from rtp_llm.test.utils.port_util import PortManager
 
@@ -15,12 +17,16 @@ from rtp_llm.test.utils.port_util import PortManager
 def _worker(rank: int, port: int) -> None:
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(port)
-    os.environ["FT_DISABLE_CUSTOM_AR"] = "0"
+    # The runtime switch is pinned off; construct with enabled_by_config patched
+    # to exercise the (still supported) FlashInfer all-reduce path directly.
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", rank=rank, world_size=2)
-    communicator = FlashInferAllReduce(
-        dist.group.WORLD, torch.device("cuda", rank), single_node=True
-    )
+    with mock.patch.object(
+        flashinfer_ar_module, "enabled_by_config", return_value=True
+    ):
+        communicator = FlashInferAllReduce(
+            dist.group.WORLD, torch.device("cuda", rank), single_node=True
+        )
     assert not communicator.disabled
 
     try:

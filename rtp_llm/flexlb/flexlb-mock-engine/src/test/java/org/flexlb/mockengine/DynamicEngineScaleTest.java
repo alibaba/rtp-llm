@@ -51,39 +51,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * Dynamic engine scale-out/in via the {@code /add_engine} + {@code /remove_engine}
- * control endpoints backed by {@link DynamicEngineManager}, with the discovery
- * file ({@link DiscoveryFileStore}) kept in sync for a file-discovery master.
- *
- * <p>Covers the required behaviours:
- * <ol>
- *   <li>add → new gRPC port reachable, engine visible in /snapshot, entry
- *       present in the discovery file (HTTP port = grpc − 1);</li>
- *   <li>remove → port refuses connections, discovery entry gone, services map
- *       free of residue, and the response reports the engine's in-flight
- *       counters at removal time — in GRACEFUL mode (default) the call also
- *       waits bounded for in-flight work to finish without failing any
- *       request (user ruling 2026-09: planned scale-in = zero failures),
- *       while mode=abrupt keeps the legacy immediate teardown for chaos
- *       cases;</li>
- *   <li>graceful specifics → in-flight request completes normally, drain
- *       deadline expiry falls back to teardown (drained=false), concurrent
- *       removes of one engine leave a consistent teardown, and a mid-drain engine stays
- *       out of the discovery file even under a concurrent add_engine;</li>
- *   <li>concurrent add×N + remove×M crossfire → the discovery file always
- *       parses completely and its entry set equals the services map;</li>
- *   <li>a dynamically added engine serves the full request pipeline
- *       (enqueue → decode scheduling → generated output).</li>
- * </ol>
+ * Checks mock-engine add/remove controls, discovery updates and graceful or abrupt scale-in.
  */
 class DynamicEngineScaleTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(63200);
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
@@ -577,48 +552,6 @@ class DynamicEngineScaleTest {
                 "removing an unknown engine must 404");
     }
 
-    // ════════════════════════════════════════════════════════════════
-    //  Cluster bootstrap
-    // ════════════════════════════════════════════════════════════════
-
-    /**
-     * Claim the next 32-port block with every port bindable right now.
-     *
-     * <p>The allocator restarts at its fixed base (63200) in every JVM, so
-     * residue from a previous suite run (a not-yet-reaped socket from the
-     * last JVM, or any other squatter on one of the ports) fails the
-     * wildcard bind inside startEngine — the observed "Failed to bind
-     * 0.0.0.0:63233" flake on back-to-back runs. Both the bootstrap engines
-     * and the dynamically added ones (auto-allocated as max+1) take
-     * consecutive ports inside the block, so the whole block must be free;
-     * occupied blocks are skipped. The probe binds exactly like the engine
-     * does (wildcard address, same JVM-default socket options), so anything
-     * that would fail the engine bind also fails the probe. Mirrors the
-     * established {@code ComprehensiveFaultInjectionTest.allocatePortBlock}
-     * pattern.
-     */
-    private static int allocatePortBlock() {
-        for (int attempt = 0; attempt < 20; attempt++) {
-            int basePort = PORT_ALLOCATOR.getAndAdd(32);
-            boolean allFree = true;
-            for (int port = basePort; port < basePort + 32; port++) {
-                // Wildcard bind with the same JVM-default socket options as
-                // the NettyServerBuilder.forPort() bind inside startEngine,
-                // so probe success/failure predicts the engine bind 1:1.
-                try (ServerSocket probe = new ServerSocket()) {
-                    probe.bind(new InetSocketAddress(port), 1);
-                } catch (IOException e) {
-                    allFree = false;
-                    break;
-                }
-            }
-            if (allFree) {
-                return basePort;
-            }
-        }
-        throw new IllegalStateException("no bindable 32-port block after 20 attempts");
-    }
-
     /**
      * Boot a real cluster (gRPC servers + control server + discovery file +
      * dynamic engine manager), mirroring {@code JavaMockEngineCluster.main}.
@@ -706,6 +639,48 @@ class DynamicEngineScaleTest {
                         engineManager);
         controlServer.start();
         return basePort;
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  Cluster bootstrap
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * Claim the next 32-port block with every port bindable right now.
+     *
+     * <p>The allocator restarts at its fixed base (63200) in every JVM, so
+     * residue from a previous suite run (a not-yet-reaped socket from the
+     * last JVM, or any other squatter on one of the ports) fails the
+     * wildcard bind inside startEngine — the observed "Failed to bind
+     * 0.0.0.0:63233" flake on back-to-back runs. Both the bootstrap engines
+     * and the dynamically added ones (auto-allocated as max+1) take
+     * consecutive ports inside the block, so the whole block must be free;
+     * occupied blocks are skipped. The probe binds exactly like the engine
+     * does (wildcard address, same JVM-default socket options), so anything
+     * that would fail the engine bind also fails the probe. Mirrors the
+     * established {@code ComprehensiveFaultInjectionTest.allocatePortBlock}
+     * pattern.
+     */
+    private static int allocatePortBlock() {
+        for (int attempt = 0; attempt < 20; attempt++) {
+            int basePort = PORT_ALLOCATOR.getAndAdd(32);
+            boolean allFree = true;
+            for (int port = basePort; port < basePort + 32; port++) {
+                // Wildcard bind with the same JVM-default socket options as
+                // the NettyServerBuilder.forPort() bind inside startEngine,
+                // so probe success/failure predicts the engine bind 1:1.
+                try (ServerSocket probe = new ServerSocket()) {
+                    probe.bind(new InetSocketAddress(port), 1);
+                } catch (IOException e) {
+                    allFree = false;
+                    break;
+                }
+            }
+            if (allFree) {
+                return basePort;
+            }
+        }
+        throw new IllegalStateException("no bindable 32-port block after 20 attempts");
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -811,10 +786,6 @@ class DynamicEngineScaleTest {
         fail(message);
     }
 
-    private interface BooleanSupplier {
-        boolean getAsBoolean();
-    }
-
     // ════════════════════════════════════════════════════════════════
     //  Model / request helpers (JavaMockEngineClusterTest style)
     // ════════════════════════════════════════════════════════════════
@@ -885,35 +856,6 @@ class DynamicEngineScaleTest {
         return unary(observer -> service.enqueueBatch(request, observer));
     }
 
-    private static EngineRpcService.WorkerStatusPB status(
-            JavaMockEngineCluster.FastRpcService service) {
-        return unary(
-                observer ->
-                        service.getWorkerStatus(
-                                EngineRpcService.StatusVersionPB.newBuilder()
-                                        .setLatestFinishedVersion(0)
-                                        .build(),
-                                observer));
-    }
-
-    private static EngineRpcService.WorkerStatusPB awaitStatus(
-            JavaMockEngineCluster.FastRpcService service,
-            Predicate<EngineRpcService.WorkerStatusPB> predicate,
-            long timeoutMs)
-            throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
-        EngineRpcService.WorkerStatusPB last = null;
-        while (System.nanoTime() < deadline) {
-            last = status(service);
-            if (predicate.test(last)) {
-                return last;
-            }
-            Thread.sleep(5);
-        }
-        fail("status condition not reached, last status=" + last);
-        return last;
-    }
-
     private static <T> T unary(Consumer<StreamObserver<T>> invocation) {
         AtomicReference<T> response = new AtomicReference<>();
         AtomicReference<Throwable> error = new AtomicReference<>();
@@ -939,7 +881,45 @@ class DynamicEngineScaleTest {
         return response.get();
     }
 
-    /** Async collector for streaming RPCs (generateStreamCall). */
+    private static EngineRpcService.WorkerStatusPB awaitStatus(
+            JavaMockEngineCluster.FastRpcService service,
+            Predicate<EngineRpcService.WorkerStatusPB> predicate,
+            long timeoutMs)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        EngineRpcService.WorkerStatusPB last = null;
+        while (System.nanoTime() < deadline) {
+            last = status(service);
+            if (predicate.test(last)) {
+                return last;
+            }
+            Thread.sleep(5);
+        }
+        fail("status condition not reached, last status=" + last);
+        return last;
+    }
+
+    private static EngineRpcService.WorkerStatusPB status(
+            JavaMockEngineCluster.FastRpcService service) {
+        return unary(
+                observer ->
+                        service.getWorkerStatus(
+                                EngineRpcService.StatusVersionPB.newBuilder()
+                                        .setLatestFinishedVersion(0)
+                                        .build(),
+                                observer));
+    }
+
+    /**
+     * Supplies a polling condition for dynamic-engine scale tests.
+     */
+    private interface BooleanSupplier {
+        boolean getAsBoolean();
+    }
+
+    /**
+     * Async collector for streaming RPCs (generateStreamCall).
+     */
     private static final class StreamCollector<T> implements StreamObserver<T> {
         final List<T> values = new CopyOnWriteArrayList<>();
         final CountDownLatch done = new CountDownLatch(1);

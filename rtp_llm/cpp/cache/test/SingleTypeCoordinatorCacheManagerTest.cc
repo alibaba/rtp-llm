@@ -1565,6 +1565,35 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ForwardBlockIdCopyMatchesRawKVAndS
 #endif
 }
 
+TEST_F(SingleTypeCoordinatorCacheManagerTest, ForwardBlockCopyPreservesUnusedTailInEveryHead) {
+#if USING_CUDA
+    auto config = makeSimpleMhaCacheConfig(2, 8, 16, DataType::TYPE_FP16, 2, 8);
+    allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    ASSERT_NE(allocator_->gpu_block_copy_, nullptr);
+    std::vector<torch::Tensor> destinations;
+    for (int layer = 0; layer < 2; ++layer) {
+        for (int block : {1, 4}) {
+            const auto buffer = allocator_->convertIndexToBuffer(layer, block).front();
+            auto       bytes =
+                torch::from_blob(buffer.addr,
+                                 {4, 16, 16},
+                                 torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, buffer.device_index));
+            bytes.fill_(block == 1 ? 17 : 91);
+            if (block == 4)
+                destinations.push_back(bytes);
+        }
+    }
+    allocator_->blockBatchCopyForForward(
+        torch::tensor({0, 1, 4}, torch::kInt32).reshape({1, 3}), config.groupTags(), torch::tensor({5}, torch::kInt32));
+    for (const auto& destination : destinations) {
+        const auto host = destination.cpu();
+        EXPECT_TRUE(host.narrow(1, 0, 5).eq(17).all().item<bool>());
+        EXPECT_TRUE(host.narrow(1, 5, 11).eq(91).all().item<bool>());
+    }
+#endif
+}
+
 TEST_F(SingleTypeCoordinatorCacheManagerTest, ForwardBlockCopyFallsBackForHostStorage) {
     auto config = createSingleTypeTestConfig();
     allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config, AllocationType::HOST);

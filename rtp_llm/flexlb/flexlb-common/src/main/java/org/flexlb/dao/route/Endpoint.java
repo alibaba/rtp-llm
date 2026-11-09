@@ -5,6 +5,9 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
+/**
+ * Describes a discovery endpoint, protocol and per-worker status addressing configuration.
+ */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class Endpoint {

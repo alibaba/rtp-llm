@@ -16,7 +16,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** An offline worker cannot retain scheduler or endpoint accounting past request inactivity TTL. */
+/**
+ * An offline worker cannot retain scheduler or endpoint accounting past request inactivity TTL.
+ */
 class WorkerOfflineTest extends FlexLBMockTestBase {
 
     @Override

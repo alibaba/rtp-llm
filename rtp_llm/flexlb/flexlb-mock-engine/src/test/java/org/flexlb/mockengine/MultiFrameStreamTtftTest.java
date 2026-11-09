@@ -27,29 +27,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Multi-frame stream semantics for the client-facing response pump: ttft must
- * be measurable from a first-token frame (finished=false, offered at prefill
- * completion) strictly BEFORE the terminal frame (finished=true, offered at
- * decode completion), so client-side ttft &lt; e2e instead of collapsing to a
- * single timestamp.
- *
- * <p>Background: the first-token frame and the loop pump in generateStreamCall
- * already existed; fetch_response still polled exactly ONE frame, which cut
- * the stream after the first-token frame — under the BATCH dispatcher the
- * client polls FetchResponse against the original prefill engine, so every
- * completed request's ttft and e2e were identical by construction (observed
- * live: run 20260827_112212 per-second ttft_p50 == e2e_p50 at every second).
- * These tests pin the multi-frame contract for BOTH pumps and the timeout
- * semantics (timeout completes the stream without error, preserving the
- * client's empty_response detection for zero-frame streams).
- *
- * <p>Topology per test: 1 prefill + 1 decode engine, in-process (no gRPC
- * server), prefill formula 100 ms, decode step 50 ms x 8 steps (tokens_per_step
- * pinned to 1 so output_len 8 == 8 steps) = 400 ms decode — the two frames are
- * ~400 ms apart, comfortably measurable.
+ * Checks that first-token stream frames arrive before terminal frames and provide an independently
+ * measurable TTFT.
  */
 class MultiFrameStreamTtftTest {
-
     private static final int BASE_PORT = 62600;
 
     @TempDir Path tempDir;
@@ -57,6 +38,7 @@ class MultiFrameStreamTtftTest {
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
     private final Map<Integer, JavaMockEngineCluster.FastRpcService> services =
             new ConcurrentHashMap<>();
+
     private JavaMockEngineCluster.FastRpcService prefill;
     private JavaMockEngineCluster.FastRpcService decode;
 
@@ -324,10 +306,18 @@ class MultiFrameStreamTtftTest {
         }
     }
 
-    private record CollectedStream(
-            List<EngineRpcService.GenerateOutputsPB> frames,
-            List<Long> frameNanos,
-            AtomicReference<Throwable> error) {}
+    private static CollectedStream fetch(
+            JavaMockEngineCluster.FastRpcService service, long requestId, long awaitMs)
+            throws InterruptedException {
+        return collect(
+                observer ->
+                        service.fetchResponse(
+                                EngineRpcService.FetchRequestPB.newBuilder()
+                                        .setRequestId(requestId)
+                                        .build(),
+                                observer),
+                awaitMs);
+    }
 
     private static CollectedStream collect(
             Consumer<StreamObserver<EngineRpcService.GenerateOutputsPB>> invoke, long awaitMs)
@@ -361,19 +351,6 @@ class MultiFrameStreamTtftTest {
         return new CollectedStream(new ArrayList<>(frames), new ArrayList<>(frameNanos), error);
     }
 
-    private static CollectedStream fetch(
-            JavaMockEngineCluster.FastRpcService service, long requestId, long awaitMs)
-            throws InterruptedException {
-        return collect(
-                observer ->
-                        service.fetchResponse(
-                                EngineRpcService.FetchRequestPB.newBuilder()
-                                        .setRequestId(requestId)
-                                        .build(),
-                                observer),
-                awaitMs);
-    }
-
     private static CollectedStream generate(
             JavaMockEngineCluster.FastRpcService service,
             EngineRpcService.GenerateInputPB input,
@@ -381,4 +358,9 @@ class MultiFrameStreamTtftTest {
             throws InterruptedException {
         return collect(observer -> service.generateStreamCall(input, observer), awaitMs);
     }
+
+    private record CollectedStream(
+            List<EngineRpcService.GenerateOutputsPB> frames,
+            List<Long> frameNanos,
+            AtomicReference<Throwable> error) {}
 }

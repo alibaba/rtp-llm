@@ -7,14 +7,6 @@ def init_fmha_group_args(parser, fmha_config):
     ##############################################################################################################
     fmha_group = parser.add_argument_group("FMHA")
     fmha_group.add_argument(
-        "--enable_fmha",
-        env_name="ENABLE_FMHA",
-        bind_to=(fmha_config, "enable_fmha"),
-        type=str2bool,
-        default=True,
-        help="控制是否启用Fused Multi-Head Attention (FMHA) 功能。可选值: True (启用), False (禁用)。",
-    )
-    fmha_group.add_argument(
         "--enable_flashinfer_trtllm_gen",
         env_name="ENABLE_FLASHINFER_TRTLLM_GEN",
         bind_to=(fmha_config, "enable_flashinfer_trtllm_gen"),
@@ -45,14 +37,6 @@ def init_fmha_group_args(parser, fmha_config):
         type=str2bool,
         default=True,
         help="控制是否启用开源版本的FMHA实现。可选值: True (启用), False (禁用)。",
-    )
-    fmha_group.add_argument(
-        "--enable_paged_open_source_fmha",
-        env_name="ENABLE_PAGED_OPEN_SOURCE_FMHA",
-        bind_to=(fmha_config, "enable_paged_open_source_fmha"),
-        type=str2bool,
-        default=True,
-        help="控制是否启用Paged开源版本的FMHA实现。可选值: True (启用), False (禁用)。",
     )
     fmha_group.add_argument(
         "--disable_flashinfer_native",

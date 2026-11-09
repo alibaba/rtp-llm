@@ -34,7 +34,7 @@ class Dsv4ConfigTest(unittest.TestCase):
         self.parallel = NS(role_type=NS(name="PREFILL"), pp_size=1, tp_size=4,
             dp_size=1, world_size=4, ep_size=1,
             prefill_cp_config=NS(is_enabled=lambda: False),
-            ffn_disaggregate_config=NS(enable_ffn_disaggregate=False))
+        )
         self.moe = NS(use_deepep_moe=True, use_deepep_low_latency=False,
                       use_deepep_internode=False, use_all_gather=False)
 

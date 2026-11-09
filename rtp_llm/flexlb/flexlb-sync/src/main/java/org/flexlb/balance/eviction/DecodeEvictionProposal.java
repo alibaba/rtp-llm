@@ -30,22 +30,6 @@ public record DecodeEvictionProposal(
         long totalCost,
         long freedKvTokens,
         PlanCost cost) {
-
-    public DecodeEvictionProposal {
-        victims = List.copyOf(victims);
-        boolean hasLocal = victims.stream().anyMatch(victim -> victim.phase().isMasterQueued());
-        boolean hasCancel =
-                victims.stream().anyMatch(victim -> victim.phase().requiresEngineCancel());
-        if (hasLocal && hasCancel) {
-            throw new IllegalArgumentException(
-                    "decode proposal cannot mix Master-local and Engine-Cancel victims");
-        }
-    }
-
-    public boolean requiresEngineCancel() {
-        return !victims.isEmpty() && victims.get(0).phase().requiresEngineCancel();
-    }
-
     /** Concurrency slots exhausted (design doc 11). */
     public static final String CASE_SLOT = "decode_slot_full";
 
@@ -62,4 +46,19 @@ public record DecodeEvictionProposal(
     public static final Comparator<DecodeEvictionProposal> ORDER =
             Comparator.comparing(DecodeEvictionProposal::cost, PlanCost.ORDER)
                     .thenComparing(DecodeEvictionProposal::endpointId);
+
+    public DecodeEvictionProposal {
+        victims = List.copyOf(victims);
+        boolean hasLocal = victims.stream().anyMatch(victim -> victim.phase().isMasterQueued());
+        boolean hasCancel =
+                victims.stream().anyMatch(victim -> victim.phase().requiresEngineCancel());
+        if (hasLocal && hasCancel) {
+            throw new IllegalArgumentException(
+                    "decode proposal cannot mix Master-local and Engine-Cancel victims");
+        }
+    }
+
+    public boolean requiresEngineCancel() {
+        return !victims.isEmpty() && victims.get(0).phase().requiresEngineCancel();
+    }
 }

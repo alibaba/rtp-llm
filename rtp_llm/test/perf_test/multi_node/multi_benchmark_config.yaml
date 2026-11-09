@@ -75,7 +75,5 @@ benchmarks:
     max_context_batch_size: 1
     enable_merge_w13: true
     use_deepep_moe: true
-    enable_layer_micro_batch: 2
-    enable_comm_overlap: true
     redundant_expert: 0
     accl_low_latency_optimize: 1

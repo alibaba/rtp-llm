@@ -22,9 +22,12 @@ import java.util.concurrent.locks.ReentrantLock;
  * Orders Encoder route decisions independently of the Generation queue.
  * A single decision thread commits each local selection before reading the next request,
  * so locally pending requests count toward the configured worker limit.
+ *
+ * <p>Offer records an Encoder request in the ordered queue. Its decision thread selects and
+ * commits a route; blocked entries become retryable on capacity changes. Closing the coordinator
+ * ends its decision work rather than shutting down shared endpoints.
  */
 final class EncoderQueueCoordinator implements AutoCloseable {
-
     private final DefaultRouter router;
     private final RequestRegistry requests;
     private final OrderedRequestQueue queue;
@@ -33,6 +36,7 @@ final class EncoderQueueCoordinator implements AutoCloseable {
     private final Set<GlobalQueueEntry> blocked =
             Collections.newSetFromMap(new IdentityHashMap<>());
     private final Thread decisionThread;
+
     private boolean closed;
     private long capacityVersion;
 
@@ -45,6 +49,37 @@ final class EncoderQueueCoordinator implements AutoCloseable {
         decisionThread.setDaemon(true);
         requests.attachEncoderQueue(this);
         decisionThread.start();
+    }
+
+    @Override
+    public void close() {
+        List<GlobalQueueEntry> abandoned;
+        lock.lock();
+        try {
+            if (closed) {
+                return;
+            }
+            closed = true;
+            abandoned = queue.drain();
+            blocked.clear();
+            changed.signalAll();
+        } finally {
+            lock.unlock();
+        }
+        for (GlobalQueueEntry entry : abandoned) {
+            fail(
+                    entry,
+                    Response.buildErrorResponse(
+                            StrategyErrorType.DISPATCH_FAILED,
+                            "request scheduler is shutting down"));
+        }
+        if (Thread.currentThread() != decisionThread) {
+            try {
+                decisionThread.join(1_000L);
+            } catch (InterruptedException interruption) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     boolean offer(BalanceContext context, CompletableFuture<Response> future) {
@@ -177,6 +212,26 @@ final class EncoderQueueCoordinator implements AutoCloseable {
         }
     }
 
+    private void remove(GlobalQueueEntry entry) {
+        lock.lock();
+        try {
+            blocked.remove(entry);
+            queue.remove(entry);
+            changed.signal();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private long capacityVersion() {
+        lock.lock();
+        try {
+            return capacityVersion;
+        } finally {
+            lock.unlock();
+        }
+    }
+
     private void publishRoute(GlobalQueueEntry entry, SelectedRole selected) {
         try (selected;
                 var pin = selected.takeGenerationPin()) {
@@ -191,12 +246,10 @@ final class EncoderQueueCoordinator implements AutoCloseable {
         }
     }
 
-    private long capacityVersion() {
-        lock.lock();
-        try {
-            return capacityVersion;
-        } finally {
-            lock.unlock();
+    private void fail(GlobalQueueEntry entry, Response response) {
+        if (!requests.publishDecisionResponseAsync(
+                entry.context.getRequestId(), entry.future, response, RequestPhase.ENCODER)) {
+            remove(entry);
         }
     }
 
@@ -213,55 +266,6 @@ final class EncoderQueueCoordinator implements AutoCloseable {
             }
         } finally {
             lock.unlock();
-        }
-    }
-
-    private void fail(GlobalQueueEntry entry, Response response) {
-        if (!requests.publishDecisionResponseAsync(
-                entry.context.getRequestId(), entry.future, response, RequestPhase.ENCODER)) {
-            remove(entry);
-        }
-    }
-
-    private void remove(GlobalQueueEntry entry) {
-        lock.lock();
-        try {
-            blocked.remove(entry);
-            queue.remove(entry);
-            changed.signal();
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    @Override
-    public void close() {
-        List<GlobalQueueEntry> abandoned;
-        lock.lock();
-        try {
-            if (closed) {
-                return;
-            }
-            closed = true;
-            abandoned = queue.drain();
-            blocked.clear();
-            changed.signalAll();
-        } finally {
-            lock.unlock();
-        }
-        for (GlobalQueueEntry entry : abandoned) {
-            fail(
-                    entry,
-                    Response.buildErrorResponse(
-                            StrategyErrorType.DISPATCH_FAILED,
-                            "request scheduler is shutting down"));
-        }
-        if (Thread.currentThread() != decisionThread) {
-            try {
-                decisionThread.join(1_000L);
-            } catch (InterruptedException interruption) {
-                Thread.currentThread().interrupt();
-            }
         }
     }
 }

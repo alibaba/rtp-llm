@@ -47,6 +47,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks exact member release across mixed batch rejection and worker completion.
+ */
 class DeliverySettlementTest {
     private FlexlbConfig config;
     private RequestRegistry registry;

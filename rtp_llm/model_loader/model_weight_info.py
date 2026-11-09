@@ -295,15 +295,7 @@ class ModelDeployWeightInfo:
             and not model_config.attn_config.use_mla
         )
 
-        self.is_ffn_service = (
-            parallelism_config.ffn_disaggregate_config.is_ffn_service()
-        )
-
-        # Calculate is_attn_model: True if FFN disaggregate is enabled but this is not an FFN service
-        ffn_config = parallelism_config.ffn_disaggregate_config
-        self.is_attn_model = (
-            ffn_config.enable_ffn_disaggregate and not ffn_config.is_ffn_service()
-        )
+        self.is_attn_model = False
 
         # for global weights: [lm_head]
         self.lm_head_tp_size = parallelism_config.tp_size

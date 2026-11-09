@@ -30,7 +30,6 @@ import static org.flexlb.constant.MetricConstant.JVM_GC_PAUSE_TOTAL_MS;
 @Slf4j
 @Component
 public class JvmGcMetricsReporter {
-
     private final FlexMonitor monitor;
     private final List<GarbageCollectorMXBean> collectors;
     private final Map<String, FlexMetricTags> collectorTags = new LinkedHashMap<>();
@@ -87,26 +86,6 @@ public class JvmGcMetricsReporter {
         }
     }
 
-    private static String gcType(String collector) {
-        return switch (collector) {
-            // G1's young collector also reports mixed collections that reclaim some old regions.
-            case "G1 Young Generation" -> "young";
-            case "G1 Old Generation" -> "full";
-            // These notifications cover concurrent-cycle pauses, not the whole concurrent cycle.
-            case "G1 Concurrent GC" -> "concurrent";
-            default -> "other";
-        };
-    }
-
-    void reportPause(String collector, long durationMs) {
-        FlexMetricTags tags = collectorTags.get(collector);
-        if (tags == null || durationMs < 0L) {
-            return;
-        }
-        monitor.report(JVM_GC_COLLECTION_COUNT, tags, 1.0D);
-        monitor.report(JVM_GC_PAUSE_TOTAL_MS, tags, durationMs);
-    }
-
     /**
      * Keeps zero-event collectors visible and preserves one-second counter samples between pauses.
      */
@@ -128,6 +107,26 @@ public class JvmGcMetricsReporter {
             }
         }
         listeners.clear();
+    }
+
+    void reportPause(String collector, long durationMs) {
+        FlexMetricTags tags = collectorTags.get(collector);
+        if (tags == null || durationMs < 0L) {
+            return;
+        }
+        monitor.report(JVM_GC_COLLECTION_COUNT, tags, 1.0D);
+        monitor.report(JVM_GC_PAUSE_TOTAL_MS, tags, durationMs);
+    }
+
+    private static String gcType(String collector) {
+        return switch (collector) {
+            // G1's young collector also reports mixed collections that reclaim some old regions.
+            case "G1 Young Generation" -> "young";
+            case "G1 Old Generation" -> "full";
+            // These notifications cover concurrent-cycle pauses, not the whole concurrent cycle.
+            case "G1 Concurrent GC" -> "concurrent";
+            default -> "other";
+        };
     }
 
     private record ListenerRegistration(

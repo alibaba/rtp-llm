@@ -1,7 +1,6 @@
 import functools
 import json
 import logging
-import os
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -116,11 +115,28 @@ def sgl_per_token_group_quant_fp8(
     scale_ue8m0: bool = False,
     fuse_silu_and_mul: bool = False,
     masked_m: Optional[torch.Tensor] = None,
+    preserve_silu_mul_rounding: bool = False,
 ):
     assert (
         x.shape[-1] % group_size == 0
     ), "the last dimension of `x` cannot be divisible by `group_size`"
     assert x.is_contiguous(), "`x` is not contiguous"
+    if preserve_silu_mul_rounding:
+        if not (
+            fuse_silu_and_mul
+            and masked_m is None
+            and x.dim() == 2
+            and x.dtype == torch.bfloat16
+            and group_size == 128
+            and x.shape[-1] % 1024 == 0
+            and column_major_scales
+            and scale_tma_aligned
+            and scale_ue8m0
+        ):
+            raise ValueError(
+                "Dense SiLU quant requires BF16 [tokens, 2 * hidden], hidden divisible by 512, group 128, "
+                "unmasked input, and TMA-aligned column-major UE8M0 scales"
+            )
 
     out_shape = (*x.shape[:-1], x.shape[-1] // (2 if fuse_silu_and_mul else 1))
     x_q = torch.empty(out_shape, device=x.device, dtype=fp8_dtype)
@@ -133,7 +149,6 @@ def sgl_per_token_group_quant_fp8(
         scale_ue8m0=scale_ue8m0,
     )
     if x.shape[0] > 0:
-        quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
 
         def can_use_v2() -> bool:
             if group_size not in (16, 32, 64, 128):
@@ -151,11 +166,7 @@ def sgl_per_token_group_quant_fp8(
             # consistently once the quantized matrix has at least ~4M elements.
             return x.numel() >= 4 * 1024 * 1024
 
-        if quant_kernel == "legacy":
-            per_token_group_quant_fp8(
-                x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
-            )
-        elif quant_kernel == "v2":
+        if preserve_silu_mul_rounding:
             per_token_group_quant_fp8_v2(
                 x,
                 x_q,
@@ -167,11 +178,7 @@ def sgl_per_token_group_quant_fp8(
                 scale_ue8m0,
                 fuse_silu_and_mul,
                 masked_m,
-            )
-        elif quant_kernel != "auto":
-            raise ValueError(
-                "DSV4_FP8_QUANT_KERNEL must be one of auto, legacy, v2; "
-                f"got {quant_kernel!r}"
+                preserve_silu_mul_rounding=True,
             )
         elif should_auto_use_v2():
             per_token_group_quant_fp8_v2(

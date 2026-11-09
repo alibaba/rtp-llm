@@ -19,6 +19,10 @@ import java.net.InetAddress;
 import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
 
+/**
+ * Handles platform readiness, startup and shutdown probes. Local lifecycle requests delegate to
+ * ApplicationLifecycle before returning their status.
+ */
 @Slf4j
 @Component
 public class AppStateHookServer {

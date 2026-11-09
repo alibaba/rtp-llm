@@ -38,9 +38,7 @@ void RtpEmbeddingOp::init(py::object model,
         auto profiling_debug_logging_config =
             engine_config.attr("profiling_debug_logging_config").cast<ProfilingDebugLoggingConfig>();
         auto hw_kernel_config       = engine_config.attr("hw_kernel_config").cast<HWKernelConfig>();
-        auto device_resource_config = engine_config.attr("device_resource_config").cast<DeviceResourceConfig>();
         auto moe_config             = engine_config.attr("moe_config").cast<MoeConfig>();
-        auto model_specific_config  = engine_config.attr("model_specific_config").cast<ModelSpecificConfig>();
         auto sp_config              = engine_config.attr("sp_config").cast<SpeculativeExecutionConfig>();
         auto cache_store_config     = engine_config.attr("cache_store_config").cast<CacheStoreConfig>();
         auto misc_config            = engine_config.attr("misc_config").cast<MiscellaneousConfig>();
@@ -70,15 +68,12 @@ void RtpEmbeddingOp::init(py::object model,
                                 kv_cache_config,
                                 profiling_debug_logging_config,
                                 hw_kernel_config,
-                                device_resource_config,
                                 moe_config,
-                                model_specific_config,
                                 sp_config,
                                 cache_store_config,
                                 misc_config,
                                 arpc_config,
                                 grpc_config,
-                                parallelism_config.ffn_disaggregate_config,
                                 vit_config_cpp,
                                 std::move(*gpt_weight),
                                 py_model);

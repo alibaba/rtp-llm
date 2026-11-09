@@ -20,11 +20,18 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 
-/** Decode worker boundary: lifecycle pins, resource operations and lock-free notifications.
+/**
+ * Decode worker boundary: lifecycle pins, resource operations and lock-free notifications.
  * DecodeState owns the generation-local resource ledger and its single mutation lock.
+ *
+ * <p>Reservation records the exact request against this generation. Dispatch permits govern
+ * transfer toward the engine; status observations reconcile accepted and finished requests.
+ * Release follows the supplied evidence and does not treat every local cancellation as remote
+ * cleanup.
  */
 public class DecodeEndpoint extends WorkerEndpoint {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+
     private final DecodeState state;
     private final EndpointEventProjector endpointEvents;
     private final PlacementAvailability placementAvailability;
@@ -87,15 +94,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return reservation;
     }
 
-    /** LOCAL_ROLLBACK requires local ownership; other evidence may leave Engine/protocol ownership intact. */
-    public ReservationReleaseResult release(ReservationHandle reservation, ReleaseReason reason) {
-        ReservationReleaseResult result = state.release(reservation, reason);
-        if (result == ReservationReleaseResult.RELEASED) {
-            publishCapacityRelease();
-        }
-        return result;
-    }
-
     /** Select no user outcome here: Prefill rejection alone cannot release Decode ownership. */
     public boolean settleFailedRequest(
             ReservationHandle reservation, DeliveryResult.Status source) {
@@ -112,6 +110,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return !state.hasOwnedResources(reservation);
     }
 
+    /** LOCAL_ROLLBACK requires local ownership; other evidence may leave Engine/protocol ownership intact. */
+    public ReservationReleaseResult release(ReservationHandle reservation, ReleaseReason reason) {
+        ReservationReleaseResult result = state.release(reservation, reason);
+        if (result == ReservationReleaseResult.RELEASED) {
+            publishCapacityRelease();
+        }
+        return result;
+    }
+
     public boolean isAcceptedByEngine(ReservationHandle reservation) {
         return state.isAcceptedByEngine(reservation);
     }
@@ -120,33 +127,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return isRetired() ? null : state.reservationHandle(requestId);
     }
 
-    public record ReservationHandle(
-            long endpointGenerationId, String requestId, long reservationToken) {
+    // Retirement and orphan cleanup.
 
-        public ReservationHandle {
-            if (endpointGenerationId <= 0L || reservationToken <= 0L) {
-                throw new IllegalArgumentException("Decode reservation identity must be positive");
-            }
-        }
-    }
-
-    public enum ReleaseReason {
-        LOCAL_ROLLBACK,
-        COUNTERPART_FINISHED,
-        NOT_SENT,
-        EXPIRED
-    }
-
-    public enum ReservationReleaseResult {
-        RELEASED,
-        ENGINE_ACCEPTED,
-        STILL_OWNED,
-        STALE,
-        CONFLICT;
-
-        public boolean released() {
-            return this == RELEASED;
-        }
+    public boolean isRetired() {
+        return isGenerationRetiringOrRetired();
     }
 
     // Dispatch: acquire capacity, hand over ownership, or return the permit.
@@ -192,140 +176,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return permit.resolve(outcome);
     }
 
-    private EngineDispatchPermitTransferStatus applyDispatch(
-            EngineDispatchPermit permit, DispatchOutcome outcome) {
-        GenerationPin pin = outcome == DispatchOutcome.ENGINE_OWNED ? tryPinGeneration() : null;
-        if (outcome == DispatchOutcome.ENGINE_OWNED && pin == null) {
-            return EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED;
-        }
-        try (pin) {
-            DecodeState.DispatchResult result = state.dispatch(permit.lease, outcome);
-            if (result.capacityReleased()) {
-                if (outcome == DispatchOutcome.ABANDONED) {
-                    publishCapacityRelease();
-                } else {
-                    notifyEngineDispatchCapacityListeners();
-                }
-            }
-            return result.status();
-        }
-    }
-
     /** Lock-free waiter hint, including retirement or lost ownership. Acquisition still rechecks capacity. */
     public boolean shouldRetryDispatch(String requestId, AdmissionCapacity capacity) {
         return isRetired() || state.shouldRetryDispatch(requestId, capacity);
-    }
-
-    public static final class EngineDispatchPermit {
-
-        private enum Resolution {
-            ACQUIRED,
-            ENGINE_LIFECYCLE_OWNED,
-            RELEASED,
-            INVALIDATED,
-            ENDPOINT_RETIRED
-        }
-
-        private final DecodeEndpoint endpoint;
-        private final String requestId;
-        private final DecodeState.DispatchLease lease;
-        private Resolution resolution = Resolution.ACQUIRED;
-
-        private EngineDispatchPermit(
-                DecodeEndpoint endpoint, String requestId, DecodeState.DispatchLease lease) {
-            this.endpoint = endpoint;
-            this.requestId = requestId;
-            this.lease = lease;
-        }
-
-        public String requestId() {
-            return requestId;
-        }
-
-        /**
-         * Transfer this acquired slot without a second capacity check.
-         *
-         * @return a typed distinction between transfer, prior request-owner
-         *         loss, and endpoint-generation retirement
-         */
-        public EngineDispatchPermitTransferStatus dispatch() {
-            return endpoint.dispatch(this, DispatchOutcome.ENGINE_OWNED);
-        }
-
-        public boolean release() {
-            return endpoint.dispatch(this, DispatchOutcome.ABANDONED)
-                    == EngineDispatchPermitTransferStatus.TRANSFERRED;
-        }
-
-        private synchronized EngineDispatchPermitTransferStatus resolve(DispatchOutcome outcome) {
-            if (outcome == DispatchOutcome.ENGINE_OWNED) {
-                if (resolution == Resolution.ENGINE_LIFECYCLE_OWNED) {
-                    return EngineDispatchPermitTransferStatus.TRANSFERRED;
-                }
-                if (resolution == Resolution.ENDPOINT_RETIRED) {
-                    return EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED;
-                }
-            }
-            if (resolution != Resolution.ACQUIRED) {
-                return EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
-            }
-            EngineDispatchPermitTransferStatus result = endpoint.applyDispatch(this, outcome);
-            resolution =
-                    switch (result) {
-                        case TRANSFERRED ->
-                                outcome == DispatchOutcome.ENGINE_OWNED
-                                        ? Resolution.ENGINE_LIFECYCLE_OWNED
-                                        : Resolution.RELEASED;
-                        case ENDPOINT_RETIRED -> Resolution.ENDPOINT_RETIRED;
-                        case OWNERSHIP_LOST -> Resolution.INVALIDATED;
-                    };
-            return result;
-        }
-    }
-
-    public record EngineDispatchPermitAcquisition(
-            EngineDispatchPermitAcquireStatus status, EngineDispatchPermit permit) {
-
-        public EngineDispatchPermitAcquisition {
-            if (status == null) {
-                throw new IllegalArgumentException("permit acquisition status is required");
-            }
-            boolean ownsHandoff =
-                    status == EngineDispatchPermitAcquireStatus.ACQUIRED
-                            || status == EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED;
-            if (ownsHandoff != (permit != null)) {
-                throw new IllegalArgumentException(
-                        "only ACQUIRED or ALREADY_ACCEPTED results carry an engine dispatch permit");
-            }
-        }
-    }
-
-    public enum EngineDispatchPermitAcquireStatus {
-        /** An exact-reservation permit now owns one Decode hard-gate slot. */
-        ACQUIRED,
-        /** Engine already owns this reservation; the permit carries identity without charging capacity. */
-        ALREADY_ACCEPTED,
-        /** Concurrency or Decode KV has no unreserved hard capacity. */
-        CAPACITY_FULL,
-        /** The request no longer owns a live shadow reservation. */
-        NOT_OWNED,
-        /** The reservation is already engine-facing rather than Prefill-queued. */
-        NOT_QUEUED,
-        /** Another pre-delivery attempt already owns this request's permit. */
-        ALREADY_ACQUIRED,
-        /** This exact Decode endpoint generation no longer accepts delivery. */
-        ENDPOINT_RETIRED
-    }
-
-    public enum EngineDispatchPermitTransferStatus {
-        TRANSFERRED,
-        OWNERSHIP_LOST,
-        ENDPOINT_RETIRED
-    }
-
-    public enum DispatchOutcome {
-        ENGINE_OWNED,
-        ABANDONED
     }
 
     public void addEngineDispatchCapacityListener(Runnable listener) {
@@ -440,6 +293,308 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return changed;
     }
 
+    // Calibration: publish facts only after the resource transaction returns.
+
+    public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
+        requireStatusGeneration(ws);
+        if (!prepared.observation().alive()) {
+            beginRetirement();
+        }
+        DecodeState.CalibrationResult result;
+        try {
+            result = state.calibrate(prepared);
+        } catch (RuntimeException | Error failure) {
+            beginRetirement();
+            throw failure;
+        }
+        notifyEngineDispatchCapacityListeners();
+        if (result.capacityImproved()) {
+            signalPlacementCapacityChanged();
+        }
+        return () -> endpointEvents.onDecodeStatus(this, result.facts());
+    }
+
+    public Runnable initializeFromPreparedStatus(
+            WorkerStatus ws, WorkerStatus.StatusObservation observation) {
+        requireStatusGeneration(ws);
+        state.initialize(observation);
+        return () -> {};
+    }
+
+    public Runnable observeStatusHeartbeat(
+            WorkerStatus ws, WorkerStatus.StatusObservation observation) {
+        requireStatusGeneration(ws);
+        List<WorkerStatusFact> facts = state.observeHeartbeat(observation);
+        return () -> endpointEvents.onDecodeStatus(this, facts);
+    }
+
+    // Read-only resource and capacity views.
+
+    public AdmissionSummary admissionSummary() {
+        return state.admissionSummary();
+    }
+
+    public DecodeRoutingView routingView() {
+        return state.routingView();
+    }
+
+    public LayeredAdmissionView resourceSnapshot() {
+        return state.resourceSnapshot();
+    }
+
+    public long placementVersion() {
+        return state.placementVersion();
+    }
+
+    public long realKvAvailable() {
+        return state.realKvAvailable();
+    }
+
+    public int getInflightCount() {
+        return state.getInflightCount();
+    }
+
+    public OptionalLong getLoadMetric() {
+        return OptionalLong.of(state.getTotalLoad());
+    }
+
+    public int evictExpiredRequests(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
+        DecodeState.CleanupResult result =
+                state.evictExpiredRequests(ttlMs, retainForSchedulerCleanup);
+        if (result.capacityReleased()) {
+            publishCapacityRelease();
+        }
+        return result.expiredReservations();
+    }
+
+    // Metrics and shared lock-free capacity notifications.
+
+    public void reportBatchMetrics(BatchSchedulerReporter reporter) {
+        DecodeState.Stats stats = state.stats();
+        String engineIp = getStatus().getMetricIpPort();
+        reporter.reportInflightRequestCount(RoleType.DECODE.name(), engineIp, stats.inflight());
+        reporter.reportDecodeTotalLoad(engineIp, stats.totalLoad());
+        reporter.reportDecodeInputAndMaxOutputKvReserved(
+                engineIp, stats.inputAndMaxOutputKvTokens());
+        reporter.reportDecodeInputKvReserved(engineIp, stats.inputKvTokens());
+        reporter.reportInflightMaxAgeMs(RoleType.DECODE.name(), engineIp, stats.oldestAgeMs());
+    }
+
+    public void reportAdmissionMetrics(RequestSchedulerReporter reporter) {
+        DecodeState.AdmissionStats stats = state.admissionStats();
+        String endpoint = getStatus().getMetricIpPort();
+        reporter.reportDecodeReservedCount(endpoint, stats.reserved());
+        reporter.reportDecodeShadowKvReserved(endpoint, stats.inputKvTokens());
+        reporter.reportDecodeRunningCount(endpoint, stats.running());
+        reporter.reportDecodeAcceptedCount(endpoint, stats.accepted());
+        reporter.reportDecodeEngineLoad(endpoint, stats.engineLoad());
+    }
+
+    protected void closeEndpoint() {
+        List<ReservationHandle> reservations = state.retire();
+        try {
+            endpointEvents.onDecodeGenerationRetired(this, reservations);
+        } finally {
+            notifyEngineDispatchCapacityListeners();
+        }
+    }
+
+    DecodeRoutingView routingViewSnapshot(String address) {
+        return state.routingViewSnapshot(address);
+    }
+
+    private EngineDispatchPermitTransferStatus applyDispatch(
+            EngineDispatchPermit permit, DispatchOutcome outcome) {
+        GenerationPin pin = outcome == DispatchOutcome.ENGINE_OWNED ? tryPinGeneration() : null;
+        if (outcome == DispatchOutcome.ENGINE_OWNED && pin == null) {
+            return EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED;
+        }
+        try (pin) {
+            DecodeState.DispatchResult result = state.dispatch(permit.lease, outcome);
+            if (result.capacityReleased()) {
+                if (outcome == DispatchOutcome.ABANDONED) {
+                    publishCapacityRelease();
+                } else {
+                    notifyEngineDispatchCapacityListeners();
+                }
+            }
+            return result.status();
+        }
+    }
+
+    private void publishCapacityRelease() {
+        notifyEngineDispatchCapacityListeners();
+        signalPlacementCapacityChanged();
+    }
+
+    private void notifyEngineDispatchCapacityListeners() {
+        for (Runnable listener : engineDispatchCapacityListeners) {
+            try {
+                listener.run();
+            } catch (Throwable listenerFailure) {
+                logger.warn("Decode capacity listener failed", listenerFailure);
+            }
+        }
+    }
+
+    private void signalPlacementCapacityChanged() {
+        WorkerStatus.TopologySnapshot topology = getStatus().topologySnapshot();
+        placementAvailability.capacityChanged(RoleType.DECODE, topology.group(), ipPort());
+    }
+
+    /**
+     * Identifies one exact request reservation on its original Decode generation.
+     */
+    public record ReservationHandle(
+            long endpointGenerationId, String requestId, long reservationToken) {
+
+        public ReservationHandle {
+            if (endpointGenerationId <= 0L || reservationToken <= 0L) {
+                throw new IllegalArgumentException("Decode reservation identity must be positive");
+            }
+        }
+    }
+
+    public enum ReleaseReason {
+        LOCAL_ROLLBACK,
+        COUNTERPART_FINISHED,
+        NOT_SENT,
+        EXPIRED
+    }
+
+    /**
+     * Separates local capacity release from remaining engine or protocol ownership.
+     */
+    public enum ReservationReleaseResult {
+        RELEASED,
+        ENGINE_ACCEPTED,
+        STILL_OWNED,
+        STALE,
+        CONFLICT;
+
+        public boolean released() {
+            return this == RELEASED;
+        }
+    }
+
+    /**
+     * Tracks one acquired dispatch slot until its engine handoff or local rollback is resolved.
+     */
+    public static final class EngineDispatchPermit {
+        private final DecodeEndpoint endpoint;
+        private final String requestId;
+        private final DecodeState.DispatchLease lease;
+
+        private Resolution resolution = Resolution.ACQUIRED;
+
+        private EngineDispatchPermit(
+                DecodeEndpoint endpoint, String requestId, DecodeState.DispatchLease lease) {
+            this.endpoint = endpoint;
+            this.requestId = requestId;
+            this.lease = lease;
+        }
+
+        public String requestId() {
+            return requestId;
+        }
+
+        /**
+         * Transfer this acquired slot without a second capacity check.
+         *
+         * @return a typed distinction between transfer, prior request-owner
+         *         loss, and endpoint-generation retirement
+         */
+        public EngineDispatchPermitTransferStatus dispatch() {
+            return endpoint.dispatch(this, DispatchOutcome.ENGINE_OWNED);
+        }
+
+        public boolean release() {
+            return endpoint.dispatch(this, DispatchOutcome.ABANDONED)
+                    == EngineDispatchPermitTransferStatus.TRANSFERRED;
+        }
+
+        private synchronized EngineDispatchPermitTransferStatus resolve(DispatchOutcome outcome) {
+            if (outcome == DispatchOutcome.ENGINE_OWNED) {
+                if (resolution == Resolution.ENGINE_LIFECYCLE_OWNED) {
+                    return EngineDispatchPermitTransferStatus.TRANSFERRED;
+                }
+                if (resolution == Resolution.ENDPOINT_RETIRED) {
+                    return EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED;
+                }
+            }
+            if (resolution != Resolution.ACQUIRED) {
+                return EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
+            }
+            EngineDispatchPermitTransferStatus result = endpoint.applyDispatch(this, outcome);
+            resolution =
+                    switch (result) {
+                        case TRANSFERRED ->
+                                outcome == DispatchOutcome.ENGINE_OWNED
+                                        ? Resolution.ENGINE_LIFECYCLE_OWNED
+                                        : Resolution.RELEASED;
+                        case ENDPOINT_RETIRED -> Resolution.ENDPOINT_RETIRED;
+                        case OWNERSHIP_LOST -> Resolution.INVALIDATED;
+                    };
+            return result;
+        }
+
+        private enum Resolution {
+            ACQUIRED,
+            ENGINE_LIFECYCLE_OWNED,
+            RELEASED,
+            INVALIDATED,
+            ENDPOINT_RETIRED
+        }
+    }
+
+    /**
+     * Returns the acquired dispatch permit or the capacity condition that blocked it.
+     */
+    public record EngineDispatchPermitAcquisition(
+            EngineDispatchPermitAcquireStatus status, EngineDispatchPermit permit) {
+
+        public EngineDispatchPermitAcquisition {
+            if (status == null) {
+                throw new IllegalArgumentException("permit acquisition status is required");
+            }
+            boolean ownsHandoff =
+                    status == EngineDispatchPermitAcquireStatus.ACQUIRED
+                            || status == EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED;
+            if (ownsHandoff != (permit != null)) {
+                throw new IllegalArgumentException(
+                        "only ACQUIRED or ALREADY_ACCEPTED results carry an engine dispatch permit");
+            }
+        }
+    }
+
+    public enum EngineDispatchPermitAcquireStatus {
+        /** An exact-reservation permit now owns one Decode hard-gate slot. */
+        ACQUIRED,
+        /** Engine already owns this reservation; the permit carries identity without charging capacity. */
+        ALREADY_ACCEPTED,
+        /** Concurrency or Decode KV has no unreserved hard capacity. */
+        CAPACITY_FULL,
+        /** The request no longer owns a live shadow reservation. */
+        NOT_OWNED,
+        /** The reservation is already engine-facing rather than Prefill-queued. */
+        NOT_QUEUED,
+        /** Another pre-delivery attempt already owns this request's permit. */
+        ALREADY_ACQUIRED,
+        /** This exact Decode endpoint generation no longer accepts delivery. */
+        ENDPOINT_RETIRED
+    }
+
+    public enum EngineDispatchPermitTransferStatus {
+        TRANSFERRED,
+        OWNERSHIP_LOST,
+        ENDPOINT_RETIRED
+    }
+
+    public enum DispatchOutcome {
+        ENGINE_OWNED,
+        ABANDONED
+    }
+
     public enum PreemptionBeginResult {
         SUCCESS,
         ENDPOINT_RETIRED,
@@ -456,20 +611,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
         ABORT
     }
 
+    /**
+     * Carries the ledger and notification effects of one preemption transition.
+     */
     public record PreemptionUpdate(
             Kind kind,
             String requestId,
             ReservationHandle reservation,
             PreemptionCancelPhase phase) {
-        public enum Kind {
-            CANCEL_SENDING,
-            CANCEL_REPLY,
-            CANCELED,
-            REQUEST_FENCED,
-            ACTIVE,
-            FINISHED
-        }
-
         public PreemptionUpdate {
             java.util.Objects.requireNonNull(kind, "kind");
             if (kind == Kind.CANCEL_REPLY) {
@@ -515,50 +664,27 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return victim(Kind.FINISHED, victim);
         }
 
+        boolean releasesCapacity() {
+            return kind != Kind.CANCEL_SENDING && kind != Kind.CANCEL_REPLY;
+        }
+
         private static PreemptionUpdate victim(Kind kind, ReservationHandle victim) {
             return new PreemptionUpdate(kind, victim.requestId(), victim, null);
         }
 
-        boolean releasesCapacity() {
-            return kind != Kind.CANCEL_SENDING && kind != Kind.CANCEL_REPLY;
+        public enum Kind {
+            CANCEL_SENDING,
+            CANCEL_REPLY,
+            CANCELED,
+            REQUEST_FENCED,
+            ACTIVE,
+            FINISHED
         }
     }
 
-    // Calibration: publish facts only after the resource transaction returns.
-
-    public Runnable applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
-        requireStatusGeneration(ws);
-        if (!prepared.observation().alive()) {
-            beginRetirement();
-        }
-        DecodeState.CalibrationResult result;
-        try {
-            result = state.calibrate(prepared);
-        } catch (RuntimeException | Error failure) {
-            beginRetirement();
-            throw failure;
-        }
-        notifyEngineDispatchCapacityListeners();
-        if (result.capacityImproved()) {
-            signalPlacementCapacityChanged();
-        }
-        return () -> endpointEvents.onDecodeStatus(this, result.facts());
-    }
-
-    public Runnable initializeFromPreparedStatus(
-            WorkerStatus ws, WorkerStatus.StatusObservation observation) {
-        requireStatusGeneration(ws);
-        state.initialize(observation);
-        return () -> {};
-    }
-
-    public Runnable observeStatusHeartbeat(
-            WorkerStatus ws, WorkerStatus.StatusObservation observation) {
-        requireStatusGeneration(ws);
-        List<WorkerStatusFact> facts = state.observeHeartbeat(observation);
-        return () -> endpointEvents.onDecodeStatus(this, facts);
-    }
-
+    /**
+     * Pairs a Decode task observation with the reservation identity to which it applies.
+     */
     public record WorkerStatusFact(Kind kind, ReservationHandle reservation, long errorCode) {
         public WorkerStatusFact {
             java.util.Objects.requireNonNull(kind, "kind");
@@ -588,40 +714,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    // Read-only resource and capacity views.
-
-    public AdmissionSummary admissionSummary() {
-        return state.admissionSummary();
-    }
-
-    public DecodeRoutingView routingView() {
-        return state.routingView();
-    }
-
-    DecodeRoutingView routingViewSnapshot(String address) {
-        return state.routingViewSnapshot(address);
-    }
-
-    public LayeredAdmissionView resourceSnapshot() {
-        return state.resourceSnapshot();
-    }
-
-    public long placementVersion() {
-        return state.placementVersion();
-    }
-
-    public long realKvAvailable() {
-        return state.realKvAvailable();
-    }
-
-    public int getInflightCount() {
-        return state.getInflightCount();
-    }
-
-    public OptionalLong getLoadMetric() {
-        return OptionalLong.of(state.getTotalLoad());
-    }
-
+    /**
+     * Captures admission usage across local reservation and engine-observed layers.
+     */
     public record LayeredAdmissionView(
             DecodeRoutingView routing,
             Map<String, DecodeRequestView> reserved,
@@ -661,6 +756,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    /**
+     * Freezes the generation's routing cost and admission evidence for selection.
+     */
     public record DecodeRoutingView(
             String address,
             long generationId,
@@ -673,6 +771,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
             CapacityUsage dispatchUsage,
             long inputKvReserved,
             long inputAndMaxOutputKvReserved) {
+        public DecodeRoutingView {
+            java.util.Objects.requireNonNull(address, "address");
+            java.util.Objects.requireNonNull(topology, "topology");
+            java.util.Objects.requireNonNull(workerStatus, "workerStatus");
+            if (generationId <= 0L) {
+                throw new IllegalArgumentException(
+                        "Decode routing view requires a positive generation");
+            }
+        }
 
         public int engineCapacityUsed() {
             return Math.toIntExact(dispatchUsage.occupiedRequests());
@@ -697,18 +804,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         public long totalKv() {
             return placementUsage.totalKvTokens();
         }
-
-        public DecodeRoutingView {
-            java.util.Objects.requireNonNull(address, "address");
-            java.util.Objects.requireNonNull(topology, "topology");
-            java.util.Objects.requireNonNull(workerStatus, "workerStatus");
-            if (generationId <= 0L) {
-                throw new IllegalArgumentException(
-                        "Decode routing view requires a positive generation");
-            }
-        }
     }
 
+    /**
+     * Freezes one request's Decode ownership and estimated releasable capacity.
+     */
     public record DecodeRequestView(
             String requestId,
             int priority,
@@ -725,7 +825,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    /** Failure-only priority summary, shared until the admission revision changes. */
+    /**
+     * Failure-only priority summary, shared until the admission revision changes.
+     */
     public static final class AdmissionSummary {
         private final DecodeRoutingView routing;
         private final CapacityRelease[] placementOccupancy;
@@ -753,6 +855,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    /**
+     * Validates the Decode limits used when acquiring reservations and dispatch slots.
+     */
     public record AdmissionCapacity(long maxEngineRequests, long maxKvUsagePercent) {
 
         public AdmissionCapacity {
@@ -825,6 +930,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    /**
+     * Separates current KV and request-slot usage for admission checks.
+     */
     public record CapacityUsage(
             long occupiedRequests,
             long totalKvTokens,
@@ -882,72 +990,5 @@ public class DecodeEndpoint extends WorkerEndpoint {
         public long kvTokens() {
             return Math.max(requiredKvTokens, kvBudgetTokens);
         }
-    }
-
-    // Retirement and orphan cleanup.
-
-    public boolean isRetired() {
-        return isGenerationRetiringOrRetired();
-    }
-
-    protected void closeEndpoint() {
-        List<ReservationHandle> reservations = state.retire();
-        try {
-            endpointEvents.onDecodeGenerationRetired(this, reservations);
-        } finally {
-            notifyEngineDispatchCapacityListeners();
-        }
-    }
-
-    public int evictExpiredRequests(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
-        DecodeState.CleanupResult result =
-                state.evictExpiredRequests(ttlMs, retainForSchedulerCleanup);
-        if (result.capacityReleased()) {
-            publishCapacityRelease();
-        }
-        return result.expiredReservations();
-    }
-
-    // Metrics and shared lock-free capacity notifications.
-
-    public void reportBatchMetrics(BatchSchedulerReporter reporter) {
-        DecodeState.Stats stats = state.stats();
-        String engineIp = getStatus().getMetricIpPort();
-        reporter.reportInflightRequestCount(RoleType.DECODE.name(), engineIp, stats.inflight());
-        reporter.reportDecodeTotalLoad(engineIp, stats.totalLoad());
-        reporter.reportDecodeInputAndMaxOutputKvReserved(
-                engineIp, stats.inputAndMaxOutputKvTokens());
-        reporter.reportDecodeInputKvReserved(engineIp, stats.inputKvTokens());
-        reporter.reportInflightMaxAgeMs(RoleType.DECODE.name(), engineIp, stats.oldestAgeMs());
-    }
-
-    public void reportAdmissionMetrics(RequestSchedulerReporter reporter) {
-        DecodeState.AdmissionStats stats = state.admissionStats();
-        String endpoint = getStatus().getMetricIpPort();
-        reporter.reportDecodeReservedCount(endpoint, stats.reserved());
-        reporter.reportDecodeShadowKvReserved(endpoint, stats.inputKvTokens());
-        reporter.reportDecodeRunningCount(endpoint, stats.running());
-        reporter.reportDecodeAcceptedCount(endpoint, stats.accepted());
-        reporter.reportDecodeEngineLoad(endpoint, stats.engineLoad());
-    }
-
-    private void publishCapacityRelease() {
-        notifyEngineDispatchCapacityListeners();
-        signalPlacementCapacityChanged();
-    }
-
-    private void notifyEngineDispatchCapacityListeners() {
-        for (Runnable listener : engineDispatchCapacityListeners) {
-            try {
-                listener.run();
-            } catch (Throwable listenerFailure) {
-                logger.warn("Decode capacity listener failed", listenerFailure);
-            }
-        }
-    }
-
-    private void signalPlacementCapacityChanged() {
-        WorkerStatus.TopologySnapshot topology = getStatus().topologySnapshot();
-        placementAvailability.capacityChanged(RoleType.DECODE, topology.group(), ipPort());
     }
 }

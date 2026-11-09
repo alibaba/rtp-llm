@@ -24,36 +24,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Task35 场景 C：11 种故障注入逐一验证 —— 明确错误传播到调度器终态，
- * post-send 不确定性在请求 TTL 内等待确认，到期回收，且同集群其余引擎不受影响。
- *
- * <p>覆盖 {@link FaultInjectionConfig} 全部字段：failOnEnqueue、enqueueErrorCode、
- * enqueueErrorMessage、enqueueDelayMs、generateDelayMs、generateError、fetchError、
- * noRespond、kvPressureTokens、queueDepthLimit、crashAfterNRequests。
- *
- * <p>控制面（enqueueBatch）故障走真实调度器栈：明确拒绝断言 8510 终态，
- * missing ACK 则断言 TTL 前保留记账、到期回收；数据面（generate_stream/fetch_response）
- * 故障不经过 LB 控制面，用直连 RPC 断言 mock 行为，同时验证调度器路径不受影响。
- *
- * <p>已知缺陷（只报不修，见任务报告）：{@code enqueueErrorCode} 字段从未被
- * {@link JavaMockEngineCluster} 读取 —— 错误响应只携带 message 不携带自定义
- * 错误码，c01 用断言固化该现状。
+ * 逐项验证故障从 mock 引擎传播到请求结果；发送后结果不明的请求等待确认或 TTL 回收，同时检查其他引擎仍可服务。
  */
 class FaultInjectionE2ETest {
-
     private static final int BASE_PORT = 62900;
-
-    /** 通用布防：单请求批次 + 快派发，每个请求恰好一次 enqueueBatch。 */
-    private static void arm(AutoTpmE2EHarness h) {
-        h.startAutoPump(10);
-    }
-
-    private static Response submitTo(AutoTpmE2EHarness h, int prefillIndex, long requestId)
-            throws Exception {
-        h.prefillSelector = ctx -> prefillIndex;
-        CompletableFuture<Response> future = h.scheduler.submit(h.context(requestId, 50));
-        return future.get(10, TimeUnit.SECONDS);
-    }
 
     // ==================== C1 failOnEnqueue + enqueueErrorMessage + enqueueErrorCode
     // ====================
@@ -405,14 +379,22 @@ class FaultInjectionE2ETest {
         }
     }
 
+    /** 通用布防：单请求批次 + 快派发，每个请求恰好一次 enqueueBatch。 */
+    private static void arm(AutoTpmE2EHarness h) {
+        h.startAutoPump(10);
+    }
+
+    private static Response submitTo(AutoTpmE2EHarness h, int prefillIndex, long requestId)
+            throws Exception {
+        h.prefillSelector = ctx -> prefillIndex;
+        CompletableFuture<Response> future = h.scheduler.submit(h.context(requestId, 50));
+        return future.get(10, TimeUnit.SECONDS);
+    }
+
     private static long engineCancelCalls(JavaMockEngineCluster.FastRpcService engine) {
         var counts = (java.util.Map<?, ?>) engine.getSnapshot().get("rpc_counts");
         return ((Number) counts.get("cancel")).longValue();
     }
-
-    // ==================== 数据面直连 helpers ====================
-
-    private record StreamResult(Throwable error, boolean completed) {}
 
     /** 直连 generate_stream，等 500ms 观察流事件（fault 场景内即时返回或保持沉默）。 */
     private static StreamResult callGenerateStream(
@@ -475,4 +457,8 @@ class FaultInjectionE2ETest {
         boolean finished = terminal.await(500, TimeUnit.MILLISECONDS);
         return new StreamResult(error.get(), finished && error.get() == null);
     }
+
+    // ==================== 数据面直连 helpers ====================
+
+    private record StreamResult(Throwable error, boolean completed) {}
 }

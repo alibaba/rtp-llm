@@ -1477,7 +1477,7 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
             if (input_lengths[i] <= 0) {
                 return fallback("metadata_mismatch", GenerationPrefillCudaGraphStatus::INPUT_METADATA_INVALID);
             }
-            if (input_lengths[i] > max_seq_len_) {
+            if (input_lengths[i] > request_max_seq_len_) {
                 return fallback("input_tokens_exceed_capture_limit",
                                 GenerationPrefillCudaGraphStatus::INPUT_TOKENS_EXCEED_CAPTURE_LIMIT);
             }
@@ -1705,7 +1705,8 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         inputs.attention_inputs.prefix_lengths = torch::empty({0}, options_cpu_int32_).pin_memory();
     }
     // padding_offset [max_num_token_, int32] (for attention padding)
-    const int padding_offset_capacity = isGenerationPrefillCudaGraph() ? max_num_token_ : max_seq_len_ * max_bs_;
+    const int64_t padding_offset_capacity =
+        isGenerationPrefillCudaGraph() ? max_num_token_ : static_cast<int64_t>(max_seq_len_) * max_bs_;
     if (isGenerationPrefillCudaGraph()) {
         generation_prefill_cuda_graph_padding_offset_host_ =
             torch::zeros({padding_offset_capacity}, options_cpu_int32_).pin_memory();

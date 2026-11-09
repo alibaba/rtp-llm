@@ -26,9 +26,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** Regression contracts for Decode capacity projected through Prefill. */
+/**
+ * Regression contracts for Decode capacity projected through Prefill.
+ */
 class CostBasedPrefillStrategyBlockerTest {
-
     @Test
     void failureUsesOneScopedFleetAndAggregatesReasonsIndependentlyOfOrder() {
         for (RoleType role : List.of(RoleType.PREFILL, RoleType.PDFUSION)) {
@@ -85,16 +86,6 @@ class CostBasedPrefillStrategyBlockerTest {
         }
     }
 
-    private static PrefillEndpoint rejectedEndpoint(
-            RoleType role, String group, AdmissionRejectReason reason) {
-        var endpoint = mock(PrefillEndpoint.class);
-        when(endpoint.getStatus())
-                .thenReturn(
-                        WorkerStatus.createDiscovered(role, group, "worker", 8080, 8090, "test"));
-        when(endpoint.admissionRejectReason(50)).thenReturn(reason);
-        return endpoint;
-    }
-
     @Test
     void everyRegisteredEndpointMustProveTheSameBlocker() {
         assertNull(CostBasedPrefillStrategy.provenPoolWideBlocker(Map.of(RoleType.DECODE, 3), 4));
@@ -104,5 +95,15 @@ class CostBasedPrefillStrategyBlockerTest {
         assertEquals(
                 RoleType.DECODE,
                 CostBasedPrefillStrategy.provenPoolWideBlocker(Map.of(RoleType.DECODE, 4), 4));
+    }
+
+    private static PrefillEndpoint rejectedEndpoint(
+            RoleType role, String group, AdmissionRejectReason reason) {
+        var endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getStatus())
+                .thenReturn(
+                        WorkerStatus.createDiscovered(role, group, "worker", 8080, 8090, "test"));
+        when(endpoint.admissionRejectReason(50)).thenReturn(reason);
+        return endpoint;
     }
 }

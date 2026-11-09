@@ -12,7 +12,6 @@ import java.util.concurrent.ConcurrentMap;
  * Service discovery backed by the static host list in an endpoint configuration.
  */
 public final class StaticServiceDiscoveryProvider implements ServiceDiscoveryProvider {
-
     private final ConcurrentMap<Endpoint, List<WorkerHost>> hostsByEndpoint =
             new ConcurrentHashMap<>();
 
@@ -28,8 +27,20 @@ public final class StaticServiceDiscoveryProvider implements ServiceDiscoveryPro
     }
 
     @Override
+    public void listen(Endpoint endpoint, ServiceHostListener listener) {
+        if (listener != null) {
+            listener.onHostsChanged(getHosts(endpoint));
+        }
+    }
+
+    @Override
     public List<WorkerHost> getHosts(Endpoint endpoint) {
         return hostsByEndpoint.get(endpoint);
+    }
+
+    @Override
+    public void shutdown() {
+        // Static discovery owns no external resources.
     }
 
     private void validateEndpoint(Endpoint endpoint) {
@@ -41,18 +52,6 @@ public final class StaticServiceDiscoveryProvider implements ServiceDiscoveryPro
                     "static-env discovery must be configured for address: "
                             + endpoint.getAddress());
         }
-    }
-
-    @Override
-    public void listen(Endpoint endpoint, ServiceHostListener listener) {
-        if (listener != null) {
-            listener.onHostsChanged(getHosts(endpoint));
-        }
-    }
-
-    @Override
-    public void shutdown() {
-        // Static discovery owns no external resources.
     }
 
     private List<WorkerHost> configuredHosts(Endpoint endpoint) {

@@ -26,11 +26,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * Centralizes JSON parsing, serialization and field traversal with consistent failure translation.
+ */
 @Slf4j
 public class JsonUtils {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
-
     private static final ObjectMapper STRICT_MAPPER =
             JsonMapper.builder()
                     .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
@@ -43,7 +44,6 @@ public class JsonUtils {
                     .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
                     .serializationInclusion(JsonInclude.Include.NON_NULL)
                     .build();
-
     private static final Set<String> MODEL_BEHAVIOR_FIELDS =
             Set.of(
                     "connect_timeout_ms",
@@ -74,11 +74,8 @@ public class JsonUtils {
                     "enableP2p",
                     "local_standby",
                     "localStandby");
-
     private static final ObjectWriter WRITER;
-
     private static final ObjectMapper MAPPER_WITH_INDENT = new ObjectMapper();
-
     private static final ObjectWriter WRITER_WITH_INDENT;
 
     static {
@@ -303,26 +300,6 @@ public class JsonUtils {
         }
     }
 
-    public static void forEachField(
-            JsonNode node, String path, String parentField, JsonFieldConsumer consumer) {
-        if (node == null || !node.isContainerNode()) {
-            return;
-        }
-        if (node.isArray()) {
-            for (int index = 0; index < node.size(); index++) {
-                forEachField(node.get(index), path + "[" + index + "]", parentField, consumer);
-            }
-            return;
-        }
-        Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
-        while (fields.hasNext()) {
-            Map.Entry<String, JsonNode> field = fields.next();
-            String fieldPath = path + "." + field.getKey();
-            consumer.accept(fieldPath, parentField, field.getKey());
-            forEachField(field.getValue(), fieldPath, field.getKey(), consumer);
-        }
-    }
-
     public static void rejectModelBehaviorFields(JsonNode node, String sourceName) {
         forEachField(
                 node,
@@ -345,6 +322,29 @@ public class JsonUtils {
                 });
     }
 
+    public static void forEachField(
+            JsonNode node, String path, String parentField, JsonFieldConsumer consumer) {
+        if (node == null || !node.isContainerNode()) {
+            return;
+        }
+        if (node.isArray()) {
+            for (int index = 0; index < node.size(); index++) {
+                forEachField(node.get(index), path + "[" + index + "]", parentField, consumer);
+            }
+            return;
+        }
+        Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            String fieldPath = path + "." + field.getKey();
+            consumer.accept(fieldPath, parentField, field.getKey());
+            forEachField(field.getValue(), fieldPath, field.getKey(), consumer);
+        }
+    }
+
+    /**
+     * Consumes one named JSON field during streaming object traversal.
+     */
     @FunctionalInterface
     public interface JsonFieldConsumer {
 

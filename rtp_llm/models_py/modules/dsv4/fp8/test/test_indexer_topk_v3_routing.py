@@ -1,4 +1,3 @@
-import os
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -23,9 +22,7 @@ class IndexerTopkV3RoutingTest(unittest.TestCase):
             mock.patch.object(indexer, "rtp_llm_ops", SimpleNamespace(topk_v3=topk_v3)),
             mock.patch.object(indexer, "_TOPK_V3_OK", True),
             mock.patch.object(indexer, "_get_topk_workspace", return_value=workspace),
-            mock.patch.dict(os.environ, {}, clear=False),
         ):
-            os.environ.pop("DSV4_TOPK_V3", None)
             self.assertTrue(
                 indexer._run_topk_v3(logits, lengths, output, 512, 2048)
             )
@@ -33,24 +30,6 @@ class IndexerTopkV3RoutingTest(unittest.TestCase):
         topk_v3.assert_called_once_with(
             logits, lengths, output, workspace, 512, 2048
         )
-
-    def test_env_can_disable_topk_v3_for_debugging(self) -> None:
-        topk_v3 = mock.Mock()
-        fake_ops = SimpleNamespace(topk_v3=topk_v3)
-        tensor = torch.empty((1, 512), dtype=torch.float32)
-        lengths = torch.tensor([512], dtype=torch.int32)
-        output = torch.empty((1, 512), dtype=torch.int32)
-
-        with (
-            mock.patch.object(indexer, "rtp_llm_ops", fake_ops),
-            mock.patch.object(indexer, "_TOPK_V3_OK", True),
-            mock.patch.dict(os.environ, {"DSV4_TOPK_V3": "0"}),
-        ):
-            self.assertFalse(
-                indexer._run_topk_v3(tensor, lengths, output, 512, 512)
-            )
-
-        topk_v3.assert_not_called()
 
     def test_unsupported_k_uses_existing_fallback(self) -> None:
         topk_v3 = mock.Mock()

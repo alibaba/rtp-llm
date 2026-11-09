@@ -85,7 +85,6 @@ public:
     ~PyWrappedModel();
 
     GptModelOutputs            forward(const GptModelInputs& inputs) override;
-    GptModelOutputs            forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
     void                       releaseBuffers() override;
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
@@ -127,7 +126,6 @@ private:
                                       const bool            has_context_request,
                                       const bool            need_all_logits,
                                       const torch::Tensor&  lm_output_indexes,
-                                      bool                  enable_sp,
                                       size_t                token_num,
                                       const GptModelInputs& inputs,
                                       torch::Tensor         merged_eagle3_hidden,
@@ -138,9 +136,6 @@ private:
     // CP path's skip_final_layernorm=true) and returns the small [num_lm, hidden]
     // both as hidden_states and all_hidden_states.
     GptModelOutputs forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs);
-    MicroBatchPlan  planMicroBatches(const GptModelInputs& inputs);
-    std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
-                    splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
     void            holdInputsHostBuffers(const GptModelInputs& inputs);
     GraphBase*      selectGraphRunner(const torch_ext::PyAttentionInputs& attention_inputs) const;
     CudaGraphState& selectGraphState(const torch_ext::PyAttentionInputs& attention_inputs);
@@ -148,10 +143,8 @@ private:
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties                   device_props_;
-    const bool                                      enable_prefill_cp_;
     const DSparkModelRole                           dspark_model_role_;
     const bool                                      track_cache_store_completion_;
-    const rtp_llm::MlaOpsType                       mla_ops_type_;
     const size_t                                    layer_num_;
     const GptModelDescription                       description_;
     std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
@@ -174,8 +167,6 @@ private:
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     bool use_spec_decoding_{false};
     bool has_mtp_hidden_buffer_{false};
-    bool supports_micro_batch_{false};
-    bool enable_device_perf_{false};
     bool check_nan_{false};
 
     std::unique_ptr<HiddenStateCapturePublisher> hidden_state_capture_publisher_;
@@ -206,7 +197,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       DSparkModelRole           dspark_model_role,
                                       bool                      allow_cuda_graph,
                                       bool                      track_cache_store_completion):
-    device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
+    device_props_(buildExecProperties(params.parallelism_config)),
     // Every prefill-shaped forward of a CP-enabled model goes through the
     // standard split/gather path — including the DSpARK draft commit, whose
     // incremental-prefill geometry CP-splits like any prompt while its
@@ -214,10 +205,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // non-causal propose block never reaches a CP-enabled model: proposals
     // run only on decode roles, where prefill CP is off (colocated CP is
     // rejected at executor construction).
-    enable_prefill_cp_(device_props_.enable_prefill_cp),
     dspark_model_role_(dspark_model_role),
     track_cache_store_completion_(track_cache_store_completion),
-    mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     description_(params.description),
     cache_manager_(params.cache_manager),
@@ -232,30 +221,28 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                    GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE :
                                                    GenerationPrefillCudaGraphStatus::NOT_REQUESTED),
     use_spec_decoding_(use_spec_decoding),
-    enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
     check_nan_(params.profile_debug_logging_config.check_nan) {
 
     c10::InferenceMode inference_guard(true);
 
     const auto& generation_prefill_cuda_graph_buckets =
         params.hw_kernel_config.generation_prefill_capture_token_buckets;
+    const int generation_prefill_graph_request_capacity =
+        params.hw_kernel_config.generation_prefill_cuda_graph_max_requests;
     if (owns_generation_prefill_cuda_graph_) {
         const auto& parallelism = params.parallelism_config;
         RTP_LLM_CHECK_WITH_INFO(isSingleDeviceGenerationPrefillCudaGraphConfig(parallelism),
                                 "Generation prefill CUDA graph currently supports only single-device execution: "
-                                "world_size=%ld tp_size=%ld dp_size=%ld ep_size=%ld pp_size=%ld ffn_sp_size=%ld "
-                                "ffn_tp_size=%ld enable_sp=%d prefill_cp=%d ffn_disaggregate=%d",
+                                "world_size=%ld tp_size=%ld dp_size=%ld ep_size=%ld pp_size=%ld "
+                                "ffn_tp_size=%ld prefill_cp=%d",
                                 parallelism.world_size,
                                 parallelism.tp_size,
                                 parallelism.dp_size,
                                 parallelism.ep_size,
                                 parallelism.pp_size,
-                                parallelism.ffn_sp_size,
                                 parallelism.ffn_tp_size,
-                                static_cast<int>(parallelism.enable_sp),
                                 static_cast<int>(parallelism.prefill_cp_config.is_enabled()
-                                                 || parallelism.prefill_cp_config.is_prefill_enabled()),
-                                static_cast<int>(parallelism.ffn_disaggregate_config.enable_ffn_disaggregate));
+                                                 || parallelism.prefill_cp_config.is_prefill_enabled()));
         const auto& buckets = generation_prefill_cuda_graph_buckets;
         RTP_LLM_CHECK_WITH_INFO(!buckets.empty(), "GENERATION_PREFILL_CAPTURE_CONFIG must not be empty");
         RTP_LLM_CHECK_WITH_INFO(
@@ -263,47 +250,51 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             "GENERATION_PREFILL_CAPTURE_CONFIG must not exceed %d buckets, got %zu",
             HWKernelConfig::kGenerationPrefillCudaGraphMaxCaptureBuckets,
             buckets.size());
-        RTP_LLM_CHECK_WITH_INFO(params.hw_kernel_config.generation_prefill_cuda_graph_max_requests > 0,
+        RTP_LLM_CHECK_WITH_INFO(generation_prefill_graph_request_capacity > 0,
                                 "GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS must be positive, got %d",
-                                params.hw_kernel_config.generation_prefill_cuda_graph_max_requests);
+                                generation_prefill_graph_request_capacity);
         RTP_LLM_CHECK_WITH_INFO(
-            params.hw_kernel_config.generation_prefill_cuda_graph_max_requests
-                <= HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests,
+            generation_prefill_graph_request_capacity <= HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests,
             "GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS must not exceed the backend limit %d, got %d",
             HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests,
-            params.hw_kernel_config.generation_prefill_cuda_graph_max_requests);
+            generation_prefill_graph_request_capacity);
         const int64_t reachable_request_capacity = generationPrefillCudaGraphReachableRequestCapacity(
             params.runtime_config.fifo_scheduler_config.max_context_batch_size,
             params.concurrency_config.concurrency_limit);
         RTP_LLM_CHECK_WITH_INFO(
             generationPrefillCudaGraphMaxRequestsFitsCapacity(
-                params.hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+                generation_prefill_graph_request_capacity,
                 params.runtime_config.fifo_scheduler_config.max_context_batch_size,
                 params.concurrency_config.concurrency_limit),
             "GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS=%d must not exceed the reachable context batch capacity "
             "min(MAX_CONTEXT_BATCH_SIZE=%ld, CONCURRENCY_LIMIT=%d)=%ld",
-            params.hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+            generation_prefill_graph_request_capacity,
             params.runtime_config.fifo_scheduler_config.max_context_batch_size,
             params.concurrency_config.concurrency_limit,
             reachable_request_capacity);
         const auto invalid_bucket = std::find_if(buckets.begin(), buckets.end(), [&](int bucket) {
-            return bucket <= 0 || bucket > params.max_seq_len
-                   || bucket > HWKernelConfig::kGenerationPrefillCudaGraphMaxCaptureTokens;
+            // Buckets count all requests' tokens, while params.max_seq_len is
+            // still the admission bound for each real request. Divide instead
+            // of multiplying user-provided limits to keep this check overflow-safe.
+            const int64_t requests = generation_prefill_graph_request_capacity;
+            return bucket <= 0 || bucket > HWKernelConfig::kGenerationPrefillCudaGraphMaxCaptureTokens
+                   || (static_cast<int64_t>(bucket) + requests - 1) / requests > params.max_seq_len;
         });
         RTP_LLM_CHECK_WITH_INFO(invalid_bucket == buckets.end(),
                                 "Generation prefill CUDA graph buckets must be in "
-                                "[1, min(max_seq_len=%ld, limit=%d)], got %d",
+                                "[1, min(max_seq_len=%ld * max_requests=%d, limit=%d)], got %d",
                                 params.max_seq_len,
+                                generation_prefill_graph_request_capacity,
                                 HWKernelConfig::kGenerationPrefillCudaGraphMaxCaptureTokens,
                                 invalid_bucket == buckets.end() ? 0 : *invalid_bucket);
         const int64_t max_bucket = *std::max_element(buckets.begin(), buckets.end());
         RTP_LLM_CHECK_WITH_INFO(
-            params.hw_kernel_config.generation_prefill_cuda_graph_max_requests < std::numeric_limits<int>::max()
-                && generationPrefillCudaGraphPaddedTokenIndexFitsInt32(
-                    params.hw_kernel_config.generation_prefill_cuda_graph_max_requests, max_bucket),
+            generation_prefill_graph_request_capacity < std::numeric_limits<int>::max()
+                && generationPrefillCudaGraphPaddedTokenIndexFitsInt32(generation_prefill_graph_request_capacity,
+                                                                       max_bucket),
             "Generation prefill CUDA graph padded token index exceeds int32 capacity: max_requests=%d "
             "max_bucket=%ld",
-            params.hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+            generation_prefill_graph_request_capacity,
             max_bucket);
     }
 
@@ -349,7 +340,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_                 = py_instance;
-    supports_micro_batch_     = py::hasattr(py_model_, "forward_micro_batch");
     auto py_initialize_method = py_model_.attr("initialize");
     try {
         py_init_result = py_initialize_method(init_resources);
@@ -403,8 +393,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             RTP_LLM_CHECK_WITH_INFO(width > 0, "DSpARK CUDA graph input hidden width must be positive, got %ld", width);
             graph_params.input_hidden_size = static_cast<size_t>(width);
         }
-        graph_params.model_data_type            = dtype;
-        graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
+        graph_params.model_data_type        = dtype;
+        graph_params.max_context_batch_size = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {
@@ -499,17 +489,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                 description_, params.parallelism_config, description_.moe_runtime_config, masked_moe_backend_supported);
             const bool model_supported = params.sp_config.type == SP_TYPE_NONE
                                          && description_.data_type == DataType::TYPE_BF16
-                                         && !description_.attention_conf.use_mla && supported_moe_config
-                                         && params.device_resource_config.enable_layer_micro_batch == 0;
+                                         && !description_.attention_conf.use_mla && supported_moe_config;
             if (!model_supported) {
                 generation_prefill_cuda_graph_init_status_ =
                     !supported_moe_config && description_.ffn_conf.moe_configs.has_value() ?
                         GenerationPrefillCudaGraphStatus::MOE_CONFIG_NOT_SUPPORTED :
                         GenerationPrefillCudaGraphStatus::MODEL_NOT_SUPPORTED;
-                const char* reason = params.device_resource_config.enable_layer_micro_batch != 0 ?
-                                         "layer_micro_batch_enabled" :
-                                     !supported_moe_config ? "unsupported_moe_config" :
-                                                             "unsupported_model";
+                const char* reason = !supported_moe_config ? "unsupported_moe_config" : "unsupported_model";
                 if (!supported_moe_config && description_.ffn_conf.moe_configs.has_value()) {
                     RTP_LLM_LOG_WARNING("generation prefill CUDA graph disabled reason=%s moe_strategy=%s "
                                         "use_all_gather=%d "
@@ -539,18 +525,30 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                 generation_prefill_cuda_graph_params.is_prefill_cuda_graph_mode = true;
                 generation_prefill_cuda_graph_params.is_target_verify           = false;
                 generation_prefill_cuda_graph_params.num_tokens_per_bs          = 1;
-                generation_prefill_cuda_graph_params.prefill_capture_seq_lens   = generation_prefill_cuda_graph_buckets;
+                generation_prefill_cuda_graph_params.request_max_seq_len        = params.max_seq_len;
+                generation_prefill_cuda_graph_params.max_seq_len =
+                    std::max<int64_t>(params.max_seq_len,
+                                      *std::max_element(generation_prefill_cuda_graph_buckets.begin(),
+                                                        generation_prefill_cuda_graph_buckets.end()));
+                // Capture puts the total token bucket into the scratch slot.
+                // Real request and decode tables retain their original width.
+                generation_prefill_cuda_graph_params.kernel_block_table_width = std::max<int64_t>(
+                    params.kernel_block_table_width,
+                    CudaGraphRunner::captureKernelBlockTableWidth(params.cache_manager->cacheConfig().topology(),
+                                                                  generation_prefill_cuda_graph_params.max_seq_len,
+                                                                  /*max_reserved_step=*/0));
+                generation_prefill_cuda_graph_params.prefill_capture_seq_lens = generation_prefill_cuda_graph_buckets;
                 generation_prefill_cuda_graph_params.max_context_batch_size =
-                    static_cast<size_t>(params.hw_kernel_config.generation_prefill_cuda_graph_max_requests + 1);
+                    static_cast<size_t>(generation_prefill_graph_request_capacity + 1);
                 generation_prefill_cuda_graph_params.generation_prefill_cuda_graph_max_requests =
-                    params.hw_kernel_config.generation_prefill_cuda_graph_max_requests;
+                    generation_prefill_graph_request_capacity;
                 generation_prefill_cuda_graph_params.generation_prefill_cuda_graph_pad_token_id = 0;
                 try {
                     generation_prefill_graph_runner_.reset(CudaGraphRunner::initializeCapture(
                         std::make_unique<CudaGraphRunner>(generation_prefill_cuda_graph_params, py_instance)));
                     generation_prefill_cuda_graph_init_status_ = GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
                     RTP_LLM_LOG_INFO("generation prefill CUDA graph enabled: max_requests=%d moe_strategy=%s",
-                                     params.hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+                                     generation_prefill_graph_request_capacity,
                                      description_.ffn_conf.moe_configs.has_value() ?
                                          description_.moe_runtime_config.moe_strategy.c_str() :
                                          "dense");
@@ -634,9 +632,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     }
 
     if (!params.hidden_state_capture_layer_ids.empty()) {
-        RTP_LLM_CHECK_WITH_INFO(
-            !(int(device_props_.enable_layer_micro_batch) && device_props_.enable_prefill_cp),
-            "hidden-state capture does not support context parallel combined with layer micro-batching");
         RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "supports_hidden_state_capture")
                                     && py_model_.attr("supports_hidden_state_capture").cast<bool>(),
                                 "configured Python model does not support hidden-state capture");
@@ -661,16 +656,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                     "hidden-state capture layer ids must be unique; duplicate id %ld",
                                     layer_id);
         }
-        if (!device_props_.ffn_as_service) {
-            hidden_state_capture_publisher_ = std::make_unique<HiddenStateCapturePublisher>(
-                static_cast<int64_t>(params.hidden_state_capture_layer_ids.size()),
-                params.hidden_size,
-                params.hidden_state_capture_dtype,
-                dataTypeToTorchType(description_.data_type),
-                params.parallelism_config.tp_rank == 0,
-                params.parallelism_config.local_rank,
-                params.metrics_reporter);
-        }
+        hidden_state_capture_publisher_ = std::make_unique<HiddenStateCapturePublisher>(
+            static_cast<int64_t>(params.hidden_state_capture_layer_ids.size()),
+            params.hidden_size,
+            params.hidden_state_capture_dtype,
+            dataTypeToTorchType(description_.data_type),
+            params.parallelism_config.tp_rank == 0,
+            params.parallelism_config.local_rank,
+            params.metrics_reporter);
     }
 
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");

@@ -82,9 +82,11 @@ public:
                                  std::vector<std::string>     group_tags,
                                  int64_t                      position_id_len_factor,
                                  std::optional<torch::Tensor> position_encoding,
-                                 std::optional<torch::Tensor> token_type_embedding) {
+                                 std::optional<torch::Tensor> token_type_embedding,
+                                 int64_t                      request_max_seq_len) {
         reset_runner();
         GraphParams params;
+        params.request_max_seq_len          = static_cast<int>(request_max_seq_len);
         params.enable_cuda_graph            = true;
         params.enable_cuda_graph_debug_mode = true;
         params.role                         = CudaGraphRole::GENERATION_PREFILL;
@@ -118,7 +120,8 @@ public:
                      std::vector<std::string> group_tags,
                      bool                     is_target_verify,
                      int64_t                  num_tokens_per_bs,
-                     int64_t                  position_id_len_factor) {
+                     int64_t                  position_id_len_factor,
+                     int64_t                  max_context_batch_size) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph            = true;
@@ -130,7 +133,7 @@ public:
         params.num_tokens_per_bs          = static_cast<int>(num_tokens_per_bs);
         params.hidden_size                = static_cast<size_t>(hidden_size);
         params.model_data_type            = c10::ScalarType::BFloat16;
-        params.max_context_batch_size     = 128;
+        params.max_context_batch_size     = static_cast<size_t>(max_context_batch_size);
         params.decode_capture_batch_sizes = std::move(decode_capture_batch_sizes);
         params.kv_cache_group_tags        = std::move(group_tags);
         params.is_target_verify           = is_target_verify;
@@ -247,9 +250,9 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_block_table_width"),
              py::arg("prefill_capture_seq_lens"),
              py::arg("hidden_size"),
-             py::arg("group_tags")            = std::vector<std::string>{},
-             py::arg("position_encoding")     = py::none(),
-             py::arg("token_type_embedding")  = py::none())
+             py::arg("group_tags")           = std::vector<std::string>{},
+             py::arg("position_encoding")    = py::none(),
+             py::arg("token_type_embedding") = py::none())
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -257,10 +260,11 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("max_seq_len"),
              py::arg("kernel_block_table_width"),
              py::arg("decode_capture_batch_sizes"),
-             py::arg("group_tags")            = std::vector<std::string>{},
-             py::arg("is_target_verify")      = false,
-             py::arg("num_tokens_per_bs")     = 1,
-             py::arg("position_id_len_factor") = 0)
+             py::arg("group_tags")             = std::vector<std::string>{},
+             py::arg("is_target_verify")       = false,
+             py::arg("num_tokens_per_bs")      = 1,
+             py::arg("position_id_len_factor") = 0,
+             py::arg("max_context_batch_size") = 128)
         .def("init_generation_prefill",
              &CudaGraphTestRunner::init_generation_prefill,
              py::arg("py_instance"),
@@ -272,7 +276,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("group_tags")             = std::vector<std::string>{},
              py::arg("position_id_len_factor") = 0,
              py::arg("position_encoding")      = py::none(),
-             py::arg("token_type_embedding")   = py::none())
+             py::arg("token_type_embedding")   = py::none(),
+             py::arg("request_max_seq_len")    = 0)
         .def("updateBlockTables", &CudaGraphTestRunner::updateBlockTables)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("canPrepare", &CudaGraphTestRunner::canPrepare)

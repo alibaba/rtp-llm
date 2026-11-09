@@ -27,29 +27,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * P-enqueue decode-KV reservation net-allocation semantics (20260903) —
- * {@code reserveDecodeLease} (92bd024, called at EnqueueBatch Phase 1.6 and
- * on the direct generate_stream path) prices the D-side reservation on the
- * NET demand {@code ceil(inputLen/spb) − own-LRU prefix hits} through the
- * fix-#5 {@code acquireWithReuse} caliber, mirroring the production
- * prepare-stage ALLOCATE: reuse hits are only REFERENCED (pinned, never
- * re-allocated), so the D pool is charged the delta — never the full
- * {@code ceil(input_len/spb)} total.
- *
- * <p>Coverage (the two failure modes a full-total reservation would
- * reintroduce):
- * <ol>
- *   <li><b>Delta allocation</b> — a parked prefix on the D LRU makes the
- *       reservation hold only {@code total − hits} blocks (held) while the
- *       hits pin as references — pool pressure (eviction candidates,
- *       available blocks) stays strictly lower than a full-total charge.</li>
- *   <li><b>Net-demand gate</b> — with the prefix already referenced by an
- *       in-flight stream, a request whose TOTAL demand exceeds the
- *       available blocks still reserves: the gate evaluates
- *       {@code netNew ≤ available}, exactly the production semantics that
- *       keep LACK_MEM from firing early (a full-total gate would reject
- *       with the 8211 surface after the retry window).</li>
- * </ol>
+ * Checks that Decode reservations charge only newly allocated blocks and pin reusable prefix blocks
+ * without allocating them again.
  */
 class DecodeReserveNetAllocationTest {
 

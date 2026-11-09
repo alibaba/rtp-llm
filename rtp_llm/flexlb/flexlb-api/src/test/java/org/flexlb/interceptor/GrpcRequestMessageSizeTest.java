@@ -20,6 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+/**
+ * Checks transport-level uncompressed message sizes and concurrent-call isolation.
+ */
 class GrpcRequestMessageSizeTest {
 
     @Test

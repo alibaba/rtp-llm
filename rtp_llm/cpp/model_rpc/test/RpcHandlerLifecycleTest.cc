@@ -50,7 +50,7 @@ public:
         action_(action),
         polling_(polling) {}
 
-    ErrorResult<GenerateOutputs> nextOutput(int64_t wait_timeout_ms = 0) override {
+    ErrorResult<GenerateOutputs> nextOutputForRpc(int64_t wait_timeout_ms = 0) override {
         std::call_once(polling_once_, [this] { polling_.set_value(); });
         switch (action_) {
             case OutputAction::COMPLETE:
@@ -62,7 +62,7 @@ public:
             case OutputAction::THROW:
                 throw std::runtime_error(kFailureReason);
             case OutputAction::WAIT:
-                return NormalGenerateStream::nextOutput(wait_timeout_ms);
+                return NormalGenerateStream::nextOutputForRpc(wait_timeout_ms);
         }
         throw std::logic_error("unknown output action");
     }
@@ -95,7 +95,6 @@ public:
                                                      params.model_config_,
                                                      params.pd_sep_config,
                                                      params.parallelism_config,
-                                                     params.model_specific_config,
                                                      resource_context_.cache_manager);
     }
 
