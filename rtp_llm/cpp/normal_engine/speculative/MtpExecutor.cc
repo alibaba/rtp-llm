@@ -1583,6 +1583,7 @@ void MtpExecutor::collectPrefillMetrics(const StreamGroups&  stream_groups,
                                stream_groups.modelExecuteTokenSize(),
                                tps_execute_time_us);
     tps_collector.addTokenSizeByPriority(stream_groups.tokenCountsByPriority(), tps_execute_time_us);
+    stream_groups.markContextReuseCountedForMetrics();
 }
 
 /*

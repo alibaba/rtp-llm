@@ -271,6 +271,14 @@ public:
     int     prefixLength() const;
     int     reuseLength() const;
     int     initialReuseLength() const;
+    // Metrics-only state: a request's reused prefix is counted once, not once
+    // per StreamGroups step. Written only on the tp-rank-0 report path.
+    bool contextReuseCountedForMetrics() const {
+        return context_reuse_counted_for_metrics_;
+    }
+    void markContextReuseCountedForMetrics() {
+        context_reuse_counted_for_metrics_ = true;
+    }
     size_t  maxTokenNum() const;
     void    setReuseLength(int reuse_length);
     void    setLocalReuseLength(int length);
@@ -995,6 +1003,7 @@ protected:
     size_t                             last_output_pos_                   = 0;
     int                                initial_reuse_length_              = 0;
     int                                reuse_length_                      = 0;
+    bool                               context_reuse_counted_for_metrics_ = false;
     int                                local_reuse_length_                = 0;
     int                                device_reuse_length_               = 0;
     int                                remote_reuse_length_               = 0;

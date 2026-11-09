@@ -453,6 +453,7 @@ void NormalExecutor::reportMetrics(const StreamGroups&                        st
                                    stream_groups.modelExecuteTokenSize(),
                                    tps_execute_time_us);
         tps_collector.addTokenSizeByPriority(token_counts_by_priority, tps_execute_time_us);
+        stream_groups.markContextReuseCountedForMetrics();
         tps_reporter_.report(&tps_collector);
         wall_tps_reporter_.report(&tps_collector);
     }

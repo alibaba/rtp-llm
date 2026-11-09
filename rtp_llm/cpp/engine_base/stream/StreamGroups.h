@@ -79,7 +79,7 @@ public:
                 auto reuse_length = stream->reuseLength();
                 context_execute_token_size_ += execute_token_size;
                 context_execute_token_size_with_cache_ += execute_token_size;
-                if (reuse_length > 0) {
+                if (reuse_length > 0 && !stream->contextReuseCountedForMetrics()) {
                     context_execute_token_size_with_cache_ += static_cast<size_t>(reuse_length) * cur_batch_size;
                 }
             }
@@ -149,6 +149,16 @@ public:
     size_t contextExecuteTokenSizeWithCache() const {
         return context_execute_token_size_with_cache_;
     }
+    // Called once the current step's metrics have been handed to the reporter.
+    // Marking here (not in the constructor) keeps the async StreamGroups rebuild
+    // from consuming the first-step reuse count before it is reported.
+    void markContextReuseCountedForMetrics() const {
+        for (const auto& stream : context_streams_) {
+            if (stream->reuseLength() > 0) {
+                stream->markContextReuseCountedForMetrics();
+            }
+        }
+    }
 
     TokenCountsByPriority tokenCountsByPriority() const {
         TokenCountsByPriority token_counts;
@@ -158,7 +168,7 @@ public:
             counts.context += execute_token_size;
             counts.context_with_cache += execute_token_size;
             counts.total += execute_token_size;
-            if (stream->reuseLength() > 0) {
+            if (stream->reuseLength() > 0 && !stream->contextReuseCountedForMetrics()) {
                 counts.context_with_cache += static_cast<int64_t>(stream->reuseLength()) * stream->currentBatchSize();
             }
         }

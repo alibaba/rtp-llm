@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -176,6 +177,26 @@ private:
     ModelConfig   model_config_;
     RuntimeConfig runtime_config_;
 };
+
+TEST(StreamGroupsMetricsTest, CountsReusedPrefixOnceAcrossSteps) {
+    GenerateStreamBuilder builder;
+    auto                  stream = builder.createComplexContextStream({1, 2, 3, 4, 5, 6, 7, 8});
+    stream->setReuseLength(7);
+    const auto batch = static_cast<size_t>(stream->currentBatchSize());
+    ASSERT_GT(batch, 0u);
+
+    StreamGroups first({stream});
+    EXPECT_EQ(first.contextExecuteTokenSizeWithCache() - first.contextExecuteTokenSize(), 7 * batch);
+    const auto first_priority = first.tokenCountsByPriority().at(stream->priority());
+    EXPECT_EQ(first_priority.context_with_cache - first_priority.context, static_cast<int64_t>(7 * batch));
+
+    first.markContextReuseCountedForMetrics();
+
+    StreamGroups second({stream});
+    EXPECT_EQ(second.contextExecuteTokenSizeWithCache(), second.contextExecuteTokenSize());
+    const auto second_priority = second.tokenCountsByPriority().at(stream->priority());
+    EXPECT_EQ(second_priority.context_with_cache, second_priority.context);
+}
 
 class GenerateStreamTest: public DeviceTestBase {
 protected:
