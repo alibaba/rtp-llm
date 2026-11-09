@@ -79,7 +79,7 @@ class NativeVisionTest {
                             .setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(56).setHeight(28)))
                         .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(3).setIgnoreEos(true).setReturnIncremental(true).setCanUsePdSeparation(true).setReuseCache(true)).build();
                     var request=FlexlbScheduleRequestPB.newBuilder().setRequestId(id).setSeqLen(input.getTokenIdsCount()).setMaxNewTokens(3).setCacheKeyBlockSize(1).setGenerateInput(input.toByteString()).build();
-                    var result=client.send(request,Duration.ofSeconds(8)).completion().toCompletableFuture().get(10,TimeUnit.SECONDS);
+                    var result=client.send(request,Duration.ofSeconds(8),List.of(924)).completion().toCompletableFuture().get(10,TimeUnit.SECONDS);
                     assertEquals(NativeClient.Outcome.success,result.outcome(),result.toString());assertEquals(3,result.outputTokens());
                     var cache = RpcServiceGrpc.newBlockingStub(pChannel).getCacheStatus(CacheVersionPB.newBuilder()
                         .setNeedCacheKeys(true).setLatestCacheVersion(-1).build());

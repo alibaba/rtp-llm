@@ -27,7 +27,7 @@ class Start:
         if len(rates) != 1 or not math.isfinite(rates[0]) or rates[0] <= 0:
             raise ValueError('Supply exactly one positive finite qps or replay_speed')
         if not self.requests_file.strip() or '://' in self.requests_file:
-            raise ValueError('requests_file must be a local JSONL or Protobuf+Zstd input path')
+            raise ValueError('requests_file must be a local indexed traffic, JSONL, or Protobuf+Zstd input path')
         for value in (self.request_timeout, self.drain_timeout):
             millis = duration(value, positive=True) * 1000
             if millis != int(millis) or not 1 <= millis <= 3600000:

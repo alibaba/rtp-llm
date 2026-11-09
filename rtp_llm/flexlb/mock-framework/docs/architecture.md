@@ -242,9 +242,34 @@ Client 取快了就在队列为空时等待；取慢了允许小队列暂时积�
 
 Python 在 stop 或最终清理时收集异常，不增加实时发压监控。开始响应丢失也必须尝试最终 stop，不能据此重发 start。Runner 原有进程退出监视保留。收尾先停 Client、获取结果，再做 Prometheus 最后采样和进程清理；不能遗漏 stop 后仍给出虚假的成功。收尾超时取消剩余调用，记录执行错误，不补造远端释放事实。
 
-#### 标准压缩输入与分片
+#### 共享索引回放输入
 
-`client/start` 通过 `requests_file` 读取 JSONL 或 Protobuf + Zstd 输入。以 `data/` 开头的路径从共享根解析，其他相对路径从 Case YAML 所在目录解析，也可使用绝对路径。当前所有 Client 位于同一机器并共享文件系统。
+新数据集用一份 `.mckidx` 文件。运行时 `client/start.requests_file` 直接指向它。client0 读取文件头，分配 Client 编号和共同起点。第 `i` 个 Client 按 `i, i+N, i+2N, …` 读取全局请求序号，独立使用原始时间偏移除以倍速，或用全局序号除以总 QPS。修改 Client 数只改变步长。预热继续在 Case 中等待指标稳定。
+
+`MCKIDX01` 按大端编码。96 字节文件头包含格式标记、请求数、前缀页索引位置与页数、媒体表位置与条数、载荷位置、最后一个到达时间和表内容的 SHA-256。请求索引、媒体表按定长记录直接定位。每条请求保存原始到达偏移、纯文本树叶节点、回放输出长度、优先级和图片插入表。图片记录按匿名 ID 保存宽高。前缀节点按连续链保存起始 ID、父节点和长度，每页最多 256 条链并单独用 Zstd 压缩。各 Client 在本地有界缓存索引页和已解压前缀页，只还原自己要发的模板。请求索引、请求、媒体记录和页索引有 CRC，压缩页有 Zstd 校验和。数据集发布后按不可变文件使用。
+
+图片位置用「前面有几个纯文本 token」表示。Client 在发送前插入一个图片占位，保留原有的 ViT 选路、元数据查询和 P/D 调度。图片引用来自数据集的匿名 ID，使用 `mock.vit.skip.download: true` 配置从记录的宽高模拟图片。参考展开长度与 Mock ViT 输出不一致时，Client 输出告警，继续用实际长度生成路由块键。
+
+用以下命令离线构建共享文件：
+
+```sh
+uv run --locked python scripts/build-indexed-traffic.py anonymous.jsonl traffic.mckidx
+```
+
+源文件是已脱敏的 JSONL，按到达顺序写请求，媒体 ID 从 1 连续编号并在引用前定义。示例：
+
+```jsonl
+["media",1,1024,768]
+["tokens",[10,20,30,40],0,3,50,[[1,2,924]]]
+["tokens",[10,20,31,41],20,3,50,[]]
+["end",2]
+```
+
+`tokens` 行依次为匿名文本符号、到达偏移毫秒、回放目标输出长度、优先级、图片列表。图片三元组是媒体 ID、前置文本 token 数、参考展开长度（0 表示缺省）。匿名符号在一轮中用同一映射，保存逐 token 相等关系。输入必须在采集端完成脱敏。构建器在磁盘维护临时前缀索引，逐条匹配并封装结果。已有匿名前缀图时，另可输入 `["chain",起始节点,父节点,长度]` 和 `["request",文本叶节点,到达偏移,回放输出长度,优先级,图片列表]`，节点 ID 从 1 连续递增。两种文本输入形式按文件选择一种。末行 `end` 包含请求总数。
+
+#### JSONL 和 MCKINP01 输入与分片
+
+`client/start` 通过 `requests_file` 也可读取 JSONL 或 MCKINP01 输入。以 `data/` 开头的路径从共享根解析，其他相对路径从 Case YAML 所在目录解析，也可使用绝对路径。当前所有 Client 位于同一机器并共享文件系统。
 
 压缩输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 测试辅助目录 python/mock_framework/execution/test/helpers 提交同一 protoc 3.25.1 生成的 client_input_pb2.py；输入读写器 input.py 也仅供框架测试与镜像终验生成、检查测试数据，不发布到 mock_framework 运行包。Request 保存未展开的回放输入：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。可选 images 保存 url、width、height、offset；每张图只占 token_ids 中的一个位置，offset 按升序排列且不得重复。LoadClient 按显式配置的 image_token_id 将这些位置写为图片标记；Mock V 默认异步下载真实图片，使用 Java 读取尺寸并按文件内容摘要生成模拟特征身份；本地 mock.vit.skip.download=true 时使用回放宽高，其他准入、排队和计算路径相同。Client 查询 V 元数据后计算路由长度和缓存 key，发送给后端的仍是原始媒体输入。P 在进入 EngineScheduler 前展开图片位置，保留语义图片标记，将逐行特征 hash 单独保存在缓存区间中；hash 不替换语义 token。完整生成参数及真实观测仍不是此播放格式的内容。未知字段、非法请求及不支持的版本均拒绝。
 
