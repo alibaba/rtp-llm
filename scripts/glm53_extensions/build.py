@@ -123,16 +123,18 @@ def prepare(work):
         ("deep_jit", "deep_jit_portable_errors.patch"),
         ("flash_mla", "flash_mla_glm53.patch"),
     ]:
-        # Git is already required by CI checkout; minimal images lack `patch`.
+        # These sources may live below the checkout in CI. Prevent Git from
+        # finding that checkout and silently filtering the patch paths.
+        source = sources[name].resolve()
         run(
             [
                 "git",
                 "apply",
-                "--unsafe-paths",
                 "--unidiff-zero",
-                "--directory=" + str(sources[name].resolve()),
                 HERE / patch,
-            ]
+            ],
+            cwd=source,
+            env=dict(os.environ, GIT_CEILING_DIRECTORIES=str(source.parent)),
         )
     shutil.copyfile(
         HERE / "glm53_only.cpp", sources["flash_mla"] / "csrc/api/glm53_only.cpp"
