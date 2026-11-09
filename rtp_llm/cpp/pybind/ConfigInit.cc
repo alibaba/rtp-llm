@@ -1,4 +1,5 @@
 #define PYBIND11_DETAILED_ERROR_MESSAGES
+#include <cmath>
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/common/blockUtil.h"
@@ -488,6 +489,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
         .def_readwrite("disk_cache_paths", &KVCacheConfig::disk_cache_paths)
         .def_readwrite("disk_cache_size_mb", &KVCacheConfig::disk_cache_size_mb)
+        .def_readwrite("disk_cache_linear_byte_ratio", &KVCacheConfig::disk_cache_linear_byte_ratio)
         .def_readwrite("disk_cache_buffered_io", &KVCacheConfig::disk_cache_buffered_io)
         .def_readwrite("disk_cache_sync_timeout_ms", &KVCacheConfig::disk_cache_sync_timeout_ms)
         .def_readwrite("disk_cache_staging_block_count", &KVCacheConfig::disk_cache_staging_block_count)
@@ -596,7 +598,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      13,
+                                      14,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -679,9 +681,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kvcm_read_backend_type,
                                       self.kvcm_min_replica_count,
                                       self.kv_cache_event_snapshot_interval_ms,
-                                      self.linear_pool_avg_prompt_tokens);
+                                      self.linear_pool_avg_prompt_tokens,
+                                      self.disk_cache_linear_byte_ratio);
             },
             [](py::tuple t) {
+                const py::tuple disk_pool_state = t;
+                const bool has_disk_pool_ratio =
+                    t.size() == 86 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 14;
+                if (has_disk_pool_ratio) {
+                    t = t[py::slice(0, 85, 1)].cast<py::tuple>();
+                    t[1] = py::int_(13);
+                }
                 const py::tuple linear_pool_state = t;
                 const bool has_linear_pool_avg_prompt_tokens =
                     t.size() == 85 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 13;
@@ -751,6 +761,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
+                if (has_disk_pool_ratio) {
+                    c.disk_cache_linear_byte_ratio = disk_pool_state[85].cast<double>();
+                    if (c.disk_cache_linear_byte_ratio != -1.0
+                        && (!std::isfinite(c.disk_cache_linear_byte_ratio) || c.disk_cache_linear_byte_ratio <= 0
+                            || c.disk_cache_linear_byte_ratio >= 1)) {
+                        throw std::runtime_error("invalid KVCacheConfig disk LINEAR byte ratio");
+                    }
+                }
                 if (has_linear_pool_avg_prompt_tokens) {
                     c.linear_pool_avg_prompt_tokens = linear_pool_state[84].cast<int>();
                     if (c.linear_pool_avg_prompt_tokens < -1) {

@@ -387,6 +387,51 @@ std::vector<size_t> computeTierBlockCounts(size_t                     capacity_b
     return block_counts;
 }
 
+std::vector<size_t> computeDiskBlockCounts(size_t                             capacity_bytes,
+                                           const std::vector<size_t>&         device_block_counts,
+                                           const std::vector<size_t>&         pool_strides,
+                                           const std::vector<CacheGroupType>& types,
+                                           double                             linear_byte_ratio) {
+    if (linear_byte_ratio == -1.0) {
+        return computeTierBlockCounts(capacity_bytes, device_block_counts, pool_strides);
+    }
+    RTP_LLM_CHECK_WITH_INFO(std::isfinite(linear_byte_ratio) && linear_byte_ratio > 0 && linear_byte_ratio < 1,
+                            "DISK_CACHE_LINEAR_BYTE_RATIO must be -1 or finite and strictly between 0 and 1, got %f",
+                            linear_byte_ratio);
+    RTP_LLM_CHECK_WITH_INFO(types.size() == device_block_counts.size() && types.size() == pool_strides.size(),
+                            "DISK pool type/count/stride size mismatch");
+    RTP_LLM_CHECK_WITH_INFO(std::find(types.begin(), types.end(), CacheGroupType::FULL) != types.end()
+                                && std::find(types.begin(), types.end(), CacheGroupType::LINEAR) != types.end()
+                                && std::all_of(types.begin(),
+                                               types.end(),
+                                               [](CacheGroupType type) {
+                                                   return type == CacheGroupType::FULL
+                                                          || type == CacheGroupType::LINEAR;
+                                               }),
+                            "DISK_CACHE_LINEAR_BYTE_RATIO requires both FULL and LINEAR and no other cache types");
+
+    const size_t        linear_bytes = static_cast<long double>(capacity_bytes) * linear_byte_ratio;
+    std::vector<size_t> result(types.size());
+    for (const auto type : {CacheGroupType::FULL, CacheGroupType::LINEAR}) {
+        std::vector<size_t> indices;
+        std::vector<size_t> counts;
+        std::vector<size_t> strides;
+        for (size_t i = 0; i < types.size(); ++i) {
+            if (types[i] == type) {
+                indices.push_back(i);
+                counts.push_back(device_block_counts[i]);
+                strides.push_back(pool_strides[i]);
+            }
+        }
+        const size_t bytes           = type == CacheGroupType::LINEAR ? linear_bytes : capacity_bytes - linear_bytes;
+        const auto   physical_counts = computeTierBlockCounts(bytes, counts, strides);
+        for (size_t i = 0; i < indices.size(); ++i) {
+            result[indices[i]] = physical_counts[i];
+        }
+    }
+    return result;
+}
+
 std::vector<size_t> computeHostUsableBlockCounts(size_t                             capacity_bytes,
                                                  const std::vector<size_t>&         strides,
                                                  const std::vector<CacheGroupType>& types,
@@ -606,8 +651,13 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
 
     std::vector<BlockTreeDiskBlockPoolPtr> disk_pools(group_members.size());
     if (disk_enabled && !group_members.empty()) {
-        const size_t bytes        = static_cast<size_t>(kv_cache_config.disk_cache_size_mb) * 1024UL * 1024UL;
-        const auto   block_counts = computeTierBlockCounts(bytes, device_block_counts, pool_strides);
+        const size_t bytes = static_cast<size_t>(kv_cache_config.disk_cache_size_mb) * 1024UL * 1024UL;
+        std::vector<CacheGroupType> types;
+        for (const auto& members : group_members) {
+            types.push_back(cache_config.topology().group(members.front()).policy.group_type);
+        }
+        const auto block_counts = computeDiskBlockCounts(
+            bytes, device_block_counts, pool_strides, types, kv_cache_config.disk_cache_linear_byte_ratio);
         auto guard =
             createDiskMountGuard(kv_cache_config, parallelism_config.local_world_size, parallelism_config.local_rank);
         if (!guard) {
@@ -619,13 +669,15 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             const std::string               pool_name =
                 "block_tree_disk_" + std::string(metricCacheGroupTypeName(first.policy.group_type));
             const size_t physical_blocks = block_counts[group_set_id];
-            RTP_LLM_LOG_INFO("%s device_blocks=%zu physical_blocks=%zu stride_bytes=%zu bytes=%zu budget_bytes=%zu",
+            RTP_LLM_LOG_INFO("%s device_blocks=%zu physical_blocks=%zu stride_bytes=%zu bytes=%zu budget_bytes=%zu "
+                             "configured_linear_byte_ratio=%f",
                              pool_name.c_str(),
                              device_block_counts[group_set_id],
                              physical_blocks,
                              pool_strides[group_set_id],
                              physical_blocks * pool_strides[group_set_id],
-                             bytes);
+                             bytes,
+                             kv_cache_config.disk_cache_linear_byte_ratio);
             disk_pools[group_set_id] = createDiskPool(kv_cache_config,
                                                       guard,
                                                       pool_name,

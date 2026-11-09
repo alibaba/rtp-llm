@@ -42,6 +42,20 @@ def _linear_pool_avg_prompt_tokens(value):
     return tokens
 
 
+def _disk_linear_byte_ratio(value):
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "disk_cache_linear_byte_ratio must be a number"
+        ) from error
+    if ratio != -1.0 and (not math.isfinite(ratio) or not 0 < ratio < 1):
+        raise argparse.ArgumentTypeError(
+            "disk_cache_linear_byte_ratio must be -1 or finite and strictly between 0 and 1"
+        )
+    return ratio
+
+
 def _positive_finite_ratio(value):
     try:
         ratio = float(value)
@@ -356,6 +370,16 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=0,
         help="单个 rank 的磁盘 KV cache 容量，单位 MB。",
+    )
+    kv_cache_group.add_argument(
+        "--disk_cache_linear_byte_ratio",
+        env_name="DISK_CACHE_LINEAR_BYTE_RATIO",
+        bind_to=(kv_cache_config, "disk_cache_linear_byte_ratio"),
+        type=_disk_linear_byte_ratio,
+        default=-1.0,
+        help="DISK 总字节预算中 LINEAR 的占比，FULL 使用剩余部分；-1 沿用 DEVICE 比例。"
+        "显式值须在 (0, 1) 内，且仅支持同时存在 FULL/LINEAR、无其他类型的池。包含对齐和 block 0。"
+        "仅在启用 DISK 时生效，不改变 HOST/DEVICE 配额。",
     )
     kv_cache_group.add_argument(
         "--disk_cache_buffered_io",

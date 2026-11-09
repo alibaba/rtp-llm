@@ -127,6 +127,7 @@ std::string KVCacheConfig::to_string() const {
         << "memory_cache_sync_timeout_ms: " << memory_cache_sync_timeout_ms << "\n"
         << "disk_cache_paths: " << disk_cache_paths << "\n"
         << "disk_cache_size_mb: " << disk_cache_size_mb << "\n"
+        << "disk_cache_linear_byte_ratio: " << disk_cache_linear_byte_ratio << "\n"
         << "disk_cache_buffered_io: " << disk_cache_buffered_io << "\n"
         << "disk_cache_sync_timeout_ms: " << disk_cache_sync_timeout_ms << "\n"
         << "disk_cache_staging_block_count: " << disk_cache_staging_block_count << "\n"

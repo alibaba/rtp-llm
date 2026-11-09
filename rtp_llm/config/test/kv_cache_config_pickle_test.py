@@ -23,8 +23,8 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 85)
-                self.assertEqual(state[:2], ("KVCacheConfig", 13))
+                self.assertEqual(len(state), 86)
+                self.assertEqual(state[:2], ("KVCacheConfig", 14))
                 self.assertEqual(
                     state[64:69], tuple(BASE_EVENT_FIELD_VALUES.values())
                 )
@@ -117,6 +117,29 @@ class KVCacheConfigPickleTest(TestCase):
         disabled = KVCacheConfig.__new__(KVCacheConfig)
         disabled.__setstate__((*state[:84], 0))
         self.assertEqual(disabled.linear_pool_avg_prompt_tokens, -1)
+
+    def test_disk_linear_byte_ratio_survives_worker_spawn_and_legacy_states(self):
+        config = KVCacheConfig()
+        self.assertTrue(hasattr(config, "disk_cache_linear_byte_ratio"))
+        self.assertEqual(config.disk_cache_linear_byte_ratio, -1.0)
+        config.disk_cache_linear_byte_ratio = 0.4
+        for _ in range(2):
+            config = pickle.loads(pickle.dumps(config))
+            self.assertEqual(config.disk_cache_linear_byte_ratio, 0.4)
+        state = config.__getstate__()
+        legacy = KVCacheConfig.__new__(KVCacheConfig)
+        legacy.__setstate__((state[0], 13, *state[2:85]))
+        self.assertEqual(legacy.disk_cache_linear_byte_ratio, -1.0)
+        self.assertEqual(
+            legacy.linear_pool_avg_prompt_tokens, config.linear_pool_avg_prompt_tokens
+        )
+
+    def test_disk_linear_byte_ratio_rejects_invalid_pickled_values(self):
+        state = KVCacheConfig().__getstate__()
+        for value in (0.0, 1.0, -0.5, float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaises(RuntimeError):
+                config = KVCacheConfig.__new__(KVCacheConfig)
+                config.__setstate__((*state[:-1], value))
 
     def test_pool_settings_round_trip_and_version10_defaults(self):
         config = KVCacheConfig()

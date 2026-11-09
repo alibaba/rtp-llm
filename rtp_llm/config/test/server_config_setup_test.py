@@ -405,6 +405,34 @@ class GenerateConfigTest(TestCase):
         config = setup_args(["--linear_pool_avg_prompt_tokens", "-1"]).kv_cache_config
         self.assertEqual(config.linear_pool_avg_prompt_tokens, -1)
 
+    def test_disk_linear_byte_ratio_defaults_env_and_cli_override(self):
+        with patch.dict("os.environ", _jit_env(), clear=True):
+            self.assertEqual(
+                setup_args([]).kv_cache_config.disk_cache_linear_byte_ratio, -1.0
+            )
+        with patch.dict(
+            "os.environ", _jit_env(DISK_CACHE_LINEAR_BYTE_RATIO="0.4"), clear=True
+        ):
+            config = setup_args([]).kv_cache_config
+            self.assertEqual(config.disk_cache_linear_byte_ratio, 0.4)
+            config = setup_args(["--disk_cache_linear_byte_ratio", "0.5"]).kv_cache_config
+            self.assertEqual(config.disk_cache_linear_byte_ratio, 0.5)
+            config = setup_args(["--disk_cache_linear_byte_ratio", "-1"]).kv_cache_config
+            self.assertEqual(config.disk_cache_linear_byte_ratio, -1.0)
+
+    def test_disk_linear_byte_ratio_rejects_invalid_cli_and_env(self):
+        for value in ("invalid", "0", "1", "1.1", "-0.5", "nan", "inf"):
+            for from_env in (False, True):
+                env = {"DISK_CACHE_LINEAR_BYTE_RATIO": value} if from_env else {}
+                args = [] if from_env else ["--disk_cache_linear_byte_ratio", value]
+                with (
+                    self.subTest(value=value, env=from_env),
+                    patch.dict("os.environ", _jit_env(**env), clear=True),
+                    contextlib.redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit),
+                ):
+                    setup_args(args)
+
     def test_reuse_tail_and_pool_limits(self):
         for option, value in (
             ("reuse_cache_tail_blocks", "invalid"),

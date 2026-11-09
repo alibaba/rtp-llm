@@ -239,6 +239,10 @@ struct KVCacheConfig {
     // Usable HOST SWA blocks per FULL block; does not change checkpoint spacing.
     double memory_cache_swa_block_ratio = 1.0;
 
+    // Fraction of DISK bytes for LINEAR; FULL receives the remainder. -1 keeps
+    // DEVICE proportions. Explicit fractions require a FULL/LINEAR-only topology.
+    double disk_cache_linear_byte_ratio = -1.0;
+
     // Optional DSV4 HCA_STATE pool block count override. 0 means HCA_STATE
     // follows dsv4_fixed_pool_blocks or the normal automatically derived count.
     uint32_t dsv4_hca_state_pool_blocks = 0;
