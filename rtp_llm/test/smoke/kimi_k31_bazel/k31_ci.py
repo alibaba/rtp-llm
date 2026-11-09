@@ -144,38 +144,6 @@ def decode_events(payload, run_id, role, expected_ranks=range(8), *, metadata=No
     return {int(rank): IndexedEvents(rows) for rank, rows in events.items()}
 
 
-def audit_long_retention(proof, retention):
-    """Match Last-5 state evidence to the traditional cold seed and 1M continuation."""
-    rows = retention["0"]["requests"]
-    route = proof["pd_native_route"]
-    if set(route) != {"seed", "continuation"} or len(rows) != 2:
-        raise ValueError("Long retention requires both native request lifecycles")
-    result = {}
-    for name in ("seed", "continuation"):
-        request_id = route[name]["request_id"]
-        selected = [row for row in rows if row["request_id"] == request_id]
-        case = proof["cases"][name]
-        if len(selected) != 1:
-            raise ValueError(
-                f"{name}: native Last-5 lifecycle is missing or duplicated"
-            )
-        row = selected[0]
-        if (
-            row["prompt_tokens"] != case["input_len"]
-            or row["completed_tokens"] != case["input_len"]
-            or row["initial_reuse_tokens"] != case["prefill_total_reuse_len"]
-            or name == "seed"
-            and row["initial_reuse_tokens"] != 0
-            or name == "continuation"
-            and row["prompt_tokens"] != 1_048_576
-        ):
-            raise ValueError(
-                f"{name}: native Last-5 lifecycle differs from the original long request"
-            )
-        result[name] = row
-    return result
-
-
 class EvidenceServer:
     """One authenticated, fixed-purpose endpoint; no paths, commands or weights."""
 
@@ -500,20 +468,14 @@ class K31Worker(Worker):
             self._regular_events = (prefill, decode)
         if phase == "long":
             from rtp_llm.test.smoke.kimi_k3.k31_long_prefix_smoke import verify
-            from rtp_llm.test.smoke.kimi_k3.k31_two_host_smoke import audit_long_events
+            from rtp_llm.test.smoke.kimi_k3.k31_two_host_smoke import audit_long_execution
 
-            proof = verify(self.task / "requests" / "long-prefix", self.task / "geometry.json")
+            geometry = self.task / "geometry.json"
+            proof = verify(self.task / "requests" / "long-prefix", geometry)
             prefill, decode = self.long_phase_events(prefill, decode)
-            proof["pd_native_route"] = audit_long_events(
-                proof, prefill, decode, decode_tp=4
-            )
-            # The traditional runner fits the continuation to exactly 1M;
-            # its cold seed is shorter by the added chat history.
-            proof["prefill_retention"] = self.audit_prefill_retention(
-                prefill, require_one_million=False
-            )
-            proof["retention_requests"] = audit_long_retention(
-                proof, proof["prefill_retention"]
+            audit_long_execution(
+                proof, prefill, decode, json.loads(geometry.read_text()), decode_tp=4,
+                max_chunk_tokens=self.host["prefill_token_capacity"],
             )
             accuracy = accuracy.with_name("long-accuracy.json")
             verdict = dict(passed=True, validation_profile="long", long_smoke_passed=True,
@@ -546,8 +508,6 @@ class K31Worker(Worker):
             verdict["complete_smoke_passed"] = (
                 verdict.get("complete_smoke_passed") is True and verdict["passed"]
             )
-            if verdict["passed"] and self.host.get("reuse_cache_tail_blocks") is not None:
-                verdict["proofs"]["prefill_retention"] = self.audit_prefill_retention(prefill, require_one_million=False)
         except (AssertionError, KeyError, OSError, TypeError, ValueError) as error:
             verdict = {
                 "passed": False,
@@ -581,25 +541,6 @@ class K31Worker(Worker):
                 "K3.1 execution audit failed: " + "; ".join(verdict["errors"][:5])
             )
         return {"requests_passed": True}
-
-    def audit_prefill_retention(self, events, *, require_one_million):
-        from rtp_llm.test.smoke.kimi_k3.audit_k31_last_n import audit_prefill_states
-
-        geometry = json.loads((self.task / "geometry.json").read_text())
-        tail = self.host["reuse_cache_tail_blocks"]
-        # TP0 owns stream allocation and cache publication. The shared audit
-        # still checks all eight ranks' conv snapshots when working states alias.
-        return {
-            "0": audit_prefill_states(
-                events,
-                tail_blocks=tail,
-                page_tokens=geometry["page_size"],
-                checkpoint_tokens=geometry["checkpoint_span"],
-                max_chunk_tokens=self.host["prefill_token_capacity"],
-                require_one_million=require_one_million,
-                root_rank=0,
-            )
-        }
 
     def long_phase_events(self, prefill, decode):
         """Exclude the completed regular phase without relying on cross-host clocks."""
@@ -779,7 +720,8 @@ def check_ci_result(accuracy_path):
         )
         or phases["regular"].get("complete_smoke_passed") is not True
         or phases["long"].get("long_smoke_passed") is not True
-        or phases["regular"].get("counts", {}).get("formal") != 267
+        or phases["regular"].get("counts", {}).get("formal")
+        != k31_full_smoke.request_budget("smoke")["formal"]
         or phases["long"].get("counts") != dict(formal=1, preparation=1)
         or verdict.get("counts")
         != {

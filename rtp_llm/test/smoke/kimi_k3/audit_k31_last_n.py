@@ -215,3 +215,43 @@ def audit_prefill_states(events, *, tail_blocks=5, page_tokens=128,
     return dict(tail_blocks=tail_blocks, page_tokens=page_tokens,
                 checkpoint_tokens=checkpoint_tokens, max_chunk_tokens=max_chunk_tokens,
                 cold_one_million_verified=million, requests=proofs)
+
+
+def audit_prefill_retention(events, geometry, *, max_chunk_tokens, require_one_million=False):
+    # TP0 owns stream allocation and publication. Aliased inputs require
+    # convolution snapshot evidence from all eight Prefill ranks.
+    return {"0": audit_prefill_states(
+        events,
+        tail_blocks=geometry["reuse_cache_tail_blocks"],
+        page_tokens=geometry["page_size"],
+        checkpoint_tokens=geometry["checkpoint_span"],
+        max_chunk_tokens=max_chunk_tokens,
+        require_one_million=require_one_million,
+        root_rank=0,
+    )}
+
+
+def audit_long_retention(proof, retention):
+    """Match Last-5 state evidence to the cold seed and exact 1M continuation."""
+    rows = retention["0"]["requests"]
+    route = proof["pd_native_route"]
+    if set(route) != {"seed", "continuation"} or len(rows) != 2:
+        raise ValueError("Long retention requires both native request lifecycles")
+    result = {}
+    for name in ("seed", "continuation"):
+        request_id = route[name]["request_id"]
+        selected = [row for row in rows if row["request_id"] == request_id]
+        case = proof["cases"][name]
+        if len(selected) != 1:
+            raise ValueError(f"{name}: native Last-5 lifecycle is missing or duplicated")
+        row = selected[0]
+        if (
+            row["prompt_tokens"] != case["input_len"]
+            or row["completed_tokens"] != case["input_len"]
+            or row["initial_reuse_tokens"] != case["prefill_total_reuse_len"]
+            or (name == "seed" and row["initial_reuse_tokens"] != 0)
+            or (name == "continuation" and row["prompt_tokens"] != 1_048_576)
+        ):
+            raise ValueError(f"{name}: native Last-5 lifecycle differs from the original long request")
+        result[name] = row
+    return result

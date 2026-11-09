@@ -10,6 +10,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from rtp_llm.test.smoke.kimi_k3 import k31_two_host_smoke as smoke
+from rtp_llm.test.smoke.kimi_k3.audit_k31_last_n import (
+    audit_long_retention, audit_prefill_retention,
+)
 from rtp_llm.test.smoke.kimi_k3.k31_full_smoke import (
     cache_pressure_plan,
     request_budget,
@@ -116,7 +119,7 @@ class SmokeFlowTest(unittest.TestCase):
         self.assertEqual(config["prefill_kv_workspace_budget_gib"], 8)
         plan = cache_pressure_plan(139, 8192)
         self.assertGreater(plan["requests"] * plan["pages_per_probe"], 139)
-        self.assertEqual(request_budget("smoke", plan["requests"])["formal"], 267)
+        self.assertEqual(request_budget("smoke", plan["requests"])["formal"], 337)
         base["prefill"]["prefill_token_capacity"] = 8192
         with self.assertRaisesRegex(ValueError, "64K"):
             k31_ci.smoke_config(base)
@@ -220,18 +223,17 @@ class SmokeFlowTest(unittest.TestCase):
                 ],
             )
         )
-        with tempfile.TemporaryDirectory() as directory:
-            worker = self.worker(Path(directory))
-            worker.host = dict(reuse_cache_tail_blocks=5, prefill_token_capacity=chunk)
-            (worker.task / "geometry.json").write_text(
-                json.dumps(dict(page_size=1024, checkpoint_span=span))
+        geometry = dict(page_size=1024, checkpoint_span=span, reuse_cache_tail_blocks=5)
+        proof = audit_prefill_retention(
+            events, geometry, max_chunk_tokens=chunk, require_one_million=True,
+        )
+        self.assertEqual(set(proof), {"0"})
+        self.assertTrue(proof["0"]["cold_one_million_verified"])
+        events[7] = []
+        with self.assertRaisesRegex(ValueError, "rank7.*conv input"):
+            audit_prefill_retention(
+                events, geometry, max_chunk_tokens=chunk, require_one_million=True,
             )
-            proof = worker.audit_prefill_retention(events, require_one_million=True)
-            self.assertEqual(set(proof), {"0"})
-            self.assertTrue(proof["0"]["cold_one_million_verified"])
-            events[7] = []
-            with self.assertRaisesRegex(ValueError, "rank7.*conv input"):
-                worker.audit_prefill_retention(events, require_one_million=True)
 
     def test_long_retention_matches_a_cold_seed_and_an_exact_one_million_continuation(
         self,
@@ -259,7 +261,7 @@ class SmokeFlowTest(unittest.TestCase):
             for identity, length, reuse in lengths.values()
         ]
         retention = {"0": {"requests": rows}}
-        result = k31_ci.audit_long_retention(proof, retention)
+        result = audit_long_retention(proof, retention)
         self.assertEqual(result["seed"]["prompt_tokens"], 1_048_501)
         self.assertEqual(result["continuation"]["prompt_tokens"], 1_048_576)
         for field in (
@@ -272,7 +274,7 @@ class SmokeFlowTest(unittest.TestCase):
                 changed = copy.deepcopy(retention)
                 changed["0"]["requests"][1][field] += 1
                 with self.assertRaisesRegex(ValueError, "continuation"):
-                    k31_ci.audit_long_retention(proof, changed)
+                    audit_long_retention(proof, changed)
 
     def test_both_request_phases_run_without_starting_or_stopping_a_service(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -289,7 +291,7 @@ class SmokeFlowTest(unittest.TestCase):
                     errors=[],
                     native_K31_MTP=True,
                     counts=(
-                        dict(formal=267, preparation=42)
+                        dict(formal=337, preparation=42)
                         if current == "regular"
                         else dict(formal=1, preparation=1)
                     ),
@@ -323,7 +325,7 @@ class SmokeFlowTest(unittest.TestCase):
             close.assert_not_called()
             verdict = k31_ci.check_ci_result(requests / "accuracy.json")
             self.assertTrue(verdict["passed"])
-            self.assertEqual(verdict["counts"], dict(formal=268, preparation=43))
+            self.assertEqual(verdict["counts"], dict(formal=338, preparation=43))
             verdict["phases"].pop("long")
             (requests / "execution-audit.json").write_text(json.dumps(verdict))
             self.assertFalse(

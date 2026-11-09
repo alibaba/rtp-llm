@@ -21,21 +21,32 @@ else:
     from mtp_contract import synthetic_fixture, native_mla_draft
 
 K3_REFERENCE = '0a0b31a72b7e831c2499d6f3c9e77b3df70a33b1'
+PREFILL_CHUNK_TOKENS = 65536
+APPEND_SEED_TOKENS = 110 * 1024
+CHUNK_CASE_STAGES = (
+    'padding_tail_1_cold', 'padding_tail_1_hit',
+    'padding_tail_7_cold', 'padding_tail_7_hit',
+    'long_110k_seed', 'long_110k_append',
+)
 
 
-def decode_batch_sizes(profile):
+def decode_batch_sizes(profile, *, last5_geometry=False):
     if profile == 'smoke':
-        return (1, 4, 8, 63)
+        return (1, 4, 8, 63) if last5_geometry else (1, 4, 8, 63, 64)
     if profile == 'capacity':
         return (64,)
     raise ValueError(f'unknown Decode batch profile: {profile}')
 
 
-def request_budget(profile, pressure_requests=15):
-    decode_batch_sizes(profile)  # Reject an unsupported contract.
-    return (dict(total=289 + pressure_requests, formal=267,
-                 preparation=22 + pressure_requests) if profile == 'smoke'
-            else dict(total=64, formal=64, preparation=0))
+def request_budget(profile, pressure_requests=15, *, last5_geometry=False):
+    batches = decode_batch_sizes(profile, last5_geometry=last5_geometry)
+    if profile == 'capacity':
+        return dict(total=64, formal=64, preparation=0)
+    formal = 191 + sum(batches)
+    if not last5_geometry:
+        formal += len(CHUNK_CASE_STAGES)
+    preparation = 22 + pressure_requests
+    return dict(total=formal + preparation, formal=formal, preparation=preparation)
 
 
 def cache_pressure_plan(device_pages, reuse_unit_tokens, *, scheduler_chunking=False):
@@ -281,7 +292,8 @@ class K31FullRunner(legacy.Runner):
 
     def max_grouped_prefill_requests(self):
         return max(decode_batch_sizes(
-            getattr(getattr(self, 'args', None), 'decode_batch_profile', 'smoke')))
+            getattr(getattr(self, 'args', None), 'decode_batch_profile', 'smoke'),
+            last5_geometry=self.scheduler_chunk_profile()))
 
     def _request_cases_group(self, cases, *, decode_relay_ports=None):
         if len(cases) < 63 or decode_relay_ports is not None:
@@ -328,8 +340,11 @@ class K31FullRunner(legacy.Runner):
         if (not isinstance(ids, list) or len(ids) != row['input_len']
                 or any(type(i) is not int for i in ids)):
             raise legacy.SmokeFailure(f'{case.name}: actual input token IDs missing')
-        if debug.get('input_source') != 'group_rpc_wire' and ids != self.tokenize(case.prompt):
-            raise legacy.SmokeFailure(f'{case.name}: actual input differs from tokenizer fixture')
+        if debug.get('input_source') != 'group_rpc_wire':
+            expected_ids = (self.tokenize(case.prompt) if case.messages is None else
+                            self.tokenize_messages(case.messages, enable_thinking=False))
+            if ids != expected_ids:
+                raise legacy.SmokeFailure(f'{case.name}: actual input differs from tokenizer fixture')
         row.update(input_tokens=ids,
                    input_sha256=hashlib.sha256(json.dumps(ids).encode()).hexdigest(),
                    input_tokens_verified=True, target_only=False,
@@ -392,7 +407,7 @@ class K31FullRunner(legacy.Runner):
                 expected_input_len=plan['input_tokens'])])
 
     def validate_prefill_capacity(self):
-        largest_batch = max(decode_batch_sizes(self.args.decode_batch_profile))
+        largest_batch = self.max_grouped_prefill_requests()
         # These short grouped requests each use one Prefill state slot.
         # Pure PD Prefill reserves one target token; proposal slots live on Decode.
         linear_required = largest_batch + 4
@@ -487,11 +502,11 @@ class K31FullRunner(legacy.Runner):
         raise legacy.SmokeFailure(f'cannot construct exact long-KV seed length {target}')
 
     def _orthogonal_decode_batches(self):
-        # BS63 exercises a full owner and a padded owner together. BS64 is an
-        # explicit capacity-only suite, not a repeated default-smoke gate.
+        # BS63 exercises asymmetric owners and BS64 fills both owners.
         owners = len(self.decode_role_addrs)
         profile = getattr(self.args, 'decode_batch_profile', 'smoke')
-        for stage_index, size in enumerate(decode_batch_sizes(profile)):
+        for stage_index, size in enumerate(decode_batch_sizes(
+                profile, last5_geometry=self.scheduler_chunk_profile())):
             name = f'orthogonal_decode_{stage_index:02d}_batch_{size}'
             # Keep early requests decoding while the rest of the cohort joins.
             large_batch = size >= 63
@@ -502,6 +517,40 @@ class K31FullRunner(legacy.Runner):
                 require_mtp_draft=True, thinking_disabled=True)
                 for index in range(size)]
             self._required_stage(name, cases, concurrent=size > 1, grouped_pd=size > 1)
+
+    def run_110k_append(self):
+        if __package__:
+            from .k31_long_prefix_smoke import common_prefix
+        else:
+            from k31_long_prefix_smoke import common_prefix
+
+        seed_name, append_name = CHUNK_CASE_STAGES[-2:]
+        seed, seed_ids = self.fit_prompt(
+            f'Archive {self.args.namespace}/110k.\nkey=archive; value=AMBER-110K\n',
+            '\n只输出 JSON {"value":"READY-110K"}。',
+            APPEND_SEED_TOKENS, enable_thinking=False,
+        )
+        self._required_stage(seed_name, [self._orthogonal_answer(
+            seed_name, seed, 'READY-110K', 'miss', expected_input_len=len(seed_ids),
+            expected_reuse_len=0, allow_long_history=True, scheduler_chunked=True,
+        )])
+        question = '检索 key=archive 的 value。只输出 JSON 对象，键为 value。'
+        messages = [
+            {'role': 'user', 'content': seed},
+            {'role': 'assistant', 'content': self.records[-1]['content']},
+            {'role': 'user', 'content': question},
+        ]
+        tokens = self.tokenize_messages(messages, enable_thinking=False)
+        shared = min(common_prefix(seed_ids, tokens), len(seed_ids) - 1)
+        reuse = shared // self.reuse_unit_tokens * self.reuse_unit_tokens
+        if reuse <= self.args.chunk_tokens or len(tokens) <= len(seed_ids):
+            raise legacy.SmokeFailure('110K append did not retain a cross-chunk prefix')
+        self._required_stage(append_name, [self._orthogonal_answer(
+            append_name, question, 'AMBER-110K', 'hit', messages=messages,
+            expected_input_len=len(tokens), expected_reuse_len=reuse,
+            allow_long_history=True, scheduler_chunked=True,
+            decode_owner_rank=len(self.decode_role_addrs) - 1,
+        )])
 
     def run_k3_full(self):
         if getattr(self.args, 'decode_batch_profile', 'smoke') == 'capacity':
@@ -519,12 +568,16 @@ class K31FullRunner(legacy.Runner):
         if self.scheduler_chunk_profile():
             self.complete_last_n_ssd_probe()
         self._orthogonal_decode_batches()
+        if not self.scheduler_chunk_profile():
+            self.run_padding_boundaries(scheduler_chunked=True)
+            self.run_110k_append()
 
     def save(self, passed, error=None):
         formal = sum(row.get('phase') == 'formal' for row in self.records)
         preparation = sum(row.get('phase') == 'preparation' for row in self.records)
         profile = getattr(self.args, 'decode_batch_profile', 'smoke')
-        budget = request_budget(profile, getattr(self, '_cache_pressure_requests', 15))
+        budget = request_budget(profile, getattr(self, '_cache_pressure_requests', 15),
+                                last5_geometry=self.scheduler_chunk_profile())
         complete_count = formal == budget['formal'] and preparation == budget['preparation']
         requested_pass = passed
         if passed and not complete_count:
@@ -552,6 +605,8 @@ class K31FullRunner(legacy.Runner):
         value['last_n_c7_fixture'] = getattr(self, '_last_n_c7_fixture', None)
         if self.scheduler_chunk_profile():
             value['validation_profile'] = 'last5-chunked-' + profile
+        elif profile == 'smoke':
+            value['excluded_scenarios'] = []
         path.write_text(json.dumps(value, ensure_ascii=False, indent=2)+'\n')
         if requested_pass and not complete_count:
             raise legacy.SmokeFailure(error)
@@ -573,7 +628,7 @@ def parse_args(argv=None, *, calibration=False):
     p.add_argument('--decode-role-addr', action='append', dest='decode_role_addrs',
                    type=legacy.parse_decode_role_addr, required=True)
     p.add_argument('--decode-batch-profile', choices=('smoke', 'capacity'), default='smoke',
-                   help='smoke: complete service suite with BS63; capacity: BS64 only')
+                   help='smoke: complete service suite; capacity: BS64 only')
     p.add_argument('--last-n-checkpoints', type=int, choices=(5,),
                    help='Exercise Last-5 with genuine scheduler chunks in the existing 304 request slots')
     args = p.parse_args(argv)
@@ -608,7 +663,7 @@ def parse_args(argv=None, *, calibration=False):
         args.suite = 'main-text-last5-chunked'
     args.run_kind = ('real93-native-mla-mtp-' if args.draft_contract is not None
                      else 'real93-synthetic-mtp-') + args.decode_batch_profile
-    args.batch_size, args.chunk_tokens, args.max_tokens = 4, 65536, 128
+    args.batch_size, args.chunk_tokens, args.max_tokens = 4, PREFILL_CHUNK_TOKENS, 128
     args.identity_max_tokens, args.single_exact_max_tokens, args.mtp_chunk_max_tokens = 256,128,128
     args.require_mtp, args.capture_rpc_frames = True,True
     args.timeout, args.case_deadline_s = 300,300

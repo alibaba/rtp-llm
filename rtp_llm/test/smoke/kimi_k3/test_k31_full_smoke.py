@@ -100,7 +100,7 @@ class FullK31SmokeTest(unittest.TestCase):
         self.assertIn(589_824+128, targets)
         self.assertEqual([runner.long_kv_seed_reuse(i) for i in range(3)], ['miss', 'miss', 'hit'])
         self.assertEqual(targets[1:], sorted(targets[1:]))
-        self.assertEqual(request_budget('smoke')['total'], 304)
+        self.assertEqual(request_budget('smoke', last5_geometry=True)['total'], 304)
         runner.tokenize = lambda text, **kwargs: [1] * (11 + text.count(' x'))
         runner.save_token_fixture = MagicMock()
         prompt = runner.long_kv_seed_prompt('base', 10, 1000)
@@ -124,7 +124,7 @@ class FullK31SmokeTest(unittest.TestCase):
             [65536, 65536, 196608, 198657, 196608, 198657])
         self.assertEqual([case.expected_reuse_len for case in submitted],
             [0, 64512, 0, 0, 195584, 198656])
-        self.assertEqual(request_budget('smoke')['total'], 304)
+        self.assertEqual(request_budget('smoke', last5_geometry=True)['total'], 304)
 
     def test_last5_boundaries_and_pressure_include_cp_edges_without_more_requests(self):
         runner = object.__new__(K31FullRunner)
@@ -263,6 +263,23 @@ class FullK31SmokeTest(unittest.TestCase):
         self.assertEqual(shared.call_args.kwargs, {'verified_input_len': 3})
         self.assertEqual(row['input_tokens'], ids)
 
+    def test_http_validation_checks_full_conversation_token_ids(self):
+        runner = object.__new__(K31FullRunner)
+        messages = [{'role': 'user', 'content': 'seed'},
+                    {'role': 'assistant', 'content': 'answer'},
+                    {'role': 'user', 'content': 'question'}]
+        case = legacy.Case('append', 'question', '.', 'hit', messages=messages)
+        runner.tokenize = MagicMock(side_effect=AssertionError('lost chat history'))
+        runner.tokenize_messages = MagicMock(return_value=[1, 2, 3])
+
+        with patch.object(legacy.Runner, 'validate', return_value={'input_len': 3, 'content': '1'}):
+            response = {'debug_info': {'input_ids': [1, 2, 3]}}
+            self.assertEqual(runner.validate(case, response, 0.1, 128)['input_tokens'], [1, 2, 3])
+            runner.tokenize_messages.assert_called_once_with(messages, enable_thinking=False)
+            response['debug_info']['input_ids'][1] = 4
+            with self.assertRaisesRegex(legacy.SmokeFailure, 'actual input differs'):
+                runner.validate(case, response, 0.1, 128)
+
     def test_pressure_evicts_witness_and_cancel_seeds_from_95_page_device_pool(self):
         runner = object.__new__(K31FullRunner)
         runner.args = SimpleNamespace(namespace='pressure-fixture', block_size=1024,
@@ -321,17 +338,18 @@ class FullK31SmokeTest(unittest.TestCase):
         stages = []
         runner._required_stage = lambda name, cases, **kw: stages.append((name, cases, kw))
         runner._orthogonal_decode_batches()
-        self.assertEqual([len(cases) for _, cases, _ in stages], [1, 4, 8, 63])
-        self.assertEqual(sum(len(cases) for _, cases, _ in stages), 76)
-        cases63 = stages[-1][1]
+        self.assertEqual([len(cases) for _, cases, _ in stages], [1, 4, 8, 63, 64])
+        cases63, cases64 = stages[-2][1], stages[-1][1]
         self.assertEqual([sum(c.decode_owner_rank == owner for c in cases63)
                           for owner in range(2)], [32, 31])
+        self.assertEqual([sum(c.decode_owner_rank == owner for c in cases64)
+                          for owner in range(2)], [32, 32])
         self.assertTrue(all(c.require_mtp_draft for _, cases, _ in stages for c in cases))
-        self.assertTrue(all(c.max_tokens == 64 for _, cases, _ in stages[:-1] for c in cases))
+        self.assertTrue(all(c.max_tokens == 64 for _, cases, _ in stages[:-2] for c in cases))
         self.assertTrue(all(len(c.expected_json['value'].split()) == 8
                             and c.max_tokens == 160 for c in cases63))
         self.assertTrue(all(options['grouped_pd'] for _, cases, options in stages[1:]))
-        self.assertEqual(runner.max_grouped_prefill_requests(), 63)
+        self.assertEqual(runner.max_grouped_prefill_requests(), 64)
         shared = object.__new__(legacy.Runner)
         self.assertEqual(shared.max_grouped_prefill_requests(), 16)
 
@@ -343,8 +361,8 @@ class FullK31SmokeTest(unittest.TestCase):
         runner._required_stage = lambda name, cases, **kw: stages.append(cases)
         runner._orthogonal_decode_batches()
         self.assertTrue(all(len(c.expected_json['value'].split()) == 1
-                            for cases in stages[:-1] for c in cases))
-        self.assertEqual(len(stages[-1]), 63)
+                            for cases in stages[:-2] for c in cases))
+        self.assertEqual(len(stages[-2]), 63)
         self.assertTrue(all(len(c.expected_json['value'].split()) == 8
                             and c.max_tokens == 160 for c in stages[-1]))
 
@@ -361,7 +379,7 @@ class FullK31SmokeTest(unittest.TestCase):
         self.assertEqual([len(cases) for _, cases in stages], [64])
         self.assertEqual([sum(c.decode_owner_rank == owner for c in stages[0][1])
                           for owner in range(2)], [32, 32])
-        self.assertEqual(request_budget('smoke'), dict(total=304, formal=267, preparation=37))
+        self.assertEqual(request_budget('smoke'), dict(total=374, formal=337, preparation=37))
         self.assertEqual(request_budget('capacity'), dict(total=64, formal=64, preparation=0))
         self.assertEqual(decode_batch_sizes('capacity'), (64,))
         with self.assertRaises(ValueError):
@@ -405,7 +423,7 @@ class FullK31SmokeTest(unittest.TestCase):
             result = json.loads(path.read_text())
             self.assertFalse(result['passed'])
             self.assertFalse(result['complete_smoke_passed'])
-            self.assertEqual(result['request_budget']['total'],304)
+            self.assertEqual(result['request_budget']['total'],374)
             self.assertEqual(result['legacy_reference_request_budget']['total'],368)
 
     def test_entry_requires_explicit_untrained_fixture(self):
@@ -457,7 +475,28 @@ class FullK31SmokeTest(unittest.TestCase):
             self.assertEqual(args.orthogonal_phases, ('cache','cancel','page','chunk','decode'))
             self.assertTrue(args.require_mtp)
             self.assertEqual(request_budget(args.decode_batch_profile),
-                             dict(total=304, formal=267, preparation=37))
+                             dict(total=374, formal=337, preparation=37))
+
+    def test_110k_append_uses_seed_response_and_exact_checkpoint(self):
+        runner = object.__new__(K31FullRunner)
+        runner.args = SimpleNamespace(namespace="boundary", chunk_tokens=65536, reuse_unit_tokens=8192)
+        runner.decode_role_addrs = ["owner0", "owner1"]
+        runner.records = [{"content": '{"value":"READY-110K"}'}]
+        seed_ids = [1] * (110 * 1024)
+        runner.fit_prompt = MagicMock(return_value=("seed", seed_ids))
+        runner.tokenize_messages = MagicMock(return_value=seed_ids[:-1] + [2] * 32)
+        stages = []
+        runner._required_stage = lambda name, cases: stages.append((name, cases[0]))
+
+        runner.run_110k_append()
+
+        seed, append = (case for _, case in stages)
+        self.assertEqual(seed.expected_input_len, 112640)
+        self.assertEqual(seed.expected_reuse_len, 0)
+        self.assertEqual(append.expected_reuse_len, 106496)
+        self.assertEqual(append.expected_input_len, 112671)
+        self.assertEqual(append.messages[1], {"role": "assistant", "content": runner.records[0]["content"]})
+        self.assertEqual(append.decode_owner_rank, 1)
 
 
 if __name__ == '__main__':

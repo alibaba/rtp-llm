@@ -611,7 +611,7 @@ assert rtp_llm.__file__ == runfiles_package
 
         plan = cache_pressure_plan(139, 8192)
         regular_budget = request_budget("smoke", plan["requests"])
-        self.assertEqual(regular_budget, dict(total=309, formal=267, preparation=42))
+        self.assertEqual(regular_budget, dict(total=379, formal=337, preparation=42))
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "result"
             stages = [
@@ -635,7 +635,7 @@ assert rtp_llm.__file__ == runfiles_package
             self.assertIs(result["passed"], True)
             self.assertEqual(result["server_lifecycles"], 1)
             self.assertEqual(
-                result["request_counts"], dict(total=311, formal=268, preparation=43)
+                result["request_counts"], dict(total=381, formal=338, preparation=43)
             )
 
 

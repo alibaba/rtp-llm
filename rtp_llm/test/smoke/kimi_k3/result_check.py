@@ -157,7 +157,10 @@ def audit_raw_answers(
                     )
                 if re.search(r"([^\s])\1{7,}", value):
                     raise ValueError(f"{channel} contains repeated characters")
-            prompt = artifact["request"]["messages"][-1]["content"]
+            messages = artifact["request"]["messages"]
+            prompt = messages[0]["content"] if len(messages) == 1 else "\n".join(
+                message["content"] for message in messages if message["role"] == "user"
+            )
             expected = answer_from_question(prompt)
             observed = (
                 answer.strip()

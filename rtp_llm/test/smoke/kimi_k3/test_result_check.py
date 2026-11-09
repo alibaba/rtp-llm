@@ -145,6 +145,25 @@ class ResultCheckTest(unittest.TestCase):
             path.write_text(json.dumps(artifact))
             self.assertTrue(audit_raw_answers(path.parent, rows))
 
+    def test_raw_answer_uses_seed_message_for_append(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "append.json"
+            artifact = dict(
+                name="append", phase="formal", status=200,
+                request={"messages": [
+                    {"role": "user", "content": "key=archive; value=AMBER-110K"},
+                    {"role": "assistant", "content": '{"value":"READY-110K"}'},
+                    {"role": "user", "content": "检索 key=archive 的 value。"},
+                ]},
+                response_body=json.dumps({
+                    "choices": [{"finish_reason": "stop",
+                                 "message": {"content": '{"value":"AMBER-110K"}'}}],
+                    "aux_info": {"pd_sep": True},
+                }),
+            )
+            path.write_text(json.dumps(artifact))
+            self.assertEqual(audit_raw_answers(path.parent, {"append": {"phase": "formal"}}), [])
+
     def fixture(self):
         # A partial full-model result isolates page/cache/owner failure checks.
         # It must never pass the complete smoke's evidence requirements.

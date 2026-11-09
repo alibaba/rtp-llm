@@ -11,14 +11,20 @@ if __package__:
     from . import audit_k31_last_n, k31_last_n_precision
     from .k31_smoke_capacity import device_pool_usable_blocks
     from . import result_check
-    from .k31_full_smoke import cache_pressure_plan, decode_batch_sizes, request_budget
+    from .k31_full_smoke import (
+        CHUNK_CASE_STAGES, PREFILL_CHUNK_TOKENS, cache_pressure_plan,
+        decode_batch_sizes, request_budget,
+    )
     from .smoke_request_identity import resolve as resolve_request_identity
 else:
     import audit_k31_last_n
     import k31_last_n_precision
     from k31_smoke_capacity import device_pool_usable_blocks
     import result_check
-    from k31_full_smoke import cache_pressure_plan, decode_batch_sizes, request_budget
+    from k31_full_smoke import (
+        CHUNK_CASE_STAGES, PREFILL_CHUNK_TOKENS, cache_pressure_plan,
+        decode_batch_sizes, request_budget,
+    )
     from smoke_request_identity import resolve as resolve_request_identity
 
 
@@ -189,6 +195,27 @@ def large_batch_evidence(stages, case_ids, decode, tp_size):
     return proofs
 
 
+def scheduler_chunk_evidence(rows, request_ids, prefill_roots):
+    proofs = {}
+    for name, row in rows.items():
+        ids = request_ids[name]
+        if len(ids) != 1:
+            raise ValueError(f"{name}: expected exactly one Prefill request")
+        rid = ids[0]
+        actual = []
+        for event in prefill_roots:
+            if rid in event["request_ids"]:
+                index = event["request_ids"].index(rid)
+                actual.append((event["reuse_lengths"][index], event["context_lengths"][index]))
+        start, end = row["effective_reuse_len"], row["input_len"]
+        expected = [(prefix, min(PREFILL_CHUNK_TOKENS, end - prefix))
+                    for prefix in range(start, end, PREFILL_CHUNK_TOKENS)]
+        if not expected or actual != expected:
+            raise ValueError(f"{name}: native Prefill chunks {actual} differ from {expected}")
+        proofs[name] = dict(request_id=rid, rounds=actual)
+    return proofs
+
+
 def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None, last_n_precision=None):
     errors, proofs = [], {}
     declared_profile = result.get("validation_profile", "smoke")
@@ -215,7 +242,8 @@ def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None, last_n_p
                 or any(row.get("phase") != "preparation"
                        or row.get("input_len") != plan["input_tokens"] for row in probes)):
             raise ValueError("cache pressure preparation coverage differs from its plan")
-    budget = request_budget(profile, plan.get("requests", 15) if plan else 15)
+    budget = request_budget(profile, plan.get("requests", 15) if plan else 15,
+                            last5_geometry=last5)
     counts = {"formal": sum(row.get("phase") == "formal" for row in rows),
               "preparation": sum(row.get("phase") == "preparation" for row in rows)}
     if (not result.get("passed") or result.get("target_only") is not False
@@ -226,8 +254,10 @@ def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None, last_n_p
     if any(not stage.get("passed") or stage.get("skipped") for stage in stages):
         raise ValueError("unfinished required smoke stage")
     stage_names = {stage["name"] for stage in stages}
-    required = {f"orthogonal_decode_{i:02d}_batch_{size}" for i, size in
-                enumerate(decode_batch_sizes(profile))}
+    batch_sizes = decode_batch_sizes(profile, last5_geometry=last5)
+    required = {f"orthogonal_decode_{i:02d}_batch_{size}" for i, size in enumerate(batch_sizes)}
+    chunk_stages = set(CHUNK_CASE_STAGES) if profile == "smoke" and not last5 else set()
+    required |= chunk_stages
     if profile == "smoke":
         required |= {f"batch_shape_{i}_{size}" for i, size in
                      enumerate((1, 2, 3, 7, 8, 9, 3, 1, 9))}
@@ -235,6 +265,13 @@ def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None, last_n_p
                      "orthogonal_cancel_recovery", "prefix_AB_mixed"}
     if not required <= stage_names:
         raise ValueError(f"missing full reference stages:{sorted(required-stage_names)}")
+    chunk_cases = set()
+    for stage in stages:
+        if stage["name"] in chunk_stages:
+            names = stage["case_names"]
+            if len(names) != 1 or names[0] in chunk_cases:
+                raise ValueError("scheduler chunk coverage requires one request per stage")
+            chunk_cases.add(names[0])
     if profile == "smoke" and not any(stage.get("cache_tier_checks")
                and all(stage["cache_tier_checks"].values()) for stage in stages):
         raise ValueError("Device/Host/partial/miss mixed-forward proof absent")
@@ -251,7 +288,8 @@ def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None, last_n_p
                 raise ValueError("summary and grouped native request IDs disagree")
             item.update(transport="pd_group_rpc", request_id=rid)
         raw[name] = item
-        errors.extend(result_check.independent_answer_check(row, scheduler_chunking=last5))
+        errors.extend(result_check.independent_answer_check(
+            row, scheduler_chunking=last5 or name in chunk_cases))
         errors.extend(result_check._cache_errors(row, result["block_size"]))
     try:
         request_ids, methods, barriers = resolve_request_identity(
@@ -270,6 +308,11 @@ def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None, last_n_p
         seen_prefill.update(group_evidence(prefill, root, 8))
     if not {rid for ids in request_ids.values() for rid in ids} <= seen_prefill:
         raise ValueError("not every request has an all8-rank Prefill forward")
+    if chunk_cases:
+        proofs["scheduler_chunks"] = scheduler_chunk_evidence(
+            {row["name"]: row for row in rows if row["name"] in chunk_cases},
+            request_ids, prefill_roots,
+        )
     for stage in stages:
         if (stage["name"].startswith("batch_shape_")
                 or stage["name"].startswith("orthogonal_cache_mixed_")
@@ -315,9 +358,9 @@ def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None, last_n_p
                                            or e["last_mla_page"] % 8 != e["source_tp_rank"]):
                         raise ValueError("PageRR cache loaded from the wrong owner")
     proofs["large_batches"] = large_batch_evidence(stages, request_ids, decode, tp_size)
-    if tp_size == 8 and not set(decode_batch_sizes(profile)) <= batches[0]:
+    if tp_size == 8 and not set(batch_sizes) <= batches[0]:
         raise ValueError(f"actual Decode {profile} batch coverage incomplete")
-    owner_batches = ({0: {1,2,4,32}, 1: {2,4,31}} if profile == "smoke"
+    owner_batches = ({0: {1,2,4,32}, 1: {2,4,31,32}} if profile == "smoke"
                      else {0: {32}, 1: {32}})
     if tp_size == 4 and any(not expected <= batches[owner]
                             for owner, expected in owner_batches.items()):
@@ -336,6 +379,10 @@ def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None, last_n_p
         proofs["host_cancel_while_actual_load_pending"] = cancel["request_id"]
     if last5:
         proofs['last_n'] = audit_last5(result, prefill, request_ids, last_n_precision)
+    elif profile == "smoke" and result.get("geometry", {}).get("reuse_cache_tail_blocks") is not None:
+        proofs["prefill_retention"] = audit_k31_last_n.audit_prefill_retention(
+            prefill, result["geometry"], max_chunk_tokens=PREFILL_CHUNK_TOKENS,
+        )
     return {"passed": not errors, "errors": errors, "proofs": proofs,
             "counts": counts, "decode_batches": {str(k):sorted(v) for k,v in batches.items()},
             "validation_profile": declared_profile, "request_budget": budget,

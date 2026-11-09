@@ -77,6 +77,8 @@ class Case:
     allow_long_history: bool = False
     preparation_only: bool = False
     thinking_disabled: bool = False
+    scheduler_chunked: bool = False
+    messages: list[dict[str, str]] | None = None
 
 
 class SmokeFailure(RuntimeError):
@@ -678,7 +680,9 @@ class Runner:
         request_max_tokens = case.max_tokens or self.args.max_tokens
         payload = {
             "model": "kimi-k3",
-            "messages": [{"role": "user", "content": case.prompt}],
+            "messages": case.messages if case.messages is not None else [
+                {"role": "user", "content": case.prompt}
+            ],
             "max_tokens": request_max_tokens,
             "temperature": 0,
             "top_k": 1,
@@ -945,7 +949,7 @@ class Runner:
                 f"{case.name}: invalid reuse {effective_reuse} for input_len {input_len}"
             )
         if (case.allow_long_history and input_len - effective_reuse > 65536
-                and not self.scheduler_chunk_profile()):
+                and not case.scheduler_chunked and not self.scheduler_chunk_profile()):
             raise SmokeFailure(
                 f"{case.name}: historical-KV request has {input_len - effective_reuse} "
                 "uncached Q tokens, exceeding 65536"
@@ -1559,10 +1563,14 @@ class Runner:
     def tokenize(
         self, prompt: str, *, enable_thinking: bool | None = None
     ) -> list[int]:
-        payload = {
-            "model": "kimi-k3",
-            "messages": [{"role": "user", "content": prompt}],
-        }
+        return self.tokenize_messages(
+            [{"role": "user", "content": prompt}], enable_thinking=enable_thinking
+        )
+
+    def tokenize_messages(
+        self, messages: list[dict[str, str]], *, enable_thinking: bool | None = None
+    ) -> list[int]:
+        payload = {"model": "kimi-k3", "messages": messages}
         if enable_thinking is not None:
             payload["enable_thinking"] = enable_thinking
         request = urllib.request.Request(
@@ -1849,7 +1857,7 @@ class Runner:
             concurrent=True,
         )
 
-    def run_padding_boundaries(self) -> None:
+    def run_padding_boundaries(self, *, scheduler_chunked=False) -> None:
         # Chunk budget is TP8 aligned. A single cold input of C+1/C+7 forces
         # terminal round padding of 7/1 respectively, regardless of batching.
         size = max(1, len(self.decode_role_addrs))
@@ -1858,13 +1866,17 @@ class Runner:
             head = f"档案 {self.args.namespace}/padding-{tail_tokens}。以下 x 为无关填充。\n"
             tail = f'\n记录 value={tag}。只输出 JSON {{"value":"{tag}"}}，不要解释。'
             target = self.args.chunk_tokens + tail_tokens
-            prompt, tokens = self.fit_prompt(head, tail, target)
+            prompt, tokens = self.fit_prompt(
+                head, tail, target, enable_thinking=False if scheduler_chunked else None
+            )
             case = Case(
                 f"padding-tail-{tail_tokens}-cold",
                 prompt,
                 r"",
                 "miss",
-                require_chunk=True,
+                require_chunk=not scheduler_chunked,
+                allow_long_history=scheduler_chunked,
+                scheduler_chunked=scheduler_chunked,
                 expected_json={"value": tag},
                 expected_input_len=len(tokens),
                 expected_reuse_len=0,

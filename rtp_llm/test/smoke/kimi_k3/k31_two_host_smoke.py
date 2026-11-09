@@ -519,15 +519,18 @@ def audit_startup(config, output):
     return proof
 
 
-def audit_long_native_route(proof, prefill_logs, decode_logs, *, start=None, end=None, decode_tp=8):
+def audit_long_execution(proof, prefill, decode, geometry, *, decode_tp, max_chunk_tokens):
     if __package__:
-        from .audit_k31_full_smoke import read_events
+        from .audit_k31_last_n import audit_long_retention, audit_prefill_retention
     else:
-        from audit_k31_full_smoke import read_events
+        from audit_k31_last_n import audit_long_retention, audit_prefill_retention
 
-    prefill = read_events(prefill_logs, prefill_logs / "engine.log", start=start, end=end)
-    decode = read_events(decode_logs, decode_logs / "engine.log")
-    return audit_long_events(proof, prefill, decode, decode_tp=decode_tp)
+    proof["pd_native_route"] = audit_long_events(proof, prefill, decode, decode_tp=decode_tp)
+    proof["prefill_retention"] = audit_prefill_retention(
+        prefill, geometry, max_chunk_tokens=max_chunk_tokens,
+    )
+    proof["retention_requests"] = audit_long_retention(proof, proof["prefill_retention"])
+    return proof
 
 
 def audit_long_events(proof, prefill, decode, *, decode_tp=8, decode_owner=0):
@@ -692,17 +695,25 @@ def audit_stage(config, output):
 
     if __package__:
         from .k31_long_prefix_smoke import verify
+        from .audit_k31_full_smoke import read_events
     else:
         from k31_long_prefix_smoke import verify
+        from audit_k31_full_smoke import read_events
 
-    proof = verify(evidence, output / "prefill" / "runtime-geometry.json")
+    geometry = output / "prefill" / "runtime-geometry.json"
+    proof = verify(evidence, geometry)
     require(
         set(proof["cases"]) == {"seed", "continuation"},
         "long smoke must contain exactly two requests",
     )
-    proof["pd_native_route"] = audit_long_native_route(
-        proof, prefill_logs, decode_logs, start=start, end=end,
-        decode_tp=8 // launcher.decode_dp_size(config))
+    audit_long_execution(
+        proof,
+        read_events(prefill_logs, prefill_logs / "engine.log", start=start, end=end),
+        read_events(decode_logs, decode_logs / "engine.log"),
+        read_json(geometry),
+        decode_tp=8 // launcher.decode_dp_size(config),
+        max_chunk_tokens=config["prefill"]["prefill_token_capacity"],
+    )
     launcher.atomic(audit_path, proof)
     return dict(total=2, formal=1, preparation=1)
 

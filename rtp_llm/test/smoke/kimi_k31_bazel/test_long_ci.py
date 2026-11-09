@@ -56,6 +56,8 @@ class LongCiTest(unittest.TestCase):
             worker = self.worker(Path(tmp))
             (worker.task / "requests").mkdir()
             proof = dict(passed=True, cases=dict(seed={}, continuation={}))
+            geometry = dict(page_size=1024, checkpoint_span=8192, reuse_cache_tail_blocks=5)
+            (worker.task / "geometry.json").write_text(json.dumps(geometry))
             inputs = ({0: []}, {0: []}, worker.task / "engine.log")
             with (
                 patch.object(
@@ -63,18 +65,18 @@ class LongCiTest(unittest.TestCase):
                 ),
                 patch.object(worker, "execution_inputs", return_value=inputs),
                 patch.object(worker, "long_phase_events", return_value=inputs[:2]),
-                patch.object(worker, "audit_prefill_retention", return_value={}),
-                patch.object(k31_ci, "audit_long_retention", return_value={}),
                 patch.object(
                     k31_long_prefix_smoke, "verify", return_value=proof
                 ) as raw,
                 patch.object(
-                    k31_two_host_smoke, "audit_long_events", return_value={}
+                    k31_two_host_smoke, "audit_long_execution", return_value=proof
                 ) as native,
             ):
                 self.assertTrue(worker.run_request_phase({})["requests_passed"])
             raw.assert_called_once_with(worker.task / "requests/long-prefix", worker.task / "geometry.json")
-            native.assert_called_once_with(proof, inputs[0], inputs[1], decode_tp=4)
+            native.assert_called_once_with(
+                proof, inputs[0], inputs[1], geometry, decode_tp=4, max_chunk_tokens=65536,
+            )
             verdict = json.loads(
                 (worker.task / "requests/long-execution-audit.json").read_text()
             )

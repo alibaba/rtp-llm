@@ -3,12 +3,24 @@ import copy
 import unittest
 
 from audit_k31_full_smoke import (IndexedEvents, audit, group_evidence, replay_evidence,
-                                 host_cancel_evidence, large_batch_evidence)
+                                 host_cancel_evidence, large_batch_evidence,
+                                 scheduler_chunk_evidence)
 from k31_full_smoke import cache_pressure_plan
 from smoke_request_identity import resolve
 
 
 class MtpExecutionAuditTest(unittest.TestCase):
+    def test_scheduler_chunk_evidence_rejects_wrong_tail(self):
+        rows = {"tail": dict(input_len=65543, effective_reuse_len=0)}
+        ids = {"tail": [12]}
+        roots = [dict(request_ids=[12], reuse_lengths=[0], context_lengths=[65536]),
+                 dict(request_ids=[12], reuse_lengths=[65536], context_lengths=[7])]
+        self.assertEqual(scheduler_chunk_evidence(rows, ids, roots)["tail"]["rounds"],
+                         [(0, 65536), (65536, 7)])
+        roots[-1]["context_lengths"] = [8]
+        with self.assertRaisesRegex(ValueError, "native Prefill chunks"):
+            scheduler_chunk_evidence(rows, ids, roots)
+
     def test_chunked_identity_checks_windows_separately_from_pd_decode_iterations(self):
         stages = [dict(name='long', passed=True, case_names=['a'])]
         raw = {'a': dict(passed=True, transport='http', result=dict(
