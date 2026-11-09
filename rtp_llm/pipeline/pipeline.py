@@ -37,7 +37,12 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutputs,
     GenerateResponse,
 )
+from rtp_llm.utils.prefix_token_cache import PrefixTokenCache
 from rtp_llm.utils.time_util import current_time_ms
+
+# Per-process prefix-incremental tokenization cache: warm steps of a growing
+# session re-encode only the appended tail instead of the full prompt.
+_PREFIX_TOKEN_CACHE = PrefixTokenCache()
 from rtp_llm.utils.util import AtomicCounter
 from rtp_llm.utils.word_util import (
     batch_remove_padding_eos,
@@ -230,7 +235,7 @@ class Pipeline(object):
         # 在 tokenizer.encode(prompt) 之前解析及填充 banned_combo_token_ids，
         # 避免重复编码 prompt。
         parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
-        token_ids = self.tokenizer.encode(prompt)
+        token_ids = _PREFIX_TOKEN_CACHE.encode(self.tokenizer, prompt)
 
         # Prompt scoring constraints (max_new_tokens=1, non-streaming, no reuse/PD-sep) are
         # already enforced by validate() → enforce_prompt_scoring_constraints() during config creation.

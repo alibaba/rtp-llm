@@ -155,6 +155,16 @@ py_test(
 )
 
 py_test(
+    name = "prefix_token_cache_test",
+    srcs = [
+        "prefix_token_cache_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+)
+
+py_test(
     name = "fuser_test",
     srcs = [
         "fuser_test.py",
