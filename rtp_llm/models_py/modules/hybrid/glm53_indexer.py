@@ -150,7 +150,6 @@ class Indexer(nn.Module):
         self.index_head_dim = attn_config.indexer_head_dim
         self.index_topk = attn_config.indexer_topk
         self.compress_ratio = int(getattr(attn_config, "indexer_compress_ratio", 1))
-        self._block_table_group_ids: Optional[Dict[int, int]] = None
 
         self.rope_head_dim = attn_config.rope_head_dim
         self.block_size = 128  # quantization block size (128)
@@ -375,7 +374,7 @@ class Indexer(nn.Module):
                             "context_parallel_info"
                         )
                     from rtp_llm.models_py.modules.dsv4.cp import build_cp_context
-                    from rtp_llm.models_py.modules.dsv4.prefill_workspace import (
+                    from rtp_llm.models_py.modules.dsv4.glm53_prefill_workspace import (
                         PrefillWorkspace,
                     )
 
@@ -890,25 +889,3 @@ class Indexer(nn.Module):
         return self._compute_topk(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params
         )
-
-
-def bind_indexer_block_table_group_ids(
-    layers: Any, kv_cache: Optional[KVCache]
-) -> None:
-    """Resolve physical block-table groups once and bind compressed indexers."""
-    compressed_indexers = []
-    for layer in layers:
-        indexer = getattr(getattr(layer, "self_attn", None), "indexer", None)
-        if isinstance(indexer, Indexer) and indexer.compress_ratio > 1:
-            compressed_indexers.append(indexer)
-
-    if not compressed_indexers or kv_cache is None:
-        return
-
-    from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
-        resolve_block_table_group_ids,
-    )
-
-    table_group_ids = resolve_block_table_group_ids(kv_cache)
-    for indexer in compressed_indexers:
-        indexer._block_table_group_ids = table_group_ids
