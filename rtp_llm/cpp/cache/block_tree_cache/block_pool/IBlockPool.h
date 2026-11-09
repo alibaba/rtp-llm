@@ -235,6 +235,7 @@ private:
 
 private:
     std::shared_ptr<const BlockPoolConfigBase>                config_;
+    double                                                    effective_frozen_block_abort_ratio_{0.0};
     bool                                                      initialized_{false};
     std::function<void()>                                     capacity_change_callback_;
     std::shared_ptr<FrozenBlockObserver>                      frozen_block_observer_;

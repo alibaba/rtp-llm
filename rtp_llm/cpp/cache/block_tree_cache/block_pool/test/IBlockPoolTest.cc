@@ -1,13 +1,16 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
 
 #include <algorithm>
+#include <cmath>
 #include <csignal>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <sys/resource.h>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -71,6 +74,13 @@ std::shared_ptr<TestPool> makeUnprotectedPool(size_t physical_block_count) {
     return makeInitializedPool(physical_block_count, BlockPoolType::HOST, /*abort_ratio=*/0.0);
 }
 
+void disableCoreDumpInChild() {
+    const rlimit limit{0, 0};
+    if (setrlimit(RLIMIT_CORE, &limit) != 0) {
+        _exit(1);
+    }
+}
+
 }  // namespace
 
 TEST(IBlockPoolTest, UnfreezeReleasesOnlyFrozenReference) {
@@ -119,65 +129,192 @@ TEST(IBlockPoolTest, UnfreezeReleasesOnlyFrozenReference) {
 
 class IBlockPoolFrozenAbortRatioTest: public ::testing::TestWithParam<BlockPoolType> {};
 
-TEST_P(IBlockPoolFrozenAbortRatioTest, DefaultFreezeAbortRatioAllowsThirtyPercentAndRejectsMore) {
+TEST_P(IBlockPoolFrozenAbortRatioTest, DefaultJitteredRatioAllowsThirtyPercentAndAbortsByFiftyPercent) {
     auto pool   = makeInitializedPool(/*physical_block_count=*/11, GetParam());
-    auto blocks = pool->malloc(4);
+    auto blocks = pool->malloc(5);
     ASSERT_TRUE(blocks.has_value());
-
     for (size_t index = 0; index < 3; ++index) {
         pool->freezeBlock(blocks->at(index));
     }
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 3u);
-
-    EXPECT_EXIT(pool->freezeBlock(blocks->at(3)), ::testing::KilledBySignal(SIGABRT), "");
+    EXPECT_EXIT(
+        {
+            disableCoreDumpInChild();
+            pool->freezeBlock(blocks->at(3));
+            pool->freezeBlock(blocks->at(4));
+        },
+        ::testing::KilledBySignal(SIGABRT),
+        "");
 }
 
-TEST_P(IBlockPoolFrozenAbortRatioTest, ConfiguredFreezeAbortRatioAllowsEqualityAndRejectsMore) {
+TEST_P(IBlockPoolFrozenAbortRatioTest, JitteredRatioCountsDistinctBlocksAndAllowsConfiguredBoundary) {
     auto pool   = makeInitializedPool(/*physical_block_count=*/11, GetParam(), /*abort_ratio=*/0.5);
-    auto blocks = pool->malloc(6);
+    auto blocks = pool->malloc(7);
     ASSERT_TRUE(blocks.has_value());
-
     for (size_t index = 0; index < 5; ++index) {
         pool->freezeBlock(blocks->at(index));
+        pool->freezeBlock(blocks->at(index));
+        pool->incTreeRef(blocks->at(index), BlockTreeRefType::FROZEN);
     }
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 5u);
-
-    EXPECT_EXIT(pool->freezeBlock(blocks->at(5)), ::testing::KilledBySignal(SIGABRT), "");
+    EXPECT_EXIT(
+        {
+            disableCoreDumpInChild();
+            pool->freezeBlock(blocks->at(5));
+            pool->freezeBlock(blocks->at(6));
+        },
+        ::testing::KilledBySignal(SIGABRT),
+        "");
+    EXPECT_EXIT(
+        {
+            disableCoreDumpInChild();
+            pool->incTreeRef(blocks->at(5), BlockTreeRefType::FROZEN);
+            pool->incTreeRef(blocks->at(6), BlockTreeRefType::FROZEN);
+        },
+        ::testing::KilledBySignal(SIGABRT),
+        "");
 }
 
-TEST_P(IBlockPoolFrozenAbortRatioTest, ZeroFreezeAbortRatioDisablesGuard) {
-    auto pool   = makeInitializedPool(/*physical_block_count=*/11, GetParam(), /*abort_ratio=*/0.0);
-    auto blocks = pool->malloc(10);
+TEST_P(IBlockPoolFrozenAbortRatioTest, BatchFrozenReferencesCannotBypassGuard) {
+    auto pool   = makeInitializedPool(/*physical_block_count=*/11, GetParam(), /*abort_ratio=*/0.5);
+    auto blocks = pool->malloc(7);
     ASSERT_TRUE(blocks.has_value());
-
-    for (const auto block : *blocks) {
-        pool->freezeBlock(block);
-    }
-    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), pool->totalBlocksNum());
+    EXPECT_EXIT(
+        {
+            disableCoreDumpInChild();
+            pool->incTreeRef(*blocks, BlockTreeRefType::FROZEN);
+        },
+        ::testing::KilledBySignal(SIGABRT),
+        "");
 }
 
-TEST_P(IBlockPoolFrozenAbortRatioTest, FullFreezeAbortRatioAllowsEntirePool) {
-    auto pool   = makeInitializedPool(/*physical_block_count=*/11, GetParam(), /*abort_ratio=*/1.0);
-    auto blocks = pool->malloc(10);
+TEST_P(IBlockPoolFrozenAbortRatioTest, ZeroAndOneAllowEntirePoolToFreeze) {
+    for (const double ratio : {0.0, 1.0}) {
+        SCOPED_TRACE(ratio);
+        auto pool   = makeInitializedPool(/*physical_block_count=*/11, GetParam(), ratio);
+        EXPECT_EQ(pool->effective_frozen_block_abort_ratio_, ratio);
+        auto blocks = pool->malloc(10);
+        ASSERT_TRUE(blocks.has_value());
+        for (const auto block : *blocks) {
+            pool->freezeBlock(block);
+        }
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), pool->totalBlocksNum());
+    }
+}
+
+TEST(IBlockPoolTest, FrozenAbortJitterIsStableAcrossPoolsAndPreservesConfiguredRatio) {
+    for (const double ratio : {0.1, 0.3, 0.5, 0.98, std::nextafter(1.0, 0.0)}) {
+        SCOPED_TRACE(ratio);
+        auto reference = makeInitializedPool(11, BlockPoolType::HOST, ratio);
+        const double effective = reference->effective_frozen_block_abort_ratio_;
+        EXPECT_GE(effective, ratio);
+        EXPECT_LE(effective, ratio + 0.10);
+        EXPECT_LT(effective, 1.0);
+        for (const auto type : {BlockPoolType::DEVICE, BlockPoolType::HOST, BlockPoolType::DISK}) {
+            SCOPED_TRACE(static_cast<int>(type));
+            for (int repetition = 0; repetition < 3; ++repetition) {
+                auto config = std::make_shared<TestPoolConfig>("jitter", 11, type);
+                config->frozen_block_abort_ratio = ratio;
+                auto pool = std::make_shared<TestPool>(config);
+                ASSERT_TRUE(pool->init());
+                EXPECT_EQ(config->frozen_block_abort_ratio, ratio);
+                EXPECT_EQ(pool->effective_frozen_block_abort_ratio_, effective);
+                const auto block = pool->malloc();
+                ASSERT_TRUE(block.has_value());
+                pool->freezeBlock(*block);
+                EXPECT_EQ(pool->effective_frozen_block_abort_ratio_, effective);
+            }
+        }
+    }
+}
+
+TEST_P(IBlockPoolFrozenAbortRatioTest, RuntimeJitteredThresholdControlsBothFreezeApis) {
+    constexpr size_t usable_blocks = 1000;
+    auto pool = makeInitializedPool(usable_blocks + 1, GetParam(), 0.3);
+    const double effective = pool->effective_frozen_block_abort_ratio_;
+    size_t allowed = static_cast<size_t>(std::floor(effective * usable_blocks));
+    if (static_cast<double>(allowed) / usable_blocks > effective) {
+        --allowed;
+    }
+    if (static_cast<double>(allowed + 1) / usable_blocks <= effective) {
+        ++allowed;
+    }
+    ASSERT_GE(allowed, 300u);
+    ASSERT_LE(allowed, 400u);
+    ASSERT_LE(static_cast<double>(allowed) / usable_blocks, effective);
+    ASSERT_GT(static_cast<double>(allowed + 1) / usable_blocks, effective);
+    auto blocks = pool->malloc(allowed + 1);
     ASSERT_TRUE(blocks.has_value());
-
-    for (const auto block : *blocks) {
-        pool->freezeBlock(block);
+    for (size_t index = 0; index < allowed; ++index) {
+        pool->freezeBlock(blocks->at(index));
     }
-    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), pool->totalBlocksNum());
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), allowed);
+    EXPECT_EQ(pool->effective_frozen_block_abort_ratio_, effective);
+    EXPECT_EXIT(
+        {
+            disableCoreDumpInChild();
+            pool->freezeBlock(blocks->back());
+        },
+        ::testing::KilledBySignal(SIGABRT),
+        "");
+    EXPECT_EXIT(
+        {
+            disableCoreDumpInChild();
+            pool->incTreeRef(blocks->back(), BlockTreeRefType::FROZEN);
+        },
+        ::testing::KilledBySignal(SIGABRT),
+        "");
 }
 
-TEST_P(IBlockPoolFrozenAbortRatioTest, RejectsInvalidFrozenBlockAbortRatios) {
-    const bool previous = StaticConfig::user_ft_core_dump_on_exception;
-    block_tree_cache_detail::ScopeRollback restore_config(
-        [previous] { StaticConfig::user_ft_core_dump_on_exception = previous; });
+TEST_P(IBlockPoolFrozenAbortRatioTest, NearOneJitterStillAbortsWhenEntirePoolFreezes) {
+    for (const double ratio : {0.99, std::nextafter(1.0, 0.0)}) {
+        SCOPED_TRACE(ratio);
+        auto pool = makeInitializedPool(101, GetParam(), ratio);
+        EXPECT_GE(pool->effective_frozen_block_abort_ratio_, ratio);
+        EXPECT_LT(pool->effective_frozen_block_abort_ratio_, 1.0);
+        auto blocks = pool->malloc(100);
+        ASSERT_TRUE(blocks.has_value());
+        for (size_t index = 0; index < 99; ++index) {
+            pool->freezeBlock(blocks->at(index));
+        }
+        EXPECT_EXIT(
+            {
+                disableCoreDumpInChild();
+                pool->freezeBlock(blocks->back());
+            },
+            ::testing::KilledBySignal(SIGABRT),
+            "");
+    }
+}
+
+TEST_P(IBlockPoolFrozenAbortRatioTest, TinyPositiveRatioRemainsEnabled) {
+    const double ratio = std::numeric_limits<double>::denorm_min();
+    auto pool = makeInitializedPool(6, GetParam(), ratio);
+    EXPECT_GE(pool->effective_frozen_block_abort_ratio_, ratio);
+    EXPECT_LE(pool->effective_frozen_block_abort_ratio_, ratio + 0.10);
+    const auto block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    EXPECT_EXIT(
+        {
+            disableCoreDumpInChild();
+            pool->freezeBlock(*block);
+        },
+        ::testing::KilledBySignal(SIGABRT),
+        "");
+}
+
+TEST_P(IBlockPoolFrozenAbortRatioTest, RejectsInvalidRatios) {
+    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
     StaticConfig::user_ft_core_dump_on_exception = false;
-
-    for (const auto ratio :
-         {-0.1, 1.1, std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+    for (const double ratio : {-0.1,
+                               1.1,
+                               std::numeric_limits<double>::quiet_NaN(),
+                               std::numeric_limits<double>::infinity(),
+                               -std::numeric_limits<double>::infinity()}) {
         SCOPED_TRACE(ratio);
         EXPECT_THROW(makeInitializedPool(11, GetParam(), ratio), RTPException);
     }
+    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 }
 
 INSTANTIATE_TEST_SUITE_P(AllPoolTypes,

@@ -386,7 +386,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "block_tree_device_frozen_abort_ratio"),
         type=_frozen_abort_ratio,
         default=0.3,
-        help="单个 DEVICE/HOST/DISK pool 冻结 block 占比严格超过此值时 core，范围 [0, 1]，默认 0.3；0 关闭各介质保护。沿用原 device 配置名，启动时配置。",
+        help="单个 DEVICE/HOST/DISK pool 的冻结 block 占比严格超过实际阈值时 core。配置范围 [0, 1]，默认 0.3；(0, 1) 内的配置会增加 [0, 0.10) 范围内的进程级固定随机扰动，接近 1 时缩小扰动范围，实际阈值始终小于 1；0 和 1 不加扰动，0 关闭保护。沿用原 device 配置名，启动时配置。",
     )
     kv_cache_group.add_argument(
         "--block_tree_transfer_worker_count",

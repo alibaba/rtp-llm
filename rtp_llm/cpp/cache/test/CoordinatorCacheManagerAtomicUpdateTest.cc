@@ -312,6 +312,7 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, UpdateKVBlockEmptyResourcesNeedN
 
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, UpdateKVBlockDoesNotTransferExternallyReferencedTail) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/5, /*seq_size_per_block=*/4);
+    config.block_tree_device_frozen_abort_ratio = 0.0;
     allocator_  = std::make_shared<TestAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
     auto pool   = allocator_->groupBlockPools().front();

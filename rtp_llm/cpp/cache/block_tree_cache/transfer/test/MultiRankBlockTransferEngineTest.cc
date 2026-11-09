@@ -2,7 +2,6 @@
 #include <grpcpp/grpcpp.h>
 
 #include <chrono>
-#include <csignal>
 #include <condition_variable>
 #include <cstdio>
 #include <future>
@@ -1475,7 +1474,11 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferReportsWorkerRpcError)
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferReportsRpcDeadline) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferReportsRpcDeadlineWithCoreDumpEnabled) {
+    const bool previous = StaticConfig::user_ft_core_dump_on_exception;
+    block_tree_cache_detail::ScopeRollback restore_config(
+        [previous] { StaticConfig::user_ft_core_dump_on_exception = previous; });
+    StaticConfig::user_ft_core_dump_on_exception = true;
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK, nullptr, /*sleep_millis=*/500},
@@ -1488,8 +1491,10 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferReportsRpcDeadline) {
     auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
         TransferTask(makeBroadcastDescriptors(), std::chrono::milliseconds(50)));
     context->waitDone();
+    EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    EXPECT_EQ(context->result().copy_error, CacheCopyError::RPC_FAILED);
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnWorkerBusinessError) {
@@ -1782,6 +1787,10 @@ TEST_F(MultiRankBlockTransferEngineTest, HostLoadRpcFailureFreezesBothEndsBefore
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
+    const bool previous = StaticConfig::user_ft_core_dump_on_exception;
+    block_tree_cache_detail::ScopeRollback restore_config(
+        [previous] { StaticConfig::user_ft_core_dump_on_exception = previous; });
+    StaticConfig::user_ft_core_dump_on_exception = true;
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     auto                                                          broadcast_manager = makeBroadcastManager(
         {{true, MemoryOperationResponsePB::COPY_FAILED, grpc::Status::OK},
@@ -1830,6 +1839,10 @@ TEST_F(MultiRankBlockTransferEngineTest, EvictionRpcFailureFreezesBothEndsAndPre
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
+    const bool previous = StaticConfig::user_ft_core_dump_on_exception;
+    block_tree_cache_detail::ScopeRollback restore_config(
+        [previous] { StaticConfig::user_ft_core_dump_on_exception = previous; });
+    StaticConfig::user_ft_core_dump_on_exception = true;
     auto state = std::make_shared<MultiRankBlockTransferRpcState>();
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     auto                                                          broadcast_manager = makeBroadcastManager(
