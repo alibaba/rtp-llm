@@ -1184,7 +1184,12 @@ void GenerateStream::matchStopWordsList(int batch_id) {
             continue;
         }
         if (complete_token_ids_->matchStopWordsList(
-                batch_id, stop_words, inputLength() + generateConfig()->min_new_tokens)) {
+                batch_id,
+                stop_words,
+                inputLength() + generateConfig()->min_new_tokens,
+                inputLength(),
+                generateConfig()->in_think_mode,
+                generateConfig()->end_think_token_ids)) {
             match = true;
             break;
         }

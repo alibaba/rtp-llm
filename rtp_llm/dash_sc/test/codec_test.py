@@ -1017,6 +1017,48 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(sp.stop_words_list, ((1, 2), (3, 4)))
         self.assertEqual(sp.stop_words_list_py(), [[1, 2], [3, 4]])
 
+    def test_parse_sampling_stop_parameters_dash_shapes(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["stop_words_list"].string_param = json.dumps([[[13693]]])
+        req.parameters["stop_token_ids"].string_param = json.dumps([[120025]])
+
+        sp = parse_sampling_params(req)
+
+        self.assertEqual(sp.stop_words_list, ((13693,), (120025,)))
+        self.assertEqual(sp.to_generate_config().stop_words_list, [[13693], [120025]])
+
+    def test_parse_sampling_stop_token_ids_are_independent_and_deduplicated(
+        self,
+    ) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["stop_words_list"].string_param = json.dumps([[7, 8], [9]])
+        req.parameters["stop_token_ids"].string_param = json.dumps([[9, 10]])
+
+        sp = parse_sampling_params(req)
+
+        self.assertEqual(sp.stop_words_list, ((7, 8), (9,), (10,)))
+
+    def test_parse_sampling_stop_words_tensor_has_priority_over_parameters(
+        self,
+    ) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "stop_words_list", "INT32", [1, 1], struct.pack("<i", 42))
+        req.parameters["stop_words_list"].string_param = json.dumps([[[13693]]])
+        req.parameters["stop_token_ids"].string_param = json.dumps([[120025]])
+
+        sp = parse_sampling_params(req)
+
+        self.assertEqual(sp.stop_words_list, ((42,),))
+
+    def test_parse_sampling_rejects_invalid_stop_parameter(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["stop_token_ids"].string_param = "not-json"
+
+        with self.assertRaisesRegex(
+            DashScParameterError, "invalid stop_token_ids: expected valid JSON"
+        ):
+            parse_sampling_params(req)
+
     def test_sampling_params_n_alias(self) -> None:
         sp = SamplingParams(num_return_sequences=5)
         self.assertEqual(sp.n, 5)

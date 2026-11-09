@@ -120,7 +120,15 @@ bool CompleteTokenIds::matchEosToken(int batch_id, int token_id, int min_seq_len
     return false;
 }
 
-bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int>& stop_words, int min_seq_length) {
+bool CompleteTokenIds::matchStopWordsList(int batch_id,
+                                         const std::vector<int>& stop_words,
+                                         int min_seq_length,
+                                         int input_length,
+                                         bool in_think_mode,
+                                         const std::vector<int>& end_think_token_ids) {
+    if (stop_words.empty() || (in_think_mode && end_think_token_ids.empty())) {
+        return false;
+    }
     int* token_ids = data(batch_id);
     for (size_t i = std::max({start_check_seq_length_, min_seq_length, static_cast<int>(stop_words.size())});
          i <= seq_length_;
@@ -134,6 +142,19 @@ bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int>& 
             }
         }
         if (match_one) {
+            if (in_think_mode) {
+                const int stop_begin = i - stop_words.size();
+                if (stop_begin < input_length) {
+                    continue;
+                }
+                const auto* content_limit = token_ids + stop_begin;
+                if (std::search(token_ids + input_length,
+                                token_ids + stop_begin,
+                                end_think_token_ids.begin(),
+                                end_think_token_ids.end()) == content_limit) {
+                    continue;
+                }
+            }
             seq_length_ = i;
             return true;
         }
