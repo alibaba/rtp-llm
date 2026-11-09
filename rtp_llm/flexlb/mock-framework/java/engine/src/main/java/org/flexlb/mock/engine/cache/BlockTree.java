@@ -3,7 +3,7 @@ package org.flexlb.mock.engine.cache;
 import java.util.*;
 
 /**
- * RTP Full-KV prefix index. Every mutation runs under KvCache's monitor.
+ * RTP Full-KV prefix index. Every mutation runs under KvCacheManager's monitor.
  */
 final class BlockTree {
     private final Map<Long, Node> nodes = new HashMap<>(), roots = new HashMap<>();
@@ -63,7 +63,7 @@ final class BlockTree {
         try {
             while (evicted.size() < count && !leaves.isEmpty()) {
                 var node = leaves.pollFirst();
-                // Pins cannot change under KvCache's monitor. Skip each pinned leaf once per reclamation.
+                // Pins cannot change under KvCacheManager's monitor. Skip each pinned leaf once per reclamation.
                 if (node.cache.inUse()) { pinned.add(node); continue; }
                 nodes.remove(node.key);
                 (node.parent == null ? roots : node.parent.children).remove(node.key);
@@ -102,9 +102,6 @@ final class BlockTree {
         observer.accept(new CacheMetadata.Change(++version, key, added));
     }
 
-    /**
-     * Tracks one cached block and its links to the prefix tree and eviction order.
-     */
     static final class Node {
         final long key, admission, insertedNanos = System.nanoTime();
         final Node parent;

@@ -7,8 +7,7 @@ import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.flexlb.mock.engine.cache.KvCache;
-import org.flexlb.mock.engine.cache.KvcmReporter;
+import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
@@ -18,65 +17,64 @@ import org.flexlb.mock.metrics.MetricTags;
 import org.flexlb.mock.protocol.ControlServer;
 
 /**
- * One owned RTP P/D object with independent listeners and resources. Does not contain the case runner or a cluster controller.
+ * One LLM Mock P/D Engine with independent listeners and resources. Does not contain the case runner or a cluster controller.
  */
-public final class RtpNode implements AutoCloseable {
+public final class LLMMockEngine implements AutoCloseable {
     private final RtpConfig config;
-    private final KvCache cache;
+    private final KvCacheManager cacheManager;
     private final RtpRpcService service;
-    private final RtpEngineLoop engine;
+    private final EngineLoop engine;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final org.flexlb.mock.engine.EngineMain.Address address = org.flexlb.mock.engine.EngineMain.Address.local();
 
     private Server rpc;
     private ControlServer api;
     private org.flexlb.mock.metrics.MetricsOutput metrics;
-    private KvcmReporter publisher;
     private java.util.function.Supplier<List<MetricFamilySamples>> metricSource;
 
-    private RtpNode(RtpConfig config, EngineScheduler.Factory schedulers, KvCache.RemotePrefixLoader remote) {
+    private LLMMockEngine(RtpConfig config, EngineScheduler.Factory schedulers, KvCacheManager.RemotePrefixLoader remote) {
         this.config = Objects.requireNonNull(config);
         Objects.requireNonNull(schedulers);
-        cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.totalCacheBlocks(), config.reserveBlocks(), config.deviceCache(),
+        cacheManager = new KvCacheManager(config.blockSize(), config.deviceBlocks(), config.totalCacheBlocks(), config.reserveBlocks(), config.deviceCache(),
             config.role() == org.flexlb.mock.protocol.Role.prefill ? remote : null);
         var lock = new Object();
         var finished = new TaskHistory();
         try {
-            var scheduler = schedulers.create(lock, cache, finished);
+            var scheduler = schedulers.create(lock, cacheManager, finished);
             var samples = AbstractRtpScheduler.metricsFor(scheduler);
             if (samples != null) metricSource = samples;
-            engine = new RtpEngineLoop(lock, scheduler, finished, cache, config.compute(), config.role(), config.id());
+            engine = new EngineLoop(lock, scheduler, finished, cacheManager, config.compute(), config.role(), config.id());
             try {
-                service = new RtpRpcService(RtpRpcService.Config.from(config), cache, lock, finished, engine, config.groupScheduling());
+                service = new RtpRpcService(RtpRpcService.Config.from(config), cacheManager, lock, finished, engine, config.groupScheduling());
             } catch (RuntimeException | Error failure) {
                 engine.close();
                 throw failure;
             }
         } catch (RuntimeException | Error failure) {
-            cache.close();
+            cacheManager.close();
             throw failure;
         }
     }
 
-    public static RtpNode start(RtpConfig config) throws IOException {
+    public static LLMMockEngine start(RtpConfig config) throws IOException {
         return start(config, 0, 0);
     }
 
-    public static RtpNode start(RtpConfig config, int rpcPort, int controlPort) throws IOException {
+    public static LLMMockEngine start(RtpConfig config, int rpcPort, int controlPort) throws IOException {
         return start(config, rpcPort, controlPort, AbstractRtpScheduler.factory(config));
     }
 
-    public static RtpNode start(RtpConfig config, EngineScheduler.Factory schedulers) throws IOException {
+    public static LLMMockEngine start(RtpConfig config, EngineScheduler.Factory schedulers) throws IOException {
         return start(config, 0, 0, schedulers);
     }
 
-    public static RtpNode start(RtpConfig config, int rpcPort, int controlPort, EngineScheduler.Factory schedulers) throws IOException {
+    public static LLMMockEngine start(RtpConfig config, int rpcPort, int controlPort, EngineScheduler.Factory schedulers) throws IOException {
         return start(config, rpcPort, controlPort, schedulers, null);
     }
 
-    public static RtpNode start(RtpConfig config, int rpcPort, int controlPort, EngineScheduler.Factory schedulers,
-                                KvCache.RemotePrefixLoader remote) throws IOException {
-        var node = new RtpNode(config, schedulers, remote);
+    public static LLMMockEngine start(RtpConfig config, int rpcPort, int controlPort, EngineScheduler.Factory schedulers,
+                                KvCacheManager.RemotePrefixLoader remote) throws IOException {
+        var node = new LLMMockEngine(config, schedulers, remote);
         try {
             var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
             node.rpc = builder.build().start();
@@ -84,7 +82,7 @@ public final class RtpNode implements AutoCloseable {
             node.api = new ControlServer(node.address.listener(controlPort)).health(node::checkHealthy);
             if (node.metrics.prometheus()) node.api.metrics(() -> MetricTags.scrape(node.collectMetrics()));
             node.api.start();
-            node.publisher = node.startMetadataReporter();
+            node.cacheManager.startKvcmReporter(config, node.address.rpc(node.rpc.getPort() - 1));
             return node;
         } catch (IOException | RuntimeException | Error error) {
             try { node.close(); } catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }
@@ -98,7 +96,7 @@ public final class RtpNode implements AutoCloseable {
         service.checkHealthy();
     }
 
-    public KvCache cache() { return cache; }
+    public KvCacheManager cacheManager() { return cacheManager; }
 
     public Map<String, Object> endpoints() {
         boolean prefill = config.role() == org.flexlb.mock.protocol.Role.prefill;
@@ -113,7 +111,8 @@ public final class RtpNode implements AutoCloseable {
             if (config.groupScheduling()) supported.addAll(List.of("EnqueueBatch", "EnqueueGroup"));
         } else supported.add("RemoteGenerate");
         result.put("supported_rpc", List.copyOf(supported));
-        if (publisher != null) result.put("kvcm",publisher.status());
+        var kvcm = cacheManager.kvcmStatus();
+        if (!kvcm.isEmpty()) result.put("kvcm", kvcm);
         result.put("local_generation", prefill ? Map.of("max_new_tokens", 1, "multimodal", true) : Map.of());
         result.put("pd_generation", prefill ? Map.of("rpc", "GenerateStreamCall", "decode_target", "role_addrs", "multimodal", true) : Map.of());
         result.put("remote_generation", prefill ? Map.of() : Map.of("stages", List.of("ALLOCATE", "LOAD", "GENERATE", "PREFILL_COMPLETE"), "multimodal", true, "load", true));
@@ -146,9 +145,7 @@ public final class RtpNode implements AutoCloseable {
             try { if (metrics != null) metrics.close(); }
             catch (RuntimeException error) { if (failure == null) failure = error; else failure.addSuppressed(error); }
             try { engine.close(); } finally {
-                try { if (publisher != null) publisher.close(); } finally {
-                    try { if (api != null) api.close(); } finally { cache.close(); }
-                }
+                try { if (api != null) api.close(); } finally { cacheManager.close(); }
             }
         }
         if (failure != null) throw failure;
@@ -160,33 +157,6 @@ public final class RtpNode implements AutoCloseable {
         var samples = new java.util.ArrayList<>(metricSource.get());
         samples.addAll(service.collectMetrics());
         return samples;
-    }
-
-    private KvcmReporter startMetadataReporter() {
-        var values = config.business();
-        String type = values.path("kv_cache_event_publisher_type").asText("none");
-        if (!Set.of("none", "kvcm").contains(type)) throw new IllegalArgumentException("Invalid kv_cache_event_publisher_type");
-        if (type.equals("none")) return null;
-        String instance = values.path("kv_cache_event_instance_id").asText();
-        String host = values.path("kv_cache_event_host_ip_port").asText(address.rpc(rpc.getPort() - 1));
-        if (instance.isBlank() || host.isBlank())
-            throw new IllegalArgumentException("KVCM requires a shared instance_id and a nonempty Master-visible host_ip_port");
-        var identity = new KvcmReporter.Identity(
-            instance,
-            values.path("kv_cache_event_instance_group").asText("default"),
-            host,
-            values.path("model_name").asText("mock-full-kv"), "FP16", false,
-            config.blockSize(), config.tpSize(), config.dpSize(), "rtp_llm_hbm_" + config.blockSize() + "_full");
-        int snapshotMillis = RtpConfig.nativeInt(values, "kv_cache_event_snapshot_interval_ms", 600000, Integer.MIN_VALUE, Integer.MAX_VALUE);
-        String override = values.path("kv_cache_event_manager_endpoint").asText();
-        boolean vip = RtpConfig.nativeBool(values, "kvcm_enable_vipserver", false);
-        var endpoint = override.isBlank()
-            ? org.flexlb.mock.engine.cache.KvcmDiscovery.discover(
-                values.path(vip ? "kvcm_vipserver_domain" : "kvcm_server_address").asText(), instance, vip)
-            : org.flexlb.mock.engine.cache.KvcmDiscovery.direct(java.net.URI.create(override));
-        var settings = new KvcmReporter.Configuration(endpoint, type.equals("kvcm") && snapshotMillis > 0,
-            snapshotMillis);
-        return new KvcmReporter(settings, identity, cache);
     }
 
 }

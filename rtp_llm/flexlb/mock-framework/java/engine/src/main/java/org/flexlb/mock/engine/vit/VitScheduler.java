@@ -46,7 +46,7 @@ final class VitScheduler implements AutoCloseable {
             metrics.events.increment("py_rtp_vit_embedding_overload_qps");
             throw Status.RESOURCE_EXHAUSTED.withDescription("V waiting queue full").asRuntimeException();
         }
-        var work=new Work(image,System.nanoTime(),deadline,new CompletableFuture<>());
+        var work=new Work(image,deadline);
         waiting.add(work); notifyAll(); return work;
     }
 
@@ -132,5 +132,14 @@ final class VitScheduler implements AutoCloseable {
         for(var job:rest) complete(job,error);
     }
 
-    record Work(VitGeometry.Image image,long enqueued,long deadline,CompletableFuture<VitGeometry.Image> result) {}
+    /**
+     * Carries one ready media work item and its completion through a ViT Forward.
+     */
+    static final class Work {
+        private final VitGeometry.Image image;
+        private final long enqueued=System.nanoTime(), deadline;
+        private final CompletableFuture<VitGeometry.Image> result=new CompletableFuture<>();
+        private Work(VitGeometry.Image image,long deadline) { this.image=image; this.deadline=deadline; }
+        CompletionStage<VitGeometry.Image> result() { return result.minimalCompletionStage(); }
+    }
 }

@@ -12,71 +12,17 @@ import java.util.stream.IntStream;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.config.RtpConfig;
-import org.flexlb.mock.engine.execution.RtpNode;
-import org.flexlb.mock.engine.scheduler.RtpNodeTest;
+import org.flexlb.mock.engine.execution.LLMMockEngine;
+import org.flexlb.mock.engine.scheduler.LLMMockEngineTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Checks Decode admission, cache preparation, failure and cancellation.
+ */
 class DecodeAdmissionTest {
-    private static Set<Long> cacheKeys(RtpNode node) {
-        return new HashSet<>(Arrays.stream(node.cache().snapshot(-1, true).keys()).boxed().toList());
-    }
     @TempDir Path directory;
-    private static GenerateRequestPB input(String client, long id, int length, int timeout) {
-        return GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(id).setClientId(client)
-            .setInput(GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(IntStream.rangeClosed(1, length).boxed().toList())
-                .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(4).setReuseCache(true).setTimeoutMs(timeout))).build();
-    }
-    private Harness node(boolean disableReuse) throws Exception {
-        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("decode"));
-        ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true)
-            .put("disable_decode_first_malloc_device_reuse", disableReuse);
-        var path = directory.resolve("config.json"); json.writeValue(path.toFile(), root);
-        return new Harness(RtpNode.start(RtpConfig.load(path)));
-    }
-    private static void await(BooleanSupplier condition) throws Exception {
-        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-        while (!condition.getAsBoolean()) { if (System.nanoTime() >= end) fail("Condition timed out"); Thread.sleep(5); }
-    }
-    private static final class Harness implements AutoCloseable {
-        final RtpNode node;
-        final ManagedChannel channel;
-        Harness(RtpNode node) { this.node = node; channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build(); }
-        WorkerStatusPB status() { return RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS).getWorkerStatus(StatusVersionPB.getDefaultInstance()); }
-        @Override public void close() throws Exception { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); node.close(); }
-    }
-    private static final class Call implements AutoCloseable {
-        final Context.CancellableContext context = Context.current().withCancellation();
-        final BlockingQueue<Object> replies = new LinkedBlockingQueue<>();
-        final StreamObserver<GenerateRequestPB> request;
-        Call(Harness node, long rpcMs) throws Exception {
-            request = context.call(() -> {
-                var stub = RpcServiceGrpc.newStub(node.channel);
-                if (rpcMs > 0) stub = stub.withDeadlineAfter(rpcMs, TimeUnit.MILLISECONDS);
-                return stub.remoteGenerate(new StreamObserver<>() {
-                    @Override public void onNext(GenerateOutputsPB value) { replies.add(value); }
-                    @Override public void onError(Throwable error) { replies.add(error); }
-                    @Override public void onCompleted() { replies.add("completed"); }
-                });
-            });
-        }
-        void ack() throws Exception {
-            var value = replies.poll(3, TimeUnit.SECONDS);
-            assertInstanceOf(GenerateOutputsPB.class, value);
-            assertFalse(((GenerateOutputsPB) value).hasFlattenOutput());
-            assertTrue(((GenerateOutputsPB) value).getSupportsPrefillCompletion());
-        }
-        Throwable error(Status.Code expected) throws Exception {
-            var value = replies.poll(3, TimeUnit.SECONDS); assertInstanceOf(Throwable.class, value);
-            assertEquals(expected, Status.fromThrowable((Throwable) value).getCode()); return (Throwable) value;
-        }
-        @Override public void close() { context.cancel(null); }
-    }
-    private static long engineCode(Throwable error) throws Exception {
-        var trailers = Status.trailersFromThrowable(error);
-        return ErrorDetailsPB.parseFrom(trailers.get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER))).getErrorCode();
-    }
 
     @Test void allocateAcknowledgementOwnsKvAndCancellationReleasesItWithoutPublishing() throws Exception {
         try (var node = node(false); var call = new Call(node, 0)) {
@@ -86,12 +32,12 @@ class DecodeAdmissionTest {
             assertEquals(1, status.getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count()); assertEquals(0, status.getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count());
             call.close(); await(() -> node.status().getAvailableKvCache() == 16 && node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 0);
             assertEquals(8100, node.status().getFinishedTaskList(0).getErrorInfo().getErrorCode());
-            assertEquals(0, node.node.cache().snapshot(-1, true).keys().length);
+            assertEquals(0, node.node.cacheManager().snapshot(-1, true).keys().length);
         }
     }
 
     @Test void temporaryPressureWaitsPastOldRetryBudgetAndWakesOnRelease() throws Exception {
-        try (var node = node(false); var owner = node.node.cache().acquire(12, List.of()).lease(); var call = new Call(node, 0)) {
+        try (var node = node(false); var owner = node.node.cacheManager().acquire(12, List.of()).lease(); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 5, 0));
             await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
             assertEquals(TaskPhase.TASK_PHASE_RECEIVED, node.status().getRunningTaskInfo(0).getPhase());
@@ -101,7 +47,7 @@ class DecodeAdmissionTest {
     }
 
     @Test void waitingDeadlineHasNative603AndCannotAllocateAfterExpiry() throws Exception {
-        try (var node = node(false); var owner = node.node.cache().acquire(12, List.of()).lease(); var call = new Call(node, 0)) {
+        try (var node = node(false); var owner = node.node.cacheManager().acquire(12, List.of()).lease(); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 5, 50));
             assertEquals(603, engineCode(call.error(Status.Code.DEADLINE_EXCEEDED)));
             owner.close(); Thread.sleep(100);
@@ -141,7 +87,7 @@ class DecodeAdmissionTest {
             try (var node = node(disabled); var call = new Call(node, 0)) {
                 var input = input("p", 1, 5, 0);
                 var keys = org.flexlb.mock.protocol.MediaInput.cacheKeys(org.flexlb.mock.protocol.MediaInput.text(input.getInput()), 2);
-                try (var lease = node.node.cache().acquire(6, List.of()).lease()) {
+                try (var lease = node.node.cacheManager().acquire(6, List.of()).lease()) {
                     lease.publish(keys, 5);
                 }
                 call.request.onNext(input); call.ack();
@@ -189,9 +135,9 @@ class DecodeAdmissionTest {
                 // Three input tokens + four computed output tokens: three full blocks.
                 var expected = Set.copyOf(allKeys.subList(0, 3));
                 await(() -> cacheKeys(node.node).equals(expected));
-                assertFalse(Arrays.stream(node.node.cache().snapshot(-1, true).keys()).anyMatch(key -> key == allKeys.get(3)));
+                assertFalse(Arrays.stream(node.node.cacheManager().snapshot(-1, true).keys()).anyMatch(key -> key == allKeys.get(3)));
                 // A later request reuses the output prefix, including a block crossing the media tail.
-                try (var lease = node.node.cache().acquire(8, allKeys).lease()) {
+                try (var lease = node.node.cacheManager().acquire(8, allKeys).lease()) {
                     assertNotNull(lease);
                     assertEquals(6, lease.reusedTokens());
                 }
@@ -240,7 +186,7 @@ class DecodeAdmissionTest {
     }
 
     @Test void cancellingCapacityWaitCannotResurrectAnAllocationOrReportForwardWork() throws Exception {
-        try (var node = node(false); var owner = node.node.cache().acquire(12, List.of()).lease(); var call = new Call(node, 0)) {
+        try (var node = node(false); var owner = node.node.cacheManager().acquire(12, List.of()).lease(); var call = new Call(node, 0)) {
             call.request.onNext(input("p", 1, 5, 0)); await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
             call.close(); await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 0);
             owner.close(); Thread.sleep(100);
@@ -258,9 +204,86 @@ class DecodeAdmissionTest {
             first.request.onNext(input("p", 1, 9, 0)); first.ack();
             waiting.request.onNext(input("p", 2, 9, 0)); await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 2);
             node.node.close();
-            assertEquals(0, node.node.cache().snapshot(0, false).heldBlocks());
-            assertEquals(8, node.node.cache().snapshot(0, false).availableBlocks());
-            assertEquals(0, node.node.cache().snapshot(-1, true).keys().length);
+            assertEquals(0, node.node.cacheManager().snapshot(0, false).heldBlocks());
+            assertEquals(8, node.node.cacheManager().snapshot(0, false).availableBlocks());
+            assertEquals(0, node.node.cacheManager().snapshot(-1, true).keys().length);
+        }
+    }
+
+    private static Set<Long> cacheKeys(LLMMockEngine node) {
+        return new HashSet<>(Arrays.stream(node.cacheManager().snapshot(-1, true).keys()).boxed().toList());
+    }
+
+    private static GenerateRequestPB input(String client, long id, int length, int timeout) {
+        return GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(id).setClientId(client)
+            .setInput(GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(IntStream.rangeClosed(1, length).boxed().toList())
+                .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(4).setReuseCache(true).setTimeoutMs(timeout))).build();
+    }
+
+    private Harness node(boolean disableReuse) throws Exception {
+        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("decode"));
+        ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true)
+            .put("disable_decode_first_malloc_device_reuse", disableReuse);
+        var path = directory.resolve("config.json"); json.writeValue(path.toFile(), root);
+        return new Harness(LLMMockEngine.start(RtpConfig.load(path)));
+    }
+
+    private static void await(BooleanSupplier condition) throws Exception {
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (!condition.getAsBoolean()) { if (System.nanoTime() >= end) fail("Condition timed out"); Thread.sleep(5); }
+    }
+
+    private static long engineCode(Throwable error) throws Exception {
+        var trailers = Status.trailersFromThrowable(error);
+        return ErrorDetailsPB.parseFrom(trailers.get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER))).getErrorCode();
+    }
+
+    /**
+     * Owns the Decode Engine fixture and its resources for one admission test.
+     */
+    private static final class Harness implements AutoCloseable {
+        final LLMMockEngine node;
+        final ManagedChannel channel;
+
+        Harness(LLMMockEngine node) { this.node = node; channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build(); }
+
+        @Override public void close() throws Exception { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); node.close(); }
+
+        WorkerStatusPB status() { return RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS).getWorkerStatus(StatusVersionPB.getDefaultInstance()); }
+    }
+
+    /**
+     * Records a Decode request's outputs and completion for assertions.
+     */
+    private static final class Call implements AutoCloseable {
+        final Context.CancellableContext context = Context.current().withCancellation();
+        final BlockingQueue<Object> replies = new LinkedBlockingQueue<>();
+        final StreamObserver<GenerateRequestPB> request;
+
+        Call(Harness node, long rpcMs) throws Exception {
+            request = context.call(() -> {
+                var stub = RpcServiceGrpc.newStub(node.channel);
+                if (rpcMs > 0) stub = stub.withDeadlineAfter(rpcMs, TimeUnit.MILLISECONDS);
+                return stub.remoteGenerate(new StreamObserver<>() {
+                    @Override public void onNext(GenerateOutputsPB value) { replies.add(value); }
+                    @Override public void onError(Throwable error) { replies.add(error); }
+                    @Override public void onCompleted() { replies.add("completed"); }
+                });
+            });
+        }
+
+        @Override public void close() { context.cancel(null); }
+
+        void ack() throws Exception {
+            var value = replies.poll(3, TimeUnit.SECONDS);
+            assertInstanceOf(GenerateOutputsPB.class, value);
+            assertFalse(((GenerateOutputsPB) value).hasFlattenOutput());
+            assertTrue(((GenerateOutputsPB) value).getSupportsPrefillCompletion());
+        }
+
+        Throwable error(Status.Code expected) throws Exception {
+            var value = replies.poll(3, TimeUnit.SECONDS); assertInstanceOf(Throwable.class, value);
+            assertEquals(expected, Status.fromThrowable((Throwable) value).getCode()); return (Throwable) value;
         }
     }
 }

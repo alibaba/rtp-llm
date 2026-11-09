@@ -8,26 +8,26 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Checks RTP settings loaded from model and runtime configuration.
+ */
 class RtpConfigTest {
     private static final ObjectMapper JSON = new ObjectMapper();
+
     @TempDir Path directory;
-    private RtpConfig load(ObjectNode value) throws Exception {
-        var path = directory.resolve("component.json"); JSON.writeValue(path.toFile(), value); return RtpConfig.load(path);
-    }
-    private ObjectNode root() { return JSON.valueToTree(RtpNodeTest.configuration("prefill")); }
 
     @Test void schedulerModeSelectsPolicyAndRejectsUnknownValues() throws Exception {
         var root = root();
         var values = (ObjectNode) root.path("component").path("config");
         var defaults = load(root);
-        try (var cache = new org.flexlb.mock.engine.cache.KvCache(16, 8, 0);
+        try (var cache = new org.flexlb.mock.engine.cache.KvCacheManager(16, 8, 0);
              var scheduler = AbstractRtpScheduler.factory(defaults).create(new Object(), cache, new org.flexlb.mock.engine.scheduler.TaskHistory())) {
             assertInstanceOf(RtpFifoScheduler.class, scheduler);
             assertEquals("fifo", defaults.effective().path("mock.scheduler.mode").asText());
         }
         values.put("mock.scheduler.mode", "group");
         var grouped = load(root);
-        try (var cache = new org.flexlb.mock.engine.cache.KvCache(16, 8, 0);
+        try (var cache = new org.flexlb.mock.engine.cache.KvCacheManager(16, 8, 0);
              var scheduler = AbstractRtpScheduler.factory(grouped).create(new Object(), cache, new org.flexlb.mock.engine.scheduler.TaskHistory())) {
             assertInstanceOf(RtpPrefillGroupScheduler.class, scheduler);
             assertEquals("group", grouped.effective().path("mock.scheduler.mode").asText());
@@ -103,6 +103,7 @@ class RtpConfigTest {
         config.put("seq_size_per_block", 16); config.remove("mock.compute");
         assertThrows(Exception.class, () -> load(root));
     }
+
     @Test void fractionalDecodeModelLoadsAndItsEffectiveConfigurationCanBeReadBack() throws Exception {
         var root = root(); root.put("component_role", "decode");
         var config = (ObjectNode) root.path("component").path("config");
@@ -112,6 +113,7 @@ class RtpConfigTest {
         ((ObjectNode) root.path("component")).set("config", model.effective());
         assertEquals(2.6, load(root).compute().configuration().decode().tokens_per_step());
     }
+
     @Test void acceptsOnlyLocalLru() throws Exception {
         var root = root();
         var config = (ObjectNode) root.path("component").path("config");
@@ -175,7 +177,7 @@ class RtpConfigTest {
     }
 
     @Test void zeroTimeHandoffDoesNotReportAnIndependentLoadTimeoutAsEffective() throws Exception {
-        var root = JSON.<ObjectNode>valueToTree(RtpNodeTest.configuration("decode"));
+        var root = JSON.<ObjectNode>valueToTree(LLMMockEngineTest.configuration("decode"));
         ((ObjectNode) root.path("component").path("config")).put("load_cache_timeout_ms", 5000);
         var effective = load(root).effective();
         assertFalse(effective.has("load_cache_timeout_ms"));
@@ -196,7 +198,7 @@ class RtpConfigTest {
 
     @Test void fileAndEnvironmentResolveToIdenticalModelsAndDefaults() throws Exception {
         for (String role : java.util.List.of("prefill", "decode")) {
-            var root = JSON.<ObjectNode>valueToTree(RtpNodeTest.configuration(role));
+            var root = JSON.<ObjectNode>valueToTree(LLMMockEngineTest.configuration(role));
             var config = (ObjectNode) root.path("component").path("config");
             config.put("cp_rotate_method", "ALL_GATHER").put("tp_size", 4).put("dp_size", 3);
             config.put("mock.scheduler.mode", "fifo");
@@ -211,6 +213,7 @@ class RtpConfigTest {
             assertThrows(IllegalArgumentException.class, () -> RtpConfig.fromEnvironment(parsed.id(), parsed.role(), env));
         }
     }
+
     @Test void resolvesNativeAutomaticBudgetsAndPreservesExplicitOverrides() throws Exception {
         var root = root(); var config = (ObjectNode) root.path("component").path("config");
         config.remove("max_batch_tokens_size");
@@ -222,12 +225,6 @@ class RtpConfigTest {
         config.put("max_batch_tokens_size", 50); assertEquals(50, load(root).maxBatchTokens());
         config.put("max_batch_tokens_size", 0).put("max_seq_len", Integer.MAX_VALUE);
         assertThrows(IllegalArgumentException.class, () -> load(root));
-    }
-
-    private static java.util.Map<String, String> environmentOf(JsonNode config) {
-        var env = new java.util.HashMap<String, String>();
-        config.fields().forEachRemaining(e -> env.put(e.getKey().toUpperCase(java.util.Locale.ROOT).replace('.', '_'), e.getValue().asText()));
-        return env;
     }
 
     @Test void usesExplicitRoutingIdentityWithoutReadingCheckpoint() throws Exception {
@@ -270,6 +267,18 @@ class RtpConfigTest {
             ((ObjectNode) root.path("component").path("config")).put("mock.cache.total.blocks", invalid);
             assertThrows(IllegalArgumentException.class, () -> load(root));
         }
+    }
+
+    private RtpConfig load(ObjectNode value) throws Exception {
+        var path = directory.resolve("component.json"); JSON.writeValue(path.toFile(), value); return RtpConfig.load(path);
+    }
+
+    private ObjectNode root() { return JSON.valueToTree(LLMMockEngineTest.configuration("prefill")); }
+
+    private static java.util.Map<String, String> environmentOf(JsonNode config) {
+        var env = new java.util.HashMap<String, String>();
+        config.fields().forEachRemaining(e -> env.put(e.getKey().toUpperCase(java.util.Locale.ROOT).replace('.', '_'), e.getValue().asText()));
+        return env;
     }
 
 }

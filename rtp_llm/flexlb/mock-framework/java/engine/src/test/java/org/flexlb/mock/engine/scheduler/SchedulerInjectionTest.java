@@ -10,33 +10,22 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.*;
-import org.flexlb.mock.engine.cache.KvCache;
+import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.config.RtpConfig;
-import org.flexlb.mock.engine.execution.RtpNode;
+import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.flexlb.mock.engine.forward.SimulatedCompute;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Checks that control requests can inject scheduler work through the Engine entry point.
+ */
 class SchedulerInjectionTest {
     @TempDir Path directory;
 
-    private RtpConfig config(String role) throws Exception {
-        var path = directory.resolve(role + ".json");
-        var json = new ObjectMapper();
-        var document = json.valueToTree(RtpNodeTest.configuration(role));
-        ((com.fasterxml.jackson.databind.node.ObjectNode) document.path("component").path("config"))
-            .put("max_batch_tokens_size", 1);
-        json.writeValue(path.toFile(), document);
-        return RtpConfig.load(path);
-    }
-    private static GenerateInputPB input(int output) {
-        return GenerateInputPB.newBuilder().setRequestId(1).addAllTokenIds(List.of(1, 2, 3))
-            .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(output)).build();
-    }
-
     @Test void defaultRtpPolicyRunsALegalSingletonAboveTheBatchTokenBudget() throws Exception {
-        try (var node = RtpNode.start(config("prefill"))) {
+        try (var node = LLMMockEngine.start(config("prefill"))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(2, TimeUnit.SECONDS);
@@ -50,10 +39,10 @@ class SchedulerInjectionTest {
 
     @Test void factoryFailureOrNullPolicyClosesTheNewInstancesCache() throws Exception {
         for (boolean returnsNull : List.of(false, true)) {
-            var resource = new AtomicReference<KvCache>();
+            var resource = new AtomicReference<KvCacheManager>();
             var config = config("prefill");
             var error = assertThrows(RuntimeException.class,
-                () -> RtpNode.start(config, (lock, cache, finished) -> {
+                () -> LLMMockEngine.start(config, (lock, cache, finished) -> {
                     resource.set(cache);
                     if (returnsNull) return null;
                     throw new IllegalStateException("Cannot create scheduler");
@@ -62,5 +51,20 @@ class SchedulerInjectionTest {
             assertNotNull(resource.get());
             assertThrows(IllegalStateException.class, () -> resource.get().acquire(1, List.of()));
         }
+    }
+
+    private RtpConfig config(String role) throws Exception {
+        var path = directory.resolve(role + ".json");
+        var json = new ObjectMapper();
+        var document = json.valueToTree(LLMMockEngineTest.configuration(role));
+        ((com.fasterxml.jackson.databind.node.ObjectNode) document.path("component").path("config"))
+            .put("max_batch_tokens_size", 1);
+        json.writeValue(path.toFile(), document);
+        return RtpConfig.load(path);
+    }
+
+    private static GenerateInputPB input(int output) {
+        return GenerateInputPB.newBuilder().setRequestId(1).addAllTokenIds(List.of(1, 2, 3))
+            .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(output)).build();
     }
 }

@@ -10,7 +10,7 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpControl;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.*;
-import org.flexlb.mock.engine.execution.RtpEngineLoop;
+import org.flexlb.mock.engine.execution.EngineLoop;
 import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.engine.scheduler.RequestState;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
@@ -26,7 +26,8 @@ final class PrefillRpcServer implements AutoCloseable {
     private final RtpRpcService.Config config;
     private final Object executionLock;
     private final Runnable recordCancellation;
-    private final RtpEngineLoop engine;
+    private final java.util.function.Supplier<Runnable> trackRequest;
+    private final EngineLoop engine;
     private final TaskHistory finished;
     // Local request lifetime; output/Fetch sessions may outlive these entries. Guarded by executionLock.
     private final Map<Long, Session> sessions = new LinkedHashMap<>();
@@ -42,7 +43,9 @@ final class PrefillRpcServer implements AutoCloseable {
     private long nextOutputSweep;
     private volatile boolean closed;
 
-    PrefillRpcServer(RtpRpcService.Config config, Object executionLock, TaskHistory finished, RtpEngineLoop engine, Runnable recordCancellation) {
+    PrefillRpcServer(RtpRpcService.Config config, Object executionLock, TaskHistory finished, EngineLoop engine,
+                     Runnable recordCancellation, java.util.function.Supplier<Runnable> trackRequest) {
+        this.trackRequest=trackRequest;
         this.config = config;
         this.executionLock = executionLock;
         this.finished = finished;
@@ -66,7 +69,7 @@ final class PrefillRpcServer implements AutoCloseable {
     }
 
     RequestState.Use beginTransfer(Session session) {
-        try { return engine.beginTransfer(session.request); }
+        try { return engine.beginKvTransfer(session.request); }
         catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
 
@@ -84,9 +87,10 @@ final class PrefillRpcServer implements AutoCloseable {
 
     void generate(GenerateInputPB input, StreamObserver<GenerateOutputsPB> observer) {
         var response = (ServerCallStreamObserver<GenerateOutputsPB>) observer;
+        Runnable completed=trackRequest.get();
         if (input.getGenerateConfig().getMaxNewTokens() > 1) {
-            try { start(input, response, 0); }
-            catch (RuntimeException error) { response.onError(error); }
+            try { start(input, response, 0, false, completed); }
+            catch (RuntimeException error) { completed.run();response.onError(error); }
             return;
         }
         Session session;
@@ -95,7 +99,7 @@ final class PrefillRpcServer implements AutoCloseable {
             validate(input, false);
             long started = System.nanoTime();
             session = new Session(input, false, started, RpcMessages.deadline(input, started, rpcDeadline()));
-        } catch (RuntimeException error) { response.onError(error instanceof RequestFailure f ? rpcFailure(f) : error); return; }
+        } catch (RuntimeException error) { completed.run();response.onError(error instanceof RequestFailure f ? rpcFailure(f) : error); return; }
         response.setOnCancelHandler(() -> {
             if (context.getDeadline() != null && context.getDeadline().isExpired()) session.expire();
             else session.cancel();
@@ -107,6 +111,7 @@ final class PrefillRpcServer implements AutoCloseable {
             session.fail(error);
         }
         session.completion().thenAccept(result -> {
+            completed.run();
             if (response.isCancelled()) return;
             if (!result.status().isOk()) { response.onError(RpcErrors.failure(result.status(), result.engineCode())); return; }
             try { response.onNext(result.output()); response.onCompleted(); }
@@ -148,12 +153,12 @@ final class PrefillRpcServer implements AutoCloseable {
     Session submit(Session session, MediaInput.Prepared prepared) {
         try {
             requirePrepared(prepared.input());
-            var input = RpcMessages.input(prepared, Long.toString(session.id), session.started,
+            var input = RpcMessages.toSchedulerInput(prepared, Long.toString(session.id), session.started,
                 session.deadline, session.retained, config.blockSize(), config.cacheKeySeed());
             synchronized (executionLock) {
                 requirePending(session, prepared.input());
                 session.input = prepared.input();
-                session.request = engine.input(input, session);
+                session.request = engine.enqueue(input, session);
             }
         } catch (RuntimeException error) {
             var nativeError = error instanceof RequestFailure f ? rpcFailure(f) : error;
@@ -177,7 +182,7 @@ final class PrefillRpcServer implements AutoCloseable {
                 long started = System.nanoTime();
                 if (session == null) session = new Session(item.input(), true, started,
                     RpcMessages.deadline(item.input(), started, item.deadline()));
-                var input = RpcMessages.input(item.prepared(), Long.toString(session.id),
+                var input = RpcMessages.toSchedulerInput(item.prepared(), Long.toString(session.id),
                     session.started, session.deadline, true, config.blockSize(), config.cacheKeySeed());
                 admittedSessions.add(session); positions.add(i); items.add(new EngineScheduler.InputItem(input, session));
             } catch (RuntimeException error) {
@@ -202,7 +207,7 @@ final class PrefillRpcServer implements AutoCloseable {
             }
             if (!items.isEmpty()) {
                 List<EngineScheduler.InputResult> admitted;
-                try { admitted = engine.input(items); }
+                try { admitted = engine.enqueue(items); }
                 catch (RuntimeException error) {
                     admittedSessions.forEach(session -> session.fail(error));
                     throw error;
@@ -226,7 +231,7 @@ final class PrefillRpcServer implements AutoCloseable {
         var calls = new ArrayList<Call>(); var results = new ArrayList<CompletableFuture<Void>>();
         for (var input : inputs) {
             try {
-                var call = start(input, null, attachMillis, true); calls.add(call); results.add(call.admitted);
+                var call = start(input, null, attachMillis, true, null); calls.add(call); results.add(call.admitted);
             } catch (RuntimeException error) { results.add(CompletableFuture.failedFuture(error)); }
         }
         var prepared = calls.stream().map(call -> call.prepared.handle((unused, error) -> null)).toArray(CompletableFuture[]::new);
@@ -290,15 +295,12 @@ final class PrefillRpcServer implements AutoCloseable {
     }
 
     private void acknowledgeLoad(Session session) {
-        try { engine.control(session.request, RtpControl.TRANSFER_ACKNOWLEDGED); }
+        try { engine.updateRequest(session.request, RtpControl.TRANSFER_ACKNOWLEDGED); }
         catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
 
-    private Call start(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, long attachMillis) {
-        return start(input, response, attachMillis, false);
-    }
-
-    private Call start(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, long attachMillis, boolean grouped) {
+    private Call start(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, long attachMillis,
+                       boolean grouped, Runnable completed) {
         validate(input, true);
         // Batch admission already selects the PD protocol, even for a single output token.
         if (!grouped && !input.getGenerateConfig().getCanUsePdSeparation())
@@ -319,7 +321,7 @@ final class PrefillRpcServer implements AutoCloseable {
                 nextOutputSweep = now + TimeUnit.SECONDS.toNanos(1);
             }
             if (outputs.containsKey(input.getRequestId())) throw Status.ALREADY_EXISTS.withDescription("Retained output request id").asRuntimeException();
-            call = new Call(input, response, host + ":" + target.getGrpcPort(), attachMillis, grouped);
+            call = new Call(input, response, host + ":" + target.getGrpcPort(), attachMillis, grouped, completed);
             if (call.deferred) outputs.put(input.getRequestId(), call.output);
             active.put(input.getRequestId(), call);
             if (call.deferred) remember(input.getRequestId(), false);
@@ -452,7 +454,7 @@ final class PrefillRpcServer implements AutoCloseable {
         private void finish(RequestFailure failure) {
             synchronized (executionLock) {
                 if (ended) return;
-                if (request != null) { engine.finish(request, failure); return; }
+                if (request != null) { engine.abortRequest(request, failure); return; }
                 var task = RpcMessages.pending(input);
                 finished.add(new EngineScheduler.Task(id, task.batchId(), task.inputLength(), 0, task.priority(),
                     EngineScheduler.ReportedPhase.PENDING, 0, 0, 0, System.currentTimeMillis(), failure, false));
@@ -473,9 +475,6 @@ final class PrefillRpcServer implements AutoCloseable {
         }
     }
 
-    /**
-     * Carries prepared input and the deadline into Prefill admission.
-     */
     record Submission(MediaInput.Prepared prepared, long deadline, Session session) {
         Submission(GenerateInputPB input, long deadline) { this(MediaInput.text(input), deadline, null); }
         GenerateInputPB input() { return prepared.input(); }
@@ -511,7 +510,9 @@ final class PrefillRpcServer implements AutoCloseable {
 
         boolean terminal, priorityPreempted;
 
-        Call(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, String target, long attachMillis, boolean grouped) {
+        final Runnable rpcCompleted;
+
+        Call(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, String target, long attachMillis, boolean grouped, Runnable completed) {
             this.input = input; this.target = target; this.deferred = response == null;
             batchSource = grouped ? new CompletableFuture<>() : null;
             output = newOutput(input.getRequestId(), attachMillis);
@@ -519,6 +520,7 @@ final class PrefillRpcServer implements AutoCloseable {
             started = System.nanoTime();
             deadline = RpcMessages.deadline(input, started, deferred ? Long.MAX_VALUE : rpcDeadline());
             source = new Session(input, true, started, deadline);
+            rpcCompleted=completed==null?trackRequest.get():completed;
         }
 
         void attach(ServerCallStreamObserver<GenerateOutputsPB> response) {
@@ -547,6 +549,7 @@ final class PrefillRpcServer implements AutoCloseable {
                     remember(input.getRequestId(), old != null && old.preempted());
                 }
             }
+            rpcCompleted.run();
             output.finish(error);
         }
 
@@ -649,9 +652,6 @@ final class PrefillRpcServer implements AutoCloseable {
         void send(GenerateOutputsPB value) { output.add(value); }
     }
 
-    /**
-     * Receives Decode stream messages for the Prefill handoff and forwards transport failure.
-     */
     private static final class Inbox implements ClientResponseObserver<GenerateRequestPB, GenerateOutputsPB> {
         final BlockingQueue<Object> values = new LinkedBlockingQueue<>(2);
 

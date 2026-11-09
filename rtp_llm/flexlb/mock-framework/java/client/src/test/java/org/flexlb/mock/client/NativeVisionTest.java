@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.config.RtpConfig;
-import org.flexlb.mock.engine.execution.RtpNode;
+import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.flexlb.mock.engine.scheduler.*;
 import org.flexlb.mock.engine.vit.*;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
@@ -23,21 +23,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Checks ViT metadata preparation followed by native P/D generation.
+ */
 class NativeVisionTest {
     @TempDir Path directory;
-    com.fasterxml.jackson.databind.JsonNode config(String role) {
-        var config=role.equals("vit")?Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4,"mock.vit.skip.download",true,"mm_cache_gpu_max_bytes",1024,"mock.compute",Map.of("forward",Map.of("expression","5")))
-            :Map.of("mock.scheduler.mode","group","image_token_id",1000,"seq_size_per_block",2,"max_seq_len",128,"test_block_num",32,"reserve_block_ratio",0,"reuse_cache",true,"mock.compute",Map.of("forward",Map.of("expression","1")));
-        return new ObjectMapper().valueToTree(Map.of("id", role + "-0", "component_role", role,
-            "component", role.equals("vit") ? Map.of("config", config) : Map.of("engine", "rtp", "config", config)));
-    }
-    FlexlbServerStatusPB server(String role, Map<String, Object> endpoints) {
-        var address=endpoints.get("rpc").toString().split(":");return FlexlbServerStatusPB.newBuilder().setRole(role.toUpperCase(Locale.ROOT)).setServerIp(address[0]).setGrpcPort(Integer.parseInt(address[1])).setWorkerGeneration(1).build();
-    }
+
     @Test void nativeSingleAndMasterBatchRequestsTraverseVPD() throws Exception {
         try (var v = VitNode.start(VitConfig.load(config("vit")), 0, 0);
-             var p = RtpNode.start(RtpConfig.load(config("prefill")));
-             var d = RtpNode.start(RtpConfig.load(config("decode")))) {
+             var p = LLMMockEngine.start(RtpConfig.load(config("prefill")));
+             var d = LLMMockEngine.start(RtpConfig.load(config("decode")))) {
             var routes = List.of(server("vit", v.endpoints()), server("prefill", p.endpoints()), server("decode", d.endpoints()));
             var stages=new AtomicInteger();var epoch=new AtomicInteger(1);var rejectedPin=new AtomicBoolean();var pChannel=ManagedChannelBuilder.forTarget(p.rpcAddress()).usePlaintext().build();
             var master=NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1",0)).addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
@@ -77,5 +72,16 @@ class NativeVisionTest {
                 assertEquals(8,stages.get());
             } finally { master.shutdownNow().awaitTermination(2,TimeUnit.SECONDS);pChannel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
+    }
+
+    com.fasterxml.jackson.databind.JsonNode config(String role) {
+        var config=role.equals("vit")?Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4,"mock.vit.skip.download",true,"mm_cache_gpu_max_bytes",1024,"mock.compute",Map.of("forward",Map.of("expression","5")))
+            :Map.of("mock.scheduler.mode","group","image_token_id",1000,"seq_size_per_block",2,"max_seq_len",128,"test_block_num",32,"reserve_block_ratio",0,"reuse_cache",true,"mock.compute",Map.of("forward",Map.of("expression","1")));
+        return new ObjectMapper().valueToTree(Map.of("id", role + "-0", "component_role", role,
+            "component", role.equals("vit") ? Map.of("config", config) : Map.of("engine", "rtp", "config", config)));
+    }
+
+    FlexlbServerStatusPB server(String role, Map<String, Object> endpoints) {
+        var address=endpoints.get("rpc").toString().split(":");return FlexlbServerStatusPB.newBuilder().setRole(role.toUpperCase(Locale.ROOT)).setServerIp(address[0]).setGrpcPort(Integer.parseInt(address[1])).setWorkerGeneration(1).build();
     }
 }

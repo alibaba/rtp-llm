@@ -12,14 +12,12 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Checks registration, event delivery, snapshots and recovery of the Engine reporter.
+ */
 class KvcmReporterTest {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static void await(BooleanSupplier condition) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
-        while (!condition.getAsBoolean()) {
-            assertTrue(System.nanoTime() < deadline, "KVCM state timed out"); Thread.sleep(10);
-        }
-    }
+
     @ParameterizedTest @ValueSource(booleans = {false, true})
     void slowFailedSnapshotDoesNotBlockDeltasOrReplayAcrossRegistration(boolean registrationLost) throws Exception {
         var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
@@ -27,7 +25,7 @@ class KvcmReporterTest {
         var expire = new AtomicBoolean(registrationLost); var hint = new AtomicBoolean();
         var bodies = new CopyOnWriteArrayList<String>(); var added = new AtomicBoolean();
         var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        try (var threads = Executors.newVirtualThreadPerTaskExecutor(); var cache = new KvCache(1, 8, 0)) {
+        try (var threads = Executors.newVirtualThreadPerTaskExecutor(); var cache = new KvCacheManager(1, 8, 0)) {
             server.setExecutor(threads);
             server.createContext("/api/", exchange -> {
                 try (exchange) {
@@ -87,44 +85,10 @@ class KvcmReporterTest {
             } finally { release.countDown(); server.stop(0); }
         }
     }
-    private static final class Meta implements AutoCloseable {
-        final HttpServer server;
-        final ExecutorService threads = Executors.newVirtualThreadPerTaskExecutor();
-        final List<JsonNode> requests = new CopyOnWriteArrayList<>();
-        volatile java.util.function.BiConsumer<JsonNode, com.fasterxml.jackson.databind.node.ObjectNode> reply = (request, response) -> {};
-        Meta() throws Exception {
-            server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-            server.setExecutor(threads);
-            server.createContext("/api/", exchange -> {
-                try (exchange) {
-                    var request = JSON.readTree(exchange.getRequestBody()); requests.add(request);
-                    var response = JSON.createObjectNode(); response.putObject("header").putObject("status").put("code", "OK");
-                    reply.accept(request, response);
-                    byte[] bytes = JSON.writeValueAsBytes(response);
-                    exchange.sendResponseHeaders(200, bytes.length); exchange.getResponseBody().write(bytes);
-                }
-            });
-            server.start();
-        }
-        int count(String type) { return (int) requests.stream().filter(request -> type.equals(type(request))).count(); }
-        int registrations() { return (int) requests.stream().filter(request -> request.has("model_deployment")).count(); }
-        static String type(JsonNode request) { return request.path("events").path(0).path("event_type").asText(); }
-        KvcmReporter reporter(KvCache cache, boolean events, java.util.function.LongSupplier clock) {
-            return new KvcmReporter(new KvcmReporter.Configuration(
-                URI.create("http://127.0.0.1:" + server.getAddress().getPort()), events, 600000),
-                new KvcmReporter.Identity("instance", "group", "127.0.0.1:9000", "model", "FP16", false, 1, 1, 1, "full"), cache, clock);
-        }
-        @Override public void close() { server.stop(0); threads.close(); }
-    }
-    private static void heartbeat(Meta meta) throws Exception {
-        int before = meta.count("EVENT_HEARTBEAT");
-        // Two starts guarantee the preceding response has been processed by the serial heartbeat worker.
-        await(() -> meta.count("EVENT_HEARTBEAT") >= before + 2);
-    }
 
     @ParameterizedTest @ValueSource(booleans = {false, true})
     void allItemResultsAreScannedEvenAfterHeaderOrEarlierItemFailure(boolean headerFailure) throws Exception {
-        try (var meta = new Meta(); var cache = new KvCache(1, 8, 0)) {
+        try (var meta = new Meta(); var cache = new KvCacheManager(1, 8, 0)) {
             var reject = new AtomicBoolean(true);
             meta.reply = (request, response) -> {
                 if (Meta.type(request).equals("EVENT_HEARTBEAT") && reject.compareAndSet(true, false)) {
@@ -141,7 +105,7 @@ class KvcmReporterTest {
     }
 
     @Test void repeatedHeartbeatHintsTriggerOneSnapshotAndFalseRearmsTheHint() throws Exception {
-        try (var meta = new Meta(); var cache = new KvCache(1, 8, 0)) {
+        try (var meta = new Meta(); var cache = new KvCacheManager(1, 8, 0)) {
             var hint = new AtomicBoolean(false); var expire = new AtomicBoolean();
             meta.reply = (request, response) -> {
                 if (Meta.type(request).equals("EVENT_HEARTBEAT")) {
@@ -167,7 +131,7 @@ class KvcmReporterTest {
     }
 
     @Test void missingNormalAckRecoversAtSixtySecondsOnceAndRegistrationDoesNotRearmIt() throws Exception {
-        try (var meta = new Meta(); var cache = new KvCache(1, 8, 0)) {
+        try (var meta = new Meta(); var cache = new KvCacheManager(1, 8, 0)) {
             var clock = new AtomicLong(1); var fail = new AtomicBoolean(true);
             meta.reply = (request, response) -> {
                 if (Meta.type(request).equals("EVENT_HEARTBEAT") && fail.get())
@@ -191,7 +155,7 @@ class KvcmReporterTest {
 
     @Test void aLaterMutationAckRefreshesTheRecoveryWindowWhileHeartbeatsFail() throws Exception {
         var releaseHeartbeat = new CountDownLatch(1);
-        try (var meta = new Meta(); var cache = new KvCache(1, 8, 0)) {
+        try (var meta = new Meta(); var cache = new KvCacheManager(1, 8, 0)) {
             var now = new AtomicLong(1);
             var observed = new AtomicReference<>(new CountDownLatch(1));
             meta.reply = (request, response) -> {
@@ -217,6 +181,59 @@ class KvcmReporterTest {
                     await(() -> meta.registrations() == 2);
                 } finally { releaseHeartbeat.countDown(); }
             }
+        }
+    }
+
+    private static void heartbeat(Meta meta) throws Exception {
+        int before = meta.count("EVENT_HEARTBEAT");
+        // Two starts guarantee the preceding response has been processed by the serial heartbeat worker.
+        await(() -> meta.count("EVENT_HEARTBEAT") >= before + 2);
+    }
+
+    private static void await(BooleanSupplier condition) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+        while (!condition.getAsBoolean()) {
+            assertTrue(System.nanoTime() < deadline, "KVCM state timed out"); Thread.sleep(10);
+        }
+    }
+
+    /**
+     * Records Meta HTTP reports and injects replies used to test reporter recovery.
+     */
+    private static final class Meta implements AutoCloseable {
+        final HttpServer server;
+        final ExecutorService threads = Executors.newVirtualThreadPerTaskExecutor();
+        final List<JsonNode> requests = new CopyOnWriteArrayList<>();
+
+        volatile java.util.function.BiConsumer<JsonNode, com.fasterxml.jackson.databind.node.ObjectNode> reply = (request, response) -> {};
+
+        Meta() throws Exception {
+            server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            server.setExecutor(threads);
+            server.createContext("/api/", exchange -> {
+                try (exchange) {
+                    var request = JSON.readTree(exchange.getRequestBody()); requests.add(request);
+                    var response = JSON.createObjectNode(); response.putObject("header").putObject("status").put("code", "OK");
+                    reply.accept(request, response);
+                    byte[] bytes = JSON.writeValueAsBytes(response);
+                    exchange.sendResponseHeaders(200, bytes.length); exchange.getResponseBody().write(bytes);
+                }
+            });
+            server.start();
+        }
+
+        @Override public void close() { server.stop(0); threads.close(); }
+
+        int count(String type) { return (int) requests.stream().filter(request -> type.equals(type(request))).count(); }
+
+        static String type(JsonNode request) { return request.path("events").path(0).path("event_type").asText(); }
+
+        int registrations() { return (int) requests.stream().filter(request -> request.has("model_deployment")).count(); }
+
+        KvcmReporter reporter(KvCacheManager cache, boolean events, java.util.function.LongSupplier clock) {
+            return new KvcmReporter(new KvcmReporter.Configuration(
+                URI.create("http://127.0.0.1:" + server.getAddress().getPort()), events, 600000),
+                new KvcmReporter.Identity("instance", "group", "127.0.0.1:9000", "model", "FP16", false, 1, 1, 1, "full"), cache, clock);
         }
     }
 

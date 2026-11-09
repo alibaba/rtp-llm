@@ -2,24 +2,51 @@
 
 [返回使用说明](../README.md)
 
-Python/Java 模块、主要类与调用关系的逐项说明见[钉钉架构文档](https://alidocs.dingtalk.com/i/nodes/6LeBq413JA9BOdm2iqd79zQ4JDOnGvpb)。Client 请求查询位于 `interfaces/client/`，运行管理位于 `execution/client_group.py`；输入生成代码只供测试使用，不提供独立请求查询 CLI。
+Python/Java 模块、主要类与调用关系的逐项说明见[钉钉架构文档](https://alidocs.dingtalk.com/i/nodes/6LeBq413JA9BOdm2iqd79zQ4JDOnGvpb)。Client 请求查询位于 `execution/step/client_requests.py`，运行管理位于 `execution/roles/client.py` 的 ClientManager；输入生成代码只供测试使用，不提供独立请求查询 CLI。
 
 本文说明组件职责、调度与协议边界，以及接口扩展方式。运行步骤见 README，Case 与启动配方用法见 [Case 指南](case-guide.md)。设计目标中尚未实现的能力仍按原文标明。文中路径和命令均以框架目录为基准。
 
 ## EngineScheduler 输入、执行完成、传输完成与状态查询
 
-EngineScheduler 是每个后端的请求状态与调度策略所有者，不只是选择 batch 的函数。公共接入代码解析协议、检查格式并发送回执；`input` 决定初始状态、队列与资源准入，成功登记不等于资源已就绪。计算结果、传输结果和协议许可分别进入明确入口，外部组件不直接修改请求阶段或队列。
+EngineScheduler 是每个后端的请求状态与调度策略所有者，不只是选择 batch 的函数。公共接入代码解析协议、检查格式并发送回执；`enqueue` 决定初始状态、队列与资源准入，成功登记不等于资源已就绪。计算结果、传输结果和协议许可分别进入明确入口，外部组件不直接修改请求阶段或队列。
 
-- `input(request, listener)`：登记请求并执行后端准入策略。
+- `enqueue(input, listener)`：登记请求并执行后端准入策略。
 - `schedule()`：返回本次 Forward 的执行计划，不暴露或取走内部 running 容器。
-- `computeCompleted(work, result)`：提交本次计算进度，决定继续计算、等待交接或终结。Compute 不修改后端状态。
+- `processOutputs(work, result)`：提交本次计算进度，决定继续计算、等待交接或终结。Compute 不修改后端状态。
 - `transferCompleted(request, result)`：接收异步 KV 传输结果，由后端决定下一步；传输结束不自动等于整个请求结束。
 - `control(request, event)`：处理后端协议许可等少量控制输入；GENERATE、LOAD ACK 等类型属于原生接入与 RTP 后端的约定，不是共享状态机。
 - `tasks()`：按需返回当前执行任务的不可变观测快照，不推进状态机；内部状态机和队列仍由后端自行定义。
 
 PD 的初始通知/初始化和 KV 传输分开。当前接入协议共用，KV 传输使用公共异步组件，第一版只建模零耗时完成；保留完成、失败、取消和资源使用权接口，不加入带宽、分块或争用模型。P 计算完成后可以退出计算集合，但仍持有 KV；本地传输结束和 D 的 LOAD ACK 是不同事实，确认前不能释放源 KV。网络协议仍由 RTP 适配器执行，状态决策及转移归 EngineScheduler。
 
-EngineLoop 负责唤醒、执行和结果交接，不判断后端队列和协议阶段。新输入、Compute/Transfer 完成、输出恢复可写、取消、资源释放和关闭触发唤醒；同时按最近请求 deadline 定时唤醒。无事件、无期限时阻塞等待，不固定周期轮询。Forward 在途时仍处理状态维护和 I/O 事件，但不提交第二个 Forward。资源可用变化必须有明确通知，不能在移除轮询后遗漏容量唤醒。
+EngineLoop 负责唤醒、执行和结果交接，不判断后端队列和协议阶段。新输入、Compute/Transfer 完成、取消、资源释放和关闭触发唤醒；同时按最近请求 deadline 定时唤醒。无事件、无期限时阻塞等待，不固定周期轮询。Forward 在途时仍处理状态维护和 I/O 事件，但不提交第二个 Forward。资源可用变化必须有明确通知，不能在移除轮询后遗漏容量唤醒。
+
+主流程沿用 real 的普通执行术语：`enqueue()` 登记请求；`loop()` 等待事件并调用 `step()`；`step()` 检查请求超时和 KV 就绪、调用 Scheduler.schedule() 选批，再进入 `forward()`；模拟 Forward 完成后调用 `processOutputs()`，由 Scheduler 提交 token、KV 和请求终态，再锁外派发回调。Forward 在途时 step 仍可检查超时与 KV，不会重复提交计算，也不等待 RPC 消费输出。real 对照为 `cpp/normal_engine/NormalEngine.{h,cc}` 的 enqueue/loop/step，以及 executor 和 BatchStreamProcessor 的处理输出路径。
+
+| EngineLoop 入口                           | 实际用途                                                                                           |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| enqueue(input, listener) / enqueue(batch) | 单请求或显式 batch 入队。                                                                          |
+| updateRequest(request, event)             | 把原生 GENERATE、PREFILL_COMPLETE、LOAD ACK 等请求更新交给后端 Scheduler.control；不是通用工作流。 |
+| beginKvTransfer(request)                  | 持有 KV 传输期间的资源引用。                                                                       |
+| onKvTransferCompleted(request, result)    | 提交异步 KV 传输结果。                                                                             |
+| abortRequest(request, failure)            | 取消或失败，failure 必填；成功由调度内部决定。                                                     |
+| step() → forward() → processOutputs()     | 私有执行主链；调度、模拟计算、提交计算结果。                                                       |
+
+```mermaid
+flowchart TB
+    engine[LLMMockEngine 启停与装配] --> rpc[RtpRpcService 原生 RPC]
+    engine --> loop[EngineLoop]
+    engine --> cache[KvCacheManager]
+    rpc --> prefill[PrefillRpcServer]
+    rpc --> decode[DecodeRpcServer]
+    prefill --> loop
+    decode --> loop
+    loop --> scheduler[EngineScheduler]
+    scheduler --> cache
+    cache --> reporter[KvcmReporter 注册与元信息同步]
+```
+
+KvCacheManager 管理 KvcmReporter 的配置、启动、状态查询与关闭。关闭时先停止报告并解绑缓存订阅，再清理 KV；等待网络线程退出和发送 HOST_DOWN 时不持有缓存锁。LLMMockEngine 不再持有或关闭 Reporter，只通过 cacheManager() 访问缓存管理器。
 
 状态转换与任务快照复制使用同一调度锁。查询可读到转换前或转换后的已提交状态，不能读到队列移动一半的状态；不等完整调度轮、Forward 或 PD 完成，不维护影子状态。活动记录移除与完成增量发布在同次状态提交完成，网络通知在锁外执行。Cache 单独采样一次，再由既有 GetWorkerStatus 编码组装；不承诺任务与 Cache 来自同一全局时刻。这与 real RTP 分开读取运行记录、Stream 阶段和 Cache 的边界一致，不复制其类之间的分工。
 
@@ -77,7 +104,7 @@ Runner 管理声明了 background 的 Step 任务。任务属于当前 Phase，P
 
 每个 Engine 使用统一的逻辑 KV block 记账，同时约束缓存保留总量和 device 驻留量。不同模型网络层的 KV 成本合并在这些预算中；不实现按模型层分池、Full/SWA/Linear 多资源组、各组独立配额及它们之间的联合分配。这是有意的 Mock 模型边界，不是后续必须补齐的 real 能力。不记录每个缓存 key 的 Device/Host 存放位置，不扩展成每层或每种注意力各自的资源池。涉及真实混合池瓶颈和逐层容量的实验不由此模型给出结论。
 
-EngineScheduler 决定申请、增长和提交时机；KvCache 管匹配、分配、索引及引用。正常结束且 Compute/PD 使用结束后，P 提交已计算 prompt；D 提交 prompt 加实际已计算的输出前缀，排除最后一个仅采样、尚未计算 KV 的 token。共享 CacheSequence 保存语义输入和 cache-only 多模态区间，并统一生成完整 block key；生成 token 值由接入层从原生 GENERATE 传入，不能猜测为 prompt 最后一个 token。失败或取消不发布新缓存。
+EngineScheduler 决定申请、增长和提交时机；KvCacheManager 管匹配、分配、索引及引用。正常结束且 Compute/PD 使用结束后，P 提交已计算 prompt；D 提交 prompt 加实际已计算的输出前缀，排除最后一个仅采样、尚未计算 KV 的 token。共享 CacheSequence 保存语义输入和 cache-only 多模态区间，并统一生成完整 block key；生成 token 值由接入层从原生 GENERATE 传入，不能猜测为 prompt 最后一个 token。失败或取消不发布新缓存。
 
 当前仅模拟 device 驻留额度的取得与归还，Host↔Device 恢复视为瞬时，不实现真实数据迁移。对齐的 feature 源码中，Host→Device 加载使用异步任务和完成上下文，Device→Host 转存也由后台任务执行；调用方在源/目标资源尚未就绪时保留引用。因而瞬时模型不覆盖搬运延迟、传输重叠和在途额外占用，不能表述成 real 使用同步瞬时迁移。
 
@@ -85,7 +112,7 @@ EngineScheduler 决定申请、增长和提交时机；KvCache 管匹配、分�
 
 RTP 和 vLLM 的设计目标是复用请求事实、资源机制、EngineLoop、Forward、输出和生命周期工具；各自的 EngineScheduler 拥有队列模型、准入、组批、抢占恢复和结果后的状态转换。替换调度策略不应修改 Compute 或 EngineLoop。原生协议和计算模型参数仍在各自接入/配置边界适配，不宣称两个真实后端只有调度差异。
 
-当前已打通 Java 装配入口 `RtpNode.start(config, EngineScheduler.Factory)`，指定监听端口时使用 `start(config, rpcPort, controlPort, factory)`。工厂的 `create(lock, cache, finished)` 为每个实例创建一个新 EngineScheduler，收到协议接入层与 EngineLoop 共用的调度锁，以及本实例独占的 RTP Full-KV 管理器 KvCache 和统一的 finished 增量记录。工厂不关闭缓存；节点在关闭或调度器创建失败时回收它。默认入口只在 RtpNode 选择 RTP 工厂，PrefillAdmission/DecodeAdmission 不再创建或引用 RtpFifoScheduler，公共执行层不识别 RTP 配置。
+当前已打通 Java 装配入口 `LLMMockEngine.start(config, EngineScheduler.Factory)`，指定监听端口时使用 `start(config, rpcPort, controlPort, factory)`。工厂的 `create(lock, cache, finished)` 为每个实例创建一个新 EngineScheduler，收到协议接入层与 EngineLoop 共用的调度锁，以及本实例独占的 RTP Full-KV 管理器 KvCacheManager 和统一的 finished 增量记录。工厂不关闭缓存；节点在关闭或调度器创建失败时回收它。默认入口只在 LLMMockEngine 选择 RTP 工厂，PrefillAdmission/DecodeAdmission 不再创建或引用 RtpFifoScheduler，公共执行层不识别 RTP 配置。
 
 P 接入层保留原生报文、模型上下文及生成参数校验，单批 token 预算等调度策略由 EngineScheduler 判定。RTP 默认策略仍拒绝超出单批预算的 Prefill，并返回原有 INVALID_ARGUMENT/605；替换 EngineScheduler 不会被接入层的重复策略校验拦截。请求数量保护上限统一来自 RtpConfig，不再由接入层读取具体调度器的常量。
 
@@ -364,7 +391,7 @@ protocol 供 Client、P 接入层和 ViT 共用媒体输入与 RPC；图片几�
 
 ViT 的终态分三步：VitScheduler 只完成已准备图片的计算阶段 Future，不依赖 VitCache；VitPreparation.Task 等待阶段结果，统一调用 VitCache.publish 发布成功/失败，随后移除任务、释放准入额度。VitCache 保留同 key 的共享结果条目、等待者和驻留淘汰，不再从 pending 数量推导执行额度。mm_inflight_inputs 来源于 Preparation 的在途任务数，包含发布尚未返回的任务。排队取消通过阶段 Future 返回给任务所有者；已经选入 Forward 的工作保留到实际完成。关闭同样由 Preparation 收口任务终态，Cache.close 仅关闭缓存驻留。
 
-SimulatedKvLoad 位于 service 包，负责 Decode 端零耗时的异步 KV 加载。Decode 通过 EngineLoop 提交加载结果后回复 LOAD ACK。Prefill 收到 ACK 后通过一次调度操作结束源请求，再释放源 KV 引用。 KvCache/BlockTree 目前固定为 RTP Full-KV，保留已有模块，不声明仅替换 EngineScheduler 就能兼容任意后端，也不增加缓存抽象或新模块。
+SimulatedKvLoad 位于 service 包，负责 Decode 端零耗时的异步 KV 加载。Decode 通过 EngineLoop 提交加载结果后回复 LOAD ACK。Prefill 收到 ACK 后通过一次调度操作结束源请求，再释放源 KV 引用。 KvCacheManager/BlockTree 目前固定为 RTP Full-KV，保留已有模块，不声明仅替换 EngineScheduler 就能兼容任意后端，也不增加缓存抽象或新模块。
 
 共享指代码复用，不是不同实例共享资源。RtpRpcService 负责协议路由和查询结果编码。PrefillRpcServer 管理 P 的本地单 token、P/D 和显式组接入，DecodeRpcServer 管理 D 的协议会话。两者保留原生校验、输入准备、协议顺序和响应投递，通过 EngineScheduler.Request 句柄与 EngineLoop 交互。RpcMessages 转换完整输入和观测快照，RpcErrors 转换原生错误码；KV、队列、计算和本地完成条件由后端 EngineScheduler 管理。`AbstractRtpScheduler` 中的 RTP 控制事件定义生成许可和交接结果；共享 EngineScheduler 只提供扩展点，不定义所有后端必须经历的状态推进序列。RtpFifoScheduler 负责普通 FIFO 准入，RtpPrefillGroupScheduler 单独负责显式组调度；两者共用基类，无 gRPC/protobuf/执行器依赖。
 
@@ -411,7 +438,7 @@ Master HA Case 在 environment 中声明两个独立 Master JVM，启动后通�
 
 接入层只处理原生 RPC 的解析、响应关联和异步输出；EngineScheduler 是队列、计算进度、容量和终态的唯一来源。D 的网络不可写只影响发送游标，不阻塞 Decode Forward 或 KV 释放；积压输出仅保留固定大小进度，输出会话仍按保留策略清理。PD 交接只保留 ALLOCATE→Prefill 完成→LOAD/ACK→GENERATE 或 PREFILL_COMPLETE，不实现额外来源注册表、Reader 所有权及自定义 proto。Wire 阶段仅用于拒绝乱序帧，不代替 EngineScheduler 的调度状态。
 
-RTP 接入位于 `java/engine` 的 `service` 包。RtpRpcService 路由原生 RPC，PrefillRpcServer 和 DecodeRpcServer 管理各自的协议会话。RtpEngineLoop 连接 RPC 与 EngineScheduler。P 默认使用 FIFO，显式组模式使用 RtpPrefillGroupScheduler，D 使用普通调度。
+RTP 接入位于 `java/engine` 的 `service` 包。RtpRpcService 路由原生 RPC，PrefillRpcServer 和 DecodeRpcServer 管理各自的协议会话。EngineLoop 连接 RPC 与 EngineScheduler。P 默认使用 FIFO，显式组模式使用 RtpPrefillGroupScheduler，D 使用普通调度。
 
 ## 构建与检查
 
@@ -439,13 +466,13 @@ RTP 在同步本地缓存上执行。KVCM Reporter 消费有效块发布和淘�
 
 ### 本地 KV 容量与元信息
 
-KvCache 同步取得本地容量和复用前缀。资源释放或新前缀发布可唤醒 RtpEngineLoop。KVCM Reporter 只在网络线程处理元信息。
+KvCacheManager 同步取得本地容量和复用前缀。资源释放或新前缀发布可唤醒 EngineLoop。KVCM Reporter 只在网络线程处理元信息。
 
 ### 状态与观测边界
 
 EngineScheduler 的 allocator loading 与 D 的 PD 协议等待分开统计。WorkerStatus 按 real 输出 phase/is_waiting，不再填写 real 未实现的 waiting_query_len/running_query_len；活动 execution_time_ms=-1，终态总耗时减最后一次离开 WAITING 时冻结的 wait 得到 execution_time_ms。正常加载后重新调度会更新 wait，加载中取消则保留之前的 wait；不能把该字段当作纯 Forward 时长。微秒阶段指标在终态上报，具体名称、零值和统计窗口见 component-reference。
 
-KvCache 投递类型化的 match/read/write 完成事件，由 RTP 指标层映射 real 名称与单位，不把协议细节放入 EngineScheduler。读取未成功不增加远端复用，写入确认数由适配器返回；独立拉取 LOAD/STORE 引用与逻辑在途状态，后台写失败不依赖请求是否还存活。未模拟的 SDK/payload 子阶段没有指标样本。
+KvCacheManager 投递类型化的 match/read/write 完成事件，由 RTP 指标层映射 real 名称与单位，不把协议细节放入 EngineScheduler。读取未成功不增加远端复用，写入确认数由适配器返回；独立拉取 LOAD/STORE 引用与逻辑在途状态，后台写失败不依赖请求是否还存活。未模拟的 SDK/payload 子阶段没有指标样本。
 
 ### 合成输出与 P/D 链路假设
 

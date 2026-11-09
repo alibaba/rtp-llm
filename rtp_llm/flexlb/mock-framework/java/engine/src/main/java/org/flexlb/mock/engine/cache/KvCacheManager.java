@@ -1,15 +1,16 @@
 package org.flexlb.mock.engine.cache;
 
 import java.util.*;
+import org.flexlb.mock.engine.config.RtpConfig;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CancellationException;
 import static org.flexlb.mock.engine.cache.BlockPool.Kind.*;
 
 /**
- * One logical KV pool with synchronous LRU and a separate device residency bound.
+ * Full-KV allocation, reuse and LRU; owns device accounting and KVCM metadata reporting.
  */
-public final class KvCache implements AutoCloseable {
+public final class KvCacheManager implements AutoCloseable {
     private static final long[] EMPTY_KEYS = new long[0];
 
     private final BlockPool pool;
@@ -24,23 +25,24 @@ public final class KvCache implements AutoCloseable {
 
     private boolean closed;
 
+    private volatile KvcmReporter reporter;
     private java.util.function.Consumer<CacheMetadata.Change> metadataObserver;
     private java.util.function.LongConsumer evictionLifetime = nanos -> {};
     private Runnable changed = () -> {};
 
-    public KvCache(int blockSize, int blocks, int reserve) {
+    public KvCacheManager(int blockSize, int blocks, int reserve) {
         this(blockSize, blocks, reserve, true);
     }
 
-    public KvCache(int blockSize, int blocks, int reserve, boolean deviceCache) {
+    public KvCacheManager(int blockSize, int blocks, int reserve, boolean deviceCache) {
         this(blockSize, blocks, reserve, deviceCache, null);
     }
 
-    public KvCache(int blockSize, int blocks, int reserve, boolean deviceCache, RemotePrefixLoader remote) {
+    public KvCacheManager(int blockSize, int blocks, int reserve, boolean deviceCache, RemotePrefixLoader remote) {
         this(blockSize, blocks, blocks, reserve, deviceCache, remote);
     }
 
-    public KvCache(int blockSize, int deviceBlocks, int totalBlocks, int reserve,
+    public KvCacheManager(int blockSize, int deviceBlocks, int totalBlocks, int reserve,
                    boolean deviceCache, RemotePrefixLoader remote) {
         if (blockSize < 1 || deviceBlocks <= 0 || totalBlocks < deviceBlocks || reserve < 0 || reserve > deviceBlocks)
             throw new IllegalArgumentException("Invalid device/total block capacity or reserve");
@@ -60,6 +62,47 @@ public final class KvCache implements AutoCloseable {
     }
 
     public synchronized int itemCount() { return tree.size(); }
+
+    /** KVCM configuration, registration and reporting share the cache manager's lifetime. */
+    public void startKvcmReporter(RtpConfig config, String workerAddress) {
+        var values = config.business();
+        String type = values.path("kv_cache_event_publisher_type").asText("none");
+        if (!Set.of("none", "kvcm").contains(type)) throw new IllegalArgumentException("Invalid kv_cache_event_publisher_type");
+        if (type.equals("none")) return;
+        String instance = values.path("kv_cache_event_instance_id").asText();
+        String host = values.path("kv_cache_event_host_ip_port").asText(workerAddress);
+        if (instance.isBlank() || host.isBlank())
+            throw new IllegalArgumentException("KVCM requires a shared instance_id and a nonempty Master-visible host_ip_port");
+        var identity = new KvcmReporter.Identity(
+            instance,
+            values.path("kv_cache_event_instance_group").asText("default"),
+            host,
+            values.path("model_name").asText("mock-full-kv"), "FP16", false,
+            config.blockSize(), config.tpSize(), config.dpSize(), "rtp_llm_hbm_" + config.blockSize() + "_full");
+        int snapshotMillis = RtpConfig.nativeInt(values, "kv_cache_event_snapshot_interval_ms", 600000, Integer.MIN_VALUE, Integer.MAX_VALUE);
+        String override = values.path("kv_cache_event_manager_endpoint").asText();
+        boolean vip = RtpConfig.nativeBool(values, "kvcm_enable_vipserver", false);
+        var endpoint = override.isBlank()
+            ? org.flexlb.mock.engine.cache.KvcmDiscovery.discover(
+                values.path(vip ? "kvcm_vipserver_domain" : "kvcm_server_address").asText(), instance, vip)
+            : org.flexlb.mock.engine.cache.KvcmDiscovery.direct(java.net.URI.create(override));
+        var settings = new KvcmReporter.Configuration(endpoint, type.equals("kvcm") && snapshotMillis > 0,
+            snapshotMillis);
+        try {
+            synchronized (this) {
+                if (closed || reporter != null) throw new IllegalStateException("KV metadata reporter already started or manager closed");
+                reporter = new KvcmReporter(settings, identity, this);
+            }
+        } catch (RuntimeException | Error failure) {
+            try { endpoint.close(); } catch (Exception cleanup) { failure.addSuppressed(cleanup); }
+            throw failure;
+        }
+    }
+
+    public Map<String, Object> kvcmStatus() {
+        var current = reporter;
+        return current == null ? Map.of() : current.status();
+    }
 
     public synchronized Preparation prepare(long requiredTokens, List<Long> keys) {
         var admission = acquire(requiredTokens, keys);
@@ -120,7 +163,7 @@ public final class KvCache implements AutoCloseable {
         if (metadataObserver != null) throw new IllegalStateException("Cache metadata already has a reporter");
         metadataObserver = Objects.requireNonNull(observer);
         tree.observe(observer);
-        return () -> { synchronized (KvCache.this) {
+        return () -> { synchronized (KvCacheManager.this) {
             if (metadataObserver == observer) { metadataObserver = null; tree.observe(change -> {}); }
         } };
     }
@@ -135,12 +178,22 @@ public final class KvCache implements AutoCloseable {
     }
 
     @Override public void close() {
+        KvcmReporter owned;
         synchronized (this) {
             if (closed) return;
             closed = true;
-            for (var load : List.copyOf(pending)) load.close();
-            for (var lease : List.copyOf(active)) lease.close();
-            tree.clear();
+            owned = reporter;
+            reporter = null;
+        }
+        // Reporter.close detaches the cache observer and waits for network workers.
+        // Never hold the cache monitor across that wait or HOST_DOWN delivery.
+        try { if (owned != null) owned.close(); }
+        finally {
+            synchronized (this) {
+                for (var load : List.copyOf(pending)) load.close();
+                for (var lease : List.copyOf(active)) lease.close();
+                tree.clear();
+            }
         }
     }
 
@@ -206,7 +259,7 @@ public final class KvCache implements AutoCloseable {
 
         /** Retry only when capacity or the reusable index has changed. */
         public Preparation retry() {
-            synchronized (KvCache.this) {
+            synchronized (KvCacheManager.this) {
                 if (failure == Failure.PERMANENT || generation == allocationGeneration()) return this;
                 return prepare(requiredTokens, keys);
             }
@@ -230,7 +283,7 @@ public final class KvCache implements AutoCloseable {
 
         /** Returns this handle while pending, or transfers ownership of the ready lease once. */
         public Preparation poll() {
-            synchronized (KvCache.this) {
+            synchronized (KvCacheManager.this) {
                 if (settled) throw new IllegalStateException("KV preparation already settled");
                 if (!restore.isDone()) return this;
                 settled = true;
@@ -249,7 +302,7 @@ public final class KvCache implements AutoCloseable {
         }
 
         @Override public void close() {
-            synchronized (KvCache.this) {
+            synchronized (KvCacheManager.this) {
                 if (settled) return;
                 settled = true;
                 pending.remove(this);
@@ -267,6 +320,9 @@ public final class KvCache implements AutoCloseable {
     public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
                            int referencedBlocks, long version, long[] keys) {}
 
+    /**
+     * Holds request references to allocated blocks until publication or release.
+     */
     public final class Lease implements AutoCloseable {
         private final List<Slot> slots;
         private int reused;
@@ -274,9 +330,9 @@ public final class KvCache implements AutoCloseable {
         private Lease(List<Slot> slots, int reused) {
             this.slots = slots; this.reused = reused;
         }
-        public long reusedTokens() { synchronized (KvCache.this) { return terminal ? 0 : (long) reused * blockSize; } }
+        public long reusedTokens() { synchronized (KvCacheManager.this) { return terminal ? 0 : (long) reused * blockSize; } }
         public Failure ensureCapacity(long requiredTokens) {
-            synchronized (KvCache.this) {
+            synchronized (KvCacheManager.this) {
                 requireOpen();
                 long target = blocksFor(requiredTokens);
                 if (target <= slots.size()) return null;
@@ -289,7 +345,7 @@ public final class KvCache implements AutoCloseable {
         }
         /** Publication does not release request ownership. Only complete immutable blocks are accepted. */
         public boolean publish(List<Long> keys, long validTokens) {
-            synchronized (KvCache.this) {
+            synchronized (KvCacheManager.this) {
                 if (terminal) return false;
                 validate(keys); tree.validatePath(keys);
                 if (validTokens < 0 || validTokens > (long) slots.size() * blockSize || keys.size() > validTokens / blockSize)
@@ -315,7 +371,7 @@ public final class KvCache implements AutoCloseable {
         }
 
         @Override public void close() {
-            synchronized (KvCache.this) {
+            synchronized (KvCacheManager.this) {
                 if (terminal) return;
                 int available = pool.snapshot().available();
                 for (var slot : slots) {

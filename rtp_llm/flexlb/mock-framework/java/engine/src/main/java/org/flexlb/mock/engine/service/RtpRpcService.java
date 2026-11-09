@@ -15,11 +15,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.mock.engine.cache.KvCache;
+import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.forward.ComputeModel;
 import org.flexlb.mock.protocol.Role;
-import org.flexlb.mock.engine.execution.RtpEngineLoop;
+import org.flexlb.mock.engine.execution.EngineLoop;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 
 /**
@@ -30,30 +30,31 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     private final EventMetrics rpcMetrics;
     private final Map<String, String> metricTags;
     private final Config config;
-    private final KvCache cache;
+    private final KvCacheManager cache;
     private final TaskHistory finished;
     private final PrefillRpcServer prefill;
     private final DecodeRpcServer decode;
 
     private final boolean groups;
 
+    private final AtomicLong onflightRequests = new AtomicLong();
     private final AtomicLong statusVersion = new AtomicLong();
 
     private volatile boolean closed;
 
-    public RtpRpcService(Config config, KvCache cache, Object executionLock, TaskHistory finished,
-                         RtpEngineLoop engine, boolean groups) {
+    public RtpRpcService(Config config, KvCacheManager cache, Object executionLock, TaskHistory finished,
+                         EngineLoop engine, boolean groups) {
         this.config = config;
         this.groups = groups;
         this.cache = cache; this.finished = finished;
         var tags = new HashMap<>(MetricTags.fromEnvironment(System.getenv()));
         tags.put("dp_rank", "0");
         metricTags = Map.copyOf(tags);
-        rpcMetrics = new EventMetrics(config.role().name(), System::nanoTime, metricTags);
+        rpcMetrics = new EventMetrics(config.role().name(), metricTags);
         rpcMetrics.register(rpcRegistry);
         prefill = config.role() == Role.prefill
-            ? new PrefillRpcServer(config, executionLock, finished, engine, this::recordCancellation) : null;
-        decode = prefill == null ? new DecodeRpcServer(config, executionLock, engine, this::recordCancellation) : null;
+            ? new PrefillRpcServer(config, executionLock, finished, engine, this::recordCancellation, this::trackRequest) : null;
+        decode = prefill == null ? new DecodeRpcServer(config, executionLock, engine, this::recordCancellation, this::trackRequest) : null;
     }
 
     public void close() {
@@ -152,15 +153,31 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     @Override public void getCacheStatus(CacheVersionPB request, StreamObserver<CacheStatusPB> response) {
         statusReply("cache_status", response, () -> {
             var snapshot = cache.snapshot(request.getLatestCacheVersion(), request.getNeedCacheKeys());
+            // Real measures cache collection only, before protobuf construction.
+            long collected = System.nanoTime();
             var result = CacheStatusPB.newBuilder().setTotalKvCache(tokens(snapshot.totalBlocks()))
                 .setAvailableKvCache(tokens(snapshot.availableBlocks())).setBlockSize(config.blockSize()).setVersion(snapshot.version());
             for (long key : snapshot.keys()) result.putCacheKeys(key, true);
-            return new StatusResult<>(result.build(), System.nanoTime());
+            return new StatusResult<>(result.build(), collected);
         });
     }
 
     public List<MetricFamilySamples> collectMetrics() {
         return MetricTags.collect(rpcRegistry, metricTags);
+    }
+
+    // Real samples at GenerateContext destruction, before its AtomicGuard decrements.
+    private Runnable trackRequest() {
+        onflightRequests.incrementAndGet();
+        var completed = new java.util.concurrent.atomic.AtomicBoolean();
+        return () -> {
+            if (completed.compareAndSet(false, true))
+                rpcMetrics.observe("rtp_llm_rpc_onflight_request", onflightRequests.getAndDecrement());
+        };
+    }
+
+    private void recordCancellation() {
+        rpcMetrics.increment("rtp_llm_rpc_cancel_qps");
     }
 
     private void recordCancellation() {

@@ -927,7 +927,12 @@ def test_instance_choices_use_full_saved_series_and_separate_master_reporter_fro
     ]
     if include_vit:
         series.append(
-            {"__name__": "py_rtp_vit_qps", "instance": "10.0.1.3:9000", "role": "vit"}
+            {
+                "__name__": "py_rtp_vit_qps_total",
+                "instance": "10.0.1.3:9000",
+                "role": "vit",
+                "source": "mm_embedding",
+            }
         )
 
     def fetch(url, timeout):

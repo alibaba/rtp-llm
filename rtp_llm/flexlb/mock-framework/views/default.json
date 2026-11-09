@@ -7,9 +7,7 @@
   "editable": false,
   "timezone": "browser",
   "refresh": "",
-  "tags": [
-    "mock-framework"
-  ],
+  "tags": ["mock-framework"],
   "panels": [
     {
       "id": 1,
@@ -77,11 +75,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "Client 开始原生调用的速率，不代表 Master 已接纳；所选 Client 求和。"
@@ -146,11 +140,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -215,11 +205,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "所选 Client 的终态速率求和，按 success/error/timeout/cancelled 区分。"
@@ -284,11 +270,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "成功终态 / 全部终态；尚未结束的请求不进入分母。"
@@ -380,11 +362,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "TTFT 是发起调用到收到首 token 的时间。TPOT 按成功请求首尾 token 到达时间差除以首 token 之后的 token 数。"
@@ -467,11 +445,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "从调用开始到终态，包含成功、失败、取消和超时。均值按调用次数加权；P95/P99 合并 Histogram。"
@@ -536,11 +510,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -605,11 +575,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "已发调用数减去已观察终态数；这是 Client 侧计数差，不等同于 Master 或 Engine 的 in-flight。"
@@ -687,11 +653,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "按 Real 口径：对应 token 数 / 有效执行时间。先合并 priority，再展示各实例执行速率的均值；不代表集群墙钟吞吐。",
@@ -762,11 +724,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10368。",
@@ -837,11 +795,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10381。",
@@ -912,11 +866,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 218。",
@@ -987,11 +937,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "对齐 Real 原生指标：每个报告窗口内的 token 数，不是 token/s；先合并同一实例的 priority，再展示实例均值。墙钟 TPS 使用独立累计 token 计数器的增量除以时间。",
@@ -1062,11 +1008,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "按 Real 口径：对应 token 数 / 有效执行时间。先合并 priority，再展示各实例执行速率的均值；不代表集群墙钟吞吐。",
@@ -1137,11 +1079,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10372。",
@@ -1212,11 +1150,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10382。",
@@ -1287,11 +1221,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "All 按角色聚合；选择具体地址时每个 Engine 一条曲线。参考 RTP-LLM 大盘 v514 / panel 231。",
@@ -1362,11 +1292,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10081。",
@@ -1437,11 +1363,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "Mock 构造本轮 ForwardBatch 的实际耗时，单位 µs。",
@@ -1512,11 +1434,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 215。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -1587,11 +1505,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 234。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -1662,11 +1576,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 121。",
@@ -1695,7 +1605,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_rpc_cancel_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "avg by(${prefill_group})(rate(rtp_llm_rpc_cancel_qps_total{instance=~\"${prefill_instance}\",role=\"prefill\"}[1m]))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -1737,11 +1647,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "以 CANCELLED 结束的 Mock 生成 RPC，每秒请求数。",
@@ -1812,11 +1718,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 130。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -1887,11 +1789,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 131。",
@@ -1962,11 +1860,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 233。",
@@ -2037,11 +1931,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 230。",
@@ -2112,11 +2002,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "完成的执行步耗时，从调度返回到处理完本轮输出，单位微秒。面板显示窗口均值在所选实例中的最大值。",
@@ -2187,11 +2073,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 161。",
@@ -2262,11 +2144,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 217。",
@@ -2337,11 +2215,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10587。",
@@ -2412,11 +2286,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10588。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -2487,11 +2357,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10098。",
@@ -2562,11 +2428,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 232。",
@@ -2637,11 +2499,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10586。",
@@ -2712,11 +2570,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10589。",
@@ -2796,11 +2650,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。整批 stream 状态更新耗时，单位为微秒。包含 CPU 更新任务的提交、执行和等待；串行路径同样统计。仅含 decode 的批次上报，也包含混合批次中的 context stream 更新。avg 为平均耗时，max 为窗口内最大耗时。 参考 RTP-LLM 大盘 v514 / panel 10629。",
@@ -2871,11 +2721,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。xgrammar 已提交状态推进超过服务配置上限的事件速率。每个请求仅在首次超时时计数，随后禁用该请求的 grammar。单位为事件/秒，KMonitor 已计算 QPS，不再做 rate。 参考 RTP-LLM 大盘 v514 / panel 10630。",
@@ -2946,11 +2792,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 128。",
@@ -3021,11 +2863,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "context_batch_size_when_has_context 参考 RTP-LLM 大盘 v514 / panel 220。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -3096,11 +2934,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 150。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -3171,11 +3005,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 327。",
@@ -3246,11 +3076,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 122。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -3321,11 +3147,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 127。",
@@ -3396,11 +3218,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 124。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -3471,11 +3289,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 226。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -3546,11 +3360,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 125。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -3621,11 +3431,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10099。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -3696,11 +3502,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10163。",
@@ -3771,11 +3573,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "Real 记录运行中的流与新 Prefill 混批的次数或新增 Prefill token 数。Mock P/D 分离执行。",
@@ -3846,11 +3644,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "Real 记录运行中的流与新 Prefill 混批的次数或新增 Prefill token 数。Mock P/D 分离执行。",
@@ -3921,11 +3715,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 227。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -3996,11 +3786,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 146。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -4072,11 +3858,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "Engine 已接纳请求的速率；同一端到端请求会经历 P 与 D，不能将两个角色相加当作请求 QPS。"
@@ -4141,11 +3923,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -4210,11 +3988,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -4279,11 +4053,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -4348,11 +4118,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -4426,11 +4192,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "成功 KV admission 时记录的输入/历史前缀复用 Token，非 Master 候选匹配。"
@@ -4495,11 +4257,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前 Scheduler 的辅助阶段，不等同于 real loading_cache_stream 队列；waiting/running 见原 RTP 面板。"
@@ -4564,11 +4322,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前 Scheduler 的辅助阶段，不等同于 real loading_cache_stream 队列；waiting/running 见原 RTP 面板。"
@@ -4633,11 +4387,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "先计算各实例实际复用 Token / 输入 Token，再求角色平均；无查找的实例无比率，不补零。"
@@ -4702,11 +4452,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "所选实例的复用 Token 总量 / 输入 Token 总量；这是 Token 加权比率，与平均实例命中率分开。"
@@ -4771,11 +4517,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "累计 Forward 耗时增量之和 / 完成 Forward 次数增量之和，保留各实例批次数量权重；单位毫秒。"
@@ -4849,11 +4591,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "合并所选实例的 Histogram 后计算分位数。"
@@ -4918,11 +4656,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -4996,11 +4730,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "每个完成 Forward 的 Token 数，不是 batch 请求数；先按实例求比值再按角色平均。"
@@ -5065,11 +4795,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -5091,7 +4817,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${prefill_group})(rtp_llm_is_streaming_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "sum by(${prefill_group})(rate(rtp_llm_is_streaming_qps_total{instance=~\"${prefill_instance}\",role=\"prefill\"}[1m]))",
               "legendFormat": "{{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -5133,11 +4859,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "按请求的 is_streaming 标志统计已结束的 Worker 请求。",
@@ -5166,7 +4888,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${prefill_group})(rtp_llm_not_streaming_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "sum by(${prefill_group})(rate(rtp_llm_not_streaming_qps_total{instance=~\"${prefill_instance}\",role=\"prefill\"}[1m]))",
               "legendFormat": "{{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -5208,11 +4930,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "按请求的 is_streaming 标志统计已结束的 Worker 请求。",
@@ -5283,11 +5001,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "累计 token 计数器的一分钟增量 / 墙钟时间。All 时为所选实例合计；不对原生窗口计数 Gauge 求 rate 或累加速率。",
@@ -5372,11 +5086,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 170。",
@@ -5447,11 +5157,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。multimodal process rt 参考 RTP-LLM 大盘 v514 / panel 169。",
@@ -5522,11 +5228,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 223。",
@@ -5597,11 +5299,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 171。",
@@ -5672,11 +5370,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 186。",
@@ -5747,11 +5441,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。remote load cache end rt 参考 RTP-LLM 大盘 v514 / panel 224。",
@@ -5822,11 +5512,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 187。",
@@ -5897,11 +5583,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 189。",
@@ -5972,11 +5654,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10108。",
@@ -6047,11 +5725,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10105。",
@@ -6122,11 +5796,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10106。",
@@ -6197,11 +5867,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10107。",
@@ -6272,11 +5938,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 197。",
@@ -6370,11 +6032,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "近 30 分钟内本 Worker 曾见的完整缓存键折算为理论命中 token。总数包含完整输入。曲线显示统计窗口内的 token/s。",
@@ -6445,11 +6103,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "本机 KV 前缀树当前索引的块数，包括仍被请求引用的缓存块。",
@@ -6520,11 +6174,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 147。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -6595,11 +6245,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10636。",
@@ -6670,11 +6316,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10094。",
@@ -6745,11 +6387,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "kv cache available blocks 参考 RTP-LLM 大盘 v514 / panel 174。",
@@ -6820,11 +6458,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "kv cache available blocks 参考 RTP-LLM 大盘 v514 / panel 173。",
@@ -6895,11 +6529,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "Device KV 不可用比例，0–100；available 包含可淘汰缓存，不能用 free 替代。参考 RTP-LLM 大盘 v514 / panel 154。",
@@ -6979,11 +6609,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 558。",
@@ -7054,11 +6680,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 142。",
@@ -7129,11 +6751,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。dsv4-on-dev 旧 Connector 去重引用块数总量：allocator 遍历其物理池求和。没有 tier 标签。当前 BTC 分支没有该去重总量的等价埋点；不能用 LOAD+STORE+EVICTION 直接代替，故无 BTC B query。 参考 RTP-LLM 大盘 v514 / panel 10095。",
@@ -7204,11 +6822,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "启用本地复用时，成功分配请求的前缀树匹配耗时，单位 µs。",
@@ -7279,11 +6893,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。mr cost time 参考 RTP-LLM 大盘 v514 / panel 235。",
@@ -7354,11 +6964,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。BTC EVICTION target 引用块数总览：保留应用、实例、DP、tier，跨全部 pool_name 求和；不受顶部 pool_name 选择影响，tier 仍跟随顶部筛选。普通表单查询：Aggregator=sum，Aggregator Down=avg；Tags不指定pool_name以跨池聚合，保留tier。统计当前该类引用数大于0的不同块；不同类型可能重叠，不相加替代旧 Connector 总量。淘汰引用仅统计 HOST/DISK 目标侧，DEVICE 不上报。来源限定：release/btc_1.0@64120b43e、feat/dsv4_on_dev@c26a12796。dsv4-on-dev 未实现这三类引用埋点，不配置虚构的兼容 query；不使用 main 分支实现。 参考 RTP-LLM 大盘 v514 / panel 10600。",
@@ -7429,11 +7035,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "容量不足淘汰设备缓存块时，从进入缓存索引到被淘汰的时长，单位 ms。没有淘汰时没有样本。",
@@ -7504,11 +7106,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "Prefill 请求终态的复用 token 总量除以输入 token 总量。",
@@ -7579,11 +7177,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "按 Worker 的近 30 分钟键历史统计理论命中。",
@@ -7654,11 +7248,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "实际复用率除以 Worker 近期理论命中率。理论值为零时无有效比值。",
@@ -7729,11 +7319,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "分母来自选中 Master 的集群历史窗口。Master 历史未就绪时没有比值。",
@@ -7827,11 +7413,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 552。",
@@ -7911,11 +7493,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 553。",
@@ -7995,11 +7573,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 554。",
@@ -8070,11 +7644,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。BTC PD connector 当前持有的 DEVICE block 数，按 tier/pool_name 分池。统计被该引用类别持有的去重块数，不是引用次数；与 request ref、另一类 connector ref 可能重叠，不能相加作为去重总量。跟随顶部 tier/pool_name 与实例筛选，时间降采样 avg。 参考 RTP-LLM 大盘 v514 / panel 10632。",
@@ -8154,11 +7724,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 556。",
@@ -8238,11 +7804,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 557。",
@@ -8313,11 +7875,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。dsv4-on-dev 旧 Connector 分池引用块数，按数值 pool 编号区分；没有 tier/pool_name 标签，不受新增 tier/pool_name 筛选变量影响。当前 BTC 没有去重 Connector 分池埋点，故无 BTC B query。 参考 RTP-LLM 大盘 v514 / panel 555。",
@@ -8388,11 +7946,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前模拟设备 KV 池被该操作引用的独立块数。",
@@ -8463,11 +8017,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前模拟设备 KV 池被该操作引用的独立块数。",
@@ -8538,11 +8088,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。BTC 淘汰迁移目标引用块数分池明细，按 tier/pool_name 展示；HOST/DISK 可取，DEVICE 不上报。统计当前持有目标引用的块，不是累计淘汰块数。来源限定：release/btc_1.0@64120b43e、feat/dsv4_on_dev@c26a12796。dsv4-on-dev 未实现这三类引用埋点，不配置虚构的兼容 query；不使用 main 分支实现。 参考 RTP-LLM 大盘 v514 / panel 10602。",
@@ -8613,11 +8159,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。数据传输超时，网络不可预期错误会触发 frozen blocks，防止脏读脏写 参考 RTP-LLM 大盘 v514 / panel 10635。",
@@ -8712,11 +8254,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "两个 Gauge 各保留最近完成批次；这里是实例最近值的平均，不是逐批平均。实际值包含模拟计时与回调调度延迟；理论值为 compute 模型计划，不代表真实 GPU 时间。"
@@ -8781,11 +8319,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "最近值差的实例平均，可观察模拟计时偏差；不能仅据此归因为 CPU 不足。"
@@ -8850,11 +8384,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "模拟执行完成耗时相对于墙钟时间的比例，不是 GPU 利用率或 JVM CPU 利用率。"
@@ -8932,11 +8462,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "对齐 Real 原生指标：每个报告窗口内的 token 数，不是 token/s；先合并同一实例的 priority，再展示实例均值。墙钟 TPS 使用独立累计 token 计数器的增量除以时间。",
@@ -9007,11 +8533,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "已提交给输出链路的 token 除以墙钟时间。按所选实例累加。",
@@ -9082,11 +8604,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 218。",
@@ -9157,11 +8675,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "对齐 Real 原生指标：每个报告窗口内的 token 数，不是 token/s；先合并同一实例的 priority，再展示实例均值。墙钟 TPS 使用独立累计 token 计数器的增量除以时间。",
@@ -9232,11 +8746,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10081。",
@@ -9307,11 +8817,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "Mock 构造本轮 ForwardBatch 的实际耗时，单位 µs。",
@@ -9382,11 +8888,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 215。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -9457,11 +8959,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 234。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -9532,11 +9030,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 121。",
@@ -9565,7 +9059,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_rpc_cancel_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "avg by(${decode_group})(rate(rtp_llm_rpc_cancel_qps_total{instance=~\"${decode_instance}\",role=\"decode\"}[1m]))",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -9607,11 +9101,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "以 CANCELLED 结束的 Mock 生成 RPC，每秒请求数。",
@@ -9682,11 +9172,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 130。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -9757,11 +9243,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 131。",
@@ -9832,11 +9314,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 233。",
@@ -9907,11 +9385,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 230。",
@@ -9982,11 +9456,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "完成的执行步耗时，从调度返回到处理完本轮输出，单位微秒。面板显示窗口均值在所选实例中的最大值。",
@@ -10057,11 +9527,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 161。",
@@ -10132,11 +9598,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 217。",
@@ -10207,11 +9669,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10587。",
@@ -10282,11 +9740,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10588。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -10357,11 +9811,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10098。",
@@ -10432,11 +9882,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 232。",
@@ -10507,11 +9953,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "仅统计计算完成且有模拟验收 token 的 Decode 步。耗时从输入组装开始，到输出处理前结束；验收量在 EOS/长度截断前统计，保留入批后取消但计算完成的 stream。使用窗口内事件样本均值。",
@@ -10582,11 +10024,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10586。",
@@ -10657,11 +10095,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10589。",
@@ -10741,11 +10175,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。整批 stream 状态更新耗时，单位为微秒。包含 CPU 更新任务的提交、执行和等待；串行路径同样统计。仅含 decode 的批次上报，也包含混合批次中的 context stream 更新。avg 为平均耗时，max 为窗口内最大耗时。 参考 RTP-LLM 大盘 v514 / panel 10629。",
@@ -10816,11 +10246,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。xgrammar 已提交状态推进超过服务配置上限的事件速率。每个请求仅在首次超时时计数，随后禁用该请求的 grammar。单位为事件/秒，KMonitor 已计算 QPS，不再做 rate。 参考 RTP-LLM 大盘 v514 / panel 10630。",
@@ -10891,11 +10317,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 128。",
@@ -10966,11 +10388,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 149。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -11041,11 +10459,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 150。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -11116,11 +10530,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 327。",
@@ -11191,11 +10601,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 127。",
@@ -11266,11 +10672,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 124。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -11341,11 +10743,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 125。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -11416,11 +10814,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 123。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -11491,11 +10885,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10163。",
@@ -11566,11 +10956,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 145。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -11641,11 +11027,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 439。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -11716,11 +11098,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 146。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -11791,11 +11169,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 219。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
@@ -11867,11 +11241,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "Engine 已接纳请求的速率；同一端到端请求会经历 P 与 D，不能将两个角色相加当作请求 QPS。"
@@ -11936,11 +11306,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -12005,11 +11371,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -12074,11 +11436,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -12143,11 +11501,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -12212,11 +11566,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前 Scheduler 的辅助阶段，不等同于 real loading_cache_stream 队列；waiting/running 见原 RTP 面板。"
@@ -12281,11 +11631,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前 Scheduler 的辅助阶段，不等同于 real loading_cache_stream 队列；waiting/running 见原 RTP 面板。"
@@ -12350,11 +11696,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "累计 Forward 耗时增量之和 / 完成 Forward 次数增量之和，保留各实例批次数量权重；单位毫秒。"
@@ -12428,11 +11770,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "合并所选实例的 Histogram 后计算分位数。"
@@ -12497,11 +11835,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -12575,11 +11909,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "每个完成 Forward 的 Token 数，不是 batch 请求数；先按实例求比值再按角色平均。"
@@ -12644,11 +11974,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -12670,7 +11996,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${decode_group})(rtp_llm_is_streaming_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "sum by(${decode_group})(rate(rtp_llm_is_streaming_qps_total{instance=~\"${decode_instance}\",role=\"decode\"}[1m]))",
               "legendFormat": "{{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -12712,11 +12038,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "按请求的 is_streaming 标志统计已结束的 Worker 请求。",
@@ -12745,7 +12067,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${decode_group})(rtp_llm_not_streaming_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "sum by(${decode_group})(rate(rtp_llm_not_streaming_qps_total{instance=~\"${decode_instance}\",role=\"decode\"}[1m]))",
               "legendFormat": "{{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -12787,11 +12109,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "按请求的 is_streaming 标志统计已结束的 Worker 请求。",
@@ -12862,11 +12180,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "累计 token 计数器的一分钟增量 / 墙钟时间。All 时为所选实例合计；不对原生窗口计数 Gauge 求 rate 或累加速率。",
@@ -12951,11 +12265,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 192。",
@@ -13026,11 +12336,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 196。",
@@ -13101,11 +12407,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 194。",
@@ -13176,11 +12478,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 211。",
@@ -13251,11 +12549,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 212。",
@@ -13326,11 +12620,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 213。",
@@ -13401,11 +12691,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 193。",
@@ -13476,11 +12762,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10114。",
@@ -13551,11 +12833,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10115。",
@@ -13640,11 +12918,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "本机 KV 前缀树当前索引的块数，包括仍被请求引用的缓存块。",
@@ -13715,11 +12989,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10094。",
@@ -13790,11 +13060,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "kv cache available blocks 参考 RTP-LLM 大盘 v514 / panel 174。",
@@ -13865,11 +13131,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "kv cache available blocks 参考 RTP-LLM 大盘 v514 / panel 173。",
@@ -13940,11 +13202,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "Device KV 不可用比例，0–100；available 包含可淘汰缓存，不能用 free 替代。参考 RTP-LLM 大盘 v514 / panel 154。",
@@ -14024,11 +13282,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 558。",
@@ -14099,11 +13353,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 142。",
@@ -14174,11 +13424,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。dsv4-on-dev 旧 Connector 去重引用块数总量：allocator 遍历其物理池求和。没有 tier 标签。当前 BTC 分支没有该去重总量的等价埋点；不能用 LOAD+STORE+EVICTION 直接代替，故无 BTC B query。 参考 RTP-LLM 大盘 v514 / panel 10095。",
@@ -14249,11 +13495,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "启用本地复用时，成功分配请求的前缀树匹配耗时，单位 µs。",
@@ -14324,11 +13566,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。mr cost time 参考 RTP-LLM 大盘 v514 / panel 235。",
@@ -14399,11 +13637,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。BTC EVICTION target 引用块数总览：保留应用、实例、DP、tier，跨全部 pool_name 求和；不受顶部 pool_name 选择影响，tier 仍跟随顶部筛选。普通表单查询：Aggregator=sum，Aggregator Down=avg；Tags不指定pool_name以跨池聚合，保留tier。统计当前该类引用数大于0的不同块；不同类型可能重叠，不相加替代旧 Connector 总量。淘汰引用仅统计 HOST/DISK 目标侧，DEVICE 不上报。来源限定：release/btc_1.0@64120b43e、feat/dsv4_on_dev@c26a12796。dsv4-on-dev 未实现这三类引用埋点，不配置虚构的兼容 query；不使用 main 分支实现。 参考 RTP-LLM 大盘 v514 / panel 10600。",
@@ -14474,11 +13708,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "容量不足淘汰设备缓存块时，从进入缓存索引到被淘汰的时长，单位 ms。没有淘汰时没有样本。",
@@ -14572,11 +13802,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 552。",
@@ -14656,11 +13882,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 553。",
@@ -14740,11 +13962,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 554。",
@@ -14815,11 +14033,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。BTC PD connector 当前持有的 DEVICE block 数，按 tier/pool_name 分池。统计被该引用类别持有的去重块数，不是引用次数；与 request ref、另一类 connector ref 可能重叠，不能相加作为去重总量。跟随顶部 tier/pool_name 与实例筛选，时间降采样 avg。 参考 RTP-LLM 大盘 v514 / panel 10632。",
@@ -14899,11 +14113,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 556。",
@@ -14983,11 +14193,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 557。",
@@ -15058,11 +14264,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。dsv4-on-dev 旧 Connector 分池引用块数，按数值 pool 编号区分；没有 tier/pool_name 标签，不受新增 tier/pool_name 筛选变量影响。当前 BTC 没有去重 Connector 分池埋点，故无 BTC B query。 参考 RTP-LLM 大盘 v514 / panel 555。",
@@ -15133,11 +14335,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前模拟设备 KV 池被该操作引用的独立块数。",
@@ -15208,11 +14406,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前模拟设备 KV 池被该操作引用的独立块数。",
@@ -15283,11 +14477,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。BTC 淘汰迁移目标引用块数分池明细，按 tier/pool_name 展示；HOST/DISK 可取，DEVICE 不上报。统计当前持有目标引用的块，不是累计淘汰块数。来源限定：release/btc_1.0@64120b43e、feat/dsv4_on_dev@c26a12796。dsv4-on-dev 未实现这三类引用埋点，不配置虚构的兼容 query；不使用 main 分支实现。 参考 RTP-LLM 大盘 v514 / panel 10602。",
@@ -15358,11 +14548,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。数据传输超时，网络不可预期错误会触发 frozen blocks，防止脏读脏写 参考 RTP-LLM 大盘 v514 / panel 10635。",
@@ -15457,11 +14643,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "两个 Gauge 各保留最近完成批次；这里是实例最近值的平均，不是逐批平均。实际值包含模拟计时与回调调度延迟；理论值为 compute 模型计划，不代表真实 GPU 时间。"
@@ -15526,11 +14708,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "最近值差的实例平均，可观察模拟计时偏差；不能仅据此归因为 CPU 不足。"
@@ -15595,11 +14773,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "模拟执行完成耗时相对于墙钟时间的比例，不是 GPU 利用率或 JVM CPU 利用率。"
@@ -15635,7 +14809,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})(rate(py_rtp_vit_qps_total{instance=~\"${vit_instance}\",role=\"vit\",source=\"mm_embedding\"}[1m]))",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -15677,14 +14851,10 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 449。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 449。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。\nsource=mm_embedding；去重后的内部 embedding 工作开始次数，包含异步提交，缓存命中和共享等待不重复计。不是多图 RPC 次数。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -15710,7 +14880,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_success_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})(rate(py_rtp_vit_success_qps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -15752,14 +14922,10 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 458。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 458。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。\n唯一内部 embedding 工作成功发布次数；缓存返回和共享消费者不重复计，无 source 标签。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -15785,7 +14951,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_error_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})(rate(py_rtp_vit_error_qps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -15827,14 +14993,10 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 457。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 457。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。\n首次观察到的错误；共享 entry 和重复异常去重，入口错误也可能计入。不是客户端请求错误率。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -15920,11 +15082,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "成功准备图片的总耗时及其下载、其余准备耗时。其余准备包括读图片尺寸、摘要和几何计算。",
@@ -15995,11 +15153,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10350。\n实际 HTTP 图片读取耗时，单位 ms；本地跳过读取时无样本。",
@@ -16070,11 +15224,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "成功准备图片的非下载耗时，单位毫秒。包含读尺寸、摘要和几何计算。",
@@ -16145,11 +15295,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "准备尚未完成的唯一媒体数，包含排队和执行中的工作。",
@@ -16220,14 +15366,10 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10366。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10366。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -16295,11 +15437,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 456。\n每份成功媒体工作从进入 GPU 就绪队列到 Forward 完成的耗时，单位 ms；不含下载、准备和缓存命中等待。",
@@ -16370,11 +15508,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10352。",
@@ -16445,14 +15579,10 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10353。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10353。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -16520,14 +15650,10 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10354。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10354。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -16595,14 +15721,10 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10355。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10355。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -16670,11 +15792,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10356。",
@@ -16745,11 +15863,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10357。",
@@ -16820,11 +15934,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10358。",
@@ -16895,11 +16005,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10359。",
@@ -16928,7 +16034,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_embedding_cache_hit_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})(rate(py_rtp_vit_embedding_cache_hit_qps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -16970,14 +16076,10 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10360。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10360。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -17003,7 +16105,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_embedding_cache_miss_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})(rate(py_rtp_vit_embedding_cache_miss_qps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -17045,14 +16147,10 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10361。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10361。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -17078,7 +16176,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_embedding_cache_inflight_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})(rate(py_rtp_vit_embedding_cache_inflight_qps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -17120,14 +16218,10 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10362。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10362。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -17195,14 +16289,10 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10367。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10367。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -17270,11 +16360,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10624。",
@@ -17345,11 +16431,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10625。",
@@ -17420,11 +16502,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10626。",
@@ -17495,11 +16573,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10627。",
@@ -17570,11 +16644,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10628。",
@@ -17603,7 +16673,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_request_rt_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_request_rt_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
+              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_request_rt_sum{instance=~\"${vit_instance}\",role=\"vit\",source=\"get_embedding_result\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_request_rt_count{instance=~\"${vit_instance}\",role=\"vit\",source=\"get_embedding_result\"}[$__rate_interval])) > 0)",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -17645,14 +16715,10 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10637。\n阻塞媒体请求从进入处理到完成或失败的总耗时，单位 ms；包含缓存等待、异步排队、下载、计算及结果发布，排除异步提交 ACK。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10637。\n阻塞媒体请求从进入处理到完成或失败的总耗时，单位 ms；包含缓存等待、异步排队、下载、计算及结果发布，排除异步提交 ACK。\nsource=get_embedding_result，status=success/error；含下载和共享等待，不含异步 ACK、RPC 传输、输出编码。合并两种状态的原始 sum/count 求均值。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -17729,11 +16795,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "来自 real 的 ViT scheduler/cache 观测边界；计划耗时仅为 Mock 模拟配置。缓存字节是逻辑预算，不是 JVM 实际内存或 GPU 显存。"
@@ -17797,11 +16859,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "来自 real 的 ViT scheduler/cache 观测边界；计划耗时仅为 Mock 模拟配置。缓存字节是逻辑预算，不是 JVM 实际内存或 GPU 显存。"
@@ -17865,11 +16923,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "来自 real 的 ViT scheduler/cache 观测边界；计划耗时仅为 Mock 模拟配置。缓存字节是逻辑预算，不是 JVM 实际内存或 GPU 显存。"
@@ -17891,7 +16945,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${vit_group})(py_rtp_vit_embedding_cache_eviction_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "avg by(${vit_group})(rate(py_rtp_vit_embedding_cache_eviction_qps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "淘汰 · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -17933,11 +16987,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "来自 real 的 ViT scheduler/cache 观测边界；计划耗时仅为 Mock 模拟配置。缓存字节是逻辑预算，不是 JVM 实际内存或 GPU 显存。"
@@ -17959,7 +17009,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${vit_group})(py_rtp_vit_embedding_overload_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "avg by(${vit_group})(rate(py_rtp_vit_embedding_overload_qps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "拒绝 · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -18001,11 +17051,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "来自 real 的 ViT scheduler/cache 观测边界；计划耗时仅为 Mock 模拟配置。缓存字节是逻辑预算，不是 JVM 实际内存或 GPU 显存。"
@@ -18027,7 +17073,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_embedding_tps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})(rate(py_rtp_vit_embedding_tps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "embedding token/s · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -18069,11 +17115,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "每秒实际计算并成功返回的 embedding token 数。缓存命中、in-flight 去重消费者不重复计数；过期和失败工作不计。",
@@ -18158,11 +17200,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 9102。",
@@ -18233,11 +17271,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10524。",
@@ -18317,11 +17351,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 9103。",
@@ -18392,11 +17422,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。待选机＋选机后待凑批；多个前端可能重复上报同一队列。 参考 RTP-LLM 大盘 v514 / panel 9104。",
@@ -18476,11 +17502,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未完整导出这些观测；无数据不代表零。候选与选中使用同次决策；Worker 实际来自执行，统计时点和请求集合不同。 部分线上表达式尚无可验证的本地对应查询，未伪造曲线。 参考 RTP-LLM 大盘 v514 / panel 10289。",
@@ -18551,11 +17573,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "发现地址数不等于存活或可接单机器数。 参考 RTP-LLM 大盘 v514 / panel 10253。",
@@ -18653,11 +17671,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10454。",
@@ -18742,11 +17756,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "主备转发可能在两端各计一次，不能跨主备相加当用户请求量。 参考 RTP-LLM 大盘 v514 / panel 10214。",
@@ -18862,11 +17872,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "各阶段区间存在重叠，不能相加还原总耗时。 参考 RTP-LLM 大盘 v514 / panel 9004。",
@@ -18964,11 +17970,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10219。",
@@ -19048,11 +18050,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "本地 MAX 是原生 Timer 的滚动最大值，不是整个实验最大值。 参考 RTP-LLM 大盘 v514 / panel 10221。",
@@ -19132,11 +18130,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "仅已下发请求有耗时样本；未下发请求仍可能在积压。 本地 MAX 是原生 Timer 的滚动最大值，不是整个实验最大值。 参考 RTP-LLM 大盘 v514 / panel 10223。",
@@ -19216,11 +18210,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "本地 MAX 是原生 Timer 的滚动最大值，不是整个实验最大值。 参考 RTP-LLM 大盘 v514 / panel 10225。",
@@ -19291,11 +18281,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10203。",
@@ -19375,11 +18361,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10206。",
@@ -19450,11 +18432,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10207。",
@@ -19525,11 +18503,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10217。",
@@ -19600,11 +18574,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10234。",
@@ -19675,11 +18645,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10235。",
@@ -19750,11 +18716,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10236。",
@@ -19834,11 +18796,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "预测与实际上报样本不完全一致，逐批误差看“实际减预测”。 参考 RTP-LLM 大盘 v514 / panel 10243。",
@@ -19927,11 +18885,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "本地 MAX 是原生 Timer 的滚动最大值，不是整个实验最大值。 参考 RTP-LLM 大盘 v514 / panel 10244。",
@@ -20110,11 +19064,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未完整导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 9101。",
@@ -20185,11 +19135,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "本地 Prometheus 适配保留旧 Gauge 标签，可能持续显示历史值；不能据此判断当前主节点或事件速率，主节点门禁查询实际 API。 参考 RTP-LLM 大盘 v514 / panel 10248。",
@@ -20260,11 +19206,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。查询指标名与参考代码注册名不一致，来源待核实。 参考 RTP-LLM 大盘 v514 / panel 10249。",
@@ -20335,11 +19277,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前查询汇总了事件类型，不能据此确定切换原因。 本地 Prometheus 适配保留旧 Gauge 标签，可能持续显示历史值；不能据此判断当前主节点或事件速率，主节点门禁查询实际 API。 参考 RTP-LLM 大盘 v514 / panel 10250。",
@@ -20424,11 +19362,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10242。",
@@ -20508,11 +19442,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "排队预测耗时＋运行剩余预测耗时；不是已等待时长或精确 TTFT。 参考 RTP-LLM 大盘 v514 / panel 10260。",
@@ -20592,11 +19522,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10255。",
@@ -20667,11 +19593,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10239。",
@@ -20751,11 +19673,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10201。",
@@ -20826,11 +19744,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10261。",
@@ -20910,11 +19824,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10256。",
@@ -20985,11 +19895,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10240。",
@@ -21060,11 +19966,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10241。",
@@ -21135,11 +20037,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10258。",
@@ -21219,11 +20117,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10280。",
@@ -21294,11 +20188,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10281。",
@@ -21369,11 +20259,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10263。",
@@ -21444,11 +20330,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10264。",
@@ -21542,11 +20424,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未完整导出这些观测；无数据不代表零。历史重复表示输入曾出现过，不保证 Worker 仍保留缓存；30min 是匹配历史范围。 部分线上表达式尚无可验证的本地对应查询，未伪造曲线。 参考 RTP-LLM 大盘 v514 / panel 10501。",
@@ -21617,11 +20495,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "只统计缓存优先策略参与的成功选机，不覆盖全部请求。 参考 RTP-LLM 大盘 v514 / panel 10452。",
@@ -21692,11 +20566,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "（候选最多命中−选中命中）÷候选最多命中；候选为 0 时比例无效。 参考 RTP-LLM 大盘 v514 / panel 10292。",
@@ -21785,11 +20655,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10451。",
@@ -21860,11 +20726,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "索引条目只在差量更新时刷新，可能滞留，不是存活机器数。 参考 RTP-LLM 大盘 v514 / panel 10453。",
@@ -21935,11 +20797,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10304。",
@@ -22010,11 +20868,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "公式估算，不是 JVM 实测内存或 Worker KV 显存。 参考 RTP-LLM 大盘 v514 / panel 10456。",
@@ -22085,11 +20939,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10294。",
@@ -22160,11 +21010,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "这是 Master 存放索引的估算内存，不是 Worker KV 显存。 参考 RTP-LLM 大盘 v514 / panel 10291。",
@@ -22244,11 +21090,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10298。",
@@ -22319,11 +21161,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "从取得缓存更新锁后计时，不含此前锁等待、RPC 和回调排队。 参考 RTP-LLM 大盘 v514 / panel 10308。",
@@ -22394,11 +21232,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10301。",
@@ -22469,11 +21303,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10306。",
@@ -22553,11 +21383,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10312。",
@@ -22628,11 +21454,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10296。",
@@ -22712,11 +21534,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10595。",
@@ -22801,11 +21619,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10277。",
@@ -22876,11 +21690,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10525。",
@@ -22951,11 +21761,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10299。",
@@ -23026,11 +21832,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10526。",
@@ -23110,11 +21912,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "下一次成功后才上报间隔；卡住时没有新样本。 参考 RTP-LLM 大盘 v514 / panel 10455。",
@@ -23194,11 +21992,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "含 RPC、回调排队、锁等待和本地处理；仅成功完成时上报。 参考 RTP-LLM 大盘 v514 / panel 10276。",
@@ -23227,7 +22021,7 @@
           "targets": [
             {
               "refId": "A_prefill",
-              "expr": "sum by(${prefill_group})(rtp_llm_rpc_worker_status_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "sum by(${prefill_group})(rate(rtp_llm_rpc_worker_status_qps_total{instance=~\"${prefill_instance}\",role=\"prefill\"}[1m]))",
               "legendFormat": "Prefill · Worker 收到 Status 查询/秒 | 部署角色= · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -23236,7 +22030,7 @@
             },
             {
               "refId": "A_decode",
-              "expr": "sum by(${decode_group})(rtp_llm_rpc_worker_status_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "sum by(${decode_group})(rate(rtp_llm_rpc_worker_status_qps_total{instance=~\"${decode_instance}\",role=\"decode\"}[1m]))",
               "legendFormat": "Decode · Worker 收到 Status 查询/秒 | 部署角色= · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -23245,7 +22039,7 @@
             },
             {
               "refId": "B_prefill",
-              "expr": "sum by(${prefill_group})(rtp_llm_rpc_cache_status_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "sum by(${prefill_group})(rate(rtp_llm_rpc_cache_status_qps_total{instance=~\"${prefill_instance}\",role=\"prefill\"}[1m]))",
               "legendFormat": "Prefill · Worker 收到 Cache 查询/秒 | 部署角色= · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -23254,7 +22048,7 @@
             },
             {
               "refId": "B_decode",
-              "expr": "sum by(${decode_group})(rtp_llm_rpc_cache_status_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "sum by(${decode_group})(rate(rtp_llm_rpc_cache_status_qps_total{instance=~\"${decode_instance}\",role=\"decode\"}[1m]))",
               "legendFormat": "Decode · Worker 收到 Cache 查询/秒 | 部署角色= · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -23296,11 +22090,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "P/D Worker 服务端实际处理的 GetWorkerStatus 和 GetCacheStatus 请求速率。",
@@ -23434,14 +22224,10 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "P/D Worker 服务端处理 GetWorkerStatus 和 GetCacheStatus 的耗时，单位 µs。最大值为所选 Worker 的采样均值最大值。",
+          "description": "P/D Worker 状态采集耗时，单位 µs。CacheStatus 计到缓存快照返回，WorkerStatus 计到容量和任务状态采集完成；包含取快照时的锁等待，排除 protobuf 构建、响应提交、网络和指标上报，不是完整 RPC 延迟。最大值为所选 Worker 的采样均值最大值。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -23509,11 +22295,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10446。",
@@ -23584,11 +22366,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10447。",
@@ -23659,11 +22437,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10448。",
@@ -23734,11 +22508,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10445。",
@@ -23809,11 +22579,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "任务数量，不是缓冲区字节数。 参考 RTP-LLM 大盘 v514 / panel 10325。",
@@ -23884,11 +22650,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "仅 EngineGrpcClient 的 EventLoop；不代表 gRPC Server EventLoop。 参考 RTP-LLM 大盘 v514 / panel 10326。",
@@ -23968,11 +22730,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "仅成功的逻辑调用；重试成功包含首次发起以来的耗时。 参考 RTP-LLM 大盘 v514 / panel 10329。",
@@ -24043,11 +22801,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "逻辑调用成功次数；与失败 QPS 分开展示。 参考 RTP-LLM 大盘 v514 / panel 10331。",
@@ -24127,11 +22881,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。本地 transport 到 Future 回调的延迟，包含交付和处理；两种区间重叠，不能相加。未知样本不上报。 参考 RTP-LLM 大盘 v514 / panel 10330。",
@@ -24202,11 +22952,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "触发断连重试时观测到的旧 Channel 年龄，不是单次 RPC 耗时。 参考 RTP-LLM 大盘 v514 / panel 10332。",
@@ -24277,11 +23023,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10327。",
@@ -24361,11 +23103,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10209。",
@@ -24445,11 +23183,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10210。",
@@ -24547,11 +23281,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10211。",
@@ -24631,11 +23361,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。指标具体口径尚未核实，保留原值。 参考 RTP-LLM 大盘 v514 / panel 10212。",
@@ -24706,11 +23432,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。与其他 RPC 失败面板是同一批事件的不同分组，不能累计相加。 参考 RTP-LLM 大盘 v514 / panel 10611。",
@@ -24781,11 +23503,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。仅最终失败，每个逻辑 RPC 计一次；与状态失败指标重叠，不能相加。 参考 RTP-LLM 大盘 v514 / panel 10608。",
@@ -24856,11 +23574,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。MASTER 仅表示证据确认的本地失败；UNCONFIRMED 不代表 Worker 故障。 参考 RTP-LLM 大盘 v514 / panel 10609。",
@@ -24931,11 +23645,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。传输阶段仅表示进度；WAITING_RESPONSE 不能单独区分网络、Worker 或本地 EventLoop 延迟。 参考 RTP-LLM 大盘 v514 / panel 10610。",
@@ -25006,11 +23716,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。本地状态处理失败阶段；与旧 health.check.fail 及 RPC 失败可能重叠。 参考 RTP-LLM 大盘 v514 / panel 10612。",
@@ -25081,11 +23787,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。NONE 表示无 gRPC 异常的应用失败；UNCONFIRMED 不表示远端故障。 参考 RTP-LLM 大盘 v514 / panel 10613。",
@@ -25096,6 +23798,80 @@
               "targetBlank": true
             }
           ]
+        },
+        {
+          "id": 409203,
+          "type": "timeseries",
+          "title": "rpc onflight request · 生成请求终态采样",
+          "gridPos": {
+            "x": 12,
+            "y": 1874,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_rpc_onflight_request_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_rpc_onflight_request_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
+              "legendFormat": "prefill · {{${prefill_group}}} · 请求终态采样均值",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            },
+            {
+              "refId": "B",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_rpc_onflight_request_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_rpc_onflight_request_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
+              "legendFormat": "decode · {{${decode_group}}} · 请求终态采样均值",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": ["mean", "max", "lastNotNull"]
+            }
+          },
+          "description": "对齐 real GenerateContext：生成请求结束时采样尚未退出的生成请求数量，包含本次请求；不含 health/status/cache 查询。P 包含等待 D 的完整请求，批量按每个请求计数。它是终态事件采样，不是每次抓取的瞬时并发；无完成事件时不补零。异步输出传输不阻塞计算，终态统计不代表待发送字节数。",
+          "links": []
         }
       ],
       "gridPos": {
@@ -25170,11 +23946,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "优先级数字越大越高；主备转发可能重复计数。 参考 RTP-LLM 大盘 v514 / panel 10176。",
@@ -25245,11 +24017,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10180。",
@@ -25320,11 +24088,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。参考版本未找到上报，空图不代表没有问题。 参考 RTP-LLM 大盘 v514 / panel 10186。",
@@ -25395,11 +24159,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。参考版本未找到上报，空图不代表没有问题。 参考 RTP-LLM 大盘 v514 / panel 10195。",
@@ -25470,11 +24230,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。参考版本未找到上报，空图不代表没有问题。 参考 RTP-LLM 大盘 v514 / panel 10182。",
@@ -25545,11 +24301,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10181。",
@@ -25638,11 +24390,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未完整导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10177。",
@@ -25713,11 +24461,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10179。",
@@ -25788,11 +24532,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10187。",
@@ -25881,11 +24621,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "同一次取消会经过多阶段，不能相加；超时后仍可能确认。 参考 RTP-LLM 大盘 v514 / panel 10194。",
@@ -25956,11 +24692,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "等待窗口内未确认，之后仍可能成功，不等于最终取消失败。 参考 RTP-LLM 大盘 v514 / panel 10527。",
@@ -26031,11 +24763,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。参考版本未找到上报，空图不代表没有问题。 参考 RTP-LLM 大盘 v514 / panel 10199。",
@@ -26106,11 +24834,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10196。",
@@ -26199,11 +24923,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "运行与已接收待运行属于引擎状态；影子预留属于 Master 账本，勿直接相加。 参考 RTP-LLM 大盘 v514 / panel 10191。",
@@ -26274,11 +24994,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10190。",
@@ -26349,11 +25065,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10184。",
@@ -26424,11 +25136,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "参考 RTP-LLM 大盘 v514 / panel 10185。",
@@ -26522,11 +25230,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "JVM 原始指标仅带 IP；图例的 hippo_role 是筛选范围，不代表 IP 与角色的逐一映射。 参考 RTP-LLM 大盘 v514 / panel 10340。",
@@ -26624,11 +25328,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "JVM 原始指标仅带 IP；图例的 hippo_role 是筛选范围，不代表 IP 与角色的逐一映射。 参考 RTP-LLM 大盘 v514 / panel 10342。",
@@ -26708,11 +25408,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。JVM 原始指标仅带 IP；图例的 hippo_role 是筛选范围，不代表 IP 与角色的逐一映射。 参考 RTP-LLM 大盘 v514 / panel 10338。",
@@ -26792,11 +25488,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。JVM 原始指标仅带 IP；图例的 hippo_role 是筛选范围，不代表 IP 与角色的逐一映射。 参考 RTP-LLM 大盘 v514 / panel 10339。",
@@ -26867,11 +25559,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。采集器比例范围及分母待核实，保留原值。 参考 RTP-LLM 大盘 v514 / panel 10334。",
@@ -26942,11 +25630,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10335。",
@@ -27017,11 +25701,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。采集器比例范围及分母待核实，保留原值。 参考 RTP-LLM 大盘 v514 / panel 10336。",
@@ -27092,11 +25772,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。采集器比例范围及分母待核实，保留原值。 参考 RTP-LLM 大盘 v514 / panel 10337。",
@@ -27185,11 +25861,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未完整导出这些观测；无数据不代表零。JVM 原始指标仅带 IP；图例的 hippo_role 是筛选范围，不代表 IP 与角色的逐一映射。 参考 RTP-LLM 大盘 v514 / panel 10343。",
@@ -27260,11 +25932,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。事件值是否累计待核实，不能当 OOM 次数/秒。 参考 RTP-LLM 大盘 v514 / panel 10345。",
@@ -27335,11 +26003,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10344。",
@@ -27410,11 +26074,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10341。",
@@ -27494,11 +26154,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "JVM 原始指标仅带 IP；图例的 hippo_role 是筛选范围，不代表 IP 与角色的逐一映射。 参考 RTP-LLM 大盘 v514 / panel 10435。",
@@ -27596,11 +26252,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。JVM 原始指标仅带 IP；图例的 hippo_role 是筛选范围，不代表 IP 与角色的逐一映射。 参考 RTP-LLM 大盘 v514 / panel 10436。",
@@ -27671,11 +26323,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。分配器中仍由缓冲区占用的 direct memory。与 reserved 对照观察；二者差值不能直接判定为泄漏。 按 Master IP 和 allocator 区分。需启用 scheduler.nettyMemoryReporter.enabled。 参考 RTP-LLM 大盘 v514 / panel 10605。",
@@ -27746,11 +26394,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。分配器持有的 direct memory，包括池中可复用空间。不能等同于正在使用的业务内存。 按 Master IP 和 allocator 区分。需启用 scheduler.nettyMemoryReporter.enabled。 参考 RTP-LLM 大盘 v514 / panel 10604。",
@@ -27821,11 +26465,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。后台采样耗时；每 10 秒采样一次，不在 RPC 或 scrape 线程执行。 按 Master IP 区分。需启用 scheduler.nettyMemoryReporter.enabled。 参考 RTP-LLM 大盘 v514 / panel 10606。",
@@ -27896,11 +26536,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。单调时钟计算；首个样本无间隔。不能仅凭保留的最后一个值判断采样器仍存活。 参考 RTP-LLM 大盘 v514 / panel 10607。",
@@ -27995,11 +26631,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "来自 Master JVM；不能据此判断共享 Engine JVM 的 CPU 使用率。"
@@ -28073,11 +26705,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -28142,11 +26770,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -28211,11 +26835,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "原生 JVM GC 暂停的样本加权均值；没有 GC 事件时保留无数据。"
@@ -28280,11 +26900,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -28358,11 +26974,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -28436,11 +27048,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -28505,11 +27113,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -28592,11 +27196,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -28670,11 +27270,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -28739,11 +27335,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "线程池饱和后的 CallerRuns 执行次数；不等于丢弃请求。"
@@ -28808,11 +27400,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -28877,11 +27465,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -28946,11 +27530,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "仅汇总有定义的非负池上限；某些 Non-heap 池没有上限，不能把 -1 加入容量。"
@@ -29024,11 +27604,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -29093,11 +27669,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -29171,11 +27743,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -29249,11 +27817,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "本地 JVM 可见宿主环境，不替代 Whale Pod 的 cgroup CPU limit 与利用率。"
@@ -29318,11 +27882,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "所选 Master 的存活线程数平均；Runnable 等各状态另图展示。daemon 与历史 peak 放在折叠明细。未导出死锁计数，不将 BLOCKED 当死锁。"
@@ -29396,11 +27956,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "按原生池 id 展开，包括实际导出的 CodeHeap、Metaspace 和堆内池；不假定特定 GC 或 JDK 必有某个池名称。"
@@ -29465,11 +28021,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "原生 max=-1 表示未定义上限，排除这些值，不把它们当作 0 容量。"
@@ -29534,11 +28086,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "先逐实例、逐池计算使用率，再平均。仅包含 max>0 的池；Metaspace 等未定义上限的池仍可在绝对容量图查看。"
@@ -29612,11 +28160,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "Micrometer 根据 GC 通知观察内存池大小变化：分配基于年轻代两次 GC 之间的增量，晋升基于老年代 GC 前后的正增量。不是逐对象精确分配采样；未触发 GC 时可能尚无增量。"
@@ -29690,11 +28234,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "原生长期存活堆池回收后的大小与容量，不是全部 heap 的实时使用量；GC 事件更新，无事件时可能仍为初始值。"
@@ -29759,11 +28299,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "原生范围 0–1，按最近一次 GC 后的长期存活堆池计算；不是当前全部 heap 使用率。保留导出器初始值/缺测，不以此单独判定内存泄漏。"
@@ -29828,11 +28364,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "原生范围 0–1；导出器在自身 lookback 窗口内估计 GC 时间占比，与按 Grafana rate 区间计算的暂停耗时/墙钟时间分开，不直接等同 CPU 利用率。"
@@ -29911,11 +28443,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "逐目标保留 up；Engine/Client/Master 业务筛选不隐藏其他目标故障。目标从发现中移除后可能停止出样，缺失不等于 0。"
@@ -29980,11 +28508,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": "每个采集目标的抓取耗时；不受业务实例筛选影响。"
@@ -30049,11 +28573,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""
@@ -30118,11 +28638,7 @@
             "legend": {
               "displayMode": "table",
               "placement": "bottom",
-              "calcs": [
-                "mean",
-                "max",
-                "lastNotNull"
-              ]
+              "calcs": ["mean", "max", "lastNotNull"]
             }
           },
           "description": ""

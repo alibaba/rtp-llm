@@ -43,7 +43,6 @@ V 使用 `ROLE_TYPE=VIT`；native 和 Mock 参数遵循[配置参考](component-
 
 本地假 URL 回放设置 `mock.vit.skip.download: true`（ENV 为 `MOCK_VIT_SKIP_DOWNLOAD=true`），并提供图片宽高；它只跳过读取，仍经过相同的准入、执行器、就绪队列和结果发布流程。Whale 使用默认 false；跳过读取不能用于评估真实下载吞吐。
 
-
 HTTP 为 START_PORT，gRPC 为 START_PORT+1；平台探针访问 HTTP `/health`，指标访问 `/metrics`。注册端口必须与 Master 配置的发现协议一致：GRPC 发现发布实际 gRPC 端口，HTTP 发现发布 HTTP 端口；当前 real WorkerAddressService 会据此转换地址，不能把任意控制端口注册进去。
 
 服务不读取本地 topology，不创建实验目录、ready 或 endpoints 文件。固定配置、实际端点在启动日志中记录。正常 TERM 关闭实例；内部 Loop/Scheduler 不可恢复故障使健康检查失败，进程随后非零退出，平台负责重拉。同一工作目录重启不受旧实验文件影响。
@@ -62,16 +61,15 @@ Mock Engine 启动不读取 checkpoint 或请求 C2 Fuse 挂载。P/D 使用显�
 
 两套部署使用相同镜像、模型、输入和计算配置，只在 Whale 中调整下列原生配置；本地运行直接配置 Case，不另外维护完整部署配置副本。
 
-| Role | 开启 | 关闭 |
-| --- | --- | --- |
-| Master（全部主备） | `FLEXLB_CONFIG.cacheMatching.type=KVCM`，配置 `MODEL_SERVICE_CONFIG.kvcm` 的服务地址、端口和 namespace | `cacheMatching.type=LOCAL_SYNC` |
-| P/D | `KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm`，配置原生 `RECO_*` 发现参数及共享 `KV_CACHE_EVENT_INSTANCE_ID` | `KV_CACHE_EVENT_PUBLISHER_TYPE=none` |
-| Frontend、ViT | 保持原有链路和配置 | 相同 |
+| Role               | 开启                                                                                                   | 关闭                                 |
+| ------------------ | ------------------------------------------------------------------------------------------------------ | ------------------------------------ |
+| Master（全部主备） | `FLEXLB_CONFIG.cacheMatching.type=KVCM`，配置 `MODEL_SERVICE_CONFIG.kvcm` 的服务地址、端口和 namespace | `cacheMatching.type=LOCAL_SYNC`      |
+| P/D                | `KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm`，配置原生 `RECO_*` 发现参数及共享 `KV_CACHE_EVENT_INSTANCE_ID`    | `KV_CACHE_EVENT_PUBLISHER_TYPE=none` |
+| Frontend、ViT      | 保持原有链路和配置                                                                                     | 相同                                 |
 
-这里只启用缓存元信息查询和上报，未实现远端 KV 数据加载。Engine 的共享 instance_id 必须等于 Master 查询的 `<namespace>_<cacheKeyBlockSize>`，host 身份必须与 Master 发现结果一致。更改 Master 查询模式需要重启。
+这里只启用缓存元信息查询和上报，未实现远端 KV 数据加载。Engine 的共享 instance*id 必须等于 Master 查询的 `<namespace>*<cacheKeyBlockSize>`，host 身份必须与 Master 发现结果一致。更改 Master 查询模式需要重启。
 
 当前 KVCM 查询只使用本地 HBM 命中，Master 的 cacheMatching 同时显式配置 `medium: [hbm]`、`globalKvsHostCount: 0`、`enableP2p: false`。仍需核对实际 MetaService descriptor；不能将 global 命中或本地回退成功当成 KVCM 本地查询成功。协议及回退边界见[组件参考](component-reference.md#dsv41-engine--kvcm-契约)。
-
 
 ## 监控自动选择
 
@@ -86,7 +84,7 @@ Engine 只启用一个指标后端，不需要额外部署开关。公共构建�
 ### 配置初始化边界
 
 文件配置和 Whale ENV 都在 `RtpConfig` / `VitConfig` 中完成默认值、派生值和校验，随后才创建组件。
-`EngineConfig` 负责输入转换和模型文件读取，`RtpNode` / `VitNode` 负责装配与生命周期；Scheduler 使用最终值，不重新解释自动配置。
+`EngineConfig` 负责输入转换和模型文件读取，`LLMMockEngine` / `VitNode` 负责装配与生命周期；Scheduler 使用最终值，不重新解释自动配置。
 模型元信息每次加载只读一次，缓存 key namespace 由共享 `CacheSequence` 解析，Client 与 Engine 共用。
 ENV 路径始终使用入口传入的环境，包括模型下载和 DSV4.1 namespace，不混入另一份进程 ENV。
 

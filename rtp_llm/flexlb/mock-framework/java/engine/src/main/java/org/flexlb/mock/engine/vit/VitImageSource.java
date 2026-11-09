@@ -14,15 +14,21 @@ import javax.imageio.stream.MemoryCacheImageInputStream;
 import org.flexlb.engine.grpc.EngineRpcService.MultimodalInputPB;
 import org.flexlb.mock.protocol.MediaInput;
 
-/** One cancellable image read. No pixel tensor is decoded or retained. */
+/**
+ * One cancellable image read. No pixel tensor is decoded or retained.
+ */
 final class VitImageSource implements AutoCloseable {
     private final VitConfig config;
     private final VitMetrics metrics;
     private final HttpClient client;
+
     private volatile CompletableFuture<?> request;
+
     private volatile boolean closed;
 
     VitImageSource(VitConfig config, VitMetrics metrics, HttpClient client) { this.config=config; this.metrics=metrics; this.client=client; }
+
+    @Override public void close() { closed=true; var active=request; if(active!=null) active.cancel(true); }
 
     VitGeometry.Image prepare(MultimodalInputPB media, long deadline) throws IOException {
         int width, height;
@@ -34,7 +40,9 @@ final class VitImageSource implements AutoCloseable {
         } else {
             byte[] bytes=download(media.getMultimodalUrl(),Math.min(deadline,System.nanoTime()+TimeUnit.SECONDS.toNanos(60)));
             downloadNanos=System.nanoTime()-started;
-            metrics.events.observe("rtp_llm_vit_image_fetch_rt_us",downloadNanos/1e3);
+            // This image planner mirrors real DeepSeek V4.1 preprocessing.
+            metrics.events.observe("rtp_llm_vit_image_fetch_rt_us",downloadNanos/1e3,
+                java.util.Map.of("model","deepseek_v41","mm_type","image"));
             int[] size=dimensions(bytes); width=size[0]; height=size[1];
             identity=contentIdentity(bytes);
         }
@@ -112,16 +120,16 @@ final class VitImageSource implements AutoCloseable {
         }
     }
 
+    private void check(long deadline) {
+        if(closed || Thread.currentThread().isInterrupted()) throw Status.CANCELLED.withDescription("Image preparation cancelled").asRuntimeException();
+        if(System.nanoTime()>=deadline) throw Status.DEADLINE_EXCEEDED.withDescription("Image preparation expired").asRuntimeException();
+    }
+
     private void retryPause(int attempt,long deadline) {
         check(deadline);
         try { TimeUnit.NANOSECONDS.sleep(Math.min(TimeUnit.MILLISECONDS.toNanos(200L << attempt),deadline-System.nanoTime())); }
         catch(InterruptedException error) { Thread.currentThread().interrupt(); }
         check(deadline);
-    }
-
-    private void check(long deadline) {
-        if(closed || Thread.currentThread().isInterrupted()) throw Status.CANCELLED.withDescription("Image preparation cancelled").asRuntimeException();
-        if(System.nanoTime()>=deadline) throw Status.DEADLINE_EXCEEDED.withDescription("Image preparation expired").asRuntimeException();
     }
 
     private static int[] dimensions(byte[] bytes) throws IOException {
@@ -144,11 +152,11 @@ final class VitImageSource implements AutoCloseable {
             finally { reader.dispose(); }
         }
     }
+
     private static boolean ascii(byte[] bytes,int offset,String text) {
         for(int i=0;i<text.length();i++) if(bytes[offset+i]!=(byte)text.charAt(i)) return false;
         return true;
     }
-    private static int little24(byte[] bytes,int offset) { return (bytes[offset]&255)|((bytes[offset+1]&255)<<8)|((bytes[offset+2]&255)<<16); }
 
-    @Override public void close() { closed=true; var active=request; if(active!=null) active.cancel(true); }
+    private static int little24(byte[] bytes,int offset) { return (bytes[offset]&255)|((bytes[offset+1]&255)<<8)|((bytes[offset+2]&255)<<16); }
 }

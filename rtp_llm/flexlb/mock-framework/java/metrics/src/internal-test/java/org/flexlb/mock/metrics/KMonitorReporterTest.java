@@ -12,38 +12,14 @@ import java.lang.reflect.Proxy;
 import java.util.*;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Checks conversion and delivery of Mock metric samples through KMonitor.
+ */
 class KMonitorReporterTest {
-    private static final class NativeGauge {
-        final GaugeMetric gauge = new GaugeMetric("input_length", 0);
-        final Map<String, MetricType> types = new HashMap<>();
-        final Map<String, List<Double>> values = new HashMap<>();
-        final KMonitorReporter reporter;
-        NativeGauge() {
-            var monitor = (KMonitor) Proxy.newProxyInstance(KMonitor.class.getClassLoader(), new Class<?>[]{KMonitor.class},
-                (proxy, method, args) -> {
-                    if (method.getName().equals("register")) { types.put((String) args[0], (MetricType) args[1]); return true; }
-                    if (method.getName().equals("report")) {
-                        var name = (String) args[0]; double value = (double) args[2];
-                        values.computeIfAbsent(name, ignored -> new ArrayList<>()).add(value);
-                        if (name.equals("input_length")) gauge.update(value);
-                        return null;
-                    }
-                    throw new AssertionError(method);
-                });
-            reporter = new KMonitorReporter(monitor);
-        }
-        double[] payload() {
-            var builder = new MetricsRecordBuilder(new MetricsInfo("test"));
-            gauge.snapshot(builder, true);
-            var value = builder.getRecord().metrics().getFirst().value().getValue().toString();
-            return Arrays.stream(value.split("_")).mapToDouble(Double::parseDouble).toArray();
-        }
-    }
-
     @Test void nativeSdkSerializationRetainsUnequalInstanceSampleWeights() {
         var first = new NativeGauge(); var second = new NativeGauge();
-        var a = new EventMetrics("prefill", System::nanoTime, first.reporter, Map.of("dp_rank", "0"));
-        var b = new EventMetrics("prefill", System::nanoTime, second.reporter, Map.of("dp_rank", "0"));
+        var a = new EventMetrics("prefill", first.reporter, Map.of("dp_rank", "0"));
+        var b = new EventMetrics("prefill", second.reporter, Map.of("dp_rank", "0"));
         for (int i = 0; i < 100; i++) a.observe("input_length", 10);
         b.observe("input_length", 1000);
         first.reporter.report(a.collect()); second.reporter.report(b.collect());
@@ -60,11 +36,9 @@ class KMonitorReporterTest {
 
     @Test void qpsUsesRawCountsAndPeriodicSnapshotsRemainGauges() {
         var sdk = new NativeGauge();
-        var clock = new java.util.concurrent.atomic.AtomicLong();
-        var events = new EventMetrics("vit", clock::get, sdk.reporter, Map.of());
+        var events = new EventMetrics("vit", sdk.reporter, Map.of());
         events.increment("vit_qps"); events.increment("vit_qps");
         events.observe("py_rtp_vit_embedding_tps", 60);
-        clock.set(2_000_000_000L);
         sdk.reporter.report(events.collect());
         assertEquals(List.of(1.0, 1.0), sdk.values.get("vit_qps"));
         assertEquals(MetricType.QPS, sdk.types.get("vit_qps"));
@@ -92,5 +66,35 @@ class KMonitorReporterTest {
         assertEquals(1000, KMonitorReporter.configure(Map.of("HIPPO_SLAVE_IP", "10.2.3.4")));
         assertEquals("10.2.3.4:4141", KMonitorConfig.getSinkAddress());
         assertThrows(IllegalArgumentException.class, () -> KMonitorReporter.configure(Map.of("kmonitorPort", "0")));
+    }
+
+    /**
+     * Records a native gauge report for comparison with the Mock sample.
+     */
+    private static final class NativeGauge {
+        final GaugeMetric gauge = new GaugeMetric("input_length", 0);
+        final Map<String, MetricType> types = new HashMap<>();
+        final Map<String, List<Double>> values = new HashMap<>();
+        final KMonitorReporter reporter;
+        NativeGauge() {
+            var monitor = (KMonitor) Proxy.newProxyInstance(KMonitor.class.getClassLoader(), new Class<?>[]{KMonitor.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("register")) { types.put((String) args[0], (MetricType) args[1]); return true; }
+                    if (method.getName().equals("report")) {
+                        var name = (String) args[0]; double value = (double) args[2];
+                        values.computeIfAbsent(name, ignored -> new ArrayList<>()).add(value);
+                        if (name.equals("input_length")) gauge.update(value);
+                        return null;
+                    }
+                    throw new AssertionError(method);
+                });
+            reporter = new KMonitorReporter(monitor);
+        }
+        double[] payload() {
+            var builder = new MetricsRecordBuilder(new MetricsInfo("test"));
+            gauge.snapshot(builder, true);
+            var value = builder.getRecord().metrics().getFirst().value().getValue().toString();
+            return Arrays.stream(value.split("_")).mapToDouble(Double::parseDouble).toArray();
+        }
     }
 }

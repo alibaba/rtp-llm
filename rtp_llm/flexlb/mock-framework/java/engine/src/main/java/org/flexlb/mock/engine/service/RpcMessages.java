@@ -7,11 +7,13 @@ import java.util.concurrent.TimeUnit;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
 
-/** Translation at the native RTP boundary; scheduling state contains no protobuf objects. */
+/**
+ * Translation at the native RTP boundary; scheduling state contains no protobuf objects.
+ */
 final class RpcMessages {
     private RpcMessages() {}
 
-    static EngineScheduler.Input input(org.flexlb.mock.protocol.MediaInput.Prepared prepared, String identity, long started, long rpcDeadline,
+    static EngineScheduler.Input toSchedulerInput(org.flexlb.mock.protocol.MediaInput.Prepared prepared, String identity, long started, long rpcDeadline,
                                  boolean retained, int blockSize, long seed) {
         var input = prepared.input();
         return new EngineScheduler.Input(identity, input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
@@ -19,14 +21,22 @@ final class RpcMessages {
             org.flexlb.mock.protocol.MediaInput.sequence(prepared, blockSize, seed), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos(),
             input.getGenerateConfig().getIsStreaming());
     }
+
     static EngineScheduler.Task pending(GenerateInputPB input) {
         return new EngineScheduler.Task(input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
             input.getTokenIdsCount(), 0, input.getPriority(), EngineScheduler.ReportedPhase.PENDING, 0, 0, -1, -1, null, false);
     }
+
     static long deadline(GenerateInputPB input, long started, long rpcDeadline) {
         int timeout = input.getGenerateConfig().getTimeoutMs();
         return Math.min(rpcDeadline, timeout <= 0 ? Long.MAX_VALUE : after(started, TimeUnit.MILLISECONDS.toNanos(timeout)));
     }
+
+    static long after(long now, long nanos) {
+        try { return Math.addExact(now, nanos); }
+        catch (ArithmeticException overflow) { return nanos < 0 ? Long.MIN_VALUE : Long.MAX_VALUE; }
+    }
+
     static TaskInfoPB task(EngineScheduler.Task task) {
         var result = TaskInfoPB.newBuilder().setRequestId(task.requestId()).setBatchId(task.batchId())
             .setRequestIdStr(Long.toString(task.requestId())).setPrefixLengthValid(task.prefixLengthValid())
@@ -46,10 +56,6 @@ final class RpcMessages {
         }
         return result.build();
     }
-    static long after(long now, long nanos) {
-        try { return Math.addExact(now, nanos); }
-        catch (ArithmeticException overflow) { return nanos < 0 ? Long.MIN_VALUE : Long.MAX_VALUE; }
-    }
 
     static void supported(GenerateInputPB input) {
         var g = input.getGenerateConfig();
@@ -68,6 +74,7 @@ final class RpcMessages {
         // Media markers are input semantics, never generated vocabulary tokens.
         return last >= 0 ? last : 42;
     }
+
     static GenerateOutputsPB token(GenerateInputPB input, int tokenId, int generated, int stepTokens, int reused, int remoteReused, long elapsedNanos, boolean finished, boolean pd) {
         var aux = AuxInfoPB.newBuilder().setInputLen(input.getTokenIdsCount()).setOutputLen(generated).setStepOutputLen(stepTokens)
             .setIterCount(generated).setPrefixLen(reused).setTotalReuseLen(reused).setLocalReuseLen(reused - remoteReused).setRemoteReuseLen(remoteReused).setPdSep(pd)
