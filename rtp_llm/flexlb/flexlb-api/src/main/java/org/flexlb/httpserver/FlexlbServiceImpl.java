@@ -52,6 +52,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private static final org.slf4j.Logger pvLogger =
             LoggerFactory.getLogger("pvLogger");
 
+    private final ScheduleCapture capture = ScheduleCapture.fromEnvironment();
     private final RouteService routeService;
     private final MasterElectService masterElectService;
     private final EngineHealthReporter engineHealthReporter;
@@ -101,7 +102,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         Long interceptedEntryNanos = GrpcServerTimingInterceptor.getNanos();
         serverLatencyRecorder.recordArrival(
                 interceptedEntryNanos != null ? interceptedEntryNanos : System.nanoTime());
-        ScheduleCompletion completionClaimed = new ScheduleCompletion(responseObserver);
+        ScheduleCompletion completionClaimed = new ScheduleCompletion(responseObserver, capture, capture == null ? 0 : capture.arrive(request));
         BalanceContext context = null;
         ScheduleOrigin errorOrigin = ScheduleOrigin.ENTRY_ERROR;
 
@@ -348,6 +349,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             return;
         }
         try {
+            completion.record(response != null && response.getSuccess() ? "routed" : "rejected",
+                    response == null ? 0 : response.getCode());
             completeSchedule(context, response, responseObserver, origin, masterHost, completion);
         } catch (Exception error) {
             Logger.warn("FlexlbService.schedule response completion error, request_id={}",
@@ -358,12 +361,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     /** Response arbitration and transport cancellation have different completion boundaries. */
     private static final class ScheduleCompletion {
         private final boolean transportCancellation;
+        private final ScheduleCapture capture;
+        private final long captureAttempt;
         private final AtomicBoolean responseClaimed = new AtomicBoolean();
         private final AtomicBoolean cancelled = new AtomicBoolean();
         private final AtomicBoolean cancellationSettled = new AtomicBoolean();
         private final AtomicReference<Runnable> cancellation = new AtomicReference<>();
 
-        ScheduleCompletion(StreamObserver<?> observer) {
+        ScheduleCompletion(StreamObserver<?> observer, ScheduleCapture capture, long captureAttempt) {
+            this.capture = capture;
+            this.captureAttempt = captureAttempt;
             transportCancellation = observer instanceof ServerCallStreamObserver<?>;
             // Install during the initial method invocation: gRPC freezes this handler
             // after schedule() returns, before asynchronous forwarding may finish.
@@ -384,9 +391,13 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             settleCancellation();
         }
 
+        void record(String status, int code) {
+            if (captureAttempt != 0) capture.complete(captureAttempt, status, code);
+        }
+
         void cancel() {
             cancelled.set(true);
-            responseClaimed.set(true);
+            if (responseClaimed.compareAndSet(false, true)) record("cancelled", 0);
             settleCancellation();
         }
 

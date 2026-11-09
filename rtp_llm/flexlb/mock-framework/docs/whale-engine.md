@@ -116,3 +116,15 @@ Mock P 上报 K4、K8 等 canonical keys，CacheStatus 的逻辑块为 512。哈
 迁移旧 Mock 部署时，直接填写所需的 `PREFILL_CP_SIZE`。旧的 `TP_SIZE`、`DP_SIZE`、`CP_ROTATE_METHOD` 和 `PREFILL_CP_KV_CACHE_SHARDED` 已退出 Mock 配置。原来只配置了 CP size 的部署，现在会同时应用对应的 Prefill 准入规则。
 
 D 的本地 FULL KV 按基础块管理。P→D 传完整语义输入和媒体身份，不增加 CP 协议字段。本地 Client/Case 可保持不分片，无需把 CP 写进数据集。具体范围见 [Prefill CP](component-reference.md#prefill-cp)。
+
+### Master 匿名前缀试采
+
+Master 镜像可以通过 `FLEXLB_PREFIX_CAPTURE_DIR` 启用一次性采集。默认不开启。两个 Master 使用独立的本地目录，同一轮使用相同的 UTC 开始时间、持续时间和随机 32 字节密钥。目录只给 Master 运行身份读写。健康与路由恢复后，在两个容器内原子发布权限为 `0600` 的 `capture.properties`，并确保开始时间仍在未来。文件字段为 `start_ms`、`seconds` 和 `key`，其中 `key` 为 64 个十六进制字符。该控制文件留在容器内，禁止和采集结果一起打包。
+
+`schedule` 记录直达调用，备转主的 RPC 不重复写入。产物是封口后出现的 `prefix-*.jsonl.zst`。内部包含匿名前缀树、入口尝试和 Master 调度结果。窗口关闭后另等 90 秒收集调度结果。只有 `.part`、丢样计数非零、缺调度结果或缺少 Master 分片，都表示采集不完整。发生重启时重新选时间窗。通过 ASI 下载时保留两个独立的分片名称。
+
+```sh
+uv run --locked python scripts/check-master-prefix-capture.py --masters 2 /path/to/master-a.jsonl.zst /path/to/master-b.jsonl.zst
+```
+
+核对报告中的 P/D 入口、ViT-only、空键和调度结果，再和同窗 Frontend 到达数对账。Master 记录生成上限和调度结果，实际生成长度、生成终态和 ViT 展开信息需要另行采集。回放转换前要显式选择输出长度口径。
