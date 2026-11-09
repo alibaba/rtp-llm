@@ -2,6 +2,21 @@
 
 This file provides guidance to agents when working with code in this repository.
 
+## 项目开发技能
+
+FlexLB 的开发技能统一维护在本目录下的 `skills/`，以仓库中的版本为准：
+
+- 开发、修复、重构和审核时，读取 [flexlb-development](skills/flexlb-development/SKILL.md)。
+- 跨组件流程与职责设计按需读取 [workflow-first-design](skills/workflow-first-design/SKILL.md)。
+- 具体类和方法实现按需读取 [evidence-first-implementation](skills/evidence-first-implementation/SKILL.md)。
+
+不依赖开发者个人技能目录中的副本；后续新增的 FlexLB 技能也放在这里。
+
+仓库根目录的 `.agents/skills/flexlb-development` 是指向本目录
+`skills/flexlb-development` 的相对符号链接。因此从仓库根目录、`rtp_llm` 或
+`rtp_llm/flexlb` 启动 Codex 均可发现 `$flexlb-development`。正文只维护一份，
+不在这些目录重复建立同名技能入口；相关实现和设计技能由主技能按需引用。
+
 ## 可读性：核心开发与审核要求
 
 可读性是 FlexLB 的核心质量要求，适用于生产代码、测试、注释和文档。
