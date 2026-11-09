@@ -31,6 +31,8 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <ATen/cuda/CUDAGraph.h>
+#include <c10/cuda/CUDAGuard.h>
 #endif
 
 namespace rtp_llm {
@@ -361,7 +363,24 @@ public:
         sp_buffer->tokens = torch::tensor({-1, -1}, torch::kInt32).reshape({1, 2});
 
         stream->setSPOutputBuffer(sp_buffer);
-        stream->specUpdate(spec_update_info);
+        auto update = spec_update_info;
+        if (update.num_new_tokens > 0) {
+            const auto cuda_i32    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            update.draft_token_gpu = torch::tensor({update.draft_token}, cuda_i32);
+            update.target_token_gpu =
+                update.new_tokens.reshape({-1}).narrow(0, update.num_new_tokens - 1, 1).to(cuda_i32);
+        }
+        stream->specUpdate(update);
+        if (update.num_new_tokens > 0) {
+            EXPECT_TRUE(sp_buffer->target_token_gpu.is_cuda());
+            EXPECT_TRUE(sp_buffer->propose_tokens_gpu.is_cuda());
+            checkTensorEqual(sp_buffer->target_token_gpu.reshape({-1}),
+                             update.new_tokens.reshape({-1}).narrow(0, update.num_new_tokens - 1, 1));
+            checkTensorEqual(sp_buffer->propose_tokens_gpu.reshape({-1}),
+                             torch::tensor({update.draft_token}, torch::kInt32));
+            checkTensorEqual(sp_buffer->target_token_gpu.reshape({-1}), sp_buffer->tokens.select(1, 0));
+            checkTensorEqual(sp_buffer->propose_tokens_gpu.reshape({-1}), sp_buffer->tokens.select(1, 1));
+        }
         return stream;
     }
 
@@ -540,6 +559,22 @@ TEST_F(MtpExecutorTest, testForwardOverlapHiddenStateContract) {
     EXPECT_FALSE(MtpExecutor::supportsForwardOverlapHiddenState(target, draft));
 }
 
+TEST_F(MtpExecutorTest, testDraftRawLogitsOptimizationIsOptIn) {
+    Sampler glm_sampler(SamplerInitParams{"glm5"});
+    Sampler hy4_sampler(SamplerInitParams{"hy_v4"});
+    EXPECT_FALSE(glm_sampler.optimizedSamplingEnabled());
+    EXPECT_EQ(glm_sampler.force_topk_, 0);
+    EXPECT_TRUE(hy4_sampler.optimizedSamplingEnabled());
+    EXPECT_EQ(hy4_sampler.force_topk_, 4096);
+    auto identity_map = torch::arange(2, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+    auto logits = torch::tensor({{0.0f, 0.0001f}}, torch::TensorOptions().device(torch::kCUDA)).to(torch::kBFloat16);
+    spec::FastTopKSampler legacy(identity_map);
+    spec::FastTopKSampler optimized(identity_map, false, true);
+    ASSERT_EQ(torch::softmax(logits, -1).argmax(-1).item<int64_t>(), 0);
+    EXPECT_EQ(legacy.forward(logits).token_ids.item<int64_t>(), 0);
+    EXPECT_EQ(optimized.forward(logits).token_ids.item<int64_t>(), 1);
+}
+
 TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
     auto identity_map = torch::arange(4, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
     spec::FastTopKSampler sampler(identity_map);
@@ -604,18 +639,29 @@ TEST_F(MtpExecutorTest, testRejectionSamplingOverwritesPoisonedOutputs) {
 TEST_F(MtpExecutorTest, testCompactPointMassProposalAndRejection) {
     const auto            i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     const auto            f32 = i32.dtype(torch::kFloat32);
-    spec::FastTopKSampler dense(torch::Tensor(), false);
-    spec::FastTopKSampler compact(torch::Tensor(), true);
+    spec::FastTopKSampler dense(torch::Tensor(), false, true);
+    spec::FastTopKSampler compact(torch::Tensor(), true, true);
     for (int batch : {1, 4, 17}) {
         for (int width : {7, 2048, 154880}) {
-            for (int pattern : {0, 1, 2}) {
+            for (int pattern : {0, 1, 2, 3, 4, 5}) {
                 auto logits = torch::randn({batch, width}, f32);
                 if (pattern == 1)
                     logits.zero_();
                 if (pattern == 2)
                     logits.select(1, width - 1).fill_(std::numeric_limits<float>::quiet_NaN());
+                if (pattern == 3)
+                    logits.fill_(-std::numeric_limits<float>::infinity());
+                if (pattern == 4) {
+                    logits.select(1, 0).fill_(std::numeric_limits<float>::infinity());
+                    logits.select(1, width - 1).fill_(std::numeric_limits<float>::infinity());
+                }
+                if (pattern == 5) {
+                    logits.zero_();
+                    logits.select(1, width - 1).fill_(1e-8f);
+                }
                 auto a = dense.forward(logits);
                 auto b = compact.forward(logits);
+                EXPECT_TRUE(torch::equal(a.token_ids, torch::argmax(logits, -1, true)));
                 EXPECT_TRUE(torch::equal(a.token_ids, b.token_ids));
                 if (compact.compactPointMassEnabled())
                     EXPECT_FALSE(b.all_probs.defined());
@@ -665,6 +711,247 @@ TEST_F(MtpExecutorTest, testCompactPointMassProposalAndRejection) {
     // Mapped vocabularies retain the established dense representation.
     spec::FastTopKSampler mapped(torch::arange(7, i32.dtype(torch::kInt64)), true);
     EXPECT_FALSE(mapped.compactPointMassEnabled());
+    auto                  mapping = torch::arange(7, i32.dtype(torch::kInt64)).flip({0});
+    spec::FastTopKSampler remapped(mapping, true);
+    auto                  logits = torch::arange(7, f32).unsqueeze(0);
+    EXPECT_EQ(remapped.forward(logits).token_ids.item<int64_t>(), 0);
+    auto multiple = dense.forward(logits, 3);
+    EXPECT_TRUE(torch::equal(multiple.all_probs, torch::softmax(logits, -1)));
+    EXPECT_TRUE(torch::equal(multiple.token_ids, std::get<1>(torch::topk(multiple.all_probs, 3, -1))));
+}
+
+TEST_F(MtpExecutorTest, testCompactTargetPointMassRejection) {
+    const auto    i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto    f32   = i32.dtype(torch::kFloat32);
+    constexpr int batch = 5;
+    constexpr int steps = 3;
+    for (int width : {7, 4096}) {
+        const int vocab = width * 2;
+        auto      candidate_ids =
+            (torch::arange(width, i32) * 2).reshape({1, 1, width}).expand({batch, steps + 1, width}).contiguous();
+        candidate_ids.select(2, width - 1).fill_(-1);
+        auto compact_q = torch::zeros({batch, steps + 1, width}, f32);
+        compact_q.select(2, 0).fill_(0.25f);
+        compact_q.select(2, 1).fill_(0.5f);
+        compact_q.select(2, 2).fill_(0.25f);
+        auto dense_q = torch::zeros({batch, steps + 1, vocab}, f32);
+        dense_q.scatter_add_(2, candidate_ids.clamp_min(0).to(torch::kLong), compact_q);
+        for (bool sample : {false, true}) {
+            for (int reject : {0, 1, steps}) {
+                for (bool missing : {false, true}) {
+                    auto draft   = torch::full({batch, steps}, 2, i32);
+                    auto target  = torch::full({batch, steps + 1}, 2, i32);
+                    auto uniform = torch::full({batch, steps + 1}, 0.125f, f32);
+                    if (reject < steps) {
+                        uniform.select(1, reject).fill_(0.875f);
+                        target.select(1, reject).fill_(4);
+                        if (missing)
+                            draft.select(1, reject).fill_(3);
+                    }
+                    auto do_sample       = torch::full({batch}, sample, i32.dtype(torch::kBool));
+                    auto dense_ids       = torch::full({batch, steps + 1}, -777, i32);
+                    auto compact_ids     = torch::empty_like(dense_ids);
+                    auto dense_lengths   = torch::empty({batch}, i32);
+                    auto compact_lengths = torch::empty_like(dense_lengths);
+                    ASSERT_EQ(invokePointMassRejectionSampling(draft.data_ptr<int32_t>(),
+                                                               uniform.data_ptr<float>(),
+                                                               dense_q.data_ptr<float>(),
+                                                               target.data_ptr<int32_t>(),
+                                                               1,
+                                                               dense_ids.data_ptr<int32_t>(),
+                                                               dense_lengths.data_ptr<int32_t>(),
+                                                               do_sample.data_ptr<bool>(),
+                                                               batch,
+                                                               steps,
+                                                               vocab,
+                                                               at::cuda::getCurrentCUDAStream().stream()),
+                              cudaSuccess);
+                    ASSERT_EQ(invokePointMassRejectionSampling(draft.data_ptr<int32_t>(),
+                                                               uniform.data_ptr<float>(),
+                                                               compact_q.data_ptr<float>(),
+                                                               target.data_ptr<int32_t>(),
+                                                               1,
+                                                               compact_ids.data_ptr<int32_t>(),
+                                                               compact_lengths.data_ptr<int32_t>(),
+                                                               do_sample.data_ptr<bool>(),
+                                                               batch,
+                                                               steps,
+                                                               width,
+                                                               at::cuda::getCurrentCUDAStream().stream(),
+                                                               candidate_ids.data_ptr<int32_t>()),
+                              cudaSuccess);
+                    EXPECT_TRUE(torch::equal(dense_ids, compact_ids));
+                    EXPECT_TRUE(torch::equal(dense_lengths, compact_lengths));
+                    EXPECT_TRUE(compact_lengths.eq(reject + 1).all().item<bool>());
+                    EXPECT_FALSE(compact_ids.eq(-777).any().item<bool>());
+                }
+            }
+        }
+    }
+}
+
+TEST_F(MtpExecutorTest, testHy4SamplerConfig) {
+    {
+        autil::EnvGuard env("RTP_LLM_HY4_FORCE_TOPK", "0");
+        ASSERT_EQ(::unsetenv("RTP_LLM_HY4_FORCE_TOPK"), 0);
+        Sampler sampler(SamplerInitParams{"hy_v4"});
+        EXPECT_EQ(sampler.force_topk_, 4096);
+    }
+    {
+        autil::EnvGuard env("RTP_LLM_HY4_FORCE_TOPK", "0");
+        Sampler         sampler(SamplerInitParams{"hy_v4"});
+        EXPECT_EQ(sampler.force_topk_, 0);
+    }
+    {
+        autil::EnvGuard env("RTP_LLM_HY4_FORCE_TOPK", "4096");
+        Sampler         sampler(SamplerInitParams{"hy_v4"});
+        Sampler         other(SamplerInitParams{"glm_5"});
+        EXPECT_EQ(sampler.force_topk_, 4096);
+        EXPECT_EQ(other.force_topk_, 0);
+    }
+    for (const std::string value : {"", "-1", "2147483648", "4096x"}) {
+        autil::EnvGuard env("RTP_LLM_HY4_FORCE_TOPK", value);
+        EXPECT_THROW(Sampler(SamplerInitParams{"hy_v4"}), c10::Error);
+        EXPECT_NO_THROW(Sampler(SamplerInitParams{"glm_5"}));
+    }
+}
+
+TEST_F(MtpExecutorTest, testDraftRawLogitsArgmax) {
+    auto logits = torch::zeros({1, 8192}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    logits[0][8191].fill_(1e-8f);
+    spec::FastTopKSampler draft(torch::Tensor(), false, true);
+    auto                  result = draft.forward(logits);
+    EXPECT_EQ(result.token_ids.item<int64_t>(), 8191);
+    EXPECT_TRUE(torch::equal(result.all_probs, torch::zeros_like(logits).scatter_(1, result.token_ids, 1.f)));
+}
+
+TEST_F(MtpExecutorTest, testHy4CompactTargetSamplerForward) {
+    constexpr int batch      = 4;
+    constexpr int vocab      = 8192;
+    constexpr int cap        = 4096;
+    const auto    host_i32   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true);
+    const auto    device_f32 = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    for (int mode = 0; mode < 6; ++mode) {
+        SCOPED_TRACE(mode);
+        autil::EnvGuard env("RTP_LLM_HY4_FORCE_TOPK", mode == 2 ? "0" : "4096");
+        Sampler         sampler(SamplerInitParams{mode == 5 ? "glm_5" : "hy_v4"});
+        SamplerInputs   inputs{};
+        inputs.logits                     = torch::randn({batch, vocab}, device_f32);
+        const auto expected_greedy        = torch::argmax(inputs.logits, -1);
+        inputs.token_ids                  = torch::zeros({batch, 1}, host_i32);
+        inputs.input_lengths              = torch::zeros({batch}, host_i32);
+        inputs.sequence_lengths           = torch::zeros({batch}, host_i32);
+        inputs.vocab_size                 = vocab;
+        inputs.step                       = 0;
+        inputs.batch_size                 = batch;
+        inputs.batch_size_out             = batch;
+        inputs.num_beams_in               = torch::ones({batch}, host_i32.dtype(torch::kInt64));
+        inputs.num_beams_out              = torch::ones_like(inputs.num_beams_in);
+        inputs.top_k                      = torch::zeros({batch}, host_i32);
+        inputs.top_p                      = torch::full({batch}, 0.9f, host_i32.dtype(torch::kFloat32));
+        inputs.temperature                = torch::ones({batch}, host_i32.dtype(torch::kFloat32));
+        inputs.allow_compact_target_probs = true;
+        inputs.skip_logits_probs_restore  = true;
+        inputs.phase                      = LogitsProcessorPhase::MTP_VERIFY;
+        if (mode == 1) {
+            inputs.top_k.data_ptr<int32_t>()[0] = 1;
+            inputs.top_k.data_ptr<int32_t>()[2] = 32;
+            inputs.top_p.data_ptr<float>()[3]   = 0;
+        }
+        if (mode == 3)
+            inputs.cum_log_probs = torch::zeros({batch}, host_i32.dtype(torch::kFloat32));
+        if (mode == 4)
+            inputs.top_k.fill_(1);
+        for (int row = 0; row < batch; ++row) {
+            inputs.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+            inputs.generator.back().set_current_seed(1234 + row);
+        }
+        auto       output  = sampler.forward(inputs);
+        const bool compact = mode < 2;
+        ASSERT_EQ(output.all_probs.dim(), 2);
+        ASSERT_EQ(output.all_probs.size(0), batch);
+        ASSERT_EQ(output.all_probs.size(1), compact ? cap : vocab);
+        ASSERT_EQ(output.all_probs_indices.defined(), compact);
+        EXPECT_TRUE(output.success.all().item<bool>());
+        EXPECT_TRUE(torch::allclose(output.all_probs.sum(-1), torch::ones({batch}, device_f32), 1e-5, 1e-5));
+        const auto tokens = output.token_ids.select(1, 0);
+        if (compact) {
+            ASSERT_EQ(output.all_probs_indices.scalar_type(), torch::kInt32);
+            ASSERT_EQ(output.all_probs_indices.sizes(), output.all_probs.sizes());
+            const auto matches = output.all_probs_indices.eq(tokens.unsqueeze(1));
+            EXPECT_TRUE(matches.sum(-1).eq(1).all().item<bool>());
+            EXPECT_TRUE((output.all_probs * matches).sum(-1).gt(0).all().item<bool>());
+        } else {
+            EXPECT_TRUE(output.all_probs.gather(1, tokens.to(torch::kLong).unsqueeze(1)).gt(0).all().item<bool>());
+        }
+        if (mode == 1) {
+            EXPECT_EQ(tokens[0].item<int32_t>(), expected_greedy[0].item<int64_t>());
+        }
+        if (mode == 4) {
+            EXPECT_TRUE(torch::equal(tokens.to(torch::kLong), expected_greedy));
+        }
+        if (mode == 3) {
+            EXPECT_TRUE(torch::isfinite(output.cum_log_probs).all().item<bool>());
+        }
+    }
+}
+
+TEST_F(MtpExecutorTest, testDraftArgmaxGraphAndBenchmark) {
+    const auto                 options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto                       stream  = at::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard guard(stream);
+    cudaDeviceProp             device;
+    ASSERT_EQ(cudaGetDeviceProperties(&device, stream.device_index()), cudaSuccess);
+    std::cout << "HY4_DRAFT_DEVICE name=" << device.name << " sm=" << device.major << device.minor << std::endl;
+    for (int batch : {1, 16, 128}) {
+        auto          logits = torch::randn({batch, 154880}, options);
+        torch::Tensor probabilities, ids, ids32, lengths;
+        auto          run = [&](const torch::Tensor& scores) {
+            ASSERT_TRUE(
+                tryMtpGreedyPack(scores, {}, probabilities, ids, ids32, {}, {}, false, lengths, stream.stream(), true));
+        };
+        run(logits);
+        ASSERT_EQ(cudaStreamSynchronize(stream.stream()), cudaSuccess);
+        at::cuda::CUDAGraph graph;
+        graph.capture_begin();
+        run(logits);
+        graph.capture_end();
+        for (int replay = 0; replay < 3; ++replay) {
+            logits.normal_();
+            logits.select(1, replay * 2048 + 17).fill_(100.0f);
+            graph.replay();
+            EXPECT_TRUE(torch::equal(ids, torch::argmax(logits, -1, true)));
+            EXPECT_TRUE(torch::equal(ids32, ids.to(torch::kInt32)));
+        }
+        graph.reset();
+        logits.normal_();
+        auto original_ids = torch::argmax(torch::softmax(logits, -1), -1, true);
+        run(logits);
+        EXPECT_TRUE(torch::equal(ids, original_ids));
+        std::cout << "HY4_DRAFT_ACCURACY batch=" << batch
+                  << " random_mismatches=" << ids.ne(original_ids).sum().item<int64_t>() << std::endl;
+        cudaEvent_t start, stop;
+        ASSERT_EQ(cudaEventCreate(&start), cudaSuccess);
+        ASSERT_EQ(cudaEventCreate(&stop), cudaSuccess);
+        for (int trial = 0; trial < 3; ++trial) {
+            for (int side = 0; side < 2; ++side) {
+                const bool softmax = (trial + side) % 2 == 0;
+                for (int i = 0; i < 20; ++i)
+                    run(softmax ? torch::softmax(logits, -1) : logits);
+                ASSERT_EQ(cudaEventRecord(start, stream.stream()), cudaSuccess);
+                for (int i = 0; i < 100; ++i)
+                    run(softmax ? torch::softmax(logits, -1) : logits);
+                ASSERT_EQ(cudaEventRecord(stop, stream.stream()), cudaSuccess);
+                ASSERT_EQ(cudaEventSynchronize(stop), cudaSuccess);
+                float ms = 0;
+                ASSERT_EQ(cudaEventElapsedTime(&ms, start, stop), cudaSuccess);
+                std::cout << "HY4_DRAFT_ARGMAX batch=" << batch << " vocab=154880 softmax=" << softmax
+                          << " trial=" << trial << " us=" << ms * 1000.0f / 100 << std::endl;
+            }
+        }
+        ASSERT_EQ(cudaEventDestroy(start), cudaSuccess);
+        ASSERT_EQ(cudaEventDestroy(stop), cudaSuccess);
+    }
 }
 
 TEST_F(MtpExecutorTest, testCompactPointMassPreservesSamplerRngState) {
@@ -2051,19 +2338,19 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
 
     draft_input_1.combo_tokens       = torch::tensor({3}, torch::kInt32);
     draft_input_1.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_1.sequence_lengths   = torch::tensor({2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({3}, torch::kInt32);
     draft_input_1.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_1.last_hidden_states = stream1_hidden_states;
 
     draft_input_2.combo_tokens       = torch::tensor({2}, torch::kInt32);
     draft_input_2.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_2.sequence_lengths   = torch::tensor({3}, torch::kInt32);
+    draft_input_2.sequence_lengths   = torch::tensor({4}, torch::kInt32);
     draft_input_2.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_2.last_hidden_states = draft_output_1.all_hidden_states;
 
     draft_input_3.combo_tokens       = torch::tensor({1}, torch::kInt32);
     draft_input_3.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_3.sequence_lengths   = torch::tensor({4}, torch::kInt32);
+    draft_input_3.sequence_lengths   = torch::tensor({5}, torch::kInt32);
     draft_input_3.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_3.last_hidden_states = draft_output_2.all_hidden_states;
 
@@ -2192,7 +2479,7 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     auto draft_output_1              = GptModelOutputs{};
     draft_input_1.combo_tokens       = torch::tensor({3}, torch::kInt32);
     draft_input_1.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_1.sequence_lengths   = torch::tensor({2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({3}, torch::kInt32);
     draft_input_1.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_1.last_hidden_states = stream_hidden_states;
     draft_output_1.logits            = torch::tensor({0.4f, 0.3f, 0.2f, 0.1f}).reshape({1, 4});
@@ -2377,10 +2664,9 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
 
     auto target_input  = GptModelInputs{};
     auto target_output = GptModelOutputs{};
-    // GLM5's MtpBatchStreamProcessor zero-fills target tokens for streams that
-    // have already entered an error state; the executor must still avoid
-    // escalating the request-level grammar failure into a process abort.
-    target_input.combo_tokens      = torch::tensor({0, 0}, torch::kInt32);
+    // Decode gathering consumes the published GPU token mirrors even after
+    // a request-level error; processing must preserve that error without aborting.
+    target_input.combo_tokens      = torch::tensor({2, 3}, torch::kInt32);
     target_input.input_lengths     = torch::tensor({2}, torch::kInt32);
     target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
     target_input.lm_output_indexes = torch::tensor({0, 1}, torch::kInt32);
@@ -2480,19 +2766,19 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
 
     draft_input_1.combo_tokens       = torch::tensor({2, 3}, torch::kInt32);
     draft_input_1.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_1.sequence_lengths   = torch::tensor({3, 2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({4, 3}, torch::kInt32);
     draft_input_1.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_1.last_hidden_states = torch::tensor({0.03f, 0.04f, 2.1f, 2.12f}).reshape({2, 2});
 
     draft_input_2.combo_tokens       = torch::tensor({1, 0}, torch::kInt32);
     draft_input_2.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_2.sequence_lengths   = torch::tensor({4, 3}, torch::kInt32);
+    draft_input_2.sequence_lengths   = torch::tensor({5, 4}, torch::kInt32);
     draft_input_2.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_2.last_hidden_states = draft_output_1.all_hidden_states;
 
     draft_input_3.combo_tokens       = torch::tensor({2, 2}, torch::kInt32);
     draft_input_3.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_3.sequence_lengths   = torch::tensor({5, 4}, torch::kInt32);
+    draft_input_3.sequence_lengths   = torch::tensor({6, 5}, torch::kInt32);
     draft_input_3.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_3.last_hidden_states = draft_output_2.all_hidden_states;
 

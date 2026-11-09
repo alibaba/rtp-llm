@@ -16,11 +16,17 @@ public:
 
     virtual SamplerOutput forward(const SamplerInputs& inputs);
 
+    bool optimizedSamplingEnabled() const {
+        return use_optimized_sampling_;
+    }
+
 private:
     void preprocessLogits(const SamplerInputs& inputs);
 
     TensorHolder            buffer_holder_;
     cuda_graph::GraphStream copy_stream_;
+    int                     force_topk_ = 0;
+    bool                    use_optimized_sampling_ = false;
 };
 
 }  // namespace rtp_llm

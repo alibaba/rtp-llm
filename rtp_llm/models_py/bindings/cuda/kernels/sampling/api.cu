@@ -135,6 +135,38 @@ std::tuple<uint64_t, uint64_t> get_seed_and_offset(int                          
     return {rng_engine_inputs.seed_.val, rng_engine_inputs.offset_.val};
 }
 
+void sampling_from_probs(torch::Tensor probs,
+                         torch::Tensor output,
+                         torch::Tensor valid,
+                         bool          deterministic,
+                         torch::Tensor seed,
+                         torch::Tensor offset,
+                         int64_t       cuda_stream) {
+    check_sampling_inputs(probs, output, valid);
+    TORCH_CHECK(probs.size(1) > 0 && probs.size(1) <= std::numeric_limits<int32_t>::max()
+                    && probs.size(0) <= std::numeric_limits<int32_t>::max(),
+                "sampling dimensions exceed CUDA index limits");
+    if (probs.size(0) == 0)
+        return;
+    at::cuda::CUDAGuard device_guard(probs.device());
+    seed   = prepare_optional_param(seed, probs.size(0), probs.device(), at::kLong, "seed");
+    offset = prepare_optional_param(offset, probs.size(0), probs.device(), at::kLong, "offset");
+    const auto status =
+        flashinfer::sampling::SamplingFromProb<float, int32_t>(probs.data_ptr<float>(),
+                                                               output.data_ptr<int32_t>(),
+                                                               valid.data_ptr<bool>(),
+                                                               nullptr,
+                                                               static_cast<uint32_t>(probs.size(0)),
+                                                               static_cast<uint32_t>(probs.size(1)),
+                                                               deterministic,
+                                                               reinterpret_cast<uint64_t*>(seed.data_ptr<int64_t>()),
+                                                               0,
+                                                               reinterpret_cast<uint64_t*>(offset.data_ptr<int64_t>()),
+                                                               0,
+                                                               resolve_stream(cuda_stream));
+    check_cuda_status(status, "SamplingFromProb");
+}
+
 void top_p_sampling_from_probs(torch::Tensor                probs,
                                torch::Tensor                output,
                                torch::Tensor                valid,

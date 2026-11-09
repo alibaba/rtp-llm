@@ -1352,9 +1352,33 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
 
     GptModelInputs  model_input;
     GptModelOutputs model_output;
-    model_output.logits = torch::zeros({3, 16}, torch::kFloat32);
+    model_output.logits =
+        torch::zeros({3, 16}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
 
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_input, model_output);
+    SpecLogitsVerifyRunner runner;
+    SpecLogitsVerifyRunner::LaunchTask task;
+    task.total_streams = 1;
+    task.propose_step = sp_config.gen_num_per_cycle;
+    task.vocab_size = model_config.vocab_size;
+    task.draft_tokens = torch::tensor({{3, 4}}, torch::kInt32);
+    size_t processor_idx = 0;
+    for (const auto& logits_processor : stream->getAllLogitsProcessorPtr()) {
+        auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(logits_processor);
+        if (spec_processor) {
+            task.active.push_back({spec_processor,
+                                   0,
+                                   processor_idx,
+                                   static_cast<uint64_t>(stream->streamId()),
+                                   static_cast<int64_t>(stream->seqLength()),
+                                   static_cast<int64_t>(stream->outputTokenLen())});
+        }
+        ++processor_idx;
+    }
+    ASSERT_FALSE(task.active.empty());
+    auto spec_mask_result = runner.buildInline(task);
+    ASSERT_TRUE(spec_mask_result.has_active_processor);
+
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_input, model_output, spec_mask_result);
     ASSERT_TRUE(sampler_inputs_status.ok());
     auto sampler_inputs = sampler_inputs_status.value();
 
@@ -1538,6 +1562,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {2, 1}, 2);
 
     auto stream_groups = StreamGroups({stream1, stream2});
+    const auto initial_state1 = stream1->getMtpAsyncDeviceState();
+    const auto initial_state2 = stream2->getMtpAsyncDeviceState();
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
     spec_decode_output.accept_len_cpu    = torch::tensor({5, 1}, torch::kInt32);
@@ -1563,10 +1589,18 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().next_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, stream2->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, stream2->seqLength());
+    // The executor publishes async position state after dispatch. This CPU
+    // draft fixture publishes a target GPU mirror and keeps the draft CPU fallback.
+    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, initial_state1.last_real_seq_len);
+    EXPECT_EQ(stream1->getMtpAsyncDeviceState().next_real_seq_len, initial_state1.next_real_seq_len);
+    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, initial_state2.last_real_seq_len);
+    EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, initial_state2.next_real_seq_len);
+    for (const auto& stream : {stream1, stream2}) {
+        const auto output = stream->getSPOutputBuffer();
+        ASSERT_TRUE(output->target_token_gpu.is_cuda());
+        EXPECT_FALSE(output->propose_tokens_gpu.defined());
+        EXPECT_EQ(toVec<int>(output->target_token_gpu.to(torch::kInt32)), (std::vector<int>{2}));
+    }
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {

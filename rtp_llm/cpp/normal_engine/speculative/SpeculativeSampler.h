@@ -45,8 +45,8 @@ struct FastTopKSamplerOutput {
 
 class FastTopKSampler {
 public:
-    FastTopKSampler(torch::Tensor d2t_map, bool allow_compact_point_mass = false):
-        d2t_map_(d2t_map), allow_compact_point_mass_(allow_compact_point_mass) {}
+    FastTopKSampler(torch::Tensor d2t_map, bool allow_compact_point_mass = false, bool use_raw_logits = false):
+        d2t_map_(d2t_map), allow_compact_point_mass_(allow_compact_point_mass), use_raw_logits_(use_raw_logits) {}
     virtual ~FastTopKSampler() {}
 
     bool compactPointMassEnabled() const;
@@ -55,8 +55,9 @@ public:
     forward(const torch::Tensor& logits, int top_k = 1, const MtpDraftSampleContext* context = nullptr);
 
 private:
-    torch::Tensor d2t_map_;
-    bool          allow_compact_point_mass_ = false;
+    torch::Tensor     d2t_map_;
+    bool              allow_compact_point_mass_ = false;
+    bool              use_raw_logits_ = false;
 };
 
 class SpeculativeSampler {

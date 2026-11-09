@@ -1,5 +1,9 @@
 #include "rtp_llm/cpp/models/Sampler.h"
 #include <cstring>
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
+#include <cmath>
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
@@ -12,7 +16,20 @@ using namespace std;
 
 namespace rtp_llm {
 
-Sampler::Sampler(const SamplerInitParams& params): copy_stream_(cuda_graph::graphGetStreamFromPool(false)) {}
+Sampler::Sampler(const SamplerInitParams& params): copy_stream_(cuda_graph::graphGetStreamFromPool(false)) {
+    if (params.model_type == "hy_v4") {
+        use_optimized_sampling_ = true;
+        force_topk_ = 4096;
+        if (const char* value = std::getenv("RTP_LLM_HY4_FORCE_TOPK")) {
+            char* end         = nullptr;
+            errno             = 0;
+            const long parsed = std::strtol(value, &end, 10);
+            TORCH_CHECK(errno == 0 && end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX,
+                        "RTP_LLM_HY4_FORCE_TOPK must be an integer in [0, INT_MAX]");
+            force_topk_ = static_cast<int>(parsed);
+        }
+    }
+}
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     c10::InferenceMode inference_mode(true);
@@ -37,6 +54,26 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     bool has_num_beams = std::any_of(num_beams_in, num_beams_in + inputs.batch_size, [](auto n) { return n > 1; })
                          || std::any_of(num_beams_out, num_beams_out + inputs.batch_size, [](auto n) { return n > 1; });
     bool variable_num_beams = inputs.batch_size != inputs.batch_size_out;
+
+    if (inputs.allow_compact_target_probs) {
+        const auto  rows       = static_cast<int64_t>(inputs.batch_size);
+        const auto* k          = inputs.top_k.data_ptr<int32_t>();
+        const auto* p          = inputs.top_p.data_ptr<float>();
+        const bool  all_greedy = std::all_of(k, k + rows, [](int32_t v) { return v == 1; });
+        const bool  mixed      = rows > 0
+                           && (std::any_of(k, k + rows, [&](int32_t v) { return v != k[0]; })
+                               || std::any_of(p, p + rows, [&](float v) { return v != p[0]; }));
+        const bool pure_top_p = std::all_of(k, k + rows, [](int32_t v) { return v <= 0; })
+                                && std::any_of(p, p + rows, [](float v) { return v > 1e-7f && v < 1.0f - 1e-7f; });
+        const bool valid_p = std::all_of(
+            p, p + rows, [](float v) { return std::isfinite(v) && (v >= 0 || std::abs(v) < 1e-7f) && v <= 1; });
+        const bool compact = !has_num_beams && !inputs.cum_log_probs.defined() && rows > 0 && valid_p && force_topk_ > 0
+                             && force_topk_ < inputs.logits.size(1) && !all_greedy && (mixed || pure_top_p);
+        const int64_t width = compact ? force_topk_ : inputs.logits.size(1);
+        inputs.all_probs    = torch::empty({rows, width}, inputs.logits.options().dtype(torch::kFloat32));
+        inputs.all_probs_indices =
+            compact ? torch::empty({rows, width}, inputs.logits.options().dtype(torch::kInt32)) : torch::Tensor();
+    }
 
     // allocate output tensors
     // Keep success on CUDA to avoid a blocking D2H copy: the GPU sampling kernel writes success
@@ -140,7 +177,11 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  frequency_penalty,
                  do_sample,
                  generator,
-                 &buffer_holder_});
+                 &buffer_holder_,
+                 force_topk_,
+                 use_optimized_sampling_,
+                 mayOptNarrow(inputs.all_probs_indices, from_batch_idx_in, batch_size_in),
+                 use_optimized_sampling_ && inputs.skip_logits_probs_restore});
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
                 // TODO(zhangjianning.zjn): would be better to eliminate the copy
@@ -216,7 +257,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                           std::move(all_beam_indices),
                           std::move(all_success),
                           inputs.raw_logprobs_logits,
-                          inputs.raw_logprobs_row_indices});
+                          inputs.raw_logprobs_row_indices,
+                          false,
+                          std::move(inputs.all_probs_indices)});
 }
 
 void Sampler::preprocessLogits(const SamplerInputs& inputs) {

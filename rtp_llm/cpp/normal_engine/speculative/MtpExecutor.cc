@@ -1491,7 +1491,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              params.eplb_config);
     }
 
-    sampler_.reset(new Sampler(SamplerInitParams{}));
+    sampler_.reset(new Sampler(SamplerInitParams{params.model_config_.model_type}));
 
     // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
     std::optional<CacheLayerLayout> kv_cache_layer_layout = std::nullopt;
@@ -1725,7 +1725,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
     fast_topk_sampler_.reset(new speculative::FastTopKSampler(
-        d2t_map_, role_type_ == RoleType::PDFUSION && parallelism_config_.tp_size == 1));
+        d2t_map_,
+        role_type_ == RoleType::PDFUSION && parallelism_config_.tp_size == 1,
+        params.model_config_.model_type == "hy_v4"));
 
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
 }
@@ -2501,15 +2503,24 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
 
             // target model sample
-            CHECK_AND_RETURN_REF(sampler_input,
-                                 batch_stream_processor_->gatherSpecSamplerInput(
-                                     stream_groups, model_input, model_output, *spec_logits_result));
+            CHECK_AND_RETURN_REF(
+                sampler_input,
+                batch_stream_processor_->gatherSpecSamplerInput(stream_groups,
+                                                                model_input,
+                                                                model_output,
+                                                                *spec_logits_result,
+                                                                sampler_->optimizedSamplingEnabled()
+                                                                    && draft_sampler_output.draft_point_mass));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
             sampler_output           = std::move(sampler_->forward(sampler_input));
             sampler_output.all_probs = reshapeMtpTargetAllProbs(sampler_output.all_probs,
                                                                 static_cast<int64_t>(batch_size),
                                                                 static_cast<int64_t>(propose_step_ + 1),
-                                                                sampler_input.logits.size(1));
+                                                                sampler_output.all_probs.size(-1));
+            if (sampler_output.all_probs_indices.defined()) {
+                sampler_output.all_probs_indices =
+                    sampler_output.all_probs_indices.reshape_as(sampler_output.all_probs);
+            }
 
             // rejection sampling
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);

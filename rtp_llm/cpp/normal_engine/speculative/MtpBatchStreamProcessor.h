@@ -181,7 +181,8 @@ public:
     gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                            const GptModelInputs&                       model_inputs,
                            const GptModelOutputs&                      model_output,
-                           const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result = {}) const;
+                           const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result     = {},
+                           bool                                        compact_target_capable = false) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,

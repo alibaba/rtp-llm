@@ -78,14 +78,12 @@ bool FastTopKSampler::compactPointMassEnabled() const {
 FastTopKSamplerOutput
 FastTopKSampler::forward(const torch::Tensor& logits, int top_k, const MtpDraftSampleContext* context) {
     FastTopKSamplerOutput output;
-    auto                  draft_probs = torch::softmax(logits, -1);
-    const bool            compact     = top_k == 1 && compactPointMassEnabled();
+    const auto scores = use_raw_logits_ && top_k == 1 ? logits : torch::softmax(logits, -1);
+    const bool            compact = top_k == 1 && compactPointMassEnabled();
 #if USING_CUDA
-    // MTP calls this sampler with top_k=1. Keep softmax unchanged: rounding
-    // can turn distinct logits into tied probabilities with a different winner.
     const torch::Tensor empty;
     if (mtpFusionEnabled() && top_k == 1
-        && tryMtpGreedyPack(draft_probs,
+        && tryMtpGreedyPack(scores,
                             d2t_map_,
                             output.all_probs,
                             output.token_ids,
@@ -101,24 +99,18 @@ FastTopKSampler::forward(const torch::Tensor& logits, int top_k, const MtpDraftS
     }
 #endif
 
-    std::tuple<torch::Tensor, torch::Tensor> sample_res;
     if (top_k == 1) {
-        sample_res = torch::max(draft_probs, -1, true);
-    } else {
-        sample_res = torch::topk(draft_probs, top_k, -1);
-    }
-
-    output.token_ids = std::get<1>(sample_res);
-    if (top_k == 1) {
+        output.token_ids = use_raw_logits_ ? torch::argmax(scores, -1, true) : std::get<1>(torch::max(scores, -1, true));
         // A deterministic top-1 proposal must be represented by its point-mass
         // distribution when rejection sampling computes its acceptance ratio.
         if (!compact) {
-            output.all_probs = torch::zeros_like(draft_probs).scatter_(-1, output.token_ids, 1.0);
+            output.all_probs = torch::zeros_like(scores).scatter_(-1, output.token_ids, 1.0);
         }
     } else {
         // Preserve the existing multi-candidate behavior. This path does not
         // describe the deterministic top-1 proposal fixed above.
-        output.all_probs = std::move(draft_probs);
+        output.all_probs = scores;
+        output.token_ids = std::get<1>(torch::topk(output.all_probs, top_k, -1));
     }
 
     int batch_size = output.token_ids.size(0);
@@ -153,6 +145,13 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     auto draft_token_probs  = draft_sampler_output.all_probs;
     auto target_token_probs = target_sampler_output.all_probs;
+    const auto& target_candidate_ids = target_sampler_output.all_probs_indices;
+    if (target_candidate_ids.defined()) {
+        RTP_LLM_CHECK(draft_sampler_output.draft_point_mass);
+        RTP_LLM_CHECK(target_candidate_ids.is_cuda() && target_candidate_ids.is_contiguous()
+                      && target_candidate_ids.scalar_type() == torch::kInt32
+                      && target_candidate_ids.sizes() == target_token_probs.sizes());
+    }
 
     buffer_holder_.hold_host(draft_token_ids);
     auto draft_token_ids_d_t = draft_token_ids.to(target_device, true);
@@ -169,10 +168,10 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     [[maybe_unused]] bool all_greedy = true;
     [[maybe_unused]] bool has_forced_accept = false;
     for (const GenerateStreamPtr& stream : streams) {
-        const bool sample = !stream->generateConfig()->top1();
+        const bool sample                      = !stream->generateConfig()->top1();
         do_sample.data_ptr<bool>()[stream_idx] = sample;
-        all_greedy = all_greedy && !sample;
-        has_forced_accept = has_forced_accept || stream->forceSpAccept();
+        all_greedy                             = all_greedy && !sample;
+        has_forced_accept                      = has_forced_accept || stream->forceSpAccept();
         stream_idx++;
     }
     buffer_holder_.hold_host(do_sample);
@@ -253,18 +252,20 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                           && target_token_probs_d_t.is_contiguous());
             RTP_LLM_CHECK(draft_token_ids_d_t.scalar_type() == torch::kInt32 && draft_token_ids_d_t.is_contiguous());
             RTP_LLM_CHECK(target_token_ids_d_t.scalar_type() == torch::kInt32 && target_token_ids_d_t.is_contiguous());
-            RTP_LLM_CHECK(invokePointMassRejectionSampling(draft_token_ids_d_t.data_ptr<int32_t>(),
-                                                           uniform_samples_d.data_ptr<float>(),
-                                                           target_token_probs_d_t.data_ptr<float>(),
-                                                           target_token_ids_d_t.data_ptr<int32_t>(),
-                                                           target_token_ids_d_t.size(1),
-                                                           output_token_ids_d.data_ptr<int32_t>(),
-                                                           output_accepted_token_num_d.data_ptr<int32_t>(),
-                                                           do_sample_d.data_ptr<bool>(),
-                                                           batch_size,
-                                                           propose_step_,
-                                                           target_token_probs_d_t.size(2),
-                                                           cuda_graph::graphGetCurrentStream().stream())
+            RTP_LLM_CHECK(invokePointMassRejectionSampling(
+                              draft_token_ids_d_t.data_ptr<int32_t>(),
+                              uniform_samples_d.data_ptr<float>(),
+                              target_token_probs_d_t.data_ptr<float>(),
+                              target_token_ids_d_t.data_ptr<int32_t>(),
+                              target_token_ids_d_t.size(1),
+                              output_token_ids_d.data_ptr<int32_t>(),
+                              output_accepted_token_num_d.data_ptr<int32_t>(),
+                              do_sample_d.data_ptr<bool>(),
+                              batch_size,
+                              propose_step_,
+                              target_token_probs_d_t.size(2),
+                              cuda_graph::graphGetCurrentStream().stream(),
+                              target_candidate_ids.defined() ? target_candidate_ids.data_ptr<int32_t>() : nullptr)
                           == cudaSuccess);
         } else
 #endif

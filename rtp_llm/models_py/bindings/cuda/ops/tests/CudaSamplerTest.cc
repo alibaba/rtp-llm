@@ -1,13 +1,18 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
+#include <ATen/cuda/CUDAGraph.h>
+#include <c10/cuda/CUDAGuard.h>
 #include "rtp_llm/models_py/bindings/cuda/ops/tests/CudaTestUtils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <limits>
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <iostream>
@@ -607,6 +612,529 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
     ASSERT_EQ(output_token_ids_host[11], 2);
     assertTokenIn(output_token_ids_host, 17, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
     assertTokenIn(output_token_ids_host, 23, {7, 8});
+}
+
+TEST_F(CudaSamplerTest, testHy4GreedyRawArgmax) {
+    const auto f32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto i32 = f32.dtype(torch::kInt32);
+    for (bool mixed : {false, true}) {
+        for (bool return_probs : {false, true}) {
+            auto logits = torch::zeros({4, 8192}, f32);
+            logits[0][8191].fill_(1e-8f);
+            logits[1][4097].fill_(std::numeric_limits<float>::quiet_NaN());
+            logits[2].fill_(-std::numeric_limits<float>::infinity());
+            logits[3].normal_();
+            auto         expected = torch::argmax(logits, -1, true);
+            GreedyParams params{};
+            params.logits           = logits.clone();
+            params.input_lengths    = torch::zeros({4}, i32);
+            params.sequence_lengths = torch::zeros({4}, i32);
+            params.token_ids        = torch::zeros({4, 1}, i32);
+            params.step             = 0;
+            params.top_k            = mixed ? pinnedIntTensor({1, 1, 1, 0}) : pinnedIntTensor({1, 1, 1, 1});
+            params.top_p            = pinnedFloatTensor({0.2f, 0.4f, 0.6f, 0.8f});
+            params.temperature      = pinnedFloatTensor({1, 1, 1, 1});
+            params.force_topk       = 4096;
+            if (return_probs)
+                params.output_all_probs = torch::empty_like(logits);
+            for (int row = 0; row < 4; ++row) {
+                params.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+                params.generator.back().set_current_seed(row + 123);
+            }
+            auto      result       = execSampleGreedy(params);
+            const int greedy_count = mixed ? 3 : 4;
+            EXPECT_TRUE(torch::equal(params.token_ids.narrow(0, 0, greedy_count).to(torch::kInt64),
+                                     expected.narrow(0, 0, greedy_count)));
+            for (int row = 0; row < greedy_count; ++row)
+                EXPECT_EQ(params.generator[row].get_offset(), 0);
+            if (return_probs) {
+                auto point_mass = torch::zeros_like(logits).scatter_(1, expected, 1.0);
+                EXPECT_TRUE(torch::equal(params.output_all_probs->narrow(0, 0, greedy_count),
+                                         point_mass.narrow(0, 0, greedy_count)));
+            }
+            if (result.success.defined()) {
+                EXPECT_TRUE(result.success.all().item<bool>());
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testOptimizedAndFallbackGreedyAndCappedReference) {
+    const auto f32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto i32 = f32.dtype(torch::kInt32);
+    for (bool optimized : {false, true}) {
+        for (bool greedy : {true, false}) {
+            if (!greedy && !optimized)
+                continue;
+            auto logits = greedy ? torch::zeros({2, 8192}, f32) : torch::randn({2, 8192}, f32);
+            if (greedy)
+                logits.select(1, 8191).fill_(1e-8f);
+            GreedyParams params{};
+            params.logits                 = logits.clone();
+            params.input_lengths          = torch::zeros({2}, i32);
+            params.sequence_lengths       = torch::zeros({2}, i32);
+            params.token_ids              = torch::zeros({2, 1}, i32);
+            params.step                   = 0;
+            params.top_k                  = greedy ? pinnedIntTensor({1, 1}) : pinnedIntTensor({32, 0});
+            params.top_p                  = pinnedFloatTensor({1, 1});
+            params.temperature            = pinnedFloatTensor({1, 1});
+            params.use_optimized_sampling = optimized;
+            params.force_topk             = !optimized ? 0 : 4096;
+            params.output_all_probs       = torch::empty_like(logits);
+            for (int row = 0; row < 2; ++row) {
+                params.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+                params.generator.back().set_current_seed(123 + row);
+            }
+            auto result = execSampleGreedy(params);
+            if (greedy) {
+                auto reference_logits = !optimized ? torch::softmax(logits, -1) : logits;
+                auto ids              = torch::argmax(reference_logits, -1, true);
+                EXPECT_TRUE(torch::equal(params.token_ids.to(torch::kInt64), ids));
+                auto expected_probs = torch::zeros_like(logits).scatter_(1, ids, 1.f);
+                if (!optimized) {
+                    auto maximum   = std::get<0>(reference_logits.max(-1, true));
+                    auto retained  = reference_logits * reference_logits.ge(maximum);
+                    expected_probs = retained / retained.sum(-1, true);
+                    EXPECT_TRUE(torch::equal(expected_probs, torch::full_like(logits, 1.f / 8192)));
+                }
+                EXPECT_TRUE(torch::equal(*params.output_all_probs, expected_probs));
+                for (const auto& generator : params.generator)
+                    EXPECT_EQ(generator.get_offset() == 0, optimized);
+            } else {
+                auto reference = torch::zeros_like(logits);
+                for (int row = 0; row < 2; ++row) {
+                    auto selected = torch::topk(logits[row], row == 0 ? 32 : 4096);
+                    reference[row].scatter_(0, std::get<1>(selected), torch::softmax(std::get<0>(selected), -1));
+                }
+                EXPECT_TRUE(torch::allclose(*params.output_all_probs, reference, 1e-5, 1e-6));
+                EXPECT_TRUE(reference.gather(1, params.token_ids.to(torch::kInt64)).gt(0).all().item<bool>());
+            }
+            if (result.success.defined()) {
+                EXPECT_TRUE(result.success.all().item<bool>());
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testHy4ForceTopK) {
+    const auto f32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto i32 = f32.dtype(torch::kInt32);
+    for (int cap : {1, 32, 4096, 8192, 0}) {
+        for (int mode : {0, 1, 2, 3, 4}) {
+            const int batch = 4, vocab = 8192;
+            auto      logits = mode == 4 ? torch::zeros({batch, vocab}, f32) : torch::randn({batch, vocab}, f32);
+            auto      ks     = mode == 1 ? pinnedIntTensor({1, 7, 0, 6000}) :
+                               mode == 2 ? pinnedIntTensor({7, 7, 7, 7}) :
+                               mode == 4 ? pinnedIntTensor({1, 1, 1, 1}) :
+                                           pinnedIntTensor({0, 0, 0, 0});
+            auto      ps =
+                mode == 4 ? pinnedFloatTensor({0.2f, 0.4f, 0.6f, 0.8f}) : pinnedFloatTensor({0.8f, 0.8f, 0.8f, 0.8f});
+            const bool truncate         = cap > 0 && cap < vocab && mode != 2 && mode != 3 && mode != 4;
+            auto       selected         = torch::topk(logits, std::max(cap, 1), -1, true, false);
+            auto       reference_logits = truncate ? std::get<0>(selected) : logits;
+            auto       reference_ks     = ks.clone();
+            if (truncate && mode == 1) {
+                auto* data = reference_ks.data_ptr<int32_t>();
+                for (int i = 0; i < batch; ++i)
+                    data[i] = data[i] <= 0 ? cap : std::min(data[i], cap);
+            }
+            auto run = [&](const torch::Tensor& input, torch::Tensor top_k, int force, bool return_probs) {
+                GreedyParams params{};
+                params.logits           = input.clone();
+                params.input_lengths    = torch::zeros({batch}, i32);
+                params.sequence_lengths = torch::zeros({batch}, i32);
+                params.token_ids        = torch::zeros({batch, 1}, i32);
+                params.step             = 0;
+                params.top_k            = top_k.clone();
+                params.top_p            = ps.clone();
+                params.temperature      = pinnedFloatTensor({1, 1, 1, 1});
+                params.generator.resize(batch);
+                params.force_topk = force;
+                if (return_probs)
+                    params.output_all_probs = torch::empty_like(input);
+                if (mode == 3)
+                    params.cum_log_probs = torch::zeros({batch}, f32);
+                torch::manual_seed(1937);
+                auto result = execSampleGreedy(params);
+                if (result.success.defined()) {
+                    EXPECT_TRUE(result.success.all().item<bool>());
+                }
+                return params;
+            };
+            auto actual    = run(logits, ks, cap, true);
+            auto reference = run(reference_logits, reference_ks, 0, true);
+            auto expected_probs =
+                truncate ? torch::zeros_like(logits).scatter_(1, std::get<1>(selected), *reference.output_all_probs) :
+                           *reference.output_all_probs;
+            auto expected_ids = truncate ? std::get<1>(selected).gather(1, reference.token_ids.to(torch::kLong)) :
+                                           reference.token_ids.to(torch::kLong);
+            EXPECT_TRUE(torch::allclose(*actual.output_all_probs, expected_probs, 1e-5, 1e-7));
+            if (!truncate) {
+                EXPECT_TRUE(torch::equal(actual.token_ids.to(torch::kLong), expected_ids));
+            }
+            EXPECT_TRUE(actual.output_all_probs->gather(1, actual.token_ids.to(torch::kLong)).gt(0).all().item<bool>());
+            EXPECT_TRUE(torch::allclose(actual.output_all_probs->sum(-1), torch::ones({batch}, f32)));
+            if (mode == 3) {
+                EXPECT_TRUE(torch::allclose(*actual.cum_log_probs, *reference.cum_log_probs));
+            }
+            auto without_probs = run(logits, ks, cap, false);
+            EXPECT_TRUE(torch::equal(actual.token_ids, without_probs.token_ids));
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testHy4ForceTopKDistribution) {
+    const auto f32   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto i32   = f32.dtype(torch::kInt32);
+    const int  batch = 4096, vocab = 8;
+    auto       logits = torch::tensor({0.4f, 0.3f, 0.2f, 0.1f, 0.f, 0.f, 0.f, 0.f}, f32).log().repeat({batch, 1});
+    for (int mode : {0, 1, 2}) {
+        SCOPED_TRACE(mode);
+        const int    cap = mode == 2 ? 4 : 0;
+        GreedyParams params{};
+        params.logits           = logits.clone();
+        params.input_lengths    = torch::zeros({batch}, i32);
+        params.sequence_lengths = torch::zeros({batch}, i32);
+        params.token_ids        = torch::zeros({batch, 1}, i32);
+        params.step             = 0;
+        params.top_k            = torch::full({batch}, 2, torch::kInt32).pin_memory();
+        params.top_k[0]         = 3;
+        params.top_p            = torch::full({batch}, 0.5f).pin_memory();
+        params.temperature      = torch::ones({batch}).pin_memory();
+        params.output_all_probs = torch::empty_like(logits);
+        params.generator.resize(batch);
+        params.force_topk             = cap;
+        params.use_optimized_sampling = mode > 0;
+        execSampleGreedy(params);
+        const auto zero_probability_tokens =
+            params.output_all_probs->gather(1, params.token_ids.to(torch::kLong)).eq(0).sum().item<int64_t>();
+        std::cout << "HY4_SAMPLING_CONTRACT cap=" << cap << " optimized=" << (mode > 0)
+                  << " zero_probability_tokens=" << zero_probability_tokens << "/" << batch << std::endl;
+        if (mode > 0) {
+            EXPECT_EQ(zero_probability_tokens, 0);
+            auto expected = torch::zeros_like(logits);
+            expected.select(1, 0).fill_(1);
+            expected[0][0].fill_(4.0f / 7.0f);
+            expected[0][1].fill_(3.0f / 7.0f);
+            EXPECT_TRUE(torch::allclose(*params.output_all_probs, expected));
+        } else {
+            EXPECT_GT(zero_probability_tokens, 0);
+        }
+    }
+    for (int k : {0, 6}) {
+        GreedyParams params{};
+        params.logits           = torch::arange(vocab, f32).repeat({2, 1});
+        params.input_lengths    = torch::zeros({2}, i32);
+        params.sequence_lengths = torch::zeros({2}, i32);
+        params.token_ids        = torch::zeros({2, 1}, i32);
+        params.step             = 0;
+        params.top_k            = pinnedIntTensor({1, k});
+        params.top_p            = pinnedFloatTensor({1, 1});
+        params.temperature      = pinnedFloatTensor({1, 1});
+        params.output_all_probs = torch::empty_like(params.logits);
+        params.generator.resize(2);
+        params.force_topk = 4;
+        execSampleGreedy(params);
+        EXPECT_EQ(params.output_all_probs->select(0, 1).gt(0).sum().item<int64_t>(), 4);
+        EXPECT_EQ(params.output_all_probs->select(0, 0).gt(0).sum().item<int64_t>(), 1);
+    }
+}
+
+TEST_F(CudaSamplerTest, testHy4GreedyBenchmark) {
+    const auto     f32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    cudaDeviceProp device;
+    ASSERT_EQ(cudaGetDeviceProperties(&device, at::cuda::getCurrentCUDAStream().device_index()), cudaSuccess);
+    std::cout << "HY4_TARGET_DEVICE name=" << device.name << " sm=" << device.major << device.minor << std::endl;
+    auto flush_buffer = torch::zeros({kL2FlushBytes / sizeof(float)}, f32);
+    for (int batch : {1, 16, 128}) {
+        for (int greedy_percent : {100, 50}) {
+            if (batch == 1 && greedy_percent != 100)
+                continue;
+            for (bool probabilities : {false, true}) {
+                auto logits = torch::randn({batch, 154880}, f32);
+                auto ks     = torch::zeros({batch}, torch::kInt32).pin_memory();
+                ks.narrow(0, 0, batch * greedy_percent / 100).fill_(1);
+                GreedyParams params{};
+                params.input_lengths    = torch::zeros({batch}, f32.dtype(torch::kInt32));
+                params.sequence_lengths = torch::zeros_like(params.input_lengths);
+                params.token_ids        = torch::zeros({batch, 1}, f32.dtype(torch::kInt32));
+                params.step             = 0;
+                params.top_p            = torch::full({batch}, 0.9f).pin_memory();
+                params.temperature      = torch::ones({batch}).pin_memory();
+                if (probabilities)
+                    params.output_all_probs = torch::empty_like(logits);
+                params.generator.resize(batch);
+                for (int trial = 0; trial < 3; ++trial) {
+                    for (int side = 0; side < 2; ++side) {
+                        const bool argmax             = (trial + side) % 2;
+                        params.use_optimized_sampling = argmax;
+                        auto run                      = [&] {
+                            params.logits = logits.clone();
+                            params.top_k  = ks.clone();
+                            execSampleGreedy(params);
+                        };
+                        const auto gpu_us = benchmarkCudaEventUs(run, flush_buffer, 20, 100);
+                        cudaDeviceSynchronize();
+                        const auto start = std::chrono::steady_clock::now();
+                        for (int i = 0; i < 20; ++i)
+                            run();
+                        cudaDeviceSynchronize();
+                        const auto wall_us =
+                            std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count()
+                            / 20;
+                        std::cout << "HY4_TARGET_GREEDY batch=" << batch << " greedy_percent=" << greedy_percent
+                                  << " probabilities=" << probabilities << " argmax=" << argmax << " trial=" << trial
+                                  << " gpu_us=" << gpu_us << " wall_us=" << wall_us << std::endl;
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testHy4ForceTopKAccuracyImpact) {
+    const auto f32   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const int  batch = 16, vocab = 154880;
+    auto       source = torch::randn({batch, vocab}, f32);
+    for (float scale : {0.f, 1.f, 4.f, 8.f}) {
+        auto                       logits       = source * scale;
+        auto                       selected_ids = std::get<1>(torch::topk(logits, 4096, -1));
+        auto                       retained     = torch::softmax(logits, -1).gather(1, selected_ids).sum(-1);
+        std::vector<torch::Tensor> distributions;
+        for (int cap : {0, 4096}) {
+            GreedyParams params{};
+            params.logits           = logits.clone();
+            params.input_lengths    = torch::zeros({batch}, f32.dtype(torch::kInt32));
+            params.sequence_lengths = torch::zeros_like(params.input_lengths);
+            params.token_ids        = torch::zeros({batch, 1}, f32.dtype(torch::kInt32));
+            params.step             = 0;
+            params.top_k            = torch::zeros({batch}, torch::kInt32).pin_memory();
+            params.top_p            = torch::full({batch}, 0.9f).pin_memory();
+            params.temperature      = torch::ones({batch}).pin_memory();
+            params.output_all_probs = torch::empty_like(logits);
+            params.generator.resize(batch);
+            params.force_topk = cap;
+            auto result       = execSampleGreedy(params);
+            ASSERT_TRUE(result.success.all().item<bool>());
+            EXPECT_TRUE(params.output_all_probs->gather(1, params.token_ids.to(torch::kLong)).gt(0).all().item<bool>());
+            distributions.push_back(*params.output_all_probs);
+        }
+        auto tv = (distributions[0] - distributions[1]).abs().sum(-1) * 0.5;
+        std::cout << "HY4_FORCE_TOPK_ACCURACY synthetic_normal_scale=" << scale
+                  << " retained_mass_mean=" << retained.mean().item<float>()
+                  << " retained_mass_min=" << retained.min().item<float>()
+                  << " total_variation_mean=" << tv.mean().item<float>()
+                  << " total_variation_max=" << tv.max().item<float>() << std::endl;
+    }
+}
+
+TEST_F(CudaSamplerTest, testHy4ForceTopKBenchmark) {
+    const auto f32          = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto       flush_buffer = torch::zeros({kL2FlushBytes / sizeof(float)}, f32);
+    for (int batch : {1, 16, 128}) {
+        auto         logits = torch::randn({batch, 154880}, f32);
+        GreedyParams params{};
+        params.input_lengths    = torch::zeros({batch}, f32.dtype(torch::kInt32));
+        params.sequence_lengths = torch::zeros_like(params.input_lengths);
+        params.token_ids        = torch::zeros({batch, 1}, f32.dtype(torch::kInt32));
+        params.step             = 0;
+        params.top_k            = torch::zeros({batch}, torch::kInt32).pin_memory();
+        params.top_p            = torch::full({batch}, 0.9f).pin_memory();
+        params.temperature      = torch::ones({batch}).pin_memory();
+        params.output_all_probs = torch::empty_like(logits);
+        params.generator.resize(batch);
+        for (int trial = 0; trial < 3; ++trial) {
+            for (int side = 0; side < 4; ++side) {
+                const int mode                   = (trial + side) % 4;
+                const int cap                    = mode == 0 ? 0 : 4096;
+                params.force_topk = cap;
+                params.skip_logits_probs_restore = mode >= 2;
+                params.output_all_probs          = torch::empty({batch, mode == 3 ? 4096 : 154880}, f32);
+                params.output_all_probs_indices =
+                    mode == 3 ? std::optional<torch::Tensor>(torch::empty({batch, 4096}, f32.dtype(torch::kInt32))) :
+                                std::nullopt;
+                const auto us     = benchmarkCudaEventUs(
+                    [&] {
+                        params.logits = logits.clone();
+                        execSampleGreedy(params);
+                    },
+                    flush_buffer,
+                    20,
+                    100);
+                std::cout << "HY4_FORCE_TOPK batch=" << batch << " vocab=154880 cap=" << cap << " trial=" << trial
+                          << " mode=" << mode << " us=" << us << std::endl;
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testHy4CompactTargetProbabilities) {
+    const auto f32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto i32 = f32.dtype(torch::kInt32);
+    for (int mode : {0, 1, 2}) {
+        auto logits = torch::randn({4, 154880}, f32);
+        auto run    = [&](bool compact) {
+            GreedyParams params{};
+            params.logits           = logits.clone();
+            params.input_lengths    = torch::zeros({4}, i32);
+            params.sequence_lengths = torch::zeros({4}, i32);
+            params.token_ids        = torch::zeros({4, 1}, i32);
+            params.step             = 0;
+            params.top_k            = mode == 1 ? pinnedIntTensor({1, 7, 0, 6000}) : pinnedIntTensor({0, 0, 0, 0});
+            params.top_p =
+                mode == 2 ? pinnedFloatTensor({0.9f, 1.f, 0.f, 0.8f}) : pinnedFloatTensor({0.9f, 0.9f, 0.9f, 0.9f});
+            params.temperature               = pinnedFloatTensor({1, 1, 1, 1});
+            params.force_topk                = 4096;
+            params.skip_logits_probs_restore = compact;
+            params.output_all_probs          = torch::empty({4, compact ? 4096 : 154880}, f32);
+            if (compact)
+                params.output_all_probs_indices = torch::empty({4, 4096}, i32);
+            params.generator.resize(4);
+            torch::manual_seed(2438);
+            auto output = execSampleGreedy(params);
+            EXPECT_TRUE(output.success.all().item<bool>());
+            return params;
+        };
+        auto dense   = run(false);
+        auto compact = run(true);
+        EXPECT_TRUE(torch::equal(compact.logits, logits));
+        EXPECT_TRUE(torch::equal(dense.token_ids, compact.token_ids)) << dense.token_ids << compact.token_ids;
+        auto ids = compact.output_all_probs_indices->to(torch::kLong);
+        ASSERT_TRUE(ids.ge(-1).logical_and(ids.lt(154880)).all().item<bool>());
+        EXPECT_FALSE(compact.output_all_probs->masked_select(ids.lt(0)).ne(0).any().item<bool>());
+        auto restored = torch::zeros_like(logits).scatter_add_(1, ids.clamp_min(0), *compact.output_all_probs);
+        EXPECT_TRUE(torch::allclose(restored, *dense.output_all_probs, 1e-5, 1e-7))
+            << "max_diff=" << (restored - *dense.output_all_probs).abs().max().item<float>()
+            << "l1=" << (restored - *dense.output_all_probs).abs().sum(-1);
+        EXPECT_TRUE(torch::allclose(compact.output_all_probs->sum(-1), torch::ones({4}, f32)));
+    }
+}
+
+TEST_F(CudaSamplerTest, testDeepSelectFallbackPreservesTopK) {
+    const auto f32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    for (int mode = 0; mode < 4; ++mode) {
+        SCOPED_TRACE(mode);
+        auto      logits = torch::randn({4, mode == 3 ? 8193 : 8192}, f32);
+        const int k      = mode == 0 ? 32 : 4096;
+        if (mode == 1)
+            logits = logits.to(torch::kFloat16);
+        if (mode == 2)
+            logits = logits.transpose(0, 1).contiguous().transpose(0, 1);
+        bool used          = true;
+        auto [values, ids] = torch_ext::deepselect_fp32_topk(logits, k, &used);
+        EXPECT_FALSE(used);
+        EXPECT_TRUE(torch::equal(values, logits.gather(1, ids)));
+        EXPECT_TRUE(torch::equal(std::get<0>(values.sort(-1, true)), std::get<0>(torch::topk(logits, k, -1))));
+    }
+}
+
+TEST_F(CudaSamplerTest, testHy4DeepSelectAccuracyAndBenchmark) {
+    const auto f32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    for (int width : {8192, 154880}) {
+        for (int pattern : {0, 1, 2, 3, 4, 5}) {
+            auto logits = torch::randn({16, width}, f32);
+            if (pattern == 1)
+                logits.zero_();
+            if (pattern == 2 || pattern == 3) {
+                logits.fill_(-std::numeric_limits<float>::infinity());
+                if (pattern == 2)
+                    logits.narrow(1, width - 8, 8).normal_();
+            }
+            if (pattern == 4)
+                logits.select(1, width - 1).fill_(std::numeric_limits<float>::infinity());
+            if (pattern == 5)
+                logits.select(1, width - 1).fill_(std::numeric_limits<float>::quiet_NaN());
+            bool used          = false;
+            auto [values, ids] = torch_ext::deepselect_fp32_topk(logits, 4096, &used);
+            ASSERT_TRUE(used);
+            ASSERT_TRUE(ids.ge(0).logical_and(ids.lt(width)).all().item<bool>());
+            auto ordered_ids = std::get<0>(ids.sort(-1));
+            EXPECT_TRUE(ordered_ids.slice(1, 1).gt(ordered_ids.slice(1, 0, 4095)).all().item<bool>());
+            EXPECT_TRUE(torch::allclose(values, logits.gather(1, ids), 0, 0, true));
+            auto reference = std::get<0>(torch::topk(logits, 4096, -1));
+            EXPECT_TRUE(torch::allclose(std::get<0>(values.sort(-1, true)), reference, 0, 0, true));
+        }
+    }
+    auto                       stream = at::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard guard(stream);
+    auto                       input = torch::randn({16, 154880}, f32);
+    torch_ext::deepselect_fp32_topk(input, 4096);
+    ASSERT_EQ(cudaStreamSynchronize(stream.stream()), cudaSuccess);
+    at::cuda::CUDAGraph graph;
+    graph.capture_begin();
+    auto [graph_values, graph_ids] = torch_ext::deepselect_fp32_topk(input, 4096);
+    graph.capture_end();
+    for (int replay = 0; replay < 3; ++replay) {
+        input.normal_();
+        graph.replay();
+        EXPECT_TRUE(torch::equal(graph_values, input.gather(1, graph_ids)));
+        EXPECT_TRUE(torch::equal(std::get<0>(graph_values.sort(-1, true)), std::get<0>(torch::topk(input, 4096, -1))));
+    }
+    auto flush = torch::zeros({kL2FlushBytes / sizeof(float)}, f32);
+    for (int batch : {1, 16, 128}) {
+        auto logits = torch::randn({batch, 154880}, f32);
+        for (int trial = 0; trial < 3; ++trial) {
+            for (int side = 0; side < 2; ++side) {
+                const bool deepselect = (trial + side) % 2;
+                const auto us         = benchmarkCudaEventUs(
+                    [&] {
+                        if (deepselect) {
+                            bool used = false;
+                            torch_ext::deepselect_fp32_topk(logits, 4096, &used);
+                            EXPECT_TRUE(used);
+                        } else {
+                            torch::topk(logits, 4096, -1, true, false);
+                        }
+                    },
+                    flush,
+                    20,
+                    100);
+                std::cout << "HY4_SELECTOR batch=" << batch << " deepselect=" << deepselect << " trial=" << trial
+                          << " us=" << us << std::endl;
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testHy4GreedyAccuracyImpact) {
+    const auto f32   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto i32   = f32.dtype(torch::kInt32);
+    const int  batch = 128, vocab = 154880;
+    for (int pattern : {0, 1, 2}) {
+        auto logits = torch::randn({batch, vocab}, f32);
+        if (pattern != 0) {
+            logits.zero_();
+            if (pattern == 1)
+                logits.select(1, vocab - 1).fill_(1e-8f);
+        }
+        GreedyParams params{};
+        params.logits           = logits.clone();
+        params.input_lengths    = torch::zeros({batch}, i32);
+        params.sequence_lengths = torch::zeros({batch}, i32);
+        params.token_ids        = torch::zeros({batch, 1}, i32);
+        params.step             = 0;
+        params.top_k            = torch::ones({batch}, torch::kInt32).pin_memory();
+        params.top_p            = torch::ones({batch}).pin_memory();
+        params.temperature      = torch::ones({batch}).pin_memory();
+        params.output_all_probs = torch::empty_like(logits);
+        execSampleGreedy(params);
+        auto actual    = params.token_ids.to(torch::kLong);
+        auto reference = torch::argmax(logits, -1, true);
+        auto old       = torch::argmax(torch::softmax(logits, -1), -1, true);
+        EXPECT_TRUE(torch::equal(actual, reference));
+        std::cout << "HY4_TARGET_ACCURACY pattern=" << pattern << " rows=" << batch
+                  << " raw_mismatches=" << actual.ne(reference).sum().item<int64_t>()
+                  << " softmax_mismatches=" << actual.ne(old).sum().item<int64_t>() << std::endl;
+        if (pattern == 0) {
+            EXPECT_TRUE(torch::equal(actual, old));
+            params.logits = logits.clone();
+            params.top_k.index_put_({batch - 1}, 0);
+            params.generator.resize(1);
+            auto output = execSampleGreedy(params);
+            EXPECT_TRUE(output.success.all().item<bool>());
+            EXPECT_TRUE(params.output_all_probs->gather(1, params.token_ids.to(torch::kLong)).gt(0).all().item<bool>());
+        }
+    }
 }
 
 TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {

@@ -60,8 +60,10 @@ cc_test(
     deps = test_deps + [
         "//3rdparty/flashinfer:flashinfer",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+        "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_fp32",
     ] + cuda13_torch_link_deps,
-    exec_properties = {'gpu':'H20'},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
 
 cc_test(

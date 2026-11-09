@@ -12,7 +12,9 @@ class LogitsProcessorStates;
 class RecordedBatch;
 typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
-struct SamplerInitParams {};
+struct SamplerInitParams {
+    std::string model_type;
+};
 
 enum class LogitsProcessorPhase {
     NORMAL_DECODE,
@@ -82,6 +84,9 @@ public:
     std::shared_ptr<torch::Event>      spec_mask_consumed_event;
     std::vector<SpecLogitsProcessorId> spec_applied_processors;
     int                                spec_propose_step = 0;
+    mutable torch::Tensor              all_probs_indices;
+    bool                               allow_compact_target_probs = false;
+    bool                               skip_logits_probs_restore  = false;
 };
 
 struct SamplerOutput {
@@ -96,6 +101,7 @@ public:
     // MTP top-1 proposals have q(v)=1 only at token_ids. No dense draft
     // probability tensor is required when this explicit representation is set.
     bool draft_point_mass = false;
+    torch::Tensor all_probs_indices;
 };
 
 struct MergedOutput {
