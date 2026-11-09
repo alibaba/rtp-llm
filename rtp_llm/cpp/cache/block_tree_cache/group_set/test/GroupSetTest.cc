@@ -6,7 +6,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
 namespace {
@@ -179,10 +178,7 @@ TEST(GroupSetTest, BatchOuterReferenceRejectsInvalidTailWithoutMutatingPrefix) {
     pool->incRef(blocks->back());
     pool->decRef(blocks->back());
 
-    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
     EXPECT_ANY_THROW(group->referenceBlocks(makeTwoNodeDeviceResource(blocks->front(), blocks->back())));
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 
     EXPECT_EQ(pool->refCount(blocks->front()), 0u);
     EXPECT_EQ(pool->referencedBlocksNum(), 0u);
@@ -202,10 +198,7 @@ TEST(GroupSetTest, BatchOuterUnreferenceRejectsInvalidTailWithoutMutatingPrefix)
     ASSERT_TRUE(blocks.has_value());
     pool->incRef(blocks->front());
 
-    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
     EXPECT_ANY_THROW(group->unreferenceBlocks(makeTwoNodeDeviceResource(blocks->front(), blocks->back())));
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 
     EXPECT_TRUE(pool->isAllocated(blocks->front()));
     if (pool->isAllocated(blocks->front())) {
@@ -225,11 +218,8 @@ TEST(GroupSetTest, BatchTreeReferenceRejectsInvalidTailWithoutMutatingPrefix) {
     pool->incRef(blocks->back());
     pool->decRef(blocks->back());
 
-    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
     EXPECT_ANY_THROW(
         group->referenceBlocks(makeTwoNodeDeviceResource(blocks->front(), blocks->back()), BlockTreeRefType::CACHE));
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 
     EXPECT_EQ(pool->refCount(blocks->front()), 0u);
     EXPECT_EQ(pool->treeRefCount(blocks->front()), 0u);
@@ -250,11 +240,8 @@ TEST(GroupSetTest, BatchTreeUnreferenceRejectsInvalidTailWithoutMutatingPrefix) 
     pool->incTreeRef(blocks->front(), BlockTreeRefType::CACHE);
     pool->incTreeRef(blocks->back(), BlockTreeRefType::LOAD);
 
-    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
     EXPECT_ANY_THROW(
         group->unreferenceBlocks(makeTwoNodeDeviceResource(blocks->front(), blocks->back()), BlockTreeRefType::CACHE));
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 
     EXPECT_TRUE(pool->isAllocated(blocks->front()));
     if (pool->isAllocated(blocks->front())) {

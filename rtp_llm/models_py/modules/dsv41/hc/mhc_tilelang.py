@@ -5,15 +5,14 @@ Thin adapter over the vendored ``rtp_llm.models_py.3rdparty.tile_kernels``
 
 Two distinct failure modes, kept distinct on purpose:
 
-  * **Gate miss** — pre/post/unfused head input doesn't satisfy
-    ``_can_use_tk``. Wrapper returns ``None``.
+  * **Gate miss** — pre/post input doesn't satisfy ``_can_use_tk``.
+    Wrapper returns ``None``.
   * **Runtime failure** — import / JIT compile / kernel launch raised. Wrapper
     re-raises a ``RuntimeError`` chained (``from e``) to the original
     exception with shape context attached. Earlier versions swallowed these
     into ``None``, which lost the underlying cause (OOM, ICE, etc.).
 
 Activation gate (``_can_use_tk``):
-  * ``DSV4_USE_TK_MHC=0`` env disables the path entirely (parity testing).
   * residual must be bf16 contiguous.
   * residual must be on CUDA.
   * residual's flattened HC hidden size (``hc * dim``) must be divisible by
@@ -28,7 +27,6 @@ Activation gate (``_can_use_tk``):
 from __future__ import annotations
 
 import importlib
-import os
 from typing import NoReturn, Tuple
 
 import torch
@@ -37,7 +35,6 @@ import torch
 _tk_mhc_pre = None
 _tk_mhc_post = None
 _tk_mhc_head_fused = None
-_tk_mhc_head = None
 
 
 def _import_tk():
@@ -45,7 +42,7 @@ def _import_tk():
 
     Raises on import failure — caller wraps with shape context.
     """
-    global _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head_fused, _tk_mhc_head
+    global _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head_fused
     # Importing tilelang_kernels triggers its module-level env-prep
     # (libz3 preload + TVM tmpdir setup), which must run before any tilelang
     # JIT import below.
@@ -59,20 +56,7 @@ def _import_tk():
     _tk_mhc_pre = mod.mhc_pre
     _tk_mhc_post = mod.mhc_post
     _tk_mhc_head_fused = getattr(mod, "mhc_head_fuse", None)
-    _tk_mhc_head = mod.mhc_head
-    return _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head_fused, _tk_mhc_head
-
-
-def _env_disabled() -> bool:
-    return os.environ.get("DSV4_USE_TK_MHC", "1") == "0"
-
-
-def tk_mhc_head_fused_enabled() -> bool:
-    return os.environ.get("DSV4_MHC_HEAD_FUSED", "1") != "0"
-
-
-def _head_fuse_disabled() -> bool:
-    return not tk_mhc_head_fused_enabled()
+    return _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head_fused
 
 
 def _shape_ctx(t: torch.Tensor, *, hc_mult: int, extra: str = "") -> str:
@@ -91,8 +75,7 @@ def _raise_head_fused_unavailable(
 ) -> NoReturn:
     err = RuntimeError(
         f"TileLang fused mHC head unavailable: {reason}; "
-        f"{_shape_ctx(residual, hc_mult=hc_mult)}. "
-        "Set DSV4_MHC_HEAD_FUSED=0 to use the older TileLang head composition."
+        f"{_shape_ctx(residual, hc_mult=hc_mult)}."
     )
     if cause is not None:
         raise err from cause
@@ -100,8 +83,6 @@ def _raise_head_fused_unavailable(
 
 
 def _can_use_tk(residual: torch.Tensor, hc_mult: int) -> bool:
-    if _env_disabled():
-        return False
     if hc_mult != 4:
         return False
     if residual.dtype != torch.bfloat16:
@@ -128,17 +109,14 @@ def tk_mhc_head_fused(
     norm_eps: float,
     pre_eps: float,
     hc_mult: int = 4,
-) -> torch.Tensor | None:
+) -> torch.Tensor:
     """Fused TK ``mhc_head`` wrapper.
 
-    Returns ``None`` only when the fused head is explicitly disabled. The
-    caller supplies the fused kernel's required layout; JIT/import failures
-    do not fall back to the older TileLang head composition.
+    The caller supplies the fused kernel's required layout; JIT/import failures
+    do not fall back to an unfused head composition.
     Runtime failures (import / JIT / kernel run) propagate as ``RuntimeError``
     chained via ``from e`` to the original exception.
     """
-    if _head_fuse_disabled():
-        return None
     if _tk_mhc_head_fused is None:
         try:
             _import_tk()
@@ -236,43 +214,4 @@ def tk_mhc_post(
         raise RuntimeError(
             "TileLang mhc_post failed: "
             + _shape_ctx(residual, hc_mult=hc_mult, extra=f"x.shape={tuple(x.shape)}")
-        ) from e
-
-
-def tk_mhc_head(
-    residual: torch.Tensor,
-    fn: torch.Tensor,
-    scale: torch.Tensor,
-    base: torch.Tensor,
-    *,
-    norm_eps: float,
-    pre_eps: float,
-    hc_mult: int = 4,
-) -> torch.Tensor | None:
-    """TK ``mhc_head`` wrapper.
-
-    Returns ``None`` only when the input fails ``_can_use_tk`` gates.
-    Runtime failures (import / JIT /
-    kernel run) propagate as ``RuntimeError`` chained via ``from e`` to the
-    original exception.
-    """
-    if not _can_use_tk(residual, hc_mult):
-        return None
-    try:
-        if _tk_mhc_head is None:
-            _import_tk()
-        head_fn = _tk_mhc_head
-        return head_fn(
-            residual,
-            fn,
-            scale,
-            base,
-            norm_weight=None,
-            norm_eps=norm_eps,
-            mhc_mult=hc_mult,
-            pre_eps=pre_eps,
-        )
-    except Exception as e:
-        raise RuntimeError(
-            "TileLang mhc_head failed: " + _shape_ctx(residual, hc_mult=hc_mult)
         ) from e

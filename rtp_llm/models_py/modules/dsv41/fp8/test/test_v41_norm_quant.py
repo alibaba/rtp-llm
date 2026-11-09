@@ -13,10 +13,8 @@ own materialized bf16 norm: the fused kernel must see exactly that bf16 value.
 from __future__ import annotations
 
 import importlib.util
-import os
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 import torch
 
@@ -48,19 +46,18 @@ def reference_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.T
     return y.to(torch.bfloat16)
 
 
-def reference_quant(norm: torch.Tensor, mode: str):
+def reference_quant(norm: torch.Tensor):
     """Standalone production quant kernel over an already-materialized norm."""
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 
-    with patch.dict(os.environ, DSV4_FP8_QUANT_KERNEL=mode):
-        return sgl_per_token_group_quant_fp8(
-            norm,
-            group_size=32,
-            eps=torch.finfo(torch.float32).tiny,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=True,
-        )
+    return sgl_per_token_group_quant_fp8(
+        norm,
+        group_size=32,
+        eps=torch.finfo(torch.float32).tiny,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+        scale_ue8m0=True,
+    )
 
 
 def _bf16_ulp_distance(actual: torch.Tensor, expected: torch.Tensor) -> torch.Tensor:
@@ -89,11 +86,11 @@ class V41NormQuantTest(unittest.TestCase):
                 f"{label} ({a.dtype}): {torch.count_nonzero(aa != bb).item()} differing bytes",
             )
 
-    def check(self, x, w, eps=1e-6, mode="auto", inplace=False):
+    def check(self, x, w, eps=1e-6, inplace=False):
         # Snapshot for the reference first: the inplace path overwrites x.
         ref = reference_norm(x, w, eps)
         norm, quant, scales = candidate.rmsnorm_group32_quant(
-            x, w, eps, quant_kernel=mode, out_norm=x if inplace else None
+            x, w, eps, out_norm=x if inplace else None
         )
         self.assertEqual(norm.dtype, torch.bfloat16)
 
@@ -107,7 +104,7 @@ class V41NormQuantTest(unittest.TestCase):
 
         # Standalone production kernel over the candidate's own bf16 norm must
         # reproduce the fused quant and packed scales byte-exactly.
-        q_ref, s_ref = reference_quant(norm, mode)
+        q_ref, s_ref = reference_quant(norm)
         self.assertBytesEqual((quant, scales), (q_ref, s_ref), "fused quant")
 
         if inplace:
@@ -117,12 +114,13 @@ class V41NormQuantTest(unittest.TestCase):
         return norm, quant, scales
 
     def test_shapes_modes_and_padding(self):
+        # auto selects the legacy quantizer below the 4Mi-element boundary and
+        # v2 above it, so this m sweep covers both quantizer branches.
         for m in [0, 1, 32, 33, 819, 820, 1021, 1664, 4096, 8192, 32768]:
             x = torch.randn(m, 5120, device="cuda", dtype=torch.bfloat16)
             w = torch.randn(5120, device="cuda", dtype=torch.bfloat16)
-            for mode in ["legacy", "v2", "auto"]:
-                with self.subTest(m=m, mode=mode):
-                    self.check(x, w, mode=mode)
+            with self.subTest(m=m):
+                self.check(x, w)
 
     def test_zero_tiny_signed_zero_and_scale_boundaries(self):
         # Mixed groups expose both quant floors without relying on RNG to
@@ -145,26 +143,25 @@ class V41NormQuantTest(unittest.TestCase):
         x = x.repeat((5120 + len(values) - 1) // len(values))[:5120].repeat(33, 1)
         for scale in [0.0, -0.0, 2.0**-126, 2.0**-100, 1e-8, 1.0]:
             w = torch.full((5120,), scale, device="cuda", dtype=torch.bfloat16)
-            for mode in ["legacy", "v2", "auto"]:
-                with self.subTest(scale=scale, mode=mode):
-                    self.check(x, w, mode=mode)
+            with self.subTest(scale=scale):
+                self.check(x, w)
         # The discontinuity in auto must be observable on the zero matrix.
         w = torch.ones(5120, device="cuda", dtype=torch.bfloat16)
-        for m, selected in [(819, "legacy"), (820, "v2")]:
+        boundary_scales = {}
+        for m in (819, 820):
             x = torch.zeros(m, 5120, device="cuda", dtype=torch.bfloat16)
             with self.subTest(m=m):
-                norm, quant, scales = self.check(x, w)
-                # Cross-check: the other mode's standalone kernel differs on
-                # the zero matrix (auto picks per-shape).
-                other = "v2" if selected == "legacy" else "legacy"
-                q_other, s_other = reference_quant(norm, other)
-                self.assertFalse(
-                    torch.equal(
-                        scales.contiguous().view(torch.uint8),
-                        s_other.contiguous().view(torch.uint8),
-                    ),
-                    f"auto mode at m={m} did not observe the {selected}/{other} split",
-                )
+                _, _, scales = self.check(x, w)
+                boundary_scales[m] = scales
+        # Cross-check: the legacy and v2 quantizers differ on the zero matrix
+        # (tiny-scale floor), and auto switches between them at 4Mi elements.
+        self.assertFalse(
+            torch.equal(
+                boundary_scales[819][0].contiguous().view(torch.uint8),
+                boundary_scales[820][0].contiguous().view(torch.uint8),
+            ),
+            "auto mode did not observe the legacy/v2 split at the 4Mi boundary",
+        )
 
     def test_epsilon_dynamic_range_and_inplace(self):
         for seed, amplitude in [(7, 1e-20), (31, 1e-3), (997, 1.0), (8191, 1e10)]:
@@ -172,9 +169,8 @@ class V41NormQuantTest(unittest.TestCase):
             x = (torch.randn(1021, 5120, device="cuda") * amplitude).bfloat16()
             w = (torch.randn(5120, device="cuda") * 0.1 + 1).bfloat16()
             for eps in [1e-12, 1e-6, 1e-5]:
-                for mode in ["legacy", "v2"]:
-                    with self.subTest(seed=seed, eps=eps, mode=mode):
-                        self.check(x.clone(), w, eps, mode, inplace=True)
+                with self.subTest(seed=seed, eps=eps):
+                    self.check(x.clone(), w, eps, inplace=True)
 
     def test_ue8m0_exponent_and_fp8_midpoint_boundaries(self):
         x = torch.ones(37, 5120, device="cuda", dtype=torch.bfloat16)
@@ -195,17 +191,7 @@ class V41NormQuantTest(unittest.TestCase):
                 ]
                 groups.extend([v * 2.0**exponent for v in values] * 4)
         w = torch.tensor(groups, device="cuda", dtype=torch.bfloat16).repeat(5)[:5120]
-        for mode in ["legacy", "v2", "auto"]:
-            with self.subTest(mode=mode):
-                self.check(x, w, mode=mode)
-
-    def test_existing_env_selection(self):
-        x = torch.zeros(820, 5120, device="cuda", dtype=torch.bfloat16)
-        w = torch.ones(5120, device="cuda", dtype=torch.bfloat16)
-        for mode in ["auto", "legacy", "v2"]:
-            with patch.dict(os.environ, DSV4_FP8_QUANT_KERNEL=" " + mode.upper() + " "):
-                with self.subTest(mode=mode):
-                    self.check(x, w, mode="auto")
+        self.check(x, w)
 
     def test_graph_replay_and_stream(self):
         stream = torch.cuda.Stream()

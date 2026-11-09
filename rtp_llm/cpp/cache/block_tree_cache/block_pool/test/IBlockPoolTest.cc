@@ -8,7 +8,6 @@
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
 namespace {
@@ -318,8 +317,6 @@ TEST(IBlockPoolTest, DecTreeRefRejectsWrongInternalType) {
     ASSERT_TRUE(block.has_value());
     pool->incTreeRef(*block, BlockTreeRefType::CACHE);
 
-    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
     EXPECT_ANY_THROW(pool->decTreeRef(*block, BlockTreeRefType::LOAD));
     EXPECT_ANY_THROW(pool->incTreeRef(*block, BlockTreeRefType::FROZEN));
     EXPECT_ANY_THROW(pool->incTreeRef(BlockIdList{*block}, BlockTreeRefType::FROZEN));
@@ -327,7 +324,6 @@ TEST(IBlockPoolTest, DecTreeRefRejectsWrongInternalType) {
     pool->freezeBlock(*block);
     EXPECT_ANY_THROW(pool->decTreeRef(*block, BlockTreeRefType::FROZEN));
     EXPECT_ANY_THROW(pool->decTreeRef(BlockIdList{*block}, BlockTreeRefType::FROZEN));
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 
     EXPECT_TRUE(pool->isAllocated(*block));
     EXPECT_EQ(pool->treeRefCount(*block), 2u);
@@ -342,10 +338,7 @@ TEST(IBlockPoolTest, BatchIncTreeRefRejectsInvalidTailWithoutMutatingPrefix) {
     ASSERT_TRUE(block.has_value());
     const BlockIdxType unallocated_block = *block + 1;
 
-    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
     EXPECT_ANY_THROW(pool->incTreeRef(BlockIdList{*block, unallocated_block}, BlockTreeRefType::CACHE));
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 
     EXPECT_EQ(pool->treeRefCount(*block), 0u);
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
@@ -364,10 +357,7 @@ TEST(IBlockPoolTest, BatchDecTreeRefRejectsInvalidTailWithoutMutatingPrefix) {
     pool->incTreeRef(blocks->front(), BlockTreeRefType::CACHE);
     pool->incTreeRef(blocks->back(), BlockTreeRefType::LOAD);
 
-    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
     EXPECT_ANY_THROW(pool->decTreeRef(*blocks, BlockTreeRefType::CACHE));
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 
     EXPECT_TRUE(pool->isAllocated(blocks->front()));
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);

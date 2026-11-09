@@ -48,7 +48,6 @@ class DSV4PDChunkTest(unittest.TestCase):
             "WORLD_SIZE=2",
             "DG_JIT_CPP_STANDARD=20",
             "RTP_LLM_DEVICE_INPUT=1",
-            "ENABLE_LAYER_MICRO_BATCH=0",
             "CP_FORCE_SINGLE_PREFILL=0",
             "FRONTEND_SERVER_COUNT=1",
         ]

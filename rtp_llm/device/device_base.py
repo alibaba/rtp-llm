@@ -7,7 +7,6 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.ops.compute_ops import (
     get_device_id,
-    preprocess_gemm_weight_by_key,
     preprocess_weight_scale,
 )
 

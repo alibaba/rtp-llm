@@ -6,9 +6,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv41.hc.base import HCHeadBase, HCUnitBase
 from rtp_llm.models_py.modules.dsv41.hc.mhc_tilelang import (
-    tk_mhc_head,
     tk_mhc_head_fused,
-    tk_mhc_head_fused_enabled,
     tk_mhc_post,
     tk_mhc_pre,
 )
@@ -87,24 +85,13 @@ class TileLangHCHead(HCHeadBase):
         # Do not materialize non-contiguous views here; that would add a hidden
         # copy to every head reduce on mis-laid-out inputs.
         with torch.inference_mode():
-            if tk_mhc_head_fused_enabled():
-                out = tk_mhc_head_fused(
-                    tk_x,
-                    self.fn,
-                    self.scale,
-                    self.base,
-                    norm_eps=self.norm_eps,
-                    pre_eps=self.hc_eps,
-                    hc_mult=self.hc_mult,
-                )
-            else:
-                out = tk_mhc_head(
-                    tk_x,
-                    self.fn,
-                    self.scale,
-                    self.base,
-                    norm_eps=self.norm_eps,
-                    pre_eps=self.hc_eps,
-                    hc_mult=self.hc_mult,
-                )
+            out = tk_mhc_head_fused(
+                tk_x,
+                self.fn,
+                self.scale,
+                self.base,
+                norm_eps=self.norm_eps,
+                pre_eps=self.hc_eps,
+                hc_mult=self.hc_mult,
+            )
         return squeeze_hc_batch(out, wrapped, name="mhc_head output")

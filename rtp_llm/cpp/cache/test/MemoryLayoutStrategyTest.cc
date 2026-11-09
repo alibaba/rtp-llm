@@ -12,7 +12,6 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -33,20 +32,14 @@ protected:
     };
 
     void SetUp() override {
-        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
-        StaticConfig::user_ft_core_dump_on_exception = false;
         rtp_llm::initLogger();
         torch::manual_seed(114514);
 
-        rtp_llm::initRuntime(/*device_id=*/0,
-                             /*trace_memory=*/false,
-                             /*enable_comm_overlap=*/false,
-                             rtp_llm::MlaOpsType::AUTO);
+        rtp_llm::initRuntime(/*device_id=*/0);
         ASSERT_TRUE(rtp_llm::isRuntimeInitialized());
     }
 
     void TearDown() override {
-        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
     }
 
     struct TestKVCacheSpec: public KVCacheSpec {
@@ -218,7 +211,6 @@ protected:
         return createTestContext(createTestConfig(k_block_bytes, v_block_bytes), device, init_mode);
     }
 
-    bool old_core_dump_on_exception_{false};
 };
 
 TEST_F(MemoryLayoutStrategyTest, Initialization) {

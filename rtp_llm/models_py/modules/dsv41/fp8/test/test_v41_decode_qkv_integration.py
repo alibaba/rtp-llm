@@ -25,7 +25,6 @@ def flags(enabled):
         "DSV41_FUSED_QKV_ROPE_CACHE": str(int(enabled)),
         "DSV41_FUSED_QKV": "1",
         "DSV41_FUSED_DECODE_Q_ROPE": "1",
-        "DSV4_FP8_QUANT_KERNEL": "auto",
     }
 
 

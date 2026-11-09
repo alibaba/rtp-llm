@@ -234,13 +234,11 @@ TEST_F(NormalEngineTest, testMakeStreamReservesKVBeforeEnqueue) {
 
 TEST(NormalEnginePolicyTest, testEmptyBatchEarlyReturnPreservesRequiredAlignment) {
     EXPECT_TRUE(NormalEngine::shouldEarlyReturnEmptyBatch(
-        /*streams_empty=*/true, /*tp_size=*/1, /*enable_ffn_disaggregate=*/false));
+        /*streams_empty=*/true, /*tp_size=*/1));
     EXPECT_FALSE(NormalEngine::shouldEarlyReturnEmptyBatch(
-        /*streams_empty=*/true, /*tp_size=*/1, /*enable_ffn_disaggregate=*/true));
+        /*streams_empty=*/true, /*tp_size=*/2));
     EXPECT_FALSE(NormalEngine::shouldEarlyReturnEmptyBatch(
-        /*streams_empty=*/true, /*tp_size=*/2, /*enable_ffn_disaggregate=*/false));
-    EXPECT_FALSE(NormalEngine::shouldEarlyReturnEmptyBatch(
-        /*streams_empty=*/false, /*tp_size=*/1, /*enable_ffn_disaggregate=*/false));
+        /*streams_empty=*/false, /*tp_size=*/1));
 }
 
 TEST_F(NormalEngineTest, testWarmUpInputLengthAccountsForReserve) {

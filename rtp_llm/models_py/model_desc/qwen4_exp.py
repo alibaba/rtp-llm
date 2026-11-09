@@ -3,8 +3,6 @@ from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.qwen4_exp_config import IndexerGeometry, ple_eos_token_id
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -84,6 +82,7 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 
 class Qwen4ExpAttention(Qwen3NextAttention):
@@ -763,7 +762,6 @@ class Qwen4ExpModel(Qwen35Model):
         max_generate_batch_size: int,
         fmha_config=None,
         py_hw_kernel_config=None,
-        device_resource_config=None,
     ):
         config = model_config
         compute_weights = (
@@ -779,7 +777,6 @@ class Qwen4ExpModel(Qwen35Model):
             max_generate_batch_size,
             fmha_config,
             py_hw_kernel_config,
-            device_resource_config,
         )
         fp8_embedding = (
             getattr(self.config, "_qwen4_full_fp8_nvfp4", False)

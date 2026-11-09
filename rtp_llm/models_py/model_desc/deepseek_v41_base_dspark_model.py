@@ -128,7 +128,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         max_generate_batch_size: int,
         fmha_config=None,
         py_hw_kernel_config=None,
-        device_resource_config=None,
     ) -> None:
         super().__init__(
             model_config,
@@ -138,7 +137,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             max_generate_batch_size=max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=device_resource_config,
         )
 
         # The same DSpARK model class is used by all three serving roles.  A

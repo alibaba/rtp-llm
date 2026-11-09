@@ -675,10 +675,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                           configured_scan_interval_ms);
         return nullptr;
     }
-    // Only tp_rank 0 of a non-FFN service drives normal request scheduling, so it is the
+    // Only tp_rank 0 drives normal request scheduling, so it is the
     // single rank per DP group that owns a mutable BlockTree worth scanning.
     const bool owns_mutable_block_tree =
-        parallelism_config.tp_rank == 0 && !parallelism_config.ffn_disaggregate_config.is_ffn_service();
+        parallelism_config.tp_rank == 0;
     config.full_prefix_scan_interval_ms = owns_mutable_block_tree ? configured_scan_interval_ms : 0;
 
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));

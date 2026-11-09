@@ -14,7 +14,6 @@ orchestrator contracts that decide which CUDA-heavy path would run:
 
 from __future__ import annotations
 
-import os
 import sys
 import unittest
 from contextlib import ExitStack
@@ -129,69 +128,52 @@ class AttentionCPPrefillDispatchTest(unittest.TestCase):
         *,
         compress_ratio: int,
         common: PrefillMeta,
-        env_value: str,
     ) -> list:
         seq: list = []
         layer = _make_dispatch_layer(compress_ratio, seq)
         layer._prefill_common_setup.side_effect = (  # type: ignore[attr-defined]
             lambda x, p: seq.append("common") or common
         )
-        with patch.dict(os.environ, {"DSV4_PREFILL_CP_OVERLAP": env_value}):
-            out = layer._forward_prefill(self.x, self.positions)
+        out = layer._forward_prefill(self.x, self.positions)
         self.assertEqual(tuple(out.shape), (3, 8))
         return seq
 
-    def test_swa_only_env_on_stays_on_swa_path(self) -> None:
+    def test_swa_only_stays_on_swa_path(self) -> None:
         common = _make_common(cp_on=True, device=torch.device("cuda"))
 
         seq = self._run_dispatch(
             compress_ratio=0,
             common=common,
-            env_value="1",
         )
 
         self.assertEqual(seq, ["common", "qkv", "ensure", "swa_write", "swa_path"])
 
-    def test_csa_env_off_uses_baseline_after_swa_write(self) -> None:
+    def test_csa_cuda_uses_overlap_orchestrator(self) -> None:
         common = _make_common(cp_on=True, device=torch.device("cuda"))
 
         seq = self._run_dispatch(
             compress_ratio=4,
             common=common,
-            env_value="0",
-        )
-
-        self.assertEqual(seq, ["common", "qkv", "ensure", "swa_write", "csa_path"])
-
-    def test_csa_env_on_cuda_uses_overlap_orchestrator(self) -> None:
-        common = _make_common(cp_on=True, device=torch.device("cuda"))
-
-        seq = self._run_dispatch(
-            compress_ratio=4,
-            common=common,
-            env_value="1",
         )
 
         self.assertEqual(seq, ["common", "qkv", "csa_overlap"])
 
-    def test_hca_env_on_cuda_uses_overlap_orchestrator(self) -> None:
+    def test_hca_cuda_uses_overlap_orchestrator(self) -> None:
         common = _make_common(cp_on=True, device=torch.device("cuda"))
 
         seq = self._run_dispatch(
             compress_ratio=128,
             common=common,
-            env_value="1",
         )
 
         self.assertEqual(seq, ["common", "qkv", "hca_overlap"])
 
-    def test_hca_env_on_cpu_falls_back_to_baseline(self) -> None:
+    def test_hca_cpu_falls_back_to_baseline(self) -> None:
         common = _make_common(cp_on=True, device=torch.device("cpu"))
 
         seq = self._run_dispatch(
             compress_ratio=128,
             common=common,
-            env_value="1",
         )
 
         self.assertEqual(seq, ["common", "qkv", "ensure", "swa_write", "hca_path"])
@@ -204,7 +186,6 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
         common = _make_common(cp_on=True, device=torch.device("cuda"))
 
         with (
-            patch.dict(os.environ, {"DSV4_PREFILL_CP_OVERLAP": "1"}),
             patch.object(
                 attention_mod, "cp_all_gather_full_varlen", lambda t, *a, **k: t
             ),

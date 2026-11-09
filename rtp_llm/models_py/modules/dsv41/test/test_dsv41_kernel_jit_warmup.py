@@ -192,9 +192,6 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DSV41_FUSED_OUTPUT_PROJECTION": "0"}):
             warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
         self.assertEqual(operation.call_count, 2)
-        with mock.patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "v2"}):
-            warmup.warmup_v41_dense_jit(object(), max_m=4, device="cuda:0")
-        self.assertEqual(operation.call_count, 4)
 
     def test_dense_failed_compile_does_not_poison_retry(self):
         operation = self.dense_fixture(fails=True)
@@ -674,12 +671,8 @@ class V41KernelJitWarmupTest(unittest.TestCase):
 
     def test_decode_query_disable_small_bound_and_failed_compile(self):
         model, operation = self.query_fixture()
-        for env in (
-            {"DSV41_FUSED_QUERY_QUANT": "0"},
-            {"DSV4_FP8_QUANT_KERNEL": "v2"},
-        ):
-            with mock.patch.dict(os.environ, env):
-                warmup.warmup_v41_decode_query_jit(model, max_m=3, device="cuda:0")
+        with mock.patch.dict(os.environ, {"DSV41_FUSED_QUERY_QUANT": "0"}):
+            warmup.warmup_v41_decode_query_jit(model, max_m=3, device="cuda:0")
         operation.assert_not_called()
         operation.side_effect = RuntimeError("query compile failed")
         with self.assertRaisesRegex(RuntimeError, "query compile failed"):
@@ -753,7 +746,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         warmup.warmup_v41_shared_expert_jit(model, max_m=16, device="cuda:0")
         self.assertEqual(len(warmup._SHARED_WARMED), 1)
 
-    def test_shared_fused_strategy_skip_and_eager_add_switch(self):
+    def test_shared_fused_strategy_skip(self):
         model, silu, combine = self.shared_fixture()
         model.moe.fused_moe.includes_shared_expert = True
         warmup.warmup_v41_shared_expert_jit(model, max_m=16, device="cuda:0")
@@ -761,11 +754,8 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         combine.assert_not_called()
         self.assertFalse(warmup._SHARED_WARMED)
         model.moe.fused_moe.includes_shared_expert = False
-        with mock.patch.dict(os.environ, {"MOE_SHARED_EXPERT_BF16_ADD": "1"}):
-            warmup.warmup_v41_shared_expert_jit(model, max_m=16, device="cuda:0")
-        self.assertEqual(silu.call_count, 1)
-        combine.assert_not_called()
         warmup.warmup_v41_shared_expert_jit(model, max_m=16, device="cuda:0")
+        self.assertEqual(silu.call_count, 1)
         combine.assert_called_once()
 
     def test_commit_only_has_no_shared_expert_launches(self):

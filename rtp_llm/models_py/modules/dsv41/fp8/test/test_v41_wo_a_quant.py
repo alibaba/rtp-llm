@@ -185,17 +185,15 @@ class WoAQuantCPUContractTest(unittest.TestCase):
         self.assertEqual(fresh._READY, {})
         self.assertEqual(fresh._LIBRARIES, {})
 
-    def test_quant_knob_is_live_and_uses_flattened_wo_b_width(self):
+    def test_quant_mode_dispatch_uses_flattened_wo_b_width(self):
         for mode, small, large in (
             ("auto", True, False),
             ("legacy", True, True),
             ("v2", False, False),
         ):
-            with self.subTest(mode=mode), mock.patch.dict(
-                os.environ, {"DSV4_FP8_QUANT_KERNEL": mode}
-            ):
-                self.assertEqual(op._legacy(511, None), small)
-                self.assertEqual(op._legacy(512, None), large)
+            with self.subTest(mode=mode):
+                self.assertEqual(op._legacy(511, mode), small)
+                self.assertEqual(op._legacy(512, mode), large)
 
     def test_supported_metadata_and_unprepared_fallback_never_load(self):
         a, w = _metadata()
@@ -451,18 +449,17 @@ class WoAQuantCudaTest(unittest.TestCase):
         )
         return q, self.pack(raw_s).transpose(0, 1)
 
-    def baseline(self, a, mode):
+    def baseline(self, a):
         d = torch.empty(a[0].shape[0], 8, 1024, device="cuda", dtype=torch.bfloat16)
         self.dg.fp8_einsum("bhr,hdr->bhd", a, (self.w, self.sw), d, recipe=(1, 1, 32))
-        with mock.patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": mode}):
-            return self.native_quant(
-                d.flatten(1),
-                group_size=32,
-                eps=torch.finfo(torch.float32).tiny,
-                column_major_scales=True,
-                scale_tma_aligned=True,
-                scale_ue8m0=True,
-            )
+        return self.native_quant(
+            d.flatten(1),
+            group_size=32,
+            eps=torch.finfo(torch.float32).tiny,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
 
     def assert_pair(self, actual, expected):
         self.assertIsNotNone(actual)
@@ -500,14 +497,11 @@ class WoAQuantCudaTest(unittest.TestCase):
         cases += [(33, e) for e in (-35, -110, -120, -126)]
         for m, exponent in cases:
             a = self.pair(m, exponent)
-            for mode in ("legacy", "v2", "auto"):
-                with self.subTest(m=m, exponent=exponent, mode=mode), mock.patch.dict(
-                    os.environ, {"DSV4_FP8_QUANT_KERNEL": mode}
-                ):
-                    self.assert_pair(
-                        op.try_grouped_quant(a, (self.w, self.sw)),
-                        self.baseline(a, mode),
-                    )
+            with self.subTest(m=m, exponent=exponent):
+                self.assert_pair(
+                    op.try_grouped_quant(a, (self.w, self.sw)),
+                    self.baseline(a),
+                )
 
     @torch.inference_mode()
     def test_nondefault_stream_and_graph_replay(self):
@@ -516,13 +510,13 @@ class WoAQuantCudaTest(unittest.TestCase):
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
-            eager = op.try_grouped_quant(a, (self.w, self.sw), quant_kernel="v2")
+            eager = op.try_grouped_quant(a, (self.w, self.sw))
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=stream):
-                captured = op.try_grouped_quant(a, (self.w, self.sw), quant_kernel="v2")
+                captured = op.try_grouped_quant(a, (self.w, self.sw))
             graph.replay()
         torch.cuda.current_stream().wait_stream(stream)
-        self.assert_pair(eager, self.baseline(a, "v2"))
+        self.assert_pair(eager, self.baseline(a))
         self.assert_pair(captured, eager)
         self.assert_pair((a[0].contiguous(), a[1]), (saved[0].contiguous(), saved[1]))
 
@@ -588,8 +582,8 @@ class WoAQuantCudaTest(unittest.TestCase):
         self.assertTrue(op.is_ready(self.w, self.sw))
         self.assertTrue(op.warmup(self.w, self.sw))
         self.assert_pair(
-            op.try_grouped_quant(a, (self.w, self.sw), quant_kernel="v2"),
-            self.baseline(a, "v2"),
+            op.try_grouped_quant(a, (self.w, self.sw)),
+            self.baseline(a),
         )
 
     @torch.inference_mode()
@@ -608,20 +602,17 @@ class WoAQuantCudaTest(unittest.TestCase):
                 original = x.clone()
                 angles = torch.randn(m, 32, device="cuda")
                 freqs = torch.polar(torch.ones_like(angles), angles)
-                for mode in ("legacy", "v2", "auto"):
-                    with self.subTest(m=m, mode=mode), mock.patch.dict(
-                        os.environ, {"DSV4_FP8_QUANT_KERNEL": mode}
-                    ):
-                        bf16 = projection.grouped_output_projection(
-                            x, freqs, self.w, self.sw
-                        )
-                        self.assertEqual(bf16.dtype, torch.bfloat16)
-                        pair = projection.try_grouped_output_quant(
-                            x, freqs, self.w, self.sw
-                        )
-                        expected = linear(bf16)
-                        actual = linear.forward_quantized(*pair)
-                        self.assertTrue(torch.equal(expected, actual))
+                with self.subTest(m=m):
+                    bf16 = projection.grouped_output_projection(
+                        x, freqs, self.w, self.sw
+                    )
+                    self.assertEqual(bf16.dtype, torch.bfloat16)
+                    pair = projection.try_grouped_output_quant(
+                        x, freqs, self.w, self.sw
+                    )
+                    expected = linear(bf16)
+                    actual = linear.forward_quantized(*pair)
+                    self.assertTrue(torch.equal(expected, actual))
                 self.assertTrue(torch.equal(x, original))
             with mock.patch.dict(op._READY, {}, clear=True), mock.patch.object(
                 projection, "_quantize_projection_input"

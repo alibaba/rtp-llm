@@ -48,9 +48,6 @@ cc_library(
         "@havenask//aios/autil:time",
         "@havenask//aios/autil:net",
     ],
-    implementation_deps = [
-        "//rtp_llm/cpp/config:static_config",
-    ],
     copts = copts(),
     visibility = ["//visibility:public"],
 )
@@ -247,20 +244,6 @@ cc_library(
         "//:using_cuda": ["//rtp_llm/models_py/bindings/cuda/ops:gpu_base"],
         "//conditions:default": [],
     }),
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)
-
-# Device performance wrapper (migrated from devices/utils/)
-cc_library(
-    name = "device_perf_wrapper",
-    hdrs = [
-        "DevicePerfWrapper.h",
-    ],
-    deps = [
-        "//rtp_llm/models_py/bindings/cuda/ops:exec_ctx_fwd",
-        "//rtp_llm/cpp/utils:core_utils",
-    ],
     copts = copts(),
     visibility = ["//visibility:public"],
 )

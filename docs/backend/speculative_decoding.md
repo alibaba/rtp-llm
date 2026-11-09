@@ -41,8 +41,6 @@ Based on the original basic startup parameters, add the following environment va
 |-----------|---------------|-------------|
 | --sp_type | deterministic | Speculative sampling strategy |
 | --gen_num_per_cycle | 128 | How many tokens the small model proposes per cycle |
-| --sp_min_token_match | 2 | Minimum length of n-gram token matching |
-| --sp_max_token_match | 2 | Maximum length of n-gram token matching |
 
 ```
 And supplement in the request's `extra_config`:

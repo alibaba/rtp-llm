@@ -56,8 +56,6 @@ struct GptModelInitParams {
     RuntimeConfig                                runtime_config;
     ConcurrencyConfig                            concurrency_config;
     SpeculativeExecutionConfig                   sp_config;
-    DeviceResourceConfig                         device_resource_config;
-    MlaOpsType                                   mla_ops_type = MlaOpsType::AUTO;
     int64_t                                      max_seq_len  = 0;
     int64_t                                      hidden_size  = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
@@ -183,21 +181,6 @@ std::array<int64_t, 2>  decodeMtpHiddenStatesShape(int64_t total_numel, int64_t 
 std::vector<int64_t> decodeKvBlockTableShape(int64_t rank, int64_t group_num, int64_t batch_size, int64_t max_blocks);
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
-
-struct MicroBatchInfo {
-    size_t prefill_num;
-    size_t decoder_num;
-};
-
-struct MicroBatchPlan {
-    bool                        enable = false;
-    std::vector<MicroBatchInfo> batch_infos;
-};
-
-struct TokenSliceInfo {
-    size_t offset = 0;
-    size_t count  = 0;
-};
 
 class ModelBase {
 public:

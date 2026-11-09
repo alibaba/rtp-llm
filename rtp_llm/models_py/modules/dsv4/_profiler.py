@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from contextlib import contextmanager
 from typing import Any, Callable, ContextManager
 
@@ -16,7 +15,10 @@ from rtp_llm.models_py.utils.profiler import (
     record_function_ranges_enabled as _generic_ranges_enabled,
 )
 
-_RANGES_ENABLED = os.environ.get("DSV4_RECORD_FUNCTION_RANGES", "1") != "0"
+# record_function ranges are always on; the generic DSV4 switch
+# (``_generic_ranges_enabled``) and the ``disable_record_function_ranges``
+# context still apply.
+_RANGES_ENABLED = True
 
 LayerForwardRange = Callable[[int], ContextManager[Any]]
 

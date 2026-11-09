@@ -40,7 +40,7 @@ class QueryQuantGateTest(unittest.TestCase):
         attn = SimpleNamespace(wq_b=torch.nn.Identity())
         self.assertIsNone(try_project_quantized_qkv(attn, None))
 
-    def test_quant_backend_selection_falls_back_before_projection(self):
+    def test_large_input_falls_back_before_projection(self):
         attn = SimpleNamespace(
             wq_b=Mock(spec=V41MXFP8Linear),
             wq_a_wkv=Mock(),
@@ -51,15 +51,9 @@ class QueryQuantGateTest(unittest.TestCase):
             "rtp_llm.models_py.modules.dsv41._v41_query_quant.is_supported",
             return_value=True,
         ):
-            for setting in ("v2", " V2 ", "invalid"):
-                with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": setting}):
-                    self.assertIsNone(
-                        try_project_quantized_qkv(attn, torch.empty(4, 128))
-                    )
-            with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "auto"}):
-                self.assertIsNone(
-                    try_project_quantized_qkv(attn, torch.empty(4096, 128))
-                )
+            # 4096 rows * 1280 rank crosses the 4Mi-element threshold, so the
+            # fused path defers to the v2 producer on the original path.
+            self.assertIsNone(try_project_quantized_qkv(attn, torch.empty(4096, 128)))
         attn.wq_a_wkv.assert_not_called()
 
 

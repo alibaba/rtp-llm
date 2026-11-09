@@ -582,9 +582,6 @@ def make_minimal_configs(
         local_world_size=1,
         get_ffn_tp_rank=lambda: 0,
         get_ffn_tp_size=lambda: 1,
-        ffn_disaggregate_config=SimpleNamespace(
-            is_ffn_service=lambda: False, enable_ffn_disaggregate=False
-        ),
         tp_size=1,
         tp_rank=0,
     )

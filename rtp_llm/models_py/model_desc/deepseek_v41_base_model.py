@@ -289,7 +289,6 @@ class DeepSeekV4Model(GptModelBase):
         max_generate_batch_size: int,
         fmha_config=None,
         py_hw_kernel_config=None,
-        device_resource_config=None,
     ):
         super().__init__(
             model_config,
@@ -298,7 +297,6 @@ class DeepSeekV4Model(GptModelBase):
             max_generate_batch_size=max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=device_resource_config,
         )
         args = _args_from_model_config(
             model_config, max_generate_batch_size, moe_config=moe_config
@@ -396,15 +394,6 @@ class DeepSeekV4Model(GptModelBase):
         self.v4: Optional[V4Transformer] = None
         self._materialized = False
         self._ckpt_path: str = model_config.ckpt_path
-        self._profile_path = os.environ.get("DSV4_PROFILE_TRACE")
-        self._profile_trigger = "/tmp/dsv4_profile_trigger"
-        self._profile_done = False
-        if self._profile_path:
-            logging.info(
-                "[DeepSeekV4Model] timeline trigger: `touch %s` — next forward captures to %s",
-                self._profile_trigger,
-                self._profile_path,
-            )
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         try:

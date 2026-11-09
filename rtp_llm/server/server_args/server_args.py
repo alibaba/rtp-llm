@@ -37,9 +37,6 @@ from rtp_llm.server.server_args.lora_group_args import init_lora_group_args
 from rtp_llm.server.server_args.master_group_args import init_master_group_args
 from rtp_llm.server.server_args.misc_group_args import init_misc_group_args
 from rtp_llm.server.server_args.model_group_args import init_model_group_args
-from rtp_llm.server.server_args.model_specific_group_args import (
-    init_model_specific_group_args,
-)
 from rtp_llm.server.server_args.moe_group_args import init_moe_group_args
 from rtp_llm.server.server_args.parallel_group_args import init_parallel_group_args
 from rtp_llm.server.server_args.pd_separation_group_args import (
@@ -456,9 +453,7 @@ def init_all_group_args(
     )
     init_cache_store_group_args(parser, py_env_configs.cache_store_config)
     init_concurrent_group_args(parser, py_env_configs.concurrency_config)
-    init_device_resource_group_args(
-        parser, py_env_configs.device_resource_config, py_env_configs.runtime_config
-    )
+    init_device_resource_group_args(parser, py_env_configs.runtime_config)
     init_embedding_group_args(parser, py_env_configs.embedding_config)
     init_engine_group_args(parser, py_env_configs.runtime_config)
     init_fifo_scheduler_group_args(
@@ -479,7 +474,6 @@ def init_all_group_args(
     init_master_group_args(parser, py_env_configs.master_config)
     init_misc_group_args(parser, py_env_configs.misc_config)
     init_model_group_args(parser, py_env_configs.model_args)
-    init_model_specific_group_args(parser, py_env_configs.model_specific_config)
     init_moe_group_args(
         parser,
         py_env_configs.moe_config,
@@ -489,7 +483,6 @@ def init_all_group_args(
     init_parallel_group_args(
         parser,
         py_env_configs.parallelism_config,
-        py_env_configs.ffn_disaggregate_config,
         py_env_configs.prefill_cp_config,
     )
     init_profile_debug_logging_group_args(
@@ -540,7 +533,6 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args(args)
-    py_env_configs.ft_disable_custom_ar_override = parsed_args.ft_disable_custom_ar
     py_env_configs.server_config.validate_allocator_dump_config()
 
     # Normalize the two switches before model construction and process spawn.

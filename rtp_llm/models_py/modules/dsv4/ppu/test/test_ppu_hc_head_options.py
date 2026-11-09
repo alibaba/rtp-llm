@@ -36,40 +36,15 @@ class HCHeadOptionsTest(unittest.TestCase):
         return self.provider(options).build_hc_head(**self.args, tp_size=4, tp_rank=0)
 
     def run_head(self, head):
-        with patch.object(
-            self.impl.F, "linear", wraps=self.impl.F.linear
-        ) as mixes:
+        with patch.object(self.impl.F, "linear", wraps=self.impl.F.linear) as mixes:
             result = head.head(self.x)
         return result, [call.args[0].shape[0] for call in mixes.call_args_list]
-
-    def test_two_heads_retain_distinct_chunks_across_environment_changes(self):
-        first = self.build({"DSV4_HC_FALLBACK_CHUNK_TOKENS": "3"})
-        second = self.build({"DSV4_HC_FALLBACK_CHUNK_TOKENS": "5"})
-        from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import FallbackHCHead
-
-        reference = FallbackHCHead(**self.args).head(self.x)
-        for env in ("1", "9"):
-            with patch.dict(os.environ, {"DSV4_HC_FALLBACK_CHUNK_TOKENS": env}):
-                a, a_chunks = self.run_head(first)
-                b, b_chunks = self.run_head(second)
-            self.assertEqual(a_chunks, [3, 3, 3, 2])
-            self.assertEqual(b_chunks, [5, 5, 1])
-            torch.testing.assert_close(a, reference, rtol=0, atol=0)
-            torch.testing.assert_close(b, reference, rtol=0, atol=0)
 
     def test_empty_snapshot_never_reads_conflicting_environment(self):
         with patch.dict(os.environ, {"DSV4_HC_FALLBACK_CHUNK_TOKENS": "1"}):
             head = self.build({})
             _, chunks = self.run_head(head)
         self.assertEqual(chunks, [11])
-
-    def test_legacy_head_preserves_environment_policy(self):
-        from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import FallbackHCHead
-
-        head = FallbackHCHead(**self.args)
-        with patch.dict(os.environ, {"DSV4_HC_FALLBACK_CHUNK_TOKENS": "4"}):
-            _, chunks = self.run_head(head)
-        self.assertEqual(chunks, [4, 4, 3])
 
 
 if __name__ == "__main__":

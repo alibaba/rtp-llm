@@ -180,9 +180,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::FMHAConfig                  fmha_config;
     rtp_llm::ProfilingDebugLoggingConfig profiling_debug_logging_config;
     rtp_llm::HWKernelConfig              hw_kernel_config;
-    rtp_llm::DeviceResourceConfig        device_resource_config;
     rtp_llm::MoeConfig                   moe_config;
-    rtp_llm::ModelSpecificConfig         model_specific_config;
     rtp_llm::SpeculativeExecutionConfig  sp_config;
     sp_config.type                   = config.speculative_enabled ? SP_TYPE_VANILLA : SP_TYPE_NONE;
     runtime_config.warm_up_with_loss = config.warm_up_with_loss;
@@ -190,7 +188,6 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::MiscellaneousConfig   misc_config;
     rtp_llm::ArpcConfig            arpc_config;
     rtp_llm::GrpcConfig            grpc_config;
-    rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
     rtp_llm::VitConfig             vit_config;
     runtime_config.output_dispatcher_worker_count = config.output_dispatcher_worker_count;
     pd_sep_config.role_type                       = config.role_type;
@@ -205,15 +202,12 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
                                              kv_cache_config,
                                              profiling_debug_logging_config,
                                              hw_kernel_config,
-                                             device_resource_config,
                                              moe_config,
-                                             model_specific_config,
                                              sp_config,
                                              cache_store_config,
                                              misc_config,
                                              arpc_config,
                                              grpc_config,
-                                             ffn_disaggregate_config,
                                              vit_config,
                                              std::move(*weights));
     return rtp_llm_params;

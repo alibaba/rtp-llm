@@ -72,20 +72,11 @@ class _PreviousSixTupleGrammarConfig:
 class _LegacyHWKernelConfig:
     def __reduce__(self):
         legacy_state = (
-            11,
-            True,
-            False,
-            False,
-            "legacy.csv",
             True,
             True,
             True,
-            True,
-            37,
             [64, 128],
             [1, 8],
-            True,
-            True,
         )
         return _new_hw_kernel_config, (), legacy_state
 
@@ -123,7 +114,7 @@ class _InvalidTypePDSepConfig:
             RoleType.PDFUSION,
             True,
             "not-an-int",
-        ] + [0] * 19
+        ] + [0] * 16
         return _new_config, (PDSepConfig,), tuple(state)
 
 
@@ -155,9 +146,9 @@ class PDSepConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.prefill_prepare_resource_pool_size, 119)
 
     def test_rejects_invalid_state_length(self):
-        for size in (20, 21, 23):
+        for size in (17, 18, 20):
             with self.subTest(size=size), self.assertRaisesRegex(
-                RuntimeError, "expected 22 fields"
+                RuntimeError, "expected 19 fields"
             ):
                 pickle.loads(pickle.dumps(_MalformedPDSepConfig(size)))
 
@@ -242,30 +233,16 @@ class GrammarConfigPickleTest(unittest.TestCase):
 class HWKernelConfigPickleTest(unittest.TestCase):
     def test_current_format_round_trip(self):
         config = HWKernelConfig()
-        config.deep_gemm_num_sm = 7
-        config.arm_gemm_use_kai = True
-        config.enable_multi_block_mode = False
-        config.ft_disable_custom_ar = False
-        config.rocm_hipblaslt_config = "current.csv"
         config.use_swizzleA = True
         config.enable_cuda_graph = True
         config.enable_cuda_graph_debug_mode = True
         config.generation_prefill_cuda_graph_max_requests = 5
         config.generation_prefill_capture_token_buckets = [32, 64, 96]
-        config.enable_native_cuda_graph = True
-        config.num_native_cuda_graph = 41
         config.prefill_capture_seq_lens = [17, 23]
         config.decode_capture_batch_sizes = [2, 7]
-        config.disable_dpc_random = True
-        config.rocm_disable_custom_ag = True
 
         restored = pickle.loads(pickle.dumps(config))
 
-        self.assertEqual(restored.deep_gemm_num_sm, 7)
-        self.assertTrue(restored.arm_gemm_use_kai)
-        self.assertFalse(restored.enable_multi_block_mode)
-        self.assertFalse(restored.ft_disable_custom_ar)
-        self.assertEqual(restored.rocm_hipblaslt_config, "current.csv")
         self.assertTrue(restored.use_swizzleA)
         self.assertTrue(restored.enable_cuda_graph)
         self.assertTrue(restored.enable_cuda_graph_debug_mode)
@@ -273,27 +250,23 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         self.assertEqual(
             restored.generation_prefill_capture_token_buckets, [32, 64, 96]
         )
-        self.assertTrue(restored.enable_native_cuda_graph)
-        self.assertEqual(restored.num_native_cuda_graph, 41)
         self.assertEqual(restored.prefill_capture_seq_lens, [17, 23])
         self.assertEqual(restored.decode_capture_batch_sizes, [2, 7])
-        self.assertTrue(restored.disable_dpc_random)
-        self.assertTrue(restored.rocm_disable_custom_ag)
 
-    def test_legacy_14_tuple_uses_generation_prefill_cuda_graph_defaults(self):
+    def test_core_only_tuple_uses_generation_prefill_cuda_graph_defaults(self):
         restored = pickle.loads(pickle.dumps(_LegacyHWKernelConfig()))
 
+        self.assertTrue(restored.use_swizzleA)
         self.assertEqual(restored.generation_prefill_cuda_graph_max_requests, 1)
         self.assertEqual(restored.prefill_capture_seq_lens, [64, 128])
         self.assertEqual(restored.decode_capture_batch_sizes, [1, 8])
-        self.assertEqual(restored.num_native_cuda_graph, 37)
         self.assertEqual(
             restored.generation_prefill_capture_token_buckets,
             HWKernelConfig().generation_prefill_capture_token_buckets,
         )
 
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (15, 19, 20):
+        for size in (6, 11, 15, 19, 20):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):
@@ -302,20 +275,11 @@ class HWKernelConfigPickleTest(unittest.TestCase):
 
     def test_current_layout_rejects_wrong_field_type(self):
         malformed_state = (
-            11,
-            True,
-            False,
-            False,
-            "legacy.csv",
             True,
             True,
             True,
-            True,
-            37,
             [64, 128],
             [1, 8],
-            True,
-            True,
             "not-an-integer",
             [32, 64],
         )

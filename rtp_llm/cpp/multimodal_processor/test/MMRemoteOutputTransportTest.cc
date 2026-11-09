@@ -413,7 +413,7 @@ TEST(MMRemoteOutputTransportTest, receiptForANeverAdvertisedPlaneIsAProtocolErro
 }
 
 // The real terminal, not the fake: a malformed inline response must come back as an error rather
-// than tripping an RTP_LLM_CHECK, which aborts the process under FT_CORE_DUMP_ON_EXCEPTION. This is
+// than tripping an RTP_LLM_CHECK, which throws. This is
 // the same reasoning the RDMA manifest path already had; the inline path used to lack it.
 TEST(MMRemoteOutputTransportTest, realInlineTerminalDecodesAndRejectsInconsistentResponses) {
     auto              terminal = createGrpcInlineReceiptReader();

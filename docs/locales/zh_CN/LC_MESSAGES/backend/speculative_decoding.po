@@ -214,9 +214,6 @@ msgid "128"
 msgstr ""
 
 #: ../../backend/speculative_decoding.md
-msgid "--sp_min_token_match"
-msgstr ""
-
 #: ../../backend/speculative_decoding.md
 msgid "2"
 msgstr ""
@@ -226,9 +223,6 @@ msgid "Minimum length of n-gram token matching"
 msgstr ""
 
 #: ../../backend/speculative_decoding.md
-msgid "--sp_max_token_match"
-msgstr ""
-
 #: ../../backend/speculative_decoding.md
 msgid "Maximum length of n-gram token matching"
 msgstr ""

@@ -51,7 +51,7 @@ from rtp_llm.openai.renderers.qwen3_code_renderer import Qwen3CoderRenderer
 from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
     QwenReasoningToolRenderer,
 )
-from rtp_llm.ops import FfnDisAggregateConfig, PDSepConfig, SpecialTokens
+from rtp_llm.ops import PDSepConfig, SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.test.utils.stream_util import (
     is_valid_tool_call_chunk,

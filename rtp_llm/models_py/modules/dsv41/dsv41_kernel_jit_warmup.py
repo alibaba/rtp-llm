@@ -74,7 +74,6 @@ def warmup_v41_dense_jit(model, *, max_m, device):
         tuple(sorted(linears)),
         tuple(sorted(outputs)),
         sms,
-        os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto"),
     )
     if key in _DENSE_WARMED:
         return
@@ -192,8 +191,7 @@ def warmup_v41_shared_expert_jit(model, *, max_m, device):
     # Rows, scale stride and quantization policy do not specialize the kernel.
     # One row warms both policies for the actual projection width and clamp.
     rows_grid = (1,)
-    fused_add = os.environ.get("MOE_SHARED_EXPERT_BF16_ADD", "0") != "1"
-    key = (str(device), frozenset(signatures), rows_grid, fused_add)
+    key = (str(device), frozenset(signatures), rows_grid)
     if key in _SHARED_WARMED:
         return
     for (dim, inter, clamp, routed_dtype, routed_stride), name in signatures.items():
@@ -207,29 +205,27 @@ def warmup_v41_shared_expert_jit(model, *, max_m, device):
                 partial(silu_mul_fp8_quant_packed_g32, gate_up, clamp_limit=clamp),
                 device=device,
             )
-        if fused_add:
-            # add_cast explicitly does_not_specialize M. One launch covers
-            # every token count for this dtype/stride contract. In particular,
-            # MXFP8's shared result is BF16; add_cast promotes both inputs
-            # to FP32 inside the kernel before adding.
-            rows = min(max_m, 2)
-            routed = torch.empty_strided(
-                (rows, dim), routed_stride, dtype=routed_dtype, device=device
-            ).zero_()
-            shared = torch.zeros((rows, dim), dtype=torch.bfloat16, device=device)
-            common._run_triton_warmup_launch_with_retry(
-                "DSV41 SharedExpert",
-                f"{name} add_cast N={dim} routed={routed_dtype} stride={routed_stride}",
-                partial(fused_moe_epilogue, routed, shared, torch.bfloat16),
-                device=device,
-            )
+        # add_cast explicitly does_not_specialize M. One launch covers
+        # every token count for this dtype/stride contract. In particular,
+        # MXFP8's shared result is BF16; add_cast promotes both inputs
+        # to FP32 inside the kernel before adding.
+        rows = min(max_m, 2)
+        routed = torch.empty_strided(
+            (rows, dim), routed_stride, dtype=routed_dtype, device=device
+        ).zero_()
+        shared = torch.zeros((rows, dim), dtype=torch.bfloat16, device=device)
+        common._run_triton_warmup_launch_with_retry(
+            "DSV41 SharedExpert",
+            f"{name} add_cast N={dim} routed={routed_dtype} stride={routed_stride}",
+            partial(fused_moe_epilogue, routed, shared, torch.bfloat16),
+            device=device,
+        )
     common._sync_cuda(device)
     _SHARED_WARMED.add(key)
     logging.info(
-        "[DSV41 SharedExpert] JIT warmup done; contracts=%d silu_M=%s fused_add=%s",
+        "[DSV41 SharedExpert] JIT warmup done; contracts=%d silu_M=%s",
         len(signatures),
         rows_grid,
-        fused_add,
     )
 
 
@@ -342,8 +338,6 @@ def warmup_v41_decode_query_jit(model, *, max_m, device):
         or not common._is_cuda_device(device)
         or max_m <= 0
         or os.environ.get("DSV41_FUSED_QUERY_QUANT", "1") != "1"
-        or os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
-        not in ("auto", "legacy")
     ):
         return
     common._assert_not_capturing()

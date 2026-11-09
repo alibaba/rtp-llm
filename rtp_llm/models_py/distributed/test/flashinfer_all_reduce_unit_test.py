@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-
 from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.distributed import flashinfer_all_reduce as flashinfer_ar
 

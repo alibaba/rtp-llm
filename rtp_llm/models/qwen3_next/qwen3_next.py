@@ -37,7 +37,6 @@ class Qwen3NextBase(BaseModel):
             max_generate_batch_size=max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=self.device_resource_config,
         )
         return self.py_model
 
@@ -324,7 +323,6 @@ class Qwen35Moe(Qwen3NextBase):
             max_generate_batch_size=max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=self.device_resource_config,
         )
         return self.py_model
 

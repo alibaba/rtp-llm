@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
-
 from rtp_llm.models_py.distributed.flashinfer_all_reduce import FlashInferAllReduce
 from rtp_llm.test.utils.port_util import PortManager
 

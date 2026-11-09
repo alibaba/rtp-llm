@@ -10,7 +10,6 @@ from typing import Dict, List, Optional, Union
 
 import torch
 import torch.distributed
-
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 # ParallelMode enum values matching C++ rtp_llm::ParallelMode in OpData.h
@@ -218,7 +217,6 @@ def init_distributed_environment(
                 parallelism_config,
                 backend,
                 timedelta(days=36500),
-                disable_custom_all_reduce,
             )
             _register_process_groups_to_cpp()
         rocm_rccl = _get_rocm_rccl()
@@ -257,7 +255,6 @@ def init_distributed_environment(
             parallelism_config,
             backend,
             timedelta(days=36500),
-            disable_custom_all_reduce,
         )
         _parallelism_config = parallelism_config
         _initialized = True
@@ -302,7 +299,6 @@ def init_distributed_environment(
         parallelism_config,
         backend,
         timedelta(days=36500),
-        disable_custom_all_reduce,
     )
     _parallelism_config = parallelism_config
     _initialized = True
@@ -322,7 +318,6 @@ def _create_process_groups(
     parallelism_config: ParallelismConfig,
     backend: str,
     timeout: Optional[timedelta],
-    disable_custom_all_reduce: Optional[bool] = None,
 ):
     """Create DP and TP process groups.
 
@@ -330,7 +325,6 @@ def _create_process_groups(
         parallelism_config: Configuration for parallelism setup
         backend: Distributed backend
         timeout: Timeout for process group creation
-        disable_custom_all_reduce: Explicit custom AllReduce override.
     """
     global _group_map
 
@@ -387,19 +381,13 @@ def _create_process_groups(
                         f"[rank: {world_rank}] Stored TP group with key: {group_key} {tp_group} with ranks: {tp_ranks}"
                     )
 
-                _get_symm_mem().init_symm_mem_communicator(
-                    tp_group,
-                    disable_custom_all_reduce=disable_custom_all_reduce,
-                )
+                _get_symm_mem().init_symm_mem_communicator(tp_group)
 
                 # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
-        _get_symm_mem().init_symm_mem_communicator(
-            torch.distributed.group.WORLD,
-            disable_custom_all_reduce=disable_custom_all_reduce,
-        )
+        _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
 
 
 def _register_process_groups_to_cpp():

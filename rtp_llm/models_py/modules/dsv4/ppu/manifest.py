@@ -61,7 +61,6 @@ def build_provider(model_config, parallelism, moe_config, max_generate_batch_siz
             or moe_config.use_deepep_low_latency != (role == "DECODE")
             or moe_config.use_deepep_internode
             or moe_config.use_all_gather
-            or parallelism.ffn_disaggregate_config.enable_ffn_disaggregate
         ):
             raise ValueError("PPU DSV4 requires single-node engine-owned DeepEP for this role")
     if role == "DECODE" and not 0 < max_generate_batch_size <= 128:

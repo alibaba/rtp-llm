@@ -8,7 +8,6 @@ import torch
 
 from rtp_llm.device.device_base import DeviceBase, MemInfo
 from rtp_llm.ops.compute_ops import (
-    preprocess_gemm_weight_by_key,
     preprocess_weight_scale,
 )
 from rtp_llm.utils.model_weight import W
@@ -51,16 +50,6 @@ class ArmCpuImpl(CpuImpl):
             W.ffn_w2,
             W.ffn_w3,
         ]
-
-    def maybe_rewrite_weight_by_key(
-        self,
-        key: str,
-        weight: torch.Tensor,
-        use_swizzle_a: Optional[bool] = None,
-    ) -> torch.Tensor:
-        return preprocess_gemm_weight_by_key(
-            key, weight, self.py_env_configs.py_hw_kernel_config.arm_gemm_use_kai
-        )
 
     def unpack_int32_into_int16(self, w_packed: torch.Tensor, int8: bool):
         if int8:

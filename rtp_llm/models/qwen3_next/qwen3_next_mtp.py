@@ -130,7 +130,6 @@ class Qwen3NextMTPMixin:
             moe_config=moe_config,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=self.device_resource_config,
         )
 
 

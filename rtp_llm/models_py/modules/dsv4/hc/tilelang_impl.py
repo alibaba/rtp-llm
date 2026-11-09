@@ -8,9 +8,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.hc.base import HCHeadBase, HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
-    tk_mhc_head,
     tk_mhc_head_fused,
-    tk_mhc_head_fused_enabled,
     tk_mhc_post,
     tk_mhc_pre,
 )
@@ -32,7 +30,10 @@ def _raise_unavailable(
     hc_mult: int,
     hint: str | None = None,
 ) -> NoReturn:
-    hint = hint or "Set DSV4_HC_IMPL=fallback for the PyTorch reference implementation."
+    hint = hint or (
+        "Input must satisfy the TileLang mHC gates: bf16 contiguous CUDA "
+        "residual, hc_mult=4, and (hc * dim) % 256 == 0."
+    )
     raise RuntimeError(
         f"TileLang mHC {op} unavailable for shape={tuple(x.shape)}, "
         f"stride={tuple(x.stride())}, dtype={x.dtype}, device={x.device}, "
@@ -123,33 +124,20 @@ class TileLangHCHead(HCHeadBase):
         # copy to every head reduce on mis-laid-out inputs.
         tk_x = _require_contiguous(tk_x, name="mhc_head residual")
         with torch.inference_mode():
-            if tk_mhc_head_fused_enabled():
-                out = tk_mhc_head_fused(
-                    tk_x,
-                    self.fn,
-                    self.scale,
-                    self.base,
-                    norm_eps=self.norm_eps,
-                    pre_eps=self.hc_eps,
-                    hc_mult=self.hc_mult,
+            out = tk_mhc_head_fused(
+                tk_x,
+                self.fn,
+                self.scale,
+                self.base,
+                norm_eps=self.norm_eps,
+                pre_eps=self.hc_eps,
+                hc_mult=self.hc_mult,
+            )
+            if out is None:
+                _raise_unavailable(
+                    "head_fused",
+                    x,
+                    self.hc_mult,
+                    "Fused mHC head is unconditional; fused head must succeed.",
                 )
-                if out is None:
-                    _raise_unavailable(
-                        "head_fused",
-                        x,
-                        self.hc_mult,
-                        "DSV4_MHC_HEAD_FUSED is enabled; fused head must succeed.",
-                    )
-            else:
-                out = tk_mhc_head(
-                    tk_x,
-                    self.fn,
-                    self.scale,
-                    self.base,
-                    norm_eps=self.norm_eps,
-                    pre_eps=self.hc_eps,
-                    hc_mult=self.hc_mult,
-                )
-        if out is None:
-            _raise_unavailable("head", x, self.hc_mult)
         return squeeze_hc_batch(out, wrapped, name="mhc_head output")

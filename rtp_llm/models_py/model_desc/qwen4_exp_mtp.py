@@ -4,8 +4,6 @@ from collections.abc import Mapping
 from typing import Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import get_attention_inputs_value
@@ -20,6 +18,7 @@ from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 
 def normalize_mtp_prefill_positions(inputs, index_factor: int) -> None:
@@ -260,7 +259,6 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
         max_generate_batch_size: int,
         fmha_config=None,
         py_hw_kernel_config=None,
-        device_resource_config=None,
     ) -> None:
         super().__init__(
             model_config,
@@ -270,7 +268,6 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             max_generate_batch_size=max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=device_resource_config,
         )
         if self.layer_num != 1:
             raise RuntimeError("qwen4_exp MTP model descriptor requires one layer")

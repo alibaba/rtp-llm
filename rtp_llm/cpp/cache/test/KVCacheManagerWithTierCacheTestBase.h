@@ -31,7 +31,6 @@
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -1362,8 +1361,6 @@ inline void reclaimAndExpectInitialPools(const std::shared_ptr<KVCacheManager>& 
 class KVCacheManagerWithTierCacheTest: public ::testing::TestWithParam<TierLayout> {
 protected:
     void SetUp() override {
-        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
-        StaticConfig::user_ft_core_dump_on_exception = false;
         rtp_llm::initLogger();
         createDevice();
     }
@@ -1380,7 +1377,6 @@ protected:
         errno = 0;
         EXPECT_EQ(::access(disk_root.c_str(), F_OK), -1);
         EXPECT_EQ(errno, ENOENT);
-        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
     }
 
     void initManager(uint32_t device_blocks, int64_t lower_cache_size_mb = 8, int cp_size = 1) {
@@ -2445,9 +2441,6 @@ protected:
     CacheConfig                                         cache_config_;
     std::shared_ptr<KVCacheManager>                     manager_;
     std::shared_ptr<ScriptedPerRankBlockTransferEngine> transfer_engine_;
-
-private:
-    bool old_core_dump_on_exception_{false};
 };
 
 }  // namespace tier_cache_test_detail

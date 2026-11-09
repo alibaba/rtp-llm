@@ -46,7 +46,6 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         max_generate_batch_size: int,
         fmha_config=None,
         py_hw_kernel_config=None,
-        device_resource_config=None,
     ):
         super().__init__(
             model_config,
@@ -56,7 +55,6 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
             max_generate_batch_size=max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=device_resource_config,
         )
         Dsv4SharedRuntimeBufferStore.enable_mtp_hidden()
         # MTP overrides for V4Args. ``DeepSeekV4Mtp._create_config``

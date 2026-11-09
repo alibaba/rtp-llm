@@ -206,23 +206,13 @@ void applyPackedMaskLogitsCpuFallback(const torch::Tensor& logits,
 
 #if USING_CUDA
 
-namespace {
-at::cuda::CUDAStream& getOverlapStream() {
-    static thread_local auto s = at::cuda::getStreamFromPool(/*isHighPriority=*/true);
-    return s;
-}
-}  // anonymous namespace
-
 // ============================================================
 // Copy ops (CUDA)
 // ============================================================
 
 void runtimeCopy(const CopyParams& params) {
     params.check();
-    auto         stream_raw  = at::cuda::getCurrentCUDAStream().stream();
-    auto         comm_stream = getOverlapStream().stream();
-    bool         use_overlap = getEnableCommOverlap();
-    cudaStream_t stream      = (params.overlapped && use_overlap) ? comm_stream : stream_raw;
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
     const auto& src = params.src;
     const auto& dst = params.dst;
@@ -302,7 +292,7 @@ static void batchCopyFallback(const BatchCopyParams& params) {
             auto src_tensor = torch::from_blob(const_cast<void*>(buffers.src_ptr[i]),
                                                {(int64_t)bytes},
                                                torch::dtype(torch::kUInt8).device(src_device));
-            runtimeCopy({dst_tensor, src_tensor, params.overlapped});
+            runtimeCopy({dst_tensor, src_tensor});
         }
     }
 }
@@ -353,13 +343,6 @@ void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
 
 #else  // ROCm / non-CUDA
 
-namespace {
-at::hip::HIPStream& getOverlapStream() {
-    static thread_local auto s = at::hip::getStreamFromPool(/*isHighPriority=*/true);
-    return s;
-}
-}  // anonymous namespace
-
 // ============================================================
 // Copy ops (ROCm)
 // ============================================================
@@ -372,8 +355,6 @@ void runtimeCopy(const CopyParams& params) {
         return;
     }
     // ROCm: dst.copy_(src) dispatches through PyTorch which uses the current HIP stream.
-    // params.overlapped is intentionally ignored — ROCm lacks the dedicated overlap stream
-    // used by the CUDA path. The default stream provides correct ordering.
     dst.copy_(src, /*non_blocking=*/src.is_hip() && dst.is_hip());
 }
 
@@ -419,7 +400,7 @@ static void batchCopyFallback(const BatchCopyParams& params) {
             auto src_tensor = torch::from_blob(const_cast<void*>(buffers.src_ptr[i]),
                                                {(int64_t)bytes},
                                                torch::dtype(torch::kUInt8).device(src_device));
-            runtimeCopy({dst_tensor, src_tensor, params.overlapped});
+            runtimeCopy({dst_tensor, src_tensor});
         }
     }
 }
@@ -456,9 +437,7 @@ void runtimeBatchCopy(const BatchCopyParams& params) {
 #else   // USING_ROCM
     auto stream_raw = at::hip::getCurrentHIPStream(at::hip::current_device()).stream();
 #endif  // USING_CUDA
-    auto         comm_stream = getOverlapStream().stream();
-    bool         use_overlap = getEnableCommOverlap();
-    cudaStream_t stream      = (params.overlapped && use_overlap) ? comm_stream : stream_raw;
+    cudaStream_t stream = stream_raw;
 
     BatchCopyParams fallback_copies;
     bool            need_fallback = false;
@@ -515,7 +494,6 @@ void runtimeBatchCopy(const BatchCopyParams& params) {
             case BatchCopyParams::H2D:
             case BatchCopyParams::D2H: {
                 need_fallback                           = true;
-                fallback_copies.overlapped              = params.overlapped;
                 fallback_copies.copy_buffers[copy_type] = buffers;
             } break;
             default:

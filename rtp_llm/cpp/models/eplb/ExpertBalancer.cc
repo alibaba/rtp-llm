@@ -81,7 +81,7 @@ void LoadFlags::setReady(bool ready) {
 bool LoadFlags::isReady(size_t world_size) {
     if (world_size > 1) {
         // sync all ranks load_flag_tensor_
-        flag_sync = execAllReduce({flag_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP, flag_sync}).buffer;
+        flag_sync = execAllReduce({flag_gpu, ReduceOp::Sum, ParallelMode::DP_AND_TP, flag_sync}).buffer;
     } else {
         flag_sync.copy_(flag_gpu);
     }
@@ -320,8 +320,8 @@ void ExpertBalancer::copyToTensor(const torch::Tensor& src, torch::Tensor& dst) 
 void ExpertBalancer::createPlan() {
     // pre run
     if (world_size_ > 1) {
-        execAllReduce({stats_.log_stats_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
-        execAllReduce({stats_.gpu_loads_gpu, ReduceOp::Sum, false, ParallelMode::DP_AND_TP});
+        execAllReduce({stats_.log_stats_gpu, ReduceOp::Sum, ParallelMode::DP_AND_TP});
+        execAllReduce({stats_.gpu_loads_gpu, ReduceOp::Sum, ParallelMode::DP_AND_TP});
     }
 
     // copy stats gpu tensor to host tensor [implicit sync]

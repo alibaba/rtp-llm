@@ -19,7 +19,6 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "kmonitor/client/MetricType.h"
 #include "kmonitor/client/core/MetricsRecord.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
@@ -40,10 +39,6 @@ void registerExecCtxOps(pybind11::module& m);
 namespace rtp_llm::test {
 
 struct PyWrappedModelTestPeer {
-    static auto splitInputsIntoMicroBatches(PyWrappedModel& model, const GptModelInputs& inputs) {
-        return model.splitInputsIntoMicroBatches(inputs, model.planMicroBatches(inputs));
-    }
-
     static void replaceContextParallelProcessor(PyWrappedModel&                            model,
                                                 std::unique_ptr<IContextParallelProcessor> processor) {
         model.context_parallel_processor_ = std::move(processor);
@@ -65,7 +60,7 @@ struct PyWrappedModelTestPeer {
             return model.forwardPostLayersLastHidden(hidden, inputs);
         }
         return model.forwardPostLayers(
-            hidden, true, need_all_logits, indexes, false, hidden.size(0), inputs, torch::Tensor(), true);
+            hidden, true, need_all_logits, indexes, hidden.size(0), inputs, torch::Tensor(), true);
     }
 
     static bool generationPrefillCudaGraphReady(const PyWrappedModel& model) {
@@ -161,7 +156,7 @@ void ensureRuntimeInitialized() {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
         if (!isRuntimeInitialized()) {
-            initRuntime(0, false, false, MlaOpsType::AUTO);
+            initRuntime(0);
         }
     });
 }
@@ -527,7 +522,6 @@ struct Scenario {
     std::map<std::string, uintptr_t> base_addresses;
     GptModelInputs                   inputs;
     ParallelismConfig                parallelism;
-    DeviceResourceConfig             device_resources;
     size_t                           model_id{0};
     std::optional<int>               mtp_cache_config_index;
     bool                             replace_cp_processor{false};
@@ -557,23 +551,6 @@ Scenario makeMultiTagScenario() {
     return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
 }
 
-Scenario makeMicroBatchScenario() {
-    auto     config = makeCacheConfig({{"default", 2, 16}});
-    auto     layout = makeLayout(config);
-    auto     inputs = makeInputs(/*input_lengths=*/{2, 4, 2},
-                             /*request_ids=*/{201, 202, 203},
-                             /*cache_keys=*/{2101, 0, 2201, 2202, 2301, 0},
-                             /*cache_keys_width=*/2,
-                             /*block_ids=*/{1, -1, 2, 3, 4, -1},
-                             /*group_tags=*/{"default"},
-                             /*block_table_width=*/2,
-                             /*global_tokens_per_block=*/2,
-                             /*global_stride_bytes=*/16);
-    Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
-    scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
-    return scenario;
-}
-
 Scenario makeContextParallelScenario(size_t tp_rank) {
     auto     config = makeCacheConfig({{"linear", 1, 24}, {"full", 2, 16}});
     auto     layout = makeLayout(config);
@@ -595,7 +572,7 @@ Scenario makeContextParallelScenario(size_t tp_rank) {
     return scenario;
 }
 
-Scenario makeCaptureScenario(bool micro_batch, bool context_parallel, bool publisher_owner, bool fp8) {
+Scenario makeCaptureScenario(bool context_parallel, bool publisher_owner, bool fp8) {
     auto config = makeCacheConfig({{"default", 2, 16}});
     auto layout = makeLayout(config);
     auto inputs =
@@ -614,9 +591,6 @@ Scenario makeCaptureScenario(bool micro_batch, bool context_parallel, bool publi
     scenario.inputs.pd_separation         = false;
     scenario.capture_layer_ids            = {0, 1};
     scenario.capture_dtype                = fp8 ? HiddenStateCaptureDtype::FP8_E4M3 : HiddenStateCaptureDtype::BF16;
-    if (micro_batch) {
-        scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
-    }
     if (context_parallel) {
         scenario.parallelism.tp_size                  = 2;
         scenario.parallelism.tp_rank                  = 0;
@@ -625,37 +599,6 @@ Scenario makeCaptureScenario(bool micro_batch, bool context_parallel, bool publi
     } else if (!publisher_owner) {
         scenario.parallelism.tp_size = 2;
         scenario.parallelism.tp_rank = 1;
-    }
-    return scenario;
-}
-
-Scenario makeMicroBatchFinalNormParityScenario(bool capture_hidden_states) {
-    auto scenario                    = makeCaptureScenario(true, false, true, false);
-    scenario.hidden_size             = 2;
-    scenario.install_final_layernorm = true;
-    if (!capture_hidden_states) {
-        scenario.inputs.capture_hidden_states = false;
-        scenario.capture_layer_ids.clear();
-    }
-    return scenario;
-}
-
-Scenario makeDisabledMicroBatchScenario(int32_t token_count, bool capture_hidden_states) {
-    auto scenario                         = makeCaptureScenario(true, false, true, false);
-    scenario.inputs                       = makeInputs(/*input_lengths=*/{token_count},
-                                 /*request_ids=*/{701},
-                                 /*cache_keys=*/{0, 0},
-                                 /*cache_keys_width=*/2,
-                                 /*block_ids=*/{1, -1},
-                                 /*group_tags=*/{"default"},
-                                 /*block_table_width=*/2,
-                                 /*global_tokens_per_block=*/2,
-                                 /*global_stride_bytes=*/16);
-    scenario.inputs.skip_lm_head          = true;
-    scenario.inputs.capture_hidden_states = capture_hidden_states;
-    scenario.inputs.pd_separation         = false;
-    if (!capture_hidden_states) {
-        scenario.capture_layer_ids.clear();
     }
     return scenario;
 }
@@ -710,7 +653,7 @@ Scenario makeScenario(const std::string& name) {
             {2, 2, 8});
         return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     }
-    if (name == "cuda_lengths_host_prefix" || name == "cuda_lengths_host_prefix_micro") {
+    if (name == "cuda_lengths_host_prefix") {
         auto config           = makeCacheConfig({{"full", 128, 256}});
         auto layout           = makeLayout(config);
         auto inputs           = makeInputs({1, 3, 4},
@@ -727,9 +670,6 @@ Scenario makeScenario(const std::string& name) {
         inputs.pd_separation  = false;
         Scenario scenario{
             std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
-        if (name == "cuda_lengths_host_prefix_micro") {
-            scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
-        }
         return scenario;
     }
     if (name == "mtp_placeholders" || name == "mtp_placeholders_extra_payload" || name == "mtp_missing_placeholder"
@@ -766,27 +706,6 @@ Scenario makeScenario(const std::string& name) {
         scenario.mtp_cache_config_index = 0;
         return scenario;
     }
-    if (name == "micro_batch_multi_tag") {
-        auto config = makeCacheConfig({{"linear", 1, 24}, {"full", 2, 16}});
-        auto layout = makeLayout(config);
-        auto inputs = makeInputs(
-            /*input_lengths=*/{2, 4, 2},
-            /*request_ids=*/{201, 202, 203},
-            /*cache_keys=*/{2101, 2102, 0, 0, 2201, 2202, 2203, 2204, 2301, 2302, 0, 0},
-            /*cache_keys_width=*/4,
-            /*block_ids=*/{1, -1, -1, -1, 2, 3, -1, -1, 4, -1, -1, -1, 2, 3, -1, -1, 4, 5, 6, 7, 1, 2, -1, -1},
-            /*group_tags=*/{"full", "linear"},
-            /*block_table_width=*/4,
-            /*global_tokens_per_block=*/1,
-            /*global_stride_bytes=*/24);
-        Scenario scenario{
-            std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
-        scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
-        return scenario;
-    }
-    if (name == "fake_micro_batch") {
-        return makeMultiTagScenario();
-    }
     if (name == "duplicate_tags" || name == "empty_tag" || name == "missing_tags" || name == "unknown_tag"
         || name == "physical_group_mismatch" || name == "type_group_mismatch" || name == "multi_group_2d") {
         auto scenario = makeMultiTagScenario();
@@ -822,9 +741,6 @@ Scenario makeScenario(const std::string& name) {
     if (name == "multi_tag") {
         return makeMultiTagScenario();
     }
-    if (name == "micro_batch") {
-        return makeMicroBatchScenario();
-    }
     if (name == "cp_actual_lengths_rank0") {
         return makeContextParallelScenario(/*tp_rank=*/0);
     }
@@ -840,114 +756,85 @@ Scenario makeScenario(const std::string& name) {
         return scenario;
     }
     if (name == "capture_bf16") {
-        return makeCaptureScenario(false, false, true, false);
+        return makeCaptureScenario(false, true, false);
     }
     if (name == "capture_explicit_off") {
-        auto scenario                         = makeCaptureScenario(false, false, true, false);
+        auto scenario                         = makeCaptureScenario(false, true, false);
         scenario.inputs.capture_hidden_states = false;
         return scenario;
     }
     if (name == "capture_with_lm_head") {
-        auto scenario                = makeCaptureScenario(false, false, true, false);
+        auto scenario                = makeCaptureScenario(false, true, false);
         scenario.inputs.skip_lm_head = false;
         scenario.install_lm_head     = true;
         return scenario;
     }
     if (name == "capture_async_history") {
-        auto scenario                               = makeCaptureScenario(false, false, true, false);
+        auto scenario                               = makeCaptureScenario(false, true, false);
         scenario.increment_request_ids_each_forward = true;
         return scenario;
     }
 
     if (name == "capture_non_4096_hidden") {
-        auto scenario        = makeCaptureScenario(false, false, true, false);
+        auto scenario        = makeCaptureScenario(false, true, false);
         scenario.hidden_size = 2048;
         return scenario;
     }
     if (name == "capture_bf16_tp") {
-        auto scenario                = makeCaptureScenario(false, false, true, false);
+        auto scenario                = makeCaptureScenario(false, true, false);
         scenario.parallelism.tp_size = 2;
         return scenario;
     }
 
     if (name == "capture_non_owner") {
-        return makeCaptureScenario(false, false, false, false);
-    }
-    if (name == "capture_ffn_service") {
-        auto scenario = makeCaptureScenario(false, false, true, false);
-        scenario.parallelism.ffn_disaggregate_config.enable_ffn_disaggregate = true;
-        scenario.parallelism.ffn_disaggregate_config.is_ffn_rank             = true;
-        return scenario;
+        return makeCaptureScenario(false, false, false);
     }
     if (name == "capture_fp8") {
-        return makeCaptureScenario(false, false, true, true);
+        return makeCaptureScenario(false, true, true);
     }
     if (name == "capture_fp8_tp") {
-        auto scenario                = makeCaptureScenario(false, false, true, true);
-        scenario.parallelism.tp_size = 2;
-        return scenario;
-    }
-    if (name == "capture_micro_batch") {
-        return makeCaptureScenario(true, false, true, false);
-    }
-    if (name == "micro_batch_final_norm_parity_capture_off") {
-        return makeMicroBatchFinalNormParityScenario(false);
-    }
-    if (name == "micro_batch_final_norm_parity_capture_on") {
-        return makeMicroBatchFinalNormParityScenario(true);
-    }
-    if (name == "capture_disabled_micro_batch_fake_lane") {
-        return makeDisabledMicroBatchScenario(/*token_count=*/2, /*capture_hidden_states=*/true);
-    }
-    if (name == "disabled_micro_batch_zero_tokens") {
-        return makeDisabledMicroBatchScenario(/*token_count=*/0, /*capture_hidden_states=*/false);
-    }
-    if (name == "capture_micro_batch_tp") {
-        auto scenario                = makeCaptureScenario(true, false, true, false);
+        auto scenario                = makeCaptureScenario(false, true, true);
         scenario.parallelism.tp_size = 2;
         return scenario;
     }
     if (name == "capture_cp") {
-        return makeCaptureScenario(false, true, true, false);
-    }
-    if (name == "capture_cp_micro_batch") {
-        return makeCaptureScenario(true, true, true, false);
+        return makeCaptureScenario(true, true, false);
     }
     if (name == "capture_cp_invalid_num_valid_tokens") {
-        auto scenario                            = makeCaptureScenario(false, true, true, false);
+        auto scenario                            = makeCaptureScenario(true, true, false);
         scenario.report_invalid_num_valid_tokens = true;
         return scenario;
     }
     if (name == "capture_cp_malformed_layout") {
-        return makeCaptureScenario(false, true, true, false);
+        return makeCaptureScenario(true, true, false);
     }
     if (name == "capture_cp_malformed_restored_width") {
-        auto scenario                   = makeCaptureScenario(false, true, true, false);
+        auto scenario                   = makeCaptureScenario(true, true, false);
         scenario.corrupt_restored_width = true;
         return scenario;
     }
     if (name == "capture_duplicate_layer_id") {
-        auto scenario              = makeCaptureScenario(false, false, true, false);
+        auto scenario              = makeCaptureScenario(false, true, false);
         scenario.capture_layer_ids = {0, 0};
         return scenario;
     }
     if (name == "capture_invalid_dtype") {
-        auto scenario          = makeCaptureScenario(false, false, true, false);
+        auto scenario          = makeCaptureScenario(false, true, false);
         scenario.capture_dtype = static_cast<HiddenStateCaptureDtype>(99);
         return scenario;
     }
     if (name == "capture_negative_request_id") {
-        auto scenario              = makeCaptureScenario(false, false, true, false);
+        auto scenario              = makeCaptureScenario(false, true, false);
         scenario.inputs.request_id = pinnedLongTensor({-1, 502}, {2});
         return scenario;
     }
     if (name == "capture_duplicate_request_id") {
-        auto scenario              = makeCaptureScenario(false, false, true, false);
+        auto scenario              = makeCaptureScenario(false, true, false);
         scenario.inputs.request_id = pinnedLongTensor({501, 501}, {2});
         return scenario;
     }
     if (name == "capture_prepare_failure_tp") {
-        auto scenario                = makeCaptureScenario(false, false, true, false);
+        auto scenario                = makeCaptureScenario(false, true, false);
         scenario.parallelism.tp_size = 2;
         auto indices                 = torch::tensor({0, 1}, torch::kInt64).reshape({1, 2});
         auto values                  = torch::tensor({501, 502}, torch::kInt64);
@@ -955,7 +842,7 @@ Scenario makeScenario(const std::string& name) {
         return scenario;
     }
     if (name == "capture_prepare_failure_non_owner") {
-        auto scenario              = makeCaptureScenario(false, false, false, false);
+        auto scenario              = makeCaptureScenario(false, false, false);
         auto indices               = torch::tensor({0, 1}, torch::kInt64).reshape({1, 2});
         auto values                = torch::tensor({501, 502}, torch::kInt64);
         scenario.inputs.request_id = torch::sparse_coo_tensor(indices, values, {2}).coalesce();
@@ -1040,22 +927,11 @@ py::dict closeCapturePublisherWithoutGil() {
     return result;
 }
 
-py::dict initializeCapturePublisherWithCoreDump() {
-    struct ScopedCoreDump {
-        ScopedCoreDump(): previous(std::exchange(StaticConfig::user_ft_core_dump_on_exception, true)) {}
-        ~ScopedCoreDump() {
-            StaticConfig::user_ft_core_dump_on_exception = previous;
-        }
-        const bool previous;
-    };
-
-    const bool          previous_core_dump = StaticConfig::user_ft_core_dump_on_exception;
+py::dict initializeCapturePublisher() {
     FakeMetricsReporter fake_metrics_reporter;
     py::dict            result;
     result["error"] = "";
     try {
-        ScopedCoreDump core_dump;
-        result["core_dump_enabled"] = StaticConfig::user_ft_core_dump_on_exception;
         HiddenStateCapturePublisher publisher(/*layer_count=*/2,
                                               /*hidden_size=*/1,
                                               HiddenStateCaptureDtype::BF16,
@@ -1067,7 +943,6 @@ py::dict initializeCapturePublisherWithCoreDump() {
     } catch (const std::exception& error) {
         result["error"] = error.what();
     }
-    result["core_dump_restored"]   = StaticConfig::user_ft_core_dump_on_exception == previous_core_dump;
     auto metrics                   = fake_metrics_reporter.snapshotHiddenStateCaptureMetrics();
     result["capture_metrics"]      = metrics[0];
     result["capture_metric_types"] = metrics[1];
@@ -1153,25 +1028,8 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     RTP_LLM_CHECK_WITH_INFO(forward_count > 0, "forward_count must be positive");
 
     const bool cacheless_warmup = scenario_name == "cacheless_warmup";
-    const bool inspect_split = scenario_name == "micro_batch_split_pinned" || scenario_name == "micro_batch_split_cuda"
-                               || scenario_name == "micro_batch_split_single_group"
-                               || scenario_name == "micro_batch_split_2d";
-    const bool single_group_split =
-        scenario_name == "micro_batch_split_single_group" || scenario_name == "micro_batch_split_2d";
-    const auto input_scenario = inspect_split ? (single_group_split ? "micro_batch" : "micro_batch_multi_tag") :
-                                                (cacheless_warmup ? "multi_tag" : scenario_name);
-    auto       scenario       = makeScenario(input_scenario);
-    if (inspect_split) {
-        scenario.inputs.kv_cache_kernel_block_id.add_(100);
-        scenario.inputs.kv_cache_kernel_block_id.masked_fill_(scenario.inputs.kv_cache_block_id.lt(0), -1);
-        if (scenario_name == "micro_batch_split_cuda") {
-            scenario.inputs.kv_cache_block_id        = scenario.inputs.kv_cache_block_id.cuda();
-            scenario.inputs.kv_cache_kernel_block_id = scenario.inputs.kv_cache_kernel_block_id.cuda();
-        } else if (scenario_name == "micro_batch_split_2d") {
-            scenario.inputs.kv_cache_block_id        = scenario.inputs.kv_cache_block_id.squeeze(0);
-            scenario.inputs.kv_cache_kernel_block_id = scenario.inputs.kv_cache_kernel_block_id.squeeze(0);
-        }
-    }
+    const auto input_scenario   = cacheless_warmup ? "multi_tag" : scenario_name;
+    auto       scenario         = makeScenario(input_scenario);
     auto                cache_store = std::make_shared<RecordingCacheStore>();
     FakeMetricsReporter fake_metrics_reporter;
     const auto&         metrics_reporter = fake_metrics_reporter.reporter();
@@ -1213,8 +1071,6 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                               RuntimeConfig{},
                               ConcurrencyConfig{},
                               SpeculativeExecutionConfig{},
-                              scenario.device_resources,
-                              MlaOpsType::AUTO,
                               /*max_seq_len=*/scenario_name.find("cuda_lengths_host_prefix") == 0 ? 1024 : 64,
                               scenario.hidden_size,
                               manager,
@@ -1241,33 +1097,6 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     {
         PyWrappedModel                model(params, std::move(py_model));
         TestContextParallelProcessor* test_cp_processor = nullptr;
-        if (inspect_split) {
-            const auto split = PyWrappedModelTestPeer::splitInputsIntoMicroBatches(model, scenario.inputs);
-            py::list   batches;
-            for (const auto& inputs : split.first) {
-                py::dict batch;
-                batch["tags"]          = inputs.kv_cache_group_tags;
-                batch["physical"]      = inputs.kv_cache_block_id;
-                batch["kernel"]        = inputs.kv_cache_kernel_block_id;
-                batch["input_lengths"] = inputs.input_lengths;
-                batches.append(std::move(batch));
-            }
-            py::dict result;
-            result["source_tags"]     = scenario.inputs.kv_cache_group_tags;
-            result["source_physical"] = scenario.inputs.kv_cache_block_id;
-            result["source_kernel"]   = scenario.inputs.kv_cache_kernel_block_id;
-            result["batches"]         = std::move(batches);
-            return result;
-        }
-        if (scenario_name == "fake_micro_batch") {
-            const auto split = PyWrappedModelTestPeer::splitInputsIntoMicroBatches(model, scenario.inputs);
-            py::dict   result;
-            result["real_tags"]             = split.first.at(0).kv_cache_group_tags;
-            result["fake_tags"]             = split.first.at(1).kv_cache_group_tags;
-            result["fake_physical_defined"] = split.first.at(1).kv_cache_block_id.defined();
-            result["fake_kernel_defined"]   = split.first.at(1).kv_cache_kernel_block_id.defined();
-            return result;
-        }
         if (scenario.replace_cp_processor) {
             auto processor = std::make_unique<TestContextParallelProcessor>(
                 scenario.parallelism, scenario.report_invalid_num_valid_tokens, scenario.corrupt_restored_width);
@@ -1337,10 +1166,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
 py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
-        initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false,
-                    /*enable_comm_overlap=*/false,
-                    MlaOpsType::AUTO);
+        initRuntime(/*device_id=*/0);
     });
 
     bool                          saw_dirty_capture_error = false;
@@ -1384,8 +1210,6 @@ py::dict runDirtyGenerationPrefillCaptureScenario(py::object py_model) {
                                   RuntimeConfig{},
                                   ConcurrencyConfig{},
                                   SpeculativeExecutionConfig{},
-                                  DeviceResourceConfig{},
-                                  MlaOpsType::AUTO,
                                   /*max_seq_len=*/4,
                                   /*hidden_size=*/4,
                                   manager,
@@ -1414,10 +1238,7 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
                                              const std::vector<std::pair<bool, bool>>& forward_flags) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
-        initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false,
-                    /*enable_comm_overlap=*/false,
-                    MlaOpsType::AUTO);
+        initRuntime(/*device_id=*/0);
     });
 
     auto config  = makeCacheConfig({{"full", 4, 64}});
@@ -1460,8 +1281,6 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
                               RuntimeConfig{},
                               ConcurrencyConfig{},
                               SpeculativeExecutionConfig{},
-                              DeviceResourceConfig{},
-                              MlaOpsType::AUTO,
                               /*max_seq_len=*/4,
                               /*hidden_size=*/4,
                               manager,
@@ -1546,8 +1365,7 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
 // Only decoder math is replaced; all routing and post-layers code is production.
 py::dict
 runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, bool python_norm, bool compact_output) {
-    static std::once_flag runtime_once;
-    std::call_once(runtime_once, []() { initRuntime(0, false, false, MlaOpsType::AUTO); });
+    ensureRuntimeInitialized();
     constexpr int     width             = 4;
     constexpr int64_t block_table_width = 2;
     const bool        enable_graph      = python_norm;
@@ -1583,7 +1401,6 @@ runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, 
         params.hw_kernel_config.decode_capture_batch_sizes                 = {1, 2};
         params.runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
     }
-    params.device_resource_config.enable_layer_micro_batch = python_norm ? 0 : 1;
     if (!handler.is_none()) {
         py_model.attr("custom_output_handler") = std::move(handler);
     }
@@ -1649,7 +1466,7 @@ py::object makeNativeLmHead(py::object                   py_model,
                             int                          tp_rank,
                             size_t                       vocab_size) {
     if (!isRuntimeInitialized()) {
-        initRuntime(kernel.get_device(), false, false, MlaOpsType::AUTO);
+        initRuntime(kernel.get_device());
     }
     auto                weights = convertNativeLmHead(kernel, scales.value_or(torch::Tensor()), true);
     GptModelDescription description;
@@ -1703,8 +1520,6 @@ runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string&
                               RuntimeConfig{},
                               ConcurrencyConfig{},
                               SpeculativeExecutionConfig{},
-                              DeviceResourceConfig{},
-                              MlaOpsType::AUTO,
                               /*max_seq_len=*/64,
                               /*hidden_size=*/1,
                               /*cache_manager=*/nullptr,
@@ -1769,7 +1584,7 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
           py::arg("compact_output") = false);
     m.def("flush_capture_publisher_without_close", &rtp_llm::test::flushCapturePublisherWithoutClose);
     m.def("close_capture_publisher_without_gil", &rtp_llm::test::closeCapturePublisherWithoutGil);
-    m.def("initialize_capture_publisher_with_core_dump", &rtp_llm::test::initializeCapturePublisherWithCoreDump);
+    m.def("initialize_capture_publisher", &rtp_llm::test::initializeCapturePublisher);
     m.def("run_tp_sync_model_inputs_scenario",
           &rtp_llm::test::runTpSyncModelInputsScenario,
           py::arg("tp_rank"),

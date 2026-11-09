@@ -230,11 +230,8 @@ def fused_rmsnorm_rope(
 
     BLOCK_D = triton.next_power_of_2(D)
 
-    env_group_heads = os.environ.get("DSV4_RMSNORM_ROPE_GROUP_HEADS")
     if group_heads is not None:
         selected_group_heads = group_heads
-    elif env_group_heads is not None:
-        selected_group_heads = int(env_group_heads)
     else:
         selected_group_heads = 1
         if _is_blackwell_device(x.device):
