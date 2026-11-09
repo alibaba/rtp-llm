@@ -5,7 +5,7 @@
 # + fast_safetensors + fastsafetensors (the last two rebuilt against
 # torch 2.11+cu130 and mirrored to oss://rtp-maga/0502/).  Other
 # torch-ABI-bound wheels (flash_attn, flashinfer, deep_ep, rtp_kernel,
-# fast_hadamard, nvidia_cutlass_dsl) are deferred — see plan
+# fast_hadamard) are deferred — see plan
 # §K and bazel/arch_select.bzl whl_deps() cuda13_x86 branch for how
 # rtp_llm/BUILD selects subset out of that set.
 
@@ -48,3 +48,6 @@ tabulate==0.9.0
 # auto_gptq      # deferred — torch 2.11 ABI rebuild needed
 # autoawq        # deferred
 # tensorrt 10.x cu12 series — drop for cuda13 (use TRT-LLM plugins via C++ side).
+
+# SM120 NVFP4 needs the CUDA13 CuTe payload (CUTLASS #3170).
+nvidia-cutlass-dsl[cu13]==4.4.2
