@@ -122,7 +122,6 @@ class Qwen3DFlash(QwenV3):
             quant_config=self.model_config.quant_config,
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.hw_kernel_config,
-            device_resource_config=self.device_resource_config,
         )
         return self.py_model
 
