@@ -66,6 +66,13 @@ public:
     virtual void free(const BlockIndicesType& block_indices)                                                     = 0;
     virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
+    // Additional physical blocks allocated by the next call, before sparse cleanup can free any old slots.
+    virtual int estimateNextNeedBlocks(int                     seq_len,
+                                       const BlockIndicesType& current_block_indices,
+                                       int                     reserve_step,
+                                       bool                    enable_reuse_cache) const {
+        return estimatePeakNeedBlocks(seq_len, current_block_indices, 0, reserve_step, enable_reuse_cache);
+    }
     // Estimate peak additional blocks needed when generating remaining_tokens more tokens.
     virtual int estimatePeakNeedBlocks(int                     seq_len,
                                        const BlockIndicesType& current_block_indices,
@@ -112,6 +119,15 @@ public:
     virtual CacheMemoryPlacement memoryPlacement() const;
 
 protected:
+    static int estimateSparsePeakFromSlotCosts(std::vector<int>         block_costs,
+                                               int                      final_slots,
+                                               int                      new_slot_cost,
+                                               int                      reserve_step,
+                                               int                      retained_tail_blocks,
+                                               bool                     enable_reuse_cache,
+                                               int                      linear_step,
+                                               const std::vector<bool>& pinned_slots = {});
+
     static GroupBase
     makeLegacyCacheGroup(const LayerIdsType& layer_ids, KVCacheSpecPtr spec, const CacheGroupPolicy& policy) {
         GroupBase group;

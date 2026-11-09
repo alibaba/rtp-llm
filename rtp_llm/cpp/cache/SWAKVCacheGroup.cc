@@ -75,18 +75,62 @@ int SWAKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_
     return std::max((seq_len + reserve_step + block_size - 1) / block_size - current_blocks, 0);
 }
 
-// Conservative upper bound: sliding-window peak usage never exceeds full-attention usage.
+int SWAKVCacheGroup::estimateNextNeedBlocks(int                     seq_len,
+                                            const BlockIndicesType& current_block_indices,
+                                            int                     reserve_step,
+                                            bool                    enable_reuse_cache) const {
+    const int  seq_slots   = needBlocksNum(seq_len, 0);
+    const int  total_slots = needBlocksNum(seq_len, 0, reserve_step);
+    const int  step        = std::max(1, linear_step_);
+    const bool reuse       = effectiveReuseCacheForAllocation(enable_reuse_cache);
+    int        need        = 0;
+    for (int slot = static_cast<int>(current_block_indices.size()); slot < total_slots; ++slot) {
+        need += shouldAllocateBlock(slot, seq_slots, reserve_step, step, reuse, activeTailBlockCount());
+    }
+    return need;
+}
+
 int SWAKVCacheGroup::estimatePeakNeedBlocks(int                     seq_len,
                                             const BlockIndicesType& current_block_indices,
                                             int                     remaining_tokens,
                                             int                     reserve_step,
                                             bool                    enable_reuse_cache) const {
-    (void)enable_reuse_cache;
+    const int        step          = std::max(1, linear_step_);
+    const bool       reuse         = effectiveReuseCacheForAllocation(enable_reuse_cache);
+    const int        seq_slots     = needBlocksNum(seq_len, 0);
+    const int        initial_slots = needBlocksNum(seq_len, 0, reserve_step);
+    const int        final_slots   = needBlocksNum(seq_len + remaining_tokens, 0, reserve_step);
+    const auto       pinned_slots  = current_block_indices.empty() ?
+                                         std::vector<bool>{} :
+                                         block_pool_->externallyReferencedSlots(current_block_indices);
+    std::vector<int> block_costs;
+    block_costs.reserve(std::max(final_slots, static_cast<int>(current_block_indices.size())));
     int allocated_blocks = 0;
     for (const auto block_index : current_block_indices) {
-        allocated_blocks += !isNullBlockIdx(block_index);
+        const bool allocated = !isNullBlockIdx(block_index);
+        allocated_blocks += allocated;
+        block_costs.push_back(allocated ? 1 : 0);
     }
-    return std::max(needBlocksNum(seq_len + remaining_tokens, 0, reserve_step) - allocated_blocks, 0);
+    // Match the next allocation's whole burst before considering later growth.
+    // Historical holes are not allocated again by SWA::malloc().
+    int initial_peak = allocated_blocks;
+    for (int slot = static_cast<int>(block_costs.size()); slot < initial_slots; ++slot) {
+        const int cost =
+            shouldAllocateBlock(slot, seq_slots, reserve_step, step, reuse, activeTailBlockCount()) ? 1 : 0;
+        block_costs.push_back(cost);
+        initial_peak += cost;
+    }
+    // incrMalloc cleans the current burst before any subsequent decode can grow.
+    const int last_expired = static_cast<int>(block_costs.size()) - activeTailBlockCount() - 1 - reserve_step;
+    for (int slot = 0; slot <= last_expired; ++slot) {
+        const auto index = static_cast<size_t>(slot);
+        if ((!reuse || (slot + 1) % step != 0) && (index >= pinned_slots.size() || !pinned_slots[index])) {
+            block_costs[index] = 0;
+        }
+    }
+    const int peak = estimateSparsePeakFromSlotCosts(
+        std::move(block_costs), final_slots, 1, reserve_step, activeTailBlockCount(), reuse, step, pinned_slots);
+    return std::max(std::max(initial_peak, peak) - allocated_blocks, 0);
 }
 
 int SWAKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
@@ -95,11 +139,24 @@ int SWAKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                         int  reserve_step,
                                                         bool enable_reuse_cache,
                                                         int  target_batch_size) const {
-    (void)enable_reuse_cache;
+    const int        step          = std::max(1, linear_step_);
+    const bool       reuse         = effectiveReuseCacheForAllocation(enable_reuse_cache);
     const int batch_size    = std::max(target_batch_size, 1);
-    const int common_blocks = needBlocksNum(common_seq_len, 0);
-    const int peak_blocks   = needBlocksNum(seq_len + remaining_tokens, 0, reserve_step);
-    return common_blocks + batch_size * std::max(peak_blocks - common_blocks, 0);
+    const int        common_slots  = needBlocksNum(common_seq_len, 0);
+    const int        seq_slots     = needBlocksNum(seq_len, 0);
+    const int        initial_slots = needBlocksNum(seq_len, 0, reserve_step);
+    const int        final_slots   = needBlocksNum(seq_len + remaining_tokens, 0, reserve_step);
+    std::vector<int> block_costs;
+    block_costs.reserve(std::max(initial_slots, final_slots));
+    for (int slot = 0; slot < common_slots; ++slot) {
+        block_costs.push_back(shouldAllocateBlock(slot, common_slots, 0, step, reuse, activeTailBlockCount()) ? 1 : 0);
+    }
+    for (int slot = common_slots; slot < initial_slots; ++slot) {
+        block_costs.push_back(
+            shouldAllocateBlock(slot, seq_slots, reserve_step, step, reuse, activeTailBlockCount()) ? batch_size : 0);
+    }
+    return estimateSparsePeakFromSlotCosts(
+        std::move(block_costs), final_slots, batch_size, reserve_step, activeTailBlockCount(), reuse, step);
 }
 
 NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(

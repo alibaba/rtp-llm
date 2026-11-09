@@ -53,6 +53,8 @@ private:
     size_t    reapErroredWaitingStreams();
     size_t    reapFinished(std::list<GenerateStreamPtr>& streams);
     size_t    promotePendingDecodeStreams();
+    bool                         useIndependentPoolDecode() const;
+    std::list<GenerateStreamPtr> scheduleIndependentPoolDecode(bool& made_progress);
     RoundType chooseRound();
     bool      tryAdmitKVForPrefill(const GenerateStreamPtr& new_stream);
 
@@ -64,6 +66,8 @@ private:
 
 private:
     std::list<GenerateStreamPtr> pending_decode_streams_;
+    // Only this stream may spend the common growth reserve. Other streams retain their KV while waiting.
+    GenerateStreamPtr protected_decode_stream_;
     // Per-prefill-round scratch state, guarded by the scheduler lock.
     std::unique_ptr<AdmissionPeakState> admission_peak_state_;
     int64_t                             decode_prefill_step_  = 1;

@@ -288,6 +288,35 @@ int GenerateStream::estimatePeakNeedBlocks(int remaining_tokens) const {
     return estimateKVNeedBlocks(remaining_tokens, maxBatchSize());
 }
 
+std::vector<KVCachePoolAdmissionEstimate> GenerateStream::estimateIndependentPoolNeeds(bool include_lifecycle_peak) {
+    // Sparse block tables and sequence lengths can change in asynchronous output bookkeeping.
+    std::lock_guard<std::mutex> lock(*mutex_);
+    checkTimeoutWithoutLock();
+    // Match or exceed the published allocation bound consumed by handleRunning().
+    const int seq_len = std::max(
+        {seqLength(), getNormalAsyncDeviceState().next_real_seq_len, getMtpAsyncDeviceState().next_real_seq_len});
+    int common_len = std::min(completeTokenIdsPtr()->commonSeqLength(), seq_len);
+    if (maxBatchSize() > 1) {
+        common_len = common_len / seqSizePerBlock() * seqSizePerBlock();
+    }
+    return resourceContext().cache_manager->estimateIndependentPoolNeeds(
+        kvCache(),
+        seq_len,
+        common_len,
+        include_lifecycle_peak ? std::max(0, static_cast<int>(maxTokenNum()) - seq_len - 1) : 0,
+        reserveStep(),
+        stream_cache_resource_->reuseCache(),
+        maxBatchSize(),
+        stream_cache_resource_->enableDeviceCache()
+            && !(resourceContext().role_type == RoleType::DECODE
+                 && resourceContext().cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse));
+}
+
+bool GenerateStream::ownsAllIndependentPoolRequests() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return resourceContext().cache_manager->ownsAllIndependentPoolRequests(kvCache());
+}
+
 std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {
     return generate_input_;
 }
