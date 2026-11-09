@@ -4,12 +4,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Union
 
-from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 
 
 @dataclass
 class VitMetricSample:
-    metric: GaugeMetrics
+    metric: Union[AccMetrics, GaugeMetrics]
     value: float
     tags: Dict[str, str] = field(default_factory=dict)
 
@@ -20,7 +20,7 @@ class VitPreprocessMetrics:
 
     def report(
         self,
-        metric: GaugeMetrics,
+        metric: Union[AccMetrics, GaugeMetrics],
         value: float,
         tags: Optional[Dict[str, str]] = None,
     ) -> None:
@@ -57,13 +57,16 @@ def vit_preprocess_timer(
 
 
 def record_vit_preprocess_value(
-    metric: GaugeMetrics,
+    metric: Union[AccMetrics, GaugeMetrics],
     value: Union[int, float],
     tags: Optional[Dict[str, str]] = None,
-) -> None:
+) -> bool:
+    """Return whether the sample was captured for parent-side reporting."""
     metrics = _current_metrics.get()
     if metrics is not None:
         metrics.report(metric, float(value), tags)
+        return True
+    return False
 
 
 def video_resized_pixel_count(

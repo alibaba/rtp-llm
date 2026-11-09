@@ -222,6 +222,26 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(hot["entries"][0]["embedding_hit"])
 
+    async def test_parsed_region_reaches_vit_for_all_media(self):
+        self.request.headers["region"] = "cn-beijing"
+        self.request.mm_inputs.append(
+            MultimodalInput(
+                "https://example/second-image",
+                1,
+                torch.empty(0),
+                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], -1),
+            )
+        )
+        keys = multimodal_cache_keys(self.request)
+        await self.client.get_vit_cache_metadata(self.address, keys, self.request)
+        call = self.engine.get_embedding_result.call_args
+        self.assertEqual(call.kwargs["region"], "cn-beijing")
+        self.assertEqual(len(call.args[0]), 2)
+
+    async def test_missing_region_reaches_vit_as_none(self):
+        await self.client.get_vit_cache_metadata(self.address, self.keys, self.request)
+        self.assertIsNone(self.engine.get_embedding_result.call_args.kwargs["region"])
+
     async def test_cache_disabled_still_returns_hashes_without_embeddings(self):
         self.engine._hash_key_cache.resize(0)
         self.engine._embedding_cache.clear()

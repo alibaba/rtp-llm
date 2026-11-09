@@ -45,7 +45,6 @@ from rtp_llm.server.mm_cache_metadata import MAX_METADATA_BYTES, metadata_from_p
 from rtp_llm.server.request_headers import (
     dashscope_greennet_metadata,
     extract_qos_priority,
-    extract_workspace_region,
 )
 from rtp_llm.server.worker_status import _coerce_role_type
 from rtp_llm.telemetry import attributes as trace_attrs
@@ -622,7 +621,7 @@ class MasterClient:
         # The cache-hit probe carries no URLs. On a miss serialize each distinct
         # missing input once, without copying image/video data into embeddings.
         inputs = MultimodalInputsPB(request_id=input.request_id)
-        region = extract_workspace_region(input.headers)
+        region = input.headers.get("region")
         if region:
             # Request-level: one value for every multimodal input submitted below.
             inputs.region = region

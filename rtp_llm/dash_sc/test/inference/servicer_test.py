@@ -1263,7 +1263,10 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 request,
                 [7, 129264, 8, 128821],
                 SamplingParams(),
-                DashScRequestControls(enable_thinking=True),
+                DashScRequestControls(
+                    enable_thinking=True,
+                    request_headers={"region": "cn-beijing"},
+                ),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -1277,6 +1280,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(visitor.enqueue_called, 2)
         first, second = visitor.generate_inputs
+        self.assertEqual(first.headers["region"], "cn-beijing")
+        self.assertEqual(second.headers["region"], "cn-beijing")
         self.assertEqual(first.token_ids.tolist(), [7, 129264, 8, 128821])
         self.assertEqual(
             second.token_ids.tolist(), [7, 129264, 8, 128821, 271, 128822, 271]

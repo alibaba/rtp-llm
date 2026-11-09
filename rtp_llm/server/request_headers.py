@@ -102,17 +102,15 @@ def dashscope_greennet_metadata(headers: Optional[Mapping[str, Any]]) -> tuple:
     return metadata
 
 
-def extract_workspace_region(headers: Optional[Mapping[str, Any]]) -> Optional[str]:
-    """读取网关注入的 x_dashscope_inner_workspace_meta, 提取 region 字段。
+def extract_workspace_region(ds_attrs: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Extract only region from workspace metadata in decoded ds_header_attributes.
 
-    该 header 是 JSON 字符串, 形如
-    '{"model_logging_policy":"default","region":"ap-southeast-1",...}'。
-    与 dashscope-serving request_region.extract_request_region 一致: 解析失败、
-    非 dict、region 非字符串时返回 None (等价无 workspace 信息)。
+    Missing or malformed metadata and blank/non-string regions return None.
+    No alternate headers or nested request paths are consulted.
     """
-    if not headers:
+    if not ds_attrs:
         return None
-    raw = headers.get("x_dashscope_inner_workspace_meta")
+    raw = ds_attrs.get("x-dashscope-inner-workspace-meta")
     if not raw:
         return None
     if isinstance(raw, str):

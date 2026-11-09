@@ -2930,6 +2930,40 @@ class ClientSpanSettlementTest(TestCase):
                 self.assertEqual(span.status, "ERROR")
                 self.assertEqual(span.end_count, 1)
 
+    def test_greennet_rpc_carries_only_parsed_region(self):
+        greennet_hook = importlib.import_module("rtp_llm.multimodal.greennet_hook")
+        for region in (None, "cn-beijing"):
+            with self.subTest(region=region):
+                client = self._build_client(_FakeClientSpan(), total=1)
+                inp = self._make_input()
+                if region is not None:
+                    inp.headers["region"] = region
+                inp.generate_config.role_addrs = [
+                    RoleAddr(
+                        role=RoleType.VIT,
+                        ip="127.0.0.1",
+                        grpc_port=8001,
+                        http_port=8000,
+                    )
+                ]
+                stub = MagicMock()
+                stub.WaitGreenNetVerdict = AsyncMock()
+                with (
+                    patch.object(greennet_hook, "greennet_enabled", return_value=True),
+                    patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.MultimodalRpcServiceStub",
+                        return_value=stub,
+                    ),
+                ):
+                    asyncio.run(
+                        client._wait_greennet_verdict(
+                            inp, GenerateInputPB(request_id=7)
+                        )
+                    )
+                stub.WaitGreenNetVerdict.assert_awaited_once()
+                sent = stub.WaitGreenNetVerdict.call_args.args[0]
+                self.assertEqual(sent.region, region or "")
+
     def test_greennet_transport_failure_is_not_content_rejection(self):
         # String patch lookup can resolve through rtp_llm.__getattr__ to the
         # mocked ops module before the real greennet_hook has been imported.

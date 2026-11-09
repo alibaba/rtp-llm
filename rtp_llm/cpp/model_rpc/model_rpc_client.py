@@ -37,7 +37,6 @@ from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_qos_priority,
     extract_trace_id,
-    extract_workspace_region,
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
@@ -1675,7 +1674,7 @@ class ModelRpcClient(object):
                 continue
             vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
             mm_inputs_pb = _make_multimodal_inputs_pb(input_pb)
-            region = extract_workspace_region(input_py.headers)
+            region = input_py.headers.get("region")
             if region:
                 # Request-level: one value for every multimodal input in this PB.
                 mm_inputs_pb.region = region
