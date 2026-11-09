@@ -565,6 +565,8 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             self.self_attn.qk_fuse_norm = ZeroCenteredFusedQKRMSNorm.replacing(fused)
 
     def _attention_quant_config(self, config, weights):
+        if getattr(config, "_qwen4_nvfp4_source", False):
+            return None
         if bool(getattr(config, "_qwen4_full_fp8_nvfp4", False)):
             from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 

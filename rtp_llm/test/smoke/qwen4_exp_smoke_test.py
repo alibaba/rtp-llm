@@ -94,8 +94,9 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import requests
-        from rtp_llm.test.utils.maga_server_manager import MagaServerManager
         from transformers import AutoTokenizer
+
+        from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
         fixture = (
             Path(__file__).parent / "data/model/qwen4_exp/q_r_qwen4_exp_fp8_full.json"
@@ -105,6 +106,13 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
             "QWEN4_EXP_CHECKPOINT", cls.task_info["model_path"]
         )
         raw = json.loads((Path(cls.model_path) / "config.json").read_text())
+        if os.environ.get("QWEN4_REQUIRE_NVFP4") == "1":
+            quant = raw.get("quantization_config") or {}
+            if (
+                quant.get("quant_method") != "modelopt"
+                or str(quant.get("quant_algo", "")).upper() != "NVFP4"
+            ):
+                raise ValueError("This smoke profile requires an NVFP4 checkpoint")
         cls.text_config = raw.get("text_config", raw)
         cls.tokenizer = AutoTokenizer.from_pretrained(
             cls.model_path, trust_remote_code=True, local_files_only=True

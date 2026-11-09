@@ -149,6 +149,26 @@ test_suite(
     ],
 )
 
+# Supply QWEN4_EXP_CHECKPOINT for an expert-only ModelOpt NVFP4 checkpoint.
+# These profiles reuse the generation, golden, QSA and cache assertions.
+[
+    custom_smoke_test(
+        name = name,
+        main = "qwen4_exp_smoke_test.py",
+        smoke_args = "--load_method scratch --act_type BF16 --tp_size %d --ep_size %d --world_size %d --moe_strategy nvfp4_marlin --fp4_moe_op marlin --use_deepep_moe 0 --enable_fp32_lm_head 0 --reserver_runtime_mem_mb 4096 --max_seq_len 32768 --seq_size_per_block 128 --kernel_seq_size_per_block 128 --enable_cuda_graph 0 --reuse_cache 1" % (world_size, world_size, world_size) + speculative_args,
+        gpu_type = [gpu],
+        test_envs = {"QWEN4_REQUIRE_NVFP4": "1"},
+        data = ["//rtp_llm:sdk", ":smoke_framework_srcs", "data/model/qwen4_exp/q_r_qwen4_exp_fp8_full.json"],
+        deps = ["//rtp_llm:transformers"],
+    )
+    for name, speculative_args, gpu, world_size in [
+        ("qwen4_exp_nvfp4_source_tp2", "", "H20", 2),
+        ("qwen4_exp_nvfp4_source_tp2_mtp", " --sp_type mtp --sp_model_type qwen4_exp_mtp --sp_act_type BF16 --gen_num_per_cycle 3", "H20", 2),
+        ("qwen4_exp_nvfp4_source_tp8_sm120", "", "RTX_5000_PRO_CU13", 8),
+        ("qwen4_exp_nvfp4_source_tp8_mtp_sm120", " --sp_type mtp --sp_model_type qwen4_exp_mtp --sp_act_type BF16 --gen_num_per_cycle 3", "RTX_5000_PRO_CU13", 8),
+    ]
+]
+
 # Frontend, a real FlexLB master, separate prefill/decode, and two ViT workers.
 # Five real requests with the same image check that FlexLB keeps sending
 # image computation to the ViT that already owns the cached embeddings.

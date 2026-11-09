@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -24,6 +25,79 @@ from rtp_llm.utils.model_weight import W
     "requires a supported NVFP4 Marlin runtime and GPU",
 )
 class MarlinNvfp4Test(MarlinNvfp4TestFixture, unittest.TestCase):
+
+    @unittest.skipUnless(
+        os.environ.get("QWEN4_NVFP4_FIXTURE"), "real NVFP4 fixture not supplied"
+    )
+    def test_checkpoint_experts_against_dequantized_reference(self):
+        from safetensors import safe_open
+
+        with safe_open(os.environ["QWEN4_NVFP4_FIXTURE"], framework="pt") as tensors:
+            for prefix in ("model.language_model", "mtp"):
+
+                def load(projection, suffix):
+                    return torch.stack(
+                        [
+                            tensors.get_tensor(
+                                f"{prefix}.layers.0.mlp.experts.{expert}.{projection}_proj.{suffix}"
+                            )
+                            for expert in (0, 117, 0, 117)
+                        ]
+                    ).cuda()
+
+                self.q1 = torch.cat((load("up", "weight"), load("gate", "weight")), 1)
+                self.q2 = load("down", "weight")
+                self.s1 = torch.cat(
+                    (load("up", "weight_scale"), load("gate", "weight_scale")), 1
+                )
+                self.s2 = load("down", "weight_scale")
+                self.g1, self.g2 = load("up", "weight_scale_2"), load(
+                    "down", "weight_scale_2"
+                )
+                torch.testing.assert_close(
+                    self.g1, load("gate", "weight_scale_2"), rtol=0, atol=0
+                )
+                lut = torch.tensor(
+                    [0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6],
+                    device="cuda",
+                )
+
+                def dequant(q, scale, outer):
+                    codes = torch.stack((q & 15, q >> 4), -1).flatten(-2).long()
+                    return (
+                        lut[codes]
+                        * scale.float().repeat_interleave(16, -1)
+                        * outer[:, None, None]
+                    )
+
+                self.w1 = dequant(self.q1, self.s1, self.g1)
+                self.w2 = dequant(self.q2, self.s2, self.g2)
+                for rank in (0, 1):
+                    model = Nvfp4MarlinMoE(
+                        self.q1, self.s1, self.g1, self.q2, self.s2, self.g2, 2, rank
+                    )
+                    for rows in (1, 7, 33):
+                        with self.subTest(prefix=prefix, rank=rank, rows=rows):
+                            x, ids, weights = self.inputs(rows, rank)
+                            actual = model(x, ids, weights)
+                            expected = self.reference(x, ids, weights, rank)
+                            self.assert_reference(actual, expected)
+                            rmse = (
+                                (
+                                    (actual.float() - expected).square().mean()
+                                    / expected.square().mean().clamp_min(1e-30)
+                                )
+                                .sqrt()
+                                .item()
+                            )
+                            print(
+                                "REAL_NVFP4_RELATIVE_RMSE",
+                                prefix,
+                                rank,
+                                rows,
+                                rmse,
+                                flush=True,
+                            )
 
     def test_repack_reuses_original_storage_and_executor_contract(self):
         def swizzle(sf):

@@ -136,6 +136,7 @@ models_py_test(
     src = "moe/marlin_nvfp4_test.py",
     args = [
         "MarlinNvfp4Test.test_repack_reuses_original_storage_and_executor_contract",
+        "MarlinNvfp4Test.test_checkpoint_experts_against_dequantized_reference",
     ],
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS + ["//rtp_llm/models_py/kernels/cuda/marlin_nvfp4/test:marlin_test_support"],
@@ -146,6 +147,7 @@ models_py_test(
     src = "moe/marlin_nvfp4_test.py",
     args = [
         "MarlinNvfp4Test.test_explicit_strategy_uses_prepared_weights",
+        "MarlinNvfp4Test.test_checkpoint_experts_against_dequantized_reference",
     ],
     gpu = "H20_CU13",
     deps = _REFERENCE_DEPS + ["//rtp_llm/models_py/kernels/cuda/marlin_nvfp4/test:marlin_test_support"],

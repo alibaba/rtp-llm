@@ -72,6 +72,13 @@ py_test(
 )
 
 py_test(
+    name = "moe_nvfp4_test",
+    srcs = ["moe_nvfp4_test.py"],
+    env = {"GPU_COUNT": "0"},
+    deps = [":config_fixture", "//rtp_llm:testlib"],
+)
+
+py_test(
     name = "full_fp8_test",
     srcs = ["full_fp8_test.py"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
@@ -91,6 +98,7 @@ test_suite(
     tests = [
         ":kv_cache_test",
         ":moe_fp4_test",
+        ":moe_nvfp4_test",
         ":moe_fp8_test",
         ":ple_weight_loading_test",
         ":qwen4_exp_mtp_component_test",

@@ -171,8 +171,18 @@ class Qwen4MarlinExecutor(Qwen4DecodeMarlinExecutor):
         checker.check(config.model_config.model_type in ("qwen4_exp", "qwen4_exp_mtp"))
         checker.check(
             quant is not None
-            and getattr(quant, "model_recipe", None) == QWEN4_FP8_NVFP4_RECIPE
-            and not quant.is_quanted()
+            and (
+                (
+                    getattr(quant, "model_recipe", None) == QWEN4_FP8_NVFP4_RECIPE
+                    and not quant.is_quanted()
+                )
+                or (
+                    getattr(config.model_config, "_qwen4_nvfp4_source", False)
+                    and quant.is_quanted()
+                    and quant.bits == 4
+                    and quant.group_size() == 16
+                )
+            )
         )
         checker.check(Nvfp4MarlinMoE.is_supported())
         checker.check(config.tp_size == config.ep_size)

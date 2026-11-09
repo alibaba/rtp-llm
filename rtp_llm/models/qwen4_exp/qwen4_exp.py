@@ -55,6 +55,17 @@ class Qwen4Exp(Qwen35Moe):
 
     @staticmethod
     def _validate_checkpoint(config: ModelConfig) -> None:
+        if getattr(config, "_qwen4_nvfp4_source", False):
+            from rtp_llm.models.qwen4_exp.moe_nvfp4 import validate_nvfp4_manifest
+
+            root = Path(config.ckpt_path)
+            validate_nvfp4_manifest(
+                json.loads((root / "config.json").read_text()),
+                json.loads((root / "model.safetensors.index.json").read_text())[
+                    "weight_map"
+                ],
+            )
+            return
         if not getattr(config, "_qwen4_fp8_source", False):
             return
         from rtp_llm.models.qwen4_exp.moe_fp8 import validate_moe_fp8_checkpoint
@@ -86,12 +97,40 @@ class Qwen4Exp(Qwen35Moe):
         config.config_dtype = text_config.get("dtype") or text_config.get(
             "torch_dtype", ""
         )
-        config._qwen4_fp8_source = bool(source_quant)
+        config._qwen4_nvfp4_source = bool(
+            source_quant
+            and source_quant.get("quant_method") == "modelopt"
+            and str(source_quant.get("quant_algo", "")).upper() == "NVFP4"
+        )
+        config._qwen4_fp8_source = bool(source_quant) and not config._qwen4_nvfp4_source
         cls._configure_precision_recipe(config)
         return config
 
     @staticmethod
     def _configure_precision_recipe(config: ModelConfig) -> None:
+        if getattr(config, "_qwen4_nvfp4_source", False):
+            from rtp_llm.config.quant_config import ModelOptFp4Config
+
+            if config.quantization:
+                raise ValueError(
+                    "Qwen4 NVFP4 checkpoints do not support requantization"
+                )
+            # Routed experts are already packed. Dense weights and PLE tables
+            # retain their original BF16 storage without online quantization.
+            config._qwen4_full_fp8_nvfp4 = False
+            config._qwen4_dense_storage = "source_bf16"
+            config.quant_config = ModelOptFp4Config(
+                bits=4,
+                group_size=16,
+                is_quanted=True,
+                mixed_attention=True,
+                dense_storage="source_bf16",
+                require_contiguous_experts=True,
+            )
+            config.quant_algo.setQuantAlgo("modelopt_fp4", 4, 16)
+            config.dense_weight_dtype = "bf16"
+            config.expert_weight_dtype = "fp4"
+            return
         config._qwen4_full_fp8_nvfp4 = bool(getattr(config, "_qwen4_fp8_source", False))
         config.quant_config = build_qwen4_quant_config(
             config.quantization, config._qwen4_full_fp8_nvfp4

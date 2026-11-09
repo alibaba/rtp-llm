@@ -156,7 +156,11 @@ def freeze_runtime_config(config, parallelism):
     snapshot = Qwen4RuntimeSnapshot(
         Qwen4Options(config.qwen4_ple_prefetch_mb),
         CheckpointGeometry.from_config(config),
-        "FP8" if getattr(config, "_qwen4_fp8_source", False) else "BF16",
+        (
+            "NVFP4"
+            if getattr(config, "_qwen4_nvfp4_source", False)
+            else "FP8" if getattr(config, "_qwen4_fp8_source", False) else "BF16"
+        ),
         getattr(config.quant_config, "model_recipe", None),
         int(parallelism.get_attn_tp_size()),
         bool(config.is_mtp),
@@ -212,7 +216,9 @@ def resolve_qwen4_parallelism(config, parallelism):
     # ParallelismConfig's pickle state omits local_rank. Preserve the selected
     # device when making a model-owned copy instead of restoring rank zero.
     resolved.local_rank = parallelism.local_rank
-    if not is_qwen4_precision_recipe(getattr(config, "quant_config", None)):
+    if not is_qwen4_precision_recipe(
+        getattr(config, "quant_config", None)
+    ) and not getattr(config, "_qwen4_nvfp4_source", False):
         return resolved
     cp = resolved.prefill_cp_config
     if (
@@ -297,7 +303,15 @@ def validate_qwen4_runtime(config, parallelism):
             "qwen4_exp FP8/NVFP4 requires ep_size <= attention TP; "
             "rejecting before PLE weight loading"
         )
-    if not full_fp8 and quant is not None:
+    source_nvfp4 = bool(getattr(config, "_qwen4_nvfp4_source", False))
+    if source_nvfp4 and not (
+        isinstance(quant, ModelOptFp4Config)
+        and quant.is_quanted()
+        and quant.bits == 4
+        and quant.group_size() == 16
+    ):
+        raise RuntimeError("Qwen4 NVFP4 source requires prequantized group-16 experts")
+    if not full_fp8 and not source_nvfp4 and quant is not None:
         raise RuntimeError(
             "qwen4_exp BF16 execution requires an unquantized checkpoint"
         )
