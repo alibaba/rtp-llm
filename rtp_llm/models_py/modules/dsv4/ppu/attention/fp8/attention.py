@@ -35,16 +35,13 @@ import logging
 import os
 import threading
 from contextlib import contextmanager, suppress
-from typing import (
-    Any,
-    Dict,
-    Optional,
-    Tuple,
-)
+from typing import Any, Dict, Optional, Tuple
+
 import deep_gemm  # noqa: E402
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
@@ -54,7 +51,6 @@ from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
     rmsnorm_fp8_quant_ue8m0,
 )
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-from rtp_llm.models_py.modules.dsv4.ppu.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_MAIN,
     CPContext,
@@ -62,7 +58,15 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_freqs_cis_local,
     cp_padded_local_kv_lens,
 )
-from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_shard import prefer_raw_q_merge_attention_conservative
+from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_shard import (
+    prefer_raw_q_merge_attention_conservative,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
+    pool_physical_tokens_per_block as _dsv4_pool_owner_tokens_per_block,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
+    require_pool_tokens_per_block as _dsv4_pool_tokens_per_block,
+)
 from rtp_llm.models_py.modules.dsv4.fp8._pool_reader import (
     CompressedKPoolReader,
     LocalPoolReader,
@@ -72,8 +76,50 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
     build_cp_byte_sliced_slot_compaction,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+    _CP_GATHER_STREAMS,
+    _CP_POST_GATHER_STREAMS,
+    _CP_STREAM_CACHE_LOCK,
+    _DSV4_FP8_INDEXER_ENTRY_BYTES,
+    _DSV4_FP8_KV_ENTRY_BYTES,
+    _FLASH_MLA_SPARSE_Q_CHUNK,
+    _SWA_CP_RR_LOGGED_SITES,
+    _V4_FP8_BLOCK_CFG,
+    BIND_KEEP,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+    AttentionFP8 as _BaseAttentionFP8,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+    CommitOnlyAttentionFP8 as _BaseCommitOnlyAttentionFP8,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+    CsaPrefillMeta,
+    PrefillMeta,
+    PrefillQKV,
+    WorkspaceMeta,
+    _build_suffix_cp_sliced_slot_mapping,
+    _build_suffix_pool_slot_mapping,
+    _cuda_device_index,
+    _flat_1d,
+    _force_all_cp_raw_q_merge,
+    _force_cp_cache_hit_raw_q_merge,
+    _get_cp_comm_stream,
+    _get_cp_post_gather_stream,
+    _get_process_cuda_stream,
+    _get_window_topk_idxs,
+    _get_window_topk_idxs_cp,
+    _get_window_topk_idxs_varlen,
+    _prepare_wo_a_stacked,
+    _repack_v4_fp8_scale_to_int32,
+    _use_cp_cache_hit_raw_q_merge,
+    _use_read_from_pool,
+    bind_attn_cache,
+)
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import kv_tag_for_compress_ratio
 from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import CompressorFP8
 from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.indexer import IndexerFP8
+from rtp_llm.models_py.modules.dsv4.ppu.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import (
     apply_rotary_emb,
@@ -82,16 +128,7 @@ from rtp_llm.models_py.modules.dsv4.rope import (
 )
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.utils.memory import dispose_tensor
-from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
-    pool_physical_tokens_per_block as _dsv4_pool_owner_tokens_per_block,
-)
-from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
-    require_pool_tokens_per_block as _dsv4_pool_tokens_per_block,
-)
-from rtp_llm.models_py.modules.dsv4.kv_cache_utils import kv_tag_for_compress_ratio
-from rtp_llm.models_py.modules.dsv4.fp8.attention import PrefillMeta, _prepare_wo_a_stacked
-from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8 as _BaseAttentionFP8
-from rtp_llm.models_py.modules.dsv4.fp8.attention import CommitOnlyAttentionFP8 as _BaseCommitOnlyAttentionFP8
+
 
 def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor, *, platform_provider=None):
     """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors.
@@ -117,6 +154,38 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor, *, platform_provider=None):
     assert s is not None, "expected non-null FP8 scale"
     return platform_provider.build_fp8_linear(_default_factory, w, s)
 
+
+def _q3_compact_start(q, metadata, ratio, cmp_tag, indexer):
+    """Use only the paged ordinary MTP2 B8 target metadata, including Graph warmup."""
+    if (
+        q.shape != (8, 3, 64, 512)
+        or not q.is_cuda
+        or os.environ.get("ROLE_TYPE") != "DECODE"
+        or os.environ.get("SP_TYPE") != "mtp"
+        or os.environ.get("GEN_NUM_PER_CYCLE") != "2"
+        or os.environ.get("TP_SIZE") != "1"
+        or os.environ.get("DP_SIZE") != "8"
+        or os.environ.get("EP_SIZE") != "8"
+        or getattr(metadata, "q_len_per_req", None) != 3
+        or not getattr(metadata, "rope_freqs_by_source", None)
+        or getattr(metadata, "active_token_mask", None) is None
+    ):
+        return None
+    if ratio not in (4, 128) or cmp_tag != kv_tag_for_compress_ratio(ratio):
+        return None
+    if ratio == 4:
+        if indexer is None or os.environ.get("DSV4_PPU_Q3_CSA_TILED") != "1":
+            return None
+    else:
+        if (
+            indexer is not None
+            or metadata.hca_cmp_global_slots is None
+            or os.environ.get("DSV4_PPU_Q3_HCA_COMPACT") != "1"
+        ):
+            return None
+    return metadata.start_pos[:8]
+
+
 class AttentionFP8(_BaseAttentionFP8):
     def init_rope_cache(self, device=None):
         if device is None:
@@ -127,7 +196,9 @@ class AttentionFP8(_BaseAttentionFP8):
 
     def _get_fp8_decode_op(self):
         if self._fp8_decode_op is None:
-            from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_flash_mla import PpuSparseAttnV4DecodeFp8Op
+            from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_flash_mla import (
+                PpuSparseAttnV4DecodeFp8Op,
+            )
 
             self._fp8_decode_op = PpuSparseAttnV4DecodeFp8Op(
                 self.n_heads, self.head_dim, self.softmax_scale
@@ -144,7 +215,9 @@ class AttentionFP8(_BaseAttentionFP8):
     prefill_fast_protocol = "dsv4.fp8-attention.v1"
 
     def _prefill_compute_qkv(self, x, common, shared_input_quant=None):
-        from rtp_llm.models_py.kernels.ppu.attention.ppu_rmsnorm_rope import fused_rmsnorm_rope
+        from rtp_llm.models_py.kernels.ppu.attention.ppu_rmsnorm_rope import (
+            fused_rmsnorm_rope,
+        )
 
         if common.cp_on:
             raise ValueError("PPU DSV4 prefill requires CP disabled")
@@ -156,8 +229,11 @@ class AttentionFP8(_BaseAttentionFP8):
             shared_input_quant = None
         with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
             q_proj = (
-                self._lin(self.wq_a, x_3d) if shared_input_quant is None
-                else self._lin_from_shared_quant(self.wq_a, shared_input_quant, x_3d.shape)
+                self._lin(self.wq_a, x_3d)
+                if shared_input_quant is None
+                else self._lin_from_shared_quant(
+                    self.wq_a, shared_input_quant, x_3d.shape
+                )
             )
             # Preserve the native full-input FP32 reduction and BF16 boundary.
             q_proj_fp32 = q_proj.float()
@@ -168,20 +244,27 @@ class AttentionFP8(_BaseAttentionFP8):
             del q_proj_fp32, q_inv_rms
         with record_function_range("dsv4.fp8.attn.qkv.kv_proj_rope"):
             kv_in = (
-                self._lin(self.wkv, x_3d) if shared_input_quant is None
-                else self._lin_from_shared_quant(self.wkv, shared_input_quant, x_3d.shape)
+                self._lin(self.wkv, x_3d)
+                if shared_input_quant is None
+                else self._lin_from_shared_quant(
+                    self.wkv, shared_input_quant, x_3d.shape
+                )
             )
             kv = fused_rmsnorm_rope(
                 kv_in, self.kv_norm, common.freqs_cis, common.rd, eps=self.eps
             )
             if getattr(self, "_prefill_kv_qat", False):
-                from rtp_llm.models_py.kernels.ppu.attention.ppu_kv_qat import quantize_dequantize_swa_kv_
+                from rtp_llm.models_py.kernels.ppu.attention.ppu_kv_qat import (
+                    quantize_dequantize_swa_kv_,
+                )
 
                 quantize_dequantize_swa_kv_(kv)
         return PrefillQKV(qr=qr.squeeze(0), q=None, kv_full=kv.squeeze(0))
 
     def _materialize_prefill_q(self, qkv, common):
-        from rtp_llm.models_py.kernels.ppu.attention.ppu_rmsnorm_rope import fused_rmsnorm_rope
+        from rtp_llm.models_py.kernels.ppu.attention.ppu_rmsnorm_rope import (
+            fused_rmsnorm_rope,
+        )
 
         if qkv.q is not None:
             return qkv
@@ -190,12 +273,15 @@ class AttentionFP8(_BaseAttentionFP8):
         with record_function_range("dsv4.fp8.attn.qkv.q_lora_b_rope"):
             q_out = common.workspace.prefill_q(seqlen)
             q_flat = self._lin(
-                self.wq_b, qkv.qr.unsqueeze(0),
+                self.wq_b,
+                qkv.qr.unsqueeze(0),
                 out=q_out.view(seqlen, self.n_heads * self.head_dim),
             )
             assert q_flat.data_ptr() == q_out.data_ptr()
             q = q_flat.view(1, seqlen, self.n_heads, self.head_dim)
-            fused_rmsnorm_rope(q, None, common.freqs_cis, common.rd, eps=self.eps, out=q)
+            fused_rmsnorm_rope(
+                q, None, common.freqs_cis, common.rd, eps=self.eps, out=q
+            )
         return qkv._replace(q=q.squeeze(0))
 
     def __init__(
@@ -346,7 +432,13 @@ class AttentionFP8(_BaseAttentionFP8):
         self.wo_a_s = wo_a_s
         K_local = n_heads_local * head_dim // n_groups_local
 
-        self.wo_a = platform_provider.build_wo_a_fp8_linear(lambda *_args, **_kwargs: None, wo_a_w, wo_a_s, groups=n_groups_local, k_local=K_local)
+        self.wo_a = platform_provider.build_wo_a_fp8_linear(
+            lambda *_args, **_kwargs: None,
+            wo_a_w,
+            wo_a_s,
+            groups=n_groups_local,
+            k_local=K_local,
+        )
         if self.wo_a is None:
             _stk_w, _stk_s = _prepare_wo_a_stacked(
                 wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
@@ -387,7 +479,9 @@ class AttentionFP8(_BaseAttentionFP8):
                 "wgate": layer_weights[W.v4_compressor_wgate],
                 "norm": layer_weights[W.v4_compressor_norm],
             }
-            from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import CompressorFP8
+            from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import (
+                CompressorFP8,
+            )
 
             self.compressor = CompressorFP8(
                 dim=dim,
@@ -415,7 +509,9 @@ class AttentionFP8(_BaseAttentionFP8):
             # absent (warmup, unit tests), keep the T hint available for
             # legacy shape fallbacks.
             if compress_ratio == 4:
-                from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.indexer import IndexerFP8
+                from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.indexer import (
+                    IndexerFP8,
+                )
 
                 self.indexer = (indexer_factory or IndexerFP8)(
                     dim=dim,
@@ -614,8 +710,12 @@ class AttentionFP8(_BaseAttentionFP8):
         Compressor / Indexer freqs_cis is bound lazily on first call
         (pool context is set in :meth:`forward_decode`'s try/finally).
         """
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.compute_qkv import decode_compute_qkv
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.output_proj import decode_output_proj
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.compute_qkv import (
+            decode_compute_qkv,
+        )
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.output_proj import (
+            decode_output_proj,
+        )
 
         bsz, q_len, _ = x.size()
         T = bsz * q_len
@@ -671,9 +771,13 @@ class AttentionFP8(_BaseAttentionFP8):
         """SWA-only layer (compress_ratio == 0) — one FlashMLA call over
         the FP8 SWA pool using per-request global slot ids translated
         from ``swa_abs_idx`` through the SWA block table."""
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.attention_kernels import attn_fp8_swa_paged
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.decode_attn_metadata import get_or_build_sched_meta
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.attention_kernels import (
+            attn_fp8_swa_paged,
+        )
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.decode_attn_metadata import (
+            get_or_build_sched_meta,
+        )
 
         swa_pool_3d = self._pool_view_3d_fp8(SWA_KV)
         swa_pool_bt = (
@@ -870,12 +974,16 @@ class AttentionFP8(_BaseAttentionFP8):
         for both SWA and compressed pools, then one dual-pool FlashMLA
         call (``extra_k_cache`` + ``extra_indices_in_kvcache`` merges
         softmax in-kernel; mirrors vLLM ``deepseek_v4_attention.py:849-865``)."""
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.attention_kernels import attn_fp8_dual_paged
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.decode_attn_metadata import get_or_build_sched_meta
         from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
             translate_local_to_global_slots,
         )
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.attention_kernels import (
+            attn_fp8_dual_paged,
+        )
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.decode_attn_metadata import (
+            get_or_build_sched_meta,
+        )
 
         win = self.window_size
         T = bsz * q_len
@@ -971,6 +1079,13 @@ class AttentionFP8(_BaseAttentionFP8):
             topk_length=swa_topk_length,
             extra_topk_length=extra_topk_length,
             platform_provider=self._platform_provider,
+            compact_start_pos=_q3_compact_start(
+                q,
+                attn_metadata,
+                int(self.compress_ratio),
+                cmp_attn_type,
+                self.indexer,
+            ),
         )
 
     def _forward_prefill(
@@ -1699,9 +1814,11 @@ class AttentionFP8(_BaseAttentionFP8):
         raises we want the process to die instead of leaking a stale
         binding into the next call.
         """
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import build_prepare_metadata_args
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.indexer import IndexerFP8
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import INDEXER_KV
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import (
+            build_prepare_metadata_args,
+        )
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.indexer import IndexerFP8
 
         assert isinstance(self.indexer, IndexerFP8), "CSA layer requires IndexerFP8"
 
@@ -1827,7 +1944,9 @@ class AttentionFP8(_BaseAttentionFP8):
         surfaces as ``TypeError`` instead of silently picking up the
         ambient env.
         """
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import build_prepare_metadata_args
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import (
+            build_prepare_metadata_args,
+        )
 
         cmp_args = build_prepare_metadata_args(
             use_varlen=use_varlen,
@@ -1913,6 +2032,11 @@ class AttentionFP8(_BaseAttentionFP8):
             )
 
         chunk_rows = min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)
+        inplace_q = (
+            bf16_projection
+            and self.n_heads == 8
+            and torch.cuda.get_device_name(q.device) == "ZW-M890P"
+        )
         if out is None:
             out = torch.empty(s_q, self.dim, dtype=torch.bfloat16, device=q.device)
         else:
@@ -1930,19 +2054,22 @@ class AttentionFP8(_BaseAttentionFP8):
 
         for start in range(0, s_q, chunk_rows):
             end = min(start + chunk_rows, s_q)
+            q_chunk = q[start:end]
             with record_function_range(profile_name):
                 o_part, _, _ = flash_mla_sparse_fwd(
-                    q=q[start:end],
+                    q=q_chunk,
                     kv=kv,
                     indices=indices[start:end],
                     sm_scale=self.softmax_scale,
                     attn_sink=self.attn_sink,
                     topk_length=topk_length[start:end],
+                    **({"out": q_chunk} if inplace_q else {}),
                 )
             if self.compress_ratio == 4 and _rt.should_record_layer(self.layer_id):
                 _rt.record_if_level(2, f"L{self.layer_id:02d}_csa_flash_out", o_part)
             if bf16_projection:
-                q[start:end].copy_(o_part)
+                if not inplace_q:
+                    q_chunk.copy_(o_part)
             else:
                 with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
                     self._prefill_output_proj_into(
@@ -1950,7 +2077,8 @@ class AttentionFP8(_BaseAttentionFP8):
                         freqs_cis[start:end],
                         out=out[start:end, :],
                     )
-            dispose_tensor(o_part)
+            if not inplace_q:
+                dispose_tensor(o_part)
 
         if bf16_projection:
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
@@ -1978,7 +2106,9 @@ class AttentionFP8(_BaseAttentionFP8):
         if self.wo_a is not None:
             with record_function_range("dsv4.fp8.attn.out.provider_wo_a"):
                 if getattr(self.wo_a, "bf16_input", False):
-                    o_proj = self._wo_a_from_bf16(o_3d, freqs_cis, 1, seqlen, prefill=True)
+                    o_proj = self._wo_a_from_bf16(
+                        o_3d, freqs_cis, 1, seqlen, prefill=True
+                    )
                 else:
                     o_proj = self._wo_a_from_bf16(o_3d, freqs_cis, 1, seqlen)
         else:
@@ -1997,14 +2127,19 @@ class AttentionFP8(_BaseAttentionFP8):
             wo_b_in = o_proj.flatten(2).reshape(seqlen, -1)
             if self.tp_size > 1 and getattr(self.wo_a, "bf16_input", False):
                 from deep_gemm.jit_kernels.gemm_fp8_fp32 import gemm_fp8_fp8_fp32_nt
-                from rtp_llm.models_py.modules.dsv4.ppu.communication import reduce_tp_sum
+
+                from rtp_llm.models_py.modules.dsv4.ppu.communication import (
+                    reduce_tp_sum,
+                )
 
                 # Keep local partials in FP32 through the TP sum. Casting a
                 # local partial to BF16 first changes replicated P/D KV.
                 partial = torch.empty_like(out, dtype=torch.float32)
                 for start in range(0, seqlen, _FLASH_MLA_SPARSE_Q_CHUNK):
                     end = min(start + _FLASH_MLA_SPARSE_Q_CHUNK, seqlen)
-                    payload, scale = self.wo_b.quantize_input(wo_b_in[start:end].contiguous())
+                    payload, scale = self.wo_b.quantize_input(
+                        wo_b_in[start:end].contiguous()
+                    )
                     gemm_fp8_fp8_fp32_nt(
                         (payload, scale),
                         (self.wo_b.weight, self.wo_b.weight_scale),
@@ -2013,6 +2148,7 @@ class AttentionFP8(_BaseAttentionFP8):
                 out.copy_(reduce_tp_sum(partial, tp_size=self.tp_size))
             else:
                 self.wo_b(wo_b_in, out=out)
+
 
 class CommitOnlyAttentionFP8(_BaseCommitOnlyAttentionFP8):
     init_rope_cache = AttentionFP8.init_rope_cache
@@ -2087,7 +2223,8 @@ class CommitOnlyAttentionFP8(_BaseCommitOnlyAttentionFP8):
         from rtp_llm.utils.model_weight import W
 
         self.wkv = _v4_fp8_linear(
-            layer_weights[W.v4_attn_wkv_w], layer_weights[W.v4_attn_wkv_s],
+            layer_weights[W.v4_attn_wkv_w],
+            layer_weights[W.v4_attn_wkv_s],
             platform_provider=platform_provider,
         )
         self.kv_norm = layer_weights[W.v4_attn_kv_norm]

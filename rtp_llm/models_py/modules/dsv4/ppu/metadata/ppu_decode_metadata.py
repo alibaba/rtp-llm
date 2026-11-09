@@ -2,13 +2,13 @@
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.ppu.metadata.ppu_metadata_update import (
-    update_decode_metadata_in_place_ppu,
-)
 from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
     DSv4DecodeFmhaImplFP8,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
+from rtp_llm.models_py.modules.dsv4.ppu.metadata.ppu_metadata_update import (
+    update_decode_metadata_in_place_ppu,
+)
 
 
 def _table_identity(tensor):
@@ -19,6 +19,39 @@ def _table_identity(tensor):
         tensor.dtype,
         tensor.device,
     )
+
+
+class _MtpCommitLayout:
+    """Fixed-size inverse maps between packed framework rows and Graph rows."""
+
+    def __init__(self, lengths, batch, width):
+        self.lengths = lengths
+        self.rows = torch.arange(batch * width, dtype=torch.long, device=lengths.device)
+        self.columns = self.rows[:width]
+        self.padded_to_compact = torch.empty_like(self.rows)
+        self._reverse = torch.empty(
+            batch * width * 2, dtype=torch.long, device=lengths.device
+        )
+        self.compact_to_padded = self._reverse[: batch * width]
+        self.valid_rows = torch.empty_like(self.rows, dtype=torch.bool)
+        self.update()
+
+    def update(self):
+        offsets = self.lengths.cumsum(dim=0) - self.lengths
+        valid = self.columns[None, :] < self.lengths[:, None]
+        compact = (offsets[:, None] + self.columns[None, :]).reshape(-1)
+        self.valid_rows.copy_(valid.reshape(-1))
+        self.padded_to_compact.copy_(torch.where(self.valid_rows, compact, 0))
+        # Give every padding row a distinct sink. Repeated scatter indices
+        # could race with a live row or with each other on the device.
+        destinations = torch.where(
+            self.valid_rows, compact, self.rows + self.rows.numel()
+        )
+        self.compact_to_padded.zero_()
+        self._reverse.scatter_(0, destinations, self.rows)
+
+    def mask_writes(self, write_slots):
+        write_slots.masked_fill_(~self.valid_rows, -1)
 
 
 class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
@@ -48,10 +81,13 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
             or not 0 < config.max_batch_size <= 128
             or not config.paged_pool_specs
         ):
-            raise ValueError("PPU metadata Graph requires paged PPU Decode q_len=1/2/3/4/6")
+            raise ValueError(
+                "PPU metadata Graph requires paged PPU Decode q_len=1/2/3/4/6"
+            )
         super().__init__(config, device, attn_inputs)
         self.metadata.active_token_mask = None
         self._metadata_graph = None
+        self._commit_layout = None
         self._source_tables = None
         self._source_identity = None
         self._capture_stream = None
@@ -65,7 +101,8 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
             # updates this owned allocation after the framework copies tables.
             self.metadata.active_token_mask = torch.ones(
                 config.max_batch_size * config.q_len,
-                dtype=torch.bool, device=device,
+                dtype=torch.bool,
+                device=device,
             )
         self._state_slot_updater = None
         if fused_state_slots:
@@ -105,6 +142,25 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
         # changing the base constructor's full-width MLA scheduling metadata.
         with torch.inference_mode():
             self._update_rope()
+
+    def enable_mtp_commit_layout(self, lengths):
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
+
+        batch, width = self.config.max_batch_size, self.config.q_len
+        if (
+            width not in (3, 4)
+            or set(self.config.paged_pool_specs) != {SWA_KV}
+            or lengths.shape != (batch,)
+            or lengths.dtype != torch.int32
+            or lengths.device != self._positions.device
+            or not lengths.is_contiguous()
+        ):
+            raise ValueError(
+                "MTP commit requires a fixed-width SWA-only Graph and captured lengths"
+            )
+        self._commit_layout = _MtpCommitLayout(lengths, batch, width)
+        self.metadata.mtp_commit_layout = self._commit_layout
+        self._commit_layout.mask_writes(self.metadata.pool_write_slot_mappings[SWA_KV])
 
     def _update_rope(self):
         for key, table in self._rope_sources.items():
@@ -157,6 +213,16 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
             or (positions.is_cuda and positions.device != self._positions.device)
         ):
             raise ValueError("Decode positions must match the captured int32 batch")
+        if self._commit_layout is not None:
+            if (
+                not prefill
+                or verify
+                or _table_identity(primary.input_lengths_device)
+                != _table_identity(self._commit_layout.lengths)
+            ):
+                raise ValueError(
+                    "MTP commit replay changed captured lengths storage or Graph role"
+                )
         tables = self._extract_paged_block_tables(attn_inputs)
         if tables is None or set(tables) != set(self._paged_entries_per_block):
             raise ValueError("PPU metadata Graph requires every configured cache tag")
@@ -179,6 +245,9 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
         return positions, tables, identity
 
     def _update(self):
+        layout = self._commit_layout
+        if layout is not None:
+            layout.update()
         update_decode_metadata_in_place_ppu(
             self.metadata,
             self._positions,
@@ -187,8 +256,13 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
             paged_pool_entries_per_block=self._paged_entries_per_block,
             paged_pool_tokens_per_block=self._paged_tokens_per_block,
             compressor_state_slot_updater=self._state_slot_updater,
+            commit_valid_rows=None if layout is None else layout.valid_rows,
         )
         self._update_rope()
+        if layout is not None:
+            from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
+
+            layout.mask_writes(self.metadata.pool_write_slot_mappings[SWA_KV])
         if self.metadata.active_token_mask is not None:
             from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
 
@@ -199,6 +273,8 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
             self.metadata.active_token_mask.view(batch, width).copy_(
                 active[:, None].expand(batch, width)
             )
+            if layout is not None:
+                self.metadata.active_token_mask.logical_and_(layout.valid_rows)
 
     def prepare_cuda_graph(self, attn_inputs):
         if torch.cuda.is_current_stream_capturing():
@@ -220,7 +296,9 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
                     graph = torch.cuda.CUDAGraph()
                     # RPC threads synchronously copy independent MTP handoff
                     # tensors while this engine thread captures owned metadata.
-                    with torch.cuda.graph(graph, stream=stream, capture_error_mode="thread_local"):
+                    with torch.cuda.graph(
+                        graph, stream=stream, capture_error_mode="thread_local"
+                    ):
                         self._update()
                 finally:
                     current.wait_stream(stream)

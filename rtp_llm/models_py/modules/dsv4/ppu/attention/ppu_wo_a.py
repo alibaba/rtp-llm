@@ -87,6 +87,9 @@ class PpuWoAFp8Linear(nn.Module):
                 f"{weight.device} and {scale_fp32.device}"
             )
 
+        # Keep the selected request layout fixed throughout Graph capture and replay.
+        self._request_local = os.environ.get("DSV4_PPU_WOA_REQUEST_LOCAL", "0") == "1"
+        self._request_grid = os.environ.get("DSV4_PPU_WOA_REQUEST_GRID", "0") == "1"
         self.groups = groups
         self.rank = rank
         self.k_local = k_local
@@ -117,8 +120,11 @@ class PpuWoAFp8Linear(nn.Module):
         # the transposed local weights for its stride-zero group views.
         self.register_buffer(
             "bf16_prefill_weight",
-            bf16_weight.transpose(1, 2).contiguous()
-            if bf16_input and groups < 8 else None,
+            (
+                bf16_weight.transpose(1, 2).contiguous()
+                if bf16_input and groups < 8
+                else None
+            ),
             persistent=False,
         )
         self._einsum = _resolve_deep_gemm_symbol("fp8_einsum")
@@ -127,7 +133,9 @@ class PpuWoAFp8Linear(nn.Module):
     def _decode_config(self, m):
         if not self._decode_attention_gemm:
             return None
-        from rtp_llm.models_py.kernels.ppu.attention.ppu_attention_gemm import decode_attention_gemm_config
+        from rtp_llm.models_py.kernels.ppu.attention.ppu_attention_gemm import (
+            decode_attention_gemm_config,
+        )
 
         return decode_attention_gemm_config(
             m, self.rank, self.k_local, groups=self.groups
@@ -203,13 +211,28 @@ class PpuWoAFp8Linear(nn.Module):
             out,
             output_shape,
             x.device,
-            (x, self.weight, self.weight_scale) + ((self.bf16_weight,) if self.bf16_input else ()),
+            (x, self.weight, self.weight_scale)
+            + ((self.bf16_weight,) if self.bf16_input else ()),
         )
         m = x.numel() // (self.groups * self.k_local)
         if m == 0:
             return output
 
         if self.bf16_input:
+            if self._request_grid:
+                from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a_request_grid import (
+                    request_grid_eligible,
+                    request_grid_woa,
+                )
+
+                if request_grid_eligible(
+                    x,
+                    self.bf16_weight,
+                    output,
+                    prefill=prefill,
+                    request_local=self._request_local,
+                ):
+                    return request_grid_woa(x, self.bf16_weight, output)
             grouped = x.reshape(m, self.groups, self.k_local).transpose(0, 1)
             if prefill and self.groups < 8:
                 # Local-group BMM rounds differently from the native G8
@@ -223,6 +246,26 @@ class PpuWoAFp8Linear(nn.Module):
                     projected = torch.bmm(lhs, rhs)
                     token_output[:, group].copy_(projected[0])
                     del projected
+                return output
+            if (
+                self._request_local
+                and not prefill
+                and x.ndim == 4
+                and x.shape[0] > 1
+                and x.shape[1] == 3
+                and self.groups == 8
+            ):
+                # Preserve G8/M3, token-major strides and one shared weight.
+                # Applies to every actual Decode Q3 caller, including draft Q3.
+                token_output = output.view(m, self.groups, self.rank)
+                for request in range(x.shape[0]):
+                    start = request * x.shape[1]
+                    end = start + x.shape[1]
+                    torch.bmm(
+                        grouped[:, start:end],
+                        self.bf16_weight.transpose(1, 2),
+                        out=token_output[start:end].transpose(0, 1),
+                    )
                 return output
             torch.bmm(
                 grouped,

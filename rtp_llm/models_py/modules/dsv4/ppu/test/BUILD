@@ -255,6 +255,7 @@ test_suite(
         ":decode_moe_hint_test", ":decode_shared_schedule_test",
         ":ppu_tp_shared_weights_test", ":ppu_hc_head_options_test",
         ":prefill_defaults_test",
+        ":mtp_commit_layout_cpu_test",
     ],
 )
 
@@ -546,4 +547,12 @@ test_suite(
         ":topk_padding_test",
         ":prefill_optimizations_test",
     ],
+)
+
+py_test(
+    name = "mtp_commit_layout_cpu_test",
+    srcs = ["test_mtp_commit_layout_cpu.py"],
+    main = "test_mtp_commit_layout_cpu.py",
+    data = ["//rtp_llm/models_py:ppu_sources"],
+    deps = ["//rtp_llm:torch"],
 )

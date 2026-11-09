@@ -29,7 +29,9 @@ class TpPrefillWorkspaceDimsTest(unittest.TestCase):
         method.returns = None
         fixed = torch.full((2, 4), -1.0)
         model = SimpleNamespace(_mtp_hidden_buffer=fixed, _mtp_hidden_valid_tokens=1)
+        # The sliced body omits the eager/Graph check at the function entry.
         scope = dict(torch=torch, v4=model, input_ids=torch.zeros(5, dtype=torch.long),
+                     is_capturing=False,
                      PyModelOutputs=lambda hidden, mtp=None: (hidden, mtp))
         scope.update(dict.fromkeys(("kv_cache", "positions", "cu_seqlens", "block_tables_by_type",
                                     "attn", "attn_inputs", "prepare_hidden_fn", "capture_context")))

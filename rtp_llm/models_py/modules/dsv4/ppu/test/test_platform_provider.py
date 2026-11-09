@@ -23,7 +23,11 @@ class PlatformProviderTest(unittest.TestCase):
         # Keep hardware/math leaves out of the construction-contract test.
         self.stub = patch.dict(sys.modules, {
             "torch": SimpleNamespace(bfloat16=object(), float32=object()),
-            "rtp_llm.models_py.kernels.ppu.runtime": SimpleNamespace(PpuStreamPool=Mock()),
+            "rtp_llm.models_py.kernels.ppu.runtime": SimpleNamespace(
+                PpuStreamPool=Mock(),
+                native_row_gemv_enabled=Mock(return_value=False),
+                require_ppu_op=Mock(),
+            ),
             PREFIX + ".attention.attention_contract": SimpleNamespace(
                 scheduler_key=Mock(), validate_dual_pool=Mock(), validate_swa_pool=Mock()),
         })

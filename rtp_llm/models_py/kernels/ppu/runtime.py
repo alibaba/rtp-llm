@@ -34,6 +34,90 @@ class PpuStreamPool:
         return self._streams[key]
 
 
+def require_ppu_op(namespace, name):
+    import torch
+
+    from rtp_llm.ops import ensure_compute_ops_loaded
+
+    ensure_compute_ops_loaded()
+    try:
+        return getattr(getattr(torch.ops, namespace), name)
+    except AttributeError as error:
+        raise RuntimeError(
+            f"PPU operator {namespace}::{name} requires an RTP-LLM build with --config=ppu"
+        ) from error
+
+
+def native_row_gemv_enabled():
+    return os.getenv("DSV4_PPU_DECODE_ROW_GEMV_NATIVE", "0") == "1"
+
+
+def try_fp32_rowwise_linear(x, weight, stream_pool, lanes):
+    """Run independent row GEMVs and join before returning the contiguous output."""
+    import torch
+
+    if (
+        stream_pool is None
+        or x.ndim != 2
+        or x.shape[0] not in (3, 24)
+        or x.dtype not in (torch.bfloat16, torch.float32)
+        or not x.is_cuda
+        or not x.is_contiguous()
+        or weight.dtype != torch.float32
+        or weight.device != x.device
+        or not weight.is_contiguous()
+        or (torch.is_grad_enabled() and (x.requires_grad or weight.requires_grad))
+        or torch.backends.cuda.matmul.allow_tf32
+        or torch.cuda.get_device_name(x.device) != "ZW-M890P"
+    ):
+        return None
+
+    if (
+        native_row_gemv_enabled()
+        and x.shape[0] == 24
+        and x.shape[1] == 4096
+        and weight.ndim == 2
+        and weight.shape[1] == 4096
+        and weight.shape[0] in (256, 1024, 2048)
+        and x.data_ptr() % 16 == 0
+        and weight.data_ptr() % 16 == 0
+    ):
+        rows_per_cta = 2 if x.shape[0] == 24 and weight.shape[0] == 256 else 4
+        return torch.ops.fp32_row_probe.forward(x.float(), weight, rows_per_cta)
+
+    if (
+        native_row_gemv_enabled()
+        and x.shape[0] == 24
+        and x.shape[1] == 16384
+        and weight.shape == (24, 16384)
+        and x.data_ptr() % 8 == 0
+        and weight.data_ptr() % 8 == 0
+    ):
+        return torch.ops.hc_projection_probe.forward(x.float(), weight, 4)
+
+    rows = x.float().split(1)
+    output = torch.empty(
+        (len(rows), weight.shape[0]), device=x.device, dtype=torch.float32
+    )
+    destinations = output.split(1)
+    transposed = weight.t()
+    main = torch.cuda.current_stream(x.device)
+    streams = [
+        stream_pool.get(("rowwise_gemv", lane), x.device)
+        for lane in range(min(lanes, len(rows)))
+    ]
+    try:
+        for lane, stream in enumerate(streams):
+            stream.wait_stream(main)
+            with torch.cuda.stream(stream):
+                for index in range(lane, len(rows), len(streams)):
+                    torch.mm(rows[index], transposed, out=destinations[index])
+    finally:
+        for stream in streams:
+            main.wait_stream(stream)
+    return output
+
+
 def require_symbol(module_name, symbol_name):
     """Resolve a selected SDK operation, failing at initialization on ABI gaps."""
     try:

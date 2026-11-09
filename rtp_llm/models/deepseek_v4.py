@@ -113,7 +113,10 @@ def detect_fp4_expert_storage(weight_keys) -> "str | None":
     does not declare ``expert_dtype``.
     """
     for key in weight_keys:
-        if key.endswith((".w1.scale", ".w2.scale", ".w3.scale")) and ".ffn.experts." in key:
+        if (
+            key.endswith((".w1.scale", ".w2.scale", ".w3.scale"))
+            and ".ffn.experts." in key
+        ):
             return "fp4"
     return None
 
@@ -170,6 +173,17 @@ def configure_ppu_scheduler(config, scheduler):
             chunk_size if chunk_size > 0 else int(config.max_seq_len),
         ),
     )
+
+
+class _PpuFp32RouterWeight(AtomicWeight):
+    """Own FP32 routing storage across initial load and in-place updates."""
+
+    def _postprocess(self, tensor, device, load_config):
+        # Preserve the normal checkpoint conversion, LoRA merge and splitting.
+        # update() also reaches this hook; data_type alone only affects load().
+        weights = super()._postprocess(tensor, device, load_config)
+        weights[self.name] = weights[self.name].float()
+        return weights
 
 
 class DeepSeekV4Weight(DeepSeekV2Weight):
@@ -401,8 +415,21 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         return out
 
     def _build_router(self, layer_id: int) -> List[WeightModule]:
+        # Match PpuGate's effective FP32 policy, including explicit opt-out.
+        fp32_route = (
+            os.environ.get(
+                "DSV4_GATE_FP32",
+                "1" if os.environ.get("DSV4_PPU_EXPERT_PRECISION") == "a8" else "0",
+            )
+            == "1"
+        )
+        router_weight = (
+            _PpuFp32RouterWeight
+            if _is_ppu_flash(self.model_config) and fp32_route
+            else AtomicWeight
+        )
         out: List[WeightModule] = [
-            AtomicWeight(
+            router_weight(
                 W.v4_router_w,
                 [CkptWeightInfo(self._key("ffn.gate.weight"), identity)],
                 identity,
@@ -735,10 +762,12 @@ class DeepSeekV4(DeepSeekV2):
 
     def create_model_loader(self):
         if _is_ppu_flash(self.model_config):
+            from rtp_llm.models_py.modules.dsv4.ppu.manifest import (
+                validate_cache_config,
+            )
             from rtp_llm.models_py.modules.dsv4.ppu.metadata.cache import (
                 configure_indexer_cache,
             )
-            from rtp_llm.models_py.modules.dsv4.ppu.manifest import validate_cache_config
 
             validate_cache_config(self.kv_cache_config)
             configure_indexer_cache(self.model_config)
@@ -1068,7 +1097,8 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
         if _is_ppu_flash(self.model_config):
             # Quantized projections already own these scale bytes.
             weights = [
-                w for w in weights
+                w
+                for w in weights
                 if w.name not in (W.v4_mtp_e_proj_s, W.v4_mtp_h_proj_s)
             ]
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
@@ -1091,7 +1121,9 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
                 PpuDeepSeekV4MtpModel as DeepSeekV4MtpModel,
             )
         else:
-            from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import DeepSeekV4MtpModel
+            from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import (
+                DeepSeekV4MtpModel,
+            )
 
         self.py_model = DeepSeekV4MtpModel(
             self.model_config,

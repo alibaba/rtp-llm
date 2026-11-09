@@ -1,17 +1,61 @@
 """PPU MTP projections and hidden-shard embedding fusion."""
 
+import os
+
 import torch
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import DeepSeekV4MtpModel
+from rtp_llm.models_py.model_desc.deepseek_v4_ppu.model import PpuDeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4.ppu.utils import _v4_fp8_linear
 from rtp_llm.utils.model_weight import W
 
-from rtp_llm.models_py.model_desc.deepseek_v4_ppu.model import PpuDeepSeekV4Model
-
 
 class PpuDeepSeekV4MtpModel(DeepSeekV4MtpModel, PpuDeepSeekV4Model):
+    def prepare_fmha_impl(
+        self, inputs, is_cuda_graph=False, cuda_graph_selection_mode=None
+    ):
+        impl = super().prepare_fmha_impl(
+            inputs, is_cuda_graph, cuda_graph_selection_mode
+        )
+        if impl is None or os.environ.get("DSV4_PPU_MTP_COMMIT_LAYOUT") != "1":
+            return impl
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+            primary_attention_inputs,
+        )
+        from rtp_llm.models_py.modules.dsv4.ppu.metadata.ppu_decode_metadata import (
+            PpuDecodeMetadataGraph,
+        )
+
+        attn = primary_attention_inputs(inputs.attention_inputs, self.kv_cache)
+        if (
+            isinstance(impl, PpuDecodeMetadataGraph)
+            and impl.config.q_len in (3, 4)
+            and self._is_decode_role
+            and impl.metadata.active_token_mask is not None
+            and attn.is_prefill
+            and not attn.is_target_verify
+        ):
+            impl.enable_mtp_commit_layout(attn.input_lengths_device)
+        return impl
+
+    def _pre_hc_from_inputs(self, inputs, T):
+        rows = super()._pre_hc_from_inputs(inputs, T)
+        layout = getattr(self, "_commit_layout", None)
+        return (
+            rows if layout is None else rows.index_select(0, layout.padded_to_compact)
+        )
+
+    def forward(self, inputs, fmha_impl=None):
+        self._commit_layout = getattr(
+            getattr(fmha_impl, "metadata", None), "mtp_commit_layout", None
+        )
+        try:
+            return super().forward(inputs, fmha_impl)
+        finally:
+            self._commit_layout = None
+
     def _load_extra_weights(self, weights: ModelWeights) -> None:
         gw = weights.global_weights
         eps = float(self._v4_args.norm_eps)
@@ -48,7 +92,8 @@ class PpuDeepSeekV4MtpModel(DeepSeekV4MtpModel, PpuDeepSeekV4Model):
                 tokens, hc, dim = pre_hc.shape
                 inputs_embeds = torch.where(
                     positions.reshape(-1, 1) == 0,
-                    torch.zeros_like(inputs_embeds), inputs_embeds,
+                    torch.zeros_like(inputs_embeds),
+                    inputs_embeds,
                 )
                 e_norm = self.enorm(inputs_embeds.contiguous())
                 h_norm = self.hnorm(pre_hc.reshape(-1, dim)).view(tokens, hc, dim)
