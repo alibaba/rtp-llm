@@ -1,9 +1,11 @@
 import concurrent.futures
+import multiprocessing
 import os
 import pickle
 import threading
 import time
 from typing import List
+from types import SimpleNamespace
 from unittest import TestCase, main, mock
 
 import PIL
@@ -736,7 +738,8 @@ class PreprocessMetricTest(TestCase):
             restored = pickle.loads(pickle.dumps(payload))
             executor = object.__new__(engine_module.MultiprocessPreprocessExecutor)
             executor._pool_lock = threading.Lock()
-            item.future = mock.Mock()
+            executor._pool_generation = 0
+            item.future = mock.Mock(generation=0)
             item.future.get.return_value = restored
             executor.get_result(item)
         for metric, expected in (
@@ -763,7 +766,8 @@ class PreprocessMetricTest(TestCase):
         self.assertEqual(item.preprocess_result, "prepared")
         executor = object.__new__(engine_module.MultiprocessPreprocessExecutor)
         executor._pool_lock = threading.Lock()
-        item.future = mock.Mock()
+        executor._pool_generation = 0
+        item.future = mock.Mock(generation=0)
         item.future.get.return_value = payload
         executor.get_result(item)
         self.assertEqual(item.preprocess_result, "prepared")
@@ -799,6 +803,8 @@ class PreprocessMetricTest(TestCase):
 
         executor = object.__new__(MultiprocessPreprocessExecutor)
         executor.pool = mock.Mock()
+        executor._pool_generation = 0
+        executor._completed_tasks = 0
         old_pool = executor.pool
         executor._clear_preprocess_tasks = mock.Mock()
         executor._create_pool = mock.Mock()
@@ -907,7 +913,9 @@ class PreprocessMetricTest(TestCase):
         executor.pool = FakePool()
         executor._pool_lock = threading.Lock()
         executor._preprocess_queue_lock = threading.Lock()
-        executor._pending_preprocess_tasks = set()
+        executor._pending_preprocess_tasks = {}
+        executor._pool_generation = 0
+        executor._completed_tasks = 0
         executor._next_preprocess_task_id = 0
 
         config = MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
@@ -980,6 +988,183 @@ class PreprocessMetricTest(TestCase):
             if call.args[0] == GaugeMetrics.VIT_IMAGE_COUNT_METRIC
         ]
         self.assertEqual(counts, [1, 1])
+
+
+def _recovery_preprocess(inputs, config):
+    if inputs == ["crash"]:
+        os._exit(17)
+    return inputs
+
+
+class PreprocessAdmissionRecoveryTest(TestCase):
+    def _executor(self):
+        from rtp_llm.multimodal.mm_process_engine import MultiprocessPreprocessExecutor
+
+        context = mock.Mock()
+        context.Pool.side_effect = lambda **kwargs: mock.Mock()
+        config = VitConfig()
+        config.mm_preprocess_max_workers = 2
+        return MultiprocessPreprocessExecutor(context, config, {}, _recovery_preprocess)
+
+    @staticmethod
+    def _item(timeout_ms=1000):
+        return SimpleNamespace(
+            should_preprocess=True,
+            mm_inputs=["prepared"],
+            mm_timeout_ms=timeout_ms,
+            future=None,
+        )
+
+    def test_rebuild_fails_pending_and_ignores_old_callbacks(self):
+        executor = self._executor()
+        old = self._item()
+        executor.submit(old)
+        old_callbacks = executor.pool.apply_async.call_args.kwargs
+        with executor._pool_lock:
+            executor._rebuild_pool()
+        with self.assertRaisesRegex(RuntimeError, "pool retired"):
+            old.future.get(timeout=0)
+        new = self._item()
+        executor.submit(new)
+        old_callbacks["callback"](("stale", 1, []))
+        old_callbacks["error_callback"](BrokenPipeError())
+        self.assertEqual(executor._completed_tasks, 0)
+        self.assertEqual(len(executor._pending_preprocess_tasks), 1)
+        executor.pool.apply_async.call_args.kwargs["callback"](("new", 1, []))
+        executor.get_result(new)
+        self.assertEqual(new.preprocess_result, "new")
+
+    def test_stale_result_cannot_change_replacement_pool(self):
+        executor = self._executor()
+        executor._rebuild_pool()
+        replacement = executor.pool
+        executor._consecutive_timeouts = executor._max_consecutive_timeouts
+        for error in (multiprocessing.TimeoutError(), BrokenPipeError(), EOFError()):
+            with self.subTest(error=error):
+                old = self._item()
+                old.future = mock.Mock(generation=0)
+                old.future.get.side_effect = error
+                with self.assertRaises((TimeoutError, OSError, EOFError)):
+                    executor.get_result(old)
+                self.assertIs(executor.pool, replacement)
+                replacement.terminate.assert_not_called()
+        old.future.get.side_effect = None
+        old.future.get.return_value = ("completed before rebuild", 1, [])
+        executor.get_result(old)
+        self.assertEqual(
+            executor._consecutive_timeouts, executor._max_consecutive_timeouts
+        )
+
+    def test_timeout_rebuilds_once_and_releases_other_requests(self):
+        executor = self._executor()
+        items = [self._item(1) for _ in range(4)]
+        for item in items:
+            executor.submit(item)
+        for item in items[:2]:
+            with self.assertRaises(TimeoutError):
+                executor.get_result(item)
+        for item in items[2:]:
+            with self.assertRaisesRegex(RuntimeError, "pool retired"):
+                executor.get_result(item)
+        self.assertEqual(executor.mp_context.Pool.call_count, 2)
+        self.assertEqual(executor._consecutive_timeouts, 0)
+        self.assertFalse(executor._pending_preprocess_tasks)
+
+    def test_business_io_error_does_not_rebuild(self):
+        from rtp_llm.multimodal.mm_process_engine import _PreprocessTaskError
+
+        executor = self._executor()
+        item = self._item()
+        executor.submit(item)
+        executor.pool.apply_async.call_args.kwargs["error_callback"](
+            _PreprocessTaskError(OSError("invalid media"))
+        )
+        with self.assertRaisesRegex(OSError, "invalid media"):
+            executor.get_result(item)
+        self.assertEqual(executor.mp_context.Pool.call_count, 1)
+
+    def test_failed_rebuild_can_be_retried_by_new_submission(self):
+        executor = self._executor()
+        old = self._item()
+        executor.submit(old)
+        executor.mp_context.Pool.side_effect = OSError("cannot create pool")
+        with self.assertRaises(OSError):
+            executor._rebuild_pool()
+        with self.assertRaisesRegex(RuntimeError, "pool retired"):
+            old.future.get(timeout=0)
+        executor.mp_context.Pool.side_effect = lambda **kwargs: mock.Mock()
+        new = self._item()
+        executor.submit(new)
+        executor.pool.apply_async.call_args.kwargs["callback"](("recovered", 1, []))
+        executor.get_result(new)
+        self.assertEqual(new.preprocess_result, "recovered")
+
+    def test_local_preprocessing_honors_worker_limit_and_queue_timeout(self):
+        from rtp_llm.multimodal.mm_process_engine import LocalPreprocessExecutor
+
+        started, release = threading.Event(), threading.Event()
+
+        def preprocess(inputs, config):
+            started.set()
+            if not release.wait(5):
+                raise RuntimeError("test did not release worker")
+            return inputs
+
+        config = VitConfig()
+        config.mm_preprocess_max_workers = 1
+        executor = LocalPreprocessExecutor(preprocess, config, {})
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            first = pool.submit(executor.submit, self._item())
+            try:
+                self.assertTrue(started.wait(2))
+                with self.assertRaisesRegex(TimeoutError, "queue"):
+                    executor.submit(self._item(20))
+            finally:
+                release.set()
+            first.result(2)
+        # A failed task must release its slot too.
+        executor.preprocess_func = mock.Mock(side_effect=ValueError("bad input"))
+        with self.assertRaises(ValueError):
+            executor.submit(self._item())
+        executor.preprocess_func.side_effect = None
+        executor.preprocess_func.return_value = "recovered"
+        item = self._item()
+        executor.submit(item)
+        self.assertEqual(item.preprocess_result, "recovered")
+
+    def test_real_spawn_pool_recovers_after_worker_exit(self):
+        from rtp_llm.multimodal.mm_process_engine import MultiprocessPreprocessExecutor
+
+        config = VitConfig()
+        config.mm_preprocess_max_workers = 1
+        executor = MultiprocessPreprocessExecutor(
+            multiprocessing.get_context("spawn"), config, {}, _recovery_preprocess
+        )
+        try:
+            # Warm up first so a startup delay cannot masquerade as a worker crash.
+            item = self._item(30000)
+            executor.submit(item)
+            executor.get_result(item)
+            self.assertEqual(item.preprocess_result, ["prepared"])
+            old_pool = executor.pool
+            old_pid = old_pool._pool[0].pid
+            crash = self._item(3000)
+            crash.mm_inputs = ["crash"]
+            executor.submit(crash)
+            with self.assertRaises(TimeoutError):
+                executor.get_result(crash)
+            # The first timeout may observe warm-up progress; the next has none.
+            if executor.pool is old_pool:
+                with self.assertRaises(TimeoutError):
+                    executor.get_result(crash)
+            self.assertIsNot(executor.pool, old_pool)
+            item = self._item(30000)
+            executor.submit(item)
+            executor.get_result(item)
+            self.assertEqual(item.preprocess_result, ["prepared"])
+            self.assertNotEqual(executor.pool._pool[0].pid, old_pid)
+        finally:
+            executor.shutdown()
 
 
 class FtRuntimeExceptionSerializationTest(TestCase):

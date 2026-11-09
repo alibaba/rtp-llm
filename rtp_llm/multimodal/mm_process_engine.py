@@ -189,12 +189,19 @@ class LocalPreprocessExecutor(PreprocessExecutor):
         self.preprocess_func = preprocess_func
         self.vit_config = vit_config
         self.preprocess_params = preprocess_params
+        if vit_config.mm_preprocess_max_workers <= 0:
+            raise ValueError("mm_preprocess_max_workers must be positive")
+        self._slots = threading.BoundedSemaphore(vit_config.mm_preprocess_max_workers)
         _report_preprocess_queue_size(0)
 
     def submit(self, work_item: "MMWorkItem") -> None:
         if not work_item.should_preprocess:
             return
 
+        # Local mode still receives concurrent calls from RPC handler threads.
+        # Bound download/decode work just as the multiprocessing pool does.
+        if not self._slots.acquire(timeout=work_item.mm_timeout_ms / 1000.0):
+            raise TimeoutError("Local preprocessing queue timed out")
         try:
             result, preprocess_time, samples = _run_preprocess_task(
                 self.preprocess_func,
@@ -208,6 +215,8 @@ class LocalPreprocessExecutor(PreprocessExecutor):
         except Exception as e:
             logging.error(f"Error in local preprocessing: {e}", exc_info=True)
             raise
+        finally:
+            self._slots.release()
 
     def get_result(self, work_item: "MMWorkItem") -> None:
         if work_item.future is None:
@@ -228,6 +237,33 @@ class LocalPreprocessExecutor(PreprocessExecutor):
         except Exception as e:
             logging.error(f"Error getting local preprocess result: {e}", exc_info=True)
             raise
+
+
+class _PreprocessPoolResetError(RuntimeError):
+    """The pool owning this request was retired; do not restart its replacement."""
+
+
+class _PreprocessFuture:
+    """A pool result that can also be completed when its workers are terminated."""
+
+    def __init__(self, generation: int):
+        self.generation = generation
+        self._ready = threading.Event()
+        self._result = None
+        self._error = None
+
+    def finish(self, result=None, error=None) -> None:
+        # Serialized by the executor's pending-task lock, exactly once.
+        self._result = result
+        self._error = error
+        self._ready.set()
+
+    def get(self, timeout=None):
+        if not self._ready.wait(timeout):
+            raise multiprocessing.pool.TimeoutError()
+        if self._error is not None:
+            raise self._error
+        return self._result
 
 
 class MultiprocessPreprocessExecutor(PreprocessExecutor):
@@ -253,6 +289,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         self.preprocess_params = preprocess_params
         self.preprocess_func = preprocess_func
         self.pool: Optional[multiprocessing.pool.Pool] = None
+        self._pool_generation = 0
         self._consecutive_timeouts = 0
         self._max_consecutive_timeouts = vit_config.mm_preprocess_max_workers
         # Counts completed tasks so a timeout can tell a stuck pool (no
@@ -261,7 +298,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         self._last_timeout_completed = 0
         # Accepted, unfinished work; includes both running and waiting tasks (M3).
         self._preprocess_queue_lock = threading.Lock()
-        self._pending_preprocess_tasks: Set[int] = set()
+        self._pending_preprocess_tasks: Dict[int, _PreprocessFuture] = {}
         self._next_preprocess_task_id = 0
         # Serializes submissions, timeout-counter updates, and pool rebuilds.
         self._pool_lock = threading.Lock()
@@ -287,17 +324,20 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         with self._preprocess_queue_lock:
             self._next_preprocess_task_id += 1
             task_id = self._next_preprocess_task_id
-            self._pending_preprocess_tasks.add(task_id)
+            self._pending_preprocess_tasks[task_id] = _PreprocessFuture(
+                self._pool_generation
+            )
             queue_size = len(self._pending_preprocess_tasks)
         _report_preprocess_queue_size(queue_size)
         return task_id
 
-    def _finish_preprocess_task(self, task_id: int) -> None:
+    def _finish_preprocess_task(self, task_id: int, result=None, error=None) -> None:
         with self._preprocess_queue_lock:
-            if task_id not in self._pending_preprocess_tasks:
+            future = self._pending_preprocess_tasks.pop(task_id, None)
+            if future is None:
                 return
-            self._pending_preprocess_tasks.remove(task_id)
-            self._completed_tasks = getattr(self, "_completed_tasks", 0) + 1
+            future.finish(result, error)
+            self._completed_tasks += 1
             queue_size = len(self._pending_preprocess_tasks)
         _report_preprocess_queue_size(queue_size)
 
@@ -305,16 +345,26 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         with self._preprocess_queue_lock:
             if not self._pending_preprocess_tasks:
                 return
+            for future in self._pending_preprocess_tasks.values():
+                future.finish(
+                    error=_PreprocessPoolResetError("Preprocessing pool retired")
+                )
             self._pending_preprocess_tasks.clear()
         _report_preprocess_queue_size(0)
 
     def _apply_async(self, work_item: "MMWorkItem", task_id: int) -> Any:
-        return self.pool.apply_async(
+        future = self._pending_preprocess_tasks[task_id]
+        self.pool.apply_async(
             _worker_process_task,
             args=(work_item.mm_inputs,),
-            callback=lambda _result: self._finish_preprocess_task(task_id),
-            error_callback=lambda _error: self._finish_preprocess_task(task_id),
+            callback=lambda result: self._finish_preprocess_task(
+                task_id, result=result
+            ),
+            error_callback=lambda error: self._finish_preprocess_task(
+                task_id, error=error
+            ),
         )
+        return future
 
     def _rebuild_pool(self) -> None:
         """Tear down the current pool and create a fresh one.
@@ -324,7 +374,10 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         """
         old = self.pool
         self.pool = None
+        self._pool_generation += 1
         self._clear_preprocess_tasks()
+        self._consecutive_timeouts = 0
+        self._last_timeout_completed = self._completed_tasks
         try:
             if old is not None:
                 old.terminate()
@@ -360,18 +413,18 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                     logging.error(
                         f"Pool broken on submit, rebuilding: {e}", exc_info=True
                     )
-                    self._finish_preprocess_task(task_id)
+                    self._finish_preprocess_task(task_id, error=e)
                     self._rebuild_pool()
                     task_id = self._track_preprocess_task()
                     work_item.future = self._apply_async(work_item, task_id)
             return
         except (BrokenPipeError, OSError, EOFError) as e:
             if task_id is not None:
-                self._finish_preprocess_task(task_id)
+                self._finish_preprocess_task(task_id, error=e)
             raise
         except Exception as e:
             if task_id is not None:
-                self._finish_preprocess_task(task_id)
+                self._finish_preprocess_task(task_id, error=e)
             logging.error(f"Unexpected error during submission: {e}", exc_info=True)
             raise
 
@@ -386,7 +439,8 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                 work_item.future.get(timeout=work_item.mm_timeout_ms / 1000.0)
             )
             with self._pool_lock:
-                self._consecutive_timeouts = 0
+                if work_item.future.generation == self._pool_generation:
+                    self._consecutive_timeouts = 0
             _report_vit_preprocess_samples(
                 [
                     VitMetricSample(
@@ -404,8 +458,12 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                 # timeout) from an overloaded one (tasks are still draining).
                 # Rebuilding an overloaded pool would discard queued work and
                 # make the backlog worse.
-                completed = getattr(self, "_completed_tasks", 0)
-                if completed != getattr(self, "_last_timeout_completed", 0):
+                completed = self._completed_tasks
+                if work_item.future.generation != self._pool_generation:
+                    # It may have timed out while another caller was rebuilding.
+                    # Old requests must never invalidate the replacement pool.
+                    pass
+                elif completed != self._last_timeout_completed:
                     self._consecutive_timeouts = 0
                     self._last_timeout_completed = completed
                 else:
@@ -417,10 +475,6 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                             f"(workers may be stuck)"
                         )
                         self._rebuild_pool()
-                        self._consecutive_timeouts = 0
-                        self._last_timeout_completed = getattr(
-                            self, "_completed_tasks", 0
-                        )
             raise TimeoutError(
                 f"Preprocessing timeout after {work_item.mm_timeout_ms}ms"
             )
@@ -429,7 +483,8 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             logging.error(f"Pool broken on get_result, rebuilding: {e}", exc_info=True)
             with self._pool_lock:
                 try:
-                    self._rebuild_pool()
+                    if work_item.future.generation == self._pool_generation:
+                        self._rebuild_pool()
                 except Exception as rb:
                     logging.error(f"pool rebuild failed: {rb}", exc_info=True)
             raise
