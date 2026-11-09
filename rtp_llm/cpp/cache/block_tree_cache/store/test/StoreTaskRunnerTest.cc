@@ -163,34 +163,38 @@ TEST(StoreTaskRunnerTest, DiskFailureWaitsForEverySubmittedBatch) {
     StoreTaskRunner                runner(group_sets);
     BlockTreeCacheMetricsReporter  metrics_reporter{nullptr};
 
-    for (const bool mixed_parent : {false, true}) {
-        SCOPED_TRACE(mixed_parent ? "mixed parent" : "standalone ordinary parent");
-        auto                    engine = std::make_shared<PendingStoreTransferEngine>();
-        BlockTransferDispatcher dispatcher(engine);
-        auto task = std::make_shared<StoreTaskRunner::Task>(Tier::DISK, CacheKeysType{}, std::chrono::seconds(30));
-        task->transfer_task.addDescriptor(TransferDescriptor::deviceToDisk(0, {1}, 1));
-        task->transfer_task.addDescriptor(TransferDescriptor::deviceToDisk(0, {2}, 2));
-        if (mixed_parent) {
-            task->transfer_task.addDescriptor(TransferDescriptor::deviceToDisk(1, {3}, 3));
-        }
-        std::optional<ErrorInfo> result;
-        runner.runTransfer(
-            task, dispatcher, metrics_reporter, [&](ErrorInfo error) { result.emplace(std::move(error)); });
-        EXPECT_EQ(engine->batches.size(), mixed_parent ? 3u : 2u);
-        for (const auto& batch : engine->batches) {
-            EXPECT_EQ(batch.size(), 1u);
-        }
-        EXPECT_FALSE(result.has_value());
-        // A failure does not release the task while another batch is writing.
-        if (mixed_parent && !engine->contexts.empty()) {
-            engine->contexts.back()->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
+    for (const size_t batch_limit : {1u, 8u}) {
+        SCOPED_TRACE(batch_limit);
+        for (const bool mixed_parent : {false, true}) {
+            SCOPED_TRACE(mixed_parent ? "mixed parent" : "standalone ordinary parent");
+            auto                    engine = std::make_shared<PendingStoreTransferEngine>();
+            BlockTransferDispatcher dispatcher(engine, nullptr, batch_limit);
+            auto task = std::make_shared<StoreTaskRunner::Task>(Tier::DISK, CacheKeysType{}, std::chrono::seconds(30));
+            task->transfer_task.addDescriptor(TransferDescriptor::deviceToDisk(0, {1}, 1));
+            task->transfer_task.addDescriptor(TransferDescriptor::deviceToDisk(0, {2}, 2));
+            if (mixed_parent) {
+                task->transfer_task.addDescriptor(TransferDescriptor::deviceToDisk(1, {3}, 3));
+            }
+            std::optional<ErrorInfo> result;
+            runner.runTransfer(
+                task, dispatcher, metrics_reporter, [&](ErrorInfo error) { result.emplace(std::move(error)); });
+            const size_t expected_batches = batch_limit == 1 ? (mixed_parent ? 3u : 2u) : (mixed_parent ? 2u : 1u);
+            EXPECT_EQ(engine->batches.size(), expected_batches);
+            for (size_t index = 0; index < engine->batches.size(); ++index) {
+                EXPECT_EQ(engine->batches[index].size(), batch_limit == 1 || index != 0 ? 1u : 2u);
+            }
             EXPECT_FALSE(result.has_value());
+            // A failure does not release the task while another batch is writing.
+            if (mixed_parent && !engine->contexts.empty()) {
+                engine->contexts.back()->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
+                EXPECT_FALSE(result.has_value());
+            }
+            for (const auto& context : engine->contexts) {
+                context->complete(ErrorInfo::OkStatus());
+            }
+            ASSERT_TRUE(result.has_value());
+            EXPECT_EQ(result->code(), mixed_parent ? ErrorCode::EXECUTION_EXCEPTION : ErrorCode::NONE_ERROR);
         }
-        for (const auto& context : engine->contexts) {
-            context->complete(ErrorInfo::OkStatus());
-        }
-        ASSERT_TRUE(result.has_value());
-        EXPECT_EQ(result->code(), mixed_parent ? ErrorCode::EXECUTION_EXCEPTION : ErrorCode::NONE_ERROR);
     }
 }
 

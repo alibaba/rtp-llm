@@ -40,17 +40,12 @@ TEST(PerRankBlockTransferEngineConfigTest, LegacyPreservesWorkerCount) {
     }
 }
 
-TEST(PerRankBlockTransferEngineConfigTest, DirectionBatchLimitsAreAvailableForBothBackends) {
+TEST(PerRankBlockTransferEngineConfigTest, BatchLimitIsAvailableForBothBackends) {
     for (const bool async : {false, true}) {
         SCOPED_TRACE(async);
         PerRankBlockTransferEngine engine({}, false, {}, 128, 17, 2, 32, nullptr, 0, 2, async);
         ASSERT_EQ(engine.asyncEnabled(), async);
-        EXPECT_EQ(engine.batchLimit(Tier::HOST, Tier::DEVICE), 17u);
-        EXPECT_EQ(engine.batchLimit(Tier::DEVICE, Tier::HOST), 17u);
-        EXPECT_EQ(engine.batchLimit(Tier::HOST, Tier::DISK), 17u);
-        EXPECT_EQ(engine.batchLimit(Tier::DISK, Tier::HOST), 17u);
-        EXPECT_EQ(engine.batchLimit(Tier::DISK, Tier::DEVICE), 17u);
-        EXPECT_EQ(engine.batchLimit(Tier::DEVICE, Tier::DISK), 1u);
+        EXPECT_EQ(engine.batchLimit(), 17u);
     }
 }
 
@@ -228,7 +223,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, ReportsSuccessfulQueueWaitThrough
     const BlockIdxType disk_block = poolMalloc(*disk_pool_);
     const auto         descriptor = makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block);
     ASSERT_TRUE(executeSucceeded(engine, descriptor));
-    engine->drain();
+    engine->shutdown();
     cache_metrics_reporter->flushStageMetrics();
     const auto sizes = engine->queueSizes();
     EXPECT_EQ(sizes.load, 0u);

@@ -39,13 +39,13 @@ public:
     // Close per-rank admission, drain local owners, then wait for transfer
     // callback chains. Call after business producers/task bodies stop; keep
     // business completion consumers alive and drain their settlement afterwards.
-    // The lifecycle caller serializes shutdown(), drainTransfers() and destruction.
+    // The lifecycle caller serializes shutdown(), waitForTransfers() and destruction.
     void shutdown() const;
 
     // Nonterminal drain of submission stacks and final callback chains, including
     // synchronously submitted stages. Stop independent producers before destruction;
     // queued business settlement must be drained separately afterwards.
-    void drainTransfers() const;
+    void waitForTransfers() const;
 
 private:
     struct CompletionTicket;

@@ -281,7 +281,7 @@ TEST_P(RequestLevelBroadcastTest, EachRankReceivesWholeRequestAndMergesLocalBatc
                            [&](TransferResult result) { done.set_value(std::move(result)); });
     ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     auto result = future.get();
-    dispatcher.drainTransfers();
+    dispatcher.waitForTransfers();
     ASSERT_EQ(result.block_errors.size(), descriptors.size());
     for (size_t i = 0; i < descriptors.size(); ++i)
         EXPECT_EQ(result.block_errors[i], i == 2 ? CacheCopyError::IO_FAILED : CacheCopyError::NONE);
@@ -327,7 +327,7 @@ TEST_P(RequestLevelBroadcastTest, MixedDirectionsBroadcastOncePerDirectionAndRan
                            [&](TransferResult result) { done.set_value(std::move(result)); });
     ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     EXPECT_TRUE(future.get().ok());
-    dispatcher.drainTransfers();
+    dispatcher.waitForTransfers();
     ASSERT_EQ(state->requests.size(), 4u);
     size_t loads = 0;
     for (const auto& request : state->requests) {
@@ -337,7 +337,7 @@ TEST_P(RequestLevelBroadcastTest, MixedDirectionsBroadcastOncePerDirectionAndRan
     EXPECT_EQ(loads, 2u);
 }
 
-TEST_P(RequestLevelBroadcastTest, DiskStoreBroadcastsWholeTaskAndExecutesSingletonBatchesPerRank) {
+TEST_P(RequestLevelBroadcastTest, DiskStoreBroadcastsWholeTaskAndUsesBackendBatchLimitsPerRank) {
     block_transfer_engine_test::TempDirGuard temp("request_disk_store");
     auto                                     disk = block_transfer_engine_test::makeDiskPool(256, 8, temp.path);
     auto                                     group =
@@ -372,16 +372,17 @@ TEST_P(RequestLevelBroadcastTest, DiskStoreBroadcastsWholeTaskAndExecutesSinglet
     runner.runTransfer(task, dispatcher, reporter, [&](ErrorInfo result) { done.set_value(std::move(result)); });
     ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     EXPECT_TRUE(future.get().ok());
-    dispatcher.drainTransfers();
+    dispatcher.waitForTransfers();
     ASSERT_EQ(state->requests.size(), 2u);
     for (const auto& request : state->requests) {
         EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::D2DISK);
         EXPECT_EQ(request.copy_items_size(), 5);
     }
     for (const auto& engine : engines) {
-        ASSERT_EQ(engine->batches.size(), 5u);
-        for (const auto& batch : engine->batches)
-            EXPECT_EQ(batch.size(), 1u);
+        const std::vector<size_t> expected_sizes{2, 2, 1};
+        ASSERT_EQ(engine->batches.size(), expected_sizes.size());
+        for (size_t index = 0; index < expected_sizes.size(); ++index)
+            EXPECT_EQ(engine->batches[index].size(), expected_sizes[index]);
     }
 }
 
@@ -626,7 +627,7 @@ TEST_F(MultiRankBlockTransferEngineTest, DispatcherAssignsDistinctWireIdsToConcu
     ASSERT_EQ(second_done.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     EXPECT_TRUE(done.get().ok());
     EXPECT_TRUE(second_done.get().ok());
-    dispatcher.drainTransfers();
+    dispatcher.waitForTransfers();
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 4u);
     std::map<uint64_t, size_t> batches;

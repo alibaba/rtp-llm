@@ -328,8 +328,9 @@ public:
         EvictionPolicy                    disk_policy               = EvictionPolicy::FIFO,
         BlockTreeEvictor::IsTierEnabledFn is_tier_enabled           = [](Tier) { return true; },
         BlockTreeTaskPool*                task_pool                 = nullptr,
-        size_t                            max_descriptors_per_batch = 8) {
-        transfer_engine_ = std::make_shared<ScriptedTransferEngine>(tree->groupSets(), false);
+        size_t                            max_descriptors_per_batch = 8,
+        bool                              async                     = true) {
+        transfer_engine_ = std::make_shared<ScriptedTransferEngine>(tree->groupSets(), false, false, async);
         transfer_dispatcher_ =
             std::make_unique<BlockTransferDispatcher>(transfer_engine_, nullptr, max_descriptors_per_batch);
         return std::make_unique<BlockTreeEvictor>(tree,
@@ -1890,52 +1891,58 @@ TEST_F(BlockTreeEvictorTest, HostDiskWatermarkConvergesAcrossBoundedBatches) {
     task_pool.shutdown();
 }
 
-TEST_F(BlockTreeEvictorTest, DeviceDiskEvictionRespectsPerRankSingleDescriptorContract) {
-    device_pool_ = makeTestDevicePool(4, "device_disk_single_descriptor");
-    ASSERT_NE(device_pool_, nullptr);
-    auto disk_pool = makeTestDiskPool(3, "device_disk_single_descriptor");
-    ASSERT_NE(disk_pool, nullptr);
-    resetGroup(nullptr, disk_pool);
+TEST_F(BlockTreeEvictorTest, DeviceDiskEvictionRespectsSelectedBackendBatchLimit) {
+    for (const bool async : {false, true}) {
+        SCOPED_TRACE(async);
+        device_pool_ = makeTestDevicePool(4, "device_disk_single_descriptor");
+        ASSERT_NE(device_pool_, nullptr);
+        auto disk_pool = makeTestDiskPool(3, "device_disk_single_descriptor");
+        ASSERT_NE(disk_pool, nullptr);
+        resetGroup(nullptr, disk_pool);
 
-    BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/4, "device_disk_single_descriptor");
-    ASSERT_TRUE(task_pool.start());
-    evictor_ = evictor_runtime_.make(
-        tree_.get(),
-        EvictionPolicy::LRU,
-        EvictionPolicy::LRU,
-        EvictionPolicy::FIFO,
-        [](Tier tier) { return tier != Tier::HOST; },
-        &task_pool);
+        BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/4, "device_disk_single_descriptor");
+        ASSERT_TRUE(task_pool.start());
+        evictor_ = evictor_runtime_.make(
+            tree_.get(),
+            EvictionPolicy::LRU,
+            EvictionPolicy::LRU,
+            EvictionPolicy::FIFO,
+            [](Tier tier) { return tier != Tier::HOST; },
+            &task_pool,
+            8,
+            async);
+        ASSERT_EQ(evictor_runtime_.transferEngine()->asyncEnabled(), async);
 
-    for (int64_t key : {100, 200, 300}) {
-        const MultiNodeBlocks blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
-        ASSERT_EQ(blocks.size(), 1u);
-        auto result = insert({key}, {{makeResource(Tier::DEVICE, blocks.front().front())}});
-        ASSERT_NE(insertedNode(result), nullptr);
-        unreferenceDeviceBlocksForTest(*group_, blocks, BlockTreeRefType::CACHE);
-    }
-
-    const TierWatermark watermark{/*low_ratio=*/0.01, /*high_ratio=*/0.02};
-    evictor_->settled_ = [this, &watermark](bool check_watermark) {
-        if (check_watermark) {
-            evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
+        for (int64_t key : {100, 200, 300}) {
+            const MultiNodeBlocks blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
+            ASSERT_EQ(blocks.size(), 1u);
+            auto result = insert({key}, {{makeResource(Tier::DEVICE, blocks.front().front())}});
+            ASSERT_NE(insertedNode(result), nullptr);
+            unreferenceDeviceBlocksForTest(*group_, blocks, BlockTreeRefType::CACHE);
         }
-    };
-    evictor_runtime_.transferEngine()->enqueue(true);
-    evictor_runtime_.transferEngine()->enqueue(true);
-    evictor_runtime_.transferEngine()->enqueue(true);
-    evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
-    task_pool.waitForIdle();
 
-    EXPECT_EQ(evictor_runtime_.transferEngine()->submittedBatchCount(), 3u);
-    EXPECT_EQ(evictor_runtime_.transferEngine()->submittedDescriptorCount(), 3u);
-    EXPECT_EQ(device_pool_->usedBlocksNum(), 0u);
-    EXPECT_EQ(disk_pool->usedBlocksNum(), 3u);
+        const TierWatermark watermark{/*low_ratio=*/0.01, /*high_ratio=*/0.02};
+        evictor_->settled_ = [this, &watermark](bool check_watermark) {
+            if (check_watermark) {
+                evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
+            }
+        };
+        evictor_runtime_.transferEngine()->enqueue(true);
+        evictor_runtime_.transferEngine()->enqueue(true);
+        evictor_runtime_.transferEngine()->enqueue(true);
+        evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
+        task_pool.waitForIdle();
 
-    evictor_->settled_ = [](bool) {};
-    while (evictor_->dropLocked(/*group_set_id=*/0, Tier::DEVICE, /*notify_settled=*/false)) {}
-    while (evictor_->dropLocked(/*group_set_id=*/0, Tier::DISK, /*notify_settled=*/false)) {}
-    task_pool.shutdown();
+        EXPECT_EQ(evictor_runtime_.transferEngine()->submittedBatchCount(), 1u);
+        EXPECT_EQ(evictor_runtime_.transferEngine()->submittedDescriptorCount(), 3u);
+        EXPECT_EQ(device_pool_->usedBlocksNum(), 0u);
+        EXPECT_EQ(disk_pool->usedBlocksNum(), 3u);
+
+        evictor_->settled_ = [](bool) {};
+        while (evictor_->dropLocked(/*group_set_id=*/0, Tier::DEVICE, /*notify_settled=*/false)) {}
+        while (evictor_->dropLocked(/*group_set_id=*/0, Tier::DISK, /*notify_settled=*/false)) {}
+        task_pool.shutdown();
+    }
 }
 
 TEST_F(BlockTreeEvictorTest, DirectDropWatermarkBatchNotifiesSettlementOnce) {

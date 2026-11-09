@@ -105,7 +105,6 @@ private:
                                  const MemberDeviceBlocks&                          device_blocks,
                                  const std::vector<BlockIdxType>&                   host_blocks,
                                  const std::vector<BlockIdxType>&                   disk_blocks,
-                                 BlockTreeTaskPool*                                 d2disk_submit_pool,
                                  BlockTreeTaskPool*                                 business_pool,
                                  size_t                                             wave_width,
                                  size_t                                             descriptor_batch_size,

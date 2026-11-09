@@ -19,6 +19,18 @@ namespace rtp_llm {
 
 struct TreeNode;
 
+// Transfer lanes describe cache movement, independently of business priority.
+enum class TransferDirection {
+    LOAD,
+    OFFLOAD,
+};
+
+// Cache promotion is Disk -> Host -> Device; keep backend routing consistent.
+inline bool isLoadTransfer(Tier source, Tier target) {
+    return (source == Tier::DISK && (target == Tier::HOST || target == Tier::DEVICE))
+           || (source == Tier::HOST && target == Tier::DEVICE);
+}
+
 enum class TransferStatus {
     OK,
     INVALID_ARGS,
@@ -311,6 +323,10 @@ private:
     }
 };
 
+// Shared task description across preparation, RPC grouping and local batching.
+// Builders resolve descriptors before submission; execution entrances validate
+// their batch constraints. Executors own their copy and do not mutate it.
+// Results use the current descriptor order; the dispatcher owns parent-index maps.
 class TransferTask {
 public:
     using Clock = std::chrono::steady_clock;

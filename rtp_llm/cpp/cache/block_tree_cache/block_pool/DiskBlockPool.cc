@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 
 #include <condition_variable>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <type_traits>
@@ -295,25 +296,33 @@ BlockIOStatus BlockTreeDiskBlockPool::asyncRead(DiskIOExecutor&           execut
         }));
 }
 
-BlockIOStatus BlockTreeDiskBlockPool::asyncWrite(DiskIOExecutor&                 executor,
-                                                 const BlockIdList&              blocks,
-                                                 const std::vector<const void*>& srcs,
-                                                 size_t                          bytes_per_block,
-                                                 Callback                        callback) {
-    if (!callback) {
+BlockIOStatus BlockTreeDiskBlockPool::asyncWrite(DiskIOExecutor&           executor,
+                                                 const BlockIdList&        blocks,
+                                                 const std::vector<void*>& srcs,
+                                                 size_t                    bytes_per_block,
+                                                 size_t                    storage_bytes,
+                                                 Callback                  callback) {
+    if (!callback)
         return BlockIOStatus::IO_ERROR;
-    }
+    if (storage_bytes > bytes_per_block)
+        return BlockIOStatus::INVALID_SIZE;
     std::vector<DiskWrite> writes;
     const auto             validation = prepareBatch(blocks, srcs, bytes_per_block, writes);
-    if (validation != BlockIOStatus::OK) {
+    if (validation != BlockIOStatus::OK)
         return validation;
+    for (auto& request : writes) {
+        if (!request.buffer)
+            return BlockIOStatus::INVALID_SIZE;
+    }
+    for (size_t i = 0; i < writes.size(); ++i) {
+        writes[i].padding       = static_cast<uint8_t*>(srcs[i]) + storage_bytes;
+        writes[i].padding_bytes = bytes_per_block - storage_bytes;
     }
     const size_t bytes = bytes_per_block * blocks.size();
     return mapStatus(async_state_->submit(
         executor, *io_, std::move(writes), [this, bytes, callback = std::move(callback)](DiskBlockIOStatus status) {
-            if (status == DiskBlockIOStatus::OK) {
+            if (status == DiskBlockIOStatus::OK)
                 write_bytes_.fetch_add(bytes, std::memory_order_relaxed);
-            }
             callback(mapStatus(status));
         }));
 }

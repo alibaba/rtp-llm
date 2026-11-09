@@ -30,8 +30,8 @@ struct TransferOptions {
     size_t transfer_queue_max_size{10000};
 
     // Number of same-direction descriptors submitted in one transfer-engine
-    // API call. 0 follows transfer_concurrency. Device->Disk is the only
-    // direction whose engine contract still requires singleton submissions.
+    // API call. 0 follows transfer_concurrency. Every direction is bounded by
+    // the engine's effective batch limit.
     size_t transfer_descriptor_batch_size{0};
 
     // Device<->Host copy strategy. Explicit strategies disable the other

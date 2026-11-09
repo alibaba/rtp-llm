@@ -48,11 +48,11 @@ BlockTransferDispatcher::~BlockTransferDispatcher() {
 
 void BlockTransferDispatcher::shutdown() const {
     if (per_rank_engine_)
-        per_rank_engine_->drain();
-    drainTransfers();
+        per_rank_engine_->shutdown();
+    waitForTransfers();
 }
 
-void BlockTransferDispatcher::drainTransfers() const {
+void BlockTransferDispatcher::waitForTransfers() const {
     std::unique_lock<std::mutex> lock(completion_mutex_);
     if (inflight_transfers_ != 0 && drain_observer_for_test_) {
         lock.unlock();
@@ -165,8 +165,7 @@ void BlockTransferDispatcher::dispatchGroups(TransferTask         task,
     bool any_batch_registered = false;
     for (const auto& group : groups) {
         const size_t batch_limit =
-            local ? std::min(max_descriptors_per_batch_, per_rank_engine_->batchLimit(group.source, group.target)) :
-                    group.descriptors.size();
+            local ? std::min(max_descriptors_per_batch_, per_rank_engine_->batchLimit()) : group.descriptors.size();
         for (size_t begin = 0; begin < group.descriptors.size(); begin += batch_limit) {
             std::vector<size_t> indices;
             bool                batch_registered = false;

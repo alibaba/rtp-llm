@@ -1,9 +1,11 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskIOExecutor.h"
 
 #include <algorithm>
+#include <cstring>
 #include <exception>
 #include <limits>
 #include <mutex>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
@@ -31,11 +33,27 @@ bool DiskIOExecutorConfig::valid() const {
     constexpr size_t max_int = std::numeric_limits<int32_t>::max();
     return read_thread_count > 0 && read_thread_count <= max_int && write_thread_count > 0
            && write_thread_count <= max_int && read_queue_size > 0 && read_queue_size < max_int && write_queue_size > 0
-           && write_queue_size < max_int && max_batch_blocks > 0 && max_batch_bytes > 0;
+           && write_queue_size < max_int;
 }
 
 struct DiskIOExecutor::State {
     explicit State(DiskIOExecutorConfig config): config(config) {}
+
+    void start() {
+        std::lock_guard<std::mutex> lock(admission_mutex);
+        if (stopped)
+            throw std::logic_error("cannot restart a stopped disk executor");
+        if (read_pool)
+            return;
+        if (!config.valid())
+            throw std::invalid_argument("invalid disk executor configuration");
+        auto reads  = std::make_unique<autil::ThreadPool>(config.read_thread_count, config.read_queue_size);
+        auto writes = std::make_unique<autil::ThreadPool>(config.write_thread_count, config.write_queue_size);
+        if (!reads->start("btc_disk_read") || !writes->start("btc_disk_write"))
+            throw std::runtime_error("failed to start async disk executor");
+        read_pool  = std::move(reads);
+        write_pool = std::move(writes);
+    }
 
     template<typename Request>
     struct Batch {
@@ -61,6 +79,9 @@ struct DiskIOExecutor::State {
                 std::sort(requests.begin(), requests.end(), [](const DiskWrite& lhs, const DiskWrite& rhs) {
                     return lhs.offset < rhs.offset;
                 });
+                for (const auto& request : requests)
+                    if (request.padding_bytes)
+                        std::memset(request.padding, 0, request.padding_bytes);
                 const auto result = io.write(requests);
                 if (result != DiskBlockIOStatus::OK) {
                     fail(result);
@@ -122,45 +143,18 @@ struct DiskIOExecutor::State {
 
     template<typename Request>
     DiskBlockIOStatus submit(DiskBlockIO& io, std::vector<Request> requests, Callback callback) {
-        if (!callback || requests.size() > config.max_batch_blocks) {
-            RTP_LLM_LOG_WARNING("async disk submission rejected: empty callback or block limit");
+        if (!callback) {
+            RTP_LLM_LOG_WARNING("async disk submission rejected: empty callback");
             return DiskBlockIOStatus::IO_ERROR;
-        }
-        size_t total_bytes = 0;
-        for (const auto& request : requests) {
-            // Subtraction also prevents size_t overflow.
-            if (request.bytes > config.max_batch_bytes - total_bytes) {
-                RTP_LLM_LOG_WARNING("async disk submission rejected: byte limit");
-                return DiskBlockIOStatus::IO_ERROR;
-            }
-            total_bytes += request.bytes;
         }
 
         auto                        batch = std::make_shared<Batch<Request>>(std::move(requests), std::move(callback));
         size_t                      accepted = 0;
         std::lock_guard<std::mutex> admission_lock(admission_mutex);
         auto*                       pool = std::is_same_v<Request, DiskRead> ? read_pool.get() : write_pool.get();
-        if (stopped) {
-            RTP_LLM_LOG_WARNING("async disk submission rejected: executor is closed");
+        if (stopped || pool == nullptr) {
+            RTP_LLM_LOG_WARNING("async disk submission rejected: executor is not running");
             return DiskBlockIOStatus::IO_ERROR;
-        }
-        if (pool == nullptr) {
-            try {
-                if (!config.valid())
-                    return DiskBlockIOStatus::IO_ERROR;
-                auto reads  = std::make_unique<autil::ThreadPool>(config.read_thread_count, config.read_queue_size);
-                auto writes = std::make_unique<autil::ThreadPool>(config.write_thread_count, config.write_queue_size);
-                if (!reads->start("btc_disk_read") || !writes->start("btc_disk_write")) {
-                    RTP_LLM_LOG_ERROR("failed to start async disk executor");
-                    return DiskBlockIOStatus::IO_ERROR;
-                }
-                read_pool  = std::move(reads);
-                write_pool = std::move(writes);
-                pool       = std::is_same_v<Request, DiskRead> ? read_pool.get() : write_pool.get();
-            } catch (const std::exception& e) {
-                RTP_LLM_LOG_ERROR("starting async disk executor threw: %s", e.what());
-                return DiskBlockIOStatus::IO_ERROR;
-            }
         }
         // Register all participants before any worker can finish.
         std::lock_guard<std::mutex> batch_lock(batch->mutex);
@@ -202,6 +196,10 @@ DiskIOExecutor::~DiskIOExecutor() {
 
 const DiskIOExecutorConfig& DiskIOExecutor::config() const {
     return state_->config;
+}
+
+void DiskIOExecutor::start() {
+    state_->start();
 }
 
 DiskBlockIOStatus DiskIOExecutor::asyncRead(DiskBlockIO& io, std::vector<DiskRead> reads, Callback callback) {

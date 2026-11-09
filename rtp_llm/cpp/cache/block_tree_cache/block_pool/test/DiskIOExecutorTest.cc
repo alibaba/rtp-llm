@@ -161,10 +161,20 @@ TEST(DiskIOExecutorTest, ReadBatchFansOutAndWriteBatchUsesOneWorkerInOffsetOrder
         Completion            done, queued;
         FakeDiskIO            io;
         DiskIOExecutor        executor(smallConfig());
+        executor.start();
         std::mutex            mutex;
         std::vector<uint64_t> offsets;
+        std::vector<unsigned char> buffer(64, 0xa5);
+        const auto                 submitting_thread = std::this_thread::get_id();
         io.operation = [&](bool actual_write, uint64_t offset) {
             EXPECT_EQ(actual_write, write);
+            EXPECT_NE(std::this_thread::get_id(), submitting_thread);
+            if (write) {
+                EXPECT_EQ(std::vector<unsigned char>(buffer.begin(), buffer.begin() + 36),
+                          std::vector<unsigned char>(36, 0xa5));
+                EXPECT_EQ(std::vector<unsigned char>(buffer.begin() + 36, buffer.end()),
+                          std::vector<unsigned char>(28, 0));
+            }
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 offsets.push_back(offset);
@@ -174,9 +184,12 @@ TEST(DiskIOExecutorTest, ReadBatchFansOutAndWriteBatchUsesOneWorkerInOffsetOrder
             return DiskBlockIOStatus::OK;
         };
         ASSERT_EQ(io.openAndPreallocate("", 0, true), DiskBlockIOStatus::OK);
-        char       buffer = 0;
-        const auto status = write ? executor.asyncWrite(io, {{1, &buffer, 1}, {0, &buffer, 1}}, done.callback()) :
-                                    executor.asyncRead(io, {{0, &buffer, 1}, {1, &buffer, 1}}, done.callback());
+        const auto status = write ?
+                                executor.asyncWrite(io,
+                                                    {{1, buffer.data(), 64, buffer.data() + 36, 28},
+                                                     {0, buffer.data(), 64, buffer.data() + 36, 28}},
+                                                    done.callback()) :
+                                executor.asyncRead(io, {{0, buffer.data(), 1}, {1, buffer.data(), 1}}, done.callback());
         EXPECT_EQ(status, DiskBlockIOStatus::OK);
         EXPECT_TRUE(started.wait(write ? 1 : 2));
         if (write) {
@@ -204,6 +217,7 @@ TEST(DiskIOExecutorTest, PartialEnqueueOwnsWholeBatchAndFullQueueRejectsWithoutC
     config.read_queue_size = 1;
     FakeDiskIO                       io;
     DiskIOExecutor                   executor(config);
+    executor.start();
     std::vector<std::atomic<size_t>> visits(10);
     for (auto& visit : visits) {
         visit = 0;
@@ -253,6 +267,7 @@ TEST(DiskIOExecutorTest, FailureWaitsForOtherIssuedIOAndKeepsCapturedOwnerAlive)
     Completion         done, failure_processed;
     FakeDiskIO         io;
     DiskIOExecutor     executor(smallConfig());
+    executor.start();
     auto               owner = std::make_shared<int>(42);
     std::weak_ptr<int> weak  = owner;
     io.operation             = [&](bool, uint64_t offset) {
@@ -299,6 +314,7 @@ TEST(DiskIOExecutorTest, IOAndCallbackExceptionsDoNotKillWorkersOrRepeatCompleti
     config.read_thread_count = 1;
     FakeDiskIO     io;
     DiskIOExecutor executor(config);
+    executor.start();
     io.operation = [](bool, uint64_t offset) {
         if (offset == 0) {
             throw std::runtime_error("injected I/O failure");
@@ -329,34 +345,36 @@ TEST(DiskIOExecutorTest, IOAndCallbackExceptionsDoNotKillWorkersOrRepeatCompleti
     EXPECT_EQ(success.calls, 1u);
 }
 
-TEST(DiskIOExecutorTest, LimitsStoppedExecutorAndEmptyCallbackRejectWithoutIO) {
-    Completion rejected;
-    auto       config       = smallConfig();
-    config.max_batch_blocks = 2;
-    config.max_batch_bytes  = 4;
+TEST(DiskIOExecutorTest, ExplicitStartIsRequiredAndStoppedExecutorCannotRestart) {
+    Completion     rejected, read, write;
     FakeDiskIO     io;
-    DiskIOExecutor executor(config);
-    char           buffer = 0;
+    DiskIOExecutor executor(smallConfig());
     ASSERT_EQ(io.openAndPreallocate("", 0, true), DiskBlockIOStatus::OK);
-    EXPECT_EQ(executor.asyncRead(io, {}, {}), DiskBlockIOStatus::IO_ERROR);
-    EXPECT_EQ(executor.asyncRead(io, std::vector<DiskRead>(3, {0, &buffer, 1}), rejected.callback()),
-              DiskBlockIOStatus::IO_ERROR);
-    EXPECT_EQ(executor.asyncRead(io, {{0, &buffer, 3}, {1, &buffer, 2}}, rejected.callback()),
-              DiskBlockIOStatus::IO_ERROR);
-    EXPECT_EQ(executor.asyncWrite(io, {{0, &buffer, std::numeric_limits<size_t>::max()}}, rejected.callback()),
-              DiskBlockIOStatus::IO_ERROR);
-    executor.stop();
-    io.close();
-    EXPECT_EQ(executor.asyncWrite(io, {}, rejected.callback()), DiskBlockIOStatus::IO_ERROR);
+    char buffer = 0;
+    EXPECT_EQ(executor.asyncRead(io, {{0, &buffer, 1}}, rejected.callback()), DiskBlockIOStatus::IO_ERROR);
+    EXPECT_EQ(executor.asyncWrite(io, {{0, &buffer, 1}}, rejected.callback()), DiskBlockIOStatus::IO_ERROR);
     EXPECT_EQ(rejected.calls, 0u);
     EXPECT_EQ(io.reads, 0u);
-    EXPECT_EQ(io.writes, 0u);
+    ASSERT_NO_THROW(executor.start());
+    EXPECT_NO_THROW(executor.start());
+    EXPECT_EQ(executor.asyncRead(io, {}, {}), DiskBlockIOStatus::IO_ERROR);
+    EXPECT_EQ(executor.asyncRead(io, {{0, &buffer, 1}}, read.callback()), DiskBlockIOStatus::OK);
+    EXPECT_EQ(executor.asyncWrite(io, {{0, &buffer, 1}}, write.callback()), DiskBlockIOStatus::OK);
+    EXPECT_EQ(read.get(), DiskBlockIOStatus::OK);
+    EXPECT_EQ(write.get(), DiskBlockIOStatus::OK);
+    executor.stop();
+    EXPECT_EQ(executor.asyncWrite(io, {{0, &buffer, 1}}, rejected.callback()), DiskBlockIOStatus::IO_ERROR);
+    EXPECT_EQ(rejected.calls, 0u);
+    EXPECT_EQ(io.reads, 1u);
+    EXPECT_EQ(io.writes, 1u);
+    EXPECT_THROW(executor.start(), std::logic_error);
 }
 
 TEST(DiskIOExecutorTest, EmptyBatchAndResubmissionCallbacksAlwaysRunOnWorkers) {
     Completion     read, write;
     FakeDiskIO     io;
     DiskIOExecutor executor(smallConfig());
+    executor.start();
     ASSERT_EQ(io.openAndPreallocate("", 0, true), DiskBlockIOStatus::OK);
     const auto submitting_thread = std::this_thread::get_id();
     EXPECT_EQ(executor.asyncRead(io,
@@ -375,20 +393,22 @@ TEST(DiskIOExecutorTest, EmptyBatchAndResubmissionCallbacksAlwaysRunOnWorkers) {
     EXPECT_EQ(io.writes, 0u);
 }
 
-TEST(DiskIOExecutorTest, BatchByteSumCannotWrapAroundTheLimit) {
-    Completion rejected;
-    auto       config      = smallConfig();
-    config.max_batch_bytes = std::numeric_limits<size_t>::max();
+TEST(DiskIOExecutorTest, AcceptsUpperLayerBatchesBeyondFormerByteAndBlockBudgets) {
+    Completion     read, write;
     FakeDiskIO     io;
-    DiskIOExecutor executor(config);
+    DiskIOExecutor executor(smallConfig());
+    executor.start();
     ASSERT_EQ(io.openAndPreallocate("", 0, true), DiskBlockIOStatus::OK);
     char buffer = 0;
-    EXPECT_EQ(executor.asyncWrite(io, {{0, &buffer, config.max_batch_bytes}, {0, &buffer, 1}}, rejected.callback()),
-              DiskBlockIOStatus::IO_ERROR);
+    // The fake backend does not dereference buffers; no large allocation is needed.
+    EXPECT_EQ(executor.asyncRead(io, std::vector<DiskRead>(4097, {0, &buffer, 1}), read.callback()),
+              DiskBlockIOStatus::OK);
+    EXPECT_EQ(executor.asyncWrite(io, {{0, &buffer, 320 * 1024 * 1024}}, write.callback()), DiskBlockIOStatus::OK);
+    EXPECT_EQ(read.get(), DiskBlockIOStatus::OK);
+    EXPECT_EQ(write.get(), DiskBlockIOStatus::OK);
     executor.stop();
-    io.close();
-    EXPECT_EQ(rejected.calls, 0u);
-    EXPECT_EQ(io.writes, 0u);
+    EXPECT_EQ(io.reads, 4097u);
+    EXPECT_EQ(io.writes, 1u);
 }
 
 TEST(DiskIOExecutorTest, StopDrainsQueuedWorkAndWaitsForCallbackReturn) {
@@ -398,6 +418,7 @@ TEST(DiskIOExecutorTest, StopDrainsQueuedWorkAndWaitsForCallbackReturn) {
     config.read_thread_count = 1;
     FakeDiskIO     io;
     DiskIOExecutor executor(config);
+    executor.start();
     ASSERT_EQ(io.openAndPreallocate("", 0, true), DiskBlockIOStatus::OK);
     char buffer = 0;
     ASSERT_EQ(executor.asyncRead(io,
@@ -431,6 +452,7 @@ TEST(DiskIOExecutorTest, SubmissionsRacingStopHaveExactlyOneCompletionPerAccepta
     Signal              start, submitted;
     FakeDiskIO          io;
     DiskIOExecutor      executor(smallConfig());
+    executor.start();
     ASSERT_EQ(io.openAndPreallocate("", 0, true), DiskBlockIOStatus::OK);
     std::vector<std::thread> submitters;
     for (size_t thread = 0; thread < 4; ++thread) {
@@ -469,6 +491,7 @@ TEST(DiskIOExecutorTest, IndependentFilesShareDirectionWorkersAndQueueCapacity) 
         config.read_thread_count = config.write_thread_count = 1;
         config.read_queue_size = config.write_queue_size = 1;
         DiskIOExecutor executor(config);
+        executor.start();
         FakeDiskIO     full, swa;
 
         ASSERT_EQ(full.openAndPreallocate("", 0, true), DiskBlockIOStatus::OK);
@@ -509,6 +532,7 @@ TEST(DiskIOExecutorTest, IndependentFilesShareDirectionWorkersAndQueueCapacity) 
 
 TEST(DiskIOExecutorTest, SharedExecutorStopDrainsCallbacksAndRejectsEveryFile) {
     DiskIOExecutor executor(smallConfig());
+    executor.start();
     FakeDiskIO     full, swa;
 
     ASSERT_EQ(full.openAndPreallocate("", 0, true), DiskBlockIOStatus::OK);
@@ -539,6 +563,7 @@ TEST(DiskIOExecutorTest, InvalidExecutorConfigDoesNotAffectSynchronousFileIO) {
     config.write_queue_size = 0;
     BlockTreePosixDiskBlockIO io;
     DiskIOExecutor            executor(config);
+    EXPECT_THROW(executor.start(), std::invalid_argument);
     const auto                path = ::testing::TempDir() + "/disk_executor_invalid_config.bin";
     ::remove(path.c_str());
     ASSERT_EQ(io.openAndPreallocate(path, 4096, true), DiskBlockIOStatus::OK);
@@ -558,6 +583,7 @@ TEST_P(PosixDiskIOAsyncTest, RoundTripValidationDrainAndReopen) {
     Completion                write, read, invalid;
     BlockTreePosixDiskBlockIO io;
     DiskIOExecutor            executor(smallConfig());
+    executor.start();
     const auto path = ::testing::TempDir() + (GetParam() ? "/disk_async_buffered.bin" : "/disk_async_direct.bin");
     ::remove(path.c_str());
     const auto opened = io.openAndPreallocate(path, 8192, GetParam());
@@ -583,6 +609,7 @@ TEST_P(PosixDiskIOAsyncTest, RoundTripValidationDrainAndReopen) {
     ::remove(path.c_str());
     ASSERT_EQ(io.openAndPreallocate(path, 8192, GetParam()), DiskBlockIOStatus::OK);
     DiskIOExecutor reopened(smallConfig());
+    reopened.start();
     EXPECT_EQ(reopened.asyncRead(io, {{GetParam() ? 8192u : 1u, destination, 4096}}, invalid.callback()),
               DiskBlockIOStatus::OK);
     EXPECT_EQ(invalid.get(), GetParam() ? DiskBlockIOStatus::INVALID_SIZE : DiskBlockIOStatus::ALIGNMENT_ERROR);

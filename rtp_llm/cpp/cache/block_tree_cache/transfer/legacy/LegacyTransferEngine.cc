@@ -63,10 +63,8 @@ std::shared_ptr<TransferAsyncContext> LegacyTransferEngine::execute(TransferTask
     const auto& descriptors = task.descriptors();
     const auto  source      = descriptors.front().source_tier;
     const auto  target      = descriptors.front().target_tier;
-    if (source == Tier::DISK && target == Tier::DEVICE)
-        return device_disk_executor_->executeDiskToDevice(std::move(task), groups);
-    if (source == Tier::DEVICE && target == Tier::DISK)
-        return device_disk_executor_->executeDeviceToDisk(std::move(task), *groups.front());
+    if ((source == Tier::DISK && target == Tier::DEVICE) || (source == Tier::DEVICE && target == Tier::DISK))
+        return device_disk_executor_->execute(std::move(task), groups);
     std::vector<HostBufferView> hosts;
     hosts.reserve(descriptors.size());
     for (size_t i = 0; i < descriptors.size(); ++i) {

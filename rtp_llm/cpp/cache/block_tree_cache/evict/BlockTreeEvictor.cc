@@ -696,13 +696,8 @@ Tier BlockTreeEvictor::watermarkTargetTier(Tier source_tier) const {
 }
 
 size_t BlockTreeEvictor::watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const {
-    if (source_tier == Tier::DEVICE && target_tier == Tier::HOST) {
-        return max_descriptors_per_batch_;
-    }
-    if (source_tier == Tier::DEVICE && target_tier == Tier::DISK) {
-        return 1;
-    }
-    if (source_tier == Tier::HOST && target_tier == Tier::DISK) {
+    if ((source_tier == Tier::DEVICE && (target_tier == Tier::HOST || target_tier == Tier::DISK))
+        || (source_tier == Tier::HOST && target_tier == Tier::DISK)) {
         return max_descriptors_per_batch_;
     }
     return std::numeric_limits<size_t>::max();

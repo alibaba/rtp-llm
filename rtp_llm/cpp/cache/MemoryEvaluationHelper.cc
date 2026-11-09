@@ -84,7 +84,8 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
                                                     const ModelConfig&                               model_config,
                                                     const ParallelismConfig&                         parallelism_config,
                                                     const std::optional<WarmUpResult>&               warm_up_result,
-                                                    const std::optional<SpeculativeExecutionConfig>& sp_config) {
+                                                    const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                                    size_t transfer_memory_bytes) {
     size_t device_reserved_memory_bytes = getGpuExecStatus().device_memory_status.available_bytes;
     size_t runtime_required_bytes       = 0;
 
@@ -133,7 +134,16 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
                             device_reserved_memory_bytes / 1024 / 1024,
                             runtime_required_bytes / 1024 / 1024);
 
-    const auto kv_cache_mem_size = device_reserved_memory_bytes - runtime_required_bytes;
+    const auto remaining_bytes = device_reserved_memory_bytes - runtime_required_bytes;
+    RTP_LLM_CHECK_WITH_INFO(remaining_bytes > transfer_memory_bytes,
+                            "available memory after runtime reservation %zu MiB cannot hold CRC transfer workspace "
+                            "%zu MiB and KV cache",
+                            remaining_bytes / 1024 / 1024,
+                            transfer_memory_bytes / 1024 / 1024);
+    const auto kv_cache_mem_size = remaining_bytes - transfer_memory_bytes;
+    RTP_LLM_LOG_INFO("CRC transfer workspace reserves %zu MiB in addition to runtime memory %zu MiB",
+                     transfer_memory_bytes / 1024 / 1024,
+                     runtime_required_bytes / 1024 / 1024);
     RTP_LLM_LOG_INFO("cache config final decided kv cache memory size %ld MiB", kv_cache_mem_size / 1024 / 1024);
     return kv_cache_mem_size;
 }

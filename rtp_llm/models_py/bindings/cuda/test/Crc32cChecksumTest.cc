@@ -141,10 +141,10 @@ struct MessageFixture {
         const size_t encoded;
 
         explicit Message(size_t payload, Pattern pattern, unsigned seed):
-            host(CrcBlockCopyBatch::encodedBytes(payload)),
+            host(CrcCopyWorkspace::encodedBytes(payload)),
             device(payload),
             length(payload),
-            encoded(CrcBlockCopyBatch::encodedBytes(payload)) {
+            encoded(CrcCopyWorkspace::encodedBytes(payload)) {
             fillPattern(host.pointer, length, pattern, seed);
             cudaCheck(cudaMemcpy(device.pointer, host.pointer, length, cudaMemcpyHostToDevice));
         }
@@ -217,7 +217,7 @@ struct MessageFixture {
 class Crc32cChecksumTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        if (!CrcBlockCopyBatch::available())
+        if (!CrcCopyWorkspace::available())
             GTEST_SKIP() << "CUDA13 CRC backend unavailable";
         int        count  = 0;
         const auto result = cudaGetDeviceCount(&count);
@@ -226,7 +226,7 @@ protected:
         ASSERT_EQ(result, cudaSuccess) << cudaGetErrorString(result);
         ASSERT_NO_FATAL_FAILURE(cudaCheck(cudaSetDevice(0)));
         ASSERT_NO_FATAL_FAILURE(cudaCheck(cudaFree(nullptr)));
-        copy_ = std::make_unique<CrcBlockCopyBatch>(0, 64, 1235040, 64);
+        copy_ = std::make_unique<CrcCopyWorkspace>(0, 64, 1235040, 64);
     }
 
     // Runs one (lengths, pattern) batch through the shared workspace and checks
@@ -248,7 +248,7 @@ protected:
 
     // Sized once for the largest matrix below: 64 messages, SWA payload, one
     // tile per message.
-    std::unique_ptr<CrcBlockCopyBatch> copy_;
+    std::unique_ptr<CrcCopyWorkspace>  copy_;
     std::vector<CrcCopyFailure>        failures_;
 };
 

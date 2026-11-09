@@ -157,7 +157,7 @@ TEST_P(DispatcherBackendTest, LocalRequestSplitsBeforeEngineAndPreservesDeadline
     EXPECT_EQ(context->result().block_errors,
               (std::vector<CacheCopyError>{
                   CacheCopyError::NONE, CacheCopyError::NONE, CacheCopyError::NONE, CacheCopyError::IO_FAILED}));
-    dispatcher.drainTransfers();
+    dispatcher.waitForTransfers();
 }
 
 INSTANTIATE_TEST_SUITE_P(ExecutionBackends,
@@ -233,7 +233,7 @@ TEST(BlockTransferDispatcherTest, RunTransferDoesNotWaitForPendingPerRankContext
         EXPECT_FALSE(pending->done());
         EXPECT_EQ(callback_count, previous);
         pending->complete(ErrorInfo::OkStatus());
-        BoundedThread<void> drain([dispatcher] { dispatcher->drainTransfers(); });
+        BoundedThread<void> drain([dispatcher] { dispatcher->waitForTransfers(); });
         ASSERT_EQ(drain.waitFor(std::chrono::seconds(5)), std::future_status::ready);
         drain.get();
         EXPECT_EQ(callback_count, previous + 1);
@@ -348,7 +348,7 @@ TEST(BlockTransferDispatcherTest, DrainAndShutdownWaitForCallbackReturnNotOnlyCo
                 if (shutdown)
                     dispatcher->shutdown();
                 else
-                    dispatcher->drainTransfers();
+                    dispatcher->waitForTransfers();
             });
             ASSERT_EQ(observed->waitFor(), std::future_status::ready);
             EXPECT_EQ(drain.waitFor(std::chrono::milliseconds(0)), std::future_status::timeout);
@@ -389,7 +389,7 @@ TEST(BlockTransferDispatcherTest, DrainIncludesNextStageSubmittedByCallback) {
                                         }
                                     });
             dispatcher->drain_observer_for_test_ = [observed] { observed->signal(); };
-            BoundedThread<void> drain([dispatcher] { dispatcher->drainTransfers(); });
+            BoundedThread<void> drain([dispatcher] { dispatcher->waitForTransfers(); });
             ASSERT_EQ(observed->waitFor(), std::future_status::ready);
             first->complete(ErrorInfo::OkStatus());
             if (!synchronous_child) {
@@ -426,7 +426,7 @@ TEST(BlockTransferDispatcherTest, ThrowingCallbackDoesNotLeaveDrainPending) {
             EXPECT_THROW(submit(), std::runtime_error);
         }
         EXPECT_EQ(calls, 1u);
-        BoundedThread<void> drain([dispatcher] { dispatcher->drainTransfers(); });
+        BoundedThread<void> drain([dispatcher] { dispatcher->waitForTransfers(); });
         ASSERT_EQ(drain.waitFor(std::chrono::seconds(5)), std::future_status::ready);
         drain.get();
     }
@@ -443,7 +443,7 @@ TEST(BlockTransferDispatcherTest, RetainedBatchCallbackDoesNotBlockDrain) {
     const auto retained = pending->callbacks_.front();
     pending->complete(TransferStatus::OK);
     EXPECT_EQ(calls, 1u);
-    BoundedThread<void> drain([dispatcher] { dispatcher->drainTransfers(); });
+    BoundedThread<void> drain([dispatcher] { dispatcher->waitForTransfers(); });
     ASSERT_EQ(drain.waitFor(std::chrono::seconds(5)), std::future_status::ready);
     drain.get();
     retained(TransferStatus::OK);
@@ -471,37 +471,38 @@ TEST(BlockTransferDispatcherTest, ExpiredTaskFailsWithoutSubmittingABatch) {
     EXPECT_EQ(engine->submittedBatchCount(), 0u);
 }
 
-TEST(BlockTransferDispatcherTest, AllDirectionsUseTheConfiguredBatchLimit) {
+TEST(BlockTransferDispatcherTest, AllDirectionsRespectSelectedBackendBatchLimits) {
     const std::vector<TransferDescriptor> directions{TransferDescriptor::hostToDevice(0, 1, {1}),
                                                      TransferDescriptor::deviceToHost(0, {1}, 1),
                                                      TransferDescriptor::hostToDisk(0, 1, 1),
                                                      TransferDescriptor::diskToHost(0, 1, 1),
                                                      TransferDescriptor::diskToDevice(0, 1, {1}),
                                                      TransferDescriptor::deviceToDisk(0, {1}, 1)};
-    for (const auto& direction : directions) {
-        for (const size_t limit : {2u, 8u, 16u}) {
-            auto engine =
-                std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<TransferAsyncContext>>{}, limit);
-            BlockTransferDispatcher dispatcher(engine, nullptr, limit);
-            size_t                  callback_count = 0;
-            dispatcher.runTransfer(
-                TransferTask(std::vector<TransferDescriptor>(100, direction), std::chrono::seconds(30)),
-                [&](TransferResult error) {
-                    EXPECT_TRUE(error.ok());
-                    ++callback_count;
-                });
-            const auto&  batches = engine->submittedBatches();
-            const size_t effective_limit =
-                direction.source_tier == Tier::DEVICE && direction.target_tier == Tier::DISK ? 1 : limit;
-            const size_t expected_count = (100 + effective_limit - 1) / effective_limit;
-            ASSERT_EQ(batches.size(), expected_count);
-            size_t total = 0;
-            for (size_t index = 0; index < batches.size(); ++index) {
-                EXPECT_EQ(batches[index].size(), std::min(effective_limit, 100 - total));
-                total += batches[index].size();
+    for (const bool async : {false, true}) {
+        SCOPED_TRACE(async);
+        for (const auto& direction : directions) {
+            for (const size_t limit : {2u, 8u, 16u}) {
+                auto engine = std::make_shared<ScriptedPerRankEngine>(
+                    std::deque<std::shared_ptr<TransferAsyncContext>>{}, limit, async);
+                BlockTransferDispatcher dispatcher(engine, nullptr, limit);
+                size_t                  callback_count = 0;
+                dispatcher.runTransfer(
+                    TransferTask(std::vector<TransferDescriptor>(100, direction), std::chrono::seconds(30)),
+                    [&](TransferResult error) {
+                        EXPECT_TRUE(error.ok());
+                        ++callback_count;
+                    });
+                const auto&  batches        = engine->submittedBatches();
+                const size_t expected_count = (100 + limit - 1) / limit;
+                ASSERT_EQ(batches.size(), expected_count);
+                size_t total = 0;
+                for (size_t index = 0; index < batches.size(); ++index) {
+                    EXPECT_EQ(batches[index].size(), std::min(limit, 100 - total));
+                    total += batches[index].size();
+                }
+                EXPECT_EQ(total, 100u);
+                EXPECT_EQ(callback_count, 1u);
             }
-            EXPECT_EQ(total, 100u);
-            EXPECT_EQ(callback_count, 1u);
         }
     }
 }

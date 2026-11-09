@@ -31,7 +31,7 @@ std::string workLoopCompatibility(const std::vector<GroupSetPtr>& groups, bool e
             throw std::invalid_argument("invalid transfer GroupSet mapping or backing layout");
         if (group->crcEnabled()
             && (group->payloadBytes() > std::numeric_limits<size_t>::max() - 19
-                || group->storageBytes() != CrcBlockCopyBatch::encodedBytes(group->payloadBytes())))
+                || group->storageBytes() != CrcCopyWorkspace::encodedBytes(group->payloadBytes())))
             throw std::invalid_argument("invalid CRC encoded storage geometry");
         if ((group->hostPool()
              && (group->hostPool()->payloadBytes() < group->payloadBytes()
@@ -56,13 +56,10 @@ std::string workLoopCompatibility(const std::vector<GroupSetPtr>& groups, bool e
                 return pool->deviceIndex() != device;
             }))
             throw std::invalid_argument("CRC backings must reside on a single GPU per GroupSet");
-        if (!CrcBlockCopyBatch::available())
+        if (!CrcCopyWorkspace::available())
             throw std::invalid_argument("CRC Device routes require the CUDA13 backend");
         // HostBlockPool's allocator guarantees pinned/registered storage.
         (void)getDeviceHostCopyTiles(*group, std::vector<BlockIdxType>(pools.size(), 0));
-        if (enable_disk_cache && group->diskPool() && group->groupType() != CacheGroupType::FULL
-            && group->groupType() != CacheGroupType::SWA)
-            reason = "Device/Disk WorkLoop staging supports FULL/SWA only";
     }
     return reason;
 }
