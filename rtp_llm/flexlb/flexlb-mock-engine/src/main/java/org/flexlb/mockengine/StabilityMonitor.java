@@ -22,28 +22,11 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Standalone stability monitor that replaces {@code stability_monitor.py}.
- *
- * <p>Polls FlexLB master inflight status and mock engine snapshots at a fixed
- * interval, writing one JSON line per poll to {@code monitor.jsonl}. Detects
- * inflight leaks by tracking per-engine completion progress: if an engine's
- * completed count stays unchanged while its inflight remains positive beyond a
- * grace period, a leak is flagged.
- *
- * <p>Configuration is entirely via environment variables (single source of truth):
- * <ul>
- *   <li>{@code FLEXLB_HTTP_ADDR} — FlexLB master HTTP address (e.g. "127.0.0.1:7002")</li>
- *   <li>{@code MOCK_CONTROL_HOST} — Mock engine control host</li>
- *   <li>{@code MOCK_CONTROL_PORT} — Mock engine control port</li>
- *   <li>{@code OUTPUT_DIR} — Output directory for monitor.jsonl</li>
- *   <li>{@code POLL_INTERVAL_S} — Poll interval in seconds (default 5)</li>
- *   <li>{@code LEAK_GRACE_S} — Leak detection grace period in seconds (default 60)</li>
- * </ul>
- *
- * <p>Run with: {@code java -cp <jar> org.flexlb.mockengine.StabilityMonitor}
+ * Polls master inflight status and mock-engine snapshots into JSONL observations. It flags engines
+ * whose completion count stops advancing while inflight work remains beyond the configured grace
+ * period.
  */
 public final class StabilityMonitor {
-
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final DateTimeFormatter ISO_FORMATTER =
             DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC);
@@ -237,6 +220,28 @@ public final class StabilityMonitor {
         }
     }
 
+    private static String httpGet(HttpClient client, String url) {
+        try {
+            HttpRequest request =
+                    HttpRequest.newBuilder()
+                            .uri(URI.create(url))
+                            .timeout(HTTP_TIMEOUT)
+                            .GET()
+                            .build();
+            HttpResponse<String> response =
+                    client.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                return null;
+            }
+            return response.body();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private static List<MockEngineData> pollMockSnapshot(HttpClient client, Config config) {
         String url =
                 "http://" + config.mockControlHost + ":" + config.mockControlPort + "/snapshot";
@@ -276,28 +281,6 @@ public final class StabilityMonitor {
         }
     }
 
-    private static String httpGet(HttpClient client, String url) {
-        try {
-            HttpRequest request =
-                    HttpRequest.newBuilder()
-                            .uri(URI.create(url))
-                            .timeout(HTTP_TIMEOUT)
-                            .GET()
-                            .build();
-            HttpResponse<String> response =
-                    client.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() != 200) {
-                return null;
-            }
-            return response.body();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return null;
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
     // ---- Inner types ----
 
     private record InflightData(
@@ -306,6 +289,9 @@ public final class StabilityMonitor {
     private record MockEngineData(
             int port, int running, long accepted, long completed, int inflight) {}
 
+    /**
+     * Parses polling targets, intervals and output settings for the stability monitor.
+     */
     private static final class Config {
         private String flexlbHttpAddr;
         private String mockControlHost;

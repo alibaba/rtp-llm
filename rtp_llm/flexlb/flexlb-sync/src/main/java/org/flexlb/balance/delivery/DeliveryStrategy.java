@@ -15,12 +15,17 @@ import java.util.OptionalLong;
  * owns only its exact capacity and transport resources.
  */
 public interface DeliveryStrategy {
-
     /** Reserve the largest feasible prefix without mutating queue ownership. */
     Transaction prepare(
             List<ScheduledRequest> candidates,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPredictionMs);
+
+    /** Fresh callback for GroupPlanner's strictly growing prefixes in one select call. */
+    default GroupPlanner.PrefixPrediction<ScheduledRequest> newGroupPredictor(
+            PrefillTimePredictor.Evaluator evaluator) {
+        return (added, items) -> projectGroupDurationMs(items, evaluator);
+    }
 
     /**
      * Pure planning duration for an exact group. The return value keeps
@@ -29,16 +34,12 @@ public interface DeliveryStrategy {
     double projectGroupDurationMs(
             List<ScheduledRequest> items, PrefillTimePredictor.Evaluator evaluator);
 
-    /** Fresh callback for GroupPlanner's strictly growing prefixes in one select call. */
-    default GroupPlanner.PrefixPrediction<ScheduledRequest> newGroupPredictor(
-            PrefillTimePredictor.Evaluator evaluator) {
-        return (added, items) -> projectGroupDurationMs(items, evaluator);
-    }
-
     /** Pure projection behavior paired with this live delivery strategy. */
     RouteProjection.DeliveryProjection projectionPolicy();
 
-    /** One delivery transaction across prepare, queue commit, and handoff. */
+    /**
+     * One delivery transaction across prepare, queue commit, and handoff.
+     */
     interface Transaction extends AutoCloseable {
 
         List<ScheduledRequest> items();

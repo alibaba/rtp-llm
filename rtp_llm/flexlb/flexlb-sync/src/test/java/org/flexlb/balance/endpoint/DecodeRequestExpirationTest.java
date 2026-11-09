@@ -17,7 +17,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Exact local lease expiration must not wait for Engine reconciliation. */
+/**
+ * Exact local lease expiration must not wait for Engine reconciliation.
+ */
 class DecodeRequestExpirationTest {
 
     private WorkerStatus status;

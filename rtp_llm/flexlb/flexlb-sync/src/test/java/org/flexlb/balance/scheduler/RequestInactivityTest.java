@@ -35,7 +35,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Matching Engine activity renews the lease; silence always ends local ownership. */
+/**
+ * Matching Engine activity renews the lease; silence always ends local ownership.
+ */
 class RequestInactivityTest {
     private static final long REQUEST_ID = 101L;
     // Explicit observation/check timestamps advance virtual time without waiting for wall time.

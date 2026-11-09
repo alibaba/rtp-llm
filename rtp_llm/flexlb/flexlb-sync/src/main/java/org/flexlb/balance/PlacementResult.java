@@ -5,7 +5,9 @@ import org.flexlb.dao.loadbalance.Response;
 import java.util.Map;
 import java.util.Objects;
 
-/** One placement attempt and its internal diagnostic snapshot, separate from the wire response. */
+/**
+ * One placement attempt and its internal diagnostic snapshot, separate from the wire response.
+ */
 public record PlacementResult<V, B>(
         Status status, V value, Response failure, B blocker, Map<String, Object> diagnostics) {
 

@@ -4,6 +4,9 @@ import lombok.Getter;
 import lombok.Setter;
 import org.flexlb.enums.LogLevel;
 
+/**
+ * Groups logging, cache-feedback metrics and recent-key observation settings.
+ */
 @Getter
 @Setter
 public final class ObservabilityConfig {
@@ -11,6 +14,9 @@ public final class ObservabilityConfig {
     private CacheHitConfig cacheHit = new CacheHitConfig();
     private LoggingConfig logging = new LoggingConfig();
 
+    /**
+     * Controls the FlexLB log level and console output switch.
+     */
     @Getter
     @Setter
     public static final class LoggingConfig {
@@ -18,6 +24,9 @@ public final class ObservabilityConfig {
         private boolean stdoutEnabled;
     }
 
+    /**
+     * Controls cache prediction metrics, request traces and recent-key observations independently.
+     */
     @Getter
     @Setter
     public static final class CacheHitConfig {
@@ -27,6 +36,9 @@ public final class ObservabilityConfig {
         private TheoryLogConfig theoryLog;
     }
 
+    /**
+     * Bounds recent-key history by retention time in milliseconds and occurrence capacity.
+     */
     @Getter
     @Setter
     public static final class RecentKeyWindowConfig {
@@ -35,6 +47,9 @@ public final class ObservabilityConfig {
         private long maxKeyOccurrences = 1_000_000L;
     }
 
+    /**
+     * Defines the destination for theoretical cache-hit trace records.
+     */
     @Getter
     @Setter
     public static final class TheoryLogConfig {

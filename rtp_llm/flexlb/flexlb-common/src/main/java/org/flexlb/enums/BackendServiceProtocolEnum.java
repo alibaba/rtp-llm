@@ -2,6 +2,9 @@ package org.flexlb.enums;
 
 import lombok.Getter;
 
+/**
+ * Identifies the backend transport protocol used by an endpoint.
+ */
 @Getter
 public enum BackendServiceProtocolEnum {
     HTTP("http"),

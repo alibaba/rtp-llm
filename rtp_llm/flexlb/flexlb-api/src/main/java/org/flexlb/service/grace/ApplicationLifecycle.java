@@ -18,11 +18,16 @@ import org.springframework.stereotype.Component;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
-/** Owns the fixed application online, health and graceful-shutdown workflow. */
+/**
+ * Owns the fixed application online, health and graceful-shutdown workflow.
+ *
+ * <p>Online starts consistency participation, waits for initial synchronization, then publishes
+ * warmup completion. Offline marks health unavailable and withdraws discovery before draining
+ * accepted RPCs. The owning Spring context closes serving resources after that drain.
+ */
 @Slf4j
 @Component
 public class ApplicationLifecycle implements ApplicationContextAware {
-
     private static final long DEFAULT_WARM_UP_WAIT_MS = 3_000L;
 
     private final LBStatusConsistencyService consistency;
@@ -30,14 +35,10 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     private final GracefulLifecycleReporter reporter;
     private final Environment environment;
     private final ApplicationWarmupState warmupState;
+
     private final long warmUpWaitMs;
 
     private ApplicationContext owningContext;
-
-    @Override
-    public void setApplicationContext(ApplicationContext context) {
-        owningContext = context;
-    }
 
     private volatile boolean shutdownReceived;
     private volatile boolean shutdownCompletedSuccessfully;
@@ -65,6 +66,11 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         this.environment = environment;
         this.warmupState = warmupState;
         this.warmUpWaitMs = warmUpWaitMs;
+    }
+
+    @Override
+    public void setApplicationContext(ApplicationContext context) {
+        owningContext = context;
     }
 
     public synchronized void online() {
@@ -97,6 +103,16 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         }
     }
 
+    @EventListener(ContextClosedEvent.class)
+    @Order(Ordered.HIGHEST_PRECEDENCE)
+    public void onContextClosed(ContextClosedEvent event) {
+        if (event.getApplicationContext() != owningContext) {
+            return;
+        }
+        offline();
+        log.info("context closing: requests drained; destroying serving resources");
+    }
+
     public synchronized boolean offline() {
         if (shutdownCompletedSuccessfully) {
             return true;
@@ -121,16 +137,6 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         reporter.reportShutdownComplete(
                 TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - drainStartedAt));
         return true;
-    }
-
-    @EventListener(ContextClosedEvent.class)
-    @Order(Ordered.HIGHEST_PRECEDENCE)
-    public void onContextClosed(ContextClosedEvent event) {
-        if (event.getApplicationContext() != owningContext) {
-            return;
-        }
-        offline();
-        log.info("context closing: requests drained; destroying serving resources");
     }
 
     public boolean isHealthy() {

@@ -25,8 +25,30 @@ import org.mockito.Mockito;
 import java.util.List;
 import java.util.Map;
 
-/** Package-local fixtures built only from the frozen endpoint-facing ports. */
+/**
+ * Package-local fixtures built only from the frozen endpoint-facing ports.
+ */
 final class StrategyTestSupport {
+    private static final CapacityBoundary PARKED_BOUNDARY =
+            CapacityBoundary.unavailable(
+                    new CapacityBoundary.Availability() {
+                        @Override
+                        public boolean isAvailable() {
+                            return false;
+                        }
+
+                        @Override
+                        public void addListener(Runnable listener) {}
+
+                        @Override
+                        public void removeListener(Runnable listener) {}
+                    },
+                    new RouteProjection.AdmissionBlockSemantics(
+                            "test delivery parked",
+                            RouteProjection.AfterProbeAdmission.BLOCKED,
+                            "test delivery parked",
+                            RoleType.PREFILL));
+    private static final DeliveryMetrics NOOP_METRICS = Mockito.mock(DeliveryMetrics.class);
 
     private StrategyTestSupport() {}
 
@@ -162,19 +184,6 @@ final class StrategyTestSupport {
         publish(status, response);
     }
 
-    private static final class TestRequestRuntime {
-        private final RequestRegistry requests = Mockito.mock(RequestRegistry.class);
-        private final EndpointEventProjector events = Mockito.mock(EndpointEventProjector.class);
-
-        RequestRegistry requests() {
-            return requests;
-        }
-
-        EndpointEventProjector events() {
-            return events;
-        }
-    }
-
     /** Keep selection-owned queues parked without replacing admission internals. */
     private static DeliveryStrategy parkedDelivery(RequestRegistry requests) {
         RouteDeliveryStrategy route = new RouteDeliveryStrategy(requests, NOOP_METRICS);
@@ -200,25 +209,19 @@ final class StrategyTestSupport {
         return delivery;
     }
 
-    private static final CapacityBoundary PARKED_BOUNDARY =
-            CapacityBoundary.unavailable(
-                    new CapacityBoundary.Availability() {
-                        @Override
-                        public boolean isAvailable() {
-                            return false;
-                        }
+    /**
+     * Provides request registration and events for strategy tests.
+     */
+    private static final class TestRequestRuntime {
+        private final RequestRegistry requests = Mockito.mock(RequestRegistry.class);
+        private final EndpointEventProjector events = Mockito.mock(EndpointEventProjector.class);
 
-                        @Override
-                        public void addListener(Runnable listener) {}
+        RequestRegistry requests() {
+            return requests;
+        }
 
-                        @Override
-                        public void removeListener(Runnable listener) {}
-                    },
-                    new RouteProjection.AdmissionBlockSemantics(
-                            "test delivery parked",
-                            RouteProjection.AfterProbeAdmission.BLOCKED,
-                            "test delivery parked",
-                            RoleType.PREFILL));
-
-    private static final DeliveryMetrics NOOP_METRICS = Mockito.mock(DeliveryMetrics.class);
+        EndpointEventProjector events() {
+            return events;
+        }
+    }
 }

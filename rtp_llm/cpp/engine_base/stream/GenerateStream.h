@@ -282,7 +282,10 @@ public:
     bool isLastChunk() const;      // current chunk reaches seqLength()
     bool isMiddleChunk() const;    // chunked + context + !last → no sample / no output row
     void advanceChunk();  // reuse_length_ += currentChunkLen()
-    int  cacheStorePublishStartToken() const {
+    bool hasAdvancedChunk() const {
+        return chunk_advanced_;
+    }
+    int cacheStorePublishStartToken() const {
         return chunk_advanced_ ? prefixLength() : 0;
     }
     // Prompt token right after the current chunk; valid only for middle chunks.

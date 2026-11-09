@@ -14,7 +14,9 @@ import org.flexlb.dao.route.RoleType;
 import java.util.List;
 import java.util.Map;
 
-/** One completed FlexLB scheduling decision written to {@code pv.log}. */
+/**
+ * One completed FlexLB scheduling decision written to {@code pv.log}.
+ */
 @Data
 public class PvLogData {
 
@@ -175,6 +177,9 @@ public class PvLogData {
                                                 selection.hitCacheTokens()));
     }
 
+    /**
+     * Copies frontend result fields into the request's PV record.
+     */
     @JsonIgnoreProperties({
         "success",
         "code",

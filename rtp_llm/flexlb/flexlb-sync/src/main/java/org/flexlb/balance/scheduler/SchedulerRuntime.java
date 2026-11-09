@@ -15,10 +15,16 @@ import javax.annotation.PreDestroy;
 import java.util.Map;
 import java.util.Objects;
 
-/** Owns scheduler maintenance, metrics traversal, and ordered shutdown. */
+/**
+ * Owns scheduler maintenance, metrics traversal, and ordered shutdown.
+ *
+ * <p>Maintenance and reporting inspect the existing registry and endpoint snapshots. Shutdown
+ * first closes placement, then closes request admission and waits for mutations before
+ * terminalizing requests, closing expiration and endpoints, and finally draining response
+ * publication.
+ */
 @Component
 final class SchedulerRuntime {
-
     private static final long EXPIRATION_MAINTENANCE_INTERVAL_MS = 60_000L;
 
     private final RequestRegistry requests;
@@ -73,6 +79,50 @@ final class SchedulerRuntime {
         reportDecodeEndpoints();
     }
 
+    @PreDestroy
+    void shutdown() {
+        Throwable failure = null;
+        boolean ownsShutdown;
+        try {
+            closePlacement.run();
+        } catch (Throwable closeFailure) {
+            failure = closeFailure;
+        }
+        try {
+            ownsShutdown = requests.closeAdmissionAndAwaitMutations();
+        } catch (Throwable closeFailure) {
+            failure = append(failure, closeFailure);
+            ownsShutdown = true;
+        }
+        if (!ownsShutdown) {
+            return;
+        }
+        try {
+            try {
+                requests.closeOutstandingAndTerminalize();
+            } catch (Throwable closeFailure) {
+                failure = append(failure, closeFailure);
+            }
+            try {
+                requests.closeExpiration();
+            } catch (Throwable closeFailure) {
+                failure = append(failure, closeFailure);
+            }
+            try {
+                endpoints.close();
+            } catch (Throwable closeFailure) {
+                failure = append(failure, closeFailure);
+            }
+        } finally {
+            try {
+                requests.closePublisher();
+            } catch (Throwable closeFailure) {
+                failure = append(failure, closeFailure);
+            }
+        }
+        rethrow(failure);
+    }
+
     private void reportSchedulerInflight() {
         try {
             RequestRegistry.TrackedRequestStats stats = requests.trackedRequestStats();
@@ -85,6 +135,14 @@ final class SchedulerRuntime {
             reporter.reportSchedulerInflightMaxAgeMs(stats.oldestAgeMs());
         } catch (RuntimeException failure) {
             warnIsolated("Failed to report scheduler inflight metrics", failure);
+        }
+    }
+
+    private static void warnIsolated(String message, RuntimeException failure) {
+        try {
+            Logger.warn(message, failure);
+        } catch (Throwable ignored) {
+            // Telemetry must never couple otherwise independent metric leaves.
         }
     }
 
@@ -139,58 +197,6 @@ final class SchedulerRuntime {
                         failure);
             }
         }
-    }
-
-    private static void warnIsolated(String message, RuntimeException failure) {
-        try {
-            Logger.warn(message, failure);
-        } catch (Throwable ignored) {
-            // Telemetry must never couple otherwise independent metric leaves.
-        }
-    }
-
-    @PreDestroy
-    void shutdown() {
-        Throwable failure = null;
-        boolean ownsShutdown;
-        try {
-            closePlacement.run();
-        } catch (Throwable closeFailure) {
-            failure = closeFailure;
-        }
-        try {
-            ownsShutdown = requests.closeAdmissionAndAwaitMutations();
-        } catch (Throwable closeFailure) {
-            failure = append(failure, closeFailure);
-            ownsShutdown = true;
-        }
-        if (!ownsShutdown) {
-            return;
-        }
-        try {
-            try {
-                requests.closeOutstandingAndTerminalize();
-            } catch (Throwable closeFailure) {
-                failure = append(failure, closeFailure);
-            }
-            try {
-                requests.closeExpiration();
-            } catch (Throwable closeFailure) {
-                failure = append(failure, closeFailure);
-            }
-            try {
-                endpoints.close();
-            } catch (Throwable closeFailure) {
-                failure = append(failure, closeFailure);
-            }
-        } finally {
-            try {
-                requests.closePublisher();
-            } catch (Throwable closeFailure) {
-                failure = append(failure, closeFailure);
-            }
-        }
-        rethrow(failure);
     }
 
     private static Throwable append(Throwable first, Throwable next) {

@@ -15,6 +15,9 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Checks status response conversion and compatibility of legacy and explicit worker fields.
+ */
 class WorkerStatusResponseTest {
 
     @Test

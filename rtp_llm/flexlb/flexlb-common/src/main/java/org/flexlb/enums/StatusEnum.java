@@ -12,6 +12,10 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Function;
 
+/**
+ * Maps public status codes to diagnostic names and typed FlexLB exceptions. Exception construction
+ * falls back to the common exception type if a specialized constructor cannot be invoked.
+ */
 @Getter
 public enum StatusEnum {
     /*---------------------------------------------- Success ------------------------------------------------------*/
@@ -36,15 +40,6 @@ public enum StatusEnum {
             "Engine abnormal disconnect!",
             EngineAbnormalDisconnectException.class),
     ;
-
-    private final int code;
-
-    private final String name;
-
-    private final String message;
-
-    private final Class<? extends FlexLBException> exceptionClz;
-
     public static final Map<Integer, Function<String, FlexLBException>> statusExceptionMapper =
             new HashMap<>();
 
@@ -53,6 +48,12 @@ public enum StatusEnum {
             statusExceptionMapper.put(statusEnum.code, statusEnum::toException);
         }
     }
+
+    private final int code;
+
+    private final String name;
+    private final String message;
+    private final Class<? extends FlexLBException> exceptionClz;
 
     StatusEnum(
             int code, String name, String message, Class<? extends FlexLBException> exceptionClz) {

@@ -45,13 +45,11 @@ import static org.junit.jupiter.api.Assertions.fail;
  * requests post-restart and confirms they complete with no leak.
  */
 class EngineCrashRecoveryTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(62400);
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
@@ -161,39 +159,6 @@ class EngineCrashRecoveryTest {
         }
     }
 
-    // ──────────── Cluster setup (with real gRPC servers) ────────────
-
-    /**
-     * Claim the next 10-port block whose first {@code needed} ports are all
-     * bindable right now. The allocator restarts at its fixed base (62400)
-     * in every JVM, so residue from a previous suite run (a not-yet-reaped
-     * socket from the last JVM, or any other squatter) fails the wildcard
-     * gRPC binds below on back-to-back runs; skipping occupied blocks keeps
-     * the test hermetic. The probe binds exactly like the gRPC servers do
-     * (wildcard address, same JVM-default socket options), so anything that
-     * would fail the engine bind also fails the probe. Mirrors the
-     * established {@code ComprehensiveFaultInjectionTest.allocatePortBlock}
-     * pattern.
-     */
-    private static int allocatePortBlock(int needed) {
-        for (int attempt = 0; attempt < 20; attempt++) {
-            int basePort = PORT_ALLOCATOR.getAndAdd(10);
-            boolean allFree = true;
-            for (int i = 0; i < needed; i++) {
-                try (ServerSocket probe = new ServerSocket()) {
-                    probe.bind(new InetSocketAddress(basePort + i), 1);
-                } catch (IOException e) {
-                    allFree = false;
-                    break;
-                }
-            }
-            if (allFree) {
-                return basePort;
-            }
-        }
-        throw new IllegalStateException("no bindable 10-port block after 20 attempts");
-    }
-
     private void startCluster(MockPerformanceModel model, int nPrefill, int nDecode)
             throws IOException {
         int basePort = allocatePortBlock(nPrefill + nDecode);
@@ -272,6 +237,39 @@ class EngineCrashRecoveryTest {
                 new MockControlServer(
                         services, serversByPort, bossGroup, workerGroup, "127.0.0.1", 0);
         controlServer.start();
+    }
+
+    // ──────────── Cluster setup (with real gRPC servers) ────────────
+
+    /**
+     * Claim the next 10-port block whose first {@code needed} ports are all
+     * bindable right now. The allocator restarts at its fixed base (62400)
+     * in every JVM, so residue from a previous suite run (a not-yet-reaped
+     * socket from the last JVM, or any other squatter) fails the wildcard
+     * gRPC binds below on back-to-back runs; skipping occupied blocks keeps
+     * the test hermetic. The probe binds exactly like the gRPC servers do
+     * (wildcard address, same JVM-default socket options), so anything that
+     * would fail the engine bind also fails the probe. Mirrors the
+     * established {@code ComprehensiveFaultInjectionTest.allocatePortBlock}
+     * pattern.
+     */
+    private static int allocatePortBlock(int needed) {
+        for (int attempt = 0; attempt < 20; attempt++) {
+            int basePort = PORT_ALLOCATOR.getAndAdd(10);
+            boolean allFree = true;
+            for (int i = 0; i < needed; i++) {
+                try (ServerSocket probe = new ServerSocket()) {
+                    probe.bind(new InetSocketAddress(basePort + i), 1);
+                } catch (IOException e) {
+                    allFree = false;
+                    break;
+                }
+            }
+            if (allFree) {
+                return basePort;
+            }
+        }
+        throw new IllegalStateException("no bindable 10-port block after 20 attempts");
     }
 
     // ──────────── Polling helpers ────────────

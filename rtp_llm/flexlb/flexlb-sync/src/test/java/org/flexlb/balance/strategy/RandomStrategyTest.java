@@ -22,6 +22,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks randomized ViT selection with group, health and engine-identity constraints.
+ */
 class RandomStrategyTest {
 
     private EndpointRegistry endpoints;

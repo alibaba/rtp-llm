@@ -23,7 +23,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
-/** Exact ordered-prefix and per-request completion contract for route delivery. */
+/**
+ * Exact ordered-prefix and per-request completion contract for route delivery.
+ */
 class RouteDeliveryStrategyTest {
 
     @Test
@@ -296,6 +298,9 @@ class RouteDeliveryStrategyTest {
         assertTrue(fixture.telemetry.routes().isEmpty());
     }
 
+    /**
+     * Creates route delivery items for strategy preparation tests.
+     */
     private static final class Fixture {
         private final TestEndpointCapabilities capabilities = new TestEndpointCapabilities();
         private final TestRequestRegistry slots = new TestRequestRegistry();

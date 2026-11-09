@@ -9,6 +9,9 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks response copying without losing scheduling or error fields.
+ */
 class ResponseCopyTest {
     private final ObjectMapper mapper = new ObjectMapper();
 

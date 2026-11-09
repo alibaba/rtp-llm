@@ -42,8 +42,10 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks Decode preemption claims and cancellation evidence before victim capacity is committed.
+ */
 class DecodePreemptionCoordinatorTest {
-
     @Test
     void commitsOnlyAfterEveryExactVictimIsTerminal() throws Exception {
         Fixture fixture = fixture();
@@ -208,13 +210,6 @@ class DecodePreemptionCoordinatorTest {
         }
     }
 
-    private static Stream<Arguments> beginResults() {
-        return Stream.of(DecodeEndpoint.PreemptionBeginResult.values())
-                .flatMap(
-                        result ->
-                                Stream.of(Arguments.of(true, result), Arguments.of(false, result)));
-    }
-
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void reportsUnavailableCancelTargetWithoutStartingPreemption(boolean reporterFails) {
@@ -336,6 +331,13 @@ class DecodePreemptionCoordinatorTest {
         verifyNoInteractions(fixture.reporter());
     }
 
+    private static Stream<Arguments> beginResults() {
+        return Stream.of(DecodeEndpoint.PreemptionBeginResult.values())
+                .flatMap(
+                        result ->
+                                Stream.of(Arguments.of(true, result), Arguments.of(false, result)));
+    }
+
     private static DecodePreemptionCoordinator.PreemptionCommand command(
             DecodeEndpoint endpoint, List<DecodeRequestView> victims) {
         return new DecodePreemptionCoordinator.PreemptionCommand(
@@ -398,9 +400,6 @@ class DecodePreemptionCoordinatorTest {
         return new Fixture(requests, endpoint, mock(RequestSchedulerReporter.class));
     }
 
-    private record Fixture(
-            RequestRegistry requests, DecodeEndpoint endpoint, RequestSchedulerReporter reporter) {}
-
     private static PreemptionRegistration claim(
             long requestId, CompletableFuture<VictimTerminal> terminal) {
         PreemptionRegistration claim = mock(PreemptionRegistration.class);
@@ -423,4 +422,7 @@ class DecodePreemptionCoordinatorTest {
                 false,
                 false);
     }
+
+    private record Fixture(
+            RequestRegistry requests, DecodeEndpoint endpoint, RequestSchedulerReporter reporter) {}
 }

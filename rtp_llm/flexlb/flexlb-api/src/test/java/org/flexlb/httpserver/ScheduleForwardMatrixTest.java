@@ -43,32 +43,10 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Tier-2 follower forwarding four-state matrix for
- * {@link FlexlbServiceImpl#schedule} plus the ForwardGuard decision matrix of
- * the real {@link FlexlbGrpcForwarder}.
- *
- * <p>Matrix source (brief p6, use case master_forward_matrix). The follower
- * B's decision depends on its cached master view, which production derives
- * from {@code LBStatusConsistencyService.getMasterHostIpPort()}. Two layers
- * are covered:
- * <ol>
- *   <li><b>schedule() branch matrix</b> — {@code grpcForwarder} mocked, the
- *       four states injected as {@code MasterForwardResult}s (state ① is
- *       injected through {@code isMaster()}).</li>
- *   <li><b>ForwardGuard matrix of the real forwarder</b> — a real
- *       {@link FlexlbGrpcForwarder} with a mocked
- *       {@link LBStatusConsistencyService}; each state is injected by
- *       stubbing {@code getMasterHostIpPort()} (the Tier-2 thenAnswer
- *       construction from the brief), including a real transport failure to
- *       a dead master address (state ②) and the SELF_TARGET /
- *       MAX_FORWARD_HOPS=1 negative guards.</li>
- * </ol></p>
- *
- * <p>Transport I/O failures permit local routing. RPC failures without a
- * transport cause retain the terminal error (8511).</p>
+ * Checks follower scheduling against cached master states and the actual forwarder's hop and target
+ * guards.
  */
 class ScheduleForwardMatrixTest {
-
     /**
      * The follower's declared IP. 127.0.0.5, not 127.0.0.1: the dead master
      * below reuses 127.0.0.1 for its instant TCP RST, and the SELF_TARGET
@@ -100,7 +78,6 @@ class ScheduleForwardMatrixTest {
     private FlexlbServiceImpl service;
     private ch.qos.logback.classic.Logger pvLogger;
     private ListAppender<ILoggingEvent> pvAppender;
-
     // ---- resources for the real-forwarder guard matrix ----
     private EventLoopGroup channelEventLoop;
     private ExecutorService channelExecutor;
@@ -492,27 +469,6 @@ class ScheduleForwardMatrixTest {
         }
     }
 
-    // ------------------------------------------------------------------
-    // fixtures and helpers
-    // ------------------------------------------------------------------
-
-    /** Real forwarder bound to a mocked consistency view; auto-closed. */
-    private final class RealForwarderFixture implements AutoCloseable {
-        final FlexlbGrpcForwarder forwarder;
-        final EngineHealthReporter engineHealthReporter;
-
-        private RealForwarderFixture(
-                EngineHealthReporter engineHealthReporter, FlexlbGrpcForwarder forwarder) {
-            this.engineHealthReporter = engineHealthReporter;
-            this.forwarder = forwarder;
-        }
-
-        @Override
-        public void close() {
-            forwarder.shutdown();
-        }
-    }
-
     private RealForwarderFixture newRealForwarderFixture(String masterHostIpPort) {
         LBStatusConsistencyService consistencyView = mock(LBStatusConsistencyService.class);
         when(consistencyView.isNeedConsistency()).thenReturn(true);
@@ -558,6 +514,13 @@ class ScheduleForwardMatrixTest {
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
     }
 
+    private void assertSuccessfulResponse(
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
+        FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = capturedResponse(observer);
+        assertTrue(response.getSuccess());
+        assertEquals(200, response.getCode());
+    }
+
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB capturedResponse(
             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
         org.mockito.ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
@@ -568,17 +531,33 @@ class ScheduleForwardMatrixTest {
         return captor.getValue();
     }
 
-    private void assertSuccessfulResponse(
-            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
-        FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = capturedResponse(observer);
-        assertTrue(response.getSuccess());
-        assertEquals(200, response.getCode());
-    }
-
     private void assertSinglePvContains(String expected) {
         assertEquals(1, pvAppender.list.size());
         assertTrue(
                 pvAppender.list.get(0).getFormattedMessage().contains(expected),
                 pvAppender.list.get(0).getFormattedMessage());
+    }
+
+    // ------------------------------------------------------------------
+    // fixtures and helpers
+    // ------------------------------------------------------------------
+
+    /**
+     * Real forwarder bound to a mocked consistency view; auto-closed.
+     */
+    private final class RealForwarderFixture implements AutoCloseable {
+        final FlexlbGrpcForwarder forwarder;
+        final EngineHealthReporter engineHealthReporter;
+
+        private RealForwarderFixture(
+                EngineHealthReporter engineHealthReporter, FlexlbGrpcForwarder forwarder) {
+            this.engineHealthReporter = engineHealthReporter;
+            this.forwarder = forwarder;
+        }
+
+        @Override
+        public void close() {
+            forwarder.shutdown();
+        }
     }
 }

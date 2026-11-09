@@ -12,7 +12,6 @@ import java.util.Map;
  * @author saichen.sm
  */
 public interface FlexMetricTags {
-
     /**
      * Get tag key-value map
      *
@@ -26,6 +25,53 @@ public interface FlexMetricTags {
      * @return true if empty, false otherwise
      */
     boolean isEmpty();
+
+    /**
+     * Factory method - create immutable tags from Map
+     *
+     * @param tags Tag map
+     * @return Immutable tags instance
+     */
+    static FlexMetricTags of(Map<String, String> tags) {
+        return new ImmutableFlexMetricTags(tags);
+    }
+
+    /**
+     * Factory method - create immutable tags from key-value pairs
+     *
+     * @param keyValues Key-value pairs, format: key1, value1, key2, value2, ...
+     * @return Immutable tags instance
+     */
+    static FlexMetricTags of(String... keyValues) {
+        return new ImmutableFlexMetricTags(keyValues);
+    }
+
+    /**
+     * Factory method - create immutable tags with engineIp pre-populated
+     *
+     * @param engineIp       Engine IP (e.g. "10.0.0.1")
+     * @param extraKeyValues Additional key-value pairs, format: key1, value1, key2, value2, ...
+     * @return Immutable tags instance
+     */
+    static FlexMetricTags ofEngine(String engineIp, String... extraKeyValues) {
+        java.util.Map<String, String> map = new java.util.HashMap<>();
+        if (engineIp != null) {
+            map.put("engineIp", engineIp);
+        }
+        if (extraKeyValues != null && extraKeyValues.length % 2 != 0) {
+            throw new IllegalArgumentException("extraKeyValues must have even number of elements");
+        }
+        if (extraKeyValues != null) {
+            for (int i = 0; i + 1 < extraKeyValues.length; i += 2) {
+                String key = extraKeyValues[i];
+                String value = extraKeyValues[i + 1];
+                if (key != null && value != null) {
+                    map.put(key, value);
+                }
+            }
+        }
+        return new ImmutableFlexMetricTags(map);
+    }
 
     /**
      * Immutable tags implementation class
@@ -97,52 +143,5 @@ public interface FlexMetricTags {
         public int hashCode() {
             return tags.hashCode();
         }
-    }
-
-    /**
-     * Factory method - create immutable tags from Map
-     *
-     * @param tags Tag map
-     * @return Immutable tags instance
-     */
-    static FlexMetricTags of(Map<String, String> tags) {
-        return new ImmutableFlexMetricTags(tags);
-    }
-
-    /**
-     * Factory method - create immutable tags from key-value pairs
-     *
-     * @param keyValues Key-value pairs, format: key1, value1, key2, value2, ...
-     * @return Immutable tags instance
-     */
-    static FlexMetricTags of(String... keyValues) {
-        return new ImmutableFlexMetricTags(keyValues);
-    }
-
-    /**
-     * Factory method - create immutable tags with engineIp pre-populated
-     *
-     * @param engineIp       Engine IP (e.g. "10.0.0.1")
-     * @param extraKeyValues Additional key-value pairs, format: key1, value1, key2, value2, ...
-     * @return Immutable tags instance
-     */
-    static FlexMetricTags ofEngine(String engineIp, String... extraKeyValues) {
-        java.util.Map<String, String> map = new java.util.HashMap<>();
-        if (engineIp != null) {
-            map.put("engineIp", engineIp);
-        }
-        if (extraKeyValues != null && extraKeyValues.length % 2 != 0) {
-            throw new IllegalArgumentException("extraKeyValues must have even number of elements");
-        }
-        if (extraKeyValues != null) {
-            for (int i = 0; i + 1 < extraKeyValues.length; i += 2) {
-                String key = extraKeyValues[i];
-                String value = extraKeyValues[i + 1];
-                if (key != null && value != null) {
-                    map.put(key, value);
-                }
-            }
-        }
-        return new ImmutableFlexMetricTags(map);
     }
 }

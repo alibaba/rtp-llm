@@ -12,6 +12,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Checks incremental formula evaluation against complete evaluation across changing item sequences.
+ */
 class IncrementalArithmeticFormulaTest {
     private final Random random = new Random(20260917);
 

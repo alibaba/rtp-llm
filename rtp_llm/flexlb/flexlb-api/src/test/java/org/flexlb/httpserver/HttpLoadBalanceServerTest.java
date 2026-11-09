@@ -22,6 +22,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks HTTP status views and response contracts for scheduler queues, blocked requests and cache
+ * versions.
+ */
 class HttpLoadBalanceServerTest {
 
     @Test

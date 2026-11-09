@@ -23,33 +23,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
- * Validates the production-caliber TPS series ({@code rtp_llm_context_tps},
- * {@code rtp_llm_context_tps_with_cache}, {@code rtp_llm_generate_tps}) the
- * mock reports on {@code /metrics} in BOTH emission modes (per-engine and
- * role-aggregated).
- *
- * <p>Accounting model under test (see FastRpcService field comments): the
- * series are PURE BOOKKEEPING on completion events — prefill completions add
- * Σ(il−hit) / Σ(il) to the context pair, decode completions add Σ(ol) to
- * generate — and every {@code /metrics} scrape drains the accumulators into
- * the just-scraped window (window = scrape interval; the value read is the
- * token sum of exactly that window, tokens/s under the 1s G1 poller).
- *
- * <ul>
- *   <li>Known il/ol/hitTokens completion events are constructed via
- *       block-cache-key reuse (first request parks its keys in the LRU; the
- *       second identical-key request hits them, fixing hitTokens exactly)</li>
- *   <li>Per-engine mode: prefill engine carries the context pair (compute
- *       excludes hit tokens, with_cache includes them), decode engine the
- *       generate series; a second scrape with no events in between reads 0
- *       (drain semantics — the window, not a lifetime counter)</li>
- *   <li>Role-aggregated mode: prefill bucket = cross-engine context sums,
- *       decode bucket = generate sum</li>
- *   <li>Cancelled completions are EXCLUDED from every numerator (production
- *       semantics: only tokens actually accepted and generated count)</li>
- *   <li>{@code /snapshot} exposes the cumulative {@code hit_tokens_total}
- *       (the cache_saved_tokens source; never drained)</li>
- * </ul>
+ * Checks Prefill and Decode token-throughput metrics in per-engine and role-aggregated emission
+ * modes.
  */
 class TpsMetricsAccountingTest {
 

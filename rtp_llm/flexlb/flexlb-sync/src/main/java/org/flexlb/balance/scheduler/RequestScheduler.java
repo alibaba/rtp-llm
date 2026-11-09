@@ -28,10 +28,13 @@ import java.util.concurrent.CompletableFuture;
  * <p>Both modes register one canonical request. DIRECT selects and commits on
  * ingress; QUEUE defers selection to the Encoder or Generation ordered queue. Endpoint
  * batchers own only delivery after the selected route is committed.</p>
+ *
+ * <p>Submission validates the request and registers its Future once. DIRECT selects on ingress;
+ * QUEUE hands the registered request to the Encoder or Generation coordinator. Cancellation and
+ * request-state lookup return to the registry rather than selecting a new route.
  */
 @Component
 public final class RequestScheduler {
-
     private final DefaultRouter router;
     private final EndpointRegistry endpointRegistry;
     private final RequestRegistry requestRegistry;
@@ -111,6 +114,65 @@ public final class RequestScheduler {
         return future;
     }
 
+    public RequestState cancelRequest(String requestId, long expectedBatchId, CancelReason reason) {
+        return requestRegistry.cancelRequest(requestId, expectedBatchId, reason);
+    }
+
+    /**
+     * Cancel the selected phase while preserving the other phase with the same request ID.
+     */
+    public RequestState cancelRequest(
+            String requestId, long expectedBatchId, CancelReason reason, RequestPhase phase) {
+        return requestRegistry.cancelRequest(requestId, expectedBatchId, reason, phase);
+    }
+
+    public int getTrackedRequestCount() {
+        return requestRegistry.trackedRequestCount();
+    }
+
+    public int getQueuedRequestCount() {
+        long queued =
+                (globalQueue == null ? 0L : globalQueue.size())
+                        + (encoderQueue == null ? 0L : encoderQueue.size());
+        for (PrefillEndpoint endpoint : endpointRegistry.snapshotPrefillEndpoints().values()) {
+            queued += endpoint.queuedRequestCount();
+            if (queued >= Integer.MAX_VALUE) {
+                return Integer.MAX_VALUE;
+            }
+        }
+        return (int) queued;
+    }
+
+    public int getBlockedRequestCount() {
+        return (globalQueue == null ? 0 : globalQueue.blockedSize())
+                + (encoderQueue == null ? 0 : encoderQueue.blockedSize());
+    }
+
+    public List<RequestState> snapshotActiveRequests() {
+        return requestRegistry.snapshotActiveRequests();
+    }
+
+    public RequestState getRequestState(String requestId, long expectedBatchId) {
+        return requestRegistry.getRequestState(requestId, expectedBatchId);
+    }
+
+    /**
+     * Read the Encoder or Generation lifecycle selected by phase.
+     */
+    public RequestState getRequestState(
+            String requestId, long expectedBatchId, RequestPhase phase) {
+        return requestRegistry.getRequestState(requestId, expectedBatchId, phase);
+    }
+
+    public void closePlacement() {
+        if (globalQueue != null) {
+            globalQueue.close();
+        }
+        if (encoderQueue != null) {
+            encoderQueue.close();
+        }
+    }
+
     private void scheduleRegisteredRequest(
             BalanceContext context,
             CompletableFuture<Response> future,
@@ -145,21 +207,8 @@ public final class RequestScheduler {
         }
     }
 
-    private void enqueueGenerationRequest(
-            BalanceContext context, CompletableFuture<Response> future) {
-        try {
-            if (!globalQueue.offer(context, future, context.getPriority())) {
-                future.complete(
-                        error(
-                                StrategyErrorType.DISPATCH_FAILED,
-                                "request scheduler is shutting down"));
-            }
-        } catch (Throwable failure) {
-            future.complete(
-                    error(
-                            StrategyErrorType.DISPATCH_FAILED,
-                            "Queue submission failed: " + failure.getMessage()));
-        }
+    private static Response error(StrategyErrorType type, String detail) {
+        return Response.buildErrorResponse(type, detail);
     }
 
     private void selectAndPublishEncoder(BalanceContext context) {
@@ -256,66 +305,20 @@ public final class RequestScheduler {
         }
     }
 
-    public RequestState cancelRequest(String requestId, long expectedBatchId, CancelReason reason) {
-        return requestRegistry.cancelRequest(requestId, expectedBatchId, reason);
-    }
-
-    /**
-     * Cancel the selected phase while preserving the other phase with the same request ID.
-     */
-    public RequestState cancelRequest(
-            String requestId, long expectedBatchId, CancelReason reason, RequestPhase phase) {
-        return requestRegistry.cancelRequest(requestId, expectedBatchId, reason, phase);
-    }
-
-    public int getTrackedRequestCount() {
-        return requestRegistry.trackedRequestCount();
-    }
-
-    public int getQueuedRequestCount() {
-        long queued =
-                (globalQueue == null ? 0L : globalQueue.size())
-                        + (encoderQueue == null ? 0L : encoderQueue.size());
-        for (PrefillEndpoint endpoint : endpointRegistry.snapshotPrefillEndpoints().values()) {
-            queued += endpoint.queuedRequestCount();
-            if (queued >= Integer.MAX_VALUE) {
-                return Integer.MAX_VALUE;
+    private void enqueueGenerationRequest(
+            BalanceContext context, CompletableFuture<Response> future) {
+        try {
+            if (!globalQueue.offer(context, future, context.getPriority())) {
+                future.complete(
+                        error(
+                                StrategyErrorType.DISPATCH_FAILED,
+                                "request scheduler is shutting down"));
             }
+        } catch (Throwable failure) {
+            future.complete(
+                    error(
+                            StrategyErrorType.DISPATCH_FAILED,
+                            "Queue submission failed: " + failure.getMessage()));
         }
-        return (int) queued;
-    }
-
-    public int getBlockedRequestCount() {
-        return (globalQueue == null ? 0 : globalQueue.blockedSize())
-                + (encoderQueue == null ? 0 : encoderQueue.blockedSize());
-    }
-
-    public List<RequestState> snapshotActiveRequests() {
-        return requestRegistry.snapshotActiveRequests();
-    }
-
-    public RequestState getRequestState(String requestId, long expectedBatchId) {
-        return requestRegistry.getRequestState(requestId, expectedBatchId);
-    }
-
-    /**
-     * Read the Encoder or Generation lifecycle selected by phase.
-     */
-    public RequestState getRequestState(
-            String requestId, long expectedBatchId, RequestPhase phase) {
-        return requestRegistry.getRequestState(requestId, expectedBatchId, phase);
-    }
-
-    public void closePlacement() {
-        if (globalQueue != null) {
-            globalQueue.close();
-        }
-        if (encoderQueue != null) {
-            encoderQueue.close();
-        }
-    }
-
-    private static Response error(StrategyErrorType type, String detail) {
-        return Response.buildErrorResponse(type, detail);
     }
 }

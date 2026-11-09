@@ -19,6 +19,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks routing mode input requirements and preservation of the scheduler future.
+ */
 class RouteServiceTest {
     private final RequestScheduler scheduler = mock(RequestScheduler.class);
     private final TheoryCacheHitReporter reporter = mock(TheoryCacheHitReporter.class);

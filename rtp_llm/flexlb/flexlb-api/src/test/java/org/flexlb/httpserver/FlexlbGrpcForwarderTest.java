@@ -41,6 +41,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks master selection, forwarding-hop guards and transport-failure behavior without local retry.
+ */
 class FlexlbGrpcForwarderTest {
 
     @Test

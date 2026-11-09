@@ -9,35 +9,9 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Test-only {@link EngineCancelChannel} backed by the in-process mock engine
- * cluster. Resolves the target {@link JavaMockEngineCluster.FastRpcService} by
- * the endpoint's gRPC port and drives the mock cancel behaviour: a live
- * request is removed and a CANCELLED completion surfaces in the next
- * WorkerStatus finished list, exactly like a real engine would report.
- * Mirrors the production engine contract (C++ Prefill Cancel): a live
- * request and its accepted-cancel terminal record return ACCEPTED; a request the
- * addressed Prefill has seen but already finished returns NOT_FOUND
- * (seen-but-terminal; the completion record stays deliverable from the
- * retain window); a rid the Prefill NEVER saw returns REQUEST_FENCED with the
- * ABSENT_FENCE record installed (racing later Enqueues of that rid are
- * rejected with 8429); Decode rejects this RPC as unsupported.
- *
- * <p><b>Fault injection:</b> an armed cancel fault
- * ({@code cancel_no_respond} / {@code cancel_error} /
- * {@code cancel_unexpected_status}) short-circuits through
- * {@link JavaMockEngineCluster.FastRpcService#arriveCancelRpc} BEFORE
- * {@code cancelRequest} — the same gate the gRPC Cancel handler and the HTTP
- * {@code /cancel_request} surface run. The engine cancel state machine is
- * never touched (production semantics "RPC failed = engine state unchanged"),
- * and the master's one-shot cancel contract (never retries, short ack
- * timeout) turns each kind into a failed future caller-side.
- *
- * <p><b>Wiring:</b> this class is NOT a Spring component. Tests inject it
- * explicitly, e.g.:
- * <pre>{@code
- *   Map<Integer, FastRpcService> services = ...; // port -> mock engine
- *   EngineCancelChannel channel = new MockEngineCancelChannel(services);
- * }</pre>
+ * Resolves mock Prefill cancellation by gRPC port and returns accepted, seen-but-finished or
+ * fenced-absent outcomes. Injected RPC faults leave engine state unchanged; successful cancellation
+ * still requires worker terminal feedback before scheduler cleanup.
  */
 public final class MockEngineCancelChannel implements EngineCancelChannel {
 

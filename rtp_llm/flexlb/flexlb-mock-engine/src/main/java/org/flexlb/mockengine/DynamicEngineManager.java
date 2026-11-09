@@ -17,74 +17,13 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Runtime scale-out/scale-in for the Java mock engine cluster, backing the
- * HTTP control endpoints {@code /add_engine} and {@code /remove_engine}.
- *
- * <p>Semantics vs the pre-existing {@code /stop_engine} + {@code /start_engine}
- * pair (which address a FIXED engine set):
- * <ul>
- *   <li>{@code addEngine} creates a brand-new {@code FastRpcService} on a fresh
- *       gRPC port (explicit or auto = current max + 1), registers it in the
- *       services map, starts the gRPC server, and appends it to the discovery
- *       file for discovery readers in the test harness.</li>
- *   <li>{@code removeEngine} PERMANENTLY detaches the engine, in two modes
- *       (user ruling 2026-09: a PLANNED scale-in under load must not lose or
- *       fail any request):
- *       <ul>
- *       <li><b>graceful</b> (default) — the production rolling scale-in
- *           order. Phase 1 strips the engine's discovery-file entry FIRST so
- *           the master stops routing NEW requests to it (the engine keeps
- *           serving everything already accepted, including stragglers that
- *           race past the strip window). Phase 2 waits a BOUNDED interval
- *           (drainTimeoutMs) for all in-flight work to finish (running
- *           tasks, both pending queues, cross-engine P→D ownership). Phase 3
- *           tears the gRPC server down and removes every bookkeeping entry.
- *           If the deadline expires with work still in flight, the removal
- *           falls back to the abrupt teardown and reports
- *           {@code drained=false} rather than blocking forever.</li>
- *       <li><b>abrupt</b> (legacy, for chaos-style fault cases) — stopped
- *           flag + cancel-sweep bookkeeping + {@code shutdownNow} cutting
- *           in-flight RPC streams immediately; master-side 3-consecutive-
- *           failure / TTL logic handles the fallout.</li>
- *       </ul>
- *       Both modes end with removal from the services map AND the discovery
- *       file — remove never leaves residue (unlike stop/start, which keeps
- *       the discovery entry for an expected same-port comeback).</li>
- * </ul>
- *
- * <p>All mutations run inside a single cluster-wide lock covering
- * "read services → allocate port/name → start server → rewrite discovery
- * file", so concurrent add/remove calls (and the file rewrite they trigger)
- * can never interleave and leave the file inconsistent with the services map.
+ * Adds mock engines by starting their servers before publishing discovery, rolling back failed
+ * creation. Graceful removal withdraws discovery, waits within the drain timeout, then tears down
+ * the engine; timeout falls back to abrupt removal and reports {@code drained=false}.
  */
 final class DynamicEngineManager {
-
     /** Detached-engine outcomes kept for a concurrent remove that resolved late. */
     private static final int MAX_DETACHED_REMOVALS = 64;
-
-    /** Outcome of a successful add — the fields the HTTP response reports. */
-    record AddedEngine(String engineName, int grpcPort) {}
-
-    /** Outcome of a successful remove — counters are sampled when the drain
-     * STARTS (the "at removal time" report), plus the drain result. */
-    record RemovedEngine(
-            String engineName,
-            int grpcPort,
-            int runningAtRemoval,
-            int waitingAtRemoval,
-            String mode,
-            boolean drained,
-            long drainMs) {}
-
-    /** Thrown for caller-input problems (bad role, port conflict, unknown engine). */
-    static final class EngineOperationException extends Exception {
-        final int status;
-
-        EngineOperationException(int status, String message) {
-            super(message);
-            this.status = status;
-        }
-    }
 
     private final JavaMockEngineCluster.Config config;
     private final MockPerformanceModel performance;
@@ -463,6 +402,24 @@ final class DynamicEngineManager {
         return outcome;
     }
 
+    private void rewriteDiscoveryFileLocked() throws IOException {
+        if (discoveryFileStore != null) {
+            if (pendingRemovalPorts.isEmpty()) {
+                discoveryFileStore.rewrite(services);
+            } else {
+                // A mid-drain engine is still hosted (it is draining, not gone)
+                // but must stay invisible to the master's routing view until
+                // the teardown completes — rewrite an EXCLUDED view so a
+                // concurrent add_engine can never resurrect its entry.
+                Map<Integer, JavaMockEngineCluster.FastRpcService> view = new HashMap<>(services);
+                for (int drainingPort : pendingRemovalPorts) {
+                    view.remove(drainingPort);
+                }
+                discoveryFileStore.rewrite(view);
+            }
+        }
+    }
+
     // ────────────────── Internals (mutationLock held) ──────────────────
 
     /** "At removal time" waiting-depth sample, by role (decode parks in its
@@ -554,21 +511,33 @@ final class DynamicEngineManager {
         services.remove(grpcPort, service);
     }
 
-    private void rewriteDiscoveryFileLocked() throws IOException {
-        if (discoveryFileStore != null) {
-            if (pendingRemovalPorts.isEmpty()) {
-                discoveryFileStore.rewrite(services);
-            } else {
-                // A mid-drain engine is still hosted (it is draining, not gone)
-                // but must stay invisible to the master's routing view until
-                // the teardown completes — rewrite an EXCLUDED view so a
-                // concurrent add_engine can never resurrect its entry.
-                Map<Integer, JavaMockEngineCluster.FastRpcService> view = new HashMap<>(services);
-                for (int drainingPort : pendingRemovalPorts) {
-                    view.remove(drainingPort);
-                }
-                discoveryFileStore.rewrite(view);
-            }
+    /**
+     * Outcome of a successful add — the fields the HTTP response reports.
+     */
+    record AddedEngine(String engineName, int grpcPort) {}
+
+    /**
+     * Outcome of a successful remove — counters are sampled when the drain
+     * STARTS (the "at removal time" report), plus the drain result.
+     */
+    record RemovedEngine(
+            String engineName,
+            int grpcPort,
+            int runningAtRemoval,
+            int waitingAtRemoval,
+            String mode,
+            boolean drained,
+            long drainMs) {}
+
+    /**
+     * Thrown for caller-input problems (bad role, port conflict, unknown engine).
+     */
+    static final class EngineOperationException extends Exception {
+        final int status;
+
+        EngineOperationException(int status, String message) {
+            super(message);
+            this.status = status;
         }
     }
 }

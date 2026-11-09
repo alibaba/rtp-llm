@@ -36,26 +36,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
- * {@link MockEngineCancelChannel} contract tests against the in-process mock
- * engine cluster (test wiring only):
- * <ul>
- *   <li>accepted: a live request on the addressed worker is cancelled and its
- *       CANCELLED completion surfaces in WorkerStatus;</li>
- *   <li>idempotent: an accepted priority-cancel terminal record stays ACCEPTED;</li>
- *   <li>not found: a completed-before-cancel request answers NOT_FOUND
- *       (production seen-but-terminal branch) and does not scan another
- *       Prefill for a match;</li>
- *   <li>request_fenced: a never-seen rid answers REQUEST_FENCED, installs the
- *       ABSENT_FENCE record, and a racing later Enqueue of that rid is
- *       rejected pre-admission with the typed 8429 error;</li>
- *   <li>failed: Decode rejects the Prefill-owned Cancel RPC;</li>
- *   <li>unsupported: endpoint whose port maps to no mock engine;</li>
- *   <li>fault injections: an armed cancel_no_respond / cancel_error /
- *       cancel_unexpected_status is an RPC-LAYER failure — the future hangs /
- *       fails, the engine cancel state machine is never touched (no fences,
- *       no terminal records, no census branch), and clearing the injection restores
- *       the normal path.</li>
- * </ul>
+ * Checks in-process cancellation outcomes and the worker completion evidence produced by the
+ * addressed mock engine.
  */
 class MockEngineCancelChannelTest {
 

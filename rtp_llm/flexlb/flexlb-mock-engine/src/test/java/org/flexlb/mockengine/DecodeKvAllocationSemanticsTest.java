@@ -34,38 +34,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Decode KV allocation semantics (production-aligned 20260903, Zola C++
- * forensics) — the four gaps closed against the production behavior:
- *
- * <ol>
- *   <li><b>D-side ALLOCATE retry window</b> (DecodeRpcServer.cc:1190-1217
- *       EXECUTE_WITH_RETRY: {@code decode_retry_times=100} /
- *       {@code decode_retry_interval_ms=1} / {@code decode_retry_timeout_ms=100}):
- *       a failed reservation retries a FRESH acquire inside the window —
- *       another request's release flips a RETRYABLE verdict mid-window — and
- *       only the window-exhausted verdict terminates. The loop runs
- *       synchronously on the caller's enqueue thread (mock has no real gRPC
- *       async) and never holds the D-side cache monitor across the sleep.</li>
- *   <li><b>PERMANENT vs RETRYABLE classification</b>
- *       (KVCacheAllocator.cc:100-110): {@code required + reserve > physical
- *       total} = PERMANENT (retrying is pointless — production still spins it
- *       to the timeout; counted in {@code lack_mem_rejects}); pool total
- *       sufficient but temporarily short = RETRYABLE (counted in
- *       {@code kv_admission_fails}). Both families retry identically.</li>
- *   <li><b>reserve_step constant front-load window</b> (speculative
- *       {@code reserve_step_ = gen_num_per_circle + 1}, non-speculative = 0):
- *       decode demand prices {@code ceil((seq_len + reserve_step)/spb)} —
- *       initial admission front-loads the window, growth CONSUMES it
- *       (never re-appends); 0 keeps the exact fit bit-identical.</li>
- *   <li><b>Master-surface 8211</b> (the P engine's closeGrpcStream rewrite of
- *       a D-side RESOURCE_EXHAUSTED into DECODE_MALLOC_FAILED): decode-side
- *       reservation rejections ack 8211 with the raw 602 in the message
- *       text; prefill-pool rejections keep 602 (the two pools surface
- *       different codes, exactly like production).</li>
- * </ol>
+ * Checks Decode KV allocation retry, reserve limits and release against the modeled engine admission
+ * contract.
  */
 class DecodeKvAllocationSemanticsTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final int SPB = 1024;
@@ -76,10 +48,10 @@ class DecodeKvAllocationSemanticsTest {
                     "(\\w+)\\{engine_name=\"[^\"]+\",role=\"[^\"]+\",grpc_port=\"(\\d+)\",engine_ip=\"[^\"]+\"\\}\\s+(\\d+)");
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
     private MockControlServer controlServer;
+
     private int nextPortOffset;
 
     @BeforeEach
@@ -440,6 +412,19 @@ class DecodeKvAllocationSemanticsTest {
         return service;
     }
 
+    private void startControlServer() {
+        if (controlServer == null) {
+            try {
+                controlServer =
+                        new MockControlServer(
+                                services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
+                controlServer.start();
+            } catch (IOException e) {
+                throw new IllegalStateException("control server failed to start", e);
+            }
+        }
+    }
+
     private JavaMockEngineCluster.FastRpcService newDecodeService(
             MockPerformanceModel model, int blocks) {
         int port = BASE_PORT + nextPortOffset++;
@@ -462,22 +447,8 @@ class DecodeKvAllocationSemanticsTest {
         return service;
     }
 
-    private void startControlServer() {
-        if (controlServer == null) {
-            try {
-                controlServer =
-                        new MockControlServer(
-                                services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
-                controlServer.start();
-            } catch (IOException e) {
-                throw new IllegalStateException("control server failed to start", e);
-            }
-        }
-    }
-
-    private int controlPort() {
-        assertNotNull(controlServer, "control server must be running");
-        return controlServer.getPort();
+    private long heldBlocks(int port) throws IOException, InterruptedException {
+        return perEngineMetrics().get("mock_engine_held_blocks").getOrDefault(port, -1L);
     }
 
     private Map<String, Map<Integer, Long>> perEngineMetrics()
@@ -493,7 +464,8 @@ class DecodeKvAllocationSemanticsTest {
         return result;
     }
 
-    private long heldBlocks(int port) throws IOException, InterruptedException {
-        return perEngineMetrics().get("mock_engine_held_blocks").getOrDefault(port, -1L);
+    private int controlPort() {
+        assertNotNull(controlServer, "control server must be running");
+        return controlServer.getPort();
     }
 }

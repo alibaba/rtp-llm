@@ -53,7 +53,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** Real executor, Slot and endpoint ledgers; only the Engine transport is simulated. */
+/**
+ * Real executor, Slot and endpoint ledgers; only the Engine transport is simulated.
+ */
 class QueuedBatchDeliveryTest {
     private static final long TIMEOUT_MS = TimeUnit.HOURS.toMillis(1);
     private final CountDownLatch releaseExecutor = new CountDownLatch(1);

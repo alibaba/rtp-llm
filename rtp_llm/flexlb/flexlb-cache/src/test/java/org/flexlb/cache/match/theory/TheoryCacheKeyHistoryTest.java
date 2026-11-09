@@ -19,8 +19,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks cache-key history retention and theoretical hits against prior requests.
+ */
 class TheoryCacheKeyHistoryTest {
-
     @Test
     void should_limit_history_to_ten_times_prefill_block_capacity() {
         FlexlbConfig config = new FlexlbConfig();
@@ -82,29 +84,6 @@ class TheoryCacheKeyHistoryTest {
         assertEquals(0L, window.record(List.of(0L)).getRequestHitOccurrences());
         assertEquals(1L, window.record(List.of(20L)).getRequestHitOccurrences());
         verifyNoInteractions(secondWorker);
-    }
-
-    private static TheoryCacheKeyHistory historyWithWindow(
-            long durationMs, long maxKeys, LongSupplier clock) throws Exception {
-        ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-        TheoryCacheKeyHistory history =
-                new TheoryCacheKeyHistory(configService, mock(WorkerStatusProvider.class));
-        Field window = TheoryCacheKeyHistory.class.getDeclaredField("historyWindow");
-        window.setAccessible(true);
-        window.set(history, new RecentCacheKeyWindow(durationMs, maxKeys, clock));
-        return history;
-    }
-
-    private static WorkerStatusProvider prefillCapacity(long totalKvCacheTokens, long blockSize) {
-        WorkerStatusProvider provider = mock(WorkerStatusProvider.class);
-        WorkerStatus worker = mock(WorkerStatus.class);
-        WorkerStatus.EngineObservation capacity = mock(WorkerStatus.EngineObservation.class);
-        when(provider.getWorkerStatuses(RoleType.PREFILL, null)).thenReturn(List.of(worker));
-        when(worker.committedEngineObservation()).thenReturn(capacity);
-        when(capacity.totalKvCacheTokens()).thenReturn(totalKvCacheTokens);
-        when(capacity.blockSize()).thenReturn(blockSize);
-        return provider;
     }
 
     @Test
@@ -174,5 +153,28 @@ class TheoryCacheKeyHistoryTest {
         window.record(List.of(33L, 44L));
         assertEquals(1L, window.record(List.of(33L)).getRequestHitOccurrences());
         assertEquals(4L, window.record(List.of(11L, 22L, 33L, 44L)).getRequestHitOccurrences());
+    }
+
+    private static TheoryCacheKeyHistory historyWithWindow(
+            long durationMs, long maxKeys, LongSupplier clock) throws Exception {
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        TheoryCacheKeyHistory history =
+                new TheoryCacheKeyHistory(configService, mock(WorkerStatusProvider.class));
+        Field window = TheoryCacheKeyHistory.class.getDeclaredField("historyWindow");
+        window.setAccessible(true);
+        window.set(history, new RecentCacheKeyWindow(durationMs, maxKeys, clock));
+        return history;
+    }
+
+    private static WorkerStatusProvider prefillCapacity(long totalKvCacheTokens, long blockSize) {
+        WorkerStatusProvider provider = mock(WorkerStatusProvider.class);
+        WorkerStatus worker = mock(WorkerStatus.class);
+        WorkerStatus.EngineObservation capacity = mock(WorkerStatus.EngineObservation.class);
+        when(provider.getWorkerStatuses(RoleType.PREFILL, null)).thenReturn(List.of(worker));
+        when(worker.committedEngineObservation()).thenReturn(capacity);
+        when(capacity.totalKvCacheTokens()).thenReturn(totalKvCacheTokens);
+        when(capacity.blockSize()).thenReturn(blockSize);
+        return provider;
     }
 }

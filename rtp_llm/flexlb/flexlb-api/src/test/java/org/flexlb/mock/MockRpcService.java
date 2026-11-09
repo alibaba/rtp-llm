@@ -14,29 +14,34 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 /**
- * Mock implementation of {@link RpcServiceGrpc.RpcServiceImplBase}.
- *
- * <p>Implements only the RPCs needed by FlexLB's batch scheduler:
- * <ul>
- *   <li>{@code enqueueBatch()} — records requests, applies configured delay, returns success/error</li>
- *   <code>getWorkerStatus()} — returns configurable {@link EngineRpcService.WorkerStatusPB}</code>
- *   <li>{@code getCacheStatus()} — returns configurable {@link EngineRpcService.CacheStatusPB}</li>
- *   <li>{@code checkHealth()} — always returns healthy</li>
- * </ul>
- * All other RPCs fall through to the default (UNIMPLEMENTED) behavior.
- *
- * <p>All call records use thread-safe collections ({@link CopyOnWriteArrayList},
- * {@link java.util.concurrent.ConcurrentHashMap}) so they can be read from test threads
- * for assertion without additional synchronization.
+ * Records scheduling RPCs and returns configured batch responses and worker status for mock-worker
+ * integration tests.
  */
 public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
-
     private static final Logger log = LoggerFactory.getLogger(MockRpcService.class);
 
-    private record FinishedTask(long version, EngineRpcService.TaskInfoPB task) {}
-
     private final List<FinishedTask> finishedTasks = new ArrayList<>();
+
     private volatile Consumer<EngineRpcService.EnqueueBatchRequestPB> acceptedBatchListener;
+
+    // ==================== Call records (thread-safe, for assertions) ====================
+
+    /** All EnqueueBatch requests received, in arrival order. */
+    final CopyOnWriteArrayList<EngineRpcService.EnqueueBatchRequestPB> enqueuedRequests =
+            new CopyOnWriteArrayList<>();
+
+    /** Counter for GetWorkerStatus calls. */
+    final AtomicLong workerStatusCallCount = new AtomicLong(0);
+
+    /** Counter for GetCacheStatus calls. */
+    final AtomicLong cacheStatusCallCount = new AtomicLong(0);
+
+    /** Counter for CheckHealth calls. */
+    final AtomicLong healthCheckCount = new AtomicLong(0);
+
+    // ==================== Behavior (volatile, hot-swappable) ====================
+
+    private volatile MockWorkerBehavior behavior = MockWorkerBehavior.builder().build();
 
     /** Optional execution bridge for tests that exercise repeated delivery and status polling. */
     public void onAcceptedBatch(Consumer<EngineRpcService.EnqueueBatchRequestPB> listener) {
@@ -64,25 +69,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
             }
         }
     }
-
-    // ==================== Call records (thread-safe, for assertions) ====================
-
-    /** All EnqueueBatch requests received, in arrival order. */
-    final CopyOnWriteArrayList<EngineRpcService.EnqueueBatchRequestPB> enqueuedRequests =
-            new CopyOnWriteArrayList<>();
-
-    /** Counter for GetWorkerStatus calls. */
-    final AtomicLong workerStatusCallCount = new AtomicLong(0);
-
-    /** Counter for GetCacheStatus calls. */
-    final AtomicLong cacheStatusCallCount = new AtomicLong(0);
-
-    /** Counter for CheckHealth calls. */
-    final AtomicLong healthCheckCount = new AtomicLong(0);
-
-    // ==================== Behavior (volatile, hot-swappable) ====================
-
-    private volatile MockWorkerBehavior behavior = MockWorkerBehavior.builder().build();
 
     /**
      * Update behavior at runtime.  Thread-safe — the next RPC will see the new config.
@@ -253,4 +239,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
                 EngineRpcService.CheckHealthResponsePB.newBuilder().setHealth("ok").build());
         responseObserver.onCompleted();
     }
+
+    private record FinishedTask(long version, EngineRpcService.TaskInfoPB task) {}
 }

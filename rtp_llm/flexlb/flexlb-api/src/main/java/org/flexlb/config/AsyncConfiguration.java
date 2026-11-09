@@ -8,6 +8,10 @@ import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Provides an executor for request-finalization callbacks. Saturation runs callbacks on the
+ * submitting thread; shutdown may discard late submissions.
+ */
 @Configuration
 public class AsyncConfiguration {
 

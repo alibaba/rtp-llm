@@ -22,20 +22,23 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-/** Fetches raw configuration documents from the local Turbo UniConfig agent. */
+/**
+ * Fetches raw configuration documents from the local Turbo UniConfig agent.
+ */
 @Slf4j
 @Component
 final class UniConfigConfigSource implements ConfigSource {
-
     private static final int CONFIG_READ_TIMEOUT_MS = 3000;
     private static final int STARTUP_RETRY_INTERVAL_SECONDS = 1;
     private static final int POLL_INTERVAL_SECONDS = 30;
     private static final int PRIORITY = 3;
 
     private final URI configUri;
+
     private ScheduledExecutorService pollExecutor;
     private volatile String configContent;
     private volatile Consumer<String> updateListener;
+
     private volatile boolean closed;
 
     UniConfigConfigSource(DeploymentIdentity deploymentIdentity) {
@@ -67,6 +70,29 @@ final class UniConfigConfigSource implements ConfigSource {
         return PRIORITY;
     }
 
+    @Override
+    public String load() {
+        return configContent;
+    }
+
+    @Override
+    public void setUpdateListener(Consumer<String> listener) {
+        updateListener = listener;
+    }
+
+    @Override
+    @PreDestroy
+    public synchronized void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        updateListener = null;
+        if (pollExecutor != null) {
+            pollExecutor.shutdownNow();
+        }
+    }
+
     @PostConstruct
     void initialize() {
         if (configUri == null) {
@@ -94,27 +120,8 @@ final class UniConfigConfigSource implements ConfigSource {
         }
     }
 
-    @Override
-    public String load() {
-        return configContent;
-    }
-
-    @Override
-    public void setUpdateListener(Consumer<String> listener) {
-        updateListener = listener;
-    }
-
-    @Override
-    @PreDestroy
-    public synchronized void close() {
-        if (closed) {
-            return;
-        }
-        closed = true;
-        updateListener = null;
-        if (pollExecutor != null) {
-            pollExecutor.shutdownNow();
-        }
+    void waitForStartupRetry() throws InterruptedException {
+        TimeUnit.SECONDS.sleep(STARTUP_RETRY_INTERVAL_SECONDS);
     }
 
     private String fetchInitialConfig() throws IOException {
@@ -135,10 +142,6 @@ final class UniConfigConfigSource implements ConfigSource {
                 }
             }
         }
-    }
-
-    void waitForStartupRetry() throws InterruptedException {
-        TimeUnit.SECONDS.sleep(STARTUP_RETRY_INTERVAL_SECONDS);
     }
 
     private String fetchConfig() throws IOException {

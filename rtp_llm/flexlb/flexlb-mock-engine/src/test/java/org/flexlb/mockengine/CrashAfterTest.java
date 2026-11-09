@@ -38,38 +38,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * crash_after TRUE-CRASH semantics (memory wipe + gRPC port kill) — the
- * behavioural lock for the semantics distinction:
- *
- * <ul>
- *   <li>{@code stop_engine} = network-level outage: port closed, pools
- *       KEPT for in-place continuation;</li>
- *   <li>{@code crash_after} = process-level death: port closed AND every
- *       per-engine container (running tasks, queues, response streams,
- *       leases, KV LRU, bounded histories, un-acked completions, admission
- *       gauges, counters) wiped — recovery equals a reboot from zero.</li>
- * </ul>
- *
- * <p>Both close the gRPC port, so the master walks the same 3-strike retire
- * path either way; the difference must show up in the recovered engine's
- * memory, asserted here. The crash-triggering EnqueueBatch still answers
- * with an EMPTY ack (no successes, no errors) so the master-side
- * BATCH_ACK_UNCERTAIN fence contract is preserved; the port kill itself is
- * delayed by {@link JavaMockEngineCluster.FastRpcService#CRASH_PORT_KILL_DELAY_MS}
- * so that ack flushes to the wire while the socket is still open.
- *
- * <p>Also locks the epoch fence: prefill batch start / completion callbacks
- * and decode step ticks already queued on the shared scheduler when the
- * crash lands cannot be unscheduled — they must drop out without touching
- * the wiped state (no resurrection of running tasks, no LRU handover, no
- * completion publication).
+ * Checks that crash injection clears engine state and closes its gRPC port, while an ordinary stop
+ * preserves state for restart.
  */
 class CrashAfterTest {
-
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(63300);
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
@@ -340,6 +315,29 @@ class CrashAfterTest {
         return port;
     }
 
+    /**
+     * Claim the next free port (same hermetic pattern as the comprehensive
+     * suite's allocatePortBlock, single-engine sized).
+     */
+    private static int allocatePortBlock(int needed) {
+        for (int attempt = 0; attempt < 20; attempt++) {
+            int basePort = PORT_ALLOCATOR.getAndAdd(10);
+            boolean allFree = true;
+            for (int i = 0; i < needed; i++) {
+                try (ServerSocket probe = new ServerSocket(basePort + i)) {
+                    probe.setReuseAddress(true);
+                } catch (IOException e) {
+                    allFree = false;
+                    break;
+                }
+            }
+            if (allFree) {
+                return basePort;
+            }
+        }
+        throw new IllegalStateException("no bindable port after 20 attempts");
+    }
+
     private void cleanupCluster() throws InterruptedException {
         if (controlServer != null) {
             controlServer.stop();
@@ -402,29 +400,6 @@ class CrashAfterTest {
             Thread.sleep(10);
         }
         assertEquals(0, service.getInflightCount(), "inflight must drain to zero");
-    }
-
-    /**
-     * Claim the next free port (same hermetic pattern as the comprehensive
-     * suite's allocatePortBlock, single-engine sized).
-     */
-    private static int allocatePortBlock(int needed) {
-        for (int attempt = 0; attempt < 20; attempt++) {
-            int basePort = PORT_ALLOCATOR.getAndAdd(10);
-            boolean allFree = true;
-            for (int i = 0; i < needed; i++) {
-                try (ServerSocket probe = new ServerSocket(basePort + i)) {
-                    probe.setReuseAddress(true);
-                } catch (IOException e) {
-                    allFree = false;
-                    break;
-                }
-            }
-            if (allFree) {
-                return basePort;
-            }
-        }
-        throw new IllegalStateException("no bindable port after 20 attempts");
     }
 
     /** True when the port refuses a REAL gRPC call (UNAVAILABLE / refused). */

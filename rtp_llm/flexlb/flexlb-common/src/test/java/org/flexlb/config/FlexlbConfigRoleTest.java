@@ -5,6 +5,9 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+/**
+ * Checks worker-role configuration and its validation.
+ */
 class FlexlbConfigRoleTest {
     @Test
     void request_timeout_is_explicit_and_dispatcher_defaults_are_shared() {

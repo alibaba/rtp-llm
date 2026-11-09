@@ -30,6 +30,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks worker cache-index updates and lookup through the cache manager.
+ */
 @ExtendWith(MockitoExtension.class)
 class KvCacheManagerTest {
 

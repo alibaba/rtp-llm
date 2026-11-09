@@ -1,6 +1,8 @@
 package org.flexlb.balance.preemption;
 
-/** Authoritative terminal proof for one exact preemption victim. */
+/**
+ * Authoritative terminal proof for one exact preemption victim.
+ */
 public record VictimTerminal(String requestId) {
 
     public VictimTerminal {

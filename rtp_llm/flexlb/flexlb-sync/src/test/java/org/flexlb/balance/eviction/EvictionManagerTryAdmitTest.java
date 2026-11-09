@@ -54,7 +54,6 @@ import static org.mockito.Mockito.when;
  */
 @DisplayName("EvictionManager.tryAdmit contracts")
 class EvictionManagerTryAdmitTest {
-
     private RequestSchedulerReporter reporter;
     private BatchSchedulerReporter deliveryReporter;
     private EngineCancelChannel cancelChannel;
@@ -155,22 +154,6 @@ class EvictionManagerTryAdmitTest {
         assertEquals(List.of(victim), command.getValue().victims());
     }
 
-    private void assertZeroSideEffect() {
-        verifyNoInteractions(cancelChannel);
-        verifyNoInteractions(preemptionCoordinator);
-        verifyNoInteractions(requests);
-        verifyNoMoreInteractions(ignoreStubs(admission));
-        verifyNoInteractions(blockedEndpoint);
-        verifyNoInteractions(reporter);
-        verifyNoInteractions(deliveryReporter);
-    }
-
-    private boolean tryAdmit(BalanceContext context, CompletableFuture<Response> future) {
-        DecodeBinding frozenRequest = DecodeBinding.capture(context);
-        when(admission.decodeBinding()).thenReturn(frozenRequest);
-        return manager.tryAdmit(context, future, admission, blockedEndpoint);
-    }
-
     // ─── Shutdown ────────────────────────────────────────────────────────
 
     @Test
@@ -269,6 +252,22 @@ class EvictionManagerTryAdmitTest {
         when(ctx.getConfig()).thenReturn(directConfig);
         assertFalse(tryAdmit(ctx, new CompletableFuture<>()));
         assertZeroSideEffect();
+    }
+
+    private void assertZeroSideEffect() {
+        verifyNoInteractions(cancelChannel);
+        verifyNoInteractions(preemptionCoordinator);
+        verifyNoInteractions(requests);
+        verifyNoMoreInteractions(ignoreStubs(admission));
+        verifyNoInteractions(blockedEndpoint);
+        verifyNoInteractions(reporter);
+        verifyNoInteractions(deliveryReporter);
+    }
+
+    private boolean tryAdmit(BalanceContext context, CompletableFuture<Response> future) {
+        DecodeBinding frozenRequest = DecodeBinding.capture(context);
+        when(admission.decodeBinding()).thenReturn(frozenRequest);
+        return manager.tryAdmit(context, future, admission, blockedEndpoint);
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────

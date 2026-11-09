@@ -52,8 +52,16 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks lazy optimizer discovery and trace query submission with resolved KVCM metadata.
+ */
 @ExtendWith(MockitoExtension.class)
 class OptimizerClientTest {
+    @Mock private GeneralHttpNettyService httpService;
+    @Mock private OptimizerAddressResolver addressResolver;
+    @Mock private FlexMonitor monitor;
+    @Mock private KvcmWorkerMetadataResolver workerMetadataResolver;
+    private OptimizerClient client;
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -69,15 +77,6 @@ class OptimizerClientTest {
         assertDoesNotThrow(() -> client.handleTraceQueryResponse(null));
         verify(httpService, never()).request(any(), any(URI.class), any(), any());
     }
-
-    @Mock private GeneralHttpNettyService httpService;
-
-    @Mock private OptimizerAddressResolver addressResolver;
-
-    @Mock private FlexMonitor monitor;
-    @Mock private KvcmWorkerMetadataResolver workerMetadataResolver;
-
-    private OptimizerClient client;
 
     @BeforeEach
     void setUp() {

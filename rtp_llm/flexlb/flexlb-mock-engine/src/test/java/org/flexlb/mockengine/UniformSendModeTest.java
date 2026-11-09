@@ -30,86 +30,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * and inspecting the client_events.jsonl send_due_epoch_ms schedule.
  */
 class UniformSendModeTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @TempDir Path tempDir;
-
-    private Path writeTrace(int n) throws IOException {
-        Path trace = tempDir.resolve("trace.jsonl");
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < n; i++) {
-            sb.append("{\"request_id\":\"rid-")
-                    .append(i)
-                    .append("\",\"il\":32,\"ol\":4,\"ts\":")
-                    .append(i * 1000L)
-                    .append("}\n");
-        }
-        Files.writeString(trace, sb.toString());
-        return trace;
-    }
-
-    private JavaLoadClient.Config config(
-            String traceFile,
-            String outDir,
-            int durationS,
-            int limit,
-            int numShards,
-            int shardIndex,
-            boolean loop,
-            String sendMode,
-            double sendModeQps) {
-        // Full constructor: priority 0 (unset) keeps the Auto-TPM QoS
-        // passthrough path untouched by uniform-mode tests; forcePriority 0
-        // likewise leaves per-record priority resolution alone.
-        return new JavaLoadClient.Config(
-                traceFile,
-                "127.0.0.1:7001",
-                "127.0.0.1:7003",
-                durationS,
-                16,
-                1000.0,
-                1,
-                outDir,
-                numShards,
-                shardIndex,
-                limit,
-                120_000L,
-                500.0,
-                false,
-                loop,
-                1,
-                1,
-                0L,
-                120,
-                true,
-                "engine_service",
-                "",
-                false,
-                10,
-                1000,
-                0,
-                0,
-                "",
-                false,
-                "",
-                true,
-                0,
-                0,
-                sendMode,
-                sendModeQps,
-                true);
-    }
-
-    private List<JsonNode> readPerRequest(Path outDir) throws IOException {
-        List<JsonNode> rows = new ArrayList<>();
-        for (String line : Files.readAllLines(outDir.resolve("client_events.jsonl"))) {
-            if (!line.isBlank()) {
-                rows.add(MAPPER.readTree(line));
-            }
-        }
-        return rows;
-    }
 
     // ------------------------------------------------------------------
     // Config validation: SEND_MODE / SEND_MODE_QPS.
@@ -350,5 +273,81 @@ class UniformSendModeTest {
         // The client writes no summary.json at all anymore: raw rows only.
         assertFalse(
                 Files.exists(outDir.resolve("summary.json")), "client must not write summary.json");
+    }
+
+    private Path writeTrace(int n) throws IOException {
+        Path trace = tempDir.resolve("trace.jsonl");
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++) {
+            sb.append("{\"request_id\":\"rid-")
+                    .append(i)
+                    .append("\",\"il\":32,\"ol\":4,\"ts\":")
+                    .append(i * 1000L)
+                    .append("}\n");
+        }
+        Files.writeString(trace, sb.toString());
+        return trace;
+    }
+
+    private JavaLoadClient.Config config(
+            String traceFile,
+            String outDir,
+            int durationS,
+            int limit,
+            int numShards,
+            int shardIndex,
+            boolean loop,
+            String sendMode,
+            double sendModeQps) {
+        // Full constructor: priority 0 (unset) keeps the Auto-TPM QoS
+        // passthrough path untouched by uniform-mode tests; forcePriority 0
+        // likewise leaves per-record priority resolution alone.
+        return new JavaLoadClient.Config(
+                traceFile,
+                "127.0.0.1:7001",
+                "127.0.0.1:7003",
+                durationS,
+                16,
+                1000.0,
+                1,
+                outDir,
+                numShards,
+                shardIndex,
+                limit,
+                120_000L,
+                500.0,
+                false,
+                loop,
+                1,
+                1,
+                0L,
+                120,
+                true,
+                "engine_service",
+                "",
+                false,
+                10,
+                1000,
+                0,
+                0,
+                "",
+                false,
+                "",
+                true,
+                0,
+                0,
+                sendMode,
+                sendModeQps,
+                true);
+    }
+
+    private List<JsonNode> readPerRequest(Path outDir) throws IOException {
+        List<JsonNode> rows = new ArrayList<>();
+        for (String line : Files.readAllLines(outDir.resolve("client_events.jsonl"))) {
+            if (!line.isBlank()) {
+                rows.add(MAPPER.readTree(line));
+            }
+        }
+        return rows;
     }
 }

@@ -22,6 +22,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks active Prefill indexing, stable captures and exact-identity removal.
+ */
 class PrefillActiveIndexTest {
     private static final Comparator<ScheduledRequest> ORDER =
             Comparator.comparingInt(ScheduledRequest::priority)

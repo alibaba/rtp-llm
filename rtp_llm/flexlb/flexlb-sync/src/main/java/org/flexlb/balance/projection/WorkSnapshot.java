@@ -15,17 +15,20 @@ import java.util.OptionalLong;
  * converted into fabricated milliseconds by a load projection.
  */
 public final class WorkSnapshot {
-
     private static final long[] EMPTY_LONGS = new long[0];
     private static final String[] EMPTY_STRINGS = new String[0];
 
     private final long capturedAtMs;
+
     private final List<RequestWork> requests;
     private final List<BatchWork> batches;
+
     private final long unknownRequestCount;
     private final long knownNonRunningWorkMs;
+
     private final long[] runningWorkMs;
     private final String[] requestIds;
+
     private final boolean unknownWork;
 
     public WorkSnapshot(
@@ -102,44 +105,6 @@ public final class WorkSnapshot {
         return unknownRequestCount;
     }
 
-    /** Lifecycle phase visible to a projection. Only ENGINE_RUNNING consumes time. */
-    public enum Phase {
-        COMMITTED,
-        ENGINE_QUEUED,
-        ENGINE_RUNNING
-    }
-
-    /** One individually delivered request, identified by request id. */
-    public record RequestWork(String requestId, Phase phase, long remainingWorkMs) {
-
-        public RequestWork {
-            if (remainingWorkMs < 0L) {
-                throw new IllegalArgumentException("remaining request work must be non-negative");
-            }
-        }
-    }
-
-    /** One EnqueueBatch work unit, identified by batch id and its live members. */
-    public record BatchWork(
-            long batchId, List<String> requestIds, Phase phase, OptionalLong remainingWorkMs) {
-
-        public BatchWork {
-            requestIds = List.copyOf(requestIds);
-            if (remainingWorkMs.isPresent() && remainingWorkMs.getAsLong() < 0L) {
-                throw new IllegalArgumentException("remaining batch work must be non-negative");
-            }
-        }
-
-        /** Convenience constructor for a batch with a known work estimate. */
-        public BatchWork(long batchId, List<String> requestIds, Phase phase, long remainingWorkMs) {
-            this(batchId, requestIds, phase, OptionalLong.of(remainingWorkMs));
-        }
-    }
-
-    public boolean hasUnknownWork() {
-        return unknownWork;
-    }
-
     public boolean containsRequest(String requestId) {
         return Arrays.binarySearch(requestIds, requestId) >= 0;
     }
@@ -151,11 +116,8 @@ public final class WorkSnapshot {
         return hasUnknownWork() ? OptionalLong.empty() : OptionalLong.of(knownRemainingWorkMs());
     }
 
-    /** Complete preceding work at a later clock; only observed running work consumes time. */
-    public OptionalLong totalRemainingWorkMsAt(long observedAtMs) {
-        return hasUnknownWork()
-                ? OptionalLong.empty()
-                : OptionalLong.of(knownRemainingWorkMsAt(observedAtMs));
+    public boolean hasUnknownWork() {
+        return unknownWork;
     }
 
     /**
@@ -168,6 +130,13 @@ public final class WorkSnapshot {
             total = saturatedAdd(total, runningMs);
         }
         return total;
+    }
+
+    /** Complete preceding work at a later clock; only observed running work consumes time. */
+    public OptionalLong totalRemainingWorkMsAt(long observedAtMs) {
+        return hasUnknownWork()
+                ? OptionalLong.empty()
+                : OptionalLong.of(knownRemainingWorkMsAt(observedAtMs));
     }
 
     /** Known work rebased to a later planning clock without copying the snapshot. */
@@ -215,5 +184,45 @@ public final class WorkSnapshot {
 
     private static long saturatedAdd(long left, long right) {
         return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
+    }
+
+    /**
+     * Lifecycle phase visible to a projection. Only ENGINE_RUNNING consumes time.
+     */
+    public enum Phase {
+        COMMITTED,
+        ENGINE_QUEUED,
+        ENGINE_RUNNING
+    }
+
+    /**
+     * One individually delivered request, identified by request id.
+     */
+    public record RequestWork(String requestId, Phase phase, long remainingWorkMs) {
+
+        public RequestWork {
+            if (remainingWorkMs < 0L) {
+                throw new IllegalArgumentException("remaining request work must be non-negative");
+            }
+        }
+    }
+
+    /**
+     * One EnqueueBatch work unit, identified by batch id and its live members.
+     */
+    public record BatchWork(
+            long batchId, List<String> requestIds, Phase phase, OptionalLong remainingWorkMs) {
+
+        public BatchWork {
+            requestIds = List.copyOf(requestIds);
+            if (remainingWorkMs.isPresent() && remainingWorkMs.getAsLong() < 0L) {
+                throw new IllegalArgumentException("remaining batch work must be non-negative");
+            }
+        }
+
+        /** Convenience constructor for a batch with a known work estimate. */
+        public BatchWork(long batchId, List<String> requestIds, Phase phase, long remainingWorkMs) {
+            this(batchId, requestIds, phase, OptionalLong.of(remainingWorkMs));
+        }
     }
 }
