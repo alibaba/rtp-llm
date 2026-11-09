@@ -37,8 +37,8 @@ fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue
 flash-attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1
 
 # Wheels built against torch 2.11+cu130.
-# The FP8 MegaMoE ring uses this build's complete BLOCK_M candidate query.
-deep-gemm==2.8.2+b0673a4.cu132
+# FP8 MegaMoE shared-expert support for GLM-5.3-Flash.
+deep-gemm==2.8.2+522942a.cu132
 flash-mla==1.0.0+9241ae3
 
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
