@@ -795,6 +795,24 @@ def _triton_kernels():
 
     ns.dequant_v41_fp8_kernel = _dequantize_k_cache_paged_v41_fp8_kernel
 
+    @triton.jit
+    def _dequantize_v41_swa_segments_kernel(
+        tail, fresh, out, start, tail_rows, out_stride,
+        WIDTH: tl.constexpr, DIM: tl.constexpr, GROUP: tl.constexpr,
+    ):
+        row = tl.program_id(0).to(tl.int64)
+        slot = row + start
+        if slot < tail_rows:
+            base = tail + slot * WIDTH
+        else:
+            base = fresh + (slot - tail_rows) * WIDTH
+        column = tl.arange(0, DIM)
+        value = tl.load(base + column).to(tl.float32)
+        scale = tl.load(base.to(tl.pointer_type(tl.uint8)) + DIM + column // GROUP)
+        tl.store(out + row * out_stride + column, (value * _ue8m0_to_fp32(scale)).to(tl.bfloat16))
+
+    ns.dequant_v41_swa_segments = _dequantize_v41_swa_segments_kernel
+
     _KERNELS = ns
     return ns
 
@@ -897,4 +915,32 @@ def try_dequantize_prefill_rows(packed, out, *, global_pool):
     if packed.shape[0]:
         decode = dequantize_global_kv_slots_ppu if global_pool else dequantize_swa_kv_slots_ppu
         decode(packed, None, out)
+    return True
+
+
+def try_dequantize_swa_segments(tail, fresh, start, out):
+    """Write a covered interval of the two packed SWA segments into BF16."""
+    if not (
+        out.ndim == 2
+        and out.shape[1] == KV_DIM
+        and out.dtype == torch.bfloat16
+        and out.stride(1) == 1
+        and all(
+            rows.ndim == 2
+            and rows.shape[1] == SWA_KV_ENTRY_BYTES
+            and rows.dtype == torch.uint8
+            and rows.is_contiguous()
+            and rows.device == out.device
+            for rows in (tail, fresh)
+        )
+        and 0 <= start <= tail.shape[0] + fresh.shape[0] - out.shape[0]
+        and _ppu_fast_path(fresh)
+    ):
+        return False
+    if out.shape[0]:
+        _triton_kernels().dequant_v41_swa_segments[(out.shape[0],)](
+            tail.view(torch.float8_e4m3fn), fresh.view(torch.float8_e4m3fn),
+            out, start, tail.shape[0], out.stride(0),
+            SWA_KV_ENTRY_BYTES, KV_DIM, FP8_GROUP,
+        )
     return True

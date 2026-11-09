@@ -9,6 +9,7 @@ import logging
 import math
 import os
 from types import SimpleNamespace
+from typing import NamedTuple
 
 import torch
 
@@ -25,6 +26,13 @@ from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
 
 _LOGGER = logging.getLogger(__name__)
 CP8_ROW_PREP_ENV = "RTP_V41_PPU_CP8_PREFILL_ROW_PREP"
+CP8_WORKSPACE_DEQUANT_ENV = "RTP_V41_PPU_CP8_FUSED_WORKSPACE_DEQUANT"
+
+
+class _StagedSwaSegments(NamedTuple):
+    prefix: int
+    tail: torch.Tensor
+    fresh: torch.Tensor
 
 
 def _latest_csa_indices(blocks, offsets, positions):
@@ -386,6 +394,13 @@ class SharedNativeCache(NativeCacheBridge):
                         "cp_size": placement.size,
                     }
                 )
+        direct_swa = (
+            fresh_lengths is not None
+            and packed.is_contiguous()
+            and self.cp8_row_prep_enabled()
+            and os.environ.get(CP8_WORKSPACE_DEQUANT_ENV, "1") == "1"
+            and os.environ.get("RTP_V41_PPU_CP8_DIRECT_SWA_WORKSPACE", "1") == "1"
+        )
         offset = 0
         for rid in range(len(self.lengths)):
             key = layer, rid
@@ -398,7 +413,9 @@ class SharedNativeCache(NativeCacheBridge):
             fresh_pos, fresh = positions[chosen], packed[chosen]
             if retain_rows:
                 prefix = int(prefixes[rid])
-                if retain_prefix_tail and prefix:
+                if direct_swa:
+                    self._fresh_swa[key] = _StagedSwaSegments(prefix, old_tails[rid], fresh)
+                elif retain_prefix_tail and prefix:
                     old_pos = torch.arange(max(0, prefix - self.geometry.window + 1), prefix, device=self.device)
                     if batch_swa:
                         old = old_tails[rid]
@@ -455,11 +472,26 @@ class SharedNativeCache(NativeCacheBridge):
                 }
             )
 
+    def try_decode_swa_range(self, layer, request, first, out):
+        saved = self._fresh_swa.get((layer, int(request)))
+        if not isinstance(saved, _StagedSwaSegments):
+            return False
+
+        from rtp_llm.models_py.modules.dsv41.ppu._quant import try_dequantize_swa_segments
+
+        start = first - saved.prefix + saved.tail.shape[0]
+        return try_dequantize_swa_segments(saved.tail, saved.fresh, start, out)
+
     def read_swa(self, layer, request, positions):
         saved = self._fresh_swa.get((layer, int(request)))
         if saved is None:
             return self._copy_rows((layer, "swa_kv"), request, positions)
-        domain, values = saved
+        if isinstance(saved, _StagedSwaSegments):
+            prefix, tail, fresh = saved
+            domain = torch.arange(prefix - tail.shape[0], prefix + fresh.shape[0], device=self.device)
+            values = torch.cat((tail, fresh))
+        else:
+            domain, values = saved
         if (
             self._batched_swa_enabled()
             and values.is_cuda

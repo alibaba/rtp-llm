@@ -13,7 +13,10 @@ from rtp_llm.models_py.modules.dsv41.backend import V41QuantizedTensor, V41StepC
 from rtp_llm.models_py.modules.dsv41.ppu import _quant
 from rtp_llm.models_py.modules.dsv41.ppu.attention import COMBINED_WIDTH
 from rtp_llm.models_py.modules.dsv41.ppu.cache import PPUKVCache, PPURequestSlots
-from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache
+from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
+    CP8_WORKSPACE_DEQUANT_ENV,
+    SharedNativeCache,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import compact_prefix
 from rtp_llm.models_py.modules.dsv41.ppu.weight import V41Geometry
 
@@ -227,7 +230,7 @@ class _CPPrefillWorkspace:
             layout[rid] = (offset, count, swa_offset, swa_first)
             if count:
                 self.global_ranges.append((rid, offset, count))
-            self.swa_ranges.append((rid, swa_offset, swa_rows))
+            self.swa_ranges.append((rid, swa_offset, swa_first, swa_rows))
             offset = swa_offset + swa_rows.numel()
 
         self.kv = torch.empty((offset, geometry.head_dim), dtype=torch.bfloat16, device=positions.device)
@@ -238,7 +241,7 @@ class _CPPrefillWorkspace:
         self.fused_dequant = (
             isinstance(cache, SharedNativeCache)
             and cache.cp8_row_prep_enabled()
-            and os.environ.get("RTP_V41_PPU_CP8_FUSED_WORKSPACE_DEQUANT", "1") == "1"
+            and os.environ.get(CP8_WORKSPACE_DEQUANT_ENV, "1") == "1"
         )
         if source is not None:
             cache.prepare_source(source)
@@ -268,9 +271,11 @@ class _CPPrefillWorkspace:
 
     def refresh_swa(self, ops, cache, layer_id):
         descriptor = cache.descriptors(layer_id)["swa_kv"]
-        for rid, begin, positions in self.swa_ranges:
-            packed = cache.read_swa(layer_id, rid, positions)
+        for rid, begin, first, positions in self.swa_ranges:
             out = self.kv[begin:begin + positions.numel()]
+            if self.fused_dequant and cache.try_decode_swa_range(layer_id, rid, first, out):
+                continue
+            packed = cache.read_swa(layer_id, rid, positions)
             if not (self.fused_dequant and _quant.try_dequantize_prefill_rows(packed, out, global_pool=False)):
                 ops.decode_kv(packed, pool_tag="swa_kv", descriptor=descriptor, out=out)
 
