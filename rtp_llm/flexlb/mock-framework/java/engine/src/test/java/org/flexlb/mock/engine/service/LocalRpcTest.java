@@ -80,8 +80,7 @@ class LocalRpcTest {
     }
 
     @Test void shardedPrefillUsesBaseHashesButVirtualAllocationAndReuseBoundaries() throws Exception {
-        try(var node=LLMMockEngine.start(config("1",Map.of("tp_size",4,"cp_rotate_method","ALL_GATHER",
-                "prefill_cp_kv_cache_sharded",true,"prefill_cp_size",4)))) {
+        try(var node=LLMMockEngine.start(config("1",Map.of("prefill_cp_size",4)))) {
             var channel=ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
                 var rpc=RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3,TimeUnit.SECONDS);

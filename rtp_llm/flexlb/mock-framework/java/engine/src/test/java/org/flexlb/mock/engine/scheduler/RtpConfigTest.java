@@ -162,17 +162,24 @@ class RtpConfigTest {
         var root=root();var config=(ObjectNode)root.path("component").path("config");
         config.put("seq_size_per_block",128).put("tp_size",4).put("cp_rotate_method","ALL_GATHER");
         assertEquals(1,load(root).cacheKeyStride());
-        config.put("prefill_cp_kv_cache_sharded",true).put("prefill_cp_size",4);
+        config.put("prefill_cp_size",4);
         assertEquals(4,load(root).cacheKeyStride());assertEquals(512,load(root).cacheBlockSize());
         assertEquals(128,load(root).effective().path("seq_size_per_block").asInt());
         var env=RtpConfig.fromEnvironment("whale-p",org.flexlb.mock.protocol.Role.prefill,java.util.Map.of(
-            "SEQ_SIZE_PER_BLOCK","128","TEST_BLOCK_NUM","17","TP_SIZE","4","CP_ROTATE_METHOD","ALL_GATHER",
-            "PREFILL_CP_KV_CACHE_SHARDED","1","PREFILL_CP_SIZE","4","MOCK_COMPUTE_FORWARD_EXPRESSION","1"));
+            "SEQ_SIZE_PER_BLOCK","128","TEST_BLOCK_NUM","17",
+            "PREFILL_CP_SIZE","4","MOCK_COMPUTE_FORWARD_EXPRESSION","1"));
         assertEquals(512,env.cacheBlockSize());assertEquals(128,env.blockSize());
         config.put("prefill_cp_size",2);
-        assertThrows(IllegalArgumentException.class,()->load(root));
+        assertEquals(256,load(root).cacheBlockSize());
         config.put("prefill_cp_size",4).put("cp_rotate_method","DISABLED");
-        assertThrows(IllegalArgumentException.class,()->load(root));
+        assertEquals(512,load(root).cacheBlockSize());
+        config.put("prefill_cp_kv_cache_sharded",false);
+        assertEquals(128,load(root).cacheBlockSize());
+        config.put("cp_rotate_method","ALL_GATHER").put("prefill_cp_kv_cache_sharded",true).remove("prefill_cp_size");
+        assertEquals(512,load(root).cacheBlockSize());
+        assertFalse(load(root).effective().has("prefill_cp_kv_cache_sharded"));
+        config.remove("prefill_cp_kv_cache_sharded");
+        config.put("prefill_cp_size",4);
         root.put("component_role","decode");
         assertEquals(1,load(root).cacheKeyStride());assertEquals(128,load(root).cacheBlockSize());
         config.put("prefill_cp_kv_cache_sharded","not-a-bool");

@@ -71,16 +71,20 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         int tpSize = nativeInt(config, "tp_size", 1, 1, Integer.MAX_VALUE);
         int dpSize = nativeInt(config, "dp_size", 1, 1, Integer.MAX_VALUE);
         String cpMethod = cpMethod(config);
-        boolean sharded=nativeBool(config,"prefill_cp_kv_cache_sharded",false);
-        int upstreamCp=nativeInt(config,"prefill_cp_size",0,0,Integer.MAX_VALUE);
-        if(role==Role.prefill && sharded) {
-            if(tpSize>1 && Set.of("DISABLED","UNKNOWN").contains(cpMethod))
-                throw new IllegalArgumentException("Sharded Prefill KV requires an enabled cp_rotate_method");
-            if(upstreamCp>0 && upstreamCp!=tpSize)
-                throw new IllegalArgumentException("Prefill prefill_cp_size must match tp_size for sharded KV");
-            Math.multiplyExact(blockSize,tpSize);
+        int prefillCpSize = nativeInt(config, "prefill_cp_size", 0, 0, Integer.MAX_VALUE);
+        // Normalize legacy configurations at load time.
+        if (config.has("prefill_cp_kv_cache_sharded")) {
+            if (!nativeBool(config, "prefill_cp_kv_cache_sharded", false)) {
+                prefillCpSize = 1;
+            } else if (prefillCpSize == 0) {
+                prefillCpSize = tpSize;
+            }
         }
-        config=((ObjectNode)config).put("prefill_cp_kv_cache_sharded",sharded).put("prefill_cp_size",upstreamCp);
+        prefillCpSize = Math.max(1, prefillCpSize);
+        if (role == Role.prefill) Math.multiplyExact(blockSize, prefillCpSize);
+        var normalized = (ObjectNode) config;
+        normalized.remove("prefill_cp_kv_cache_sharded");
+        normalized.put("prefill_cp_size", prefillCpSize);
         // PrefillCPConfig.is_enabled(): general CP uses the TP group.
         boolean cpEnabled = Set.of("ALL_GATHER", "ALL_GATHER_WITH_OVERLAP", "ALLTOALL").contains(cpMethod);
         int cpSize = cpEnabled ? tpSize : 1;
@@ -103,9 +107,8 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             ConfigInput.signedLong(config, "cache_key_hash_seed", 0));
     }
 
-    // Like real KVCacheManager: Decode's CP flag describes upstream P, never local FULL sharding.
     public int cacheKeyStride() {
-        return role==Role.prefill && business.path("prefill_cp_kv_cache_sharded").asBoolean(false) ? tpSize : 1;
+        return role == Role.prefill ? business.path("prefill_cp_size").asInt(1) : 1;
     }
     public int cacheBlockSize() { return Math.multiplyExact(blockSize,cacheKeyStride()); }
 
@@ -126,7 +129,6 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
             .put("max_context_batch_size", business.path("max_context_batch_size").asInt())
             .put("cp_force_single_prefill", business.path("cp_force_single_prefill").asBoolean())
-            .put("prefill_cp_kv_cache_sharded",business.path("prefill_cp_kv_cache_sharded").asBoolean())
             .put("prefill_cp_size",business.path("prefill_cp_size").asInt())
             .put("cache_key_block_size",cacheBlockSize())
             .put("dp_size", dpSize).put("tp_size", tpSize).put("cp_rotate_method", cpMethod(business));
