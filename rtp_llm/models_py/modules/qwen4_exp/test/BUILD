@@ -5,6 +5,30 @@ load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 package(default_visibility = ["//visibility:public"])
 
 models_py_test(
+    name = "indexer_prefix_reuse_snapshot_fusion_test",
+    src = "indexer_prefix_reuse_snapshot_fusion_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
+    name = "qsa_indexer_buffer_sm90_test",
+    src = "qsa_indexer_buffer_sm90_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
+    name = "qsa_mrope_fused_sm90_test",
+    src = "qsa_mrope_fused_sm90_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
+    name = "qsa_writer_geometry_test",
+    src = "qsa_writer_geometry_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
     name = "qsa_cu_seqlens_host_test",
     src = "qsa_cu_seqlens_host_test.py",
     gpu = "H20_CU13",

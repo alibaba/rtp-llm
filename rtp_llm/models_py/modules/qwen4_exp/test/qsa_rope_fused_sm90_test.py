@@ -197,10 +197,15 @@ class QsaRopeFusedSM90Test(unittest.TestCase):
             if factor == 3:
                 # The fused dispatch keeps the equal-axes transport check.
                 transported[1] += 1
-                with self.assertRaisesRegex(ValueError, "three axes"):
-                    build_base_rope(
-                        transported, config, inv_freq=frequency, **kwargs
-                    )
+                # Production mode enqueues the equal-axes verdict as a device
+                # assert; strict mode keeps the legacy fail-fast ValueError.
+                with patch.dict(
+                    "os.environ", {"RTP_LLM_QSA_STRICT_VALIDATION": "1"}
+                ):
+                    with self.assertRaisesRegex(ValueError, "three axes"):
+                        build_base_rope(
+                            transported, config, inv_freq=frequency, **kwargs
+                        )
 
     # ---- production step-plan call path ----
 

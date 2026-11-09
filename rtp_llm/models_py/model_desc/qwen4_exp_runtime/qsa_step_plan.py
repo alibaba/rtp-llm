@@ -46,6 +46,10 @@ from typing import Any
 
 import torch
 
+from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
+    INDEXER_KV_TAG,
+    INDEXER_STATE_TAG,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa import grid_prep_triton
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     _normalized_rope_style_name,
@@ -54,10 +58,12 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     cached_inv_freq,
     is_qsa_rope_style,
     mrope_decode_tail_verdict_packed,
+    mrope_equal_axis_verdict,
     validate_mrope_decode_tail,
 )
 
 from .qsa_cache_views import (
+    _block_table,
     qsa_assert_valid,
     qsa_strict_validation_enabled,
 )
@@ -400,6 +406,13 @@ class Qwen4ExpPrefillStepPlan:
     # passes ``trusted_geometry`` and the writer re-checks only the
     # per-layer projection tensors.
     prefix_reuse_fused_supported: bool = False
+    # Step-frozen writer geometry for the vectorized indexer writer
+    # (:class:`...indexer_compressor.IndexerWriterGeometry`): the layer-
+    # independent token/page resolution every layer's side-cache write needs.
+    # Built with the plan (strict validation skips it and keeps the legacy
+    # per-call chain); each layer's writer re-validates it host-side before
+    # use, so a stale bundle can never feed a wrong write.
+    writer_geometry: Any = field(default=None, repr=False, compare=False)
 
 
 def _cache_regions(context: Any) -> tuple:
@@ -882,6 +895,70 @@ def prefix_reuse_fused_geometry_supported(
     )
 
 
+def _build_step_writer_geometry(
+    context: Any,
+    *,
+    cu_seqlens: torch.Tensor,
+    start_positions: torch.Tensor,
+    token_count: int,
+    ratio: int,
+    kv_tokens_per_block: int,
+    state_tokens_per_block: int,
+    host_lengths: list[int],
+    host_prefixes: list[int],
+    trusted_tables: bool = False,
+) -> Any:
+    """Freeze the vectorized indexer writer's geometry for this step plan.
+
+    The layer-independent block tables come from the step's cache-region inputs
+    and the pool shapes from the caches; every layer's writer then re-uses the
+    bundle instead of re-deriving token/page resolution per call.  Strict
+    validation skips the bundle so each call keeps the legacy per-call
+    diagnostics.  The runtime's state ring is ``2 * ratio`` entries wide; a
+    mismatching pool makes the writer's own applicability check fall back.
+    ``trusted_tables`` (incremental plans, whose build proved the cu partition
+    and ran the required-blocks verdicts over every column this geometry can
+    read) drops the redundant resolve asserts.
+    """
+    if qsa_strict_validation_enabled():
+        return None
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+        build_indexer_writer_geometry,
+    )
+
+    kv_table = _block_table(
+        context.indexer_kv_inputs,
+        "kv_cache_kernel_block_id_device",
+        tag=INDEXER_KV_TAG,
+        batch_size=len(host_lengths),
+        device=cu_seqlens.device,
+    )
+    state_table = _block_table(
+        context.indexer_state_inputs,
+        "kv_cache_block_id_device",
+        tag=INDEXER_STATE_TAG,
+        batch_size=len(host_lengths),
+        device=cu_seqlens.device,
+    )
+    return build_indexer_writer_geometry(
+        cu_seqlens,
+        start_positions,
+        kv_table,
+        state_table,
+        token_count=token_count,
+        ratio=ratio,
+        kv_tokens_per_block=kv_tokens_per_block,
+        state_tokens_per_block=state_tokens_per_block,
+        state_ring_entries=2 * ratio,
+        kv_pool_blocks=int(context.indexer_kv_cache.kv_cache_base.shape[0]),
+        state_pool_blocks=int(context.indexer_state_cache.kv_cache_base.shape[0]),
+        invalid_block_policy="raise",
+        host_lengths=host_lengths,
+        host_prefixes=host_prefixes,
+        trusted_tables=trusted_tables,
+    )
+
+
 def build_incremental_step_plan(
     context: Any,
     *,
@@ -1123,6 +1200,18 @@ def build_incremental_step_plan(
         and not context.is_mtp_draft
         and is_qsa_rope_style(rope_config, "Mrope")
     )
+    # Host-only equal-axes verdict over the transported suffix rows.  Text
+    # requests repeat one position across their three axes, image rows do
+    # not; host-resident rows compare on the CPU (never touching the
+    # device), and device-resident rows keep the eager MRoPE builder because
+    # reading their axes back would synchronize the plan window.  The verdict
+    # covers every block-start row the mrope sources select below.
+    mrope_suffix_text = target_mrope and (
+        mrope_equal_axis_verdict(
+            position_ids, token_count=token_count, index_factor=index_factor
+        )
+        is True
+    )
     try:
         if target_mrope and any(length % ratio for length in lengths):
             # Ratio-aligned requests have no unfinished tail to validate, so
@@ -1163,8 +1252,10 @@ def build_incremental_step_plan(
             logical_positions=None if target_mrope else logical_positions,
             # Text-shaped transports (Base style, or MRoPE whose rows the
             # logical-positions check inside build_qsa_rope proves
-            # equal-axis) engage the fused text kernel; target MRoPE keeps
-            # the eager builder.
+            # equal-axis) engage the fused text kernel through the shared
+            # cached inv_freq tables; target MRoPE proves its rows on the
+            # host when the transport is host-resident, and multimodal or
+            # device-resident rows keep the eager builder.
             inv_freq=None if target_mrope else cached_inv_freq(rope_config, device),
         )
     except ValueError as error:
@@ -1212,7 +1303,8 @@ def build_incremental_step_plan(
             # group, including image groups with unequal/nonlinear axes.
             # Multimodal positions keep the eager MRoPE builder (which now
             # reads the shared cached inv_freq table); the fused text kernel
-            # is only valid for proven equal-axis text transports.
+            # engages for proven equal-axis text transports -- the suffix
+            # verdict above covers every row the sources select.
             sources = prep.mrope_sources
             block_positions = (
                 position_ids.to(device=device)
@@ -1225,6 +1317,9 @@ def build_incremental_step_plan(
                 token_count=token_count,
                 dtype=torch.bfloat16,
                 device=device,
+                # The selected rows are device-resident; only the caller's
+                # suffix proof lets them reach the fused kernel.
+                validate_position_axes=not mrope_suffix_text,
             )
         else:
             rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
@@ -1245,6 +1340,27 @@ def build_incremental_step_plan(
     selection_row_map = prep.selection_row_map
     selection_valid_rows = prep.selection_valid_rows
     selection_valid = prep.selection_valid
+
+    # Freeze the writer geometry when the full-shape write path can engage
+    # (no request spans more than the state ring).  Longer incremental windows
+    # keep the legacy per-call writer, so the bundle is not paid for nothing.
+    # The incremental build validated the cu partition (torch.equal against
+    # the pinned mirrors) and both tables (required-blocks verdicts cover every
+    # column the geometry reads), so the redundant resolve asserts are dropped.
+    writer_geometry = None
+    if max(lengths, default=0) <= 2 * ratio:
+        writer_geometry = _build_step_writer_geometry(
+            context,
+            cu_seqlens=expected_cu,
+            start_positions=prep.prefixes_i64,
+            token_count=token_count,
+            ratio=ratio,
+            kv_tokens_per_block=kv_tokens_per_block,
+            state_tokens_per_block=state_tokens_per_block,
+            host_lengths=lengths,
+            host_prefixes=prefix_values,
+            trusted_tables=True,
+        )
 
     return Qwen4ExpPrefillStepPlan(
         mode=(
@@ -1312,6 +1428,7 @@ def build_incremental_step_plan(
             kv_tokens_per_block=kv_tokens_per_block,
             state_tokens_per_block=state_tokens_per_block,
         ),
+        writer_geometry=writer_geometry,
     )
 
 
@@ -1463,6 +1580,22 @@ def build_cold_step_plan(
         rope_sin[request_idx, :seq_len].copy_(sin)
         offset = end
 
+    # Freeze the writer geometry only when the full-shape write path can engage
+    # (short zero-prefix prefills); long cold prefills keep the per-call writer.
+    writer_geometry = None
+    if max(lengths, default=0) <= 2 * ratio:
+        writer_geometry = _build_step_writer_geometry(
+            context,
+            cu_seqlens=cu_seqlens,
+            start_positions=start_positions,
+            token_count=token_count,
+            ratio=ratio,
+            kv_tokens_per_block=kv_tokens_per_block,
+            state_tokens_per_block=state_tokens_per_block,
+            host_lengths=lengths,
+            host_prefixes=prefix_values,
+        )
+
     return Qwen4ExpPrefillStepPlan(
         mode=MODE_COLD_PREFILL,
         main_inputs=main_inputs,
@@ -1491,6 +1624,7 @@ def build_cold_step_plan(
         rope_table_cos=rope_cos,
         rope_table_sin=rope_sin,
         cu_checked=not defer_cu,
+        writer_geometry=writer_geometry,
     )
 
 

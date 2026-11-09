@@ -30,6 +30,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
+    qsa_assert_valid,
+    qsa_strict_validation_enabled,
+)
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
@@ -57,6 +61,10 @@ def _normalized_rope_style_name(style: Any) -> str:
 # One constant inv_freq table per (base, rope_dim, device) geometry; see
 # cached_inv_freq below.
 _INV_FREQ_TABLES: dict = {}
+
+# One constant interleaved-MRoPE inv_freq table per (base, sections, device)
+# geometry; see cached_mrope_inv_freq below.
+_MROPE_INV_FREQ_TABLES: dict = {}
 
 
 def is_qsa_rope_style(rope_config: Any, expected_style: str) -> bool:
@@ -158,6 +166,74 @@ def cached_inv_freq(rope_config: Any, device: Any) -> torch.Tensor:
         )
         _INV_FREQ_TABLES[key] = table
     return table
+
+
+def cached_mrope_inv_freq(rope_config: Any, device: Any) -> torch.Tensor:
+    """Return the constant interleaved-MRoPE inverse-frequency table.
+
+    The eager builder computes ``angle[:, i] = positions[:, axes[i]] / scale *
+    base ** (-2 * i / rope_dim)`` -- the frequency of interleaved slot ``i``
+    is the slot-indexed base table, and ``axes`` only selects which position
+    component feeds the slot.  A text transport repeats one position across
+    its three axes, so every slot then reads ``positions[:, 0]`` and the
+    fused text kernel fed this table reproduces the eager bytes.  The table
+    is cached per ``(base, sections, device)`` so the MRoPE geometry stays
+    self-contained should the construction ever grow per-section terms.
+    """
+    base = float(rope_config.base)
+    rope_dim = int(rope_config.dim)
+    sections = (
+        int(rope_config.mrope_dim1),
+        int(rope_config.mrope_dim2),
+        int(rope_config.mrope_dim3),
+    )
+    device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        # Resolve the implicit current device so cuda and cuda:N share one
+        # entry; tensor devices always carry an explicit index.
+        device = torch.device("cuda", torch.cuda.current_device())
+    key = (base, sections, device)
+    table = _MROPE_INV_FREQ_TABLES.get(key)
+    if table is None:
+        table = base ** (
+            -2.0
+            * torch.arange(rope_dim // 2, dtype=torch.float32, device=device)
+            / rope_dim
+        )
+        _MROPE_INV_FREQ_TABLES[key] = table
+    return table
+
+
+def mrope_equal_axis_verdict(
+    position_ids: torch.Tensor, *, token_count: int, index_factor: int
+) -> Optional[bool]:
+    """Host-only equal-axes verdict for one transported MRoPE batch.
+
+    Text-shaped transports repeat one position across their three axes;
+    multimodal rows do not.  The verdict is computed only for host-resident
+    rows, where comparing the axes is plain CPU work that never touches the
+    device.  Device-resident rows return ``None`` -- no sync-free verdict
+    exists for them, so callers keep their eager builder.  Malformed counts
+    also return ``None`` so the eager builder keeps its exact legacy errors.
+    """
+    if position_ids.device.type != "cpu":
+        return None
+    if int(position_ids.numel()) != token_count * index_factor:
+        return None
+    rows = position_ids.reshape(token_count, index_factor)
+    return bool(torch.equal(rows, rows[:, :1].expand_as(rows)))
+
+
+def _first_axis_positions(
+    position_ids: torch.Tensor,
+    *,
+    token_count: int,
+    index_factor: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """First-axis ``[token_count]`` positions for a proven text transport."""
+    rows = position_ids.reshape(token_count, index_factor)
+    return rows[:, 0].to(device=device)
 
 
 def build_interleaved_mrope(
@@ -327,6 +403,7 @@ def build_qsa_rope(
     logical_positions: Optional[torch.Tensor] = None,
     checks: Optional[DeviceChecks] = None,
     inv_freq: Optional[torch.Tensor] = None,
+    validate_position_axes: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Dispatch the QSA indexer RoPE builder from ``rope_config.style``.
 
@@ -338,6 +415,15 @@ def build_qsa_rope(
     ``inv_freq`` (e.g. :func:`cached_inv_freq`) lets the Base-style fused
     text kernel engage; text-shaped transports pass it while multimodal
     MRoPE keeps the eager builder either way.
+
+    The MRoPE branch reaches the same fused kernel through
+    :func:`cached_mrope_inv_freq` once the transport is proven text-shaped:
+    ``logical_positions`` validated every axis against the cache rows,
+    ``validate_position_axes=False`` reports a caller-side proof, or the
+    rows are host-resident and :func:`mrope_equal_axis_verdict` compares
+    their axes without touching the device.  Device-resident rows without a
+    caller proof keep the eager builder -- reading their axes back would
+    synchronize the caller.
     """
     if is_qsa_rope_style(rope_config, "Base"):
         return build_base_rope(
@@ -351,16 +437,52 @@ def build_qsa_rope(
             inv_freq=inv_freq,
         )
     if is_qsa_rope_style(rope_config, "Mrope"):
+        index_factor = int(rope_config.index_factor)
+        first_axis = None
         if logical_positions is not None:
             positions = _position_matrix(
                 position_ids,
                 token_count=token_count,
-                index_factor=int(rope_config.index_factor),
+                index_factor=index_factor,
                 device=device,
             )
             _validate_logical_cache_positions(
                 positions, logical_positions, rope_name="text-only MRoPE", checks=checks
             )
+            # The validated transport repeats one position across its axes,
+            # so the first axis is the position every interleaved slot reads.
+            first_axis = positions[:, 0]
+        elif not validate_position_axes:
+            # Caller-side proof, e.g. the plan window's host verdict over the
+            # whole suffix, which covers every selected block-start row.
+            first_axis = _first_axis_positions(
+                position_ids,
+                token_count=token_count,
+                index_factor=index_factor,
+                device=device,
+            )
+        elif mrope_equal_axis_verdict(
+            position_ids, token_count=token_count, index_factor=index_factor
+        ):
+            first_axis = _first_axis_positions(
+                position_ids,
+                token_count=token_count,
+                index_factor=index_factor,
+                device=device,
+            )
+        if first_axis is not None:
+            from .rope_triton import try_build_text_rope
+
+            fused = try_build_text_rope(
+                first_axis,
+                rope_config,
+                "Mrope",
+                dtype=dtype,
+                device=device,
+                inv_freq=cached_mrope_inv_freq(rope_config, device),
+            )
+            if fused is not None:
+                return fused
         return build_interleaved_mrope(
             position_ids,
             rope_config,
@@ -611,6 +733,9 @@ class Qwen4ExpQSAIndexer(nn.Module):
         self.max_selected = token_budget + compress_ratio - 1
         # Build with the same Torch pow/divide kernels as the reference before
         # capture. Device pow approximations can shift BF16 cos/sin values.
+        # The instance buffer mirrors the module-level cached_inv_freq table
+        # for this constructor geometry; accessors stay constructor-pinned so a
+        # drifted runtime config declines to the reference path.
         frequency = None
         score_weights = None
         self._score_weights_key = None
@@ -620,7 +745,7 @@ class Qwen4ExpQSAIndexer(nn.Module):
             and int(rope_config.dim) == 64
             and qk_proj.is_cuda
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(qk_proj.device) == (12, 0)
+            and torch.cuda.get_device_capability(qk_proj.device) in ((9, 0), (12, 0))
         ):
             base = float(rope_config.base)
             frequency = base ** (
