@@ -274,10 +274,6 @@ class Qwen35Moe(Qwen3NextBase):
     def _parse_mm_config(cls, config_json: dict, config: ModelConfig):
         # Ascend is text-only: the mm flag would build ViT on a CUDA device string.
         if is_ascend():
-            logging.warning(
-                "Qwen3.5 multimodal checkpoint on Ascend: serving text-only "
-                "(no ViT support in the Ascend python model yet)."
-            )
             return
         config.mm_model_config.is_multimodal = True
         config.mm_model_config.mm_sep_tokens = [
@@ -296,6 +292,7 @@ class Qwen35Moe(Qwen3NextBase):
 
         from rtp_llm.models_py.utils.arch import (
             get_device_type,
+            is_ascend,
             is_cuda,
             is_hip,
             is_ppu,
