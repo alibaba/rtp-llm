@@ -12,10 +12,11 @@ from rtp_llm.models_py.distributed.cpu_status import create_cpu_tp_status
 
 def prepare_cpu_target_status(config, parallelism):
     role = str(getattr(parallelism, "role_type", "")).rsplit(".", 1)[-1]
+    atom_target = bool(getattr(config, "atom_qwen4_exp_mtp_target", False))
     if not (
-        role == "DECODE"
+        (role == "DECODE" or (atom_target and role == "PDFUSION"))
         and not getattr(config, "is_mtp", False)
-        and getattr(config, "enable_qwen4_ple", False)
+        and (getattr(config, "enable_qwen4_ple", False) or atom_target)
         and parallelism.tp_size == 2
         and parallelism.dp_size == 1
         and parallelism.local_world_size == 2
@@ -25,10 +26,9 @@ def prepare_cpu_target_status(config, parallelism):
     from rtp_llm.ops.compute_ops import rtp_llm_ops
 
     group = _get_group(Group.TP)
-    eligible = (
-        torch.version.hip is None
-        and torch.cuda.get_device_capability() == (12, 0)
-        and torch.cuda.device_count() == 2
+    eligible = torch.cuda.device_count() == 2 and (
+        torch.version.hip is not None
+        or torch.cuda.get_device_capability() == (12, 0)
     )
     identity = (
         eligible,

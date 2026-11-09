@@ -1,0 +1,992 @@
+diff --git a/atom/model_ops/attentions/qwen4_exp_attn.py b/atom/model_ops/attentions/qwen4_exp_attn.py
+index dd73067..b8782a1 100644
+--- a/atom/model_ops/attentions/qwen4_exp_attn.py
++++ b/atom/model_ops/attentions/qwen4_exp_attn.py
+@@ -80,6 +80,8 @@ class Qwen4ExpQSAMetadata:
+     state_page_size: int = 0
+     state_read_pages: torch.Tensor | None = None
+     state_candidate_pages: torch.Tensor | None = None
++    host_lens: tuple[tuple[int, ...], tuple[int, ...]] | None = None
++    context_slots: torch.Tensor | None = None
+ 
+     def for_tokens(self, num_tokens: int) -> "Qwen4ExpQSAMetadata":
+         """Draft step zero uses real rows, without the target graph's padding."""
+diff --git a/atom/model_ops/fla_ops/replayssm.py b/atom/model_ops/fla_ops/replayssm.py
+index 8c4b424..a6c273b 100644
+--- a/atom/model_ops/fla_ops/replayssm.py
++++ b/atom/model_ops/fla_ops/replayssm.py
+@@ -701,6 +701,15 @@ def _replayssm_fwd_kernel(
+     stride_bufg_pos: tl.constexpr,
+     stride_bufg_hv: tl.constexpr,
+     stride_beta_tok: tl.constexpr,
++    stride_q_tok: tl.constexpr,
++    stride_q_head: tl.constexpr,
++    stride_q_dim: tl.constexpr,
++    stride_k_tok: tl.constexpr,
++    stride_k_head: tl.constexpr,
++    stride_k_dim: tl.constexpr,
++    stride_v_tok: tl.constexpr,
++    stride_v_head: tl.constexpr,
++    stride_v_dim: tl.constexpr,
+     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+     IS_KDA: tl.constexpr,
+     IS_BETA_HEADWISE: tl.constexpr,
+@@ -788,10 +797,10 @@ def _replayssm_fwd_kernel(
+         # The l2 norms need the whole vector, so take them before tiling; the
+         # per-tile reloads below are [BKT] slices of the same two vectors.
+         if USE_QK_L2NORM_IN_KERNEL:
+-            b_qf = tl.load(q + (bos * H + i_h) * K + o_k, mask=mask_k, other=0.0).to(
++            b_qf = tl.load(q + bos * stride_q_tok + i_h * stride_q_head + o_k * stride_q_dim, mask=mask_k, other=0.0).to(
+                 tl.float32
+             )
+-            b_kf = tl.load(k + (bos * H + i_h) * K + o_k, mask=mask_k, other=0.0).to(
++            b_kf = tl.load(k + bos * stride_k_tok + i_h * stride_k_head + o_k * stride_k_dim, mask=mask_k, other=0.0).to(
+                 tl.float32
+             )
+             q_rn = 1.0 / tl.sqrt(tl.sum(b_qf * b_qf) + 1e-6)
+@@ -807,14 +816,14 @@ def _replayssm_fwd_kernel(
+         b_kq = 0.0
+         p_ckpt = ckpt + slot * stride_ckpt_slot + i_hv * K * V
+         b_qt = (
+-            tl.load(q + (bos * H + i_h) * K + o_k, mask=mask_k, other=0.0).to(
++            tl.load(q + bos * stride_q_tok + i_h * stride_q_head + o_k * stride_q_dim, mask=mask_k, other=0.0).to(
+                 tl.float32
+             )
+             * q_rn
+             * scale
+         )
+         b_kt = (
+-            tl.load(k + (bos * H + i_h) * K + o_k, mask=mask_k, other=0.0).to(
++            tl.load(k + bos * stride_k_tok + i_h * stride_k_head + o_k * stride_k_dim, mask=mask_k, other=0.0).to(
+                 tl.float32
+             )
+             * k_rn
+@@ -867,7 +876,7 @@ def _replayssm_fwd_kernel(
+         b_sk += tl.sum(b_ck[:, None] * b_ru, 0)
+         b_sq += tl.sum(b_cq[:, None] * b_ru, 0)
+ 
+-        b_v = tl.load(v + (bos * HV + i_hv) * V + o_v, mask=mask_v, other=0.0).to(
++        b_v = tl.load(v + bos * stride_v_tok + i_hv * stride_v_head + o_v * stride_v_dim, mask=mask_v, other=0.0).to(
+             tl.float32
+         )
+         if IS_BETA_HEADWISE:
+@@ -942,13 +951,13 @@ def _replayssm_fwd_kernel(
+         # A flush is the one step that still needs S_h as a value, and it is
+         # one step in `cap - 1`.
+         p_o = o + (bos * HV + i_hv) * V + o_v
+-        b_q = tl.load(q + (bos * H + i_h) * K + o_k, mask=mask_k, other=0.0).to(
++        b_q = tl.load(q + bos * stride_q_tok + i_h * stride_q_head + o_k * stride_q_dim, mask=mask_k, other=0.0).to(
+             tl.float32
+         )
+-        b_k = tl.load(k + (bos * H + i_h) * K + o_k, mask=mask_k, other=0.0).to(
++        b_k = tl.load(k + bos * stride_k_tok + i_h * stride_k_head + o_k * stride_k_dim, mask=mask_k, other=0.0).to(
+             tl.float32
+         )
+-        b_v = tl.load(v + (bos * HV + i_hv) * V + o_v, mask=mask_v, other=0.0).to(
++        b_v = tl.load(v + bos * stride_v_tok + i_hv * stride_v_head + o_v * stride_v_dim, mask=mask_v, other=0.0).to(
+             tl.float32
+         )
+         if USE_QK_L2NORM_IN_KERNEL:
+@@ -1028,9 +1037,9 @@ def _replayssm_fwd_kernel(
+         tl.store(p_ckpt_hv, b_h.to(p_ckpt_hv.dtype.element_ty), mask=mask_h)
+ 
+     # ---- 3. this step's tokens ---------------------------------------------
+-    p_q = q + (bos * H + i_h) * K + o_k
+-    p_k = k + (bos * H + i_h) * K + o_k
+-    p_v = v + (bos * HV + i_hv) * V + o_v
++    p_q = q + bos * stride_q_tok + i_h * stride_q_head + o_k * stride_q_dim
++    p_k = k + bos * stride_k_tok + i_h * stride_k_head + o_k * stride_k_dim
++    p_v = v + bos * stride_v_tok + i_hv * stride_v_head + o_v * stride_v_dim
+     p_o = o + (bos * HV + i_hv) * V + o_v
+     if IS_BETA_HEADWISE:
+         p_beta = beta + (bos * HV + i_hv) * V + o_v
+@@ -1101,9 +1110,9 @@ def _replayssm_fwd_kernel(
+             else:
+                 tl.store(p_bg2 + i_hv * stride_bufg_hv, b_g.to(p_bg2.dtype.element_ty))
+ 
+-        p_q += H * K
+-        p_k += H * K
+-        p_v += HV * V
++        p_q += stride_q_tok
++        p_k += stride_k_tok
++        p_v += stride_v_tok
+         p_o += HV * V
+         p_beta += stride_beta_tok
+         p_g += HV * K if IS_KDA else HV
+@@ -1411,7 +1420,7 @@ def replayssm_gated_delta_rule(
+     BK = triton.next_power_of_2(K)
+     assert triton.cdiv(K, BK) == 1, "K must fit one block"
+ 
+-    q, k, v, g, beta = (x.contiguous() for x in (q, k, v, g, beta))
++    g, beta = g.contiguous(), beta.contiguous()
+     if o is None:
+         o = q.new_empty(1, T_tot, HV, V)
+     else:
+@@ -1442,6 +1451,7 @@ def replayssm_gated_delta_rule(
+         # the K.K^T and Q.K^T gemms) does not depend on the V split, so
+         # splitting V would replicate it NV times.  Measured 2.9x worse at
+         # BV=32/NV=4 than BV=V/NV=1.
++        q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
+         BV_UT = triton.next_power_of_2(V)
+         BT = triton.next_power_of_2(max_query_len)
+         BH_UT = max(16, triton.next_power_of_2(cap - max_query_len))
+@@ -1532,6 +1542,15 @@ def replayssm_gated_delta_rule(
+         stride_bufg_pos=buf_g.stride(2),
+         stride_bufg_hv=buf_g.stride(1),
+         stride_beta_tok=beta.stride(1),
++        stride_q_tok=q.stride(1),
++        stride_q_head=q.stride(2),
++        stride_q_dim=q.stride(3),
++        stride_k_tok=k.stride(1),
++        stride_k_head=k.stride(2),
++        stride_k_dim=k.stride(3),
++        stride_v_tok=v.stride(1),
++        stride_v_head=v.stride(2),
++        stride_v_dim=v.stride(3),
+         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+         IS_KDA=is_kda,
+         IS_BETA_HEADWISE=beta.ndim == v.ndim,
+diff --git a/atom/model_ops/qwen4_exp/qsa_attention.py b/atom/model_ops/qwen4_exp/qsa_attention.py
+index b30eeb5..d8f3d76 100644
+--- a/atom/model_ops/qwen4_exp/qsa_attention.py
++++ b/atom/model_ops/qwen4_exp/qsa_attention.py
+@@ -32,6 +32,8 @@ arithmetically once the group is behind the current chunk. That is what
+ raw index keys so pooling can read them back.
+ """
+ 
++import functools
++import os
+ from types import SimpleNamespace
+ 
+ import aiter
+@@ -65,6 +67,14 @@ from atom.plugin.prepare import is_plugin_mode
+ from atom.utils import envs
+ from atom.utils.forward_context import get_forward_context
+ 
++_FLYDSL_WIDTHS = (1027, 2051, 3075, 4099)
++_FLYDSL_PREFILL = os.getenv("ATOM_QSA_FLYDSL_ATTN", "0") == "1"
++
++@functools.cache
++def _flydsl_attention_op():
++    from aiter.ops.flydsl.kernels.qsa.attention import qsa_sparse_attention_flydsl
++    return qsa_sparse_attention_flydsl
++
+ 
+ def build_qwen4_exp_rope(config, head_size: int):
+     """mRoPE over the leading `rotary_dim` channels of `head_size`.
+@@ -368,6 +378,29 @@ class Qwen4ExpAttention(nn.Module):
+             v_scale=self.v_scale_cache,
+         )
+ 
++    def _flydsl_attention(self, query, key, value, selected, qsa):
++        width = next((w for w in _FLYDSL_WIDTHS if w >= selected.shape[1]), None)
++        if (not _FLYDSL_PREFILL or qsa.host_lens is None or width is None
++            or torch.cuda.is_current_stream_capturing()
++            or self.num_kv_heads != 1 or self.num_heads not in (12, 6, 3)
++            or self.head_dim != 256 or query.dtype != torch.bfloat16
++            or self.k_scale_cache is not None or self.v_scale_cache is not None):
++            return None
++        query_lens, seq_lens = qsa.host_lens
++        if sum(query_lens) != query.shape[0]:
++            return None
++        if qsa.context_slots is None:
++            k, v = key.contiguous(), value.contiguous()
++        else:
++            k = self.k_cache.flatten(0, 1).index_select(0, qsa.context_slots)
++            v = self.v_cache.flatten(0, 1).index_select(0, qsa.context_slots)
++        indices = torch.nn.functional.pad(selected, (0, width - selected.shape[1]), value=-1)
++        return _flydsl_attention_op()(
++            query.contiguous(), k, v, indices, query_lens=query_lens,
++            prefix_lens=tuple(s - q for q, s in zip(query_lens, seq_lens)),
++            softmax_scale=self.scaling,
++        )
++
+     def _select_tokens(
+         self,
+         hidden_states: torch.Tensor,
+@@ -480,17 +513,14 @@ class Qwen4ExpAttention(nn.Module):
+             qsa = qsa.for_tokens(num_tokens)
+             self._store_kv(key, value, qsa.slot_mapping)
+             selected = self._select_tokens(hidden_states, positions, qsa)
+-            attn_out = self._attend(
+-                query,
+-                selected,
+-                qsa.block_tables,
+-                qsa.token_to_req,
+-                (
+-                    None
+-                    if forward_context.context.is_prefill
+-                    else qsa.block_tables.shape[0]
+-                ),
+-            )
++            attn_out = None
++            if forward_context.context.is_prefill:
++                attn_out = self._flydsl_attention(query, key, value, selected, qsa)
++            if attn_out is None:
++                attn_out = self._attend(
++                    query, selected, qsa.block_tables, qsa.token_to_req,
++                    None if forward_context.context.is_prefill else qsa.block_tables.shape[0],
++                )
+ 
+         if is_per_token_fp8_linear(self.o_proj):
+             gated, gated_scale = sigmoid_mul_quant(
+@@ -522,6 +552,12 @@ class Qwen4ExpAttention(nn.Module):
+             block_tables=torch.arange(pages, device=device, dtype=torch.int32)[None],
+             seq_lens=torch.tensor([tokens], device=device, dtype=torch.int32),
+             max_seq_len=tokens,
++            # Serving metadata gained these optional native cache mappings.
++            # Synthetic profiling does not own paged RTP cache regions.
++            raw_index_slot_mapping=None,
++            index_compressed_slot_mapping=None,
++            raw_index_block_tables=None,
++            index_block_tables=None,
+         )
+         names = (
+             "k_cache",
+diff --git a/atom/model_ops/topK.py b/atom/model_ops/topK.py
+index 77a8152..461bf1b 100644
+--- a/atom/model_ops/topK.py
++++ b/atom/model_ops/topK.py
+@@ -210,39 +210,19 @@ def rocm_aiter_topk_softmax_impl(
+     fused_shared_experts_scoring_func: str | None = None,
+     num_valid_rows: torch.Tensor | None = None,
+ ) -> tuple[torch.Tensor, torch.Tensor]:
+-    from aiter import topk_softmax
++    # Keep standalone and RTP on the same pinned AITER ABI bridge. This wheel
++    # calls the eight-argument topk API, while AITER cbccc02fd exposes seven.
++    from atom.plugin.rtpllm.utils.topk_compat import rtp_topk_softmax
+ 
+-    token = gating_output.shape[0]
+-    device = gating_output.device
+-    if num_fused_shared_experts > 0:
+-        total_topk_weights, total_topk_ids = topk_meta_rows(token)
+-        # The kernel scores the shared columns too when given a scoring func.
+-        topk_weights = total_topk_weights
+-        topk_ids = total_topk_ids[:, :topk]
+-    else:
+-        topk_ids = torch.empty((token, topk), dtype=torch.int32, device=device)
+-        topk_weights = torch.empty((token, topk), dtype=torch.float32, device=device)
+-    token_expert_indicies = torch.empty(
+-        gating_output.shape[0], topk, dtype=torch.int32, device=gating_output.device
+-    )
+-    if fused_shared_experts_scoring_func is None:
+-        fused_shared_experts_scoring_func = ""
+-        fused_shared_experts_for_kernel = 0
+-    else:
+-        fused_shared_experts_for_kernel = num_fused_shared_experts
+-    topk_softmax(
+-        topk_weights,
+-        topk_ids,
+-        token_expert_indicies,
++    return rtp_topk_softmax(
+         gating_output,
++        topk,
+         renormalize,
+-        fused_shared_experts_for_kernel,
++        num_fused_shared_experts,
++        num_routing_experts,
+         fused_shared_experts_scoring_func,
+         num_valid_rows,
+     )
+-    if num_fused_shared_experts > 0:
+-        return total_topk_weights, total_topk_ids
+-    return topk_weights, topk_ids
+ 
+ 
+ def rocm_aiter_biased_grouped_topk_impl(
+diff --git a/atom/plugin/rtpllm/models/qwen4_exp.py b/atom/plugin/rtpllm/models/qwen4_exp.py
+old mode 100644
+new mode 100755
+index a65f17e..adf1d34
+--- a/atom/plugin/rtpllm/models/qwen4_exp.py
++++ b/atom/plugin/rtpllm/models/qwen4_exp.py
+@@ -18,6 +18,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
+     ple_state_desc,
+ )
+ from rtp_llm.ops import (
++    CacheTailPolicyDesc,
+     DataType,
+     HybridAttentionType,
+     KVCacheSpecType,
+@@ -34,6 +35,11 @@ from atom.plugin.rtpllm.models.qwen3_5 import (
+ 
+ logger = logging.getLogger("atom.plugin.rtpllm.models")
+ 
++# The GDN state is much larger than QSA/PLE state. One checkpoint per 1024
++# prompt tokens lets the prefix cache serve common 6K/7K prefixes without
++# retaining every 64-token state page of a long request.
++GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS = 16
++
+ 
+ class _Qwen4ExpAttnPyObj(_ATOMAttnPyObj):
+     # Graph replay refreshes and consumes device block tables only. The host
+@@ -77,10 +83,13 @@ class _ATOMQwen4ExpRuntime(_ATOMQwen35MoeRuntime):
+                 raise ValueError("Qwen4Exp MTP requires positive request capacity")
+             self._rtp_mtp_request_capacity = max_batch
+         self._atom_attn_pyobj = _Qwen4ExpAttnPyObj(self)
++        from atom.plugin.rtpllm.utils.replayssm_rtp import install_runtime
++        install_runtime(self)
+ 
+     def copy_plugin_cache_blocks(self, mapping: torch.Tensor, tags: list[str]) -> None:
+-        """All QSA and PLE pools are RTP-owned tagged regions, copied natively."""
+-        return
++        """Move ReplaySSM records with RTP linear blocks when enabled."""
++        from atom.plugin.rtpllm.utils.replayssm_rtp import copy_moved_blocks
++        copy_moved_blocks(self, mapping, tags)
+ 
+     def prepare_fmha_impl(self, inputs, is_cuda_graph: bool = False):
+         tagged = inputs.attention_inputs
+@@ -720,6 +729,9 @@ class ATOMQwen4Exp(ATOMQwen35Moe):
+             for desc in layer:
+                 if desc.cache_type == KVCacheSpecType.LINEAR:
+                     desc.dtype = DataType.TYPE_BF16
++                    tail = desc.tail or CacheTailPolicyDesc()
++                    tail.prefix_checkpoint_stride_blocks = GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS
++                    desc.tail = tail
+         model_config.kv_cache_spec_descs = descs
+ 
+     @classmethod
+diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+old mode 100644
+new mode 100755
+index e600c2f..2beb5d2
+--- a/atom/plugin/rtpllm/utils/qwen4_exp_context.py
++++ b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+@@ -6,6 +6,8 @@ from collections.abc import Iterator
+ from contextlib import contextmanager
+ from typing import Any
+ 
++import numpy as np
++import os
+ import torch
+ import triton
+ import triton.language as tl
+@@ -387,6 +389,9 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+                 caches[f"layer_{layer_num}"].v_cache = state
+                 caches[f"layer_{layer_num}"].k_cache = conv
+ 
++        from atom.plugin.rtpllm.utils.replayssm_rtp import allocate_buffers
++        allocate_buffers(runtime, caches, layer_maps)
++
+         # AITER decode expects physical VK storage exposed as a logical KV
+         # view. Bind that view before the first state write; the prefill path
+         # and Triton decode fallback both honor its inner strides. MTP target
+@@ -738,6 +743,8 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+                 gdn_metadata.ssm_conv_state_len = (
+                     int(model.config.linear_conv_kernel_dim) - 1
+                 )
++            from atom.plugin.rtpllm.utils.replayssm_rtp import prepare_metadata
++            prepare_metadata(runtime, gdn_metadata)
+             cls._configure_gdn_backends(
+                 metadata.gdn_metadata,
+                 resolved_layer_maps[0],
+@@ -929,6 +936,33 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+                     raw_slots.copy_(candidate_slots)
+                 else:
+                     raw_slots = candidate_slots
++            host_lens = context_slots = None
++            if (
++                os.getenv("ATOM_QSA_FLYDSL_ATTN", "0") == "1"
++                and forward_context.context.is_prefill
++                and not forward_context.context.is_draft
++                and not in_capture
++                and full_inputs.input_lengths.device.type == "cpu"
++                and full_inputs.prefix_lengths.device.type == "cpu"
++            ):
++                query_lens = tuple(int(v) for v in full_inputs.input_lengths.tolist())
++                prefix_lens = tuple(int(v) for v in full_inputs.prefix_lengths.tolist())
++                seq_lens = tuple(q + p for q, p in zip(query_lens, prefix_lens))
++                if (len(query_lens) == full_blocks.shape[0]
++                    and len(query_lens) == len(prefix_lens)
++                    and sum(query_lens) == int(logical.numel())
++                    and all(q >= 0 and p >= 0 for q, p in zip(query_lens, prefix_lens))):
++                    host_lens = (query_lens, seq_lens)
++                    if any(prefix_lens):
++                        lengths = np.asarray(seq_lens, dtype=np.int64)
++                        requests = np.repeat(np.arange(len(seq_lens), dtype=np.int64), lengths)
++                        tokens = np.arange(len(requests), dtype=np.int64) - np.repeat(
++                            np.cumsum(lengths) - lengths, lengths
++                        )
++                        host = torch.from_numpy(np.stack((requests, tokens))).pin_memory()
++                        requests, tokens = host.to(full_blocks.device, non_blocking=True)
++                        pages = full_blocks[requests, tokens // full_block_size].to(torch.int64)
++                        context_slots = pages * full_block_size + tokens % full_block_size
+             metadata.qsa_metadata = Qwen4ExpQSAMetadata(
+                 block_tables=full_blocks,
+                 slot_mapping=slots,
+@@ -950,6 +984,8 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+                 state_page_size=int(runtime.kv_cache.get_seq_size_per_block("indexer_state")),
+                 state_read_pages=state_read_pages,
+                 state_candidate_pages=state_candidate_pages,
++                host_lens=host_lens,
++                context_slots=context_slots,
+             )
+             tagged_inputs = getattr(inputs, "attention_inputs_by_tag", {})
+             ple_inputs = tagged_inputs.get("ple_conv_state")
+diff --git a/atom/plugin/rtpllm/utils/replayssm_rtp.py b/atom/plugin/rtpllm/utils/replayssm_rtp.py
+new file mode 100644
+index 0000000..de33dd1
+--- /dev/null
++++ b/atom/plugin/rtpllm/utils/replayssm_rtp.py
+@@ -0,0 +1,248 @@
++"""Experimental RTP Qwen3.8 ReplaySSM state bridge.
++
++The RTP linear block pool keeps full checkpoints. ReplaySSM records are attached
++per physical block; the accepted candidate receives the checkpoint and records
++before RTP advances its block table. No transaction is published on a failed
++prepare. A failure after mutation is fail-stop rather than serving bad state.
++"""
++from __future__ import annotations
++
++from dataclasses import dataclass
++from types import MethodType
++import os
++
++import torch
++
++from atom.model_ops.fla_ops.replayssm import replayssm_buffer_shapes, replayssm_commit
++from atom.plugin.rtpllm.utils.replayssm_rtp_fused_copy import (
++    make_layer_pointer_tables, copy_replay_slot_with_version,
++    commit_copy_versioned,
++)
++
++
++@dataclass
++class _Stage:
++    src: torch.Tensor
++    candidates: torch.Tensor
++    width: int
++    read: torch.Tensor
++
++
++def enabled(runtime) -> bool:
++    return os.getenv("ATOM_RTP_ENABLE_REPLAYSSM", "0") == "1" and bool(
++        getattr(getattr(runtime, "_rtp_model_config", None), "atom_qwen4_exp_mtp_target", False)
++    )
++
++
++def allocate_buffers(runtime, caches, layer_maps) -> None:
++    if not enabled(runtime):
++        return
++    count = 0
++    cap = 16
++    for layer_num in sorted(layer_maps[0]):
++        cache = caches[f"layer_{layer_num}"]
++        state = cache.v_cache
++        if state.ndim != 4 or state.dtype != torch.float32:
++            raise RuntimeError("RTP ReplaySSM requires FP32 GDN checkpoint state")
++        slots, heads, key_dim, value_dim = map(int, state.shape)
++        if count and count != slots:
++            raise RuntimeError("RTP ReplaySSM state slot counts differ by layer")
++        count = slots
++        sk, su, sg = replayssm_buffer_shapes(cap, heads, key_dim, value_dim, False)
++        cache.replay_buf_k = torch.empty((slots,) + sk, device=state.device, dtype=torch.bfloat16)
++        cache.replay_buf_u = torch.empty((slots,) + su, device=state.device, dtype=torch.bfloat16)
++        cache.replay_buf_g = torch.empty((slots,) + sg, device=state.device, dtype=torch.float32)
++    if count <= 0:
++        raise RuntimeError("RTP ReplaySSM found no GDN layers")
++    runtime._rtp_replay_write_pos = torch.zeros(count, device=state.device, dtype=torch.int32)
++    runtime._rtp_replay_state_version = torch.arange(count, device=state.device, dtype=torch.int64)
++    runtime._rtp_replay_epoch = 0
++    request_capacity = int(runtime._rtp_mtp_request_capacity)
++    runtime._rtp_replay_commit_dst = torch.empty(request_capacity, device=state.device, dtype=torch.int64)
++    runtime._rtp_replay_commit_pos = torch.empty(request_capacity, device=state.device, dtype=torch.int32)
++    runtime._rtp_replay_commit_version = torch.empty(request_capacity, device=state.device, dtype=torch.int64)
++    runtime._rtp_replay_commit_copy = torch.empty(request_capacity, device=state.device, dtype=torch.int32)
++    cache_list = [caches[f"layer_{i}"] for i in sorted(layer_maps[0])]
++    runtime._rtp_replay_layer_ptrs, runtime._rtp_replay_layer_sizes = (
++        make_layer_pointer_tables(cache_list, state.device)
++    )
++    runtime._rtp_replay_captured = {}
++    runtime._rtp_replay_active = None
++    runtime._rtp_replay_pending_accept = None
++    runtime._rtp_replay_modified = False
++    runtime._rtp_replay_debug_count = 0
++
++
++def prepare_metadata(runtime, metadata) -> None:
++    if not enabled(runtime) or metadata is None:
++        return
++    pos = getattr(runtime, "_rtp_replay_write_pos", None)
++    if pos is None:
++        raise RuntimeError("RTP ReplaySSM buffers were not allocated")
++    if metadata.num_prefills:
++        runtime._rtp_replay_epoch += 1
++        epoch_base = runtime._rtp_replay_epoch * pos.numel()
++        version = runtime._rtp_replay_state_version
++        def reset_slots(slots):
++            indices = slots.reshape(-1).to(torch.int64)
++            pos.index_fill_(0, indices, 0)
++            version.index_copy_(0, indices, indices + epoch_base)
++        slots = metadata.non_spec_state_indices_tensor
++        if slots is not None:
++            reset_slots(slots)
++        checkpoints = metadata.ssm_checkpoints
++        if checkpoints is not None:
++            cp_slots = checkpoints.get("slots")
++            if cp_slots is not None and cp_slots.numel():
++                reset_slots(cp_slots)
++        return
++    if not metadata.num_spec_decodes:
++        return
++    candidates = metadata.spec_state_indices_tensor
++    if candidates is None or candidates.ndim != 2:
++        raise RuntimeError("RTP ReplaySSM requires candidate state slots [B,Q]")
++    src = candidates[:, 0].contiguous()
++    read = metadata.spec_state_indices_in_tensor[:, 0].contiguous()
++    if read.shape != src.shape:
++        raise RuntimeError("ReplaySSM read/write state slot shapes differ")
++    # RTP verification reads the previous token's block and writes fresh
++    # candidate blocks. ReplaySSM addresses checkpoint and records by one
++    # slot, so fork all side state to candidate zero before the captured GDN.
++    copy_replay_slot_with_version(
++        runtime._rtp_replay_layer_ptrs, runtime._rtp_replay_layer_sizes,
++        pos, runtime._rtp_replay_state_version, read, src,
++    )
++    if os.getenv("ATOM_RTP_REPLAY_DEBUG") == "1" and runtime._rtp_replay_debug_count < 12 and not torch.cuda.is_current_stream_capturing():
++        print("REPLAY_PRE", runtime._rtp_replay_debug_count, "slots", src[:3].tolist(), "candidates", candidates[:3].tolist(), "cursor", pos[src[:3].long()].tolist(), flush=True)
++        runtime._rtp_replay_debug_count += 1
++    metadata.replayssm = True
++    metadata.slot_idx = src
++    metadata.write_pos = pos
++    metadata.replayssm_cache_len = 16
++    metadata.replayssm_route = "auto"
++    metadata.replayssm_max_query_len = int(candidates.shape[1])
++    runtime._rtp_replay_active = _Stage(src, candidates, int(candidates.shape[1]), read)
++
++
++def _clear_graph(self):
++    # CudaGraphRunner invokes clear before every bucket warmup; keep prior buckets.
++    self._rtp_replay_active = None
++
++
++def _save_graph(self, graph_key):
++    stage = self._rtp_replay_active
++    if stage is None:
++        raise RuntimeError("ReplaySSM target graph captured without GDN stage")
++    self._rtp_replay_captured[int(graph_key)] = stage
++
++
++def _activate_graph(self, graph_key):
++    self._rtp_replay_active = self._rtp_replay_captured[int(graph_key)]
++
++
++def _prepare_commit(self, accept_len):
++    stage = self._rtp_replay_active
++    if stage is None:
++        raise RuntimeError("ReplaySSM commit has no target verify stage")
++    if accept_len.ndim != 1 or accept_len.numel() > stage.src.numel() or accept_len.dtype != torch.int32:
++        raise RuntimeError(
++            f"ReplaySSM accept_len shape/dtype mismatch: got {tuple(accept_len.shape)} "
++            f"{accept_len.dtype}, captured rows={stage.src.numel()}"
++        )
++    if self._rtp_replay_pending_accept is not None:
++        raise RuntimeError("ReplaySSM previous commit is still pending")
++    self._rtp_replay_pending_accept = accept_len
++    self._rtp_replay_modified = False
++
++
++def _finish_commit(self, commit):
++    accept = self._rtp_replay_pending_accept
++    if not commit:
++        if self._rtp_replay_modified:
++            raise RuntimeError("ReplaySSM partial commit requires fail-stop")
++        self._rtp_replay_pending_accept = None
++        return
++    if accept is None:
++        raise RuntimeError("ReplaySSM commit was not prepared")
++    stage = self._rtp_replay_active
++    self._rtp_replay_modified = True
++    commit_copy_versioned(
++        self._rtp_replay_layer_ptrs, self._rtp_replay_layer_sizes,
++        self._rtp_replay_write_pos, self._rtp_replay_state_version,
++        stage.src, stage.candidates, accept,
++        self._rtp_replay_commit_dst, self._rtp_replay_commit_pos,
++        self._rtp_replay_commit_version, self._rtp_replay_commit_copy, 16,
++    )
++
++
++def _finalize_commit(self):
++    if self._rtp_replay_pending_accept is None:
++        raise RuntimeError("ReplaySSM finalize without commit")
++    self._rtp_replay_pending_accept = None
++    self._rtp_replay_modified = False
++
++
++def _has_status_reducer(self) -> bool:
++    return self._rtp_replay_cpu_status is not None
++
++
++def _reduce_status(self, local_ok: bool) -> bool:
++    status = self._rtp_replay_cpu_status
++    if status is None:
++        raise RuntimeError("ReplaySSM TP status reducer was not initialized")
++    return status.reduce(local_ok)
++
++
++def install_runtime(runtime) -> None:
++    if not enabled(runtime):
++        return
++    from rtp_llm.models_py.modules.qwen4_exp.cpu_target_status import prepare_cpu_target_status
++    runtime._rtp_replay_cpu_status = prepare_cpu_target_status(
++        runtime._rtp_model_config, runtime.parallelism_config
++    )
++    if runtime._rtp_replay_cpu_status is None:
++        pc = runtime.parallelism_config
++        mc = runtime._rtp_model_config
++        raise RuntimeError(
++            "ReplaySSM requires local TP2 CPU status consensus: "
++            f"role={pc.role_type}, tp={pc.tp_size}, dp={pc.dp_size}, "
++            f"local={pc.local_world_size}, target={getattr(mc, 'atom_qwen4_exp_mtp_target', None)}, "
++            f"is_mtp={getattr(mc, 'is_mtp', None)}, visible={torch.cuda.device_count()}"
++        )
++    for name, fn in (
++        ("has_speculative_target_status_reducer", _has_status_reducer),
++        ("reduce_speculative_target_prepare_status", _reduce_status),
++        ("clear_speculative_target_graph_capture", _clear_graph),
++        ("save_speculative_target_graph_capture", _save_graph),
++        ("activate_speculative_target_graph_replay", _activate_graph),
++        ("prepare_speculative_target_commit", _prepare_commit),
++        ("finish_speculative_target_commit", _finish_commit),
++        ("finalize_speculative_target_commit", _finalize_commit),
++    ):
++        setattr(runtime, name, MethodType(fn, runtime))
++
++
++def copy_moved_blocks(runtime, mapping: torch.Tensor, tags: list[str]) -> None:
++    if not enabled(runtime) or "linear" not in tags:
++        return
++    if not hasattr(runtime, "_rtp_replay_write_pos"):
++        raise RuntimeError("ReplaySSM copy requested before pool initialization")
++    row = tags.index("linear")
++    moves = mapping[mapping[:, 0] == row]
++    if not moves.numel():
++        return
++    src = moves[:, 1].to(device=runtime._rtp_replay_write_pos.device, dtype=torch.int64, non_blocking=True)
++    dst = moves[:, 2].to(device=src.device, dtype=torch.int64, non_blocking=True)
++    if os.getenv("ATOM_RTP_REPLAY_DEBUG") == "1" and runtime._rtp_replay_debug_count < 36:
++        print("REPLAY_COPY", runtime._rtp_replay_debug_count, "src", src[:5].tolist(), "dst", dst[:5].tolist(), "tags", tags, flush=True)
++        runtime._rtp_replay_debug_count += 1
++    # Relocation mappings may overlap or form chains. Gather all sources
++    # before writes, preserving RTP's native block-copy semantics.
++    for layer_num in sorted(runtime._rtp_layer_maps[0]):
++        cache = runtime._rtp_kv_cache_data[f"layer_{layer_num}"]
++        for tensor in (cache.replay_buf_k, cache.replay_buf_u, cache.replay_buf_g):
++            tensor.index_copy_(0, dst, tensor.index_select(0, src))
++    pos = runtime._rtp_replay_write_pos
++    pos.index_copy_(0, dst, pos.index_select(0, src))
++    version = runtime._rtp_replay_state_version
++    version.index_copy_(0, dst, version.index_select(0, src))
+diff --git a/atom/plugin/rtpllm/utils/replayssm_rtp_fused_copy.py b/atom/plugin/rtpllm/utils/replayssm_rtp_fused_copy.py
+new file mode 100644
+index 0000000..d2facc3
+--- /dev/null
++++ b/atom/plugin/rtpllm/utils/replayssm_rtp_fused_copy.py
+@@ -0,0 +1,307 @@
++"""Fused checkpoint, record, and cursor copy for RTP ReplaySSM slots."""
++import math
++
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _copy_replay_slot(
++    state, record_k, record_u, record_g, cursor, reads, writes,
++    STATE_ELEMS: tl.constexpr,
++    K_ELEMS: tl.constexpr,
++    U_ELEMS: tl.constexpr,
++    G_ELEMS: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0)
++    tile = tl.program_id(1)
++    src = tl.load(reads + row).to(tl.int64)
++    dst = tl.load(writes + row).to(tl.int64)
++    if src >= 0 and dst >= 0 and src != dst:
++        offset = tile * BLOCK + tl.arange(0, BLOCK)
++        v = tl.load(state + src * STATE_ELEMS + offset, mask=offset < STATE_ELEMS, other=0)
++        tl.store(state + dst * STATE_ELEMS + offset, v, mask=offset < STATE_ELEMS)
++        if tile * BLOCK < K_ELEMS:
++            k = tl.load(record_k + src * K_ELEMS + offset, mask=offset < K_ELEMS, other=0)
++            tl.store(record_k + dst * K_ELEMS + offset, k, mask=offset < K_ELEMS)
++        if tile * BLOCK < U_ELEMS:
++            u = tl.load(record_u + src * U_ELEMS + offset, mask=offset < U_ELEMS, other=0)
++            tl.store(record_u + dst * U_ELEMS + offset, u, mask=offset < U_ELEMS)
++        if tile * BLOCK < G_ELEMS:
++            g = tl.load(record_g + src * G_ELEMS + offset, mask=offset < G_ELEMS, other=0)
++            tl.store(record_g + dst * G_ELEMS + offset, g, mask=offset < G_ELEMS)
++        if tile == 0:
++            tl.store(cursor + dst, tl.load(cursor + src))
++
++
++def copy_replay_slot(cache, cursor: torch.Tensor, reads: torch.Tensor, writes: torch.Tensor) -> None:
++    tensors = (cache.v_cache, cache.replay_buf_k, cache.replay_buf_u, cache.replay_buf_g)
++    if not all(t.is_contiguous() for t in tensors):
++        raise RuntimeError("RTP ReplaySSM fused copy requires contiguous state and record buffers")
++    if reads.numel() != writes.numel():
++        raise RuntimeError("RTP ReplaySSM fused copy row mismatch")
++    sizes = tuple(t[0].numel() for t in tensors)
++    block = 2048
++    grid = (reads.numel(), triton.cdiv(max(sizes), block))
++    _copy_replay_slot[grid](*tensors, cursor, reads, writes, *sizes, block, num_warps=4)
++
++
++@triton.jit
++def _copy_all_replay_slots(
++    state_ptrs, k_ptrs, u_ptrs, g_ptrs, cursor, reads, writes,
++    STATE_ELEMS: tl.constexpr,
++    STATE_STRIDE: tl.constexpr,
++    K_ELEMS: tl.constexpr,
++    U_ELEMS: tl.constexpr,
++    G_ELEMS: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    row = tl.program_id(0)
++    tile = tl.program_id(1)
++    layer = tl.program_id(2)
++    src = tl.load(reads + row).to(tl.int64)
++    dst = tl.load(writes + row).to(tl.int64)
++    if src >= 0 and dst >= 0 and src != dst:
++        state = tl.load(state_ptrs + layer).to(tl.pointer_type(tl.float32))
++        record_k = tl.load(k_ptrs + layer).to(tl.pointer_type(tl.bfloat16))
++        record_u = tl.load(u_ptrs + layer).to(tl.pointer_type(tl.bfloat16))
++        record_g = tl.load(g_ptrs + layer).to(tl.pointer_type(tl.float32))
++        offset = tile * BLOCK + tl.arange(0, BLOCK)
++        v = tl.load(state + src * STATE_STRIDE + offset, mask=offset < STATE_ELEMS, other=0)
++        tl.store(state + dst * STATE_STRIDE + offset, v, mask=offset < STATE_ELEMS)
++        if tile * BLOCK < K_ELEMS:
++            k = tl.load(record_k + src * K_ELEMS + offset, mask=offset < K_ELEMS, other=0)
++            tl.store(record_k + dst * K_ELEMS + offset, k, mask=offset < K_ELEMS)
++        if tile * BLOCK < U_ELEMS:
++            u = tl.load(record_u + src * U_ELEMS + offset, mask=offset < U_ELEMS, other=0)
++            tl.store(record_u + dst * U_ELEMS + offset, u, mask=offset < U_ELEMS)
++        if tile * BLOCK < G_ELEMS:
++            g = tl.load(record_g + src * G_ELEMS + offset, mask=offset < G_ELEMS, other=0)
++            tl.store(record_g + dst * G_ELEMS + offset, g, mask=offset < G_ELEMS)
++        if tile == 0 and layer == 0:
++            tl.store(cursor + dst, tl.load(cursor + src))
++
++
++def make_layer_pointer_tables(caches: list, device: torch.device):
++    names = ("v_cache", "replay_buf_k", "replay_buf_u", "replay_buf_g")
++    tables = []
++    sizes = tuple(getattr(caches[0], name)[0].numel() for name in names)
++    state_stride = caches[0].v_cache.stride(0)
++    for name, size in zip(names, sizes):
++        tensors = [getattr(cache, name) for cache in caches]
++        if name == "v_cache":
++            inner = tensors[0].stride()[1:]
++            if not all(t[0].is_contiguous() and t[0].numel() == size and
++                       t.stride(0) == state_stride and t.stride()[1:] == inner for t in tensors):
++                raise RuntimeError("RTP ReplaySSM GDN state layouts differ")
++        elif not all(t.is_contiguous() and t[0].numel() == size for t in tensors):
++            raise RuntimeError(f"RTP ReplaySSM record layout differs for {name}")
++        tables.append(torch.tensor([t.data_ptr() for t in tensors], device=device, dtype=torch.int64))
++    return tuple(tables), (sizes[0], state_stride, *sizes[1:])
++
++
++def copy_all_replay_slots(tables, sizes, cursor: torch.Tensor, reads: torch.Tensor, writes: torch.Tensor):
++    if reads.numel() != writes.numel():
++        raise RuntimeError("RTP ReplaySSM copy row mismatch")
++    block = 1024
++    grid = (reads.numel(), triton.cdiv(max(sizes[0], *sizes[2:]), block), tables[0].numel())
++    _copy_all_replay_slots[grid](*tables, cursor, reads, writes, *sizes, block, num_warps=4)
++
++
++@triton.jit
++def _commit_copy_all_replay_slots(
++    state_ptrs, k_ptrs, u_ptrs, g_ptrs, cursor,
++    sources, candidates, accepts,
++    ACTIVE: tl.constexpr,
++    CANDIDATE_ROW_STRIDE: tl.constexpr,
++    CANDIDATE_COL_STRIDE: tl.constexpr,
++    WIDTH: tl.constexpr,
++    CAP: tl.constexpr,
++    STATE_ELEMS: tl.constexpr,
++    STATE_STRIDE: tl.constexpr,
++    K_ELEMS: tl.constexpr,
++    U_ELEMS: tl.constexpr,
++    G_ELEMS: tl.constexpr,
++    BLOCK: tl.constexpr,
++):
++    row=tl.program_id(0)
++    tile=tl.program_id(1)
++    layer=tl.program_id(2)
++    if row < ACTIVE:
++        src=tl.load(sources+row).to(tl.int64)
++        accepted=tl.load(accepts+row)
++        if src >= 0 and accepted > 0:
++            step=tl.minimum(accepted-1,WIDTH-1)
++            dst=tl.load(candidates+row*CANDIDATE_ROW_STRIDE+step*CANDIDATE_COL_STRIDE).to(tl.int64)
++            if dst >= 0:
++                if src != dst:
++                    state=tl.load(state_ptrs+layer).to(tl.pointer_type(tl.float32))
++                    record_k=tl.load(k_ptrs+layer).to(tl.pointer_type(tl.bfloat16))
++                    record_u=tl.load(u_ptrs+layer).to(tl.pointer_type(tl.bfloat16))
++                    record_g=tl.load(g_ptrs+layer).to(tl.pointer_type(tl.float32))
++                    offset=tile*BLOCK+tl.arange(0,BLOCK)
++                    v=tl.load(state+src*STATE_STRIDE+offset,mask=offset<STATE_ELEMS,other=0)
++                    tl.store(state+dst*STATE_STRIDE+offset,v,mask=offset<STATE_ELEMS)
++                    if tile*BLOCK<K_ELEMS:
++                        k=tl.load(record_k+src*K_ELEMS+offset,mask=offset<K_ELEMS,other=0)
++                        tl.store(record_k+dst*K_ELEMS+offset,k,mask=offset<K_ELEMS)
++                    if tile*BLOCK<U_ELEMS:
++                        u=tl.load(record_u+src*U_ELEMS+offset,mask=offset<U_ELEMS,other=0)
++                        tl.store(record_u+dst*U_ELEMS+offset,u,mask=offset<U_ELEMS)
++                    if tile*BLOCK<G_ELEMS:
++                        g=tl.load(record_g+src*G_ELEMS+offset,mask=offset<G_ELEMS,other=0)
++                        tl.store(record_g+dst*G_ELEMS+offset,g,mask=offset<G_ELEMS)
++                if tile==0 and layer==0:
++                    h=tl.load(cursor+src)
++                    if h<0:
++                        new_pos=0
++                    else:
++                        base=tl.where(h+2*WIDTH>CAP,0,h)
++                        new_pos=base+accepted
++                    tl.store(cursor+src,new_pos)
++                    tl.store(cursor+dst,new_pos)
++
++
++def commit_copy_all_replay_slots(
++    tables, sizes, cursor: torch.Tensor, sources: torch.Tensor,
++    candidates: torch.Tensor, accepts: torch.Tensor, cap: int,
++) -> None:
++    if accepts.ndim != 1 or accepts.dtype != torch.int32:
++        raise RuntimeError("RTP ReplaySSM accept lengths must be int32 [batch]")
++    if accepts.numel() > sources.numel():
++        raise RuntimeError("RTP ReplaySSM accept batch exceeds captured slot batch")
++    block=1024
++    grid=(sources.numel(),triton.cdiv(max(sizes[0],*sizes[2:]),block),tables[0].numel())
++    _commit_copy_all_replay_slots[grid](
++        *tables,cursor,sources,candidates,accepts,
++        accepts.numel(),candidates.stride(0),candidates.stride(1),
++        candidates.shape[1],cap,*sizes,block,num_warps=4,
++    )
++
++
++@triton.jit
++def _copy_replay_slot_with_version(
++    state_ptrs,k_ptrs,u_ptrs,g_ptrs,cursor,version,reads,writes,
++    STATE_ELEMS:tl.constexpr,STATE_STRIDE:tl.constexpr,
++    K_ELEMS:tl.constexpr,U_ELEMS:tl.constexpr,G_ELEMS:tl.constexpr,
++    BLOCK:tl.constexpr,
++):
++    row=tl.program_id(0);tile=tl.program_id(1);layer=tl.program_id(2)
++    src=tl.load(reads+row).to(tl.int64)
++    dst=tl.load(writes+row).to(tl.int64)
++    if src>=0 and dst>=0 and src!=dst:
++        state=tl.load(state_ptrs+layer).to(tl.pointer_type(tl.float32))
++        rk=tl.load(k_ptrs+layer).to(tl.pointer_type(tl.bfloat16))
++        ru=tl.load(u_ptrs+layer).to(tl.pointer_type(tl.bfloat16))
++        rg=tl.load(g_ptrs+layer).to(tl.pointer_type(tl.float32))
++        off=tile*BLOCK+tl.arange(0,BLOCK)
++        x=tl.load(state+src*STATE_STRIDE+off,mask=off<STATE_ELEMS,other=0)
++        tl.store(state+dst*STATE_STRIDE+off,x,mask=off<STATE_ELEMS)
++        if tile*BLOCK<K_ELEMS:
++            xk=tl.load(rk+src*K_ELEMS+off,mask=off<K_ELEMS,other=0)
++            tl.store(rk+dst*K_ELEMS+off,xk,mask=off<K_ELEMS)
++        if tile*BLOCK<U_ELEMS:
++            xu=tl.load(ru+src*U_ELEMS+off,mask=off<U_ELEMS,other=0)
++            tl.store(ru+dst*U_ELEMS+off,xu,mask=off<U_ELEMS)
++        if tile*BLOCK<G_ELEMS:
++            xg=tl.load(rg+src*G_ELEMS+off,mask=off<G_ELEMS,other=0)
++            tl.store(rg+dst*G_ELEMS+off,xg,mask=off<G_ELEMS)
++        if tile==0 and layer==0:
++            tl.store(cursor+dst,tl.load(cursor+src))
++            tl.store(version+dst,tl.load(version+src))
++
++
++@triton.jit
++def _prepare_versioned_commit(
++    cursor,version,sources,candidates,accepts,
++    out_dst,out_pos,out_version,out_copy,
++    ACTIVE:tl.constexpr,ROW_STRIDE:tl.constexpr,COL_STRIDE:tl.constexpr,
++    WIDTH:tl.constexpr,CAP:tl.constexpr,VERSION_DELTA:tl.constexpr,
++):
++    row=tl.program_id(0)
++    dst=tl.full((),-1,tl.int64)
++    if row<ACTIVE:
++        src=tl.load(sources+row).to(tl.int64)
++        accepted=tl.load(accepts+row)
++        if src>=0 and accepted>0:
++            step=tl.minimum(accepted-1,WIDTH-1)
++            dst=tl.load(candidates+row*ROW_STRIDE+step*COL_STRIDE).to(tl.int64)
++            if dst>=0:
++                h=tl.load(cursor+src)
++                flushed=h>=0 and h+2*WIDTH>CAP
++                base=tl.where(flushed,0,h)
++                new_pos=tl.where(h<0,0,base+accepted)
++                src_version=tl.load(version+src)
++                dst_version=tl.load(version+dst)
++                new_version=src_version+tl.where(flushed,VERSION_DELTA,0)
++                copy_state=flushed or src_version!=dst_version
++                tl.store(out_pos+row,new_pos)
++                tl.store(out_version+row,new_version)
++                tl.store(out_copy+row,copy_state.to(tl.int32))
++    tl.store(out_dst+row,dst)
++
++
++@triton.jit
++def _copy_versioned_commit(
++    state_ptrs,k_ptrs,u_ptrs,g_ptrs,cursor,version,sources,
++    dsts,new_positions,new_versions,copy_flags,
++    STATE_ELEMS:tl.constexpr,STATE_STRIDE:tl.constexpr,
++    K_ELEMS:tl.constexpr,U_ELEMS:tl.constexpr,G_ELEMS:tl.constexpr,
++    BLOCK:tl.constexpr,
++):
++    row=tl.program_id(0);tile=tl.program_id(1);layer=tl.program_id(2)
++    src=tl.load(sources+row).to(tl.int64)
++    dst=tl.load(dsts+row).to(tl.int64)
++    if src>=0 and dst>=0:
++        if src!=dst:
++            off=tile*BLOCK+tl.arange(0,BLOCK)
++            if tl.load(copy_flags+row)!=0:
++                state=tl.load(state_ptrs+layer).to(tl.pointer_type(tl.float32))
++                x=tl.load(state+src*STATE_STRIDE+off,mask=off<STATE_ELEMS,other=0)
++                tl.store(state+dst*STATE_STRIDE+off,x,mask=off<STATE_ELEMS)
++            if tile*BLOCK<K_ELEMS:
++                rk=tl.load(k_ptrs+layer).to(tl.pointer_type(tl.bfloat16))
++                xk=tl.load(rk+src*K_ELEMS+off,mask=off<K_ELEMS,other=0)
++                tl.store(rk+dst*K_ELEMS+off,xk,mask=off<K_ELEMS)
++            if tile*BLOCK<U_ELEMS:
++                ru=tl.load(u_ptrs+layer).to(tl.pointer_type(tl.bfloat16))
++                xu=tl.load(ru+src*U_ELEMS+off,mask=off<U_ELEMS,other=0)
++                tl.store(ru+dst*U_ELEMS+off,xu,mask=off<U_ELEMS)
++            if tile*BLOCK<G_ELEMS:
++                rg=tl.load(g_ptrs+layer).to(tl.pointer_type(tl.float32))
++                xg=tl.load(rg+src*G_ELEMS+off,mask=off<G_ELEMS,other=0)
++                tl.store(rg+dst*G_ELEMS+off,xg,mask=off<G_ELEMS)
++        if tile==0 and layer==0:
++            p=tl.load(new_positions+row)
++            ver=tl.load(new_versions+row)
++            tl.store(cursor+src,p)
++            tl.store(cursor+dst,p)
++            tl.store(version+src,ver)
++            tl.store(version+dst,ver)
++
++
++def copy_replay_slot_with_version(tables,sizes,cursor,version,reads,writes):
++    block=4096
++    grid=(reads.numel(),triton.cdiv(max(sizes[0],*sizes[2:]),block),tables[0].numel())
++    _copy_replay_slot_with_version[grid](
++        *tables,cursor,version,reads,writes,*sizes,block,num_warps=4)
++
++
++def commit_copy_versioned(tables,sizes,cursor,version,sources,candidates,accepts,
++                          dst_buffer,pos_buffer,version_buffer,copy_buffer,cap):
++    if accepts.dtype!=torch.int32 or accepts.ndim!=1 or accepts.numel()>sources.numel():
++        raise RuntimeError("ReplaySSM versioned commit accept shape/dtype mismatch")
++    rows=sources.numel()
++    _prepare_versioned_commit[(rows,)](
++        cursor,version,sources,candidates,accepts,
++        dst_buffer,pos_buffer,version_buffer,copy_buffer,
++        accepts.numel(),candidates.stride(0),candidates.stride(1),
++        candidates.shape[1],cap,1<<32,num_warps=1)
++    block=4096
++    grid=(rows,triton.cdiv(max(sizes[0],*sizes[2:]),block),tables[0].numel())
++    _copy_versioned_commit[grid](
++        *tables,cursor,version,sources,
++        dst_buffer,pos_buffer,version_buffer,copy_buffer,
++        *sizes,block,num_warps=4)
