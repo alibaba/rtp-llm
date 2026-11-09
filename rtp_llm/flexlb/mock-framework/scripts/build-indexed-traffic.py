@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seal one shared indexed replay file from anonymous text chains and media JSONL."""
+"""Seal one shared indexed replay file from anonymous text and media JSONL."""
 import argparse
 from array import array
 from contextlib import closing
@@ -36,29 +36,6 @@ def number(value, minimum, maximum=(1 << 31) - 1):
 def record(table, data):
     table.write(data)
     table.write(struct.pack(">I", zlib.crc32(data)))
-
-
-def text_length(table, count, node):
-    length = 0
-    while node:
-        low, high = 0, count
-        while low < high:
-            index = (low + high) // 2
-            table.seek(index * (CHAIN.size + 4))
-            first, parent, size = CHAIN.unpack(table.read(CHAIN.size))
-            if node < first:
-                high = index
-            elif node >= first + size:
-                low = index + 1
-            else:
-                length += node - first + 1
-                node = parent
-                break
-        else:
-            raise ValueError("unknown text prefix node")
-        if length > MAX_TOKENS:
-            raise ValueError("text template exceeds token limit")
-    return length
 
 
 def text_template(db, tokens, next_node):
@@ -114,7 +91,6 @@ def build(source, target):
         db.execute("PRAGMA cache_size=-16384")
         db.execute("CREATE TABLE edges (parent INTEGER, symbol BLOB, first INTEGER, symbols BLOB,"
                    " PRIMARY KEY(parent, symbol)) WITHOUT ROWID")
-        source_mode = None
         count = chain_count = media_count = 0
         next_node = 1
         last_arrival = -1
@@ -124,53 +100,27 @@ def build(source, target):
                 kind, *fields = json.loads(line)
                 if sealed:
                     raise ValueError("data after seal")
-                if kind == "chain":
-                    if source_mode == "tokens":
-                        raise ValueError("cannot mix anonymous tokens and prebuilt chains")
-                    source_mode = "chains"
-                    first, parent, size = fields
-                    if number(first, 1, max_id) != next_node:
-                        raise ValueError("noncontiguous text chain")
-                    size = number(size, 1, MAX_TOKENS)
-                    parent = number(parent, 0, first - 1)
-                    if next_node + size - 1 > max_id or chain_count >= (1 << 31) - 3:
-                        raise ValueError("text chain limit")
-                    chains.seek(0, 2)
-                    record(chains, CHAIN.pack(first, parent, size))
-                    chain_count += 1
-                    next_node += size
-                elif kind == "media":
+                if kind == "media":
                     media_id, width, height = fields
                     if number(media_id, 1, max_id) != media_count + 1:
                         raise ValueError("noncontiguous media ID")
                     record(media, MEDIA.pack(number(width, 1, 32768), number(height, 1, 32768)))
                     media_count += 1
-                elif kind in ("request", "tokens"):
-                    leaf, arrival, output, priority, images = fields
+                elif kind == "tokens":
+                    tokens, arrival, output, priority, images = fields
                     arrival = number(arrival, max(0, last_arrival), max_id)
                     if not isinstance(images, list) or len(images) > 256:
                         raise ValueError("invalid image list")
-                    if kind == "tokens":
-                        if source_mode == "chains":
-                            raise ValueError("cannot mix anonymous tokens and prebuilt chains")
-                        source_mode = "tokens"
-                        tokens = leaf
-                        leaf, added = text_template(db, tokens, next_node)
-                        length = len(tokens)
-                        if added:
-                            if leaf > max_id or chain_count >= (1 << 31) - 3:
-                                raise ValueError("text chain limit")
-                            record(chains, CHAIN.pack(*added))
-                            chain_count += 1
-                            next_node += added[2]
-                        if count % 256 == 255:
-                            db.commit()
-                    else:
-                        if source_mode == "tokens":
-                            raise ValueError("cannot mix anonymous tokens and prebuilt chains")
-                        source_mode = "chains"
-                        leaf = number(leaf, 0, next_node - 1)
-                        length = text_length(chains, chain_count, leaf)
+                    leaf, added = text_template(db, tokens, next_node)
+                    length = len(tokens)
+                    if added:
+                        if leaf > max_id or chain_count >= (1 << 31) - 3:
+                            raise ValueError("text chain limit")
+                        chains.write(CHAIN.pack(*added))
+                        chain_count += 1
+                        next_node += added[2]
+                    if count % 256 == 255:
+                        db.commit()
                     if not 1 <= length + len(images) <= MAX_TOKENS:
                         raise ValueError("invalid input length")
                     row = bytearray(REQUEST.pack(arrival, leaf, number(output, 1), number(priority, 0)))
@@ -199,7 +149,7 @@ def build(source, target):
         page_count = 0
         for start in range(0, chain_count, CHAINS_PER_PAGE):
             size = min(CHAINS_PER_PAGE, chain_count - start)
-            raw = b"".join(chains.read(CHAIN.size + 4)[:CHAIN.size] for _ in range(size))
+            raw = chains.read(size * CHAIN.size)
             encoded = compressor.compress(raw)
             record(pages, CHAIN_PAGE.pack(struct.unpack_from(">q", raw)[0], requests.tell(), len(encoded), size))
             requests.write(encoded)

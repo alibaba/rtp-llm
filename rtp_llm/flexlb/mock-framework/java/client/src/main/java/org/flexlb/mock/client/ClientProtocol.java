@@ -32,33 +32,32 @@ public interface ClientProtocol {
                 throw new IllegalArgumentException("Invalid finite playback plan (maximum 24 hours)");
         }
     }
-    record Item(long request_id, long index, org.flexlb.mock.client.input.ClientInput.Request input,
-                List<Integer> expectedImageTokens) {
-        public Item { if (request_id <= 0 || index < 0) throw new IllegalArgumentException("Invalid request identity"); }
-    }
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    record Shard(long sequence, @Argument(optional=true) List<String> masters, String requests_file,
+    record WorkerPlan(long sequence, @Argument(optional=true) List<String> masters, String requests_file,
                  long count, long first_index, int stride, long first_request_id, String sha256,
                  @Argument(optional=true) Double qps, @Argument(optional=true) Double replay_speed,
                  int concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms,
                  @Argument(optional=true) Boolean reuse_cache) {
-        public Shard(long sequence, List<String> masters, String requests_file, long count, long first_index,
+        public WorkerPlan(long sequence, List<String> masters, String requests_file, long count, long first_index,
                      int stride, long first_request_id, String sha256, Double qps, Double replay_speed,
                      int concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms) {
             this(sequence, masters, requests_file, count, first_index, stride, first_request_id, sha256, qps,
                 replay_speed, concurrency, queue_capacity, request_timeout_ms, drain_timeout_ms, false);
         }
-        public Shard {
-            new Start(masters, requests_file, qps, replay_speed, concurrency, queue_capacity, request_timeout_ms, drain_timeout_ms, reuse_cache);
-            masters = masters == null ? null : List.copyOf(masters);
+        public WorkerPlan {
+            masters = new Start(masters, requests_file, qps, replay_speed, concurrency, queue_capacity,
+                request_timeout_ms, drain_timeout_ms, reuse_cache).masters();
             if (sequence < 1 || count < 1 || first_index < 0 || stride < 1 || first_index >= stride || first_request_id < 1
                     || sha256 == null || !sha256.matches("[0-9a-f]{64}"))
-                throw new IllegalArgumentException("Invalid shard");
+                throw new IllegalArgumentException("Invalid worker playback plan");
             long last = Math.addExact(first_index, Math.multiplyExact(count - 1, stride));
             Math.addExact(first_request_id, last);
-            if (qps != null && last / qps > 86400) throw new IllegalArgumentException("Playback exceeds 24 hours");
         }
     }
+    static long requestCount(long total, long firstIndex, int stride) {
+        return total / stride + (firstIndex < total % stride ? 1 : 0);
+    }
+
     record Begin(long sequence, long start_epoch_ms) {}
     record Sequence(long sequence) {}
     record Ack(boolean accepted) {}
@@ -68,7 +67,7 @@ public interface ClientProtocol {
 
     Ack start(Start args) throws Exception;
     Summary stop(Empty args) throws Exception;
-    Ack prepare(Shard args) throws Exception;
+    Ack prepare(WorkerPlan args) throws Exception;
     Ack begin(Begin args);
     Ack halt(Sequence args);
     State state(Sequence args);

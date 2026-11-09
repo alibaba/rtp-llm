@@ -67,16 +67,16 @@ public final class NativeClient implements AutoCloseable {
     }
 
     public Call send(FlexlbScheduleRequestPB request, Duration timeout) {
-        return send(request, timeout, List.of());
-    }
-
-    Call send(FlexlbScheduleRequestPB request, Duration timeout, List<Integer> expectedImageTokens) {
-        Objects.requireNonNull(timeout);
-        long budget = timeout.toNanos();
-        if (budget <= 0) throw new IllegalArgumentException("Positive request timeout required");
         GenerateInputPB input;
         try { input = GenerateInputPB.parseFrom(request.getGenerateInput()); }
         catch (com.google.protobuf.InvalidProtocolBufferException error) { throw new IllegalArgumentException("Invalid native generate_input", error); }
+        return send(request, input, timeout, List.of());
+    }
+
+    Call send(FlexlbScheduleRequestPB request, GenerateInputPB input, Duration timeout, List<Integer> expectedImageTokens) {
+        Objects.requireNonNull(timeout);
+        long budget = timeout.toNanos();
+        if (budget <= 0) throw new IllegalArgumentException("Positive request timeout required");
         if (request.getRequestId() <= 0 || input.getRequestId() != request.getRequestId() || input.getTokenIdsCount() == 0
                 || input.getTokenIdsCount() != request.getSeqLen() || input.getGenerateConfig().getMaxNewTokens() < 1
                 || input.getGenerateConfig().getMaxNewTokens() != request.getMaxNewTokens() || request.getVitRouteOnly()

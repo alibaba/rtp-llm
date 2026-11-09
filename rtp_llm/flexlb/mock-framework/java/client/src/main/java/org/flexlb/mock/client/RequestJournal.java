@@ -24,10 +24,10 @@ final class RequestJournal {
     private boolean closing;
     private volatile String failure;
 
-    RequestJournal(Path path, String client, ClientProtocol.Shard plan) throws IOException {
+    RequestJournal(Path path, String client, ClientProtocol.WorkerPlan plan) throws IOException {
         this(path, client, plan, 8 * 1024 * 1024);
     }
-    RequestJournal(Path path, String client, ClientProtocol.Shard plan, int capacity) throws IOException {
+    RequestJournal(Path path, String client, ClientProtocol.WorkerPlan plan, int capacity) throws IOException {
         this.capacity = capacity;
         header = JSON.createObjectNode().put("version", 1).put("client", client)
             .put("playback", Long.toString(plan.sequence()))
