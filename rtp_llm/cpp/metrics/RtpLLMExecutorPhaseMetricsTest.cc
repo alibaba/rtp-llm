@@ -107,11 +107,11 @@ TEST_F(RtpLLMExecutorPhaseMetricsTest, ZeroRoundStillReportsPhaseGauges) {
     RtpLLMExecutorMetricsCollector collector;
     report(collector);
     const auto actual = snapshot();
-    for (const auto* name : {"rtp_llm_kv_cache_update_us", "rtp_llm_round_end_sync_us",
+    for (const char* const name : {"rtp_llm_kv_cache_update_us", "rtp_llm_round_end_sync_us",
                              "rtp_llm_dispatch_output_us", "rtp_llm_sample_input_us"}) {
-        SCOPED_TRACE(*name);
-        ASSERT_NE(actual.find(*name), actual.end());
-        EXPECT_DOUBLE_EQ(actual.find(*name)->second, 0.0);
+        SCOPED_TRACE(name);
+        ASSERT_NE(actual.find(name), actual.end());
+        EXPECT_DOUBLE_EQ(actual.find(name)->second, 0.0);
     }
 }
 
