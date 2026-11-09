@@ -45,7 +45,7 @@ def _project_with_optional_fp8(
         and CudaFp8GEMMLinear is not None
         and isinstance(projection, CudaFp8GEMMLinear)
     ):
-        return projection(fp8_input, input_scales=input_scale)
+        return projection.forward_quantized(fp8_input, input_scale)
     return projection(bf16_input)
 
 
