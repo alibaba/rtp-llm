@@ -13,6 +13,8 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalOutputPB,
     ReleaseEmbeddingPB,
 )
+from rtp_llm.multimodal.mm_process_engine import vit_source_request_id
+from rtp_llm.server.request_headers import VIT_SOURCE_REQUEST_ID_METADATA
 from rtp_llm.server.vit_proxy_server import (
     LoadBalancer,
     VitProxyRpcServer,
@@ -24,7 +26,9 @@ from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
 
 class VitWorkerRequestIdTest(TestCase):
     @patch("rtp_llm.server.vit_rpc_server.trans_mm_input", return_value=[])
-    def test_invalid_image_has_invalid_argument_status_and_typed_details(self, _convert):
+    def test_invalid_image_has_invalid_argument_status_and_typed_details(
+        self, _convert
+    ):
         engine = MagicMock()
         engine.get_embedding_result.side_effect = FtRuntimeException(
             ExceptionType.MM_WRONG_FORMAT_ERROR, "invalid image"
@@ -52,8 +56,6 @@ class VitWorkerRequestIdTest(TestCase):
         converted = [MagicMock(name="mm_input")]
         trans_mm_input.return_value = converted
         engine = MagicMock()
-        engine.wait_greennet_verdict.return_value = SimpleNamespace(passed=True)
-        engine.get_embedding_result.return_value = []
         servicer = MultimodalRpcServer.__new__(MultimodalRpcServer)
         servicer.engine = engine
         servicer._rdma = None
@@ -66,9 +68,31 @@ class VitWorkerRequestIdTest(TestCase):
         wait_context.add_callback.return_value = True
         remote_context.add_callback.return_value = True
 
+        source_ids = []
+
+        def remember_source(result):
+            def call(*args, **kwargs):
+                source_ids.append(vit_source_request_id.get())
+                return result
+
+            return call
+
+        engine.async_submit.side_effect = remember_source([])
+        engine.wait_greennet_verdict.side_effect = remember_source(
+            SimpleNamespace(passed=True)
+        )
+        engine.get_embedding_result.side_effect = remember_source([])
+        for context in (async_context, wait_context, remote_context):
+            context.invocation_metadata.return_value = (
+                (VIT_SOURCE_REQUEST_ID_METADATA, b"replay-request#attempt1"),
+            )
+
         servicer.AsyncSubmitEmbedding(request, async_context)
         servicer.WaitGreenNetVerdict(request, wait_context)
         servicer.RemoteMultimodalEmbedding(request, remote_context)
+
+        self.assertEqual(source_ids, ["replay-request#attempt1"] * 3)
+        self.assertEqual(vit_source_request_id.get(), "")
 
         engine.async_submit.assert_called_once_with(converted, 987654321)
         engine.wait_greennet_verdict.assert_called_once_with(
@@ -290,8 +314,21 @@ class VitProxyRdmaReleaseTest(TestCase):
         )
 
         servicer = VitProxyRpcServer(load_balancer, connection_pool)
+        metadata = ((VIT_SOURCE_REQUEST_ID_METADATA, b"replay-request"),)
+        context = MagicMock()
+        context.invocation_metadata.return_value = (
+            *metadata,
+            ("authorization", "example-secret"),
+        )
+        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), context)
         servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), MagicMock())
-        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), MagicMock())
+        self.assertEqual(
+            stub_a.RemoteMultimodalEmbedding.future.call_args.kwargs["metadata"],
+            metadata,
+        )
+        self.assertEqual(
+            stub_b.RemoteMultimodalEmbedding.future.call_args.kwargs["metadata"], ()
+        )
         servicer.ReleaseMultimodalEmbedding(
             ReleaseEmbeddingPB(handle=["handle-a", "handle-b-1", "handle-b-2"]),
             MagicMock(),

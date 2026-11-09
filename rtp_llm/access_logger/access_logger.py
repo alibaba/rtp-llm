@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional
 from rtp_llm.access_logger.json_util import dump_json
 from rtp_llm.access_logger.log_utils import get_handler
 from rtp_llm.access_logger.py_access_log import PyAccessLog, RequestLog, ResponseLog
+from rtp_llm.config.exceptions import FtRuntimeException
+from rtp_llm.multimodal.mm_error_messages import media_domain
 from rtp_llm.ops import MultimodalInput
 from rtp_llm.structure.request_constants import request_id_field_name
 
@@ -161,13 +163,18 @@ class MMAccessLogger(AccessLogger):
             time.strftime("%Y-%m-%d %H:%M:%S", local_time)
             + f".{int((current_time % 1) * 1000):03d}"
         )
+        error_type = None
+        if isinstance(exception, FtRuntimeException):
+            error_type = exception.exception_type.name
+        elif exception is not None:
+            error_type = type(exception).__name__
         logger.info(
             dump_json(
                 {
                     "id": request_id,
-                    "query": [mm_input.to_string() for mm_input in request],
+                    "query": [media_domain(mm_input.url) for mm_input in request],
                     "log_time": log_time,
-                    "exception": exception,
+                    "exception": error_type,
                     "response": response,
                 }
             )

@@ -1,6 +1,7 @@
 from typing import Any, Dict, Mapping, Optional
 
 QOS_PRIORITY_HEADER = "x-dashscope-inner-qos-level"
+VIT_SOURCE_REQUEST_ID_METADATA = "x-rtp-source-request-id-bin"
 DEFAULT_QOS_PRIORITY = 50
 MIN_QOS_PRIORITY = 1
 MAX_QOS_PRIORITY = 100

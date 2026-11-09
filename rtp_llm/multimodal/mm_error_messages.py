@@ -1,4 +1,5 @@
-from typing import NoReturn
+from typing import NoReturn, Optional
+from urllib.parse import urlsplit
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 
@@ -28,3 +29,51 @@ def raise_mm(
     code: ExceptionType = ExceptionType.MM_WRONG_FORMAT_ERROR,
 ) -> NoReturn:
     raise FtRuntimeException(code, message)
+
+
+def media_domain(url: str) -> Optional[str]:
+    try:
+        return urlsplit(url).hostname
+    except ValueError:
+        return None
+
+
+class MediaDownloadError(FtRuntimeException):
+    """Safe diagnostics that survive the spawn-based preprocessing pool."""
+
+    def __init__(
+        self,
+        code: ExceptionType,
+        message: str,
+        failure_type: str,
+        http_status: Optional[int],
+        domain: Optional[str],
+        elapsed_ms: float,
+        retry_count: int,
+    ):
+        super().__init__(code, message)
+        self.failure_type = failure_type
+        self.http_status = http_status
+        self.domain = domain
+        self.elapsed_ms = elapsed_ms
+        self.retry_count = retry_count
+
+    def __reduce__(self):
+        return type(self), (
+            self.exception_type,
+            self.message,
+            self.failure_type,
+            self.http_status,
+            self.domain,
+            self.elapsed_ms,
+            self.retry_count,
+        )
+
+    def metric_tags(self) -> dict[str, str]:
+        status = self.http_status
+        return {
+            "failure_type": self.failure_type,
+            "http_status": (
+                str(status) if status is not None and 100 <= status <= 599 else "none"
+            ),
+        }

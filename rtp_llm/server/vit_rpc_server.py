@@ -1,6 +1,7 @@
 import logging
 import threading
 from concurrent import futures
+from contextlib import contextmanager
 
 import grpc
 import torch
@@ -29,13 +30,35 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 )
 from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
+from rtp_llm.multimodal.mm_process_engine import (
+    MMEmbeddingRes,
+    MMProcessEngine,
+    vit_source_request_id,
+)
 from rtp_llm.multimodal.multimodal_util import (
     build_multimodal_output_pb,
     trans_mm_input,
 )
 from rtp_llm.ops import MMPreprocessConfig, MMRdmaEncoderOp, MultimodalInput
+from rtp_llm.server.request_headers import VIT_SOURCE_REQUEST_ID_METADATA
 from rtp_llm.server.server_args.server_args import setup_args
+
+
+@contextmanager
+def _download_log_context(context):
+    source_id = next(
+        (
+            value
+            for key, value in (context.invocation_metadata() or ())
+            if key == VIT_SOURCE_REQUEST_ID_METADATA
+        ),
+        b"",
+    )
+    token = vit_source_request_id.set(source_id[:256].decode("utf-8", errors="replace"))
+    try:
+        yield
+    finally:
+        vit_source_request_id.reset(token)
 
 
 def _rpc_timeout_ms(context, default_ms: int) -> int:
@@ -170,7 +193,8 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
-            self.engine.async_submit(converted_inputs, multimodal_inputs.request_id)
+            with _download_log_context(context):
+                self.engine.async_submit(converted_inputs, multimodal_inputs.request_id)
             return EmptyPB()
         except TimeoutError as error:
             _abort_ft_runtime(
@@ -187,12 +211,13 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
             cancellation_event = self._register_rpc_completion(context)
-            verdict = self.engine.wait_greennet_verdict(
-                converted_inputs,
-                timeout_ms=_rpc_timeout_ms(context, 60000),
-                request_id=multimodal_inputs.request_id,
-                cancellation_event=cancellation_event,
-            )
+            with _download_log_context(context):
+                verdict = self.engine.wait_greennet_verdict(
+                    converted_inputs,
+                    timeout_ms=_rpc_timeout_ms(context, 60000),
+                    request_id=multimodal_inputs.request_id,
+                    cancellation_event=cancellation_event,
+                )
         except TimeoutError as error:
             _abort_ft_runtime(
                 context, FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, str(error))
@@ -220,12 +245,13 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
             cancellation_event = self._register_rpc_completion(context)
-            results = self.engine.get_embedding_result(
-                converted_inputs,
-                timeout_ms=_rpc_timeout_ms(context, 120000),
-                request_id=multimodal_inputs.request_id,
-                cancellation_event=cancellation_event,
-            )
+            with _download_log_context(context):
+                results = self.engine.get_embedding_result(
+                    converted_inputs,
+                    timeout_ms=_rpc_timeout_ms(context, 120000),
+                    request_id=multimodal_inputs.request_id,
+                    cancellation_event=cancellation_event,
+                )
             merged = merge_embedding_results(results)
             logging.debug(
                 "[VIT] transport negotiation: support_rdma=%s, rdma_ready=%s, embeddings=%d",

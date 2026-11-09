@@ -1,8 +1,9 @@
 #pragma once
 
-#include <grpcpp/support/status_code_enum.h>
-#include <string>
-#include <utility>
+#include <cstdint>
+#include <grpcpp/support/status.h>
+
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
@@ -23,6 +24,24 @@ inline ErrorCode multimodalRpcErrorCode(grpc::StatusCode status) {
         default:
             return ErrorCode::MM_PROCESS_ERROR;
     }
+}
+
+inline bool isMultimodalRpcErrorCode(int64_t code) {
+    return code >= static_cast<int64_t>(ErrorCode::MM_LONG_PROMPT_ERROR)
+           && code <= static_cast<int64_t>(ErrorCode::UNSAFE_OUTPUT_CONTENT);
+}
+
+inline ErrorCode multimodalRpcErrorCode(const grpc::Status& status) {
+    ErrorDetailsPB details;
+    if (details.ParseFromString(status.error_details())) {
+        const auto code = details.error_code();
+        // Accept the ViT application codes only. Unknown, absent, or malformed
+        // details use the existing gRPC transport mapping.
+        if (isMultimodalRpcErrorCode(code)) {
+            return static_cast<ErrorCode>(code);
+        }
+    }
+    return multimodalRpcErrorCode(status.error_code());
 }
 
 }  // namespace rtp_llm

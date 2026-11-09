@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import threading
+import time
 from io import BytesIO
 from typing import Any, List, Optional
 
@@ -18,7 +19,12 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputsPB,
     MultimodalOutputPB,
 )
-from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
+from rtp_llm.multimodal.mm_error_messages import (
+    MMErr,
+    MediaDownloadError,
+    media_domain,
+    raise_mm,
+)
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
@@ -38,7 +44,7 @@ def _default_request_get(url, headers):
     return requests.get(url, stream=True, headers=headers, timeout=10)
 
 
-def request_get(url, headers):
+def request_get(url, headers, *, on_retry=None):
     global REQUEST_GET
     if REQUEST_GET is None:
         try:
@@ -56,11 +62,8 @@ def request_get(url, headers):
         except requests.exceptions.ConnectTimeout:
             if retry_count == CONNECT_TIMEOUT_RETRIES:
                 raise
-            logger.warning(
-                "multimodal download connect timeout; retrying request (%d/%d)",
-                retry_count + 1,
-                CONNECT_TIMEOUT_RETRIES,
-            )
+            if on_retry is not None:
+                on_retry(retry_count + 1)
 
 
 def _get_http_heads(download_headers: str = ""):
@@ -242,10 +245,32 @@ def _download_http_content(
     from urllib3.exceptions import ReadTimeoutError
 
     response = None
+    http_status = None
+    started = time.monotonic()
+    retry_count = 0
+
+    def on_retry(count):
+        nonlocal retry_count
+        retry_count = count
+
+    def failure(kind: str, message: str, code: ExceptionType) -> MediaDownloadError:
+        return MediaDownloadError(
+            code,
+            message,
+            kind,
+            http_status,
+            media_domain(url),
+            (time.monotonic() - started) * 1000,
+            retry_count,
+        )
+
     try:
-        response = request_get(url, headers)
-        if response.status_code != 200:
-            raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+        response = request_get(url, headers, on_retry=on_retry)
+        http_status = response.status_code
+        if http_status != 200:
+            raise failure(
+                "http_status", MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED
+            )
 
         if max_file_size_kb is not None and max_file_size_kb > 0:
             content_length = response.headers.get("Content-Length")
@@ -269,23 +294,41 @@ def _download_http_content(
         return content
     except FtRuntimeException:
         raise
+    except requests.exceptions.ConnectTimeout:
+        raise failure(
+            "connect_timeout", MMErr.DL_TIMEOUT, ExceptionType.MM_PROCESS_ERROR
+        ) from None
+    except requests.exceptions.ReadTimeout:
+        raise failure(
+            "read_timeout", MMErr.DL_TIMEOUT, ExceptionType.MM_PROCESS_ERROR
+        ) from None
     except (requests.exceptions.Timeout, TimeoutError):
-        raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_PROCESS_ERROR)
+        raise failure(
+            "timeout", MMErr.DL_TIMEOUT, ExceptionType.MM_PROCESS_ERROR
+        ) from None
     except requests.exceptions.ConnectionError as error:
         # Response.iter_content wraps urllib3's read timeout in ConnectionError.
         if error.args and isinstance(error.args[0], ReadTimeoutError):
-            raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_PROCESS_ERROR)
-        raise_mm(MMErr.URL_INVALID, ExceptionType.MM_PROCESS_ERROR)
+            raise failure(
+                "read_timeout", MMErr.DL_TIMEOUT, ExceptionType.MM_PROCESS_ERROR
+            ) from None
+        raise failure(
+            "connection_error", MMErr.URL_INVALID, ExceptionType.MM_PROCESS_ERROR
+        ) from None
     except (
         requests.exceptions.InvalidURL,
         requests.exceptions.MissingSchema,
         requests.exceptions.InvalidSchema,
         requests.exceptions.URLRequired,
     ):
-        raise_mm(MMErr.URL_INVALID, ExceptionType.MM_PROCESS_ERROR)
+        raise failure(
+            "invalid_url", MMErr.URL_INVALID, ExceptionType.MM_PROCESS_ERROR
+        ) from None
     except Exception:
-        logger.exception("failed to download multimodal content")
-        raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+        # Transport exceptions can embed a signed URL or headers.
+        raise failure(
+            "request_error", MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED
+        ) from None
     finally:
         if response is not None:
             response.close()

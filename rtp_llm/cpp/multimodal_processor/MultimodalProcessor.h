@@ -62,7 +62,8 @@ private:
     virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                               std::string                                 ip_port = "",
                                                               int64_t              request_id                     = 0,
-                                                              grpc::ServerContext* server_context = nullptr) = 0;
+                                                              grpc::ServerContext* server_context    = nullptr,
+                                                              const std::string&   source_request_id = "") = 0;
 
     ErrorResult<ExpandedOutput>
     expandTokenIds(const std::vector<torch::Tensor>&                mm_embedding,

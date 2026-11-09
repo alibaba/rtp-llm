@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/model_rpc/PrefillBatchRpcServer.h"
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalRpcError.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <algorithm>
@@ -136,12 +137,12 @@ void addBatchError(EnqueueBatchResponsePB* response, int64_t request_id, int64_t
 }
 
 int64_t batchErrorCode(const grpc::Status& status) {
-    // AutoTPM 8429 is carried in gRPC details because RESOURCE_EXHAUSTED is
-    // only its transport projection. Preserve the domain code when adapting
-    // the status into EnqueueBatchErrorPB.
+    // Preserve priority preemption and typed multimodal errors when adapting
+    // the transport status into a per-request EnqueueBatchErrorPB.
     ErrorDetailsPB details;
     if (!status.error_details().empty() && details.ParseFromString(status.error_details())
-        && details.error_code() == static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED)) {
+        && (details.error_code() == static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED)
+            || isMultimodalRpcErrorCode(details.error_code()))) {
         return details.error_code();
     }
     return status.error_code();

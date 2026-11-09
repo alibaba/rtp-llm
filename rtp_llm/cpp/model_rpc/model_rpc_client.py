@@ -24,6 +24,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     RpcServiceStub,
 )
 from rtp_llm.server.request_headers import (
+    VIT_SOURCE_REQUEST_ID_METADATA,
     extract_correlation_request_id,
     extract_trace_id,
     resolve_qos_priority,
@@ -794,7 +795,17 @@ class ModelRpcClient(object):
             channel = await self._channel_pool.get(vit_addr)
             stub = MultimodalRpcServiceStub(channel)
             try:
-                await stub.WaitGreenNetVerdict(mm_inputs_pb, timeout=120.0)
+                source_request_id = input_pb.request_info.request_id.encode("utf-8")[
+                    :256
+                ]
+                metadata = (
+                    ((VIT_SOURCE_REQUEST_ID_METADATA, source_request_id),)
+                    if source_request_id
+                    else None
+                )
+                await stub.WaitGreenNetVerdict(
+                    mm_inputs_pb, timeout=120.0, metadata=metadata
+                )
             except grpc.RpcError as e:
                 error_details = ErrorDetailsPB()
                 metadata = e.trailing_metadata()

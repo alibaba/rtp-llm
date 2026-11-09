@@ -187,19 +187,23 @@ private:
         return mm_output;
     }
 
-    static std::unique_ptr<grpc::ClientContext> makeClientContext(grpc::ServerContext* server_context) {
-        if (server_context == nullptr) {
-            return std::make_unique<grpc::ClientContext>();
-        }
+    static std::unique_ptr<grpc::ClientContext> makeClientContext(grpc::ServerContext* server_context,
+                                                                  const std::string&   source_request_id) {
         grpc::PropagationOptions options;
         options.enable_deadline_propagation().enable_cancellation_propagation();
-        return grpc::ClientContext::FromServerContext(*server_context, options);
+        auto context = server_context ? grpc::ClientContext::FromServerContext(*server_context, options) :
+                                        std::make_unique<grpc::ClientContext>();
+        if (!source_request_id.empty()) {
+            context->AddMetadata("x-rtp-source-request-id-bin", source_request_id.substr(0, 256));
+        }
+        return context;
     }
 
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                       std::string                                 ip_port    = "",
                                                       int64_t                                     request_id = 0,
-                                                      grpc::ServerContext* server_context = nullptr) {
+                                                      grpc::ServerContext* server_context                    = nullptr,
+                                                      const std::string&   source_request_id = "") override {
         if (ip_port == "") {
             return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "ip:port is empty in remote multimodal processing");
         }
@@ -210,7 +214,7 @@ private:
         auto&              connection = connection_status.value();
         auto               stub       = connection.stub;
         MultimodalOutputPB output_pb;
-        auto               context = makeClientContext(server_context);
+        auto               context = makeClientContext(server_context, source_request_id);
 
         auto request = QueryConverter::transMMInputsPB(mm_inputs, request_id);
         if (rdma_transport_ != nullptr) {
@@ -218,7 +222,7 @@ private:
         }
         auto status = stub->RemoteMultimodalEmbedding(context.get(), request, &output_pb);
         if (!status.ok()) {
-            return ErrorInfo(multimodalRpcErrorCode(status.error_code()), status.error_message());
+            return ErrorInfo(multimodalRpcErrorCode(status), status.error_message());
         }
 
         // RDMA fast path: encoder returned descriptor(s) instead of inline output bytes. The
@@ -287,10 +291,10 @@ private:
                                 descs.size());
             request.set_support_rdma(false);
             MultimodalOutputPB fallback_pb;
-            auto               fallback_context = makeClientContext(server_context);
+            auto               fallback_context = makeClientContext(server_context, source_request_id);
             auto fallback_status = stub->RemoteMultimodalEmbedding(fallback_context.get(), request, &fallback_pb);
             if (!fallback_status.ok()) {
-                return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                return ErrorInfo(multimodalRpcErrorCode(fallback_status),
                                  "rdma read failed and inline-bytes fallback also failed: "
                                      + fallback_status.error_message());
             }

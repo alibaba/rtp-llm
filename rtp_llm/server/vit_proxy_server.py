@@ -31,11 +31,20 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
+from rtp_llm.server.request_headers import VIT_SOURCE_REQUEST_ID_METADATA
 
 # Default per-request gRPC timeout for proxy → worker forwarding. Per-request
 # override comes from MMPreprocessConfigPB.mm_timeout_ms if set (>0).
 DEFAULT_PROXY_RPC_TIMEOUT_SECONDS = VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0
 RDMA_HANDLE_ROUTE_TTL_SECONDS = 120.0
+
+
+def _download_log_metadata(context):
+    return tuple(
+        (key, value[:256])
+        for key, value in (context.invocation_metadata() or ())
+        if key == VIT_SOURCE_REQUEST_ID_METADATA
+    )
 
 
 def _resolve_rpc_timeout_seconds(
@@ -220,7 +229,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 f"timeout: {timeout_s}s"
             )
             worker_call = stub.RemoteMultimodalEmbedding.future(
-                request, timeout=timeout_s
+                request, timeout=timeout_s, metadata=_download_log_metadata(context)
             )
             if not context.add_callback(worker_call.cancel):
                 worker_call.cancel()
@@ -283,7 +292,9 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             worker_address = self.load_balancer.get_worker()
             self.load_balancer.increment_connections(worker_address)
             stub = self.connection_pool.get_stub(worker_address)
-            return stub.AsyncSubmitEmbedding(request, timeout=5.0)
+            return stub.AsyncSubmitEmbedding(
+                request, timeout=5.0, metadata=_download_log_metadata(context)
+            )
         except grpc.RpcError as e:
             logging.error(
                 f"RPC error when forwarding AsyncSubmit to worker {worker_address}: {e.code()} - {e.details()}"

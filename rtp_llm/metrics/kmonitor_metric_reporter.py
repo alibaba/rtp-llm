@@ -65,6 +65,7 @@ class AccMetrics(Enum):
     TOOL_CALL_LOOP_QPS_METRIC = "py_rtp_tool_call_loop_qps"
     VIT_QPS_METRIC = "py_rtp_vit_qps"
     VIT_ERROR_QPS_METRIC = "py_rtp_vit_error_qps"
+    VIT_MEDIA_DOWNLOAD_FAILURE_QPS_METRIC = "py_rtp_vit_media_download_failure_qps"
     VIT_SUCCESS_QPS_METRIC = "py_rtp_vit_success_qps"
     VIT_PROCESS_POOL_RESTART_QPS_METRIC = "py_rtp_vit_process_pool_restart_qps"
     VIT_CUDA_GRAPH_HIT_QPS_METRIC = "py_rtp_vit_cuda_graph_hit_qps"

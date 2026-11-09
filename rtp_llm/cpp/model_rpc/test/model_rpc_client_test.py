@@ -1,8 +1,9 @@
 import asyncio
+import importlib
 import struct
 import sys
 from enum import Enum
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Mock the ops module to avoid CUDA dependency in this unit test
 # This MUST be at the very top before any other imports, even before unittest
@@ -44,6 +45,7 @@ from rtp_llm.config.log_config import setup_logging
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
     StreamState,
+    _make_multimodal_inputs_pb,
     trans_input,
     trans_output,
 )
@@ -53,6 +55,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
     TensorPB,
 )
+from rtp_llm.server.request_headers import VIT_SOURCE_REQUEST_ID_METADATA
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
@@ -252,6 +255,34 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(mm_inputs_pb.request_id, 987654321)
         self.assertEqual(
             mm_inputs_pb.multimodal_inputs[0].multimodal_url, "image://test"
+        )
+
+    def test_greennet_wait_carries_download_log_correlation(self):
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        client._channel_pool = SimpleNamespace(get=AsyncMock())
+        input_py = SimpleNamespace(
+            generate_config=SimpleNamespace(
+                role_addrs=[
+                    SimpleNamespace(role=RoleType.VIT, ip="127.0.0.1", grpc_port=1234)
+                ]
+            )
+        )
+        input_pb = GenerateInputPB(request_id=987654321)
+        input_pb.request_info.request_id = "replay-request#attempt1"
+        stub = SimpleNamespace(WaitGreenNetVerdict=AsyncMock())
+        greennet = importlib.import_module("rtp_llm.multimodal.greennet_hook")
+        rpc_client_module = sys.modules[ModelRpcClient.__module__]
+        with patch.object(
+            greennet, "greennet_enabled", return_value=True
+        ), patch.object(
+            rpc_client_module, "MultimodalRpcServiceStub", return_value=stub
+        ):
+            asyncio.run(client._wait_greennet_verdict(input_py, input_pb))
+        call = stub.WaitGreenNetVerdict.await_args
+        self.assertEqual(call.args[0].request_id, 987654321)
+        self.assertEqual(
+            call.kwargs["metadata"],
+            ((VIT_SOURCE_REQUEST_ID_METADATA, b"replay-request#attempt1"),),
         )
 
     def test_trans_input_keeps_fractional_fps_and_max_long_side(self):

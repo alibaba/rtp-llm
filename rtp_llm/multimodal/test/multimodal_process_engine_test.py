@@ -30,17 +30,19 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputPB,
     MultimodalInputsPB,
 )
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.multimodal.greennet_hook import (
     GreenNetHandle,
     GreenNetProvider,
     GreenNetVerdict,
 )
-from rtp_llm.multimodal.mm_error_messages import MMErr
+from rtp_llm.multimodal.mm_error_messages import MMErr, MediaDownloadError
 from rtp_llm.multimodal.mm_process_engine import (
     MMEmbeddingAsyncCache,
     MMEmbeddingCacheEntry,
     MMProcessEngine,
     MMWorkItem,
+    vit_source_request_id,
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
@@ -1380,17 +1382,64 @@ class MMProcessEngineGreenNetTest(TestCase):
 
 
 class MMAccessLoggerRequestIdTest(TestCase):
-    def test_request_id_is_serialized_at_top_level(self):
+    def test_access_log_keeps_request_id_and_only_the_media_domain(self):
         access_logger = MMAccessLogger.__new__(MMAccessLogger)
         access_logger.query_logger = MagicMock()
-        mm_input = MagicMock()
-        mm_input.to_string.return_value = "image://test"
+        access_logger.logger = MagicMock()
+        url = "https://user:pass@example.com/media?signature=secret"
+        mm_input = SimpleNamespace(url=url)
 
         access_logger.log_query_access([mm_input], request_id=123456)
+        access_logger.log_exception_access(
+            [mm_input], ValueError(url), request_id=123456
+        )
 
-        payload = json.loads(access_logger.query_logger.info.call_args.args[0])
-        self.assertEqual(payload["id"], 123456)
-        self.assertEqual(payload["query"], ["image://test"])
+        for logger in (access_logger.query_logger, access_logger.logger):
+            message = logger.info.call_args.args[0]
+            self.assertNotIn("secret", message)
+            self.assertNotIn("/media", message)
+            self.assertNotIn("user:pass", message)
+            payload = json.loads(message)
+            self.assertEqual(payload["id"], 123456)
+            self.assertEqual(payload["query"], ["example.com"])
+
+    def test_download_failure_log_correlates_prefill_retry(self):
+        error = MediaDownloadError(
+            ExceptionType.MM_DOWNLOAD_FAILED,
+            MMErr.DL_FAILED,
+            "http_status",
+            403,
+            "example.com",
+            12.5,
+            0,
+        )
+        token = vit_source_request_id.set("replay-request#attempt1")
+        try:
+            with self.assertLogs(level="WARNING") as logs, patch(
+                "rtp_llm.multimodal.mm_process_engine.kmonitor.report"
+            ) as report:
+                MMProcessEngine._report_download_failure(123456, error)
+        finally:
+            vit_source_request_id.reset(token)
+        self.assertEqual(
+            json.loads(logs.records[0].getMessage()),
+            {
+                "event": "vit_media_download_failed",
+                "request_id": 123456,
+                "source_request_id": "replay-request",
+                "request_retry_count": 1,
+                "media_domain": "example.com",
+                "http_status": 403,
+                "failure_type": "http_status",
+                "elapsed_ms": 12.5,
+                "retry_count": 0,
+            },
+        )
+        report.assert_called_once_with(
+            AccMetrics.VIT_MEDIA_DOWNLOAD_FAILURE_QPS_METRIC,
+            1,
+            {"failure_type": "http_status", "http_status": "403"},
+        )
 
 
 _DEFAULT_CONFIG = [-1, -1, -1, -1, -1, -1, -1, [], 30000]

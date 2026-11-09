@@ -1,12 +1,15 @@
 import asyncio
 import concurrent.futures
 import gc
+import json
 import logging
 import multiprocessing.pool
 import os
+import re
 import signal
 import threading
 import time
+from contextvars import ContextVar, copy_context
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -27,6 +30,7 @@ from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingCache,
     MMEmbeddingCacheEntry,
 )
+from rtp_llm.multimodal.mm_error_messages import MediaDownloadError
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.mm_scheduler import MMScheduler
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
@@ -43,6 +47,7 @@ from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.time_util import Timer, timer_wrapper
 
+vit_source_request_id: ContextVar[str] = ContextVar("vit_source_request_id", default="")
 _worker_vit_config: Optional[VitConfig] = None
 _worker_preprocess_params: Optional[dict] = None
 _worker_preprocess_func: Optional[Callable] = None
@@ -947,14 +952,42 @@ class MMProcessEngine:
         except Exception as e:
             for work_item in work_items:
                 work_item.fail_cache(e)
-            torch.cuda.empty_cache()
-            gc.collect()
             if not self.is_proxy_mode:
                 kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
+                if isinstance(e, MediaDownloadError):
+                    self._report_download_failure(request_id, e)
+            torch.cuda.empty_cache()
+            gc.collect()
             self._access_logger.log_exception_access(mm_inputs, e, request_id)
             raise
         finally:
             self.dec_query_num()
+
+    @staticmethod
+    def _report_download_failure(request_id: int, error: MediaDownloadError) -> None:
+        source_id = vit_source_request_id.get()
+        retry = re.search(r"#attempt([0-9]{1,6})$", source_id)
+        logging.warning(
+            "%s",
+            json.dumps(
+                {
+                    "event": "vit_media_download_failed",
+                    "request_id": request_id,
+                    "source_request_id": (
+                        source_id[: retry.start()] if retry else source_id
+                    ),
+                    "request_retry_count": int(retry.group(1)) if retry else 0,
+                    "media_domain": error.domain,
+                    "http_status": error.http_status,
+                    "failure_type": error.failure_type,
+                    "elapsed_ms": round(error.elapsed_ms, 2),
+                    "retry_count": error.retry_count,
+                }
+            ),
+        )
+        kmonitor.report(
+            AccMetrics.VIT_MEDIA_DOWNLOAD_FAILURE_QPS_METRIC, 1, error.metric_tags()
+        )
 
     def _create_work_items(
         self,
@@ -1416,6 +1449,7 @@ class MMProcessEngine:
             try:
                 for mm_input, cache_key, entry in active_pending:
                     future = self._async_compute_executor.submit(
+                        copy_context().run,
                         self._run_async_compute,
                         [mm_input],
                         cache_key,

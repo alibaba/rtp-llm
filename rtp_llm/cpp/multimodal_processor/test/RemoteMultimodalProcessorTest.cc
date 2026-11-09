@@ -19,6 +19,24 @@ TEST(MultimodalRpcErrorTest, UnclassifiedRpcFailuresRemainInternal) {
     EXPECT_EQ(multimodalRpcErrorCode(grpc::StatusCode::UNAVAILABLE), ErrorCode::MM_PROCESS_ERROR);
 }
 
+TEST(MultimodalRpcErrorTest, PreservesTypedDownloadFailureFromVit) {
+    ErrorDetailsPB details;
+    details.set_error_code(static_cast<int>(ErrorCode::MM_DOWNLOAD_FAILED));
+    grpc::Status status(grpc::StatusCode::INTERNAL, "download failed", details.SerializeAsString());
+    EXPECT_EQ(multimodalRpcErrorCode(status), ErrorCode::MM_DOWNLOAD_FAILED);
+}
+
+TEST(MultimodalRpcErrorTest, InvalidOrUnknownDetailsKeepTheTransportMapping) {
+    ErrorDetailsPB details;
+    details.set_error_code(906 + (1LL << 32));
+    EXPECT_EQ(multimodalRpcErrorCode(grpc::Status(grpc::StatusCode::INTERNAL, "", details.SerializeAsString())),
+              ErrorCode::MM_PROCESS_ERROR);
+    EXPECT_EQ(multimodalRpcErrorCode(grpc::Status(grpc::StatusCode::UNAVAILABLE, "", "\xff")),
+              ErrorCode::MM_PROCESS_ERROR);
+    EXPECT_EQ(multimodalRpcErrorCode(grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "")),
+              ErrorCode::GENERATE_TIMEOUT);
+}
+
 class FakeMMRdmaTransport: public MMRdmaTransport {
 public:
     bool exportEmbedding(const std::vector<torch::Tensor>&,
