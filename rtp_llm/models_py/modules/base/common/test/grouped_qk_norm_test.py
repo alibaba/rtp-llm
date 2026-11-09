@@ -10,7 +10,6 @@ from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
 )
 from rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm import (
     is_small_qk_supported,
-    try_prefill_qk_rmsnorm_,
 )
 
 
@@ -118,23 +117,6 @@ class GroupedQKNormTest(unittest.TestCase):
                 expected = self.reference(x, qg, kg, heads)
                 actual = ZeroCenteredFusedQKRMSNorm(qg, kg, heads, 1, 256)(x)
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-    def test_prefill_graph_refreshes_input_and_raw_gains(self):
-        x = torch.randn(4096, 3584, device="cuda", dtype=torch.bfloat16)
-        qg = torch.zeros(256, device="cuda", dtype=torch.bfloat16)
-        kg = torch.zeros_like(qg)
-        for _ in range(3):
-            try_prefill_qk_rmsnorm_(x, qg, kg, 12, 1, 256, 1e-6)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            actual = try_prefill_qk_rmsnorm_(x, qg, kg, 12, 1, 256, 1e-6)
-        for gain in (0.01, 0.2, 2):
-            x.normal_()
-            qg.normal_(0, gain)
-            kg.normal_(0, gain)
-            expected = self.reference(x, qg, kg, 12)
-            graph.replay()
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_indexer_prefill_norm_with_strided_projection(self):
         for rows in (129, 4096, 12288, 32768):

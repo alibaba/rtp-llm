@@ -1,6 +1,6 @@
-#include "rtp_llm/models_py/bindings/common/kernels/sampling_temperature.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/sampling/temperature_host.h"
 #include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
-#include "rtp_llm/models_py/bindings/common/kernels/sampling_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/sampling/host_utils.h"
 
 namespace rtp_llm {
 namespace {
@@ -16,8 +16,8 @@ void applySamplerTemperature(const torch::Tensor& logits, const torch::Tensor& t
     if (canUseTiledTemperature(logits)) {
         invokeTiledTemperaturePenalty(logits.data_ptr<float>(), temperatures.data_ptr<float>(), batch, vocab, stream);
     } else {
-        invokeBatchApplyTemperaturePenalty(logits.data_ptr<float>(), (float*)nullptr, temperatures.data_ptr<float>(),
-                                           batch, vocab, vocab, stream);
+        invokeBatchApplyTemperaturePenalty(
+            logits.data_ptr<float>(), (float*)nullptr, temperatures.data_ptr<float>(), batch, vocab, vocab, stream);
     }
 }
 

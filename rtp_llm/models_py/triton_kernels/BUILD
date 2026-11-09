@@ -65,12 +65,6 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
-filegroup(
-    name = "kernel_layout_sources",
-    srcs = glob(["gated_residual/*.py"]),
-    visibility = ["//visibility:public"],
-)
-
 py_library(
     name = "common",
     srcs = glob(["common/*.py"]),

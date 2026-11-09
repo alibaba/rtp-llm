@@ -21,6 +21,19 @@ from rtp_llm.utils.model_weight import W
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class FactoryIsolationTest(unittest.TestCase):
+    def test_missing_or_uninspectable_histogram_keeps_torch_fallback(self):
+        import triton.language as tl
+
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.decode_capabilities import (
+            masked_histogram_available,
+        )
+
+        self.assertTrue(masked_histogram_available())
+        with patch.object(tl, "histogram", None):
+            self.assertFalse(masked_histogram_available())
+        with patch("inspect.signature", side_effect=ValueError):
+            self.assertFalse(masked_histogram_available())
+
     def test_legacy_fp8_mlp_keeps_separate_activation_and_projection(self):
         module = DenseMLP.__new__(DenseMLP)
         torch.nn.Module.__init__(module)

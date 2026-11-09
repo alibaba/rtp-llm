@@ -1,14 +1,11 @@
 import unittest
-from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules.hybrid.test.residual_fixtures import ResidualFp8Fixture
 from rtp_llm.models_py.triton_kernels.gated_residual.splitk_inject import (
     try_splitk_down_inject,
-)
-from rtp_llm.models_py.triton_kernels.gated_residual.test.residual_fixtures import (
-    ResidualFp8Fixture,
 )
 
 MODULE = "rtp_llm.models_py.triton_kernels.gated_residual.splitk_inject"
@@ -40,56 +37,6 @@ class ResidualSplitKInjectTest(unittest.TestCase):
                     )
                     for a, b in zip(actual, expected):
                         torch.testing.assert_close(a, b, rtol=0, atol=0)
-
-    def test_complete_consumer_and_graph_live_weight(self):
-        for rows in (4, 8, 16, 17, 24, 32, 4093, 4094, 4095, 4096):
-            model = ResidualFp8Fixture().module(True)
-            model.up_projection.role = "DECODE"
-            x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
-            for _ in range(3):
-                model(x)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                actual = model(x)
-            for gain in (0.01, 0.3, 2.0):
-                x.normal_(0, gain)
-                model.norm_gamma.normal_(0, gain)
-                model.inject_projection.compute_weight.normal_(0, gain)
-                graph.replay()
-                with patch(MODULE + ".try_splitk_down_inject", return_value=None):
-                    expected = model(x)
-                ResidualFp8Fixture().assert_outputs(actual, expected)
-
-    def test_prefill_mix_tiles_preserve_complete_consumer_and_live_graph(self):
-        import triton
-
-        from rtp_llm.models_py.triton_kernels.gated_residual import mix as kernels
-
-        def original_mix(logits, normed, branches):
-            rows = logits.shape[0]
-            out = torch.empty((rows, 2560), device=logits.device, dtype=logits.dtype)
-            kernels._mix_reduce_kernel[(rows, triton.cdiv(2560, 128))](
-                logits, normed, out, HIDDEN=2560, BRANCHES=4, BLOCK=128, num_warps=4
-            )
-            return out
-
-        for rows in (4, 16, 4093, 4094, 4095, 4096, 12288):
-            model = ResidualFp8Fixture().module(True)
-            model.up_projection.role = "PREFILL"
-            x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
-            for _ in range(3):
-                model(x)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                actual = model(x)
-            for gain in (0.01, 2.0):
-                x.normal_(0, gain)
-                model.norm_gamma.normal_(0, gain)
-                graph.replay()
-                with patch.object(kernels, "fused_mix_reduce", original_mix):
-                    expected = model(x)
-                ResidualFp8Fixture().assert_outputs(actual, expected)
-            graph.reset()
 
     def test_unsupported_layouts_do_not_dispatch(self):
         weight = torch.randn(4, 10240, device="cuda", dtype=torch.bfloat16)

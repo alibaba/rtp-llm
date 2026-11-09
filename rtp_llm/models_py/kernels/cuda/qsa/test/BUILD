@@ -89,13 +89,6 @@ models_py_test(
 )
 
 models_py_test(
-    name = "main_qk_norm_rope_test",
-    src = "main_qk_norm_rope_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = ["//rtp_llm/models_py/modules/qwen4_exp/test:test_support"],
-)
-
-models_py_test(
     name = "qsa_cub_topk_test",
     src = "qsa_cub_topk_test.py",
     gpu = "RTX_5000_PRO_CU13",
@@ -117,4 +110,40 @@ models_py_test(
     name = "draft_qsa_metadata_test",
     src = "draft_qsa_metadata_test.py",
     gpu = "RTX_5000_PRO_CU13",
+)
+
+py_library(
+    testonly = True,
+    name = "fp8_kv_test_support",
+    srcs = ["fp8_kv_fixture.py"],
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+models_py_test(
+    name = "sparse_paged_fmha_test",
+    src = "sparse_paged_fmha_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [
+        "//rtp_llm/models_py/kernels/cuda/qsa/test/reference:sparse_paged_reference",
+    ],
+)
+
+models_py_test(
+    name = "fp8_kv_test",
+    src = "fp8_kv_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [
+        ":fp8_kv_test_support",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test/reference:sparse_paged_reference",
+    ],
+)
+
+models_py_test(
+    name = "topk_test",
+    src = "topk_test.py",
+    gpu = "L20_CU13",
+    deps = [
+        "//rtp_llm/models_py/kernels/cuda/qsa/test/reference:math_references",
+    ],
 )

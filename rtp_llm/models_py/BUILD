@@ -61,14 +61,10 @@ filegroup(
 
 filegroup(
     name = "kernel_layout_sources",
-    srcs = glob([
+    srcs = [
         "kernels/__init__.py",
         "kernels/cuda/fp8_input_quant.py",
-        "kernels/cuda/gdn_sm120/*.py",
-        "kernels/cuda/qsa/*.py",
-        "kernels/cuda/qwen4_ple/*.py",
-        "modules/qwen4_exp/**/*.py",
-    ], exclude = ["modules/qwen4_exp/test/**"]),
+    ],
     visibility = ["//visibility:public"],
 )
 

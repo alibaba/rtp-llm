@@ -115,13 +115,6 @@ models_py_test(
 )
 
 models_py_test(
-    name = "moe_align_triton_test",
-    src = "moe/moe_align_triton_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-models_py_test(
     name = "moe_topk_triton_test",
     src = "moe/moe_topk_triton_test.py",
     gpu = "RTX_5000_PRO_CU13",
@@ -133,35 +126,29 @@ models_py_test(
     src = "moe/marlin_admission_test.py",
     data = [
         "//rtp_llm/models_py/kernels/cuda/marlin_nvfp4/test:marlin_large_decode_test.py",
-        "moe/marlin_nvfp4_test.py",
+        "//rtp_llm/models_py/kernels/cuda/marlin_nvfp4/test:marlin_nvfp4_test.py",
     ],
+    deps = ["//rtp_llm/models_py/kernels/cuda/marlin_nvfp4/test:marlin_test_support"],
 )
 
 models_py_test(
     name = "marlin_nvfp4_test",
     src = "moe/marlin_nvfp4_test.py",
     args = [
-        "MarlinNvfp4Test.test_precompiled_library_in_fresh_process_without_toolchain",
-        "MarlinNvfp4Test.test_scale_range_zero_expert_and_fp32_weight_reference",
-        "MarlinNvfp4Test.test_ep_global_ids_and_all_nonlocal_routes",
-        "MarlinNvfp4Test.test_graph_refreshes_values_ids_weights",
-        "MarlinNvfp4Test.test_alignment_stable_order_padding_and_nonlocal_routes",
-        "MarlinNvfp4Test.test_concurrent_stream_workspaces",
         "MarlinNvfp4Test.test_repack_reuses_original_storage_and_executor_contract",
     ],
     gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
+    deps = _REFERENCE_DEPS + ["//rtp_llm/models_py/kernels/cuda/marlin_nvfp4/test:marlin_test_support"],
 )
 
 models_py_test(
     name = "marlin_nvfp4_hopper_test",
     src = "moe/marlin_nvfp4_test.py",
     args = [
-        "MarlinNvfp4Test.test_precompiled_library_in_fresh_process_without_toolchain",
         "MarlinNvfp4Test.test_explicit_strategy_uses_prepared_weights",
     ],
     gpu = "H20_CU13",
-    deps = _REFERENCE_DEPS,
+    deps = _REFERENCE_DEPS + ["//rtp_llm/models_py/kernels/cuda/marlin_nvfp4/test:marlin_test_support"],
 )
 
 models_py_test(
@@ -225,13 +212,6 @@ models_py_test(
 )
 
 models_py_test(
-    name = "small_moe_gemv_test",
-    src = "moe/small_moe_gemv_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-models_py_test(
     name = "pd_cache_store_test",
     src = "qsa/pd_cache_store_test.py",
     gpu = "L20_CU13",
@@ -249,7 +229,7 @@ models_py_test(
     name = "fp8_kv_test",
     src = "qsa/fp8_kv_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
+    deps = _REFERENCE_DEPS + ["//rtp_llm/models_py/kernels/cuda/qsa/test:fp8_kv_test_support"],
 )
 
 models_py_test(
@@ -336,13 +316,6 @@ models_py_test(
 models_py_test(
     name = "ple_gate_test",
     src = "ple/ple_gate_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    deps = _REFERENCE_DEPS,
-)
-
-models_py_test(
-    name = "gdn_prefill_adapter_test",
-    src = "gdn/gdn_prefill_adapter_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = _REFERENCE_DEPS,
 )
@@ -504,6 +477,10 @@ test_suite(
 test_suite(
     name = "qwen4_qsa",
     tests = [
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:sparse_paged_fmha_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:fp8_kv_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:topk_test",
+        "//rtp_llm/models_py/triton_kernels/common/test:silu_fp8_quant_test",
         ":decode_rope_stride_test",
         ":decode_snapshot_test",
         "//rtp_llm/models_py/kernels/cuda/qsa/test:draft_metadata_test",
@@ -527,7 +504,7 @@ test_suite(
         ":indexer_prefill_triton_test",
         ":indexer_rope_triton_test",
         ":main_qk_cache_test",
-        "//rtp_llm/models_py/kernels/cuda/qsa/test:main_qk_norm_rope_test",
+        "//rtp_llm/models_py/modules/qwen4_exp/test:main_qk_norm_rope_test",
         ":mtp_embedding_norm_test",
         "//rtp_llm/models_py/kernels/cuda/test:qwen4_mtp_norm_test",
         ":pd_cache_store_test",
@@ -554,16 +531,19 @@ test_suite(
 test_suite(
     name = "qwen4_moe",
     tests = [
+        "//rtp_llm/models_py/kernels/cuda/marlin_nvfp4/test:marlin_nvfp4_hopper_test",
+        "//rtp_llm/models_py/kernels/cuda/marlin_nvfp4/test:marlin_nvfp4_test",
+        "//rtp_llm/models_py/triton_kernels/moe/test:decode_alignment_test",
+        "//rtp_llm/models_py/triton_kernels/moe/test:small_moe_gemv_test",
         ":factory_isolation_test",
         "//rtp_llm/models_py/kernels/cuda/marlin_nvfp4/test:marlin_large_decode_test",
         ":marlin_nvfp4_hopper_test",
         ":marlin_nvfp4_test",
         "//rtp_llm/models_py/kernels/cuda/marlin_nvfp4/test:marlin_prefill_test",
-        ":moe_align_triton_test",
         ":moe_topk_triton_test",
         "//rtp_llm/models_py/triton_kernels/moe/test:qwen4_topk_test",
         ":shared_expert_overlap_test",
-        ":small_moe_gemv_test",
+        "//rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test:small_moe_gemv_test",
     ],
 )
 
@@ -574,7 +554,7 @@ test_suite(
         ":gdn_norm_quant_test",
         "//rtp_llm/models_py/kernels/cuda/gdn_sm120/test:norm_quant_test",
         "//rtp_llm/models_py/kernels/cuda/gdn_sm120/test:norm_test",
-        ":gdn_prefill_adapter_test",
+        "//rtp_llm/models_py/kernels/cuda/gdn_sm120/test:prefill_test",
         ":gdn_prefill_norm_test",
     ],
 )
@@ -590,6 +570,21 @@ test_suite(
 test_suite(
     name = "qwen4_components",
     tests = [
+        "//rtp_llm/models_py/modules/hybrid/test:residual_up_mix_test",
+        "//rtp_llm/models_py/modules/hybrid/test:residual_norm_fp8_test",
+        "//rtp_llm/models_py/modules/hybrid/test:residual_medium_up_mix_test",
+        "//rtp_llm/models_py/modules/hybrid/test:residual_prefill_up_mix_test",
+        "//rtp_llm/models_py/modules/hybrid/test:residual_prefill_inject_norm_test",
+        "//rtp_llm/models_py/modules/hybrid/test:residual_inject_projection_test",
+        "//rtp_llm/models_py/modules/hybrid/test:residual_splitk_inject_test",
+        "//rtp_llm/models_py/modules/base/common/test:fp8_quantization_contract_test",
+        "//rtp_llm/models_py/modules/base/common/test:fp8_dense_gemv_test",
+        "//rtp_llm/models_py/modules/qwen4_exp/test:main_qk_norm_rope_test",
+        "//rtp_llm/models_py/triton_kernels/gated_residual/test:epilogue_mix_test",
+        "//rtp_llm/models_py/triton_kernels/common/test:vocab_byte_gather_test",
+        "//rtp_llm/models_py/triton_kernels/common/test:zero_centered_compile_test",
+        "//rtp_llm/models_py/triton_kernels/common/test:grouped_qk_norm_test",
+        "//rtp_llm/models_py/triton_kernels/common/test:vocab_lookup_test",
         ":qwen4_gdn",
         ":qwen4_moe",
         ":qwen4_parity",
@@ -610,4 +605,11 @@ models_py_test(
     name = "factory_isolation_test",
     src = "moe/factory_isolation_test.py",
     gpu = "RTX_5000_PRO_CU13",
+)
+
+models_py_test(
+    name = "main_qk_norm_rope_test",
+    src = "qsa/main_qk_norm_rope_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [":test_support"],
 )

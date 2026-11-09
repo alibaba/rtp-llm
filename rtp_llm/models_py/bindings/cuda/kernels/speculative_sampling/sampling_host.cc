@@ -1,7 +1,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling_host.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
-#include "rtp_llm/models_py/bindings/common/kernels/sampling_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/sampling/host_utils.h"
 
 namespace rtp_llm {
 namespace {

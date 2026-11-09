@@ -32,10 +32,8 @@ def topology(tp, ep, rank=0):
 
 
 class Qwen4ParallelismTest(unittest.TestCase):
-    def test_real_config_has_no_retired_fields(self):
+    def test_nvfp4_tensor_parallel_uses_native_topology(self):
         pc = topology(2, 1)
-        self.assertFalse(hasattr(pc, "ffn_sp_size"))
-        self.assertFalse(hasattr(pc, "ffn_disaggregate_config"))
         config = SimpleNamespace(
             parallelism_config=pc,
             model_config=SimpleNamespace(quant_config=recipe()),

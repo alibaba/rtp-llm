@@ -139,3 +139,26 @@ models_py_test(
     src = "qwen4_topk_test.py",
     gpu = "L20_CU13",
 )
+
+py_library(
+    testonly = True,
+    name = "small_moe_test_support",
+    srcs = ["small_moe_fixture.py"],
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+models_py_test(
+    name = "decode_alignment_test",
+    src = "decode_alignment_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+)
+
+models_py_test(
+    name = "small_moe_gemv_test",
+    src = "small_moe_gemv_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [
+        ":small_moe_test_support",
+    ],
+)

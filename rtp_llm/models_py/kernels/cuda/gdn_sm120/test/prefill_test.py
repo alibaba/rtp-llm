@@ -3,7 +3,7 @@ import unittest
 import torch
 import triton
 
-from rtp_llm.models_py.modules.qwen4_exp.test.reference.gdn_prefill_reference import (
+from rtp_llm.models_py.kernels.cuda.gdn_sm120.test.reference import (
     sm120_prefill_with_checkpoints,
 )
 from rtp_llm.models_py.triton_kernels.fla.block import store_page_checkpoints_kernel

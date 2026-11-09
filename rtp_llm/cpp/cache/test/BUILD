@@ -467,3 +467,14 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+cc_test(
+    name = "tp_cache_transfer_layout_test",
+    srcs = ["TpCacheTransferLayoutTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:tp_cache_transfer_layout",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

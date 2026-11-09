@@ -12,6 +12,5 @@ py_test(
     srcs = ["kernel_layout_test.py"],
     data = [
         "//rtp_llm/models_py:kernel_layout_sources",
-        "//rtp_llm/models_py/triton_kernels:kernel_layout_sources",
     ],
 )

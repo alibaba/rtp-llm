@@ -4,6 +4,7 @@
 test_suite(
     name = "qwen4_cpu",
     tests = [
+        "//rtp_llm/cpp/cache/test:tp_cache_transfer_layout_test",
         "//rtp_llm/model_loader/test:nvfp4_cache_test",
         "//rtp_llm/models/qwen4_exp/test:qwen4_config",
         "//rtp_llm/models_py/modules/qwen4_exp/test:cpu_target_status_test",
@@ -19,6 +20,14 @@ test_suite(
 test_suite(
     name = "qwen4_single_gpu",
     tests = [
+        "//rtp_llm/models_py/bindings/cuda/ops/tests:cuda_sampler_test",
+        "//rtp_llm/models_py/bindings/cuda/ops/tests:cuda_sampler_sm120_test",
+        "//rtp_llm/models_py/bindings/cuda/kernels/sampling/tests:split_softmax_test",
+        "//rtp_llm/models_py/bindings/common/kernels/test:tiled_temperature_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:sparse_paged_fmha_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:fp8_kv_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:topk_test",
+        "//rtp_llm/models_py/triton_kernels/common/test:silu_fp8_quant_test",
         "//rtp_llm/cpp/models/test:native_lm_head_test",
         "//rtp_llm/models/qwen4_exp/test:full_fp8_test",
         "//rtp_llm/models_py/model_desc/test/qwen4_exp:qwen4_runtime",
@@ -41,7 +50,7 @@ test_suite(
         "//rtp_llm/models_py/modules/qwen4_exp/test:indexer_prefill_triton_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:indexer_rope_triton_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:main_qk_cache_test",
-        "//rtp_llm/models_py/kernels/cuda/qsa/test:main_qk_norm_rope_test",
+        "//rtp_llm/models_py/modules/qwen4_exp/test:main_qk_norm_rope_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:mtp_embedding_norm_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:pd_cache_store_test",
         "//rtp_llm/models_py/modules/qwen4_exp/test:prefetch_order_test",

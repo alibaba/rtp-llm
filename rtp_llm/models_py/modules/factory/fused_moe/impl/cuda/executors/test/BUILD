@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
+
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 
@@ -342,4 +344,13 @@ py_test(
     env = {"GPU_COUNT": "1"},
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+models_py_test(
+    name = "small_moe_gemv_test",
+    src = "small_moe_gemv_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [
+        "//rtp_llm/models_py/triton_kernels/moe/test:small_moe_test_support",
+    ],
 )

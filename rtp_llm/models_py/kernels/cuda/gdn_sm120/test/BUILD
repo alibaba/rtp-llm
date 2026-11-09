@@ -13,3 +13,19 @@ models_py_test(
     src = "norm_quant_test.py",
     gpu = "RTX_5000_PRO_CU13",
 )
+
+py_library(
+    testonly = True,
+    name = "prefill_reference",
+    srcs = ["reference.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+models_py_test(
+    name = "prefill_test",
+    src = "prefill_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [
+        ":prefill_reference",
+    ],
+)

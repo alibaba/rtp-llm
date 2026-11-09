@@ -13,7 +13,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
-#include "rtp_llm/models_py/bindings/common/kernels/sampling_temperature.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/sampling/temperature_host.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/softmax_host.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling_host.h"
 #include <cstddef>

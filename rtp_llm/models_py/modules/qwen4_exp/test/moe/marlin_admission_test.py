@@ -1,7 +1,6 @@
 import runpy
 import unittest
 from contextlib import ExitStack
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from rtp_llm.config.model_config import ModelConfig
@@ -134,13 +133,8 @@ class MarlinAdmissionTest(unittest.TestCase):
                     "rtp_llm.models_py.kernels.cuda.marlin_nvfp4.marlin_nvfp4.load_library"
                 ) as load,
             ):
-                module = (
-                    runpy.run_module(
-                        "rtp_llm.models_py.kernels.cuda.marlin_nvfp4.test."
-                        + filename[:-3]
-                    )
-                    if filename == "marlin_large_decode_test.py"
-                    else runpy.run_path(str(Path(__file__).with_name(filename)))
+                module = runpy.run_module(
+                    "rtp_llm.models_py.kernels.cuda.marlin_nvfp4.test." + filename[:-3]
                 )
                 suite = unittest.defaultTestLoader.loadTestsFromTestCase(
                     module[class_name]
