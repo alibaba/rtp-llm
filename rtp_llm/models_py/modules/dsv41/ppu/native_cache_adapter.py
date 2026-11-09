@@ -159,11 +159,13 @@ class SharedNativeCache(NativeCacheBridge):
             and os.environ.get(CP8_ROW_PREP_ENV, "1") == "1"
         )
 
-    def insert_request_rows(self, layer, tag, request, positions, rows):
+    def insert_request_rows(self, layer, tag, request, positions, rows, *, start=None):
         """Write raw positions already grouped by the caller's request."""
         if not positions.numel():
             return
         key = layer, tag
+        if start is not None and self._try_store_prefill_range(key, request, start, rows):
+            return
         owned = self.owned_positions(key, positions)
         write = {
             "layer": layer,
@@ -189,6 +191,46 @@ class SharedNativeCache(NativeCacheBridge):
             write["physical_rows"] = len(keep)
         self._copy_rows(key, request, positions, rows)
         self.writes.append(write)
+
+    def _try_store_prefill_range(self, key, request, start, rows):
+        if (
+            os.environ.get("RTP_V41_PPU_CP8_FUSED_COMPRESSED_STORE", "1") != "1"
+            or not self.cp8_row_prep_enabled()
+            or start < 0
+            or not rows.is_cuda
+            or not rows.is_contiguous()
+        ):
+            return False
+        layer, tag = key
+        pool, placement = self.pools[key], self.placements[key]
+        full = tag in _FULL
+        field = "kv_cache_kernel_block_id" if full else "kv_cache_block_id"
+        host = getattr(self.inputs[pool.framework_tag], field, None)
+        if host is None or host.device.type != "cpu" or host.shape != pool.table.shape:
+            return False
+
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import (
+            try_write_cp_prefill_rows,
+            try_write_prefill_csa,
+        )
+
+        write = {"layer": layer, "tag": tag, "request": request, "rows": rows.shape[0]}
+        if full:
+            owned = try_write_cp_prefill_rows(
+                pool, placement, host, request, start, rows, planar=tag == "indexer_kv",
+            )
+            if owned is None:
+                return False
+        else:
+            counts = try_write_prefill_csa(
+                pool, placement, host, request, start, self.lengths[request], rows,
+            )
+            if counts is None:
+                return False
+            owned, write["physical_rows"] = counts
+        write["owned_rows"] = owned
+        self.writes.append(write)
+        return True
 
     def request_length(self, request):
         return self.lengths[int(request)]

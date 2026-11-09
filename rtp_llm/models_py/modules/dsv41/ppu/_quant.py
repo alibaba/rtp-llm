@@ -739,7 +739,10 @@ def _triton_kernels():
         SCALE_STRIDE: tl.constexpr,
     ):
         token_id = tl.program_id(0).to(tl.int64)
-        loc = tl.load(page_table_ptr + token_id).to(tl.int64)
+        if page_table_ptr is None:
+            loc = token_id
+        else:
+            loc = tl.load(page_table_ptr + token_id).to(tl.int64)
         page_idx = loc // PAGE_SIZE
         in_page = loc % PAGE_SIZE
         page_byte_base = page_idx * BYTES_PER_PAGE
@@ -775,7 +778,10 @@ def _triton_kernels():
         SCALE_STRIDE: tl.constexpr,
     ):
         token_id = tl.program_id(0).to(tl.int64)
-        loc = tl.load(page_table_ptr + token_id).to(tl.int64)
+        if page_table_ptr is None:
+            loc = token_id
+        else:
+            loc = tl.load(page_table_ptr + token_id).to(tl.int64)
         page_idx = loc // PAGE_SIZE
         in_page = loc % PAGE_SIZE
         page_byte_base = page_idx * BYTES_PER_PAGE
@@ -820,18 +826,19 @@ def quantize_indexer_q_ppu(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]
 
 
 def dequantize_global_kv_slots_ppu(
-    pool: torch.Tensor, slots: torch.Tensor, out: torch.Tensor
+    pool: torch.Tensor, slots: torch.Tensor | None, out: torch.Tensor
 ) -> torch.Tensor:
     """PPU fast path for ``dequantize_global_kv_slots`` (288B FP4 pool)."""
     ns = _triton_kernels()
     entries = pool.shape[1] // FP4_GLOBAL_ENTRY_BYTES
     buf_u8 = pool.reshape(-1)
     buf_fp8 = pool.view(torch.float8_e4m3fn).reshape(-1)
-    ns.dequant_v41_fp4_kernel[(slots.numel(),)](
+    count = pool.shape[0] * entries if slots is None else slots.numel()
+    ns.dequant_v41_fp4_kernel[(count,)](
         out,
         buf_u8,
         buf_fp8,
-        slots.to(torch.int64),
+        None if slots is None else slots.to(torch.int64),
         out.stride(0),
         BYTES_PER_PAGE=pool.shape[1],
         PAGE_SIZE=entries,
@@ -846,18 +853,19 @@ def dequantize_global_kv_slots_ppu(
 
 
 def dequantize_swa_kv_slots_ppu(
-    pool: torch.Tensor, slots: torch.Tensor, out: torch.Tensor
+    pool: torch.Tensor, slots: torch.Tensor | None, out: torch.Tensor
 ) -> torch.Tensor:
     """PPU fast path for SWA 528B FP8 pool dequant (strided ``out`` ok)."""
     ns = _triton_kernels()
     entries = pool.shape[1] // SWA_KV_ENTRY_BYTES
     buf_fp8 = pool.view(torch.float8_e4m3fn).reshape(-1)
     buf_u8 = pool.reshape(-1)
-    ns.dequant_v41_fp8_kernel[(slots.numel(),)](
+    count = pool.shape[0] * entries if slots is None else slots.numel()
+    ns.dequant_v41_fp8_kernel[(count,)](
         out,
         buf_fp8,
         buf_u8,
-        slots.to(torch.int64),
+        None if slots is None else slots.to(torch.int64),
         out.stride(0),
         BYTES_PER_PAGE=pool.shape[1],
         PAGE_SIZE=entries,
@@ -869,3 +877,24 @@ def dequantize_swa_kv_slots_ppu(
         SCALE_STRIDE=SWA_KV_ENTRY_BYTES,
     )
     return out
+
+
+def try_dequantize_prefill_rows(packed, out, *, global_pool):
+    """Decode dense 288/528-byte rows into the existing BF16 workspace."""
+    width = FP4_GLOBAL_ENTRY_BYTES if global_pool else SWA_KV_ENTRY_BYTES
+    if not (
+        packed.dtype == torch.uint8
+        and packed.ndim == 2
+        and packed.shape[1] == width
+        and packed.is_contiguous()
+        and out.device == packed.device
+        and out.dtype == torch.bfloat16
+        and out.shape == (packed.shape[0], KV_DIM)
+        and out.stride(1) == 1
+        and _ppu_fast_path(packed)
+    ):
+        return False
+    if packed.shape[0]:
+        decode = dequantize_global_kv_slots_ppu if global_pool else dequantize_swa_kv_slots_ppu
+        decode(packed, None, out)
+    return True

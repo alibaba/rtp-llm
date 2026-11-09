@@ -95,9 +95,106 @@ def _kernels():
             value = tl.load(pool_ptr, valid & (column < width), other=0)
             tl.store(rows_ptr, value, column < width)
 
+    @triton.jit
+    def store_cp_prefill_rows(
+        pool, table, rows, start, first,
+        POOL_STRIDE: tl.constexpr, TABLE_STRIDE: tl.constexpr, WIDTH: tl.constexpr,
+        ENTRIES: tl.constexpr, PAGE: tl.constexpr, OWNER: tl.constexpr,
+        CP: tl.constexpr, RANK: tl.constexpr, PLANAR: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        owned = first + tl.program_id(0).to(tl.int64)
+        logical = (owned // OWNER * CP + RANK) * OWNER + owned % OWNER
+        block = tl.load(table + (owned // PAGE) * TABLE_STRIDE).to(tl.int64)
+        offset = owned % PAGE
+        column = tl.arange(0, BLOCK)
+        if PLANAR:
+            target = tl.where(column < 64, offset * 64 + column,
+                              ENTRIES * 64 + offset * 4 + column - 64)
+        else:
+            target = offset * WIDTH + column
+        value = tl.load(rows + (logical - start) * WIDTH + column, column < WIDTH, other=0)
+        tl.store(pool + block * POOL_STRIDE + target, value, column < WIDTH)
+
+    @triton.jit
+    def store_prefill_csa(pool, plan, rows, WIDTH: tl.constexpr):
+        item = tl.program_id(0).to(tl.int64)
+        target = tl.load(plan + 2 * item)
+        source = tl.load(plan + 2 * item + 1)
+        column = tl.arange(0, WIDTH)
+        value = tl.load(rows + source * WIDTH + column)
+        tl.store(pool + target + column, value)
+
     return SimpleNamespace(
-        triton=triton, position_slots=position_slots, packed_rows=packed_rows
+        triton=triton, position_slots=position_slots, packed_rows=packed_rows,
+        store_cp_prefill_rows=store_cp_prefill_rows, store_prefill_csa=store_prefill_csa,
     )
+
+
+def _owned_before(end, span, owned_start, owned_count):
+    cycles, tail = divmod(end, span)
+    return cycles * owned_count + min(max(tail - owned_start, 0), owned_count)
+
+
+def try_write_cp_prefill_rows(pool, placement, host_table, request, start, rows, *, planar):
+    """Store locally owned entries directly into the scheduler's kernel pages."""
+    ratio = placement.ratio
+    if start % ratio or pool.span % ratio:
+        return None
+    start //= ratio
+    page = pool.span // ratio
+    owner = placement.physical_span // ratio
+    if page > pool.entries or owner % page:
+        return None
+    cycle = owner * placement.size
+    rank_start = owner * placement.rank
+    first = _owned_before(start, cycle, rank_start, owner)
+    stop = _owned_before(start + rows.shape[0], cycle, rank_start, owner)
+    if first == stop:
+        return 0
+    page_end = (stop - 1) // page + 1
+    if page_end > host_table.shape[1]:
+        return None
+    blocks = host_table[request, first // page:page_end].tolist()
+    if len(set(blocks)) != len(blocks) or any(not 0 <= block < pool.tensor.shape[0] for block in blocks):
+        return None
+    kernels = _kernels()
+    kernels.store_cp_prefill_rows[(stop - first,)](
+        pool.tensor, pool.table[request], rows, start, first, pool.tensor.stride(0),
+        pool.table.stride(1), rows.shape[1], pool.entries, page, owner, placement.size,
+        placement.rank, planar, kernels.triton.next_power_of_2(rows.shape[1]),
+    )
+    return stop - first
+
+
+def try_write_prefill_csa(pool, placement, host_table, request, start, length, rows):
+    """Deduplicate latest raw states by physical address on the host."""
+    end = start + rows.shape[0]
+    last_page = (end - 1) // pool.span + 1
+    if end > length or last_page > host_table.shape[1]:
+        return None
+    entries = pool.entries
+    owned_start = placement.rank * entries
+    cycle = placement.full_entries
+    first_page = start // pool.span
+    plan = {}
+    for page, block in enumerate(host_table[request, first_page:last_page].tolist(), first_page):
+        begin = max(start, page * pool.span)
+        stop = min(end, (page + 1) * pool.span)
+        if block == -1 and stop <= length - length % 2:
+            continue
+        if not 0 <= block < pool.tensor.shape[0]:
+            return None
+        for offset in range(entries):
+            last = stop - 1 - (stop - 1 - owned_start - offset) % cycle
+            if last >= begin:
+                target = block * pool.tensor.stride(0) + offset * rows.shape[1]
+                plan[target] = last - start
+    if plan:
+        indices = torch.tensor(tuple(plan.items()), dtype=torch.int64).to(pool.tensor.device, non_blocking=True)
+        _kernels().store_prefill_csa[(len(plan),)](pool.tensor, indices, rows, rows.shape[1])
+    owned = _owned_before(end, cycle, owned_start, entries) - _owned_before(start, cycle, owned_start, entries)
+    return owned, len(plan)
 
 
 def position_slots(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -233,13 +234,20 @@ class _CPPrefillWorkspace:
         self.row_meta = meta.index_select(0, context.request_ids.long())
         self.selection = None
         self.index_plan = None
+        self.fused_dequant = (
+            isinstance(cache, SharedNativeCache)
+            and cache.cp8_row_prep_enabled()
+            and os.environ.get("RTP_V41_PPU_CP8_FUSED_WORKSPACE_DEQUANT", "1") == "1"
+        )
         if source is not None:
             cache.prepare_source(source)
             tag = "global_kv_2" if ratio == 2 else "global_kv_1"
             descriptor = cache.descriptors(source)[tag]
             for rid, begin, count in self.global_ranges:
                 packed = cache.read_source(source, rid, global_entries=count)[0]
-                ops.decode_kv(packed, pool_tag=tag, descriptor=descriptor, out=self.kv[begin:begin + count])
+                out = self.kv[begin:begin + count]
+                if not (self.fused_dequant and _quant.try_dequantize_prefill_rows(packed, out, global_pool=True)):
+                    ops.decode_kv(packed, pool_tag=tag, descriptor=descriptor, out=out)
 
     def indices(self, positions, selected, ratio, window):
         if self.index_plan is None or self.selection is not selected:
@@ -261,8 +269,9 @@ class _CPPrefillWorkspace:
         descriptor = cache.descriptors(layer_id)["swa_kv"]
         for rid, begin, positions in self.swa_ranges:
             packed = cache.read_swa(layer_id, rid, positions)
-            ops.decode_kv(packed, pool_tag="swa_kv", descriptor=descriptor,
-                          out=self.kv[begin:begin + positions.numel()])
+            out = self.kv[begin:begin + positions.numel()]
+            if not (self.fused_dequant and _quant.try_dequantize_prefill_rows(packed, out, global_pool=False)):
+                ops.decode_kv(packed, pool_tag="swa_kv", descriptor=descriptor, out=out)
 
 
 def build_cp_prefill_workspace(
@@ -412,7 +421,8 @@ def _produce_global(
         write_positions = entry_positions[write_offset:]
         if handle is None:
             cache.insert_request_rows(
-                layer_id, tag, rid, write_positions, packed_global[write_offset:]
+                layer_id, tag, rid, write_positions, packed_global[write_offset:],
+                start=first_write * ratio,
             )
         else:
             cache.insert_rows(
@@ -428,7 +438,8 @@ def _produce_global(
         packed_index = ops.encode_kv(index_keys, pool_tag="indexer_kv")
         if handle is None:
             cache.insert_request_rows(
-                layer_id, "indexer_kv", rid, write_positions, packed_index[write_offset:]
+                layer_id, "indexer_kv", rid, write_positions, packed_index[write_offset:],
+                start=first_write * ratio,
             )
         else:
             cache.insert_rows(
@@ -444,7 +455,9 @@ def _produce_global(
                 continue
             state = torch.cat((values[state_rows], scores[state_rows]), dim=-1).float()
             if handle is None:
-                cache.insert_request_rows(layer_id, "csa_state", rid, state_positions, state)
+                cache.insert_request_rows(
+                    layer_id, "csa_state", rid, state_positions, state, start=max(start, append)
+                )
             else:
                 state_slots = cache.slots_at_positions(layer_id, "csa_state", rid, state_positions)
                 cache.insert_rows(layer_id, "csa_state", state_slots, state)
