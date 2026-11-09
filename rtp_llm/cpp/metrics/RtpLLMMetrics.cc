@@ -503,9 +503,11 @@ bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
     REGISTER_GAUGE_MUTABLE_METRIC(gather_model_input_us_metric, "rtp_llm_gather_model_input_us");
     REGISTER_GAUGE_MUTABLE_METRIC(tp_sync_input_us_metric, "rtp_llm_tp_sync_input_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_update_us_metric, "rtp_llm_kv_cache_update_us");
     REGISTER_GAUGE_MUTABLE_METRIC(model_forward_us_metric, "rtp_llm_model_forward_us");
     REGISTER_GAUGE_MUTABLE_METRIC(sample_input_us_metric, "rtp_llm_sample_input_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(dispatch_output_us_metric, "rtp_llm_dispatch_output_us_metric");
+    REGISTER_GAUGE_MUTABLE_METRIC(dispatch_output_us_metric, "rtp_llm_dispatch_output_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(round_end_sync_us_metric, "rtp_llm_round_end_sync_us");
 
     return true;
 }
@@ -524,9 +526,11 @@ void RtpLLMExecutorMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMExec
 
     REPORT_GAUGE(gather_model_input_us);
     REPORT_GAUGE(tp_sync_input_us);
+    REPORT_GAUGE(kv_cache_update_us);
     REPORT_GAUGE(model_forward_us);
     REPORT_GAUGE(sample_input_us);
     REPORT_GAUGE(dispatch_output_us);
+    REPORT_GAUGE(round_end_sync_us);
 }
 
 bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {

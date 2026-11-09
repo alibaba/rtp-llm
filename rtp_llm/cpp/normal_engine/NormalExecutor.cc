@@ -286,9 +286,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // update kv cache
         if (model_input.kv_cache_update_mapping.defined() && model_input.kv_cache_update_mapping.numel() > 0) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
+            int64_t      start_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
             RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "cache update mapping requires a cache manager");
             cache_manager_->blockBatchCopyForForward(model_input.kv_cache_update_mapping,
                                                      model_input.kv_cache_group_tags);
+            executor_collector.kv_cache_update_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         }
     }
     {
@@ -325,7 +327,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
 
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
-        cudaSyncAndCheck();
+        {
+            int64_t start_time_us                          = autil::TimeUtility::currentTimeInMicroSeconds();
+            cudaSyncAndCheck();
+            executor_collector.round_end_sync_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        }
         model_->releaseBuffers();
         if (profile_step_finish_) {
             profile_step_finish_();
@@ -398,7 +404,12 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         int64_t      start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         absl::Status result;
         if (zero_token_batch) {
-            cudaSyncAndCheck();
+            {
+                int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
+                cudaSyncAndCheck();
+                executor_collector.round_end_sync_us =
+                    autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+            }
             const auto context_kv_gpu_ready_at =
                 model_output.context_kv_has_rank_completion_dependency ?
                     std::optional<RemoteRestoreTiming::Clock::time_point>(RemoteRestoreTiming::Clock::now()) :

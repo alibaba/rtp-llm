@@ -1035,9 +1035,11 @@ public:
     int64_t max_seq_len                          = 0;
     int64_t gather_model_input_us                = 0;
     int64_t tp_sync_input_us                     = 0;
+    int64_t kv_cache_update_us                   = 0;
     int64_t model_forward_us                     = 0;
     int64_t sample_input_us                      = 0;
     int64_t dispatch_output_us                   = 0;
+    int64_t round_end_sync_us                    = 0;
 };
 
 class RtpLLMExecutorMetrics: public kmonitor::MetricsGroup {
@@ -1057,9 +1059,11 @@ public:
 
     kmonitor::MutableMetric* gather_model_input_us_metric = nullptr;
     kmonitor::MutableMetric* tp_sync_input_us_metric      = nullptr;
+    kmonitor::MutableMetric* kv_cache_update_us_metric    = nullptr;
     kmonitor::MutableMetric* model_forward_us_metric      = nullptr;
     kmonitor::MutableMetric* sample_input_us_metric       = nullptr;
     kmonitor::MutableMetric* dispatch_output_us_metric    = nullptr;
+    kmonitor::MutableMetric* round_end_sync_us_metric     = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
