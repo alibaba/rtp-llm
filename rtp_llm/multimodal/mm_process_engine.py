@@ -1811,6 +1811,7 @@ class MMProcessEngine:
                     f"requested={len(active_pending)}",
                 )
                 logging.warning(error.message)
+                _report_vit_metric(AccMetrics.VIT_QUEUE_REJECT_QPS_METRIC, 1)
                 for _, cache_key, entry in active_pending:
                     self._forget_async_task_locked(entry)
                     self._fail_async_compute(cache_key, entry, error)

@@ -56,6 +56,8 @@ class AccMetrics(Enum):
 
     VIT_QPS_METRIC = "py_rtp_vit_qps"
     VIT_ERROR_QPS_METRIC = "py_rtp_vit_error_qps"
+    # Count rejected async submissions, not the number of media items in them.
+    VIT_QUEUE_REJECT_QPS_METRIC = "py_rtp_vit_queue_reject_qps"
     VIT_SUCCESS_QPS_METRIC = "py_rtp_vit_success_qps"
     # Accumulated embedding rows; AccMetric normalizes by the flush interval,
     # so the reported value is visual tokens/s.
