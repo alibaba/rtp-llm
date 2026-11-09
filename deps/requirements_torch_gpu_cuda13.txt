@@ -32,16 +32,18 @@ nvidia-cutlass-dsl-libs-cu13==4.4.2
 flashinfer-python==0.6.9+8c4f4dcf
 flashinfer-cubin==0.6.9+8c4f4dcf
 
+# MiniMax M3.1 CP Prefill FMHA; universal Python/JIT source wheel.
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/fmha_sm100-0.1.1-py3-none-any.whl
+quack-kernels==0.4.1
+
 # Hadamard transform used by the GLM5 indexer.
 fast-hadamard-transform @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl
 # Upstream v2.8.3.post1@a8aa52b1 with CUTLASS dc481792, rebuilt for CUDA 13.2.
 flash-attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1
 
 # Wheels built against torch 2.11+cu130.
-# Preserve the GLM5 kernel versions used by the validated inference path.
-# Re-pinned from 2.8.0+6d6aaad.cu132 / 1.0.0+49e2000.cu132: those wheels were
-# removed from the wheel index and cold-cache builds could no longer resolve them.
-deep-gemm==2.8.0+122e18b.cu132
+# DeepGEMM provides M3.1 NVFP4 MegaMoE; retain main's available FlashMLA wheel.
+deep-gemm==2.8.2+522942a.cu132
 flash-mla==1.0.0+9241ae3
 
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.

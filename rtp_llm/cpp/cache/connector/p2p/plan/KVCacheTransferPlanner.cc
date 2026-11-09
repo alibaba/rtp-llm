@@ -203,6 +203,11 @@ KVCacheTransferPlanner::validateTag(const ShardLayout& src, const ShardLayout& d
                          + " dst=" + KVCacheSpecTypeToString(dg.spec_type));
     }
 
+    if (sg.indexer_scale_format != dg.indexer_scale_format) {
+        return planError("indexer scale format mismatch for tag '" + tag
+                         + "'; Prefill and Decode must use the same indexer cache encoding");
+    }
+
     if (sg.spec_type == KVCacheSpecType::LinearAttention) {
         // Asymmetric routes use explicit per-history-row Q/K/V subspans.
         // Legacy LINEAR layouts continue to require equal head shards.
@@ -768,6 +773,9 @@ ErrorInfo validatePipeline(const PipelineTransferLayout& side, int& main_layers,
                 digest.mix(static_cast<int>(group.policy.cp_slice));
                 digest.mix(group.policy.active_tail_blocks);
                 digest.mix(group.spec_type);
+                if (group.indexer_scale_format != IndexerScaleFormat::NONE) {
+                    digest.mix(static_cast<uint32_t>(group.indexer_scale_format));
+                }
                 digest.mix(group.kv_block_stride_bytes);
                 digest.mix(group.kv_scale_stride_bytes);
                 digest.mix(group.k_block_payload_bytes);
@@ -979,6 +987,9 @@ ShardLayout ShardLayout::forPeer(const ShardLayout&       self,
     peer.deriveHeadShardCounts();
 
     for (auto& [tag, g] : peer.groups) {
+        // Indexer encoding depends on the actual backend; topology cannot infer it.
+        // Indexer peers must advertise their pipeline layout before transfer.
+        g.indexer_scale_format = IndexerScaleFormat::NONE;
         // pre_sliced 是角色属性：仅 PREFILL 角色的 cp_slice group 的 spec 本身被切片。
         const bool slice_active = peer.cpSize() > 1 && g.policy.group_type != CacheGroupType::FULL
                                   && g.policy.cp_slice != CpBlockSliceMode::NONE;

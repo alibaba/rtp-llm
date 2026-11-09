@@ -607,12 +607,22 @@ class GenerateEnvConfig:
         self.think_end_token_id: int = -1
         self.max_thinking_tokens: Optional[int] = None
         self.think_mode: str = "disabled"
+        self.think_mode_explicit: bool = False
         self.force_stop_words: bool = False
         self.stop_words_list: Optional[str] = None
         self.stop_words_str: Optional[str] = None
         self.think_start_tag: str = "<think>\n"
         self.think_terminate_token_id: int = 1
         self.generation_config_path: Optional[str] = None
+
+    def apply_model_defaults(self, model_type: str) -> None:
+        from rtp_llm.model_factory_register import get_model_config_module
+
+        configure = getattr(
+            get_model_config_module(model_type), "configure_generation", None
+        )
+        if configure is not None:
+            configure(model_type, self)
 
     def to_string(self):
         return (

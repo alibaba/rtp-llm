@@ -1090,4 +1090,25 @@ TEST(PDCancelRegistryTest, LateAdmissionRetainsOrdinaryCancellationCause) {
     EXPECT_EQ(registry.admit(request, "late109", "", currentTimeMs() + 1000, handle).code(),
               ErrorCode::GENERATE_TIMEOUT);
 }
+
+TEST(PrefillRpcServerRoutingTest, LocalFallbackKeepsMainValidationOrder) {
+    for (const auto* model_type : {"qwen_3", "minimax_m31", "minimax_m31_vl"}) {
+        PrefillRpcServer server;
+        auto&            params           = server.maga_init_params_;
+        params.model_config_.model_type   = model_type;
+        params.parallelism_config.dp_size = params.model_config_.model_type == "qwen_3" ? 2 : 1;
+        GenerateInputPB request;
+        request.set_request_id(4);
+        request.add_token_ids(0);
+        auto* config = request.mutable_generate_config();
+        config->set_can_use_pd_separation(false);
+        config->set_prefill_only(true);
+        config->set_max_new_tokens(8);
+        grpc::ServerContext context;
+        const auto          status = server.GenerateStreamCall(&context, &request, nullptr);
+        EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE) << model_type;
+        EXPECT_EQ(status.error_message(), "Prefill is not initialized") << model_type;
+    }
+}
+
 }  // namespace rtp_llm

@@ -1,8 +1,10 @@
-"""Normalize latest DeepGEMM compressed BF16 logits for V4.1 selectors."""
+"""Normalize DeepGEMM compressed BF16 logits for V4 and V4.1 selectors."""
 
 import torch
 import triton
 import triton.language as tl
+
+from rtp_llm.models_py.triton_kernels.common.offset import linear_offset_64
 
 
 @triton.jit
@@ -29,9 +31,11 @@ def _normalize(
         & (source_col < end - begin)
     )
     value = tl.load(
-        scores + row * source_stride + source_col, valid, other=-float("inf")
+        scores + linear_offset_64(row, source_stride) + source_col,
+        valid,
+        other=-float("inf"),
     ).to(tl.float32)
-    tl.store(output + row * width + col, value, col < width)
+    tl.store(output + linear_offset_64(row, width) + col, value, col < width)
 
 
 def normalize_mqa_logits(scores, starts, ends, width, *, relative):

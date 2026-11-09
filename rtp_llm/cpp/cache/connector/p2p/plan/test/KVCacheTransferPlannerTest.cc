@@ -180,6 +180,132 @@ PipelineTransferLayout pipeline(const std::vector<int>& cuts, const ShardLayout&
 
 }  // namespace
 
+TEST(PlannerPipeline, IndexerEncodingSurvivesSpecAndWireLayout) {
+    auto             pc = makePc(1, CPRotateMethod::DISABLED, false);
+    SpecBuildContext ctx;
+    ctx.seq_size_per_block = 128;
+    ctx.parallelism_config = &pc;
+    KVCacheSpecDesc desc;
+    desc.tag                    = kFullTag;
+    desc.cache_type             = KVCacheSpecType::OpaqueKV;
+    desc.entry_dtype            = DataType::TYPE_UINT8;
+    desc.entry_elems            = 132;
+    ctx.kernel_tokens_per_block = 128;
+    desc.entry_count_mode       = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    std::set<std::string> fingerprints;
+    for (auto format : {IndexerScaleFormat::FP32, IndexerScaleFormat::UE8M0}) {
+        desc.indexer_scale_format = format;
+        auto spec                 = SpecBuilder::build(desc, ctx);
+        fingerprints.insert(spec->fingerprint());
+        GroupBase group;
+        group.tag       = desc.tag;
+        group.spec      = spec;
+        group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        group.block_num = 8;
+        auto topology   = CacheTopology::create({group}, {{0, {kFullTag}}});
+        auto layout     = ShardLayoutFactory::fromTopology(*topology, pc, RoleType::PREFILL, 128);
+        EXPECT_EQ(layout.group(kFullTag).indexer_scale_format, format);
+        P2PShardLayoutPB wire;
+        encodeP2PShardLayout(layout, &wire);
+        ShardLayout received;
+        ASSERT_TRUE(decodeP2PShardLayout(wire, RoleType::PREFILL, received));
+        EXPECT_EQ(received.group(kFullTag).indexer_scale_format, format);
+        EXPECT_EQ(spec->k_block_payload_bytes(), 128u * 132);
+        const auto inferred = ShardLayout::forPeer(layout, pc, false);
+        EXPECT_FALSE(KVCacheTransferPlanner::plan(layout, inferred, {kFullTag}).ok());
+        EXPECT_FALSE(KVCacheTransferPlanner::plan(inferred, layout, {kFullTag}).ok());
+        wire.mutable_groups(0)->set_indexer_scale_format(3);
+        ShardLayout invalid;
+        EXPECT_FALSE(decodeP2PShardLayout(wire, RoleType::PREFILL, invalid));
+    }
+    EXPECT_EQ(fingerprints.size(), 2u);
+}
+
+TEST(PlannerPipeline, PreservesLinearAndIndexerMetadataInOneWireLayout) {
+    auto  layout                  = mlaLayout(1);
+    auto& indexer                 = layout.groups.at(kFullTag);
+    indexer.spec_type             = KVCacheSpecType::OpaqueKV;
+    indexer.indexer_scale_format  = IndexerScaleFormat::UE8M0;
+    indexer.kv_block_stride_bytes = kSeqSizePerBlock * 132;
+    indexer.k_block_payload_bytes = indexer.kv_block_stride_bytes;
+    indexer.kv_scale_stride_bytes = 0;
+    auto& linear                  = layout.groups[kFixedTag];
+    linear.policy                 = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    linear.spec_type              = KVCacheSpecType::LinearAttention;
+    linear.seq_size_per_block     = kSeqSizePerBlock;
+    linear.k_block_payload_bytes  = 64;
+    linear.linear_q_row_bytes     = 8;
+    linear.linear_k_row_bytes     = 8;
+    linear.linear_v_row_bytes     = 16;
+    linear.linear_history_rows    = 3;
+    linear.kv_block_stride_bytes  = 64 + 3 * (8 + 8 + 16);
+    layout.deriveHeadShardCounts();
+
+    P2PShardLayoutPB wire;
+    encodeP2PShardLayout(layout, &wire);
+    ShardLayout received;
+    ASSERT_TRUE(decodeP2PShardLayout(wire, RoleType::PREFILL, received));
+    EXPECT_EQ(received.group(kFullTag).indexer_scale_format, IndexerScaleFormat::UE8M0);
+    const auto& restored = received.group(kFixedTag);
+    EXPECT_EQ(restored.indexer_scale_format, IndexerScaleFormat::NONE);
+    EXPECT_EQ(restored.linear_q_row_bytes, 8u);
+    EXPECT_EQ(restored.linear_k_row_bytes, 8u);
+    EXPECT_EQ(restored.linear_v_row_bytes, 16u);
+    EXPECT_EQ(restored.linear_history_rows, 3u);
+}
+
+TEST(PlannerPipeline, RequiresMatchingIndexerEncodingForMainAndDraft) {
+    auto  shards                = mlaLayout(1);
+    auto& group                 = shards.groups.at(kFullTag);
+    group.spec_type             = KVCacheSpecType::OpaqueKV;
+    group.kv_block_stride_bytes = group.k_block_payload_bytes = kSeqSizePerBlock * 132;
+    const auto native =
+        KVCacheTransferPlanner::planStages(pipeline({3, 5}, shards), pipeline({2, 6}, shards), "request");
+    ASSERT_TRUE(native.ok()) << native.error.ToString();
+    std::set<uint64_t> digests;
+    for (auto format : {IndexerScaleFormat::FP32, IndexerScaleFormat::UE8M0}) {
+        group.indexer_scale_format = format;
+        auto src                   = pipeline({3, 5}, shards);
+        auto dst                   = pipeline({2, 6}, shards);
+        for (auto* side : {&src, &dst}) {
+            side->stages.back().draft_shards = shards;
+            side->stages.back().layer_tags.push_back({kFullTag});
+        }
+        const auto matched = KVCacheTransferPlanner::planStages(src, dst, "request");
+        ASSERT_TRUE(matched.ok()) << matched.error.ToString();
+        digests.insert(matched.plan.digest());
+        expectAllRouteBytesMatch(matched.plan);
+        // The format marker must not alter the native copy geometry.
+        auto main_only =
+            KVCacheTransferPlanner::planStages(pipeline({3, 5}, shards), pipeline({2, 6}, shards), "request");
+        ASSERT_TRUE(main_only.ok());
+        ASSERT_EQ(main_only.plan.routes.size(), native.plan.routes.size());
+        for (size_t i = 0; i < native.plan.routes.size(); ++i) {
+            EXPECT_EQ(main_only.plan.routes[i].src_bytes, native.plan.routes[i].src_bytes);
+            EXPECT_EQ(main_only.plan.routes[i].dst_bytes, native.plan.routes[i].dst_bytes);
+        }
+        for (auto other : {IndexerScaleFormat::NONE, IndexerScaleFormat::FP32, IndexerScaleFormat::UE8M0}) {
+            if (other == format)
+                continue;
+            // Check both transfer directions, with a mismatch only in a later PP stage
+            // or only in draft, so matching main layers cannot conceal an invalid draft.
+            for (bool draft : {false, true}) {
+                auto  mismatch                                  = dst;
+                auto& stage                                     = mismatch.stages.back();
+                auto& target                                    = draft ? stage.draft_shards : stage.main_shards;
+                target.groups.at(kFullTag).indexer_scale_format = other;
+                for (const auto& result : {KVCacheTransferPlanner::planStages(src, mismatch, "request"),
+                                           KVCacheTransferPlanner::planStages(mismatch, src, "request")}) {
+                    EXPECT_FALSE(result.ok());
+                    EXPECT_NE(result.error.ToString().find("indexer scale format mismatch"), std::string::npos);
+                    EXPECT_TRUE(result.plan.routes.empty());
+                }
+            }
+        }
+    }
+    EXPECT_EQ(digests.size(), 2u);
+}
+
 TEST(PlannerPipeline, CoversDifferentStageCutsInBothDirections) {
     const std::vector<std::pair<std::vector<int>, std::vector<int>>> cuts = {
         {{8}, {3, 5}}, {{3, 5}, {8}}, {{3, 5}, {2, 6}}, {{3, 5}, {2, 4, 2}}};

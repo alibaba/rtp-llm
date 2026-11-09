@@ -18,13 +18,13 @@ from pathlib import Path
 import torch
 
 try:
+    from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
     from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
         FP8_E4M3_MAX,
         INDEXER_HEAD_DIM,
         indexer_q_fp8_quant_fold,
         indexer_q_rope_fp8_quant_fold,
     )
-    from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
 except Exception as exc:
     if "libth_transformer_config.so" not in str(exc):
         raise
@@ -41,7 +41,9 @@ except Exception as exc:
     _q_mod = _load_module(
         "dsv4_indexer_q_quant_triton", _FP8_DIR / "_indexer_q_quant_triton.py"
     )
-    _rope_mod = _load_module("dsv4_rope_only_triton", _DSV4_DIR / "_rope_only_triton.py")
+    _rope_mod = _load_module(
+        "dsv4_rope_only_triton", _DSV4_DIR / "_rope_only_triton.py"
+    )
     FP8_E4M3_MAX = _q_mod.FP8_E4M3_MAX
     INDEXER_HEAD_DIM = _q_mod.INDEXER_HEAD_DIM
     indexer_q_fp8_quant_fold = _q_mod.indexer_q_fp8_quant_fold
@@ -196,6 +198,26 @@ def test_fused_rope_quant_matches_old_batched_decode_shape():
     w = torch.randn(B, S, H, dtype=torch.float32, device="cuda")
     freqs = _make_freqs(B, rope_head_dim)
     _assert_fused_rope_quant_matches_old(q, w, freqs, rope_head_dim)
+
+
+def test_mx_fused_rope_quant_matches_separate_rope():
+    torch.manual_seed(24)
+    b, s, h, d = 2, 3, 32, INDEXER_HEAD_DIM
+    rope_head_dim = 64
+    q = torch.randn(b, s, h, d, dtype=torch.bfloat16, device="cuda") * 0.25
+    weights = torch.randn(b, s, h, dtype=torch.bfloat16, device="cuda")
+    freqs = _make_freqs(b * s, rope_head_dim)
+    rotated = q.clone()
+    rope_only_inplace(rotated[..., -rope_head_dim:], freqs)
+    ref_q, ref_w, ref_sf = indexer_q_fp8_quant_fold(
+        rotated.contiguous(), weights, mx=True
+    )
+    got_q, got_w, got_sf = indexer_q_rope_fp8_quant_fold(
+        q, weights, freqs, rope_head_dim, mx=True
+    )
+    assert torch.equal(got_q.view(torch.uint8), ref_q.view(torch.uint8))
+    assert torch.equal(got_w, ref_w)
+    assert torch.equal(got_sf, ref_sf)
 
 
 if __name__ == "__main__":

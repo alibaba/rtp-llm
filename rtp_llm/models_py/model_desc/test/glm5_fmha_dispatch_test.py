@@ -730,6 +730,41 @@ class Glm5CmpCallContractTest(unittest.TestCase):
             ),
         )
 
+    def test_cmp_indexer_format_checked_before_loading_operators(self):
+        for mx in (False, True):
+            for phase in ("prefill", "decode", "target_verify", "draft_prefill"):
+                for reuse in (False, True):
+                    with self.subTest(mx=mx, phase=phase, reuse=reuse):
+                        self.cmp._draft_prefill_clone = phase == "draft_prefill"
+                        fmha = self.inputs(4, requests=1, prefill=phase != "decode")
+                        fmha.attn_inputs.is_target_verify = phase == "target_verify"
+                        with (
+                            patch(
+                                "rtp_llm.models_py.modules.indexer_mx_abi.use_mx_indexer_cache",
+                                return_value=mx,
+                            ),
+                            patch(
+                                "rtp_llm.models_py.modules.hybrid.glm5_cmp._load_ops"
+                            ) as load_ops,
+                            patch.object(self.cmp, "_initialize_for_cmp") as initialize,
+                        ):
+                            selected = should_enable_glm5_cmp(
+                                [SimpleNamespace(cmp=self.cmp)],
+                                1,
+                                torch.empty(4, 6144),
+                                fmha,
+                                SimpleNamespace(get_layer_cache=lambda *_: object()),
+                                force_reuse_topk_indices=reuse,
+                            )
+                        expected = phase != "prefill" and (reuse or not mx)
+                        self.assertEqual(selected, expected)
+                        if expected:
+                            load_ops.assert_called_once()
+                            initialize.assert_called_once()
+                        else:
+                            load_ops.assert_not_called()
+                            initialize.assert_not_called()
+
     def test_non_fp8_projections_disable_cmp_before_loading_operators(self):
         for projection in ("fused_qkv_a_proj", "q_b_proj", "o_proj", "wk", "wq_b"):
             for missing_scale in (False, True):

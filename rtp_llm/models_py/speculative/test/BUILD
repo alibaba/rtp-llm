@@ -85,3 +85,9 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
 )
+
+py_test(
+    name = "test_minimax_m31_dspark_context",
+    srcs = ["test_minimax_m31_dspark_context.py"],
+    deps = ["//rtp_llm:testlib"],
+)

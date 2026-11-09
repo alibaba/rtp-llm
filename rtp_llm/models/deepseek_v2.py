@@ -576,6 +576,12 @@ class DeepSeekV2(BaseModel):
             OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED
         )
         indexer_desc.compression_ratio = 1
+        if indexer_head_dim == 128:
+            from rtp_llm.models_py.modules.indexer_mx_abi import (
+                indexer_cache_scale_format,
+            )
+
+            indexer_desc.indexer_scale_format = indexer_cache_scale_format()
         descs = model_config.kv_cache_spec_descs
         for layer_descs in descs:
             layer_descs.append(indexer_desc)

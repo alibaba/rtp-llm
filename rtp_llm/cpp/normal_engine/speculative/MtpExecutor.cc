@@ -305,6 +305,10 @@ private:
 
 }  // namespace
 
+bool MtpExecutor::isMtpStreamAdmitted(const GenerateStreamPtr& stream) {
+    return isPrefillOnly(stream) || !LogitsProcessorFactory::validateMtpCompatibility(stream->getAllLogitsProcessorPtr()).has_value();
+}
+
 torch::Tensor MtpExecutor::snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder) {
     if (!tensor.defined() || tensor.is_cuda()) {
         return tensor;
@@ -471,7 +475,7 @@ void MtpExecutor::stageAcceptLenMetrics(const torch::Tensor& accept_len,
 
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(stage_accept_len_metrics)");
     metrics_accept_len_stream_num_        = static_cast<int64_t>(stream_count);
-    metrics_accept_len_propose_token_num_ = static_cast<int64_t>(stream_count * propose_step_);
+    metrics_accept_len_propose_token_num_ = static_cast<int64_t>(stream_count * verify_step_);
     metrics_accept_len_row_priorities_    = std::move(row_priorities);
 
     if (!accept_len.is_cuda()) {
@@ -653,6 +657,18 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     mtp_indexer_topk_ = draft_config.attn_config.indexer_topk;
     RTP_LLM_LOG_INFO("MTP index sharing enabled=%d topk=%ld", mtp_indexer_share_enabled_, mtp_indexer_topk_);
 
+    if (!warm_up_ && is_block_draft_ && !is_dflash_ && role_type_ == RoleType::PDFUSION
+        && params.parallelism_config.dp_size > 1 && params.py_model && !params.py_model.is_none()) {
+        py::gil_scoped_acquire gil;
+        if (py::hasattr(params.py_model, "skip_all_fake_prefill")) {
+            skip_all_fake_prefill_ = params.py_model.attr("skip_all_fake_prefill").cast<bool>();
+        }
+    }
+    const auto configured_verify_steps = params.sp_config.verifySteps();
+    verify_step_                       = is_block_draft_ ? static_cast<size_t>(configured_verify_steps) : propose_step_;
+    RTP_LLM_CHECK_WITH_INFO(!is_block_draft_
+                                || params.sp_config.gen_num_per_cycle == static_cast<int64_t>(propose_step_),
+                            "DSpARK config gamma and proposal width must match");
     dspark_prefill_commit_only_ = is_block_draft_ && role_type_ == RoleType::PREFILL;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
@@ -932,7 +948,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             if (enable_cuda_graph || is_block_draft_) {
                 RTP_LLM_LOG_INFO("[speculative decoding] creating draft prefill model");
                 // Ordinary MTP captures a prefill graph. DSpARK keeps the same
-                // runtime slot but constructs a gamma+1 decode-graph commit wrapper.
+                // runtime slot but constructs a verifySteps()+1 decode-graph commit wrapper.
                 py::object prefill_py_model = params.py_sp_model;
                 {
                     py::gil_scoped_acquire gil;
@@ -1009,6 +1025,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         RTP_LLM_LOG_INFO("[speculative decoding] DSpARK PREFILL commit-only worker: skipping proposal/Markov weights");
     }
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
+    if (is_block_draft_ && verify_step_ != propose_step_) {
+        dspark_verify_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, verify_step_));
+    }
     if (!is_block_draft_) {
         fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
     }
@@ -1175,6 +1194,17 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             return absl::OkStatus();
         }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+
+    if (skip_all_fake_prefill_) {
+        // Real prefill on any DP rank still needs every rank's MoE collectives.
+        auto all_fake = torch::tensor({model_input.is_fake_stream ? int32_t{1} : int32_t{0}},
+                                      torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        all_fake      = execAllReduce({all_fake, ReduceOp::Min, ParallelMode::STAGE}).buffer;
+        if (all_fake.item<int32_t>() == 1) {
+            releaseAllModelBuffers();
+            return absl::OkStatus();
+        }
     }
 
     beginProfiledWork();
@@ -1649,7 +1679,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 batch_stream_processor_->prepareDSparkTargetVerifyModelInput(
                     dspark_round_state, model_input, draft_sampler_output.token_ids, buffer_holder_);
                 draft_token_ids_t = model_input.combo_tokens.reshape(
-                    {static_cast<int64_t>(batch_size), static_cast<int64_t>(propose_step_ + 1)});
+                    {static_cast<int64_t>(batch_size), static_cast<int64_t>(verify_step_ + 1)});
                 ensureModelInputsOnCuda(model_input, "decode.prepare_dspark_target_verify");
             }
             mtp::applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
@@ -1728,10 +1758,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // Both proposal implementations have now produced the same target-verify
     // rows. Launch once here so spec-logits D2H/CPU work overlaps target verify.
     auto launch_spec_logits_phase = [&]() {
-        if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()) {
+        if (spec_logits_processor_present && verify_step_ > 1 && draft_token_ids_t.defined()) {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
             const int64_t expected_verify_tokens =
-                static_cast<int64_t>(batch_size) * static_cast<int64_t>(propose_step_ + 1);
+                static_cast<int64_t>(batch_size) * static_cast<int64_t>(verify_step_ + 1);
             const int64_t actual_verify_tokens = draft_token_ids_t.numel();
             RTP_LLM_CHECK_WITH_INFO(actual_verify_tokens == expected_verify_tokens,
                                     "spec logits verify tokens mismatch: got %ld, expected %ld",
@@ -1902,10 +1932,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             if (model_input.is_fake_stream) {
                 speculative_sampler_output.accept_len =
                     torch::full({1},
-                                (int64_t)(propose_step_ + 1),
+                                (int64_t)(verify_step_ + 1),
                                 torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
                 speculative_sampler_output.accept_tokens =
-                    torch::zeros({1, (int64_t)(propose_step_ + 1)},
+                    torch::zeros({1, (int64_t)(verify_step_ + 1)},
                                  torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
             } else {
                 // gatherSpecSamplerInput reads host stream state updated by the previous
@@ -1930,11 +1960,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
                 sampler_output           = std::move(sampler_->forward(sampler_input));
                 sampler_output.all_probs = sampler_output.all_probs.reshape(
-                    {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
+                    {(int64_t)batch_size, (int64_t)(verify_step_ + 1), (int64_t)vocab_size_});
 
                 // rejection sampling
                 auto params = gatherSpeculativeSamplingParams(streams);
-                mtp::runRejectionSampling(*speculative_sampler_,
+                auto& verify_sampler = dspark_verify_sampler_ ? dspark_verify_sampler_ : speculative_sampler_;
+                mtp::runRejectionSampling(*verify_sampler,
                                           params,
                                           draft_sampler_output,
                                           sampler_output,
@@ -2134,7 +2165,7 @@ std::shared_ptr<RecordedBatch> MtpExecutor::buildSpVerifyRecord(int64_t record_i
             for (int i = 0; i < batch_size; ++i) {
                 Json row{{"phase", std::string(phase)}};
                 if (sp_verify)
-                    row["q_len"] = propose_step_ + 1;
+                    row["q_len"] = verify_step_ + 1;
                 else {
                     row["input_len"] = stream->inputLength();
                     row["reuse_len"] = stream->initialReuseLength();
@@ -2203,8 +2234,7 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
         // Async prepare only needs the token count for metadata/cudagraph sizing.
         // The actual target-verify token ids are produced by the draft decode
         // path below.
-        model_input_copy.combo_tokens =
-            torch::empty({static_cast<int64_t>(batch_size * (propose_step_ + 1))}, cuda_i32);
+        model_input_copy.combo_tokens = torch::empty({static_cast<int64_t>(batch_size * (verify_step_ + 1))}, cuda_i32);
         // Shifted draft KV and target verification resume at the same cache
         // position. Prefer the explicit target prefix; callers without one
         // supply that position in sequence_lengths.
@@ -2231,17 +2261,17 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
                                          model_input_copy.prefix_lengths,
                                          model_input_copy.sequence_lengths_plus_1,
                                          model_input_copy.lm_output_indexes,
-                                         static_cast<int32_t>(propose_step_ + 1),
+                                         static_cast<int32_t>(verify_step_ + 1),
                                          cuda_graph::graphGetCurrentStream().stream());
         } else
 #endif
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input_fallback)");
             model_input_copy.input_lengths =
-                torch::full({static_cast<int64_t>(batch_size)}, static_cast<int64_t>(propose_step_ + 1), cuda_i32);
+                torch::full({static_cast<int64_t>(batch_size)}, static_cast<int64_t>(verify_step_ + 1), cuda_i32);
             model_input_copy.lm_output_indexes       = torch::arange(0,
-                                                               static_cast<int64_t>(batch_size * (propose_step_ + 1)),
-                                                               static_cast<int64_t>(propose_step_ + 1),
+                                                               static_cast<int64_t>(batch_size * (verify_step_ + 1)),
+                                                               static_cast<int64_t>(verify_step_ + 1),
                                                                cuda_i32);
             const auto& target_prefix_lengths        = target_prefix_lengths_for_prepare.defined() ?
                                                            target_prefix_lengths_for_prepare :
@@ -2585,7 +2615,7 @@ MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& str
                                          std::shared_ptr<torch::Event>       draft_tokens_ready_event) {
     SpecLogitsVerifyRunner::LaunchTask task;
     task.total_streams            = streams.size();
-    task.propose_step             = static_cast<int>(propose_step_);
+    task.propose_step             = static_cast<int>(verify_step_);
     task.vocab_size               = vocab_size_;
     task.draft_tokens             = draft_tokens;
     task.draft_tokens_ready_event = std::move(draft_tokens_ready_event);
@@ -2763,7 +2793,7 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
     buffer_holder_.hold_host(temperature_cpu);
     auto temperature = temperature_cpu.to(base_logits.device(), /*non_blocking=*/true);
     return speculative_sampler_->sampleDSparkDraft(
-        base_logits, anchors, temperature, dspark_markov_w1_, dspark_markov_w2_, draft_vocab_size_);
+        base_logits, anchors, temperature, dspark_markov_w1_, dspark_markov_w2_, draft_vocab_size_, verify_step_);
 }
 
 void MtpExecutor::runDSparkProposal(GptModelInputs&              proposal_input,
@@ -2858,7 +2888,7 @@ void MtpExecutor::collectDecodeMetrics(const StreamGroups&                      
     sp_engine_collector.total_accepted_token_num     = total_accept_len;
     sp_engine_collector.total_stream_num             = accept_len_metrics.total_stream_num;
     sp_engine_collector.total_propose_token_num      = accept_len_metrics.total_propose_token_num;
-    sp_engine_collector.spec_steps                   = propose_step_;
+    sp_engine_collector.spec_steps                   = verify_step_;
     metrics_collector.accepted_token_num_by_priority = accept_len_metrics.accept_len_by_priority;
 }
 
@@ -3035,7 +3065,7 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
             prefill_streams.push_back(stream);
         } else {
             if (!use_mtp_snapshot) {
-                stream->setScoreLen(propose_step_ + 1);
+                stream->setScoreLen(verify_step_ + 1);
             }
             if (!use_mtp_snapshot && stream->getSPOutputBuffer() == nullptr && stream->isPerfTest()) {
                 auto sp_output_buffer = makeFakeSPOutputBuffer(
@@ -3641,7 +3671,7 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
     }
     auto next_position_ids_all =
         is_block_draft_ ? advanceDSparkPositionIds(
-                              verify_position_ids, accept_len_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
+                              verify_position_ids, accept_len_all, batch_size, static_cast<int64_t>(verify_step_ + 1)) :
                           torch::Tensor();
 
     // Assign per-stream views
@@ -3761,7 +3791,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     auto next_position_ids_all =
         is_block_draft_ ?
             advanceDSparkPositionIds(
-                verify_position_ids, accept_len_gpu_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
+                verify_position_ids, accept_len_gpu_all, batch_size, static_cast<int64_t>(verify_step_ + 1)) :
             torch::Tensor();
 
     torch::Tensor next_kv_cache_block_id;

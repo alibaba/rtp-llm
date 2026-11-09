@@ -16,6 +16,52 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.fused_prefill_rope_hadamard imp
 
 
 class Glm5IndexerFusionTest(unittest.TestCase):
+    def test_mx_fused_query_preserves_quantized_values_and_packs_scales(self):
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_q_rope_quant import (
+            fused_qk_rope_quant,
+        )
+
+        torch.manual_seed(31)
+        for rows in (0, 1, 33, 2048):
+            with self.subTest(rows=rows):
+                q = torch.randn(rows, 32, 128, device="cuda", dtype=torch.bfloat16)
+                k = torch.randn(rows, 128, device="cuda", dtype=torch.bfloat16)
+                positions = torch.arange(rows, device="cuda", dtype=torch.int32)
+                angles = torch.randn(max(rows, 1), 32, device="cuda")
+                cache = torch.cat((angles.cos(), angles.sin()), dim=-1)
+                legacy_q, legacy_sf, legacy_k = fused_qk_rope_quant(
+                    q, k, positions, cache, 32, 128, 64, scale_fmt="ue8m0"
+                )
+                mx_q, mx_sf, mx_k = fused_qk_rope_quant(
+                    q, k, positions, cache, 32, 128, 64, scale_fmt="mx_ue8m0"
+                )
+                self.assertEqual(mx_sf.dtype, torch.int32)
+                self.assertEqual(mx_sf.shape, (rows, 32))
+                torch.testing.assert_close(
+                    mx_q.float(), legacy_q.float(), rtol=0, atol=0
+                )
+                torch.testing.assert_close(mx_k, legacy_k, rtol=0, atol=0)
+                scale_bits = legacy_sf.squeeze(-1).contiguous().view(torch.int32)
+                expected_sf = (scale_bits >> 23) * 0x01010101
+                torch.testing.assert_close(mx_sf, expected_sf, rtol=0, atol=0)
+
+    def test_mx_fused_gate_keeps_query_scale_explicit(self):
+        torch.manual_seed(37)
+        for rows in (0, 1, 33):
+            for transposed in (False, True):
+                with self.subTest(rows=rows, transposed=transposed):
+                    x = torch.randn(rows, 128, device="cuda", dtype=torch.bfloat16)
+                    w = torch.randn(32, 128, device="cuda", dtype=torch.bfloat16)
+                    if transposed:
+                        w = w.t().contiguous().t()
+                    ones = torch.ones(rows, 32, device="cuda")
+                    expected = fused_logits_head_gate(x, ones, w, 0.125)
+                    actual = fused_logits_head_gate(x, None, w, 0.125)
+                    self.assertEqual(actual.dtype, torch.bfloat16)
+                    torch.testing.assert_close(
+                        actual, expected.bfloat16(), rtol=0, atol=0
+                    )
+
     def test_head_gate_dispatch_and_transposed_weights(self):
         torch.manual_seed(29)
         for rows in (0, 1, 32, 33):

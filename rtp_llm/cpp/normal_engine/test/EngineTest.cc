@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
+#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
@@ -458,16 +459,15 @@ TEST_F(NormalEngineTest, testPpStepRejectsBeforeFakePaddingAndDefersRetirementTo
 
             engine->sp_config.type              = type;
             engine->sp_config.gen_num_per_cycle = 3;
-            engine->scheduler_ = std::make_unique<PPScheduler>(
-                engine->runtime_config,
-                engine->model_config_,
-                engine->pd_sep_config,
-                engine->parallelism_config,
-                engine->sp_config,
-                engine->resource_context_.cache_manager);
-            auto  executor = std::make_unique<RecordingExecutor>();
-            auto* recorded = executor.get();
-            engine->executor_ = std::move(executor);
+            engine->scheduler_                  = std::make_unique<PPScheduler>(engine->runtime_config,
+                                                               engine->model_config_,
+                                                               engine->pd_sep_config,
+                                                               engine->parallelism_config,
+                                                               engine->sp_config,
+                                                               engine->resource_context_.cache_manager);
+            auto  executor                      = std::make_unique<RecordingExecutor>();
+            auto* recorded                      = executor.get();
+            engine->executor_                   = std::move(executor);
 
             auto query                             = std::make_shared<GenerateInput>();
             query->request_id                      = 101;
@@ -506,12 +506,12 @@ TEST_F(NormalEngineTest, testPpStepRejectsBeforeFakePaddingAndDefersRetirementTo
             EXPECT_TRUE(rejected->streamCacheResource().isResourceReleased());
             EXPECT_TRUE(engine->scheduler_->empty());
 
-            auto healthy_query                            = std::make_shared<GenerateInput>();
+            auto healthy_query                             = std::make_shared<GenerateInput>();
             healthy_query->request_id                      = 202;
             healthy_query->input_ids                       = torch::tensor({3, 4}, torch::kInt32);
             healthy_query->generate_config                 = std::make_shared<GenerateConfig>();
             healthy_query->generate_config->max_new_tokens = 2;
-            auto healthy                                  = engine->makeStream(healthy_query);
+            auto healthy                                   = engine->makeStream(healthy_query);
             ASSERT_TRUE(engine->scheduler_->enqueue(healthy).ok());
             ASSERT_TRUE(engine->pp_step().ok());
             ASSERT_EQ(recorded->calls.size(), 3u);
@@ -1464,6 +1464,31 @@ import torch)");
     inline static std::unique_ptr<py::scoped_interpreter> interpreter_;
 };
 
+TEST_F(NormalEngineCustomOutputTest, testModelAdmissionCapabilityReadBeforeExecutorConstruction) {
+    // A deliberately failing startup policy must prevent any executor/warmup work.
+    // Use an unrelated model identity and a plain Python object, not an M3.1 name.
+    for (const bool speculative : {false, true}) {
+        CustomConfig  config;
+        ModelConfig   model_config;
+        RuntimeConfig runtime_config;
+        KVCacheConfig kv_cache_config;
+        auto          params            = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+        params.model_config_.model_type = "other_model";
+        params.sp_config.type           = speculative ? SP_TYPE_DSPARK : SP_TYPE_NONE;
+        auto model                      = py::module_::import("types").attr("SimpleNamespace")();
+        model.attr("supports_cacheless_warmup")  = py::bool_(false);
+        int calls                                = 0;
+        model.attr("supports_local_pd_fallback") = py::cpp_function([&](bool actual_speculative) -> bool {
+            ++calls;
+            EXPECT_EQ(actual_speculative, speculative);
+            throw std::runtime_error("model policy stops construction");
+        });
+        params.py_model                          = model;
+        EXPECT_THROW((void)std::make_shared<NormalEngine>(params, nullptr), py::error_already_set);
+        EXPECT_EQ(calls, 1);
+    }
+}
+
 TEST_F(NormalEngineCustomOutputTest, testCustomOutputSelectedOnceBeforeSystemPrefix) {
     CustomConfig config;
     config.multi_task_prompt_tokens = {{"1", {8, 9, 10}}};
@@ -2195,6 +2220,185 @@ TEST_F(NormalEngineTest, testAllowsUnsupportedCombosWithoutOutputVocab) {
     auto         proposal = makeLocalProposalParams(params);
     NormalEngine engine(params, std::move(proposal));
     EXPECT_NE(dynamic_cast<MtpExecutor*>(engine.executor_.get()), nullptr);
+}
+
+TEST_F(NormalEngineTest, testRejectedMtpBatchStillGetsRoleSpecificFakeStreams) {
+    class UnsupportedMtpProcessor final: public BaseLogitsProcessor {
+    public:
+        std::optional<ErrorInfo> process(const SamplerInputs&, size_t, size_t) override {
+            return std::nullopt;
+        }
+        void                     updateMultiSeqStatus(const std::vector<int>&) override {}
+        std::optional<ErrorInfo> updateStatus(const torch::Tensor&, int32_t) override {
+            return std::nullopt;
+        }
+        MtpProcessorCapability mtpCapability() const override {
+            return {MtpProcessorMode::UNSUPPORTED, "test processor has no spec-verify support"};
+        }
+    };
+    auto engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    ModelConfig   model;
+    RuntimeConfig runtime;
+    KVCacheConfig cache;
+    auto          draft_params = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+    draft_params->push_back(
+        std::make_unique<EngineInitParams>(createEngineInitParams(CustomConfig{}, model, runtime, cache)));
+    engine->propose_params_ =
+        std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_DSPARK, 1, std::move(draft_params));
+    engine->parallelism_config.dp_size = 2;
+    engine->sp_config.type             = SP_TYPE_DSPARK;
+
+    for (const auto role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
+        SCOPED_TRACE(static_cast<int>(role));
+        engine->pd_sep_config.role_type = role;
+        for (const bool admitted : {false, true}) {
+            auto query                             = std::make_shared<GenerateInput>();
+            query->input_ids                       = torch::tensor({1, 2}, torch::kInt32);
+            query->generate_config                 = std::make_shared<GenerateConfig>();
+            query->generate_config->max_new_tokens = 1;
+            auto stream                            = engine->makeStream(query);
+            ASSERT_FALSE(stream->hasError());
+            if (!admitted) {
+                stream->sampling_state_.logits_processors.push_back(std::make_shared<UnsupportedMtpProcessor>());
+            }
+            stream->setIsContextStream(role != RoleType::DECODE);
+            ASSERT_EQ(MtpExecutor::isMtpStreamAdmitted(stream), admitted);
+            std::list<GenerateStreamPtr> streams{stream};
+            engine->mayAddFakeStream(streams);
+            bool has_prefill = false;
+            bool has_decode  = false;
+            for (const auto& candidate : streams) {
+                if (!MtpExecutor::isMtpStreamAdmitted(candidate)) {
+                    continue;
+                }
+                (candidate->isContextStream() ? has_prefill : has_decode) = true;
+            }
+            EXPECT_EQ(has_prefill, role != RoleType::DECODE);
+            EXPECT_EQ(has_decode, role != RoleType::PREFILL);
+            EXPECT_EQ(streams.size(),
+                      admitted ? (role == RoleType::PDFUSION ? 2 : 1) : (role == RoleType::PDFUSION ? 3 : 2));
+        }
+    }
+}
+
+TEST_F(NormalEngineTest, testModelCapabilityRejectsLocalPrefillGenerationBeforeScheduling) {
+    auto engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    engine->parallelism_config.role_type = RoleType::PREFILL;
+    // Exercise the shared admission contract independently of model identity/topology.
+    engine->model_config_.model_type = "other_model";
+    for (const bool supports_local : {false, true}) {
+        engine->supports_local_pd_fallback_ = supports_local;
+        for (const bool pd_separation : {false, true}) {
+            for (const int max_new_tokens : {0, 1, 8}) {
+                auto query                             = make_shared<GenerateInput>();
+                query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+                query->generate_config                 = make_shared<GenerateConfig>();
+                query->generate_config->max_new_tokens = max_new_tokens;
+                query->generate_config->pd_separation  = pd_separation;
+                const bool rejected                    = !supports_local && !pd_separation && max_new_tokens > 1;
+                auto       stream                      = engine->makeStream(query);
+                EXPECT_EQ(stream->hasError(), rejected);
+                if (rejected) {
+                    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                    auto local = engine->enqueue(query);
+                    ASSERT_TRUE(local->hasError());
+                    EXPECT_EQ(local->curBlocksNum(), 0);
+                    auto [accepted, streams] = engine->enqueueMultiple({query, query});
+                    EXPECT_EQ(accepted, (std::vector<bool>{false, false}));
+                }
+            }
+        }
+    }
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+}
+
+TEST_F(NormalEngineTest, testModelCapabilityAllowsPromptLogitsWithoutLocalGeneration) {
+    auto engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    engine->parallelism_config.role_type = RoleType::PREFILL;
+    engine->supports_local_pd_fallback_          = false;
+    auto query                                   = make_shared<GenerateInput>();
+    query->input_ids                             = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    query->generate_config                       = make_shared<GenerateConfig>();
+    query->generate_config->max_new_tokens       = 8;
+    query->generate_config->return_prompt_logits = true;
+    EXPECT_FALSE(engine->makeStream(query)->hasError());
+}
+
+TEST_F(NormalEngineTest, testModelCapabilityDecodeRequiresHandoffButAllowsAllocation) {
+    CustomConfig config;
+    config.role_type = RoleType::DECODE;
+    auto engine      = createMockEngine(config);
+    ASSERT_TRUE(engine->stop().ok());
+    engine->model_config_.model_type = "other_model";
+    for (const bool supports_local : {false, true}) {
+        engine->supports_local_pd_fallback_ = supports_local;
+        for (const int max_new_tokens : {1, 8}) {
+            auto query                             = make_shared<GenerateInput>();
+            query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+            query->generate_config                 = make_shared<GenerateConfig>();
+            query->generate_config->max_new_tokens = max_new_tokens;
+            // DecodeRpcServer allocates before remote Prefill supplies the first token.
+            auto allocated = engine->makeStream(query);
+            ASSERT_FALSE(allocated->hasError());
+            allocated->update({torch::tensor({{5}}, torch::kInt32), 1}, false);
+            ASSERT_FALSE(allocated->isContextStream());
+            EXPECT_TRUE(engine->validateStreamForScheduling(allocated));
+            auto context = engine->makeStream(query);
+            EXPECT_EQ(engine->validateStreamForScheduling(context), supports_local);
+            if (!supports_local) {
+                auto local = engine->enqueue(query);
+                EXPECT_TRUE(local->hasError());
+                EXPECT_EQ(local->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_EQ(local->curBlocksNum(), 0);
+                auto [accepted, streams] = engine->enqueueMultiple({query, query});
+                EXPECT_EQ(accepted, (std::vector<bool>{false, false}));
+            }
+        }
+    }
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+}
+
+TEST_F(NormalEngineTest, testModelCapabilityAcceptsPdContextBeforeFirstTokenHandoff) {
+    CustomConfig config;
+    config.role_type = RoleType::DECODE;
+    auto engine      = createMockEngine(config);
+    ASSERT_TRUE(engine->stop().ok());
+    engine->supports_local_pd_fallback_ = false;
+    auto make_query                     = [](bool pd_separation) {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 8;
+        query->generate_config->pd_separation  = pd_separation;
+        return query;
+    };
+    // Match DecodeRpcServer: makeStream -> enqueue while still waiting for Prefill.
+    auto stream = engine->makeStream(make_query(true));
+    ASSERT_TRUE(stream->isContextStream());
+    ASSERT_EQ(stream->outputTokenLen(), 0);
+    engine->enqueue(stream);
+    ASSERT_FALSE(stream->hasError());
+    EXPECT_TRUE(stream->isContextStream());
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 1);
+
+    auto direct = engine->enqueue(make_query(true));
+    ASSERT_FALSE(direct->hasError());
+    EXPECT_TRUE(direct->isContextStream());
+    auto [accepted, streams] = engine->enqueueMultiple({make_query(false), make_query(true)});
+    EXPECT_EQ(accepted, (std::vector<bool>{false, true}));
+    EXPECT_EQ(streams[0]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_FALSE(streams[1]->hasError());
+    EXPECT_TRUE(streams[1]->isContextStream());
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 3);
+
+    // First-token publication, rather than a synthetic phase flag, advances the stream.
+    stream->update({torch::tensor({{5}}, torch::kInt32), 1}, false);
+    ASSERT_FALSE(stream->isContextStream());
+    EXPECT_EQ(stream->outputTokenLen(), 1);
+    EXPECT_TRUE(engine->validateStreamForScheduling(stream));
 }
 
 }  // namespace rtp_llm

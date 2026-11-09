@@ -873,6 +873,8 @@ message P2PShardLayoutPB {
         uint64 linear_k_row_bytes = 14;
         uint64 linear_v_row_bytes = 15;
         uint32 linear_history_rows = 16;
+        // IndexerScaleFormat: NONE=0, FP32=1, UE8M0=2. Must match the peer.
+        uint32 indexer_scale_format = 17;
     }
     int32 tp_size = 1;
     int32 cp_method = 2;

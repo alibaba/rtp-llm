@@ -1582,6 +1582,13 @@ class CustomChatRenderer:
             else generate_config.num_beams
         )
         nums_output = last_num_beams if last_num_beams != 1 else nums_output
+        if (
+            generate_config.thinking_mode == ThinkingMode.ENABLED
+            and self.resolve_thinking_mode(request) == ThinkingMode.ADAPTIVE
+        ):
+            # A prefilled think prefix promotes the engine to ENABLED. Parser
+            # hooks must see that mode too, without mutating the caller's request.
+            request = request.model_copy(update={"enable_thinking": True})
         status_list = await self._create_status_list(nums_output, request)
         index = 0
         resolved_thinking_mode = generate_config.thinking_mode

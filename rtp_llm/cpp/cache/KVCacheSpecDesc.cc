@@ -37,7 +37,15 @@ KVCacheSpecPtr SpecBuilder::build(const KVCacheSpecDesc& desc, const SpecBuildCo
         desc.tag.c_str(),
         static_cast<int>(desc.cache_type),
         static_cast<int>(mode));
-    spec->tp_transfer.mode = mode;
+    RTP_LLM_CHECK_WITH_INFO(desc.indexer_scale_format == IndexerScaleFormat::NONE
+                                || (desc.cache_type == KVCacheSpecType::OpaqueKV
+                                    && desc.entry_dtype == DataType::TYPE_UINT8 && desc.entry_elems == 132
+                                    && desc.entry_count_mode == OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED
+                                    && (desc.indexer_scale_format == IndexerScaleFormat::FP32
+                                        || desc.indexer_scale_format == IndexerScaleFormat::UE8M0)),
+                            "indexer scale encoding requires 132-byte FP8 compressed kernel pages");
+    spec->indexer_scale_format = desc.indexer_scale_format;
+    spec->tp_transfer.mode     = mode;
     return spec;
 }
 

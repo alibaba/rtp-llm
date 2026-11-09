@@ -1,5 +1,6 @@
 import pickle
 from unittest import TestCase, main
+from unittest.mock import patch
 
 import rtp_llm.ops as ops
 from rtp_llm.config.model_config import ModelConfig
@@ -491,6 +492,41 @@ class HybridKVCacheSpecTest(TestCase):
         self.assertFalse(restored.reuse.enable_prefix_reuse)
         self.assertFalse(hasattr(ops, "CacheReusePolicy"))
         self.assertFalse(hasattr(ops, "CacheEvictPolicy"))
+
+
+class IndexerScaleDescriptorTest(TestCase):
+    def test_sparse_mla_describes_writer_encoding(self):
+        for mx in (False, True):
+            with self.subTest(mx=mx), patch(
+                "rtp_llm.models_py.modules.indexer_mx_abi.use_mx_indexer_cache",
+                return_value=mx,
+            ):
+                config = ModelConfig()
+                config.num_layers = 1
+                config.attn_config.use_mla = True
+                config.attn_config.is_sparse = True
+                config.attn_config.indexer_head_dim = 128
+                config.attn_config.tokens_per_block = 256
+                DeepSeekV2._post_build_model_config(config)
+                desc = config.kv_cache_spec_descs[0][-1]
+                expected = (
+                    ops.IndexerScaleFormat.UE8M0 if mx else ops.IndexerScaleFormat.FP32
+                )
+                self.assertEqual(desc.indexer_scale_format, expected)
+                self.assertEqual(
+                    pickle.loads(pickle.dumps(desc)).indexer_scale_format, expected
+                )
+                self.assertEqual(
+                    config.kv_cache_spec_descs[0][0].indexer_scale_format,
+                    ops.IndexerScaleFormat.NONE,
+                )
+
+    def test_old_pickle_defaults_to_unspecified_encoding(self):
+        desc = KVCacheSpecDesc()
+        for size in (20, 21):
+            restored = KVCacheSpecDesc.__new__(KVCacheSpecDesc)
+            restored.__setstate__(desc.__getstate__()[:size])
+            self.assertEqual(restored.indexer_scale_format, ops.IndexerScaleFormat.NONE)
 
 
 if __name__ == "__main__":

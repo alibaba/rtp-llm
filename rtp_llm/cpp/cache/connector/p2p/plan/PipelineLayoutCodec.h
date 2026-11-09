@@ -56,6 +56,7 @@ inline void encodeP2PShardLayout(const ShardLayout& layout, P2PShardLayoutPB* pb
         g->set_linear_k_row_bytes(group.linear_k_row_bytes);
         g->set_linear_v_row_bytes(group.linear_v_row_bytes);
         g->set_linear_history_rows(group.linear_history_rows);
+        g->set_indexer_scale_format(static_cast<uint32_t>(group.indexer_scale_format));
     }
 }
 
@@ -78,7 +79,8 @@ inline bool decodeP2PShardLayout(const P2PShardLayoutPB& pb, RoleType role, Shar
         if (g.tag().empty() || g.group_type() < 0 || g.group_type() > static_cast<int>(CacheGroupType::SWA)
             || g.spec_type() < 0 || g.spec_type() > KVCacheSpecType::OpaqueState || g.cp_mapping() < 0
             || g.cp_mapping() > static_cast<int>(CpBlockMappingMode::COMPACT_LAST_RANK) || g.cp_slice() < 0
-            || g.cp_slice() > static_cast<int>(CpBlockSliceMode::PAYLOAD_BYTES)) {
+            || g.cp_slice() > static_cast<int>(CpBlockSliceMode::PAYLOAD_BYTES)
+            || g.indexer_scale_format() > static_cast<uint32_t>(IndexerScaleFormat::UE8M0)) {
             return false;
         }
         ShardLayout::GroupLayout group;
@@ -97,6 +99,7 @@ inline bool decodeP2PShardLayout(const P2PShardLayoutPB& pb, RoleType role, Shar
         group.linear_k_row_bytes        = g.linear_k_row_bytes();
         group.linear_v_row_bytes        = g.linear_v_row_bytes();
         group.linear_history_rows       = g.linear_history_rows();
+        group.indexer_scale_format      = static_cast<IndexerScaleFormat>(g.indexer_scale_format());
         if (!layout.groups.emplace(g.tag(), std::move(group)).second) {
             return false;
         }

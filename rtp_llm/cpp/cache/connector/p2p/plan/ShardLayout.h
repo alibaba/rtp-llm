@@ -23,6 +23,7 @@ struct ShardLayout {
     struct GroupLayout {
         CacheGroupPolicy policy;
         KVCacheSpecType  spec_type = KVCacheSpecType::MultiHeadAttention;
+        IndexerScaleFormat indexer_scale_format = IndexerScaleFormat::NONE;
 
         size_t kv_block_stride_bytes = 0;
         size_t kv_scale_stride_bytes = 0;

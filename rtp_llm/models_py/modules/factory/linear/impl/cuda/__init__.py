@@ -20,6 +20,9 @@ if is_cuda():
 
     major, minor = get_sm()
     if major >= 10:
+        from .mxfp8_linear import CudaMxfp8Linear
+
+        LinearFactory.register(CudaMxfp8Linear)
         try:
             from .fp4_linear import CudaFp4GEMMLinear
         except ImportError as error:

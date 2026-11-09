@@ -224,15 +224,15 @@ class IndexerPagedContractTest(unittest.TestCase):
             attention.configure_fusion(SimpleNamespace(enable_fuse_kernels=enabled))
             self.assertEqual(attention._fuse_qk_rope_cat_cache_mla, enabled)
 
-    def make_indexer(self, *, fuse=True, cp=False):
+    def make_indexer(self, *, fuse=True, cp=False, mx=False):
         module = Indexer.__new__(Indexer)
         nn.Module.__init__(module)
+        module.indexer_op = SimpleNamespace(_use_mx=Mock(return_value=mx))
         module.parallelism_config = SimpleNamespace(
             prefill_cp_config=SimpleNamespace(is_enabled=lambda: cp)
         )
         module._fuse_logits_head_gate = fuse
         module._fuse_kernels_enabled = fuse
-        module._prefill_cp_fused_quant_enabled = Mock(return_value=True)
         q, scales = torch.zeros(4, 2, 128), torch.ones(4, 2, 1)
         module._fused_forward_decode = Mock(return_value=(q, scales))
         module._fused_forward_prefill_cp = Mock(return_value=(q, scales))
@@ -286,6 +286,60 @@ class IndexerPagedContractTest(unittest.TestCase):
         module._get_q_k_bf16.assert_called_once()
         module._quantize_q_k.assert_called_once()
         module._fused_forward_decode.assert_not_called()
+
+    def test_forward_preserves_mx_and_legacy_score_inputs(self):
+        for mx in (False, True):
+            for phase in ("decode", "target_verify", "draft_extend", "prefill"):
+                for fuse in (False, True):
+                    with (
+                        self.subTest(mx=mx, phase=phase, fuse=fuse),
+                        patch.object(
+                            indexer_module,
+                            "_DEVICE_TYPE",
+                            indexer_module.DeviceType.Cuda,
+                        ),
+                    ):
+                        prefill = phase == "prefill"
+                        module = self.make_indexer(mx=mx, cp=prefill, fuse=fuse)
+                        inputs = SimpleNamespace(
+                            is_prefill=phase != "decode",
+                            is_target_verify=phase == "target_verify",
+                            is_draft_extend=phase == "draft_extend",
+                        )
+                        cp_params = (
+                            SimpleNamespace(full_rope_pos_ids=torch.arange(4))
+                            if prefill
+                            else None
+                        )
+                        self.call_indexer(module, inputs, cp_params)
+                        if not fuse:
+                            module._get_q_k_bf16.assert_called_once()
+                            module._quantize_q_k.assert_called_once()
+                            module._fused_forward_decode.assert_not_called()
+                            module._fused_forward_prefill_cp.assert_not_called()
+                        else:
+                            module._get_q_k_bf16.assert_not_called()
+                            module._quantize_q_k.assert_not_called()
+                            if prefill:
+                                module._fused_forward_prefill_cp.assert_called_once()
+                                module._fused_forward_decode.assert_not_called()
+                            else:
+                                module._fused_forward_decode.assert_called_once()
+                                module._fused_forward_prefill_cp.assert_not_called()
+                        scales = module._fused_forward_decode.return_value[1]
+                        module.indexer_op._use_mx.assert_called_once_with(
+                            torch.device("cpu")
+                        )
+                        module._get_logits_head_gate.assert_called_once()
+                        self.assertIs(
+                            module._get_logits_head_gate.call_args.args[1],
+                            None if mx else scales,
+                        )
+                        module._compute_topk.assert_called_once()
+                        self.assertIs(
+                            module._compute_topk.call_args.kwargs["q_sf"],
+                            scales if mx else None,
+                        )
 
     def test_reference_decode_uses_local_positions_with_cp_configured(self):
         module = self.make_indexer(cp=True)

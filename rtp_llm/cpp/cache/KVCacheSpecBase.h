@@ -17,6 +17,13 @@
 
 namespace rtp_llm {
 
+// Numeric encoding of the FP8 indexer's four scale bytes per 128-element row.
+enum class IndexerScaleFormat : uint32_t {
+    NONE  = 0,
+    FP32  = 1,
+    UE8M0 = 2
+};
+
 inline KVPartitionBytes splitKVPartitionBytes(size_t      full_block_bytes,
                                               size_t      k_block_bytes,
                                               size_t      v_block_bytes,
@@ -79,6 +86,7 @@ struct KVCacheSpec {
 
     KVCacheSpecType type = KVCacheSpecType::MultiHeadAttention;
     TpCacheTransferLayout tp_transfer;
+    IndexerScaleFormat    indexer_scale_format = IndexerScaleFormat::NONE;
 
     KVCacheSpec(std::string tag,
                 uint32_t    seq_size_per_block,
@@ -155,6 +163,8 @@ struct KVCacheSpec {
            << ";tp_k_bytes=" << tp_transfer.k_row_bytes << ";tp_v_bytes=" << tp_transfer.v_row_bytes
            << ";tp_history=" << tp_transfer.history_rows << ";tp_key_heads=" << tp_transfer.key_heads
            << ";tp_value_heads=" << tp_transfer.value_heads;
+        if (indexer_scale_format != IndexerScaleFormat::NONE)
+            os << ";indexer_scale_format=" << static_cast<uint32_t>(indexer_scale_format);
         return os.str();
     }
 
