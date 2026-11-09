@@ -205,7 +205,7 @@ Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.express
 | reserve_block_ratio | 5，0–100 | 首次分配预留百分比。 |
 | reuse_cache / enable_device_cache | false / true | 前缀复用和 Device 索引。 |
 | tp_size / dp_size | 1 / 1，正整数 | real 并行配置；tp_size 用于原生状态/接入元数据，二者分别绑定公式 tpSize/dpSize，不模拟 rank 间执行。 |
-| prefill_cp_kv_cache_sharded / prefill_cp_size | false / 0（未指定） | 前者控制 P KV 分片；P 的实际分片数为 tp_size，显式 prefill_cp_size 必须与之相等。D 仅保留上游 CP 信息，本地 FULL KV 不分片。 |
+| prefill_cp_size | 1（0 视为默认） | Mock P 每组包含的基础缓存块数。大于 1 时只取每组末尾的键，逻辑块大小为基础块大小乘该值。D 的本地 FULL KV 始终按基础块管理。 |
 | cp_rotate_method | DISABLED | 沿用 real PrefillCPConfig；ALL_GATHER、ALL_GATHER_WITH_OVERLAP、ALLTOALL 开启通用 CP，cpSize=tp_size、cpEnabled=1，否则为 1/0。PREFILL_CP 的计算策略不模拟；它与通用 CP 都可启用下述 P KV 分片布局。 |
 | max_batch_tokens_size | 0，启动时解析为 max_context_batch_size × max_seq_len | P 的 batch token/矩形准入；合法 singleton 可超过预算。D 不使用该预算选批，仍通过 WorkerStatus 报告。 |
 | max_context_batch_size | 1，正整数 | 只在 max_batch_tokens_size 缺省或为 0 时参与预算推导，不直接限制 batch 请求数。 |
@@ -477,10 +477,10 @@ ViT Cache Claim 和 Forward Work 只提供只读 CompletionStage；调用方转�
 
 ### CP：只模拟缓存布局，不模拟 rank 通信
 
-数据集只提供语义 token、媒体信息和期望输出，不知道 CP。Mock Client 保持普通布局，不增加 CP 参数；本地 Case 的 P/D 不启用 `prefill_cp_kv_cache_sharded`，Client 与 Engine 使用相同基础块。`cp_rotate_method` 可以继续为计算公式和 Prefill 准入提供已有的 CP 参数，这与是否分片缓存是两个开关。
+数据集只提供语义 token、媒体信息和期望输出，不知道 CP。Mock Client 保持普通布局，不增加 CP 参数；本地 Case 默认使用 `prefill_cp_size=1`，Client 与 Engine 使用相同基础块。`cp_rotate_method` 和 `tp_size` 仍用于已有的计算模型和 Prefill 准入。
 
-Whale 使用真实 Frontend 时，需要让 Mock P 遵守真实 Frontend 的缓存路由合同：相同 `cache_key_hash_seed` 和基础 `seq_size_per_block`，并对齐 CP 分片配置。以基础块 128、P TP/CP4 为例，P 配置 `cp_rotate_method=ALL_GATHER`、`tp_size=4`、`prefill_cp_kv_cache_sharded=true`、`prefill_cp_size=4`，仍按 128-token 块滚动哈希，再选择 K4、K8；不能将哈希块直接改为 512，特别是媒体身份按基础块边界参与哈希时。P 的 KV 分配、复用、完整块提交、CacheStatus.block_size 和 token 容量统一使用 512 的逻辑边界；`test_block_num` 仍是每 rank 物理块数（含 null block）。有效配置额外显示只读的 `cache_key_block_size`。
+Whale 使用真实 Frontend 时，需要让 Mock P 遵守真实 Frontend 的缓存路由合同：相同 `cache_key_hash_seed` 和基础 `seq_size_per_block`，并对齐 CP 分片配置。基础块为 128 时，Mock P 设置 `prefill_cp_size=4`，按 128-token 块滚动哈希并保留 K4、K8。媒体身份也在基础块边界参与哈希。P 的 KV 分配、复用、完整块提交、CacheStatus.block_size 和 token 容量统一使用 512 的逻辑边界；`test_block_num` 仍是每 rank 物理块数（含 null block）。有效配置额外显示只读的 `cache_key_block_size`。
 
-P→D 仍传完整语义 token 和媒体 cache spans，ALLOCATE/LOAD/GENERATE 接口不新增 CP 字段，不传预先抽样的 P cache keys。D 从同一语义输入按自己的本地布局生成 key；即使设置 `prefill_cp_size=4` 和分片标志，它的 FULL KV 仍不做本地 CP 分片，与 real `KVCacheManager` 的 DECODE 分支一致。P 分片、D 不分片时，二者的 key 数和容量粒度不同是预期行为，不应强行设置成相同。
+P→D 仍传完整语义 token 和媒体 cache spans，ALLOCATE/LOAD/GENERATE 接口不新增 CP 字段，不传预先抽样的 P cache keys。D 从同一语义输入按自己的本地布局生成 key；即使设置 `prefill_cp_size=4`，它的 FULL KV 仍按基础块管理，与 real `KVCacheManager` 的 DECODE 分支一致。P 分片、D 不分片时，二者的 key 数和容量粒度不同是预期行为，不应强行设置成相同。
 
 Mock 模拟的是 FULL KV 的 key/容量/复用边界及既有性能公式，不启动 CP rank，不模拟 collective、真实 KV payload 拆分或张量搬运。KVCM 注册的基础 block_size 仍保留 128，不能因 P canonical key 的跨度为 512 就改注册命名空间。未配置分片时保持原有行为；不会根据 TH 的某一套配置自动给所有部署开启 CP4。

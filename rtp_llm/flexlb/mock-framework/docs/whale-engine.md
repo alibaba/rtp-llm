@@ -104,16 +104,15 @@ ENV 路径始终使用入口传入的环境，包括模型下载和 DSV4.1 names
 
 ### 真实 Frontend 的 CP 缓存布局
 
-Whale 的 Frontend 是真实组件，不使用本地 Mock Client。需要对齐 Frontend 与 Mock P 的基础哈希参数及 CP 分片开关，例如：
+Whale 的真实 Frontend 按原生配置开启分片。对于基础块为 128 的 CP4 布局，Mock P 的缓存配置如下。
 
 ```text
 SEQ_SIZE_PER_BLOCK=128
-TP_SIZE=4
-CP_ROTATE_METHOD=ALL_GATHER
-PREFILL_CP_KV_CACHE_SHARDED=1
 PREFILL_CP_SIZE=4
 ```
 
-该组合使 Mock P 上报 K4、K8 等 canonical keys，CacheStatus 的逻辑块为 512；基础哈希及 KVCM 注册仍按 128。Frontend 侧也必须使用相同 seed、基础块及 CP4 分片配置。参数需要显式配置并重启生效，代码升级不会自动改变部署配置。
+Mock P 上报 K4、K8 等 canonical keys，CacheStatus 的逻辑块为 512。哈希和 KVCM 注册的基础块大小为 128。Frontend 与 Mock P 使用相同的 seed、基础块和抽样步长。
 
-D 的 `PREFILL_CP_SIZE` 表示上游布局，不把 D 的本地 FULL KV 容量再乘 CP4。P→D 传完整语义输入和媒体身份，不增加 CP 协议字段。本地 Client/Case 可保持不分片，无需把 CP 写进数据集。具体范围见 [CP 缓存布局](component-reference.md#cp只模拟缓存布局不模拟-rank-通信)。
+旧 Mock 配置的分片开关仍可读取。显式关闭时按 CP1，开启且 CP size 缺省或为 0 时沿用 `TP_SIZE`。迁移时删除旧开关，填写实际的 `PREFILL_CP_SIZE`。旧部署若只填了大于 1 的 CP size，升级后会启用对应的缓存布局。
+
+D 的本地 FULL KV 按基础块管理。P→D 传完整语义输入和媒体身份，不增加 CP 协议字段。本地 Client/Case 可保持不分片，无需把 CP 写进数据集。具体范围见 [CP 缓存布局](component-reference.md#cp只模拟缓存布局不模拟-rank-通信)。

@@ -115,9 +115,8 @@ class PdGenerationTest {
     }
 
     @Test void shardedPrefillTransfersSemanticInputToUnshardedDecode() throws Exception {
-        try(var p=node("prefill",16,1,Map.of("settings",Map.of("tp_size",4,"cp_rotate_method","ALL_GATHER",
-                    "prefill_cp_kv_cache_sharded",true,"prefill_cp_size",4)));
-            var d=node("decode",32,1,Map.of("settings",Map.of("prefill_cp_kv_cache_sharded",true,"prefill_cp_size",4)))) {
+        try(var p=node("prefill",16,1,Map.of("settings",Map.of("prefill_cp_size",4)));
+            var d=node("decode",32,1,Map.of("settings",Map.of("prefill_cp_size",4)))) {
             var request=input(d,71,17,5,3000,true);
             var rpc=RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(4,TimeUnit.SECONDS);
             var results=rpc.generateStreamCall(request);
