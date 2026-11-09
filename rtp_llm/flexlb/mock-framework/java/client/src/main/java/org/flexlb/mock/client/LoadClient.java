@@ -13,7 +13,7 @@ import org.flexlb.mock.client.ClientProtocol.*;
 
 /** Owns playback pacing, admission, concurrency and request lifetimes. */
 final class LoadClient implements AutoCloseable {
-    record Item(long requestId, IndexedTraffic.Entry entry) {}
+    record Item(long requestId, IndexedTraffic.Entry entry, int outputLimit) {}
     private final WorkerPlan plan;
     private final NativeClient client;
     private final RequestJournal journal;
@@ -79,11 +79,12 @@ final class LoadClient implements AutoCloseable {
                 if (Thread.interrupted()) throw new InterruptedException();
                 long index = plan.first_index() + position * plan.stride();
                 var entry = indexed.entry(index, imageToken);
+                int outputLimit = entry.playbackLimit(plan.fallback_max_output_tokens());
                 long due = startNanos + delayNanos(index, entry.arrivalMs(), plan.qps(), plan.replay_speed());
                 long left;
                 while ((left = due - System.nanoTime()) > 0) TimeUnit.NANOSECONDS.sleep(left);
                 if (Thread.interrupted()) throw new InterruptedException();
-                submit.accept(new Item(plan.first_request_id() + index, entry));
+                submit.accept(new Item(plan.first_request_id() + index, entry, outputLimit));
             }
         }
     }
@@ -142,7 +143,8 @@ final class LoadClient implements AutoCloseable {
                         var entry = item.entry();
                         var input = entry.input().toBuilder().setRequestId(item.requestId());
                         input.getGenerateConfigBuilder().setReuseCache(Boolean.TRUE.equals(plan.reuse_cache()))
-                            .setIgnoreEos(true).setCanUsePdSeparation(true).setReturnIncremental(true).setIsStreaming(true);
+                            .setMaxNewTokens(item.outputLimit()).setIgnoreEos(entry.observedOutputTokens() > 0)
+                            .setCanUsePdSeparation(true).setReturnIncremental(true).setIsStreaming(true);
                         var generateInput = input.build();
                         var request = FlexlbScheduleRequestPB.newBuilder().setRequestId(item.requestId())
                             .setCacheKeyBlockSize(blockSize).setSeqLen(input.getTokenIdsCount())

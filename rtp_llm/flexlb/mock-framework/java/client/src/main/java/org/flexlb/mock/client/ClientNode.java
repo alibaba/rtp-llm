@@ -108,6 +108,8 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
             long total;
             String identity;
             try (var input = new IndexedTraffic(Path.of(args.requests_file()))) {
+                if (input.missingOutput > 0 && args.fallback_max_output_tokens() == null)
+                    throw new IOException("Dataset requires fallback_max_output_tokens for " + input.missingOutput + " requests");
                 total = input.count;
                 identity = input.identity;
                 if (total < created.peers.size()) throw new IOException("Need at least one request per Client");
@@ -123,7 +125,8 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
                 int slots = args.concurrency() / clients + (i < args.concurrency() % clients ? 1 : 0);
                 call(created.peers.get(i), "worker/prepare", new WorkerPlan(created.number, args.masters(), args.requests_file(),
                     count, i, clients, created.firstId, identity, args.qps(), args.replay_speed(), slots,
-                    args.queue_capacity(), args.request_timeout_ms(), args.drain_timeout_ms(), args.reuse_cache()));
+                    args.queue_capacity(), args.request_timeout_ms(), args.drain_timeout_ms(), args.reuse_cache(),
+                    args.fallback_max_output_tokens()));
             }
             long startAt = System.currentTimeMillis() + Math.max(1000, created.peers.size() * 100L);
             for (String peer : created.peers) {

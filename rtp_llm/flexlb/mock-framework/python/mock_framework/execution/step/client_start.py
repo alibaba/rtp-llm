@@ -19,6 +19,7 @@ class Start:
     request_timeout: Annotated[str, 'duration'] = '30s'
     drain_timeout: Annotated[str, 'duration'] = '30s'
     reuse_cache: bool = False
+    fallback_max_output_tokens: Annotated[int, Bounds(minimum=1, maximum=2147483647)] | None = None
 
     def __post_init__(self):
         if self.masters is not None and (not self.masters or len(set(self.masters)) != len(self.masters) or any(not v.strip() for v in self.masters)):

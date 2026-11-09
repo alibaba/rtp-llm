@@ -184,7 +184,7 @@ ForwardBatch 保留请求长度、实际缓存命中、已生成长度、stepTok
 
 Decode 只配置每轮平均输出量 `tokens.per.step`，默认 1。小数用相邻两轮累计目标的差分实现，例如 2.6 每轮输出 2 或 3 个 token。每轮每请求计一个计算输入。EOS 或长度上限可以截短本轮输出，KV 只为本轮可能提交的前缀预留。
 
-EOS 由 `StoppingModel` 按请求和绝对 token 位置决定，遵守 `min_new_tokens`。`ignore_eos` 屏蔽 EOS，实际输出仍受 `max_new_tokens` 和上下文长度限制。标准回放使用 `ignore_eos=true`，按输入文件给出的目标长度回放。
+EOS 由 `StoppingModel` 按请求和绝对 token 位置决定，遵守 `min_new_tokens`。`ignore_eos` 屏蔽 EOS，实际输出仍受 `max_new_tokens` 和上下文长度限制。回放有可信实际输出量时使用 `ignore_eos=true`；实际量缺省时使用请求上限或运行兜底，允许 EOS 提前结束。
 
 real 依据：MtpExecutor::decodeStep 先 target verify Forward，再执行 speculative_sampler；MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo 提取接受后的 token，GenerateStream::specUpdate 经 NormalGenerateStream::updateOutput 检查 EOS/max；CompleteTokenIds::matchEosToken 截断到第一个 EOS。PrefillRpcServer::remoteLoadCacheEnd 保留 LOAD ACK、释放源 KV 和 PREFILL_COMPLETE 顺序。当前 Mock 不支持 stop words/beam search 等未实现条件，显式请求会拒绝。
 
@@ -287,7 +287,7 @@ manager_endpoint 是显式 Meta HTTP 覆盖地址，优先于发现；未配置�
 
 发送边界对齐 `server/master_client.py`：只有 Schedule 的传输失败尝试一次备节点；业务拒绝、deadline 和取流失败不尝试其他 Master。整个请求仍受同一个总 deadline 约束，重试消耗剩余预算。这个策略不承诺 exactly-once：响应丢失后原主可能已经接收请求，保留与 real Frontend 相同的传输重试风险。Client QPS 仍按逻辑请求 issued 计一次，备节点尝试不会再发放流量预算。
 
-每次只预取一个响应，验证身份、INT32 载荷/形状、递增长度和终态；最终长度必须达到 min_new_tokens，ignore_eos 时必须等于 max_new_tokens，提前 finished 不能冒充固定长度回放成功；finished 后仍须正常结束，空流/截断/终态后额外帧均失败，不保留全部输出。firstToken 从发送的单调时钟到实际收到首 token，包含调度和网络；没有首 token 就没有数值。completion 记录发送墙钟、可空 TTFT、总耗时、收到 token 数及终态/错误码；后续失败保留已观测 TTFT，不读取 aux 耗时代替。
+每次只预取一个响应，验证身份、INT32 载荷/形状、递增长度和终态；实际输出受上下文上限约束；finished 后仍须正常结束，空流/截断/终态后额外帧均失败，不保留全部输出。firstToken 从发送的单调时钟到实际收到首 token，包含调度和网络；没有首 token 就没有数值。completion 记录发送墙钟、可空 TTFT、总耗时、收到 token 数及终态/错误码；后续失败保留已观测 TTFT，不读取 aux 耗时代替。
 
 同一 deadline 覆盖调度和取流，并受更短原生 timeout 限制。取消/错误/超时结束当前 RPC，向该请求最后尝试的 Master 尽力发一次有界 Cancel，不随新的选举结果改变取消目标；Cancel 失败写日志，不承诺远端释放。连接复用、请求上下文独立，close 取消活动并等待有界 Cancel 后关闭所拥有连接。
 

@@ -136,7 +136,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
             {'id': 'stop', 'describe': 'Collect every Client', 'interface': 'client/stop'}]}]}
     count = 720 if large_input else 12
     source = tmp_path / 'requests.mckidx'
-    write_inputs(source, (([index + 10000] * (1024 if large_input else 3), 0, 3, 50, [])
+    write_inputs(source, (([index + 10000] * (1024 if large_input else 3), 0, {"max_output_tokens": 3}, 50, [])
                           for index in range(count)))
     if large_input:
         start = data['phases'][0]['steps'][0]
@@ -250,7 +250,7 @@ def test_unknown_master_selection_is_rejected_before_start(monkeypatch):
 
 def test_file_input_resolves_against_case_and_only_sends_metadata(tmp_path, monkeypatch):
     source = tmp_path / 'requests.mckidx'
-    write_inputs(source, [([1], 0, 2, 50, [])])
+    write_inputs(source, [([1], 0, {"max_output_tokens": 2}, 50, [])])
     ctx = context(); ctx.runtime.case = SimpleNamespace(directory=tmp_path)
     calls = []
     async def post(url, body): calls.append(body['args']); return {'accepted': True}

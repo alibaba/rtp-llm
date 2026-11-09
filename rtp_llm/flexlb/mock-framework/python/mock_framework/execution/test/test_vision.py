@@ -32,22 +32,29 @@ def test_vision_playback_through_real_master(tmp_path):
         'grpcServer': {'executorCoreSize': 4, 'executorMaxSize': 8, 'executorQueueSize': 64, 'shutdownQuietPeriodMs': 10}})
     engine = {'engine': 'rtp', 'config': {'image_token_id': 1000, 'seq_size_per_block': 2, 'test_block_num': 128,
         'reserve_block_ratio': 0, 'max_seq_len': 128, 'mock.compute.forward.expression': '1'}}
+    decode = {**engine, 'config': {**engine['config'], 'mock.compute.eos.probability': 1}}
     vision = {'config': {'patch_size': 14, 'downsample_ratio': 3, 'min_pixels': 0, 'max_image_tokens': 1024, 'hidden_size': 4, 'mock.vit.skip.download': True, 'mm_cache_gpu_max_bytes': 1024,
         'mm_cache_cpu_max_bytes': 1024, 'mock.compute.forward.expression': '2 + batchSize'}}
     data = {'id': 'vision_playback', 'describe': 'Native V selection, metadata preparation, P/D generation',
-        'environment': {'master': {'config': native}, 'prefill': engine, 'decode': engine, 'vit': vision, 'client': {'config': {'image_token_id': 1000}, 'deployment': {'replicas': 2}}},
+        'environment': {'master': {'config': native}, 'prefill': engine, 'decode': decode, 'vit': vision, 'client': {'config': {'image_token_id': 1000}, 'deployment': {'replicas': 2}}},
         'phases': [{'id': 'traffic', 'describe': 'Play media requests', 'timeout': '30s', 'steps': [
             {'id': 'start', 'describe': 'Play image input', 'interface': 'client/start', 'args': {
                 'requests_file': 'requests.mckidx', 'replay_speed': 2, 'concurrency': 4, 'queue_capacity': 8,
-                'request_timeout': '5s', 'drain_timeout': '5s'}, 'wait_after': '6s'},
+                'request_timeout': '5s', 'drain_timeout': '5s', 'fallback_max_output_tokens': 6}, 'wait_after': '6s'},
             {'id': 'stop', 'describe': 'Collect playback result', 'interface': 'client/stop'}]}]}
     (tmp_path / 'configs').mkdir()
     for role in ('master', 'prefill', 'decode', 'vit'):
         component = data['environment'][role]
         (tmp_path / 'configs' / f'{role}.yaml').write_text(yaml.safe_dump(component['config']))
         data['environment'][role] = {**component, 'config': f'configs/{role}.yaml'}
+    lengths = [
+        {'observed_output_tokens': 3, 'max_output_tokens': 8},
+        {'max_output_tokens': 8},
+        {},
+        {'observed_output_tokens': 4},
+    ]
     write_inputs(tmp_path / 'requests.mckidx', (
-        ([10, 20 if i < 4 else 21], i * 250, 3, 50, [[i % 2 + 1, 1, 924]]) for i in range(8)
+        ([10, 20 if i < 4 else 21], i * 250, lengths[i % 4], 50, [[i % 2 + 1, 1, 924]]) for i in range(8)
     ), media=[(1, 56, 28), (2, 56, 28)])
     path = tmp_path / 'case.yaml'
     path.write_text(yaml.safe_dump(data))
@@ -79,6 +86,10 @@ def test_vision_playback_through_real_master(tmp_path):
         issued = [int(row['request_id']) for row in rows if row.get('kind') == 'ISSUED']
         assert issued == list(range(index + 1, 9, 2))
         assert sum(row.get('kind') == 'SCHEDULE_START' for row in rows) == 8
+        expected = [3, 2, 2, 4]
+        assert {int(row['request_id']): int(row['output_tokens']) for row in rows if row.get('kind') == 'TERMINAL'} == {
+            request_id: expected[(request_id - 1) % 4] for request_id in issued
+        }
         assert any('ViT replay length differs' in path.read_text(errors='replace')
                    for path in component.glob('*.log'))
     events = [json.loads(line) for line in (output / 'events.jsonl').read_text().splitlines()]

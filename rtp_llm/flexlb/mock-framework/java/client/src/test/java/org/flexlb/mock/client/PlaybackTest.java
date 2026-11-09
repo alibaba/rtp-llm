@@ -43,7 +43,7 @@ class PlaybackTest {
             assertTrue(result.done()); assertFalse(result.stopped()); assertTrue(result.errors().isEmpty(), result.toString());
             assertEquals(3, result.issued()); assertEquals(3, result.finished()); assertEquals(0, result.unsent());
             assertEquals(3, h.schedules.get());
-            assertTrue(h.generated.get().getGenerateConfig().getIgnoreEos());
+            assertFalse(h.generated.get().getGenerateConfig().getIgnoreEos());
             assertEquals(3, h.generated.get().getGenerateConfig().getMaxNewTokens());
         }
     }
@@ -126,7 +126,7 @@ class PlaybackTest {
                  var one = new ClientNode("client-1", topology, directory.resolve("one-" + early))) {
                 new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                     Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
-                zero.start(new Start(List.of(master(h)), source.toString(), null, 5.0, 4, 8, 3000, 1000, true));
+                zero.start(new Start(List.of(master(h)), source.toString(), null, 5.0, 4, 8, 3000, 1000, true, null));
                 assertTrue(h.scheduleEntered.await(3, TimeUnit.SECONDS));
                 if (!early) eventually(() -> zero.state(new Sequence(1)).done() && one.state(new Sequence(1)).done());
                 var result = zero.stop(new Empty());
@@ -189,7 +189,7 @@ class PlaybackTest {
             new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
             byte[] data = Files.readAllBytes(input);
-            int payload = Math.toIntExact(java.nio.ByteBuffer.wrap(data).getLong(48));
+            int payload = Math.toIntExact(java.nio.ByteBuffer.wrap(data).getLong(56));
             data[payload] ^= 1;
             Files.write(input, data);
             zero.start(new Start(null, input.toString(), 2.0, null, 2, 4, 3000, 1000));

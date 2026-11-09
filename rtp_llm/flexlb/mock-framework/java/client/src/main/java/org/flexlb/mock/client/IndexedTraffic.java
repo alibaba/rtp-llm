@@ -14,27 +14,35 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.zip.CRC32;
-import org.flexlb.engine.grpc.EngineRpcService.GenerateConfigPB;
 import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
 import org.flexlb.engine.grpc.EngineRpcService.MMPreprocessConfigPB;
 import org.flexlb.engine.grpc.EngineRpcService.MultimodalInputPB;
 
 /** One immutable dataset. All positions are absolute except request offsets relative to the payload. */
 final class IndexedTraffic implements AutoCloseable {
-    private static final byte[] MAGIC = {'M', 'C', 'K', 'I', 'D', 'X', '0', '1'};
-    private static final int HEADER = 96, INDEX = 16, CHAIN = 20, CHAIN_PAGE = 28, MEDIA = 12;
+    private static final byte[] MAGIC = {'M', 'C', 'K', 'I', 'N', 'D', 'E', 'X'};
+    private static final int HEADER = 112, INDEX = 16, CHAIN = 20, CHAIN_PAGE = 28, MEDIA = 12, CAP = 8;
     private static final int CHAINS_PER_PAGE = 256, CACHE_CHAIN_PAGES = 128;
-    private static final int REQUEST = 24, IMAGE = 16, MAX_IMAGES = 256;
+    private static final int REQUEST = 26, IMAGE = 16, MAX_IMAGES = 256;
     private static final int MAX_REQUEST = 1024 * 1024;
     private static final int PAGE_BYTES = 4096, CACHE_PAGES = 256;
 
-    record Entry(long arrivalMs, int priority, GenerateInputPB input, List<Integer> expectedImageTokens) {}
+    record Entry(long arrivalMs, int priority, int observedOutputTokens, int maxOutputTokens,
+                 GenerateInputPB input, List<Integer> expectedImageTokens) {
+        int playbackLimit(Integer fallback) throws IOException {
+            if (observedOutputTokens == 0) throw invalid("zero observed output cannot be replayed as generation");
+            if (observedOutputTokens > 0) return observedOutputTokens;
+            if (maxOutputTokens > 0) return maxOutputTokens;
+            if (fallback == null) throw invalid("fallback_max_output_tokens is required");
+            return fallback;
+        }
+    }
     private record Chain(long first, long parent, int size, int symbol) {}
 
-    final long count, lastArrival;
+    final long count, lastArrival, missingOutput;
     final String identity;
     private final FileChannel file;
-    private final long fileSize, chains, chainPageCount, media, mediaCount, payload;
+    private final long fileSize, chains, chainPageCount, media, mediaCount, caps, capCount, payload;
     private final LinkedHashMap<Long, byte[]> pages = new LinkedHashMap<>(16, 0.75f, true);
 
     private final LinkedHashMap<Long, byte[]> chainPages = new LinkedHashMap<>(16, 0.75f, true);
@@ -52,15 +60,18 @@ final class IndexedTraffic implements AutoCloseable {
             chainPageCount = header.getLong();
             media = header.getLong();
             mediaCount = header.getLong();
+            capCount = header.getLong();
             payload = header.getLong();
             lastArrival = header.getLong();
+            missingOutput = header.getLong();
             byte[] digest = new byte[32];
             header.get(digest);
             identity = HexFormat.of().formatHex(digest);
-            if (count < 1 || chainPageCount < 0 || chainPageCount > Integer.MAX_VALUE / CHAINS_PER_PAGE || mediaCount < 0
+            caps = Math.addExact(media, Math.multiplyExact(mediaCount, MEDIA));
+            if (capCount < 0 || capCount > 65535 || missingOutput < 0 || missingOutput > count || count < 1 || chainPageCount < 0 || chainPageCount > Integer.MAX_VALUE / CHAINS_PER_PAGE || mediaCount < 0
                     || lastArrival < 0 || chains != Math.addExact(HEADER, Math.multiplyExact(count, INDEX))
                     || media != Math.addExact(chains, Math.multiplyExact(chainPageCount, CHAIN_PAGE))
-                    || payload != Math.addExact(media, Math.multiplyExact(mediaCount, MEDIA)) || payload >= fileSize)
+                    || payload != Math.addExact(caps, capCount * CAP) || payload >= fileSize)
                 throw invalid("invalid table bounds");
         } catch (IOException | RuntimeException error) {
             file.close();
@@ -78,9 +89,13 @@ final class IndexedTraffic implements AutoCloseable {
             throw invalid("invalid request bounds");
         var row = checked(table(payload + offset, size));
         long arrival = row.getLong(), leaf = row.getLong();
-        int output = row.getInt(), priority = row.getInt();
+        int observed = row.getInt(), priority = row.getInt();
+        int capId = Short.toUnsignedInt(row.getShort());
+        if (capId > capCount) throw invalid("unknown output cap");
+        int maximum = capId == 0 ? 0 : checked(table(caps + (capId - 1L) * CAP, CAP)).getInt();
         int images = (size - REQUEST - 4) / IMAGE;
-        if (arrival < 0 || arrival > lastArrival || leaf < 0 || output < 1 || priority < 0)
+        if (arrival < 0 || arrival > lastArrival || leaf < 0 || observed < -1 || priority < 0
+                || (capId != 0 && (maximum < 1 || observed > maximum)))
             throw invalid("invalid request metadata");
 
         var reversed = new ArrayList<Chain>();
@@ -101,7 +116,7 @@ final class IndexedTraffic implements AutoCloseable {
             if (imageToken == 0) Arrays.fill(text, position + 1, position + chain.size, 1);
             position += chain.size;
         }
-        var request = GenerateInputPB.newBuilder().setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(output));
+        var request = GenerateInputPB.newBuilder();
         var expected = new ArrayList<Integer>(images);
         int previous = 0;
         for (int i = 0; i < images; i++) {
@@ -123,7 +138,7 @@ final class IndexedTraffic implements AutoCloseable {
         var input = request.build();
         if (input.getTokenIdsCount() == 0 || input.getSerializedSize() > MAX_REQUEST)
             throw invalid("invalid or oversized input");
-        return new Entry(arrival, priority, input, List.copyOf(expected));
+        return new Entry(arrival, priority, observed, maximum, input, List.copyOf(expected));
     }
 
     private static int token(int symbol, int imageToken) {

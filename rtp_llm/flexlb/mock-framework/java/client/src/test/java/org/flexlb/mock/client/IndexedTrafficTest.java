@@ -23,13 +23,13 @@ class IndexedTrafficTest {
         var rows = new ArrayList<ByteBuffer>();
         for (int i = 0; i < 5; i++) {
             long leaf = i == 2 ? 2 : i % 2 == 0 ? 4 : 6;
-            var row = ByteBuffer.allocate(i == 0 && image ? 40 : 24);
-            row.putLong(i * 10).putLong(leaf).putInt(3).putInt(50);
+            var row = ByteBuffer.allocate(i == 0 && image ? 42 : 26);
+            row.putLong(i * 10).putLong(leaf).putInt(-1).putInt(50).putShort((short) 1);
             if (i == 0 && image) row.putLong(1).putInt(2).putInt(924);
             rows.add(row);
         }
         var chains = ByteBuffer.allocate(40).putLong(1).putLong(0).putInt(4).putLong(5).putLong(2).putInt(2);
-        return InputFixture.indexed(directory.resolve("traffic.mckidx"), rows, chains, 40, List.of(new int[]{1024, 768}));
+        return InputFixture.indexed(directory.resolve("traffic.mckidx"), rows, chains, 40, List.of(new int[]{1024, 768}), List.of(3), 0);
     }
 
     @Test void reconstructsSharedTextAcrossAnInteriorBranchAndInsertsMedia() throws Exception {
@@ -51,7 +51,7 @@ class IndexedTrafficTest {
         try (var dataset = new IndexedTraffic(path)) { identity = dataset.identity; }
         byte[] data = Files.readAllBytes(path);
         // Corrupt only ordinal 0. A player assigned to 1 and 3 must still finish.
-        data[96 + 5 * 16 + 28 + 12] ^= 1;
+        data[Math.toIntExact(ByteBuffer.wrap(data).getLong(56))] ^= 1;
         Files.write(path, data);
         var odd = new WorkerPlan(1, null, path.toString(), 2, 1, 2, 100, identity, null, 2.0, 1, 4, 1000, 1000);
         var items = new ArrayList<LoadClient.Item>();
@@ -80,6 +80,40 @@ class IndexedTrafficTest {
                     LoadClient.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), plan.qps(), null))));
                 assertEquals(expected.get(worker), times);
             }
+        }
+    }
+
+    @Test void outputLengthsStayIndependentAndFallbackIsOnlyForMissingValues() throws Exception {
+        var rows = new ArrayList<ByteBuffer>();
+        rows.add(ByteBuffer.allocate(26).putLong(0).putLong(1).putInt(37).putInt(50).putShort((short) 1));
+        rows.add(ByteBuffer.allocate(26).putLong(1).putLong(1).putInt(-1).putInt(50).putShort((short) 1));
+        rows.add(ByteBuffer.allocate(26).putLong(2).putLong(1).putInt(9).putInt(50).putShort((short) 0));
+        rows.add(ByteBuffer.allocate(26).putLong(3).putLong(1).putInt(-1).putInt(50).putShort((short) 0));
+        rows.add(ByteBuffer.allocate(26).putLong(4).putLong(1).putInt(0).putInt(50).putShort((short) 0));
+        var chain = ByteBuffer.allocate(20).putLong(1).putLong(0).putInt(1);
+        var path = InputFixture.indexed(directory.resolve("lengths.mckidx"), rows, chain, 4, List.of(), List.of(8192), 1);
+        try (var dataset = new IndexedTraffic(path)) {
+            assertEquals(1, dataset.missingOutput);
+            var observed = dataset.entry(0, 1000);
+            assertEquals(8192, observed.maxOutputTokens());
+            assertEquals(37, observed.playbackLimit(6));
+            assertEquals(8192, dataset.entry(1, 1000).playbackLimit(6));
+            assertEquals(9, dataset.entry(2, 1000).playbackLimit(null));
+            var unknown = dataset.entry(3, 1000);
+            assertThrows(IOException.class, () -> unknown.playbackLimit(null));
+            assertEquals(6, unknown.playbackLimit(6));
+            var zero = dataset.entry(4, 1000);
+            assertEquals(0, zero.observedOutputTokens());
+            assertThrows(IOException.class, () -> zero.playbackLimit(6));
+        }
+        try (var client = new ClientNode("client-0", directory.resolve("topology.json"), directory.resolve("worker"))) {
+            new ObjectMapper().writeValue(directory.resolve("topology.json").toFile(),
+                List.of(Map.of("role", "client", "control", client.url())));
+            var error = assertThrows(IOException.class, () ->
+                client.start(new Start(null, path.toString(), 1.0, null, 1, 4, 1000, 1000)));
+            assertTrue(error.getMessage().contains("fallback_max_output_tokens"));
+            assertFalse(client.stop(new Empty()).errors().isEmpty());
+            assertFalse(Files.exists(directory.resolve("worker/playback")));
         }
     }
 

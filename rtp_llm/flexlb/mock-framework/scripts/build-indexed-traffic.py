@@ -16,13 +16,13 @@ import zlib
 import zstandard
 
 
-HEADER = struct.Struct(">8s7q32s")
+HEADER = struct.Struct(">8s9q32s")
 INDEX = struct.Struct(">qi")
 CHAIN = struct.Struct(">qqi")
 CHAIN_PAGE = struct.Struct(">qqii")
 CHAINS_PER_PAGE = 256
 MEDIA = struct.Struct(">ii")
-REQUEST = struct.Struct(">qqii")
+REQUEST = struct.Struct(">qqiiH")
 IMAGE = struct.Struct(">qii")
 MAX_TOKENS = 1024 * 1024
 
@@ -91,7 +91,8 @@ def build(source, target):
         db.execute("PRAGMA cache_size=-16384")
         db.execute("CREATE TABLE edges (parent INTEGER, symbol BLOB, first INTEGER, symbols BLOB,"
                    " PRIMARY KEY(parent, symbol)) WITHOUT ROWID")
-        count = chain_count = media_count = 0
+        count = chain_count = media_count = missing_output = 0
+        caps = {}
         next_node = 1
         last_arrival = -1
         sealed = False
@@ -123,7 +124,22 @@ def build(source, target):
                         db.commit()
                     if not 1 <= length + len(images) <= MAX_TOKENS:
                         raise ValueError("invalid input length")
-                    row = bytearray(REQUEST.pack(arrival, leaf, number(output, 1), number(priority, 0)))
+                    if not isinstance(output, dict) or output.keys() - {"observed_output_tokens", "max_output_tokens"}:
+                        raise ValueError("invalid output fields")
+                    observed = output.get("observed_output_tokens")
+                    maximum = output.get("max_output_tokens")
+                    observed = -1 if observed is None else number(observed, 0)
+                    cap_id = 0
+                    if maximum is not None:
+                        maximum = number(maximum, 1)
+                        if observed > maximum:
+                            raise ValueError("observed output exceeds request maximum")
+                        cap_id = caps.setdefault(maximum, len(caps) + 1)
+                        if cap_id > 65535:
+                            raise ValueError("too many distinct output caps")
+                    if observed == -1 and cap_id == 0:
+                        missing_output += 1
+                    row = bytearray(REQUEST.pack(arrival, leaf, observed, number(priority, 0), cap_id))
                     previous = 0
                     for media_id, offset, expected in images:
                         offset = number(offset, previous, length)
@@ -155,20 +171,23 @@ def build(source, target):
             requests.write(encoded)
             page_count += 1
         media_offset = chain_offset + page_count * (CHAIN_PAGE.size + 4)
-        payload = media_offset + media_count * (MEDIA.size + 4)
+        payload = media_offset + media_count * (MEDIA.size + 4) + len(caps) * 8
         digest = hashlib.sha256()
         with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".mckidx-", delete=False) as out:
             pending = Path(out.name)
             try:
                 out.write(bytes(HEADER.size))
+                media.seek(0, 2)
+                for cap in caps:
+                    record(media, struct.pack(">i", cap))
                 for table in (index, pages, media, requests):
                     table.seek(0)
                     while chunk := table.read(1024 * 1024):
                         digest.update(chunk)
                         out.write(chunk)
                 out.seek(0)
-                out.write(HEADER.pack(b"MCKIDX01", count, chain_offset, page_count, media_offset,
-                                      media_count, payload, last_arrival, digest.digest()))
+                out.write(HEADER.pack(b"MCKINDEX", count, chain_offset, page_count, media_offset,
+                                      media_count, len(caps), payload, last_arrival, missing_output, digest.digest()))
                 out.flush()
                 os.fsync(out.fileno())
                 out.close()
