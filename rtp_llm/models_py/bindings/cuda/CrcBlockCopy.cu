@@ -64,6 +64,61 @@ constexpr size_t kH2dPipelineMinBytes = size_t{4} << 20;
 constexpr int kPowerStride = 33;
 constexpr size_t kCrcTableWords = 8 * 256;
 
+// Bound the ordinary host cache even when callers submit arbitrary lengths.
+constexpr size_t kFoldTableCacheEntries = 16;
+
+struct WorkspaceLayout {
+    size_t stride, staging_bytes, result_bytes, partials_bytes, fold_mats_bytes, final_const_bytes;
+    size_t table_bytes, power_bytes, arrived_offset, tiles_offset, pack_bytes, alias_bytes;
+    size_t device_bytes{0}, host_bytes{0};
+
+    static size_t add(size_t a, size_t b) {
+        if (b > std::numeric_limits<size_t>::max() - a)
+            throw std::overflow_error("CRC workspace size overflow");
+        return a + b;
+    }
+
+    WorkspaceLayout(size_t items, size_t payload, size_t tiles) {
+        if (!items || !payload || !tiles || items > unsigned(std::numeric_limits<int>::max())
+            || tiles > unsigned(std::numeric_limits<int>::max()))
+            throw std::invalid_argument("invalid CRC capacity");
+        stride            = CrcCopyWorkspace::encodedBytes(payload);
+        staging_bytes     = checkedProduct(items, stride);
+        result_bytes      = checkedProduct(items, sizeof(Result));
+        partials_bytes    = checkedProduct(checkedProduct(items, kMaxCrcBlocksPerMessage), 2 * sizeof(uint32_t));
+        fold_mats_bytes   = checkedProduct(checkedProduct(items, 33 * kPowerStride), sizeof(uint32_t));
+        final_const_bytes = checkedProduct(items, sizeof(uint32_t));
+        if (payload > std::numeric_limits<uint32_t>::max())
+            throw std::invalid_argument("CRC payload too large");
+        size_t levels = 0;
+        for (size_t value = payload; value != 0; value >>= 1)
+            ++levels;
+        table_bytes    = 8 * 256 * sizeof(uint32_t);
+        power_bytes    = checkedProduct(checkedProduct(levels, kPowerStride), sizeof(uint32_t));
+        arrived_offset = add(checkedProduct(items, sizeof(size_t)), 7) / 8 * 8;
+        tiles_offset   = add(add(arrived_offset, checkedProduct(items, sizeof(unsigned int))), 7) / 8 * 8;
+        pack_bytes     = add(tiles_offset, checkedProduct(tiles, sizeof(CopyTile)));
+        alias_bytes    = checkedProduct(items, sizeof(void*));
+        for (const auto bytes : {staging_bytes,
+                                 result_bytes,
+                                 partials_bytes,
+                                 fold_mats_bytes,
+                                 final_const_bytes,
+                                 table_bytes,
+                                 power_bytes,
+                                 pack_bytes,
+                                 alias_bytes})
+            device_bytes = add(device_bytes, bytes);
+        for (const auto bytes : {pack_bytes,
+                                 fold_mats_bytes,
+                                 final_const_bytes,
+                                 alias_bytes,
+                                 result_bytes,
+                                 checkedProduct(items, sizeof(bool))})
+            host_bytes = add(host_bytes, bytes);
+    }
+};
+
 std::vector<uint32_t> buildCrc32cTables() {
     std::vector<uint32_t> tables(kCrcTableWords);
     for (int index = 0; index < 256; ++index) {
@@ -506,66 +561,7 @@ cudaError_t launchCrc32cBatched(unsigned char*  staging,
 }
 }  // namespace crc_block_copy_internal
 
-namespace {
-
-struct WorkspaceLayout {
-    size_t staging_bytes;
-    size_t result_bytes;
-    size_t partials_bytes;
-    size_t fold_mats_bytes;
-    size_t final_const_bytes;
-    size_t shift_power_bytes;
-    size_t aliases_bytes;
-    size_t arrived_offset;
-    size_t tiles_offset;
-    size_t pack_bytes;
-
-    size_t deviceBytes() const {
-        size_t total = 0;
-        for (const auto bytes : {staging_bytes,
-                                 result_bytes,
-                                 partials_bytes,
-                                 fold_mats_bytes,
-                                 final_const_bytes,
-                                 kCrcTableWords * sizeof(uint32_t),
-                                 shift_power_bytes,
-                                 aliases_bytes,
-                                 pack_bytes}) {
-            if (bytes > std::numeric_limits<size_t>::max() - total)
-                throw std::overflow_error("CRC workspace size overflow");
-            total += bytes;
-        }
-        return total;
-    }
-};
-
-WorkspaceLayout workspaceLayout(size_t items, size_t payload, size_t tiles) {
-    if (!items || !payload || !tiles || items > unsigned(std::numeric_limits<int>::max())
-        || tiles > unsigned(std::numeric_limits<int>::max()))
-        throw std::invalid_argument("invalid CRC capacity");
-    // Preserve overflow checking before the kernel's narrower payload limit.
-    const size_t staging_bytes = checkedProduct(items, CrcBlockCopyBatch::encodedBytes(payload));
-    if (payload > std::numeric_limits<uint32_t>::max())
-        throw std::invalid_argument("CRC payload too large");
-    constexpr size_t align          = 8;
-    const size_t     arrived_offset = (checkedProduct(items, sizeof(size_t)) + align - 1) / align * align;
-    const size_t     tiles_offset =
-        (arrived_offset + checkedProduct(items, sizeof(unsigned int)) + align - 1) / align * align;
-    return {staging_bytes,
-            checkedProduct(items, sizeof(Result)),
-            checkedProduct(checkedProduct(items, kMaxCrcBlocksPerMessage), 2 * sizeof(uint32_t)),
-            checkedProduct(checkedProduct(items, 33 * kPowerStride), sizeof(uint32_t)),
-            checkedProduct(items, sizeof(uint32_t)),
-            static_cast<size_t>(shiftPowerLevels(payload)) * kPowerStride * sizeof(uint32_t),
-            checkedProduct(items, sizeof(void*)),
-            arrived_offset,
-            tiles_offset,
-            tiles_offset + checkedProduct(tiles, sizeof(CopyTile))};
-}
-
-}  // namespace
-
-struct CrcBlockCopyBatch::Impl {
+struct CrcCopyWorkspace::Impl {
     int          device;
     size_t       max_items, max_payload, max_tiles, stride;
     size_t       device_bytes{0};
@@ -579,12 +575,21 @@ struct CrcBlockCopyBatch::Impl {
     Allocation   fold_mats, final_consts, fold_mats_host, final_consts_host;
     Allocation   host_results, host_failed;
     bool*        device_failed{nullptr};
-    // Fold tables depend only on (lengths, blocks); they are rebuilt and
-    // re-uploaded only when that signature changes, so steady-state calls skip
-    // both the host build and the H2D copy.
-    std::vector<uint32_t> powers_host;
-    std::vector<size_t>   fold_lengths;
-    int                   fold_blocks{-1};
+    // The signature tracks the valid prefix of the per-message GPU tables.
+    // Host matrices depend only on (length, blocks), independent of batch size,
+    // tile addresses and message contents. Keep a bounded cache per workspace;
+    // its pure CPU values remain valid even after a failed CUDA submission.
+    struct FoldTable {
+        size_t                length;
+        int                   blocks;
+        std::vector<uint32_t> matrices;
+        uint32_t              final_constant;
+    };
+    std::vector<uint32_t>  powers_host;
+    std::vector<size_t>    fold_lengths;
+    int                    fold_blocks{-1};
+    std::vector<FoldTable> fold_table_cache;
+    size_t                 fold_table_evict{0};
     // Fixed offsets inside the pack buffers; arrived stays zero on the host
     // copy, so every descriptor upload also resets it on the device.
     size_t                                        lengths_offset, arrived_offset, tiles_offset;
@@ -609,19 +614,19 @@ struct CrcBlockCopyBatch::Impl {
         max_items(items),
         max_payload(payload),
         max_tiles(tile_count),
-        stride(CrcBlockCopyBatch::encodedBytes(payload)),
+        stride(CrcCopyWorkspace::encodedBytes(payload)),
         dump_writer(std::move(writer)) {
         if (device < 0)
-            throw std::invalid_argument("invalid CRC device");
-        const auto layout = workspaceLayout(items, payload, tile_count);
-        device_bytes      = layout.deviceBytes();
-        const auto tables = buildCrc32cTables();
-        auto       powers = buildShiftPowers(payload);
-        power_levels      = static_cast<int>(powers.size() / kPowerStride);
-        powers_host       = std::move(powers);
-        lengths_offset    = 0;
-        arrived_offset    = layout.arrived_offset;
-        tiles_offset      = layout.tiles_offset;
+            throw std::invalid_argument("invalid CRC capacity");
+        const WorkspaceLayout layout(items, payload, tile_count);
+        const auto            tables = buildCrc32cTables();
+        const auto            powers = buildShiftPowers(payload);
+        power_levels                 = static_cast<int>(powers.size() / kPowerStride);
+        powers_host                  = powers;
+        fold_lengths.reserve(items);
+        lengths_offset = 0;
+        arrived_offset = layout.arrived_offset;
+        tiles_offset   = layout.tiles_offset;
         checkCuda(cudaSetDevice(device));
         staging.allocate(layout.staging_bytes);
         results.allocate(layout.result_bytes);
@@ -630,18 +635,17 @@ struct CrcBlockCopyBatch::Impl {
         final_consts.allocate(layout.final_const_bytes);
         fold_mats_host.allocate(layout.fold_mats_bytes, true);
         final_consts_host.allocate(layout.final_const_bytes, true);
-        crc_tables.allocate(tables.size() * sizeof(uint32_t));
-        shift_powers.allocate(layout.shift_power_bytes);
+        crc_tables.allocate(layout.table_bytes);
+        shift_powers.allocate(layout.power_bytes);
         pack_device.allocate(layout.pack_bytes);
-        aliases.allocate(layout.aliases_bytes);
+        aliases.allocate(layout.alias_bytes);
         pack_host.allocate(layout.pack_bytes, true);
-        host_aliases.allocate(layout.aliases_bytes, true);
+        host_aliases.allocate(layout.alias_bytes, true);
         host_results.allocate(layout.result_bytes, true);
         std::memset(pack_host.pointer, 0, layout.pack_bytes);
         checkCuda(
             cudaMemcpy(crc_tables.pointer, tables.data(), tables.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
-        checkCuda(
-            cudaMemcpy(shift_powers.pointer, powers_host.data(), layout.shift_power_bytes, cudaMemcpyHostToDevice));
+        checkCuda(cudaMemcpy(shift_powers.pointer, powers_host.data(), layout.power_bytes, cudaMemcpyHostToDevice));
         host_failed.allocate(items * sizeof(bool), true, cudaHostAllocMapped);
         checkCuda(cudaHostGetDevicePointer(reinterpret_cast<void**>(&device_failed), host_failed.pointer, 0));
         // Create streams and events last: no constructor-failure path can strand work.
@@ -656,8 +660,8 @@ struct CrcBlockCopyBatch::Impl {
             destroyHandles();
             throw;
         }
-        host_bytes = layout.pack_bytes + layout.fold_mats_bytes + layout.final_const_bytes + layout.aliases_bytes
-                     + layout.result_bytes + checkedProduct(items, sizeof(bool));
+        device_bytes = layout.device_bytes;
+        host_bytes   = layout.host_bytes;
     }
 
     void drainOrAbort() noexcept {
@@ -719,7 +723,7 @@ struct CrcBlockCopyBatch::Impl {
         auto snapshot = failure;
         try {
             checkCuda(cudaSetDevice(device));
-            const size_t encoded = CrcBlockCopyBatch::encodedBytes(item.payload_bytes);
+            const size_t encoded = CrcCopyWorkspace::encodedBytes(item.payload_bytes);
             const auto*  host    = static_cast<const uint8_t*>(item.host);
             snapshot.cpu_snapshot.assign(host, host + encoded);
             snapshot.staging_snapshot.resize(encoded);
@@ -760,12 +764,33 @@ struct CrcBlockCopyBatch::Impl {
         bool   upload_fold{false};
     };
 
-    // Fold matrices and final constants depend only on (lengths, blocks), so
-    // they are rebuilt and re-uploaded only when that signature changes. The
-    // preceding operation must retire before this slot can be used again.
+    const FoldTable& foldTable(size_t length, int blocks) {
+        const auto found = std::find_if(fold_table_cache.begin(), fold_table_cache.end(), [&](const auto& table) {
+            return table.length == length && table.blocks == blocks;
+        });
+        if (found != fold_table_cache.end())
+            return *found;
+        checkpoint("fold_build");
+        FoldTable table{length,
+                        blocks,
+                        buildFoldMatrices(length, blocks, powers_host),
+                        hostApplyShift(powers_host, 0xFFFFFFFFu, length)};
+        if (fold_table_cache.size() < kFoldTableCacheEntries) {
+            fold_table_cache.push_back(std::move(table));
+            return fold_table_cache.back();
+        }
+        // FIFO replacement avoids bookkeeping and allocation on cache hits.
+        const size_t index      = fold_table_evict;
+        fold_table_cache[index] = std::move(table);
+        fold_table_evict        = (index + 1) % kFoldTableCacheEntries;
+        return fold_table_cache[index];
+    }
+
+    // A smaller matching batch leaves the longer valid GPU prefix intact.
+    // The preceding operation must retire before this slot can be used again.
     void prepareFoldTables(PreparedBatch& prepared) {
         const size_t* lengths = packHostAt<size_t>(lengths_offset);
-        if (fold_blocks == prepared.crc_blocks && fold_lengths.size() == prepared.count
+        if (fold_blocks == prepared.crc_blocks && fold_lengths.size() >= prepared.count
             && std::equal(lengths, lengths + prepared.count, fold_lengths.begin()))
             return;
         fold_blocks = -1;
@@ -773,9 +798,9 @@ struct CrcBlockCopyBatch::Impl {
         uint32_t* mats   = fold_mats_host.as<uint32_t>();
         uint32_t* finals = final_consts_host.as<uint32_t>();
         for (size_t index = 0; index < prepared.count; ++index) {
-            const auto message = buildFoldMatrices(lengths[index], prepared.crc_blocks, powers_host);
-            std::copy(message.begin(), message.end(), mats + index * (33 * kPowerStride));
-            finals[index] = hostApplyShift(powers_host, 0xFFFFFFFFu, lengths[index]);
+            const auto& table = foldTable(lengths[index], prepared.crc_blocks);
+            std::copy(table.matrices.begin(), table.matrices.end(), mats + index * (33 * kPowerStride));
+            finals[index] = table.final_constant;
         }
         prepared.upload_fold = true;
     }
@@ -783,6 +808,7 @@ struct CrcBlockCopyBatch::Impl {
     void uploadFoldTables(const PreparedBatch& prepared) {
         if (!prepared.upload_fold)
             return;
+        checkpoint("fold_upload");
         checkCuda(cudaMemcpyAsync(fold_mats.pointer,
                                   fold_mats_host.pointer,
                                   prepared.count * (33 * kPowerStride) * sizeof(uint32_t),
@@ -811,14 +837,14 @@ struct CrcBlockCopyBatch::Impl {
             const auto& item = batch[index];
             if (!item.host || !item.payload_bytes || item.payload_bytes > max_payload)
                 return std::nullopt;
-            const size_t    encoded = CrcBlockCopyBatch::encodedBytes(item.payload_bytes);
+            const size_t    encoded = CrcCopyWorkspace::encodedBytes(item.payload_bytes);
             const uintptr_t address = reinterpret_cast<uintptr_t>(item.host);
             if (item.capacity_bytes < encoded || address > std::numeric_limits<uintptr_t>::max() - encoded)
                 return std::nullopt;
             // Overlapping destinations can invalidate an earlier item's footer.
             for (size_t previous = 0; previous < index; ++previous) {
                 const uintptr_t other       = reinterpret_cast<uintptr_t>(batch[previous].host);
-                const size_t    other_bytes = CrcBlockCopyBatch::encodedBytes(batch[previous].payload_bytes);
+                const size_t    other_bytes = CrcCopyWorkspace::encodedBytes(batch[previous].payload_bytes);
                 if (address < other + other_bytes && other < address + encoded)
                     return std::nullopt;
             }
@@ -951,7 +977,7 @@ struct CrcBlockCopyBatch::Impl {
             for (size_t index = 0; index < prepared.count; ++index)
                 checkCuda(cudaMemcpyAsync(batch[index].host,
                                           staging.as<unsigned char>() + index * stride,
-                                          CrcBlockCopyBatch::encodedBytes(batch[index].payload_bytes),
+                                          CrcCopyWorkspace::encodedBytes(batch[index].payload_bytes),
                                           cudaMemcpyDeviceToHost,
                                           stream));
         }
@@ -960,14 +986,14 @@ struct CrcBlockCopyBatch::Impl {
     void enqueueLoad(const PreparedBatch& prepared) {
         size_t total_bytes = 0;
         for (const auto& item : batch)
-            total_bytes += CrcBlockCopyBatch::encodedBytes(item.payload_bytes);
+            total_bytes += CrcCopyWorkspace::encodedBytes(item.payload_bytes);
         const size_t waves =
             total_bytes >= kH2dPipelineMinBytes ? std::min<size_t>(kMaxH2dWaveCount, prepared.count) : 1;
         if (waves == 1) {
             for (size_t index = 0; index < prepared.count; ++index)
                 checkCuda(cudaMemcpyAsync(staging.as<unsigned char>() + index * stride,
                                           batch[index].host,
-                                          CrcBlockCopyBatch::encodedBytes(batch[index].payload_bytes),
+                                          CrcCopyWorkspace::encodedBytes(batch[index].payload_bytes),
                                           cudaMemcpyHostToDevice,
                                           stream));
             uploadFoldTables(prepared);
@@ -982,7 +1008,7 @@ struct CrcBlockCopyBatch::Impl {
                 for (size_t index = begin; index < begin + count; ++index)
                     checkCuda(cudaMemcpyAsync(staging.as<unsigned char>() + index * stride,
                                               batch[index].host,
-                                              CrcBlockCopyBatch::encodedBytes(batch[index].payload_bytes),
+                                              CrcCopyWorkspace::encodedBytes(batch[index].payload_bytes),
                                               cudaMemcpyHostToDevice,
                                               copy_stream));
                 checkCuda(cudaEventRecord(wave_done[wave], copy_stream));
@@ -1128,60 +1154,61 @@ struct CrcBlockCopyBatch::Impl {
     }
 };
 
-bool CrcBlockCopyBatch::available() {
+CrcCopyMemoryUsage CrcCopyWorkspace::memoryUsage(size_t items, size_t payload, size_t tiles) {
+    const WorkspaceLayout layout(items, payload, tiles);
+    return {layout.device_bytes, layout.host_bytes};
+}
+
+bool CrcCopyWorkspace::available() {
     return true;
 }
 
-size_t CrcBlockCopyBatch::deviceMemoryBytesFor(size_t items, size_t payload, size_t tiles) {
-    return workspaceLayout(items, payload, tiles).deviceBytes();
-}
-
-size_t CrcBlockCopyBatch::deviceMemoryBytes() const {
+size_t CrcCopyWorkspace::deviceMemoryBytes() const {
     return impl_->device_bytes;
 }
 
-size_t CrcBlockCopyBatch::hostMemoryBytes() const {
+size_t CrcCopyWorkspace::hostMemoryBytes() const {
     return impl_->host_bytes;
 }
 
-CrcBlockCopyBatch::CrcBlockCopyBatch(
+CrcCopyWorkspace::CrcCopyWorkspace(
     int device, size_t items, size_t payload, size_t tiles, std::shared_ptr<CrcDumpWriter> dump_writer):
     impl_(std::make_unique<Impl>(device, items, payload, tiles, std::move(dump_writer))) {}
 
-CrcBlockCopyBatch::~CrcBlockCopyBatch() = default;
+CrcCopyWorkspace::~CrcCopyWorkspace() = default;
 
-CrcCopyState CrcBlockCopyBatch::store(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures) {
+CrcCopyState CrcCopyWorkspace::store(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures) {
     return impl_->synchronous(items, CrcCopyDirection::STORE, failures);
 }
 
-CrcCopyState CrcBlockCopyBatch::load(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures) {
+CrcCopyState CrcCopyWorkspace::load(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures) {
     return impl_->synchronous(items, CrcCopyDirection::LOAD, failures);
 }
 
-CrcCopyState CrcBlockCopyBatch::trySubmit(const std::vector<CrcCopyItem>& items, CrcCopyDirection direction) {
+CrcCopyState CrcCopyWorkspace::trySubmit(const std::vector<CrcCopyItem>& items, CrcCopyDirection direction) {
     std::unique_lock<std::mutex> lock(impl_->mutex, std::try_to_lock);
     if (!lock.owns_lock())
         return CrcCopyState::BUSY;
     return impl_->submit(items, direction, true);
 }
 
-CrcCopyState CrcBlockCopyBatch::poll() {
+CrcCopyState CrcCopyWorkspace::poll() {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->poll();
 }
 
-const std::vector<CrcCopyFailure>& CrcBlockCopyBatch::failures() const {
+const std::vector<CrcCopyFailure>& CrcCopyWorkspace::failures() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->requireTerminal();
     return impl_->failures;
 }
 
-CrcCopyState CrcBlockCopyBatch::finish() {
+CrcCopyState CrcCopyWorkspace::finish() {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->finish();
 }
 
-void CrcBlockCopyBatch::setTestHook(std::function<int(const char*, void*, void*)> hook) {
+void CrcCopyWorkspace::setTestHook(std::function<int(const char*, void*, void*)> hook) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->state != CrcCopyState::IDLE)
         throw std::logic_error("cannot change hooks on an active CRC workspace");

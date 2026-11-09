@@ -52,7 +52,7 @@ void CrcTransferService::initialize(const std::vector<GroupSetPtr>& groups,
                                     size_t                          slots_per_device,
                                     int64_t                         world_rank,
                                     std::shared_ptr<CrcDumpWriter>  dump_writer) {
-    if (!CrcBlockCopyBatch::available() || !max_batch || !slots_per_device)
+    if (!CrcCopyWorkspace::available() || !max_batch || !slots_per_device)
         throw std::invalid_argument("CRC requires CUDA 13 and positive workspace limits");
     if (!dump_writer)
         dump_writer = CrcDumpWriter::forRank(world_rank);
@@ -89,7 +89,7 @@ void CrcTransferService::initialize(const std::vector<GroupSetPtr>& groups,
         for (size_t i = 0; i < slots_per_device; ++i) {
             Slot slot;
             slot.device = device;
-            slot.copy   = std::make_unique<CrcBlockCopyBatch>(device, max_batch, shape.payload, tiles, dump_writer);
+            slot.copy   = std::make_unique<CrcCopyWorkspace>(device, max_batch, shape.payload, tiles, dump_writer);
             if (i == 0) {
                 total_device_bytes = checkedMultiply(slots_per_device, slot.copy->deviceMemoryBytes());
                 total_host_bytes   = checkedMultiply(slots_per_device, slot.copy->hostMemoryBytes());
@@ -111,7 +111,7 @@ void CrcTransferService::initialize(const std::vector<GroupSetPtr>& groups,
 }
 
 CrcTransferService::~CrcTransferService() {
-    drain();
+    stopAndWaitForIo();
 }
 
 TransferStatus CrcTransferService::statusFor(CrcCopyState status) {
@@ -185,6 +185,17 @@ bool CrcTransferService::trySubmit(const std::vector<HostBufferView>&     hosts,
     if (host_tier != Tier::HOST && host_tier != Tier::DISK)
         return reject();
 
+    if (!accepting_)
+        return reject();
+    Slot* slot = nullptr;
+    for (auto& candidate : slots_.at(deviceFor(*group)))
+        if (!candidate.operation) {
+            slot = &candidate;
+            break;
+        }
+    if (!slot)
+        return false;
+
     // Every allocation and capture precedes the first possible CUDA enqueue.
     auto operation         = std::make_unique<Operation>();
     operation->group       = group;
@@ -201,18 +212,8 @@ bool CrcTransferService::trySubmit(const std::vector<HostBufferView>&     hosts,
     }
     TransferResult invalid(TransferStatus::INVALID_ARGS);
     TransferResult failed(TransferStatus::DEVICE_IO_ERROR);
-    Slot*          slot = nullptr;
-    if (!accepting_)
-        return reject();
-    for (auto& candidate : slots_.at(deviceFor(*group)))
-        if (!candidate.operation) {
-            slot                  = &candidate;
-            slot->operation       = std::move(operation);
-            slot->operation->done = std::move(done);
-            break;
-        }
-    if (!slot)
-        return false;
+    slot->operation       = std::move(operation);
+    slot->operation->done = std::move(done);
 
     // The primitive returns only after draining any partial submission error.
     const auto                 submitted = slot->copy->trySubmit(items, direction);
@@ -269,7 +270,7 @@ void CrcTransferService::stopAdmission() {
     cv_.notify_all();
 }
 
-void CrcTransferService::drain() {
+void CrcTransferService::stopAndWaitForIo() {
     stopAdmission();
     // TODO(legacy removal): remove this synchronous wait branch.
     if (unlikely(!async_)) {

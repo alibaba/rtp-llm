@@ -103,7 +103,9 @@ HostStagingBlockPool::HostStagingBlockBatch HostStagingBlockPool::allocateBatchL
 
 std::vector<HostStagingBlockPool::ReadyBatch> HostStagingBlockPool::collectReadyBatchesLocked() {
     std::vector<ReadyBatch> ready_batches;
-    const auto              now = Clock::now();
+    if (batch_waiters_.empty())
+        return ready_batches;
+    const auto now = Clock::now();
     while (!batch_waiters_.empty()) {
         if (now >= batch_waiters_.front().deadline) {
             BatchWaiter waiter = std::move(batch_waiters_.front());

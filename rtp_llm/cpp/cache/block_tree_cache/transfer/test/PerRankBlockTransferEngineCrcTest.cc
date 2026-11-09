@@ -54,7 +54,7 @@ uint32_t softwareCrc32c(const uint8_t* data, size_t size) {
 class PerRankBlockTransferEngineCrcTest: public ::testing::TestWithParam<bool> {
 protected:
     void SetUp() override {
-        if (!CrcBlockCopyBatch::available()) {
+        if (!CrcCopyWorkspace::available()) {
             GTEST_SKIP() << "CUDA13 CRC backend unavailable";
         }
         int count = 0;
@@ -238,21 +238,6 @@ protected:
         for (size_t item = 0; item < sources_.size(); ++item) {
             descriptors.push_back(makeDescriptor(
                 from, to, from == Tier::DEVICE ? sources_[item] : targets_[item], hosts_[item], disks_[item]));
-        }
-        // DEVICE->DISK stages one backing per task; keep load directions batched
-        // so corruption in the final backing still exercises all-item validation.
-        if (from == Tier::DEVICE && to == Tier::DISK) {
-            std::shared_ptr<TransferAsyncContext> context;
-            for (auto& descriptor : descriptors) {
-                context = engine_->execute(makeTransferTask({std::move(descriptor)}));
-                context->waitDone();
-                EXPECT_TRUE(context->done());
-                if (!context->success()) {
-                    ADD_FAILURE() << "DEVICE->DISK fixture setup failed: " << context->errorInfo().ToString();
-                    return context;
-                }
-            }
-            return context;
         }
         auto context = engine_->execute(makeTransferTask(std::move(descriptors)));
         context->waitDone();
@@ -604,7 +589,7 @@ TEST_P(PerRankBlockTransferEngineCrcTest, AsyncDroppedResultOwnerDrainsWithCalle
     EXPECT_FALSE(weak.expired());
     // Dropping the handle does not retire CUDA work or release caller-owned
     // business references. Keep those references until drain proves completion.
-    service.drain();
+    service.stopAndWaitForIo();
     EXPECT_FALSE(weak.expired());
     EXPECT_FALSE(service.poll());
     EXPECT_TRUE(weak.expired());
@@ -705,7 +690,7 @@ TEST_P(PerRankBlockTransferEngineCrcTest, AsyncDrainPreservesUnconsumedResultAnd
     auto submitted = submitService(service, {{buffer.addr, payload_, buffer.stride_bytes}}, {descriptor}, group_);
     ASSERT_TRUE(submitted);
     EXPECT_EQ(host_->treeRefCount(hosts_[0]), 1u);
-    service.drain();
+    service.stopAndWaitForIo();
     EXPECT_EQ(host_->treeRefCount(hosts_[0]), 1u);
     EXPECT_FALSE(submitted->result);
     EXPECT_FALSE(service.poll());
@@ -856,7 +841,7 @@ TEST_P(PerRankBlockTransferEngineCrcTest, AsyncCallbackRunsOnOwnerAfterSlotRetir
             EXPECT_TRUE(result.ok());
             EXPECT_EQ(std::this_thread::get_id(), owner);
         }));
-    service.drain();
+    service.stopAndWaitForIo();
     EXPECT_FALSE(called);
     EXPECT_FALSE(service.poll());
     EXPECT_TRUE(called);

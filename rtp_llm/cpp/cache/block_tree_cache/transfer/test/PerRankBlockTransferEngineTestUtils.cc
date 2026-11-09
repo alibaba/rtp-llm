@@ -85,7 +85,7 @@ std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupConfi
 
 void encodeTestRecord(void* data, size_t payload_bytes) {
     auto*      bytes   = static_cast<uint8_t*>(data);
-    const auto encoded = CrcBlockCopyBatch::encodedBytes(payload_bytes);
+    const auto encoded = CrcCopyWorkspace::encodedBytes(payload_bytes);
     std::memset(bytes + payload_bytes, 0, encoded - payload_bytes);
     uint32_t crc = ~uint32_t{0};
     for (size_t i = 0; i < payload_bytes; ++i) {
@@ -98,7 +98,7 @@ void encodeTestRecord(void* data, size_t payload_bytes) {
 }
 
 BackingLayout makeTestBackingLayout(size_t payload_bytes, bool enable_crc, bool physical_geometry) {
-    const size_t storage_bytes = enable_crc ? CrcBlockCopyBatch::encodedBytes(payload_bytes) : payload_bytes;
+    const size_t storage_bytes = enable_crc ? CrcCopyWorkspace::encodedBytes(payload_bytes) : payload_bytes;
     return {physical_geometry ? payload_bytes : 0, storage_bytes, ((storage_bytes + 4095) / 4096) * 4096, enable_crc};
 }
 

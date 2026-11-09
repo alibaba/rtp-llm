@@ -1,6 +1,19 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
+cc_library(
+    name = "block_tree_cache_layout",
+    srcs = ["BlockTreeCacheLayout.cc"],
+    hdrs = ["BlockTreeCacheLayout.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings:crc_block_copy",
+    ],
+)
+
 # Leaf pool target: DeviceBlockPool owns its backing and inherits the common
 # IBlockPool lifecycle. Keeping this target below allocator/group targets avoids
 # a cycle with the full block_tree_cache library.
@@ -138,6 +151,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":block_tree_cache_layout",
         "@havenask//aios/autil:common_macros",
         "//rtp_llm/cpp/cache/events:kv_cache_event",
         ":block_tree_task_pool",
@@ -223,6 +237,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":block_tree_cache_layout",
         ":transfer_common",
         ":transfer_work_loop",
         "//rtp_llm/cpp/cache/block_tree_cache/transfer/legacy",

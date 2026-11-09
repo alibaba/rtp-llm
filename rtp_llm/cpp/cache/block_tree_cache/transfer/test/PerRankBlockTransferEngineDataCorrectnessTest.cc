@@ -176,7 +176,7 @@ void expectTransferSuccess(const BlockTransferDispatcher&         dispatcher,
 }
 
 struct TransferFixture {
-    TransferFixture(CacheGroupType group_type, size_t data_block_count, const std::string& name):
+    TransferFixture(CacheGroupType group_type, size_t data_block_count, const std::string& name, bool async = true):
         temp_dir(name.c_str()) {
         const size_t usable_count  = data_block_count + 2;
         auto         policy        = defaultCacheGroupPolicy(group_type);
@@ -192,8 +192,8 @@ struct TransferFixture {
         disk_pool = makeDiskPool(kPayloadBytes, usable_count, temp_dir.path, nullptr, name + "_disk", true, true);
         group_set = makeTestGroupSet(0, std::move(topology), {"group0"}, {device_pool}, host_pool, disk_pool, true);
         engine    = std::make_shared<PerRankBlockTransferEngine>(
-            std::vector<GroupSetPtr>{group_set}, true, DeviceHostCopyOptions{}, 128, 8, 4, 10000, nullptr, 0, 4, true);
-        EXPECT_TRUE(engine->asyncEnabled());
+            std::vector<GroupSetPtr>{group_set}, true, DeviceHostCopyOptions{}, 128, 8, 4, 10000, nullptr, 0, 4, async);
+        EXPECT_EQ(engine->asyncEnabled(), async);
         dispatcher = std::make_unique<BlockTransferDispatcher>(engine);
     }
 
@@ -310,53 +310,57 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, HostDiskRoundTripsDistinct
 }
 
 TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceDiskRoundTripsDistinctBlocksWithoutStaleStagingData) {
-    constexpr size_t kDescriptorCount = 3;
-    TransferFixture  env(GetParam(), kDescriptorCount, "data_correctness_device_disk_" + groupTypeName(GetParam()));
-    const auto       device_blocks = allocateBlocks(*env.device_pool, kDescriptorCount);
-    const auto       disk_blocks   = allocateBlocks(*env.disk_pool, kDescriptorCount);
-    writeDevicePayload(env.device_pool, device_blocks.before, makePattern(600));
-    writeDevicePayload(env.device_pool, device_blocks.after, makePattern(601));
-    writeDiskStride(env.disk_pool, disk_blocks.before, 0x91);
-    writeDiskStride(env.disk_pool, disk_blocks.after, 0x92);
-    const auto device_before = readDevicePayload(env.device_pool, device_blocks.before);
-    const auto device_after  = readDevicePayload(env.device_pool, device_blocks.after);
-    const auto disk_before   = readDiskStride(env.disk_pool, disk_blocks.before);
-    const auto disk_after    = readDiskStride(env.disk_pool, disk_blocks.after);
+    for (const bool async : {false, true}) {
+        SCOPED_TRACE(async);
+        constexpr size_t kDescriptorCount = 3;
+        TransferFixture  env(
+            GetParam(), kDescriptorCount, "data_correctness_device_disk_" + groupTypeName(GetParam()), async);
+        const auto device_blocks = allocateBlocks(*env.device_pool, kDescriptorCount);
+        const auto disk_blocks   = allocateBlocks(*env.disk_pool, kDescriptorCount);
+        writeDevicePayload(env.device_pool, device_blocks.before, makePattern(600));
+        writeDevicePayload(env.device_pool, device_blocks.after, makePattern(601));
+        writeDiskStride(env.disk_pool, disk_blocks.before, 0x91);
+        writeDiskStride(env.disk_pool, disk_blocks.after, 0x92);
+        const auto device_before = readDevicePayload(env.device_pool, device_blocks.before);
+        const auto device_after  = readDevicePayload(env.device_pool, device_blocks.after);
+        const auto disk_before   = readDiskStride(env.disk_pool, disk_blocks.before);
+        const auto disk_after    = readDiskStride(env.disk_pool, disk_blocks.after);
 
-    std::vector<std::vector<uint8_t>> d2disk_expected;
-    for (size_t index = 0; index < kDescriptorCount; ++index) {
-        d2disk_expected.push_back(makePattern(700 + index));
-        writeDevicePayload(env.device_pool, device_blocks.data[index], d2disk_expected.back());
-        writeDiskPayload(env.disk_pool, disk_blocks.data[index], makePattern(750 + index), 0xF0);
-        expectTransferSuccess(
-            *env.dispatcher,
-            {makeDescriptor(
-                Tier::DEVICE, Tier::DISK, {device_blocks.data[index]}, NULL_BLOCK_IDX, disk_blocks.data[index])});
-    }
-    for (size_t index = 0; index < kDescriptorCount; ++index) {
-        EXPECT_EQ(readDiskPayload(env.disk_pool, disk_blocks.data[index]), d2disk_expected[index]);
-        EXPECT_EQ(readDevicePayload(env.device_pool, device_blocks.data[index]), d2disk_expected[index]);
-    }
+        std::vector<std::vector<uint8_t>> d2disk_expected;
+        std::vector<TransferDescriptor>   d2disk;
+        for (size_t index = 0; index < kDescriptorCount; ++index) {
+            d2disk_expected.push_back(makePattern(700 + index));
+            writeDevicePayload(env.device_pool, device_blocks.data[index], d2disk_expected.back());
+            writeDiskPayload(env.disk_pool, disk_blocks.data[index], makePattern(750 + index), 0xF0);
+            d2disk.push_back(makeDescriptor(
+                Tier::DEVICE, Tier::DISK, {device_blocks.data[index]}, NULL_BLOCK_IDX, disk_blocks.data[index]));
+        }
+        expectTransferSuccess(*env.dispatcher, d2disk);
+        for (size_t index = 0; index < kDescriptorCount; ++index) {
+            EXPECT_EQ(readDiskPayload(env.disk_pool, disk_blocks.data[index]), d2disk_expected[index]);
+            EXPECT_EQ(readDevicePayload(env.device_pool, device_blocks.data[index]), d2disk_expected[index]);
+        }
 
-    std::vector<std::vector<uint8_t>> disk2d_expected;
-    std::vector<TransferDescriptor>   disk2d;
-    for (size_t index = 0; index < kDescriptorCount; ++index) {
-        disk2d_expected.push_back(makePattern(800 + index));
-        writeDiskPayload(env.disk_pool, disk_blocks.data[index], disk2d_expected.back(), 0xA0 + index);
-        writeDevicePayload(env.device_pool, device_blocks.data[index], makePattern(850 + index));
-        disk2d.push_back(makeDescriptor(
-            Tier::DISK, Tier::DEVICE, {device_blocks.data[index]}, NULL_BLOCK_IDX, disk_blocks.data[index]));
-    }
-    expectTransferSuccess(*env.dispatcher, disk2d);
-    for (size_t index = 0; index < kDescriptorCount; ++index) {
-        EXPECT_EQ(readDevicePayload(env.device_pool, device_blocks.data[index]), disk2d_expected[index]);
-        EXPECT_EQ(readDiskPayload(env.disk_pool, disk_blocks.data[index]), disk2d_expected[index]);
-    }
+        std::vector<std::vector<uint8_t>> disk2d_expected;
+        std::vector<TransferDescriptor>   disk2d;
+        for (size_t index = 0; index < kDescriptorCount; ++index) {
+            disk2d_expected.push_back(makePattern(800 + index));
+            writeDiskPayload(env.disk_pool, disk_blocks.data[index], disk2d_expected.back(), 0xA0 + index);
+            writeDevicePayload(env.device_pool, device_blocks.data[index], makePattern(850 + index));
+            disk2d.push_back(makeDescriptor(
+                Tier::DISK, Tier::DEVICE, {device_blocks.data[index]}, NULL_BLOCK_IDX, disk_blocks.data[index]));
+        }
+        expectTransferSuccess(*env.dispatcher, disk2d);
+        for (size_t index = 0; index < kDescriptorCount; ++index) {
+            EXPECT_EQ(readDevicePayload(env.device_pool, device_blocks.data[index]), disk2d_expected[index]);
+            EXPECT_EQ(readDiskPayload(env.disk_pool, disk_blocks.data[index]), disk2d_expected[index]);
+        }
 
-    EXPECT_EQ(readDevicePayload(env.device_pool, device_blocks.before), device_before);
-    EXPECT_EQ(readDevicePayload(env.device_pool, device_blocks.after), device_after);
-    EXPECT_EQ(readDiskStride(env.disk_pool, disk_blocks.before), disk_before);
-    EXPECT_EQ(readDiskStride(env.disk_pool, disk_blocks.after), disk_after);
+        EXPECT_EQ(readDevicePayload(env.device_pool, device_blocks.before), device_before);
+        EXPECT_EQ(readDevicePayload(env.device_pool, device_blocks.after), device_after);
+        EXPECT_EQ(readDiskStride(env.disk_pool, disk_blocks.before), disk_before);
+        EXPECT_EQ(readDiskStride(env.disk_pool, disk_blocks.after), disk_after);
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(FullAndSwa,

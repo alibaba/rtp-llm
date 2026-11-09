@@ -1965,7 +1965,7 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictionExplicitNoneCascadesAtLeafWithoutC
 }
 
 TEST_F(BlockTreeCacheIntegrationTest, WorkLoopStoreEvictLoadRetainsBusinessReferencesAndInstallsOnlySuccess) {
-    if (!CrcBlockCopyBatch::available() || !cudaAvailable())
+    if (!CrcCopyWorkspace::available() || !cudaAvailable())
         GTEST_SKIP() << "requires CUDA13 CRC";
     for (bool corrupt : {false, true}) {
         SCOPED_TRACE(corrupt);

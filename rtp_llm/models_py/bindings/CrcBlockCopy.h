@@ -64,6 +64,11 @@ enum class CrcCopyDirection {
     STORE,
     LOAD
 };
+
+struct CrcCopyMemoryUsage {
+    size_t device_bytes{0};
+    size_t host_bytes{0};
+};
 // Bounded, single-operation CRC32C workspace. max_tiles limits the entire batch.
 // store/load require ordered, gap-free tiles covering exactly payload_bytes.
 // load additionally requires device target spans across items to be disjoint:
@@ -86,19 +91,22 @@ enum class CrcCopyDirection {
 // A failed store may have written host bytes: callers must not publish them.
 // A failed load may have scattered corrupted bytes into device tiles: callers
 // discard failed items through the reported status instead of adopting them.
-class CrcBlockCopyBatch {
+class CrcCopyWorkspace {
 public:
-    CrcBlockCopyBatch(int                            device_index,
-                      size_t                         max_items,
-                      size_t                         max_payload_bytes,
-                      size_t                         max_tiles,
-                      std::shared_ptr<CrcDumpWriter> dump_writer = nullptr);
-    ~CrcBlockCopyBatch();
-    CrcBlockCopyBatch(const CrcBlockCopyBatch&)            = delete;
-    CrcBlockCopyBatch& operator=(const CrcBlockCopyBatch&) = delete;
+    CrcCopyWorkspace(int                            device_index,
+                     size_t                         max_items,
+                     size_t                         max_payload_bytes,
+                     size_t                         max_tiles,
+                     std::shared_ptr<CrcDumpWriter> dump_writer = nullptr);
+    ~CrcCopyWorkspace();
+    CrcCopyWorkspace(const CrcCopyWorkspace&)            = delete;
+    CrcCopyWorkspace& operator=(const CrcCopyWorkspace&) = delete;
 
-    static bool   available();
-    static size_t encodedBytes(size_t payload_bytes) {
+    static bool available();
+    // Pure capacity calculation: no CUDA context, streams or buffers are created.
+    // Uses the same layout as construction; excludes CUDA/allocator internal memory.
+    static CrcCopyMemoryUsage memoryUsage(size_t max_items, size_t max_payload_bytes, size_t max_tiles);
+    static size_t             encodedBytes(size_t payload_bytes) {
         if (payload_bytes > std::numeric_limits<size_t>::max() - 19) {
             throw std::overflow_error("CRC encoded block size overflow");
         }
@@ -107,7 +115,6 @@ public:
 
     // Explicit GPU allocations owned by this workspace; excludes pinned host and CUDA/nvCOMP internal memory.
     size_t deviceMemoryBytes() const;
-    static size_t deviceMemoryBytesFor(size_t max_items, size_t max_payload_bytes, size_t max_tiles);
     // Explicit pinned-host allocations owned by this workspace (pack buffers, fold tables, aliases,
     // results and per-item failure flags); excludes CUDA/allocator internal memory.
     size_t hostMemoryBytes() const;
@@ -134,7 +141,7 @@ public:
     CrcCopyState finish();
 
 private:
-    friend struct CrcBlockCopyBatchTestPeer;
+    friend struct CrcCopyWorkspaceTestPeer;
     // Deterministic CUDA fault/barrier seam; not used by production callers.
     // The drain hook reports errors by return value and must not throw.
     void setTestHook(std::function<int(const char*, void*, void*)> hook);
