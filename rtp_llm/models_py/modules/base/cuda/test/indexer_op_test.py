@@ -1,10 +1,14 @@
 import math
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest import TestCase, main
+from unittest.mock import patch
 
 import torch
 
 from rtp_llm.models_py.kernels.cuda.fast_topk import fast_topk_transform_ragged_fused
+from rtp_llm.models_py.modules import indexer_mx_abi
+from rtp_llm.models_py.modules.base.cuda import indexer_op as indexer_op_module
 from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
@@ -27,6 +31,69 @@ def _make_op() -> IndexerOp:
 
 
 class IndexerCacheViewTest(TestCase):
+    def test_mx_cache_requires_mqa_entries_and_schedule_metadata(self) -> None:
+        wheel = SimpleNamespace(fp8_fp4_mqa_logits=object())
+        with (
+            patch.object(indexer_mx_abi, "deep_gemm", wheel),
+            patch.object(torch.cuda, "get_device_capability", return_value=(10, 0)),
+        ):
+            indexer_mx_abi.use_mx_indexer_cache.cache_clear()
+            self.assertFalse(indexer_mx_abi.use_mx_indexer_cache(torch.device("cuda")))
+            wheel.fp8_fp4_paged_mqa_logits = object()
+            indexer_mx_abi.use_mx_indexer_cache.cache_clear()
+            self.assertFalse(indexer_mx_abi.use_mx_indexer_cache(torch.device("cuda")))
+            wheel.get_paged_mqa_logits_metadata = object()
+            indexer_mx_abi.use_mx_indexer_cache.cache_clear()
+            self.assertTrue(indexer_mx_abi.use_mx_indexer_cache(torch.device("cuda")))
+        indexer_mx_abi.use_mx_indexer_cache.cache_clear()
+
+    def test_renamed_mqa_api_reuses_shared_score_layout(self) -> None:
+        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score
+
+        q = torch.zeros((1, 1, 32, 128), dtype=torch.float8_e4m3fn)
+        k = torch.zeros((64, 128), dtype=torch.float8_e4m3fn)
+        weights = torch.zeros((1, 32), dtype=torch.float32)
+        lengths = torch.tensor([64], dtype=torch.int32)
+        seen = {}
+
+        def paged(*args, **kwargs):
+            seen["paged"] = (args, kwargs)
+            return torch.empty((1, 64))
+
+        with (
+            patch.object(
+                indexer_op_module,
+                "deep_gemm",
+                SimpleNamespace(fp8_fp4_mqa_logits=None, fp8_fp4_paged_mqa_logits=None),
+            ),
+            patch.object(
+                _indexer_score,
+                "fp8_mqa_indexer_score",
+                return_value=torch.empty((1, 64)),
+            ) as contiguous,
+            patch.object(_indexer_score, "fp8_paged_indexer_score", side_effect=paged),
+        ):
+            indexer_op_module._fp8_mqa_logits_compat(
+                q.view(1, 32, 128),
+                (k, torch.ones(64)),
+                weights,
+                torch.zeros_like(lengths),
+                lengths,
+            )
+            indexer_op_module._fp8_paged_mqa_logits_compat(
+                q,
+                torch.zeros((1, 64, 1, 132), dtype=torch.uint8),
+                weights,
+                lengths,
+                torch.zeros((1, 1), dtype=torch.int32),
+                64,
+                64,
+            )
+
+        self.assertIsNone(contiguous.call_args.kwargs["q_sf"])
+        self.assertIsNone(seen["paged"][1]["q_sf"])
+        self.assertEqual(tuple(seen["paged"][0][4].shape), (1, 1))
+
     def test_opaque_pool_is_exposed_as_token_addressable_view(self) -> None:
         op = _make_op()
         cache = torch.empty((3, 64 * 132), dtype=torch.uint8)
@@ -49,6 +116,37 @@ class IndexerCacheViewTest(TestCase):
 
 
 class IndexerCacheKernelTest(TestCase):
+    def test_mx_indexer_cache_writer_and_gather(self) -> None:
+        op = _make_op()
+        device = torch.device("cuda")
+        count = 65
+        cache = LayerKVCache(
+            torch.zeros((2, op.blocksize * 132), dtype=torch.uint8, device=device),
+            op.blocksize,
+            tag="indexer_kv",
+        )
+        keys = torch.randn((count, 128), dtype=torch.bfloat16, device=device)
+        slots = torch.arange(count, dtype=torch.int64, device=device)
+        op.quant_k_only(keys, cache, slots, mx=True)
+        gathered_k = torch.empty((count, 128), dtype=torch.float8_e4m3fn, device=device)
+        gathered_sf = torch.empty((count, 4), dtype=torch.uint8, device=device)
+        rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+            op._indexer_cache_view(cache),
+            gathered_k,
+            gathered_sf,
+            torch.tensor([[0, 1]], dtype=torch.int32, device=device),
+            torch.tensor([0, count], dtype=torch.int32, device=device),
+        )
+        assert torch.equal(gathered_sf, gathered_sf[:, :1].expand_as(gathered_sf))
+        scale = torch.exp2((gathered_sf[:, 0].int() - 127).float())
+        expected_scale = torch.exp2(
+            torch.ceil(torch.log2(keys.float().abs().amax(dim=1).clamp_min(1e-4) / 448))
+        )
+        torch.testing.assert_close(scale, expected_scale, rtol=0, atol=0)
+        torch.testing.assert_close(
+            gathered_k.float() * scale[:, None], keys.float(), rtol=0.13, atol=0.1
+        )
+
     @staticmethod
     def _gather_cache(
         op: IndexerOp, cache: LayerKVCache, token_count: int
@@ -90,7 +188,9 @@ class IndexerCacheKernelTest(TestCase):
         output = torch.sum(main_values[selected].float() * weights.unsqueeze(-1), dim=0)
         return selected, output
 
-    def test_independent_indexer_prefix_preserves_sparse_decode_computation(self) -> None:
+    def test_independent_indexer_prefix_preserves_sparse_decode_computation(
+        self,
+    ) -> None:
         """Real cache kernels plus reference sparse selection; not a FlashMLA kernel test."""
         device = torch.device("cuda")
         op = IndexerOp(
@@ -122,9 +222,13 @@ class IndexerCacheKernelTest(TestCase):
         history_keys[:, 0] = -8
         history_keys[0, 0] = 16
         history_keys[1, 0] = 8
-        current_key = torch.zeros((1, op.index_head_dim), dtype=torch.bfloat16, device=device)
+        current_key = torch.zeros(
+            (1, op.index_head_dim), dtype=torch.bfloat16, device=device
+        )
         current_key[0, 0] = -16
-        query = torch.zeros((1, 1, op.index_head_dim), dtype=torch.bfloat16, device=device)
+        query = torch.zeros(
+            (1, 1, op.index_head_dim), dtype=torch.bfloat16, device=device
+        )
         query[0, 0, 0] = 1
         history_slots = torch.arange(history_length, dtype=torch.int64, device=device)
         current_slot = torch.tensor([history_length], dtype=torch.int64, device=device)
@@ -195,9 +299,13 @@ class IndexerCacheKernelTest(TestCase):
             cache,
             torch.arange(history_length, dtype=torch.int64, device=device),
         )
-        query = torch.zeros((1, 1, op.index_head_dim), dtype=torch.bfloat16, device=device)
+        query = torch.zeros(
+            (1, 1, op.index_head_dim), dtype=torch.bfloat16, device=device
+        )
         query[0, 0, 0] = 1
-        current_key = torch.zeros((1, op.index_head_dim), dtype=torch.bfloat16, device=device)
+        current_key = torch.zeros(
+            (1, op.index_head_dim), dtype=torch.bfloat16, device=device
+        )
         q_fp8, q_scale = op.quant_q_k(
             query,
             current_key,
@@ -205,7 +313,9 @@ class IndexerCacheKernelTest(TestCase):
             torch.tensor([history_length], dtype=torch.int64, device=device),
         )
         gathered = self._gather_cache(op, cache, history_length + 1)
-        main_values = torch.arange(history_length + 1, dtype=torch.float32, device=device).unsqueeze(-1)
+        main_values = torch.arange(
+            history_length + 1, dtype=torch.float32, device=device
+        ).unsqueeze(-1)
         selected, output = self._reference_sparse_decode(
             (q_fp8.float() * q_scale).reshape(-1), gathered, main_values, topk=1
         )

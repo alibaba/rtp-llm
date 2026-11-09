@@ -352,9 +352,12 @@ struct SpeculativeExecutionConfig {
     int64_t sp_dspark_mask_token_id = -1;
     // True: gamma query rows, including the anchor prediction. False:
     // one conditioning anchor followed by gamma prediction rows.
-    bool        sp_dspark_sample_from_anchor = true;
+    bool sp_dspark_sample_from_anchor = true;
+    // Zero verifies all gamma proposals; a positive value verifies that prefix.
+    int64_t     sp_dspark_verify_tokens = 0;
     std::string to_string() const;
     size_t      speculativeReserveStep() const;
+    int64_t     verifySteps() const;
 
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);

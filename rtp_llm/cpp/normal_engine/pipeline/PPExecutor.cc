@@ -295,6 +295,9 @@ void PPExecutor::validateConfig(const EngineInitParams& params) const {
     RTP_LLM_CHECK_WITH_INFO(!sp_enabled || params.sp_config.gen_num_per_cycle > 0,
                             "PP speculative decoding requires a positive gen_num_per_cycle, got %ld",
                             params.sp_config.gen_num_per_cycle);
+    RTP_LLM_CHECK_WITH_INFO(!sp_enabled || params.sp_config.verifySteps() == params.sp_config.gen_num_per_cycle,
+                            "pipeline parallelism requires full speculative verification; "
+                            "set sp_dspark_verify_tokens to 0 or gen_num_per_cycle");
     RTP_LLM_CHECK_WITH_INFO(!params.kv_cache_config.enable_remote_cache,
                             "pipeline parallelism does not support enable_remote_cache");
 }

@@ -277,7 +277,10 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
 #if USING_CUDA
-    if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)) {
+    // M3.1's tagged KV path needs the production cache layout, which the
+    // temporary Prefill warmup executor does not create.
+    if (runtime_config.warm_up && model_config_.model_type != "minimax_m31"
+        && (!model_config_.mm_model_config.is_multimodal)) {
         // warm up
         RTP_LLM_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
                          runtime_config.fifo_scheduler_config.max_context_batch_size,
@@ -915,7 +918,7 @@ absl::Status NormalEngine::stop() {
         return absl::OkStatus();
     }
     RTP_LLM_LOG_INFO("stop normal engine");
-    running_ = false;
+    running_                    = false;
     const auto scheduler_status = scheduler_->stop();
     // Ask rank 0 to stop at a step boundary. Receivers must finish all model
     // collectives for inputs that rank 0 has already published before exiting.
@@ -957,8 +960,30 @@ absl::Status NormalEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
 }
 
-bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) const {
+bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream, bool for_scheduling) const {
     if (stream->hasError()) {
+        return false;
+    }
+    // PD allocation creates a context stream before DecodeRpcServer receives
+    // the first generated token. Only scheduling requires the decode phase.
+    if (for_scheduling && pd_sep_config.role_type == RoleType::DECODE && stream->isContextStream()
+        && (model_config_.model_type == "minimax_m31" || model_config_.model_type == "minimax_m31_vl")) {
+        stream->reportError(ErrorCode::INVALID_PARAMS,
+                            "MiniMax-M3.1 DECODE requires a completed Prefill handoff; local Prefill is unsupported");
+        return false;
+    }
+    const auto& config    = stream->generateConfig();
+    const auto& cp_config = parallelism_config.prefill_cp_config;
+    const bool  cp_kv_cache_sharded =
+        cp_config.kv_cache_sharded && cp_config.is_enabled() && parallelism_config.tp_size > 1;
+    if (parallelism_config.role_type == RoleType::PREFILL
+        && (parallelism_config.dp_size > 1 || cp_kv_cache_sharded || sp_config.type != SP_TYPE_NONE)
+        && (model_config_.model_type == "minimax_m31" || model_config_.model_type == "minimax_m31_vl")
+        && config->max_new_tokens > 1 && !config->pd_separation && !config->return_prompt_logits) {
+        stream->reportError(
+            ErrorCode::INVALID_PARAMS,
+            "MiniMax-M3.1 PREFILL with DP>1, sharded CP KV cache or speculative execution cannot run multi-token generation "
+            "locally");
         return false;
     }
     if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {
@@ -1018,7 +1043,7 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
     auto stream = createStream(input);
     // DecodeRpcServer allocates the destination KV table before enqueue/P-D handoff.
     stream->setReserveStep(reserveStepForStream(stream->generateConfig()->isPrefillOnly()));
-    (void)validateStreamForScheduling(stream);
+    (void)validateStreamForScheduling(stream, /*for_scheduling=*/false);
     return stream;
 }
 
@@ -1264,23 +1289,22 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     } else {
         bool need_prefill = false;
         bool need_decode  = false;
+        bool has_prefill  = false;
+        bool has_decode   = false;
+        for (const auto& stream : streams) {
+            if (!MtpExecutor::isMtpStreamAdmitted(stream)) {
+                continue;
+            }
+            (stream->isContextStream() ? has_prefill : has_decode) = true;
+        }
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
-                need_prefill = streams.empty();
+                need_prefill = !has_prefill;
                 break;
             case RoleType::DECODE:
-                need_decode = streams.empty();
+                need_decode = !has_decode;
                 break;
             case RoleType::PDFUSION: {
-                bool has_prefill = false;
-                bool has_decode  = false;
-                for (const auto& stream : streams) {
-                    if (stream->isContextStream()) {
-                        has_prefill = true;
-                    } else {
-                        has_decode = true;
-                    }
-                }
                 need_prefill = shouldAddMtpFakePrefill(
                     has_prefill, runtime_config.use_batch_decode_scheduler, parallelism_config.dp_size);
                 need_decode = !has_decode;

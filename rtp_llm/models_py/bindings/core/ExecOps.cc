@@ -39,8 +39,10 @@ using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
 #endif
 
 namespace rtp_llm {
-GreedyOutput     sampleGreedy(const GreedyParams& params);
-torch::Tensor    sampleFromProbs(const torch::Tensor& probabilities);
+GreedyOutput  sampleGreedy(const GreedyParams& params);
+torch::Tensor sampleFromProbs(const torch::Tensor& probabilities);
+#if USING_CUDA
+#endif
 BeamSearchOutput sampleBeamSearch(BeamSearchParams params);
 void             rejectionSampling(const RejectionSamplingParams& params);
 void             mappingDraft2Target(const MappingDraft2TargetParams& params);
@@ -71,7 +73,6 @@ namespace rtp_llm {
 namespace {
 static std::atomic<bool> g_runtime_initialized{false};
 static std::once_flag    g_init_flag;
-
 
 static int64_t g_device_id = 0;
 }  // anonymous namespace
@@ -276,7 +277,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     const auto   host_kv_cache_offset  = param.host_kv_cache_offset.accessor<int32_t, 2>();
     const auto   input_lengths_host    = param.input_lengths_host.accessor<int32_t, 1>();
     const auto   prefix_lengths_host   = param.prefix_lengths_host.accessor<int32_t, 1>();
-    const auto   publish_start_tokens = param.publish_start_tokens.accessor<int32_t, 1>();
+    const auto   publish_start_tokens  = param.publish_start_tokens.accessor<int32_t, 1>();
     const auto   request_ids           = param.request_id.accessor<int64_t, 1>();
     const auto   request_pd_separation = param.request_pd_separation.accessor<bool, 1>();
     const auto   cache_keys            = param.cache_keys.accessor<int64_t, 2>();
@@ -331,16 +332,19 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 (request_cache_key_count + key_blocks_per_group_block - 1) / key_blocks_per_group_block;
         const size_t key_blocks_per_logical_block = compact_cp_mapping ? 1 : key_blocks_per_group_block;
 
-        const int64_t request_id       = request_ids[context_index];
-        const int publish_start_token = publish_start_tokens[context_index];
+        const int64_t request_id          = request_ids[context_index];
+        const int     publish_start_token = publish_start_tokens[context_index];
         RTP_LLM_CHECK_WITH_INFO(publish_start_token >= 0 && publish_start_token <= prefix_length,
                                 "cache-store tag=%s invalid publish_start_token=%d for prefix_length=%d",
-                                layer_kv.tag.c_str(), publish_start_token, prefix_length);
+                                layer_kv.tag.c_str(),
+                                publish_start_token,
+                                prefix_length);
         const size_t publish_start_block =
             group.policy.group_type == CacheGroupType::FULL && group.policy.active_tail_blocks == 0 ?
-                static_cast<size_t>(publish_start_token) / seq_size_per_block : 0;
-        auto event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
-        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+                static_cast<size_t>(publish_start_token) / seq_size_per_block :
+                0;
+        auto                 event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
+        auto                 request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         std::vector<int64_t> publication_lease_keys;
         std::vector<int32_t> publication_lease_blocks;
         RTP_LLM_LOG_DEBUG("write cache store, request id is %ld, blocks num is %zu",
@@ -856,7 +860,7 @@ void initRuntime(size_t device_id) {
         ROCM_CHECK(hipSetDevice(device_id));
 #endif
 
-        g_device_id           = device_id;
+        g_device_id = device_id;
 
         g_runtime_initialized.store(true, std::memory_order_release);
         RTP_LLM_LOG_INFO("Runtime init done (communication via c10d ProcessGroup)");
@@ -888,12 +892,7 @@ void registerExecCtxOps(pybind11::module& m) {
     m.def("get_device_id", &getDeviceId);
     m.def("preprocess_weight_scale", &preprocessWeightScale, py::arg("weight"), py::arg("scale"));
 
-    m.def(
-        "init_exec_ctx",
-        [](size_t device_id) {
-            initRuntime(device_id);
-        },
-        py::arg("device_id"));
+    m.def("init_exec_ctx", [](size_t device_id) { initRuntime(device_id); }, py::arg("device_id"));
 
     m.def(
         "register_comm_ops",

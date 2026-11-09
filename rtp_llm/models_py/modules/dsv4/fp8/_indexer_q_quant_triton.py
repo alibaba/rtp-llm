@@ -1,8 +1,8 @@
 """DSv4 Indexer Q per-(token, head) FP8 quant + weight fold.
 
-Companion to :func:`deep_gemm.fp8_paged_mqa_logits` — that kernel takes
-``q`` already in FP8 e4m3fn (no per-token Q scale tensor; the per-token
-scale must be folded into ``weights`` upstream).
+The legacy DeepGEMM MQA path folds the per-token Q scale into FP32 head
+weights. The SM100 MX path passes packed UE8M0 Q scales separately and keeps
+the head weights in BF16.
 
 Math:
 
@@ -41,11 +41,13 @@ def _indexer_q_fp8_fold_kernel(
     q_ptr,  # [B*S, H, D] bf16
     w_ptr,  # [B*S, H]    bf16/fp32
     q_fp8_ptr,  # [B*S, H, D] fp8e4nv (uint8 view)
-    w_fold_ptr,  # [B*S, H]    fp32
+    w_fold_ptr,  # [B*S, H]    fp32 or bf16
+    sf_ptr,  # [B*S, H] int32 when MX=True
     # geometry
     BSH,  # B*S*H — rows
     D: tl.constexpr,  # head_dim = 128
     fp8_max: tl.constexpr,
+    MX: tl.constexpr,
 ):
     """One program per (b, s, h) row. Each row is one 128-elem vector;
     fits in registers, no inner-D tiling needed."""
@@ -58,6 +60,11 @@ def _indexer_q_fp8_fold_kernel(
 
     absmax = tl.max(tl.abs(q), axis=0)
     scale = tl.maximum(absmax / fp8_max, 1e-12)
+    if MX:
+        exponent = tl.ceil(tl.log2(scale))
+        scale = tl.exp2(exponent)
+        sf = tl.minimum(tl.maximum(exponent.to(tl.int32) + 127, 0), 254)
+        tl.store(sf_ptr + pid, sf | (sf << 8) | (sf << 16) | (sf << 24))
 
     q_fp8 = (q / scale).to(tl.float8e4nv)
     tl.store(
@@ -66,18 +73,22 @@ def _indexer_q_fp8_fold_kernel(
     )
 
     w = tl.load(w_ptr + pid).to(tl.float32)
-    tl.store(w_fold_ptr + pid, w * scale)
+    if MX:
+        tl.store(w_fold_ptr + pid, w)
+    else:
+        tl.store(w_fold_ptr + pid, w * scale)
 
 
 def indexer_q_fp8_quant_fold(
     q_bf16: torch.Tensor,  # [B, S, H, D] bf16, D=128
     weights: torch.Tensor,  # [B, S, H]    bf16 or fp32
+    *,
+    mx: bool = False,
 ):
     """Per-(token, head) FP8 quant of indexer Q + scale-fold into weights.
 
-    Returns ``(q_fp8, w_folded)`` where ``q_fp8`` is contiguous
-    ``[B, S, H, D] float8_e4m3fn`` and ``w_folded`` is contiguous
-    ``[B, S, H] float32``.
+    Legacy mode returns FP8 Q and FP32 folded weights. MX mode also returns
+    packed int32 Q scales and keeps BF16 head weights.
     """
     assert q_bf16.dim() == 4 and q_bf16.shape[-1] == INDEXER_HEAD_DIM
     assert q_bf16.dtype == torch.bfloat16
@@ -90,21 +101,28 @@ def indexer_q_fp8_quant_fold(
     B, S, H, D = q_bf16.shape
     BSH = B * S * H
     q_fp8 = torch.empty(B, S, H, D, dtype=torch.float8_e4m3fn, device=q_bf16.device)
-    w_fold = torch.empty(B, S, H, dtype=torch.float32, device=q_bf16.device)
+    w_fold = torch.empty(
+        B, S, H, dtype=torch.bfloat16 if mx else torch.float32, device=q_bf16.device
+    )
+    q_sf = (
+        torch.empty(B, S, H, dtype=torch.int32, device=q_bf16.device) if mx else q_fp8
+    )
     if BSH == 0:
-        return q_fp8, w_fold
+        return (q_fp8, w_fold, q_sf) if mx else (q_fp8, w_fold)
 
     _indexer_q_fp8_fold_kernel[(BSH,)](
         q_bf16,
         weights,
         q_fp8,
         w_fold,
+        q_sf,
         BSH=BSH,
         D=D,
         fp8_max=FP8_E4M3_MAX,
+        MX=mx,
         num_warps=4,
     )
-    return q_fp8, w_fold
+    return (q_fp8, w_fold, q_sf) if mx else (q_fp8, w_fold)
 
 
 @triton.jit(do_not_specialize=["BSH"])
@@ -113,7 +131,8 @@ def _indexer_q_rope_fp8_fold_kernel(
     w_ptr,  # [B*S, H]    bf16/fp32
     freqs_ri_ptr,  # [N_freq, RD/2, 2] float32 view_as_real(complex freqs)
     q_fp8_ptr,  # [B*S, H, D] fp8e4nv (uint8 view)
-    w_fold_ptr,  # [B*S, H]    fp32
+    w_fold_ptr,  # [B*S, H]    fp32 or bf16
+    sf_ptr,  # [B*S, H] int32 when MX=True
     BSH,  # B*S*H — rows
     freq_stride_n: tl.constexpr,
     freqs_stride_b,
@@ -123,6 +142,7 @@ def _indexer_q_rope_fp8_fold_kernel(
     RD_HALF: tl.constexpr,
     ROPE_START: tl.constexpr,
     fp8_max: tl.constexpr,
+    MX: tl.constexpr,
 ):
     pid = tl.program_id(0).to(tl.int64)
     if pid >= BSH:
@@ -156,6 +176,11 @@ def _indexer_q_rope_fp8_fold_kernel(
 
     absmax = tl.max(tl.abs(q), axis=0)
     scale = tl.maximum(absmax / fp8_max, 1e-12)
+    if MX:
+        exponent = tl.ceil(tl.log2(scale))
+        scale = tl.exp2(exponent)
+        sf = tl.minimum(tl.maximum(exponent.to(tl.int32) + 127, 0), 254)
+        tl.store(sf_ptr + pid, sf | (sf << 8) | (sf << 16) | (sf << 24))
 
     q_fp8 = (q / scale).to(tl.float8e4nv)
     tl.store(
@@ -164,7 +189,10 @@ def _indexer_q_rope_fp8_fold_kernel(
     )
 
     w = tl.load(w_ptr + pid).to(tl.float32)
-    tl.store(w_fold_ptr + pid, w * scale)
+    if MX:
+        tl.store(w_fold_ptr + pid, w)
+    else:
+        tl.store(w_fold_ptr + pid, w * scale)
 
 
 def indexer_q_rope_fp8_quant_fold(
@@ -172,6 +200,8 @@ def indexer_q_rope_fp8_quant_fold(
     weights: torch.Tensor,  # [B, S, H] bf16 or fp32
     freqs_cis: torch.Tensor,  # complex [N_freq, RD/2]
     rope_head_dim: int,
+    *,
+    mx: bool = False,
 ):
     """Fused RoPE + per-(token, head) FP8 quant + scale fold.
 
@@ -197,9 +227,14 @@ def indexer_q_rope_fp8_quant_fold(
     B, S, H, D = q_bf16.shape
     BSH = B * S * H
     q_fp8 = torch.empty(B, S, H, D, dtype=torch.float8_e4m3fn, device=q_bf16.device)
-    w_fold = torch.empty(B, S, H, dtype=torch.float32, device=q_bf16.device)
+    w_fold = torch.empty(
+        B, S, H, dtype=torch.bfloat16 if mx else torch.float32, device=q_bf16.device
+    )
+    q_sf = (
+        torch.empty(B, S, H, dtype=torch.int32, device=q_bf16.device) if mx else q_fp8
+    )
     if BSH == 0:
-        return q_fp8, w_fold
+        return (q_fp8, w_fold, q_sf) if mx else (q_fp8, w_fold)
 
     freqs_flat = freqs_cis.view(-1, freqs_cis.shape[-1])
     n_freq = freqs_flat.shape[0]
@@ -215,6 +250,7 @@ def indexer_q_rope_fp8_quant_fold(
         freqs_ri,
         q_fp8,
         w_fold,
+        q_sf,
         BSH=BSH,
         freq_stride_n=freq_stride_n,
         freqs_stride_b=freqs_ri.stride(0),
@@ -224,6 +260,23 @@ def indexer_q_rope_fp8_quant_fold(
         RD_HALF=rope_head_dim // 2,
         ROPE_START=D - rope_head_dim,
         fp8_max=FP8_E4M3_MAX,
+        MX=mx,
         num_warps=4,
     )
-    return q_fp8, w_fold
+    return (q_fp8, w_fold, q_sf) if mx else (q_fp8, w_fold)
+
+
+def quantize_indexer_q_for_score(
+    q_bf16: torch.Tensor,
+    weights: torch.Tensor,
+    freqs_cis: torch.Tensor,
+    rope_head_dim: int,
+):
+    """Return Q, head weights and optional MX scales for the active MQA ABI."""
+    from rtp_llm.models_py.modules.indexer_mx_abi import use_mx_indexer_cache
+
+    mx = use_mx_indexer_cache(q_bf16.device)
+    result = indexer_q_rope_fp8_quant_fold(
+        q_bf16, weights, freqs_cis, rope_head_dim, mx=mx
+    )
+    return result if mx else (*result, None)

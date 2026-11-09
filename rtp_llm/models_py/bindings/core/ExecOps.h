@@ -14,6 +14,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if USING_ROCM
@@ -31,7 +32,7 @@ namespace rtp_llm {
 class CacheConfig;
 class CacheStore;
 
-using CacheStoreCompletionCallback = std::function<void(std::exception_ptr)>;
+using CacheStoreCompletionCallback  = std::function<void(std::exception_ptr)>;
 using CacheStoreCompletionRegistrar = std::function<CacheStoreCompletionCallback(
     const std::vector<int64_t>&, const std::vector<int32_t>&, const std::string&)>;
 

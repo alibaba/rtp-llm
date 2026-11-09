@@ -52,11 +52,11 @@ private:
 
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
-    bool                            validateStreamForScheduling(const GenerateStreamPtr& stream) const;
-    std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
-    WarmUpResult                    warmUp(const EngineInitParams& params);
-    WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
-    WarmUpResult                    decodeWarmUp(const EngineInitParams& params);
+    bool validateStreamForScheduling(const GenerateStreamPtr& stream, bool for_scheduling = true) const;
+    std::shared_ptr<GenerateStream>   createMinFakeStream(int32_t max_new_tokens);
+    WarmUpResult                      warmUp(const EngineInitParams& params);
+    WarmUpResult                      prefillWarmUp(const EngineInitParams& params);
+    WarmUpResult                      decodeWarmUp(const EngineInitParams& params);
     absl::StatusOr<GenerateStreamPtr> runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& generate_input,
                                                             const ResourceContext& resource_context,
                                                             int                    reuse_length,
@@ -88,18 +88,18 @@ private:
     bool isDSpark() override;
 
 private:
-    autil::ThreadPtr                              loop_thread_;
-    std::atomic<bool>                             running_{false};
-    std::unique_ptr<Executor>                     executor_;
-    ModelConfig                                   model_config_;
-    py::object                                    custom_output_selector_;
-    ParallelismConfig                             parallelism_config;
-    RuntimeConfig                                 runtime_config;
-    EPLBConfig                                    eplb_config;
-    PDSepConfig                                   pd_sep_config;
-    ProfilingDebugLoggingConfig                   profiling_debug_logging_config;
-    KVCacheConfig                                 kv_cache_config;
-    CacheStoreConfig                              cache_store_config;
+    autil::ThreadPtr            loop_thread_;
+    std::atomic<bool>           running_{false};
+    std::unique_ptr<Executor>   executor_;
+    ModelConfig                 model_config_;
+    py::object                  custom_output_selector_;
+    ParallelismConfig           parallelism_config;
+    RuntimeConfig               runtime_config;
+    EPLBConfig                  eplb_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    KVCacheConfig               kv_cache_config;
+    CacheStoreConfig            cache_store_config;
 
     SpeculativeExecutionConfig                    sp_config;
     kmonitor::MetricsReporterPtr                  metrics_reporter_;

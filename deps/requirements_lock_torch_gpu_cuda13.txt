@@ -616,9 +616,9 @@ decord==0.6.0 \
 deep-ep==2.1.0+a56d615 \
     --hash=sha256:76c04452cfbd8acf363ceeea1b59dc95b970fc945f86dec5b39bbb1b200dfcf0
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
-deep-gemm==2.8.0+122e18b.cu132 \
-    --hash=sha256:5d5afc1d58bb24f7c8a460f74e8dff39a99d7a6ebae35152cdcfd5f393ead080
-    # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
+deep-gemm==2.8.2+522942a.cu132 \
+    --hash=sha256:806896fa0e88c5c50f5f02bc1c0c72983506a9bc079bed4d6829b184e7e83957
+    # via -r deps/requirements_torch_gpu_cuda13.txt
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \
     --hash=sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2
@@ -669,6 +669,9 @@ flashinfer-python==0.6.9+8c4f4dcf \
     # via
     #   -r internal_source/deps/requirements_torch_gpu_cuda13.txt
     #   rtp-kernel
+fmha-sm100 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/fmha_sm100-0.1.1-py3-none-any.whl \
+    --hash=sha256:2aa4fc564a3ef2f7bb1a63207e7c43e2e71cf09a82b5140c437c2c1df437c580
+    # via -r deps/requirements_torch_gpu_cuda13.txt
 fonttools==4.58.4 \
     --hash=sha256:0c7a12fb6f769165547f00fcaa8d0df9517603ae7e04b625e5acb8639809b82d \
     --hash=sha256:0d3acc7f0d151da116e87a182aefb569cf0a3c8e0fd4c9cd0a7c1e7d3e7adb26 \
@@ -1953,7 +1956,9 @@ nvidia-cusparselt-cu13==0.8.0 \
     # via torch
 nvidia-cutlass-dsl==4.4.2 \
     --hash=sha256:7cfb9ef19062b055b9372c7a627004724e2755e4c8b16c3cc88807d64501a4ae
-    # via flashinfer-python
+    # via
+    #   -r deps/requirements_torch_gpu_cuda13.txt
+    #   flashinfer-python
 nvidia-cutlass-dsl-libs-base==4.4.2 \
     --hash=sha256:06acb3acff3dcf4bf6630476efac7de94de30b988ded4fa00b647bbcec4224ff \
     --hash=sha256:22e37b58f7a6f2f43bba533c4df8a088012122e0b4e9a632eca23937adeafb39 \
@@ -2576,6 +2581,10 @@ pyarrow==14.0.0 \
     --hash=sha256:ecc463c45f2b6b36431f5f2025842245e8c15afe4d42072230575785f3bb00c6 \
     --hash=sha256:f05e81b4c621e6ad4bcd8f785e3aa1d6c49a935818b809ea6e7bf206a5b1a4e8
     # via pyodps
+pybind11==3.1.0 \
+    --hash=sha256:a1cc06b524ab3edca51f8ad3895f9c4fa20b8b19283173dff4ae781449dc9639 \
+    --hash=sha256:b8488090f8acffbcb6b5d6a85571a6827a0a2981ffb75e5a0b27b87c4a6b7dd0
+    # via fmha-sm100
 pybind11-stubgen==2.5.5 \
     --hash=sha256:10824cd2fc5cbbee032b8fb39e6f6c08de232deb309bc66d786a6c6e8a4601bd \
     --hash=sha256:758d6d6bbeefc62ad7f78d5e5bbf357ccf6af83cd4504f5f549403f452942708
@@ -2884,6 +2893,12 @@ pyyaml==6.0.2 \
     #   huggingface-hub
     #   timm
     #   transformers
+quack-kernels==0.4.1 \
+    --hash=sha256:9d7d6ba412bc0c8a9b1331c52a73db76280adb9dc2f2750df4851ddabef1466b \
+    --hash=sha256:c1c8df2935bf5156ec47d2c5384ac08b411fd0ee702d80ae916dbf6d6f5ae813
+    # via
+    #   -r deps/requirements_torch_gpu_cuda13.txt
+    #   fmha-sm100
 referencing==0.37.0 \
     --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231 \
     --hash=sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8

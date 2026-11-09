@@ -1,8 +1,48 @@
-_DSV4_CUDA13_ONLY = select({
+load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
+
+_CUDA13_ONLY = select({
     "@//:using_cuda13_x86": [],
     "@//:using_cuda13_arm": [],
     "//conditions:default": ["@platforms//:incompatible"],
 })
+
+_CUDA13_TEST_GPU = select({
+    "@//:using_cuda13_x86": {"gpu": "L20_CU13", "gpu_count": "1"},
+    "@//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+    "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+})
+
+py_test(
+    name = "minimax_m31_kv_cache_test",
+    srcs = ["minimax_m31_kv_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    target_compatible_with = _CUDA13_ONLY,
+    exec_properties = _CUDA13_TEST_GPU,
+)
+
+# Exercise the full KV suite on the x86 SM103 pool, including SM103-only kernels.
+py_test(
+    name = "minimax_m31_sm103_test",
+    srcs = [
+        "minimax_m31_sm103_test.py",
+        "minimax_m31_kv_cache_test.py",
+    ],
+    deps = ["//rtp_llm:testlib"],
+    tags = [cuda13_x86_test_gpu()],
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    exec_properties = {"gpu": cuda13_x86_test_gpu(), "gpu_count": "1"},
+)
+
+py_test(
+    name = "minimax_m31_dspark_test",
+    srcs = ["minimax_m31_dspark_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    target_compatible_with = _CUDA13_ONLY,
+    exec_properties = _CUDA13_TEST_GPU,
+)
 
 py_test(
     name = "dsv4_kv_cache_test",
@@ -30,14 +70,10 @@ py_test(
     name = "moe_cuda13_config_propagation_test",
     srcs = ["moe_cuda13_config_propagation_test.py"],
     deps = ["//rtp_llm:testlib"],
-    target_compatible_with = _DSV4_CUDA13_ONLY,
+    target_compatible_with = _CUDA13_ONLY,
     # Initializes CUDA at import: pin to a GPU test pool now that unpinned
     # cuda13 actions default to the CPU worker pool. Every branch carries a
     # real pool value — an empty-dict default is NOT a GPU request and lands
     # the test on a CPU worker (see 3rdparty/trt_beam_search/tests/BUILD).
-    exec_properties = select({
-        "@//:using_cuda13_x86": {"gpu": "L20_CU13", "gpu_count": "1"},
-        "@//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
-        "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
-    }),
+    exec_properties = _CUDA13_TEST_GPU,
 )
