@@ -1,7 +1,6 @@
 package org.flexlb.mock.engine.cache;
 
 import java.util.*;
-import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
 import static org.flexlb.mock.engine.cache.BlockPool.Kind.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -36,16 +35,13 @@ class BlockPoolTest {
         assertEquals(1, secondPool.snapshot().free());
         target.forEach(BlockPool.Reference::close);
     }
-    @Test void oversizedAllocationDoesNotPartiallyConsumeCapacityAndReleaseWakesWaiter() throws Exception {
+    @Test void oversizedAllocationDoesNotPartiallyConsumeCapacityAndReleaseAdvancesGeneration() {
         var pool = new BlockPool(2);
         assertNull(pool.allocate(Integer.MAX_VALUE, REQUEST));
         var owned = pool.allocate(2, REQUEST);
         long generation = pool.generation();
-        try (var threads = Executors.newVirtualThreadPerTaskExecutor()) {
-            var waiter = threads.submit(() -> { pool.awaitChange(generation, 10000); return pool.generation(); });
-            owned.getFirst().close();
-            assertTrue(waiter.get(1, TimeUnit.SECONDS) > generation);
-        }
+        owned.getFirst().close();
+        assertTrue(pool.generation() > generation);
         owned.forEach(BlockPool.Reference::close);
         assertEquals(2, pool.snapshot().free());
     }

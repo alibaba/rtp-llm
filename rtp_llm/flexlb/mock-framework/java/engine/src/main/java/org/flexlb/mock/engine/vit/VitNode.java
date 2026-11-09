@@ -7,7 +7,7 @@ import java.util.concurrent.TimeUnit;
 import org.flexlb.mock.protocol.*;
 import org.flexlb.mock.engine.EngineMain.Address;
 
-/** Backend-independent V instance. The same listeners serve shared JVM and remote P. */
+/** Standalone vision instance serving Prefill over gRPC. */
 public final class VitNode implements AutoCloseable {
     private final VitConfig config;
     private final VitService service;

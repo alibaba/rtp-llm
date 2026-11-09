@@ -283,7 +283,7 @@ def test_non_file_source_is_rejected_before_marking_client_pending(tmp_path):
 def test_replay_speed_replaces_qps_and_is_forwarded_without_timestamp_conversion(monkeypatch):
     ctx = context()
     calls = []
-    async def start(body, query_time, timeout):
+    async def start(body, timeout):
         calls.append(body)
         return True
     monkeypatch.setattr(ctx.runtime.clients, 'start_playback', start)
@@ -307,7 +307,7 @@ def test_shared_requests_resolve_independently_of_case_directory(monkeypatch, tm
     source = ctx.runtime.case.shared_root / 'data/traffic/example.mckidx'
     source.parent.mkdir(parents=True)
     source.touch()
-    async def start(body, query_time, timeout):
+    async def start(body, timeout):
         assert body['requests_file'] == str(source)
         return True
     monkeypatch.setattr(ctx.runtime.clients, 'start_playback', start)

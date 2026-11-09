@@ -77,7 +77,7 @@ final class DecodeRpcServer implements AutoCloseable {
             int elapsedUs = (int) Math.min(Integer.MAX_VALUE, (System.nanoTime() - started) / 1000);
             var info = AuxInfoPB.newBuilder().setInputLen(input.getTokenIdsCount())
                 .setIterCount(progress.iterations() + 1).setPrefixLen(request.reused()).setTotalReuseLen(request.reused())
-                .setLocalReuseLen(request.reused() - request.remoteReused()).setRemoteReuseLen(request.remoteReused()).setPdSep(true)
+                .setLocalReuseLen(request.reused()).setPdSep(true)
                 .setCostTimeUs(elapsedUs).setFirstTokenCostTimeUs(elapsedUs);
             delivery.advance(input.getRequestId(), token, progress.generated(), info.build(), progress.finished());
         }

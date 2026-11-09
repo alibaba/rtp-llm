@@ -17,8 +17,6 @@ public final class TransportProbe {
     public record PerMasterEngines(Map<String, List<String>> instances) {}
     public record MasterReceipt(MasterSet affected) {}
     public record MetricValue(double value, String unit) {}
-    public record QuerySample(Map<String, String> labels, double value, String sample_time) {}
-    public record QueryResult(List<QuerySample> samples, String query_time) {}
     public static final class Implementation {
         public MasterReceipt action(Request args) {
             delay(args);
@@ -30,12 +28,6 @@ public final class TransportProbe {
         public MetricValue metric(Request args) {
             delay(args);
             return new MetricValue(Boolean.TRUE.equals(args.invalid_result()) ? Double.NaN : args.value() == null ? 0.25 : args.value(), "s");
-        }
-        public QueryResult query(Request args, ControlServer.Context context) {
-            delay(args);
-            return new QueryResult(Boolean.TRUE.equals(args.empty()) ? List.of() : List.of(
-                new QuerySample(Map.of("node", "a"), 1, context.queryTime().toString()),
-                new QuerySample(Map.of("node", "b"), 2, context.queryTime().toString())), context.queryTime().toString());
         }
         public PerMasterEngines engines(None args) {
             var engines = List.of("127.0.0.1:9002", "127.0.0.1:9001");
@@ -53,10 +45,9 @@ public final class TransportProbe {
     static ControlServer server() throws Exception {
         var probe = new Implementation();
         return new ControlServer(new InetSocketAddress("127.0.0.1", 0))
-            .route("probe/action", Request.class, MasterReceipt.class, true, (args, context) -> probe.action(args))
+            .route("probe/action", Request.class, MasterReceipt.class, probe::action)
             .route("probe/masters", None.class, MasterSet.class, probe::masters)
             .route("probe/metric", Request.class, MetricValue.class, probe::metric)
-            .route("probe/query", Request.class, QueryResult.class, false, probe::query)
             .route("probe/engines", None.class, PerMasterEngines.class, probe::engines)
             .start();
     }

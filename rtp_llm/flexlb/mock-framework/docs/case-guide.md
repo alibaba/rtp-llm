@@ -130,11 +130,11 @@ components:
     command: [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.engine.EngineMain]
 ```
 
-配方必须覆盖 Case 实际声明的组件。组件通过 `MOCK_CONFIG_FILE` 读取本实例配置和完整 environment；`MOCK_NODE_ID`、`MOCK_COMPONENT`、`MOCK_OUTPUT_DIR` 提供身份和目录。初始化并绑定端口后原子发布 `MOCK_READY_FILE`，启动超时或提前退出都失败并回收已有进程。
+配方必须覆盖 Case 实际声明的组件。组件通过 `MOCK_CONFIG_FILE` 读取本实例配置和完整 environment；`MOCK_NODE_ID`、`MOCK_OUTPUT_DIR` 提供身份和目录。初始化并绑定端口后原子发布 `MOCK_READY_FILE`，启动超时或提前退出都失败并回收已有进程。
 
 统一 Engine JAR 的默认入口为 `EngineMain`。本地 Runner 为每个实例分配监听端口、配置和产物目录，启动 JVM 后等待 ready 和端点回读。Whale 每个 Pod 使用同一入口，由平台管理发现与进程。
 
-宿主的 `host/create`、`host/stop`、`host/status` 是内部原子接口，不接收集群副本数。`create` 接收 Python 分配的实例 id、rpcPort 和 controlPort；metrics 与该实例的 control 共用 HTTP 监听端口。宿主控制端口通过 `MOCK_HOST_PORT` 指定。Python 在启动监听前选择本次实验未使用的端口，Java 绑定指定端口，Runner 再核对返回地址与分配一致。端口探测不构成预留，若被其他进程抢占，启动失败并结束实验，不偷偷换端口；不能先启动服务再检查是否复用了旧地址。
+Python 为每个 Engine JVM 分配独立的 RPC 和控制端口，指标与控制端点共用 HTTP 监听。进程发布 ready 后，Runner 校验实例身份与地址，再更新拓扑和 Prometheus。端口探测后若实际绑定失败，本次运行报错。
 
 Case 使用 `engine/scale` 调整 Engine 实例数。必填参数 `direction` 为 `out`（扩容）或 `in`（缩容）。`role` 默认为 `prefill`，`count` 指定时取值为 1–1024。返回实际新增或关闭的服务地址列表。
 

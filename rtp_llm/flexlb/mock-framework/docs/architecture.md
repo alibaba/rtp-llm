@@ -52,7 +52,7 @@ KvCacheManager 管理 KvcmReporter 的配置、启动、状态查询与关闭。
 
 ## 设计边界
 
-本节记录已确定的职责边界，包含尚待实现的部分。当前已迁移 Python Case 接口、Step/ref 和 Prometheus 查询，并拆出协议无关的 EngineLoop、请求进度/终态和 RTP 调度域；本批接通 Engine 宿主、实例扩缩容和发现更新；Client 已接通标准压缩输入播放与 client0 协调，其他后端仍待实现。其后的“当前代码职责”及运行说明描述可执行范围。
+Python 负责 Case 编译、执行和进程管理。每个 Engine 独立启动，Client 由 client0 协调索引回放。
 
 ### Python Case 操作与 Java 实例能力
 
@@ -62,11 +62,11 @@ Python 提供面向 Case 的业务接口，Java Engine 提供实例原子能力�
 | --- | --- |
 | Python Runner | 顺序执行 step、解析引用、固定时间范围、预算和失败处理、记录结果。 |
 | Python Case 接口实现 | 选择 Engine、扩缩容、向 client0 提交流量任务、跨实例查询与聚合；使用进程管理和发现文件能力。 |
-| Java 实例协议 | 停止实例、查询自身状态、接收已分配的流量计划等。Engine 宿主另负责创建和关闭本 JVM 内的 Engine 对象。 |
+| Java 实例协议 | Engine 提供原生 RPC、健康检查和指标。Master 提供状态查询，Client 接收回放控制和参与者命令。 |
 | Java client0 协调者 | 固定参与者、分配总流量与输入、协调准备/启动/停止、汇总活动状态；与本地请求执行分开。 |
 | Java 公共 Mock Engine | 请求接入、调度循环、资源机制、Forward 执行、输出和指标；组合 RTP 或 vLLM EngineScheduler。 |
 
-缩容一个 Decode 时，Python 从全局候选集合中选择并固定一个地址，再通知其宿主关闭该实例，更新发现文件并返回实际结果。Java 不接收全局 `count: 1`；不能对每个 JVM 广播一次缩容，否则会缩掉多个实例。Client 总 QPS、请求数和并发预算由 client0 只分配一次，各 Client 收到自己的份额，不能广播完整总量。
+缩容一个 Decode 时，Python 选定一个实例，采集末次指标，停止其 JVM，再从拓扑、Master 发现文件和 Prometheus 中移除地址。Client 总 QPS、请求数和并发预算由 client0 分配。
 
 Case 操作放在独立的 Python 实现中，不在 Runner 主循环按接口名堆分支。简单实例调用复用公共传输；Engine 扩缩容、client0 流量协调、Python 查询聚合保留各自的业务逻辑，不用一个通用广播器代替。
 
@@ -307,7 +307,7 @@ Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排�
 | `execution/roles/client.py` | ClientManager 管 Client JVM 和回放收尾。Java client0 负责分片、控速与汇总。 |
 | `execution/roles/prometheus.py` | Prometheus 进程、目标、采集基线和末次抓取。 |
 | `execution/launch.py` | 启动配方的结构校验与规范化。 |
-| `execution/transport.py` | 共用 HTTP /invoke 请求和响应封装。 |
+| `execution/transport.py` | Master 与 Client 的 HTTP /invoke 传输。请求包含 interface、args 和 timeout_ms。 |
 | `execution/step_trace.py` | 运行快照、事件、门禁和终态。 |
 
 EndpointRegistry 发布当前端点快照。MasterRole 消费快照，更新活跃 Master 的 discovery。主备状态来自各 Master 的实际观测。发布失败使实验报错，已登记状态和进程所有权留给回收路径处理。
@@ -404,9 +404,8 @@ KvCacheManager 同步取得本地容量和复用前缀。资源释放或新前�
 
 ### 状态与观测边界
 
-EngineScheduler 的 allocator loading 与 D 的 PD 协议等待分开统计。WorkerStatus 按 real 输出 phase/is_waiting，不再填写 real 未实现的 waiting_query_len/running_query_len；活动 execution_time_ms=-1，终态总耗时减最后一次离开 WAITING 时冻结的 wait 得到 execution_time_ms。正常加载后重新调度会更新 wait，加载中取消则保留之前的 wait；不能把该字段当作纯 Forward 时长。微秒阶段指标在终态上报，具体名称、零值和统计窗口见 component-reference。
+WorkerStatus 按 real 输出 phase/is_waiting。活动任务的 execution_time_ms 为 -1，终态使用总耗时减等待时间。D 的 P/D 协议等待可在实时调度状态中查看。
 
-KvCacheManager 投递类型化的 match/read/write 完成事件，由 RTP 指标层映射 real 名称与单位，不把协议细节放入 EngineScheduler。读取未成功不增加远端复用，写入确认数由适配器返回；独立拉取 LOAD/STORE 引用与逻辑在途状态，后台写失败不依赖请求是否还存活。未模拟的 SDK/payload 子阶段没有指标样本。
 
 ### 合成输出与 P/D 链路假设
 

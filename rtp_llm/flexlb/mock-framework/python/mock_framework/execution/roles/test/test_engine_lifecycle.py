@@ -85,7 +85,8 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
     @register_step('probe/lifecycle', effect='write')
     async def exercise(ctx, args: Args) -> list[str]:
         owner = ctx.runtime
-        assert len({owner.supervisor.child(node).pid for node in owner.engines.instances}) == 3
+        assert len({owner.supervisor.child(node['id']).pid for node in owner.topology.active()
+                    if node['role'] in ('prefill', 'decode', 'vit')}) == 3
         original = ctx.globals()['prefill']
         first = next(item for item in owner.topology.active('prefill') if item['rpc'] == original[0])
         original_files = {name: (ctx.records.directory / 'components' / first['id'] / name).read_bytes()

@@ -42,10 +42,6 @@ public final class BlockPool {
     public synchronized int referencedBlocks(Kind kind) { return referenced[kind.ordinal()]; }
     synchronized int cachedActiveBlocks() { return cachedActive; }
     public synchronized long generation() { return generation; }
-    public synchronized void awaitChange(long observed, long waitMs) throws InterruptedException {
-        if (generation == observed) wait(Math.max(1, waitMs));
-    }
-
     private Reference add(Block block, Kind kind) {
         if (block.refs[kind.ordinal()] == Integer.MAX_VALUE) throw new IllegalStateException("Block reference overflow");
         boolean cached = isCachedActive(block);
@@ -65,7 +61,7 @@ public final class BlockPool {
         if (reference.kind != Kind.CACHE && --block.activeRefs == 0) { active--; increased = true; }
         if (cached && !isCachedActive(block)) cachedActive--;
         if (--block.totalRefs == 0) { allocated--; increased = true; }
-        if (increased) { generation++; notifyAll(); }
+        if (increased) generation++;
     }
     private static boolean isCachedActive(Block block) {
         return block.activeRefs > 0 && block.refs[Kind.CACHE.ordinal()] > 0;

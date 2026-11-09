@@ -51,4 +51,4 @@ async def client_start(ctx: StepContext, args: Start) -> bool:
     body['requests_file'] = str(path)
     body['request_timeout_ms'] = int(duration(body.pop('request_timeout')) * 1000)
     body['drain_timeout_ms'] = int(duration(body.pop('drain_timeout')) * 1000)
-    return await ctx.runtime.clients.start_playback(body, ctx.query_time, ctx.timeout)
+    return await ctx.runtime.clients.start_playback(body, ctx.timeout)

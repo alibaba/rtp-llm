@@ -47,8 +47,6 @@ public final class FormulaForward {
         formula = ArithmeticFormula.parse(expression, indices, batchVariables, true);
     }
 
-    public static Set<String> variableNames() { return INDICES.keySet(); }
-
     public Duration estimate(ForwardBatch batch) {
         if (batch.requests().isEmpty()) throw new IllegalArgumentException("Forward requires a nonempty batch");
         double[] outer = new double[indices.size()];

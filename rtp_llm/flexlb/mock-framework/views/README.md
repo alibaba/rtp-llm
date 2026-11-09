@@ -26,16 +26,9 @@ TPS 保持 Real 的不同统计合同：P context TPS 是有效执行速率；P 
 
 Master 的已有 Reporter 比 Engine 完整，所以可用曲线多。线上 RTP-LLM 大盘还包含本分支尚未导出的 Master 新指标、Frontend 和 Pod 监控，这些明确标为待埋点；原生 Micrometer JVM 资源另外补充，不能把 KMonitor 的不同指标名当成本地已导出。
 
-## 共享 JVM 的资源归属
+## Engine 资源归属
 
-| 观测 | 当前归属 | 对齐方式 |
-|---|---|---|
-| 请求/队列、KV 逻辑容量、Forward | 逻辑 Engine | Engine 自有状态和独立 registry，按 Engine 地址与 role 筛选 |
-| CPU、RSS、堆、GC、线程、进程 FD | Engine Host JVM | 应由宿主单独暴露一次，Prometheus instance 使用宿主管理端点；不能挂到每个 Engine 的 metrics endpoint 重复采集 |
-| Pod CPU/内存限额与利用率 | 容器 | Whale 一 Pod 一 Engine 时可直接关联；本地共 JVM 时只代表整个宿主，不能均分后冒充实例消耗 |
-| GPU 利用率、显存、Tensor/Core 活跃率 | 真实 GPU | CPU Mock 不产生这些硬件观测；保留待接采集入口，不合成数值 |
-
-大盘的 Engine 宿主资源 row 暂不绑定逐 Engine 查询，避免把同一 JVM 的资源复制 N 次。后续资源接线需要 Runner 将宿主管理端点注册为独立 scrape target，一 JVM 一目标；复用 Prometheus 原生 job/instance，不增加 node/JVM 身份 tag。若必须测单个 Engine 的真实进程资源，应使用一个 JVM 一个 Engine 的运行形态。线程 CPU 只能算被跟踪线程的部分工作，堆内存分配也不是 retained RSS，不作为自动拆账方案。
+每个 Engine 运行在独立 JVM 中。请求、队列、KV 逻辑容量和 Forward 指标按实例导出。Engine 的 CPU、RSS、堆、GC、线程及 FD 暂未接入本地大盘。GPU 资源指标来自真实设备。
 
 ## 筛选、标签与事件
 
@@ -60,7 +53,7 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 
 | 边界 | 对齐指标与含义 | 明确限制 |
 |---|---|---|
-| 调度选批后 | `rtp_llm_wait_stream_size`、`rtp_llm_running_stream_size`、`rtp_llm_loading_cache_stream_size` | 区间内按轮次求均值。Waiting max/agg 取各实例轮均值的最大值。KV loading 仅计 KV prepare。 |
+| 调度选批后 | `rtp_llm_wait_stream_size`、`rtp_llm_running_stream_size`、`rtp_llm_loading_cache_stream_size` | 区间内按轮次求均值。Waiting max/agg 取各实例轮均值的最大值。KV prepare 为同步操作，原生 KV loading 曲线为 0。 |
 | Forward 组装 | `rtp_llm_context_batch_size` / `generate_batch_size`，`execute_token_size`，`max_seq_len`；含 Context 的条件系列只在 P 上产生 | Decode 执行 Token 取 verify/step，不拿整段历史输入相加；不把 running 请求数当作本批大小 |
 | 执行步 | P/D `rtp_llm_step_latency_us` | 完成的非空执行步，从调度返回到处理完输出，微秒；包含 Mock 执行和输出处理 |
 | 每输出 token 耗时 | D `rtp_llm_sp_estimate_tpot_us`、Client `mock_client_tpot_seconds` | D 按输入组装至计算完成的耗时和本批截断前验收 token 数估算，参与 stream 包含入批后取消但计算完成者。Client 按成功请求首尾 token 到达间隔计算。 |
@@ -70,7 +63,7 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 | ViT 请求 | `py_rtp_vit_qps` / `success_qps` / `error_qps`，`image_count` / `embedding_length` / `embedding_rt` | QPS（source=mm_embedding）与成功数按去重后的内部工作统计，含异步提交；缓存和共享消费者不重复计。错误按首次观察计数，也包含入口拒绝。图片数/长度按阻塞请求采样；request_rt 带 source=get_embedding_result、status=success/error。纯 hash 命中不产生计算请求，没有 Tensor 数据搬运 |
 | ViT 缓存 | `py_rtp_vit_embedding_cache_{hit,miss,inflight,eviction}_qps`、`tokens` / `bytes` | GPU+CPU 逻辑驻留合计，不能作为真实 GPU/JVM 物理占用 |
 
-事件耗时在 KMonitor 逐样本上报，Prometheus 由累计 `_sum` / `_count` 计算加权均值；无事件时不发新的耗时样本。逐请求 QPS 从终态事件累计量计算速率。它们与 KMonitor 的固定上报周期并非逐点相同；共享 JVM 不能导出可信的单 Engine CPU/堆/GPU 利用率，资源面板继续留空。
+事件耗时在 KMonitor 逐样本上报，Prometheus 由累计 `_sum` / `_count` 计算加权均值；无事件时不发新的耗时样本。逐请求 QPS 从终态事件累计量计算速率。它们与 KMonitor 的固定上报周期并非逐点相同。
 
 ## 事件指标的权重
 

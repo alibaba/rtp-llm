@@ -50,7 +50,7 @@ def validate_master_launch(config, launch_env, *, local_election):
     if duplicate:
         key = min(duplicate)
         raise ConfigError(f'{key} is declared in both environment.master.config and launch.components.master.env')
-    assigned = {'MOCK_TOPOLOGY_FILE', 'MOCK_NODE_ID', 'MOCK_COMPONENT', 'MOCK_CONFIG_FILE',
+    assigned = {'MOCK_TOPOLOGY_FILE', 'MOCK_NODE_ID', 'MOCK_CONFIG_FILE',
                 'MOCK_READY_FILE', 'MOCK_OUTPUT_DIR'}
     if local_election:
         assigned.update({'HIPPO_ROLE', 'FLEXLB_SYNC_CONSISTENCY_CONFIG',
@@ -193,7 +193,7 @@ class MasterRole:
         if attempt:
             address = next(address for address, item in self._instances.items() if item.index == index)
             self._instances[address].directory = directory
-        control, endpoint = await launch_component(
+        _, control, endpoint = await launch_component(
             self.supervisor, self.records, self._configuration, 'master', index, self.recipe,
             configure=lambda directory: self._environment(index, directory), attempt=attempt)
         if endpoint is None and self.environment:
@@ -232,18 +232,17 @@ class MasterRole:
             raise ExecutionError('Master targets are empty or unknown')
         return [available[address] for address in addresses]
 
-    async def _read_state(self, master, operation, args, query_time, remaining):
+    async def _read_state(self, master, operation, args, remaining):
         return await post(master['control'], {'interface': operation, 'args': args,
-            'context': {'run': 'foreground', 'query_time': query_time, 'observation': None,
-                        'timeout_ms': max(1, int(remaining() * 1000))}})
+            'timeout_ms': max(1, int(remaining() * 1000))})
 
-    async def get(self, targets, is_leader, *, query_time, remaining):
+    async def get(self, targets, is_leader, *, remaining):
         masters = self._read_targets(targets)
         if is_leader is None:
             return [master['rpc'] for master in masters]
         result = []
         for master in masters:
-            value = await self._read_state(master, 'master/leadership/get', {}, query_time, remaining)
+            value = await self._read_state(master, 'master/leadership/get', {}, remaining)
             own = value['instances']
             if own not in ([], [{'id': master['id']}]):
                 raise ExecutionError('Master returned an invalid local leadership observation')
@@ -251,10 +250,10 @@ class MasterRole:
                 result.append(master['rpc'])
         return result
 
-    async def get_engines(self, targets, role, *, query_time, remaining):
+    async def get_engines(self, targets, role, *, remaining):
         result = {}
         for master in self._read_targets(targets):
-            value = await self._read_state(master, 'master/engine/get', {'role': role}, query_time, remaining)
+            value = await self._read_state(master, 'master/engine/get', {'role': role}, remaining)
             if set(value['instances']) != {master['id']}:
                 raise ExecutionError('Master returned another instance observation')
             addresses = value['instances'][master['id']]

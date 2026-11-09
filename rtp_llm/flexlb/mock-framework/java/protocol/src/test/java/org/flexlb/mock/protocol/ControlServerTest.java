@@ -3,7 +3,6 @@ package org.flexlb.mock.protocol;
 import static org.junit.jupiter.api.Assertions.*;
 import java.net.*;
 import java.net.http.*;
-import java.time.Instant;
 import java.util.*;
 import org.junit.jupiter.api.*;
 
@@ -35,17 +34,14 @@ class ControlServerTest {
         assertEquals(404, CLIENT.send(HttpRequest.newBuilder(URI.create(server.url() + "/metrics")).GET().build(), HttpResponse.BodyHandlers.ofString()).statusCode());
     }
 
-    private HttpResponse<String> call(String route, Object args, String run, long timeout) throws Exception {
-        var context = new HashMap<String, Object>();
-        context.put("run", run); context.put("query_time", Instant.now().toString());
-        context.put("observation", null); context.put("timeout_ms", timeout);
-        var body = JsonWire.JSON.writeValueAsString(Map.of("interface", route, "args", args, "context", context));
+    private HttpResponse<String> call(String route, Object args, long timeout) throws Exception {
+        var body = JsonWire.JSON.writeValueAsString(Map.of("interface", route, "args", args, "timeout_ms", timeout));
         return CLIENT.send(HttpRequest.newBuilder(URI.create(server.url() + "/invoke"))
             .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
     }
 
-    @Test void typedRecordsAndContext() throws Exception {
-        var response = call("probe/action", Map.of(), "background", 1000);
+    @Test void typedRecords() throws Exception {
+        var response = call("probe/action", Map.of(), 1000);
         assertEquals(200, response.statusCode());
         assertEquals("master-0", JsonWire.JSON.readTree(response.body()).at("/result/affected/instances/0/id").asText());
     }
@@ -69,24 +65,26 @@ class ControlServerTest {
             var response = CLIENT.send(HttpRequest.newBuilder(URI.create(nativeHost.url() + "/health")).GET().build(), HttpResponse.BodyHandlers.ofString());
             assertEquals(200, response.statusCode());
             assertEquals(0, JsonWire.JSON.readTree(response.body()).get("interfaces").size());
+            var invoke = HttpRequest.newBuilder(URI.create(nativeHost.url() + "/invoke"))
+                .POST(HttpRequest.BodyPublishers.noBody()).build();
+            assertEquals(404, CLIENT.send(invoke, HttpResponse.BodyHandlers.ofString()).statusCode());
         }
     }
 
     @Test void rejectsInvalidRequestsBeforeImplementation() throws Exception {
-        assertEquals(400, call("probe/action", Map.of("delay_ms", java.math.BigInteger.ONE.shiftLeft(63)), "foreground", 1000).statusCode());
-        assertEquals(400, call("probe/action", Map.of("delay_ms", "1"), "foreground", 1000).statusCode());
-        assertEquals(400, call("probe/action", Map.of("extra", 1), "foreground", 1000).statusCode());
-        assertEquals(400, call("probe/metric", Map.of(), "background", 1000).statusCode());
-        assertEquals(400, call("probe/missing", Map.of(), "foreground", 1000).statusCode());
+        assertEquals(400, call("probe/action", Map.of("delay_ms", java.math.BigInteger.ONE.shiftLeft(63)), 1000).statusCode());
+        assertEquals(400, call("probe/action", Map.of("delay_ms", "1"), 1000).statusCode());
+        assertEquals(400, call("probe/action", Map.of("extra", 1), 1000).statusCode());
+        assertEquals(400, call("probe/missing", Map.of(), 1000).statusCode());
     }
 
     @Test void timesOutWithoutRetry() throws Exception {
-        assertEquals(504, call("probe/action", Map.of("delay_ms", 1000), "foreground", 20).statusCode());
-        assertEquals(200, call("probe/metric", Map.of(), "foreground", 1000).statusCode());
+        assertEquals(504, call("probe/action", Map.of("delay_ms", 1000), 20).statusCode());
+        assertEquals(200, call("probe/metric", Map.of(), 1000).statusCode());
     }
 
     @Test void rejectsInvalidComponentResult() throws Exception {
-        assertEquals(500, call("probe/metric", Map.of("invalid_result", true), "foreground", 1000).statusCode());
+        assertEquals(500, call("probe/metric", Map.of("invalid_result", true), 1000).statusCode());
     }
 
     @org.junit.jupiter.params.ParameterizedTest

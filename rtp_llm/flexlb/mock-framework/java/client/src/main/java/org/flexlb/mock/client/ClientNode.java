@@ -54,8 +54,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         } finally { Files.deleteIfExists(temp); }
     }
     private JsonNode call(String url, String operation, Object args) throws Exception {
-        var body = Map.of("interface", operation, "args", args, "context", Map.of(
-            "run", "foreground", "query_time", Instant.now().toString(), "timeout_ms", 2000, "observation", Map.of()));
+        var body = Map.of("interface", operation, "args", args, "timeout_ms", 2000);
         var request = HttpRequest.newBuilder(URI.create(url + "/invoke")).timeout(Duration.ofSeconds(3))
             .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofByteArray(JSON.writeValueAsBytes(body))).build();
         var response = http.send(request, HttpResponse.BodyHandlers.ofString());

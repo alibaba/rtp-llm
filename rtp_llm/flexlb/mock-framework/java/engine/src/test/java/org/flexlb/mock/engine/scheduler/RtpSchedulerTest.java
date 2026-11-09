@@ -559,72 +559,22 @@ class RtpSchedulerTest {
         }
     }
 
-    @Test void schedulerMetricsCountOnlyPostAdmissionQueuesAndKvLoading() throws Exception {
+    @Test void schedulerMetricsCountOnlyPostAdmissionQueues() throws Exception {
         var config = config("prefill", "1", 2, 0, true);
-        var remote = new CompletableFuture<Integer>();
-        try (var cache = new KvCacheManager(2, 8, 0, true, keys -> remote);
+        try (var cache = new KvCacheManager(2, 8, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
-            var sequence = new CacheSequence(2, List.of(1, 2, 3, 4, 5), List.of());
-            scheduler.enqueue(new EngineScheduler.Input("restore", 1, 0, 5, 1, 0, System.nanoTime(),
-                Long.MAX_VALUE, sequence, true, false, 0, false), new Listener());
-            assertNull(scheduler.schedule());
-            var text = scheduler.metrics().scrape();
-            assertEquals(0, RtpMetricsTest.mean(text, "rtp_llm_wait_stream_size", ""));
-            assertEquals(1, RtpMetricsTest.mean(text, "rtp_llm_loading_cache_stream_size", ""));
-
             scheduler.enqueue(input(2, false), new Listener());
             var forward = scheduler.schedule();
             assertEquals(List.of(2L), ids(forward));
             scheduler.enqueue(input(3, false), new Listener());
-            text = scheduler.metrics().scrape();
+            var text = scheduler.metrics().scrape();
             assertEquals(1, RtpMetricsTest.sample(text, "rtp_llm_scheduler_requests", "state=\"waiting\""));
             assertEquals(0, RtpMetricsTest.mean(text, "rtp_llm_wait_stream_size", ""));
-            assertEquals(2, RtpMetricsTest.sample(text, "rtp_llm_wait_stream_size_count", ""));
+            assertEquals(1, RtpMetricsTest.sample(text, "rtp_llm_wait_stream_size_count", ""));
             assertEquals(1, RtpMetricsTest.sample(text, "rtp_llm_running_stream_size_sum", ""));
-            assertEquals(1, RtpMetricsTest.mean(text, "rtp_llm_loading_cache_stream_size", ""));
+            assertEquals(0, RtpMetricsTest.mean(text, "rtp_llm_loading_cache_stream_size", ""));
             complete(scheduler, forward, config);
             drain(scheduler);
-        }
-    }
-
-    @Test void asynchronousKvPreparationWakesEngineAndCancellationReleasesLease() throws Exception {
-        for (boolean cancel : List.of(false, true)) {
-            var config = config("prefill", "1", 2, 0, true);
-            var remote = new CompletableFuture<Integer>();
-            var started = new CompletableFuture<List<Long>>();
-            try (var cache = new KvCacheManager(2, 8, 0, true, keys -> {
-                     started.complete(keys);
-                     return remote;
-                 });
-                 var engine = new EngineLoop(new Object(), AbstractRtpScheduler.factory(config), new TaskHistory(),
-                     cache, config.compute(), config.role(), config.id())) {
-                var listener = new Listener();
-                var sequence = new CacheSequence(2, List.of(1, 2, 3, 4, 5), List.of());
-                var request = engine.enqueue(new EngineScheduler.Input("restore", 1, 0, 5, 1, 0, System.nanoTime(),
-                    Long.MAX_VALUE, sequence, true, false, 0, false), listener);
-                assertEquals(sequence.keys(), started.get(2, TimeUnit.SECONDS));
-                assertFalse(listener.output.isDone());
-                assertEquals(0, request.reused());
-                if (cancel) {
-                    engine.abortRequest(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "test"));
-                    assertEquals(RequestFailure.Reason.CANCELLED, listener.terminal.get(2, TimeUnit.SECONDS).reason());
-                    assertTrue(remote.isCancelled());
-                    assertFalse(remote.complete(1));
-                    assertFalse(listener.output.isDone());
-                    assertEquals(0, cache.snapshot(-1, true).keys().length);
-                } else {
-                    // An unrelated local request can run while the first waits for KV.
-                    var local = new Listener();
-                    engine.enqueue(input(2, false), local);
-                    assertNull(local.terminal.get(2, TimeUnit.SECONDS));
-                    remote.complete(1);
-                    assertNull(listener.terminal.get(2, TimeUnit.SECONDS));
-                    assertEquals(2, request.reused());
-                    assertEquals(2, request.remoteReused());
-                    assertTrue(listener.output.isDone());
-                }
-                assertEquals(8, cache.snapshot(0, false).availableBlocks());
-            }
         }
     }
 
@@ -938,7 +888,7 @@ class RtpSchedulerTest {
     @Test void largerLogicalCacheDoesNotLetFifoOrGroupOverfillDeviceBatch() throws Exception {
         var config = config("prefill", "1", 4, 100);
         for (boolean group : List.of(false, true))
-            try (var cache = new KvCacheManager(2, 3, 12, 0, true, null);
+            try (var cache = new KvCacheManager(2, 3, 12, 0, true);
                  var scheduler = group ? new RtpPrefillGroupScheduler(new Object(), config, cache)
                                        : new RtpFifoScheduler(new Object(), config, cache)) {
                 if (group) scheduler.enqueue(batch(sized(1, 5), sized(2, 5)));

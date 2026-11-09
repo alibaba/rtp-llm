@@ -161,14 +161,13 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
             assert result['tokens'] == 3 and 0 < result['ttft_ns'] <= result['elapsed_ns']
             if replicas == 2:
                 from mock_framework.execution.transport import post
-                from mock_framework.execution.step_trace import timestamp
                 nodes = {f'master-{i}': json.loads((output / f'components/master-{i}/endpoints.json').read_text())
                          for i in range(replicas)}
                 async def claims():
                     result = []
                     for node in nodes.values():
                         value = await post(node['control'], {'interface': 'master/leadership/get', 'args': {},
-                            'context': {'run': 'foreground', 'query_time': timestamp(), 'observation': None, 'timeout_ms': 3000}})
+                            'timeout_ms': 3000})
                         result.extend(item['id'] for item in value['instances'])
                     return result
                 before = await claims()

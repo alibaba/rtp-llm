@@ -13,4 +13,4 @@ class MasterSelection(Targets):
 async def master_get(ctx: StepContext, args: MasterSelection) -> list[str]:
     """List active Masters, optionally filtering their actual leadership claims."""
     return await ctx.runtime.masters.get(args.targets, args.is_leader,
-                                           query_time=ctx.query_time, remaining=lambda: ctx.timeout)
+                                           remaining=lambda: ctx.timeout)

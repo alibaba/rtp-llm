@@ -40,7 +40,6 @@ public interface EngineScheduler extends AutoCloseable {
         RequestState.Snapshot snapshot();
         Progress progress();
         int reused();
-        default int remoteReused() { return 0; }
     }
 
     record Progress(int generated, int iterations, boolean finished) {}

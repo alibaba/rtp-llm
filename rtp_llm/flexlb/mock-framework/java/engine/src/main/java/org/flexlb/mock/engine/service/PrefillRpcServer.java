@@ -92,7 +92,7 @@ final class PrefillRpcServer implements AutoCloseable {
             complete(null, failure);
         }
         private Result success(EngineScheduler.Request request, boolean finished) {
-            return new Result(RpcMessages.token(input, RpcMessages.sampledToken(input), 1, 1, request.reused(), request.remoteReused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
+            return new Result(RpcMessages.token(input, RpcMessages.sampledToken(input), 1, 1, request.reused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
         }
         @Override public void progressed(EngineScheduler.Request request) {
             var output = request.progress();
@@ -500,9 +500,8 @@ final class PrefillRpcServer implements AutoCloseable {
                 boolean prefillFinished = first.output().getFlattenOutput().getFinished(0);
                 var prefillAux = first.output().getFlattenOutput().getAuxInfo(0);
                 int prefillReuse = prefillAux.getTotalReuseLen();
-                int prefillRemoteReuse = prefillAux.getRemoteReuseLen();
                 send(RpcMessages.token(input, RpcMessages.sampledToken(input), 1, 1,
-                    prefillReuse, prefillRemoteReuse, ttft, prefillFinished, true));
+                    prefillReuse, ttft, prefillFinished, true));
                 var loaded = inbox.next();
                 if (loaded == null || !loaded.hasErrorInfo() || loaded.getErrorInfo().getErrorCodeValue() != 0)
                     throw Status.DATA_LOSS.withDescription("Invalid LOAD acknowledgement").asRuntimeException();
@@ -523,9 +522,9 @@ final class PrefillRpcServer implements AutoCloseable {
                         aux.setDecodeTotalReuseLen(aux.getTotalReuseLen()).setDecodeLocalReuseLen(aux.getLocalReuseLen())
                             .setDecodeRemoteReuseLen(aux.getRemoteReuseLen())
                             .setPrefillTotalReuseLen(prefillReuse).setPrefillLocalReuseLen(prefillAux.getLocalReuseLen())
-                            .setPrefillRemoteReuseLen(prefillRemoteReuse)
+                            .clearPrefillRemoteReuseLen()
                             .setTotalReuseLen(prefillReuse).setLocalReuseLen(prefillAux.getLocalReuseLen())
-                            .setRemoteReuseLen(prefillRemoteReuse).setPrefixLen(prefillReuse)
+                            .clearRemoteReuseLen().setPrefixLen(prefillReuse)
                             .setFirstTokenCostTimeUs((int) Math.min(Integer.MAX_VALUE, ttft / 1000)).setPdSep(true);
                     }
                     finished = output.getFlattenOutput().getFinished(0); send(merged.build());
