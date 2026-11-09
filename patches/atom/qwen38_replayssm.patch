@@ -538,9 +538,10 @@ diff --git a/atom/plugin/rtpllm/utils/replay_hybrid.py b/atom/plugin/rtpllm/util
 new file mode 100644
 --- /dev/null
 +++ b/atom/plugin/rtpllm/utils/replay_hybrid.py
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,93 @@
 +"""Experimental final-state fast path with replay only for partial acceptance."""
 +import os
++import logging
 +from types import MethodType
 +import torch
 +import triton
@@ -628,6 +629,7 @@ new file mode 100644
 +        # Keep the supported FlyDSL path when this topology lacks CPU consensus.
 +        return
 +    runtime._hybrid_enabled = True
++    logging.getLogger(__name__).info("RTP GDN default route: FlyDSL + hybrid Replay; ATOM_ENABLE_REPLAYSSM=%s", os.getenv("ATOM_ENABLE_REPLAYSSM", "<unset>"))
 +    runtime._hybrid_stages={};runtime._hybrid_graphs={};runtime._hybrid_active=None;runtime._hybrid_pending=None;runtime._hybrid_modified=False
 +    for name,fn in [('has_speculative_target_status_reducer',_has),('reduce_speculative_target_prepare_status',_reduce),('clear_speculative_target_graph_capture',_clear),('save_speculative_target_graph_capture',_save),('activate_speculative_target_graph_replay',_activate),('prepare_speculative_target_commit',_prepare),('finish_speculative_target_commit',_finish),('finalize_speculative_target_commit',_finalize)]:setattr(runtime,name,MethodType(fn,runtime))
 diff --git a/atom/plugin/rtpllm/utils/replay_policy.py b/atom/plugin/rtpllm/utils/replay_policy.py
