@@ -435,18 +435,21 @@ def mhc_combine(
 @triton.jit
 def _mhc_post_kernel(
     x_ptr,
+    shared_ptr,
     r_ptr,
     post_ptr,
     comb_ptr,
     y_ptr,
     H,
     x_stride_m,
+    shared_stride_m,
     r_stride_m,
     post_stride_m,
     comb_stride_m,
     y_stride_m,
     HC: tl.constexpr,
     BLOCK_H: tl.constexpr,
+    HAS_SHARED: tl.constexpr,
 ):
     """R'[t, i] = post[t, i] * x[t] + sum_j comb[t, j, i] * R[t, j], FP32 accum."""
     pid_m = tl.program_id(0)
@@ -458,6 +461,12 @@ def _mhc_post_kernel(
 
     post_v = tl.load(post_ptr + m64 * post_stride_m + ii).to(tl.float32)
     xv = tl.load(x_ptr + m64 * x_stride_m + offs_h, mask=mask, other=0.0).to(tl.float32)
+    if HAS_SHARED:
+        shared = tl.load(
+            shared_ptr + m64 * shared_stride_m + offs_h, mask=mask, other=0.0
+        ).to(tl.float32)
+        # Retain the BF16 landing of the standalone routed + shared add.
+        xv = (xv + shared).to(tl.bfloat16).to(tl.float32)
     # acc[i, h] starts at post[i] * x[h].
     acc = post_v[:, None] * xv[None, :]
 
@@ -479,6 +488,8 @@ def mhc_post(
     residual: torch.Tensor,
     post: torch.Tensor,
     comb: torch.Tensor,
+    *,
+    shared: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """``R'[t, i] = post[t, i] * x[t] + sum_j comb[t, j, i] * R[t, j]``.
 
@@ -492,6 +503,11 @@ def mhc_post(
     h = residual.shape[2]
     assert post.shape[1] == hc and comb.shape[1] == hc and comb.shape[2] == hc
     assert h == x.shape[1]
+    if shared is not None:
+        assert shared.shape == x.shape
+        assert shared.device == x.device
+        assert shared.dtype == x.dtype == torch.bfloat16
+        shared = shared.contiguous()
 
     x = x.contiguous()
     residual = residual.contiguous()
@@ -506,18 +522,21 @@ def mhc_post(
     block_h = 1024
     _mhc_post_kernel[(m, triton.cdiv(h, block_h))](
         x,
+        shared if shared is not None else x,
         residual,
         post,
         comb,
         out,
         h,
         x.stride(0),
+        shared.stride(0) if shared is not None else 0,
         residual.stride(0),
         post.stride(0),
         comb.stride(0),
         out.stride(0),
         HC=hc,
         BLOCK_H=block_h,
+        HAS_SHARED=shared is not None,
         num_warps=4,
     )
     return out

@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 
+import torch
 from torch import nn
 
 from rtp_llm.models_py.modules.dsv41.block import Block
@@ -11,7 +12,9 @@ from rtp_llm.models_py.modules.dsv41.ppu.layers import (
     PPUSharedHCUnit,
     PPUSharedMoE,
     PPUSharedRMSNorm,
+    _ordinary_decode_graph,
 )
+from rtp_llm.models_py.modules.dsv41.ppu.mhc import _prefer_triton
 from rtp_llm.utils.model_weight import W
 
 
@@ -77,7 +80,8 @@ class SharedPPUBlock(Block):
                 "decode", is_cuda_graph=True,
                 speculative=self.attn.runtime.model._is_speculative,
             )
-            state.layer_calls[self.layer_id].add_(1)
+            if not getattr(state, "bulk_counters", False):
+                state.layer_calls[self.layer_id].add_(1)
             return super().forward_decode(
                 x, attn_metadata, input_ids, expert_load=expert_load, **kwargs
             )
@@ -100,6 +104,24 @@ class SharedPPUBlock(Block):
             "graph" if is_cuda_graph else
             "ced" if ced else phase
         )
+
+    def _try_decode_ffn_post(self, hidden, input_ids, expert_load, residual, post, comb):
+        runtime = self.attn.runtime
+        if (
+            not _ordinary_decode_graph(runtime)
+            or runtime.current.grouped_moe is not None
+            or self.ffn.shared_expert is None
+            or torch.is_grad_enabled()
+            or residual.shape[1:] != (1, 4, 5120)
+            or hidden.shape != (residual.shape[0], 1, 5120)
+            or residual.dtype != torch.bfloat16
+            or not _prefer_triton(self.ops._mhc.config, residual)
+        ):
+            return None
+        routed, shared = self.ffn(
+            hidden, input_ids, expert_load=expert_load, _return_shared=True
+        )
+        return self.ffn_hc.post_graph_moe(routed, shared, residual, post, comb)
 
     def _try_mega_mhc(
         self, attn_out, residual, post, comb, *, original_tokens=None, moe_inputs=None

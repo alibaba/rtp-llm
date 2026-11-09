@@ -1040,6 +1040,7 @@ def engram_gate_inject(
     eps: float = 1e-20,
     clamp: float = 1e-6,
     token_mask: Optional[torch.Tensor] = None,
+    fused_mask: bool = False,
 ) -> torch.Tensor:
     """Gated Engram inject, matching rtp-llm engram.py:626-639 exactly.
 
@@ -1051,8 +1052,18 @@ def engram_gate_inject(
     """
     if h.ndim != 3:
         raise ValueError("h must be [T, hc, dim]")
+    tokens, copies, dim = h.shape
     if (
-        token_mask is None
+        (token_mask is None or (
+            fused_mask and token_mask.shape == (tokens,)
+            and token_mask.dtype == torch.bool and token_mask.device == h.device
+            and value.shape == (tokens, (copies + 1) * dim)
+            and q_weight.shape == k_weight.shape == (copies, dim)
+            and all(
+                tensor.device == h.device and tensor.is_contiguous()
+                for tensor in (h, value, q_weight, k_weight)
+            )
+        ))
         and h.device.type != "cpu"
         and h.dtype in (torch.bfloat16, torch.float32)
         and value.dtype == h.dtype
@@ -1061,8 +1072,9 @@ def engram_gate_inject(
     ):
         kernels = _triton_kernels()
         if kernels is not None:
-            return kernels.fused_engram_gate(h, value, q_weight, k_weight, eps, clamp)
-    tokens, copies, dim = h.shape
+            return kernels.fused_engram_gate(
+                h, value, q_weight, k_weight, eps, clamp, token_mask=token_mask,
+            )
     key = value[:, : copies * dim].reshape(tokens, copies, dim).float()
     shared = value[:, copies * dim :].reshape(tokens, 1, dim).float()
     hidden = h.float()
@@ -1732,6 +1744,9 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
         num_tokens,
         pad_id,
         HAS_DEAD: tl.constexpr,
+        CHECK_WINDOW: tl.constexpr,
+        VOCAB_SIZE: tl.constexpr,
+        IMAGE_ID: tl.constexpr,
         N: tl.constexpr,
         L: tl.constexpr,
         H: tl.constexpr,
@@ -1745,12 +1760,19 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
         tmask2 = tmask[:, None] & (s >= 0)
         win = tl.load(win_ptr + t2 * N + s, mask=tmask2, other=-1).to(tl.int64)
         blk = win < 0
+        if CHECK_WINDOW:
+            in_range = (win >= 0) & (win < VOCAB_SIZE)
+            blk = ~in_range | (win == IMAGE_ID)
+            current_dead = tl.sum((blk & (s == 0)).to(tl.int32), axis=1) > 0
+            map_mask = tmask2 & in_range
+        else:
+            map_mask = tmask2
         if HAS_DEAD:
             d = tl.load(dead_ptr + t2 * N + s, mask=tmask2, other=0)
             blk = blk | (d != 0)
         # Once a shift is blocked every older shift is too.
         blocked = tl.cumsum(blk.to(tl.int32), axis=1) > 0
-        mapped = tl.load(token_map_ptr + tl.maximum(win, 0), mask=tmask2, other=0).to(
+        mapped = tl.load(token_map_ptr + tl.maximum(win, 0), mask=map_mask, other=0).to(
             tl.int64
         )
         comp = tl.where(blocked, pad_id, mapped)
@@ -1765,6 +1787,8 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
                 primes = tl.load(primes_ptr + l * COLS + (i - 1) * H + h)
                 offsets = tl.load(offsets_ptr + l * COLS + (i - 1) * H + h)
                 val = rolling[:, None] % primes + offsets
+                if CHECK_WINDOW:
+                    val = tl.where(current_dead[:, None], -1, val)
                 tl.store(
                     out_ptr + t2 * (L * COLS) + l * COLS + (i - 1) * H + h,
                     val,
@@ -1780,6 +1804,8 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
         offsets: torch.Tensor,
         pad_id: int,
         block_t: int = 64,
+        *,
+        image_token_id: Optional[int] = None,
     ) -> torch.Tensor:
         """Hash [T, n] windows (column 0 = current token) to [T, L, (n-1)*H] int64."""
         num_tokens = window.shape[0]
@@ -1805,6 +1831,9 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
             num_tokens,
             pad_id,
             HAS_DEAD=dead_mask is not None,
+            CHECK_WINDOW=image_token_id is not None,
+            VOCAB_SIZE=token_map.numel(),
+            IMAGE_ID=image_token_id if image_token_id is not None else -1,
             N=N,
             L=L,
             H=H,
@@ -1812,6 +1841,29 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
             num_warps=4,
         )
         return out
+
+    @triton.jit
+    def _engram_graph_ids_kernel(
+        rows, valid, output,
+        BATCH: tl.constexpr, COLS: tl.constexpr, CAPACITY: tl.constexpr,
+        ROW_STRIDE: tl.constexpr, COL_STRIDE: tl.constexpr, MASK_STRIDE: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        row = index // COLS
+        live = tl.load(valid + row * MASK_STRIDE, row < BATCH, other=False)
+        ids = tl.load(
+            rows + row * ROW_STRIDE + index % COLS * COL_STRIDE,
+            mask=(row < BATCH) & live, other=-1,
+        )
+        tl.store(output + index, ids, index < CAPACITY)
+
+    def engram_graph_ids(rows, valid, output):
+        block = 128
+        _engram_graph_ids_kernel[(triton.cdiv(output.numel(), block),)](
+            rows, valid, output, rows.shape[0], rows.shape[1], output.numel(),
+            rows.stride(0), rows.stride(1), valid.stride(0), block, num_warps=4,
+        )
 
     # ------------------------------------------------------------------
     # Adapted from sglang-for-sail
@@ -1825,6 +1877,7 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
         QW,
         KW,
         IDS,
+        TOKEN_MASK,
         O,
         IMAGE_ID,
         D: tl.constexpr,
@@ -1833,6 +1886,8 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
         CLAMP: tl.constexpr,
         B: tl.constexpr,
         HAS_IDS: tl.constexpr,
+        HAS_MASK: tl.constexpr,
+        MASK_STRIDE: tl.constexpr,
     ):
         row = tl.program_id(0)
         token = row // HC
@@ -1843,14 +1898,17 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
         key = tl.load(KV + token * (HC + 1) * D + hc * D + col, mask, 0).to(tl.float32)
         q_weight = tl.load(QW + hc * D + col, mask, 0).to(tl.float32)
         k_weight = tl.load(KW + hc * D + col, mask, 0).to(tl.float32)
-        weight = q_weight * k_weight
-        rstd = tl.rsqrt(tl.sum(x * x, 0) / D + EPS) * tl.rsqrt(
-            tl.sum(key * key, 0) / D + EPS
-        )
-        dot = tl.sum((x * weight) * key, 0) * rstd * (D**-0.5)
-        gate = tl.sigmoid(
-            libdevice.copysign(tl.sqrt(tl.maximum(tl.abs(dot), CLAMP)), dot)
-        )
+        rstd_x = tl.rsqrt(tl.sum(x * x, 0) / D + EPS)
+        rstd_key = tl.rsqrt(tl.sum(key * key, 0) / D + EPS)
+        if HAS_MASK:
+            dot = tl.sum(((x * q_weight) * k_weight) * key, 0) * rstd_x
+            dot = dot * (rstd_key * (D**-0.5))
+            root = tl.sqrt(tl.maximum(tl.abs(dot), CLAMP))
+            gate = tl.sigmoid(tl.where(dot < 0, -root, root))
+            gate = tl.where(tl.load(TOKEN_MASK + token * MASK_STRIDE), gate, 0.0)
+        else:
+            dot = tl.sum((x * (q_weight * k_weight)) * key, 0) * (rstd_x * rstd_key) * (D**-0.5)
+            gate = tl.sigmoid(libdevice.copysign(tl.sqrt(tl.maximum(tl.abs(dot), CLAMP)), dot))
         value = tl.load(KV + token * (HC + 1) * D + HC * D + col, mask, 0).to(
             tl.float32
         )
@@ -1868,6 +1926,7 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
         clamp_value: float,
         input_ids: Optional[torch.Tensor] = None,
         image_token_id: Optional[int] = None,
+        token_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Rows whose ``input_ids`` entry is ``image_token_id`` keep ``x`` unchanged."""
         assert x.ndim == 3 and kv.ndim == 2
@@ -1895,6 +1954,7 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
                 q_weight,
                 k_weight,
                 input_ids,
+                token_mask,
                 out,
                 image_token_id,
                 d,
@@ -1903,6 +1963,8 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
                 clamp_value,
                 triton.next_power_of_2(d),
                 input_ids is not None,
+                token_mask is not None,
+                token_mask.stride(0) if token_mask is not None else 0,
                 num_warps=4,
                 enable_fp_fusion=False,
             )
@@ -1919,6 +1981,7 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
         engram_hash_ids_and_commit=engram_hash_ids_and_commit,
         engram_hash_extend_and_commit=engram_hash_extend_and_commit,
         engram_hash_windows=engram_hash_windows,
+        engram_graph_ids=engram_graph_ids,
         fused_engram_gate=fused_engram_gate,
     )
     return _KERNELS

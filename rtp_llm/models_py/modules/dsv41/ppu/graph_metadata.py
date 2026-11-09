@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from functools import lru_cache
 from pathlib import Path
 
 import torch
@@ -11,6 +12,58 @@ from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
     as_attention_inputs_by_tag,
     primary_attention_inputs,
 )
+
+
+@lru_cache(maxsize=1)
+def _decode_kernels():
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def metadata_kernel(
+        source, request_ids, live_count, positions, valid,
+        rows: tl.constexpr, source_stride: tl.constexpr,
+        last_position: tl.constexpr, plus_one: tl.constexpr, BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        position = tl.load(source + row * source_stride, row < rows, other=0).to(tl.int64)
+        if plus_one:
+            position = position - 1
+        position = tl.minimum(tl.maximum(position, 0), last_position)
+        request = tl.load(request_ids + row, row < rows, other=0)
+        tl.store(positions + row, position, row < rows)
+        tl.store(valid + row, request < tl.load(live_count), row < rows)
+
+    @triton.jit
+    def counters_kernel(
+        layers, moe, engram, engram_mask, rows: tl.constexpr, BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        active = row < rows
+        tl.store(layers + row, tl.load(layers + row, active, 0) + 1, active)
+        tl.store(moe + row, tl.load(moe + row, active, 0) + 1, active)
+        with_engram = tl.load(engram_mask + row, active, False)
+        tl.store(engram + row, tl.load(engram + row, with_engram, 0) + 1, with_engram)
+
+    return triton, metadata_kernel, counters_kernel
+
+
+def update_decode_metadata(source, metadata, live_count, *, last_position, plus_one):
+    triton, kernel, _ = _decode_kernels()
+    block = 32
+    kernel[(triton.cdiv(metadata.batch_size, block),)](
+        source, metadata.request_ids, live_count, metadata.positions, metadata.valid_mask,
+        metadata.batch_size, source.stride(0), last_position, plus_one, block,
+        num_warps=1,
+    )
+
+
+def increment_decode_counters(layers, moe, engram, engram_mask):
+    triton, _, kernel = _decode_kernels()
+    block = 32
+    kernel[(triton.cdiv(layers.numel(), block),)](
+        layers, moe, engram, engram_mask, layers.numel(), block, num_warps=1,
+    )
 
 
 def device_rows(attention_inputs, name, device, rows):

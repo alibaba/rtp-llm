@@ -370,6 +370,10 @@ class Block(nn.Module):
         _, _, _, ffn_hc_post = self._prefill_fast_hc_impls()
         return ffn_hc_post(ffn_out, residual, post, comb)
 
+    def _try_decode_ffn_post(self, hidden, input_ids, expert_load, residual, post, comb):
+        """Optional backend fusion of Decode FFN output and mHC writeback."""
+        return None
+
     def forward_decode(
         self,
         x: torch.Tensor,  # [B, 1, hc, dim]
@@ -475,6 +479,17 @@ class Block(nn.Module):
             _, x_pre, post, comb = fused_mhc
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
+        if (
+            not _dbg_layer
+            and not _defer_ffn_post
+            and moe_inputs is None
+            and routing_metadata is None
+        ):
+            fused_post = self._try_decode_ffn_post(
+                x_pre, input_ids, expert_load, residual, post, comb
+            )
+            if fused_post is not None:
+                return fused_post
         if moe_inputs is not None:
             ffn_out = self.ffn(
                 x_pre, input_ids, expert_load=expert_load, mhc_inputs=moe_inputs

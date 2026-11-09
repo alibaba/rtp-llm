@@ -14,6 +14,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv41.ppu._quant import prepare_e2m1_codebooks
 from rtp_llm.models_py.modules.dsv41.ppu.graph_engram import GraphEngram
+from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import increment_decode_counters
 from rtp_llm.ops import PyModelOutputs
 
 
@@ -50,10 +51,29 @@ class SharedGraphRuntime:
         else:
             raise ValueError("speculative PPU Graph requires grouped W4A8")
         self.freqs = tuple(model.shared_runtime.freqs_for(i) for i in range(g.num_layers))
-        self.engram = GraphEngram(self.ops, g, device=self.device, max_batch_size=self.max_rows)
         self.layer_calls = torch.zeros(g.num_layers, dtype=torch.int64, device=self.device)
         self.moe_calls = torch.zeros_like(self.layer_calls)
         self.engram_calls = torch.zeros_like(self.layer_calls)
+        layers = model.v4.layers
+        self._bulk_counters = (
+            self.device.type == "cuda" and self.grouped is None and not draft and row_width == 1
+            and not model._is_speculative and len(layers) == g.num_layers
+            and all(
+                layer.layer_id == index and layer.ffn.routed_enabled
+                and (layer.engram is not None) == (index in g.engram_layer_ids)
+                for index, layer in enumerate(layers)
+            )
+        )
+        if self._bulk_counters:
+            self._engram_layer_mask = torch.tensor(
+                [index in g.engram_layer_ids for index in range(g.num_layers)],
+                dtype=torch.bool, device=self.device,
+            )
+            model.v4.norm.runtime = model.shared_runtime
+        self.engram = GraphEngram(
+            self.ops, g, device=self.device, max_batch_size=self.max_rows,
+            fuse_metadata=self._bulk_counters,
+        )
         self.routed_rows_device = torch.zeros_like(self.layer_calls)
         self.attention_capture_calls = Counter()
         self._pointers = self._storage_signature()
@@ -88,6 +108,8 @@ class SharedGraphRuntime:
             raise RuntimeError("shared Graph cannot overlap an eager/verify transaction")
         if impl.runtime is not self or impl.cache.native is not model.kv_cache:
             raise ValueError("shared Graph metadata belongs to another model/native pool")
+        verify = getattr(impl, "mode", None) in ("dense", "packed")
+        bulk_counters = self._bulk_counters and not verify
         hashes = None
         if self.geometry.engram_layer_ids:
             if windows is None or tuple(windows.shape) != (
@@ -101,7 +123,7 @@ class SharedGraphRuntime:
             layer_calls=self.layer_calls, moe_calls=self.moe_calls,
             engram_calls=self.engram_calls, routed_rows_device=self.routed_rows_device,
             grouped_moe=self.grouped,
-            verify=getattr(impl, "mode", None) in ("dense", "packed"),
+            verify=verify, bulk_counters=bulk_counters,
             packed_attention=getattr(impl, "packed_attention", None),
             visible_indexer=getattr(impl, "visible_indexer", False),
             attention_calls=Counter(),
@@ -135,6 +157,8 @@ class SharedGraphRuntime:
         verify = getattr(impl, "mode", None) in ("dense", "packed")
         if verify:
             impl.assert_inputs_bound(inputs)
+        elif self._bulk_counters:
+            impl._fuse_decode_metadata = True
         impl.prepare_in_graph(inputs.attention_inputs)
         metadata = impl.metadata
         with self.bind(impl, metadata, windows=inputs.engram_token_windows) as state:
@@ -143,6 +167,10 @@ class SharedGraphRuntime:
                 ids, metadata, expert_token_counts=inputs.expert_token_counts,
                 kv_cache=model.kv_cache,
             )
+            if state.bulk_counters:
+                increment_decode_counters(
+                    self.layer_calls, self.moe_calls, self.engram_calls, self._engram_layer_mask,
+                )
             if state.attention_calls and torch.cuda.is_current_stream_capturing():
                 self.attention_capture_calls.update(state.attention_calls)
             if state.verify:

@@ -52,7 +52,7 @@ class GraphEngram:
     ordering on the model stream, just as the eager device path does.
     """
 
-    def __init__(self, ops, geometry, *, device, max_batch_size):
+    def __init__(self, ops, geometry, *, device, max_batch_size, fuse_metadata=False):
         self.device = torch.device(device)
         self.max_batch_size = int(max_batch_size)
         if self.max_batch_size < 1:
@@ -85,6 +85,7 @@ class GraphEngram:
             offsets=params.offsets.to(self.device),
         )
         self._device_path = self.device.type != "cpu"
+        self._fuse_metadata = fuse_metadata and self._device_path
         self._decode_e4m3_bytes = _software_decode_e4m3()
         if self._device_path:
             self._kernels = _triton_kernels()
@@ -211,6 +212,12 @@ class GraphEngram:
                 dtype=torch.int64,
                 device=self.device,
             )
+        if self._fuse_metadata:
+            return self._kernels.engram_hash_windows(
+                windows, None, self.params.token_map, self.params.multipliers,
+                self.params.primes, self.params.offsets, self.params.pad_id,
+                image_token_id=self.image_token_id,
+            )
         # Invalid IDs must be made safe even for a masked table load. An image
         # token terminates the n-gram history, matching the eager hash contract.
         invalid = (windows < 0) | (windows >= self.params.token_map.numel())
@@ -249,10 +256,13 @@ class GraphEngram:
             raise ValueError("Graph Engram validity must be one bool per captured row")
         if valid_mask.device != self.device:
             raise ValueError("Graph Engram validity must remain on the model device")
-        binding.ids.fill_(DEAD_ID)
-        binding.ids[: rows.numel()].copy_(
-            rows.masked_fill(~valid_mask[:, None], DEAD_ID).reshape(-1)
-        )
+        if self._fuse_metadata:
+            self._kernels.engram_graph_ids(rows, valid_mask, binding.ids)
+        else:
+            binding.ids.fill_(DEAD_ID)
+            binding.ids[: rows.numel()].copy_(
+                rows.masked_fill(~valid_mask[:, None], DEAD_ID).reshape(-1)
+            )
         if binding.size > 1:
             dist.all_gather_into_tensor(
                 binding.gathered, binding.ids, group=binding.process_group

@@ -231,6 +231,7 @@ def sqrtsoftplus_gate(
     top_k: int = DEFAULT_TOP_K,
     routed_scaling_factor: float = ROUTED_SCALING_FACTOR,
     image_rows: Optional[torch.Tensor] = None,
+    graph_routes: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """DeepSeek-V4.1 sqrtsoftplus routing gate (torch reference).
 
@@ -254,7 +255,9 @@ def sqrtsoftplus_gate(
 
     Returns:
         ``(ids int64 [T, top_k], weights float32 [T, top_k])``. Empty ``T``
-        returns correctly-shaped empty tensors.
+        returns correctly-shaped empty tensors. Ordinary Decode Graph can pass
+        ``graph_routes=(valid_mask, routed_row_count)`` to get dispatch-ready
+        slots and write the number of rows with live routes.
 
     PPU fast path: when triton is importable and the logits live on an
     accelerator device, the fused sglang-for-sail router kernel runs instead
@@ -264,9 +267,13 @@ def sqrtsoftplus_gate(
     t = hidden.size(0)
     device = hidden.device
     if t == 0:
+        slots = top_k
+        if graph_routes is not None:
+            slots = max(slots, COMM_SLOTS)
+            graph_routes[1].zero_()
         return (
-            torch.zeros((0, top_k), dtype=torch.int64, device=device),
-            torch.zeros((0, top_k), dtype=torch.float32, device=device),
+            torch.zeros((0, slots), dtype=torch.int64, device=device),
+            torch.zeros((0, slots), dtype=torch.float32, device=device),
         )
     x_bf16 = hidden if hidden.dtype == torch.bfloat16 else hidden.to(torch.bfloat16)
     w_bf16 = (
@@ -285,27 +292,37 @@ def sqrtsoftplus_gate(
         and image_rows is None
         and _fused_gate_available(logits, router_bias)
     ):
+        direct_routes = (
+            graph_routes
+            if graph_routes is not None and _can_write_graph_routes(logits, top_k, graph_routes)
+            else None
+        )
         weights, ids = _fused_sqrtsoftplus_gate_triton(
             logits.contiguous(),
             router_bias.contiguous(),
             topk=top_k,
             routed_scaling_factor=float(routed_scaling_factor),
+            graph_routes=direct_routes,
         )
-        return ids.to(torch.int64), weights
-
-    original = F.softplus(logits).sqrt()
-    if router_bias is not None:
-        # Bias for ranking only; weights below come from `original`.
-        ranking = original + router_bias.to(torch.float32)
+        if direct_routes is not None:
+            return ids, weights
     else:
-        ranking = original
-    weights, indices = _select_routes_with_nonfinite_fallback(
-        original,
-        ranking,
-        top_k,
-        float(routed_scaling_factor),
-    )
-    return indices.to(torch.int64), weights
+        original = F.softplus(logits).sqrt()
+        ranking = (
+            original + router_bias.to(torch.float32)
+            if router_bias is not None else original
+        )
+        weights, ids = _select_routes_with_nonfinite_fallback(
+            original, ranking, top_k, float(routed_scaling_factor)
+        )
+    ids = ids.to(torch.int64)
+    if graph_routes is not None:
+        valid_mask, routed_rows = graph_routes
+        ids, weights = pad_topk_for_dispatch(ids, weights)
+        ids = torch.where(valid_mask[:, None], ids, -1)
+        weights = torch.where(valid_mask[:, None], weights, 0)
+        routed_rows.copy_((ids >= 0).any(-1).sum())
+    return ids, weights
 
 
 def _select_routes_with_nonfinite_fallback(
@@ -358,11 +375,26 @@ def _fused_gate_available(logits: torch.Tensor, bias: torch.Tensor) -> bool:
     return importlib.util.find_spec("triton") is not None
 
 
+def _can_write_graph_routes(logits, top_k, graph_routes) -> bool:
+    valid, count = graph_routes
+    return (
+        top_k == DEFAULT_TOP_K
+        and valid.shape == (logits.shape[0],)
+        and valid.dtype == torch.bool
+        and valid.is_contiguous()
+        and count.ndim == 0
+        and count.dtype == torch.int64
+        and valid.device == count.device == logits.device
+    )
+
+
 def _fused_sqrtsoftplus_gate_triton(
     logits: torch.Tensor,
     bias: torch.Tensor,
     topk: int,
     routed_scaling_factor: float,
+    *,
+    graph_routes: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Fused Triton sqrtsoftplus router gate (PPU fast path).
 
@@ -388,9 +420,13 @@ def _fused_sqrtsoftplus_gate_triton(
     kernels = _get_triton_kernels()
     triton = kernels.triton
     m, n = logits.shape
-    k = topk
+    k = COMM_SLOTS if graph_routes is not None else topk
     weights = torch.empty((m, k), dtype=torch.float32, device=logits.device)
-    indices = torch.empty((m, k), dtype=torch.int32, device=logits.device)
+    indices = torch.empty(
+        (m, k),
+        dtype=torch.int64 if graph_routes is not None else torch.int32,
+        device=logits.device,
+    )
     if m == 0:
         return weights, indices
     block_n = triton.next_power_of_2(n)
@@ -398,11 +434,14 @@ def _fused_sqrtsoftplus_gate_triton(
     block_m = max(1, min(4, 256 // block_n))
     num_warps = 1 if block_n <= 512 else 4
     grid = (triton.cdiv(m, block_m),)
+    valid_mask, routed_rows = graph_routes if graph_routes is not None else (None, None)
     kernels.router_gate[grid](
         logits,
         bias,
         weights,
         indices,
+        valid_mask,
+        routed_rows,
         m,
         float(routed_scaling_factor),
         logits.stride(0),
@@ -414,7 +453,7 @@ def _fused_sqrtsoftplus_gate_triton(
         indices.stride(1),
         N=n,
         K=k,
-        K_ROUTED=k,
+        K_ROUTED=topk,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         BLOCK_K=block_k,
@@ -424,6 +463,7 @@ def _fused_sqrtsoftplus_gate_triton(
         RENORMALIZE_EPSILON=1e-12,
         APPLY_SCALE=True,
         HAS_BIAS=True,
+        GRAPH_ROWS=triton.next_power_of_2(m) if graph_routes is not None else 0,
         num_warps=num_warps,
     )
     return weights, indices
@@ -493,6 +533,21 @@ def _get_triton_kernels():
         import triton.language as tl
         from triton.language.extra import libdevice
 
+        @triton.jit
+        def _accumulate_mega_expert_load_kernel(
+            counts_ptr,
+            current_ptr,
+            previous_ptr,
+            EXPERTS: tl.constexpr,
+            BLOCK: tl.constexpr,
+        ):
+            expert = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+            live = expert < EXPERTS
+            previous = tl.load(previous_ptr + expert, live, 0)
+            current = tl.load(current_ptr + expert, live, 0)
+            counts = tl.load(counts_ptr + expert, live, 0)
+            tl.store(counts_ptr + expert, counts + (current - previous), live)
+
         # Adapted from sglang-for-sail kernels/ops/moe/moe_fused_gate.py
         # (512b03d), Apache-2.0: _router_triton_kernel.
         @triton.jit
@@ -500,7 +555,9 @@ def _get_triton_kernels():
             scores_ptr,  # [M, N] raw logits, fp32/fp16/bf16 (fp32 on load)
             bias_ptr,  # [N] fp32/fp16/bf16 (fp32 on load)
             out_weights_ptr,  # [M, K] fp32
-            out_indices_ptr,  # [M, K] int32
+            out_indices_ptr,  # [M, K] int32, or int64 for dispatch-ready output
+            valid_mask_ptr,
+            routed_rows_ptr,
             M,
             routed_scaling_factor,
             stride_sm,
@@ -522,6 +579,7 @@ def _get_triton_kernels():
             APPLY_SCALE: tl.constexpr,
             HAS_BIAS: tl.constexpr,
             RENORMALIZE_EPSILON: tl.constexpr,
+            GRAPH_ROWS: tl.constexpr,
         ) -> None:
             pid = tl.program_id(0)
             offs_m = pid * BLOCK_M + tl.arange(0, BLOCK_M)  # [BLOCK_M]
@@ -627,6 +685,17 @@ def _get_triton_kernels():
                 + offs_k[None, :] * stride_ik
             )
             store_mask = mask_m[:, None] & mask_k_total[None, :]
+            if GRAPH_ROWS:
+                real = tl.load(valid_mask_ptr + offs_m, mask_m, other=False)
+                live_routes = real[:, None] & mask_k_routed[None, :]
+                selected_vals = tl.where(live_routes, selected_vals, 0.0)
+                selected_idx = tl.where(live_routes, selected_idx, -1)
+                if pid == 0:
+                    # A live row always has a nonnegative first ID, including
+                    # the existing nonfinite-score handling above.
+                    rows = tl.arange(0, GRAPH_ROWS)
+                    valid_rows = tl.load(valid_mask_ptr + rows, rows < M, other=False)
+                    tl.store(routed_rows_ptr, tl.sum(valid_rows.to(tl.int32), 0))
             tl.store(out_w_ptr, selected_vals, mask=store_mask)
             tl.store(out_i_ptr, selected_idx, mask=store_mask)
 
@@ -1036,6 +1105,7 @@ def _get_triton_kernels():
 
         bundle = _Kernels()
         bundle.triton = triton
+        bundle.accumulate_mega_expert_load = _accumulate_mega_expert_load_kernel
         bundle.router_gate = _router_gate_kernel
         bundle.scatter_m_indices = _ep_scatter_m_indices_kernel
         bundle.scatter_tokens = _ep_scatter_tokens_kernel
@@ -1884,7 +1954,16 @@ class PPUMoE:
         for layer_id in layer_ids:
             self._processed_weights(layer_id, x.device)
 
-    def forward_shared_graph(self, x, expert_ids, expert_weights, *, layer_id, expert_load=None):
+    def forward_shared_graph(
+        self,
+        x,
+        expert_ids,
+        expert_weights,
+        *,
+        layer_id,
+        expert_load=None,
+        fused_expert_load=False,
+    ):
         """Fixed workspace path for capture AND graph-safe eager reference."""
         if (self.backend, self.precision) != ("megamoe", "w4a4"):
             raise ValueError("shared Graph requires MegaMoE/W4A4")
@@ -1896,10 +1975,19 @@ class PPUMoE:
         return self._forward_megamoe(
             x, expert_ids, expert_weights, layer_id, expert_load,
             graph_buffer=self._mega_buffer,
+            fused_expert_load=fused_expert_load,
         )
 
     def _forward_megamoe(
-        self, x, expert_ids, expert_weights, layer_id, expert_load=None, *, graph_buffer=None
+        self,
+        x,
+        expert_ids,
+        expert_weights,
+        layer_id,
+        expert_load=None,
+        *,
+        graph_buffer=None,
+        fused_expert_load=False,
     ):
         self._validate_megamoe_input(x)
         layer_id = self._resolve_layer_id(layer_id)
@@ -1936,7 +2024,20 @@ class PPUMoE:
         )
         if counts is not None:
             # The fused dispatch exposes destination counts rather than IDs.
-            counts.add_(self._mega_recv_stats - previous_counts)
+            if fused_expert_load and importlib.util.find_spec("triton") is not None:
+                kernels = _get_triton_kernels()
+                block = 128
+                grid = (kernels.triton.cdiv(counts.numel(), block),)
+                kernels.accumulate_mega_expert_load[grid](
+                    counts,
+                    self._mega_recv_stats,
+                    previous_counts,
+                    EXPERTS=counts.numel(),
+                    BLOCK=block,
+                    num_warps=4,
+                )
+            else:
+                counts.add_(self._mega_recv_stats - previous_counts)
         self.mega_moe_calls += 1
         return y
 
@@ -2430,6 +2531,8 @@ def shared_expert_forward(
     w13: PPUResidentBF16Linear,
     w2: PPUResidentBF16Linear,
     swiglu_limit: float = SWIGLU_LIMIT,
+    *,
+    fused_activation: bool = False,
 ) -> torch.Tensor:
     """Shared-expert SwiGLU forward on BF16-resident weights.
 
@@ -2439,6 +2542,19 @@ def shared_expert_forward(
     projection. Returns BF16.
     """
     gate_up = w13(x)
+    if (
+        fused_activation
+        and gate_up.is_cuda
+        and gate_up.dtype == torch.bfloat16
+        and gate_up.ndim == 2
+        and gate_up.is_contiguous()
+        and importlib.util.find_spec("triton") is not None
+    ):
+        from rtp_llm.models_py.modules.dsv41.moe._silu_mul_bf16_triton import (
+            silu_mul_split_bf16,
+        )
+
+        return w2(silu_mul_split_bf16(gate_up, clamp_limit=swiglu_limit))
     gate, up = gate_up.chunk(2, dim=-1)
     if swiglu_limit and swiglu_limit > 0:
         up = up.clamp(min=-float(swiglu_limit), max=float(swiglu_limit))

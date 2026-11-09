@@ -15,13 +15,20 @@ import torch
 from rtp_llm.models_py.modules.dsv41.ppu.attention import _pad_heads
 
 
-def packed_decode(q, plan, *, softmax_scale, attn_sink):
+def _layout(tensor):
+    if tensor is not None:
+        return tensor.shape, tensor.stride(), tensor.dtype, tensor.device
+    return None
+
+
+def packed_decode(q, plan, *, softmax_scale, attn_sink, mask_output=True, scheduler_cache=None):
     """Return BF16 ``[rows, real_heads, 512]`` from a prequalified plan.
 
     ``plan`` retains every cache view, physical index tensor and actual live
     prefix length until this current-stream launch has been submitted. Each
     row is one independent ordinary decode query. The caller validates the
-    pool layout and masks invalid rows. Native errors propagate to the caller.
+    pool layout. A caller disabling the output mask must apply it before
+    consuming the result. Native errors propagate to the caller.
     """
     if q.ndim != 3 or q.shape[-1] != 512 or q.dtype != torch.bfloat16:
         raise ValueError("packed decode requires BF16 [rows, heads, 512] Q")
@@ -29,9 +36,20 @@ def packed_decode(q, plan, *, softmax_scale, attn_sink):
         return q.new_empty(q.shape)
 
     query, sink, heads = _pad_heads(q, attn_sink)
-    # Schedulers are not reused across lengths/requests: the pinned ABI
-    # permits reuse only when values as well as shapes remain unchanged.
-    metadata, num_splits = plan.metadata_factory()
+    if scheduler_cache is None:
+        metadata, num_splits = plan.metadata_factory()
+    else:
+        # The pinned ABI requires equal prefix lengths as well as equal
+        # geometry. Identity here means the same actual length producer on
+        # this stream, including when a fallback has its own length tensor.
+        key = (
+            "packed_mla_scheduler", plan.native, plan.metadata_factory, _layout(query),
+            _layout(plan.swa_cache), _layout(plan.swa_indices), id(plan.swa_lengths),
+            _layout(plan.global_cache), _layout(plan.global_indices), id(plan.global_lengths),
+        )
+        if key not in scheduler_cache:
+            scheduler_cache[key] = plan.metadata_factory()
+        metadata, num_splits = scheduler_cache[key]
     output, _ = plan.native(
         q=query.unsqueeze(1).contiguous(),
         k_cache=plan.swa_cache,
@@ -51,6 +69,8 @@ def packed_decode(q, plan, *, softmax_scale, attn_sink):
         extra_topk_length=plan.global_lengths,
     )
     output = output[:, 0, :heads]
+    if not mask_output:
+        return output
     return torch.where(
         plan.valid_mask[:, None, None], output, torch.zeros_like(output)
     )

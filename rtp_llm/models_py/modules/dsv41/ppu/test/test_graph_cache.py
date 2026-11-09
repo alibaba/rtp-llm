@@ -2,6 +2,8 @@
 
 import os
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -219,6 +221,114 @@ class DecodeGraphMetadataTest(unittest.TestCase):
     "requires explicit PPU/CUDA Graph device qualification",
 )
 class GraphCacheDeviceTest(unittest.TestCase):
+    @torch.inference_mode()
+    def test_packed_scheduler_replay_shares_only_equal_prefixes(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_packed_attention import (
+            GRAPH_SHARED_MLA_METADATA_ENV,
+            GraphPackedAttention,
+        )
+        from rtp_llm.models_py.modules.dsv41.ppu.kv_codec import encode_kv
+        from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import DEPENDENCY_ENV
+
+        if not os.environ.get(DEPENDENCY_ENV):
+            self.skipTest("requires the pinned packed FlashMLA provider")
+
+        torch.manual_seed(5530)
+        device = torch.device("cuda", torch.cuda.current_device())
+        ratios = (0, 1, 1, 2, 2)
+        pages, span = 8, 128
+        for rows in (1, 8):
+            with self.subTest(rows=rows):
+                cache = NativeGraphCache.__new__(NativeGraphCache)
+                cache.device = device
+                cache.entries, cache.spans, cache.tables = {}, {}, {}
+                cache._framework_tags, cache._pools = {}, {}
+                page_ids = torch.arange(1, pages, dtype=torch.int32, device=device)
+                for owner, ratio in enumerate(ratios):
+                    global_tag = f"global_kv_{ratio}"
+                    tags = ("swa_kv", global_tag) if ratio else ("swa_kv",)
+                    for tag in tags:
+                        domain = (
+                            "decoder_swa_kv" if tag == "swa_kv" and owner % 2 else tag
+                        )
+                        entries = span // ratio if tag == global_tag else span
+                        cache._framework_tags[owner, tag] = domain
+                        cache.entries[domain], cache.spans[domain] = entries, span
+                        mapping = page_ids if domain != "decoder_swa_kv" else page_ids.flip(0)
+                        cache.tables[domain] = mapping.repeat(rows, 1)
+                        kv = torch.randn(
+                            pages * entries, 512, device=device, dtype=torch.bfloat16
+                        ) * 0.25
+                        cache._pools[owner, tag] = encode_kv(kv, pool_tag=tag).reshape(pages, -1)
+                cache.geometry = SimpleNamespace(
+                    pool_keys=lambda: tuple(cache._pools), ratio=lambda owner: ratios[owner]
+                )
+                geometry = SimpleNamespace(
+                    window=128, head_dim=512, n_heads=64, sm_scale=lambda: 512**-0.5
+                )
+                with patch.dict(os.environ, {GRAPH_SHARED_MLA_METADATA_ENV: "1"}):
+                    packed = GraphPackedAttention(cache, geometry)
+                metadata_factory = packed.metadata_factory
+                schedules = []
+
+                def record_scheduler():
+                    meta, num_splits = metadata_factory()
+                    schedules.append(meta)
+                    return meta, num_splits
+
+                packed.metadata_factory = record_scheduler
+                sink = torch.zeros(64, device=device)
+                layers = [
+                    SimpleNamespace(
+                        layer_id=layer, kv_source_layer_id=layer, index_source_layer_id=layer,
+                        compress_ratio=ratio, geometry=geometry, attn_sink=sink,
+                    )
+                    for layer, ratio in enumerate(ratios)
+                ]
+                q = torch.randn(rows, 64, 512, device=device, dtype=torch.bfloat16)
+                positions = torch.zeros(rows, device=device, dtype=torch.int64)
+                valid = torch.ones(rows, device=device, dtype=torch.bool)
+                metadata = SimpleNamespace(positions=positions, valid_mask=valid)
+                ordinal = torch.arange(512, device=device, dtype=torch.int32).repeat(rows, 1)
+                selected = (None, ordinal, ordinal.roll(3, 1), ordinal, ordinal.roll(7, 1))
+
+                def step(share):
+                    shared = {}
+                    schedules.clear()
+                    outputs = [
+                        packed.forward(layer, q, ids, metadata, shared, share_scheduler=share)
+                        for layer, ids in zip(layers, selected)
+                    ]
+                    return outputs, tuple(schedules)
+
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream(device))
+                with torch.cuda.stream(stream):
+                    self.assertEqual(len(step(True)[1]), len(layers))
+                stream.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    reference, reference_schedules = step(False)
+                    actual, shared_schedules = step(True)
+                self.assertEqual(len(reference_schedules), 5)
+                self.assertEqual(len(shared_schedules), 3)
+
+                live_rows = torch.arange(rows, device=device)
+                for start, count in ((0, rows), (387, rows), (6, rows - 1), (513, rows)):
+                    positions.copy_(start + 3 * live_rows)
+                    valid.copy_(live_rows < count)
+                    graph.replay()
+                    for index, group in enumerate((0, 1, 1, 2, 2)):
+                        torch.testing.assert_close(
+                            actual[index], reference[index], rtol=0.005, atol=0.005
+                        )
+                        self.assertEqual(int(torch.count_nonzero(actual[index][~valid])), 0)
+                        torch.testing.assert_close(
+                            shared_schedules[group].num_splits,
+                            reference_schedules[index].num_splits,
+                            rtol=0, atol=0,
+                        )
+
     def test_replay_refreshes_all_pool_formats_and_independent_tables(self):
         config = synthetic_config(max_position_embeddings=256)
         native, reference = NativePools(config), NativePools(config)

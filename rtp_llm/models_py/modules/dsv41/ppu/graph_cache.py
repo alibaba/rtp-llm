@@ -292,6 +292,16 @@ class PPUDecodeGraphImpl:
         self._position_is_plus_one = plus_one
 
     def _update_metadata(self):
+        if getattr(self, "_fuse_decode_metadata", False) and self._position_source.dtype in (
+            torch.int32, torch.int64
+        ):
+            from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import update_decode_metadata
+
+            update_decode_metadata(
+                self._position_source, self.metadata, self.cuda_graph_valid_request_count_device,
+                last_position=self.cache.max_seq_len - 1, plus_one=self._position_is_plus_one,
+            )
+            return
         positions = self._position_source.to(dtype=torch.int64)
         if self._position_is_plus_one:
             positions = positions - 1

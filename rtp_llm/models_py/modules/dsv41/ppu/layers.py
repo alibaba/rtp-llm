@@ -5,12 +5,14 @@ provides its real projection/normalization inputs, rather than constructing
 a CUDA Attention object or presenting a placeholder as AttentionFP8.
 """
 
+import importlib.util
 import weakref
 from dataclasses import replace
 
 import torch
 from torch import nn
 
+from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.base.common.norm import BaseNorm
 from rtp_llm.models_py.modules.dsv41.hc.base import HCUnitBase
@@ -28,6 +30,37 @@ from rtp_llm.models_py.modules.dsv41.ppu.weight import (
     _load_engram_shard,
 )
 from rtp_llm.utils.model_weight import W
+
+
+def _ordinary_decode_graph(runtime):
+    state = runtime.current if runtime is not None else None
+    return (
+        getattr(state, "is_graph", False)
+        and not getattr(state, "verify", False)
+        and not runtime.model._is_speculative
+    )
+
+
+def try_graph_rms_norm(hidden_states, weight, eps) -> torch.Tensor | None:
+    """Reuse the strided RMSNorm for ordinary Graph BF16 activations."""
+    if (
+        weight is None
+        or not hidden_states.is_cuda
+        or hidden_states.dtype != torch.bfloat16
+        or hidden_states.ndim not in (2, 3)
+        or not hidden_states.is_contiguous()
+        or weight.dtype not in (torch.bfloat16, torch.float32)
+        or weight.ndim != 1
+        or not weight.is_contiguous()
+        or weight.device != hidden_states.device
+        or not 0 < hidden_states.shape[-1] == weight.numel() <= 8192
+        or torch.is_grad_enabled()
+        or importlib.util.find_spec("triton") is None
+    ):
+        return None
+    from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import strided_q_rmsnorm
+
+    return strided_q_rmsnorm(hidden_states, weight, eps)
 
 
 class PPUSharedEmbedding(EmbeddingTorch):
@@ -53,6 +86,12 @@ class PPUSharedRMSNorm(BaseNorm):
 
     def forward(self, hidden_states):
         self.calls += 1
+        if _ordinary_decode_graph(getattr(self, "runtime", None)):
+            normalized = try_graph_rms_norm(
+                hidden_states, self.weight, self.variance_epsilon
+            )
+            if normalized is not None:
+                return normalized
         x = hidden_states.float()
         return (
             x
@@ -137,6 +176,24 @@ class PPUSharedHCUnit(HCUnitBase):
         return self.state.hidden, self.state.post_mix, self.state.residual_mix
 
     def _post_impl(self, x, residual, post, comb):
+        if (
+            _ordinary_decode_graph(getattr(self, "runtime", None))
+            and residual.is_cuda
+            and residual.ndim == 4
+            and residual.shape[1] == 1
+            and residual.shape[-2:] == (4, 5120)
+            and x.dtype == residual.dtype == torch.bfloat16
+            and post.dtype == comb.dtype == torch.float32
+            and all(t.is_contiguous() for t in (x, residual, post, comb))
+        ):
+            # The singleton decode axis is a view. The existing flat-token
+            # mHC kernel loads BF16 inputs and accumulates in FP32.
+            mix = PPUStepMix(
+                hidden=None, post_mix=post.squeeze(1), residual_mix=comb.squeeze(1)
+            )
+            return self.ops.mhc(
+                residual.squeeze(1), x.squeeze(1), phase="post", state=mix
+            ).hidden.unsqueeze(1)
         return self.ops.mhc(
             residual,
             x,
@@ -156,6 +213,32 @@ class PPUSharedHCUnit(HCUnitBase):
             post_mix=transition.post_mix,
             residual_mix=transition.residual_mix,
         )
+
+    def post_graph_moe(self, routed, shared, residual, post, comb):
+        if (
+            routed.shape != shared.shape
+            or routed.dtype != torch.bfloat16
+            or shared.dtype != torch.bfloat16
+            or post.dtype != torch.float32
+            or comb.dtype != torch.float32
+            or not all(
+                t.is_contiguous() and t.device == residual.device
+                for t in (routed, shared, residual, post, comb)
+            )
+        ):
+            return self.post(
+                combine_routed_and_shared(routed, shared), residual, post, comb
+            )
+        from rtp_llm.models_py.modules.dsv41.ppu._mhc_triton import mhc_post
+
+        with record_function_range(f"dsv4.hc.L{self.layer_id:02d}.{self.name}.post"):
+            return mhc_post(
+                routed.squeeze(1),
+                residual.squeeze(1),
+                post.squeeze(1).squeeze(-1),
+                comb.squeeze(1),
+                shared=shared.squeeze(1),
+            ).unsqueeze(1)
 
 
 class PPUSharedHCHead(nn.Module):
@@ -241,10 +324,11 @@ class PPUSharedGate(nn.Module):
         self.top_k = views.geometry.n_activated_experts
         self.route_scale = views.geometry.routed_scaling_factor
 
-    def forward(self, hidden):
+    def forward(self, hidden, *, graph_routes=None):
         return sqrtsoftplus_gate(
             hidden, self.weight, self.bias,
             top_k=self.top_k, routed_scaling_factor=self.route_scale,
+            graph_routes=graph_routes,
         )
 
 
@@ -257,8 +341,11 @@ class PPUSharedExpert(nn.Module):
         self.w2 = views.linear(layer_id, W.v4_shared_w2_w)
         self.swiglu_limit = views.geometry.swiglu_limit
 
-    def forward(self, hidden):
-        return shared_expert_forward(hidden, self.w13, self.w2, self.swiglu_limit)
+    def forward(self, hidden, *, fused_activation=False):
+        return shared_expert_forward(
+            hidden, self.w13, self.w2, self.swiglu_limit,
+            fused_activation=fused_activation,
+        )
 
 
 class PPUSharedMoE(nn.Module):
@@ -284,7 +371,15 @@ class PPUSharedMoE(nn.Module):
                     raw_tensors=views.eplb_raw_tensors(layer_id),
                 )
 
-    def forward(self, hidden, input_ids=None, expert_load=None, routing_metadata=None):
+    def forward(
+        self,
+        hidden,
+        input_ids=None,
+        expert_load=None,
+        routing_metadata=None,
+        *,
+        _return_shared=False,
+    ):
         self.calls += 1
         if not self.routed_enabled:
             raise RuntimeError("partial N1 consumer cannot execute full routed MoE")
@@ -292,19 +387,30 @@ class PPUSharedMoE(nn.Module):
             raise NotImplementedError("shared PPU does not consume external routing metadata")
         shape = hidden.shape
         flat = hidden.reshape(-1, shape[-1])
-        ids, weights = pad_topk_for_dispatch(*self.gate(flat))
         runtime = getattr(self, "runtime", None)
         state = runtime.current if runtime is not None else None
         if getattr(state, "is_graph", False):
             real = state.metadata.valid_mask
-            ids = torch.where(real[:, None], ids, -1)
-            weights = torch.where(real[:, None], weights, 0)
-            state.moe_calls[self.layer_id].add_(1)
-            state.routed_rows_device[self.layer_id].copy_((ids >= 0).any(-1).sum())
+            routed_rows = state.routed_rows_device[self.layer_id]
+            ordinary = _ordinary_decode_graph(runtime)
+            if ordinary and state.grouped_moe is None:
+                ids, weights = self.gate(flat, graph_routes=(real, routed_rows))
+            else:
+                ids, weights = pad_topk_for_dispatch(*self.gate(flat))
+                ids = torch.where(real[:, None], ids, -1)
+                weights = torch.where(real[:, None], weights, 0)
+                routed_rows.copy_((ids >= 0).any(-1).sum())
+            if not getattr(state, "bulk_counters", False):
+                state.moe_calls[self.layer_id].add_(1)
             engine = self.ops.moe_engine
             if state.grouped_moe is None:
                 routed = engine.forward_shared_graph(
-                    flat, ids, weights, layer_id=self.layer_id, expert_load=expert_load
+                    flat,
+                    ids,
+                    weights,
+                    layer_id=self.layer_id,
+                    expert_load=expert_load,
+                    fused_expert_load=ordinary,
                 )
             else:
                 physical = engine._map_expert_ids(ids, weights, self.layer_id)
@@ -312,8 +418,12 @@ class PPUSharedMoE(nn.Module):
                     flat, physical, weights, layer_id=self.layer_id, expert_load=expert_load
                 )
             if self.shared_expert is not None:
-                routed = combine_routed_and_shared(routed, self.shared_expert(flat))
+                shared = self.shared_expert(flat, fused_activation=ordinary)
+                if _return_shared:
+                    return routed.reshape(shape), shared.reshape(shape)
+                routed = combine_routed_and_shared(routed, shared)
             return routed.reshape(shape)
+        ids, weights = pad_topk_for_dispatch(*self.gate(flat))
         if state is not None:
             if state.idle:
                 real = torch.zeros(flat.shape[0], dtype=torch.bool, device=flat.device)
@@ -369,13 +479,16 @@ class PPUSharedEngram(nn.Module):
             raise RuntimeError("N2 must supply original-row Engram hashes")
         state = getattr(self, "_graph_state", None)
         if state is not None:
-            state.engram_calls[self.layer_id].add_(1)
+            fused_mask = getattr(state, "bulk_counters", False)
+            if not fused_mask:
+                state.engram_calls[self.layer_id].add_(1)
             embedded = state.engram.lookup(
                 hashes, layer_id=self.layer_id, valid_mask=state.metadata.valid_mask
             )
             value = wkv_project(embedded.flatten(1), self.wkv.weight)
             return engram_gate_inject(
-                hidden, self.q_weight, self.k_weight, value, token_mask=token_mask
+                hidden, self.q_weight, self.k_weight, value,
+                token_mask=token_mask, fused_mask=fused_mask,
             )
         pending, self._prefetched = self._prefetched, None
         if pending is not None and pending[0] is not hashes:
