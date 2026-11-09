@@ -267,109 +267,13 @@ uv run --locked python scripts/build-indexed-traffic.py anonymous.jsonl traffic.
 
 `tokens` 行依次为匿名文本符号、到达偏移毫秒、回放目标输出长度、优先级、图片列表。图片三元组是媒体 ID、前置文本 token 数、参考展开长度（0 表示缺省）。匿名符号在一轮中用同一映射，保存逐 token 相等关系。输入必须在采集端完成脱敏。构建器在磁盘维护临时前缀索引，逐条匹配并封装结果。已有匿名前缀图时，另可输入 `["chain",起始节点,父节点,长度]` 和 `["request",文本叶节点,到达偏移,回放输出长度,优先级,图片列表]`，节点 ID 从 1 连续递增。两种文本输入形式按文件选择一种。末行 `end` 包含请求总数。
 
-#### JSONL 和 MCKINP01 输入与分片
+#### 回放与收尾
 
-`client/start` 通过 `requests_file` 也可读取 JSONL 或 MCKINP01 输入。以 `data/` 开头的路径从共享根解析，其他相对路径从 Case YAML 所在目录解析，也可使用绝对路径。当前所有 Client 位于同一机器并共享文件系统。
+`requests_file` 以 `data/` 开头时从共享根解析，其他相对路径从 Case YAML 所在目录解析，也接受绝对路径。各 Client 在本机共享同一份文件。
 
-压缩输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 测试辅助目录 python/mock_framework/execution/test/helpers 提交同一 protoc 3.25.1 生成的 client_input_pb2.py；输入读写器 input.py 也仅供框架测试与镜像终验生成、检查测试数据，不发布到 mock_framework 运行包。Request 保存未展开的回放输入：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。可选 images 保存 url、width、height、offset；每张图只占 token_ids 中的一个位置，offset 按升序排列且不得重复。LoadClient 按显式配置的 image_token_id 将这些位置写为图片标记；Mock V 默认异步下载真实图片，使用 Java 读取尺寸并按文件内容摘要生成模拟特征身份；本地 mock.vit.skip.download=true 时使用回放宽高，其他准入、排队和计算路径相同。Client 查询 V 元数据后计算路由长度和缓存 key，发送给后端的仍是原始媒体输入。P 在进入 EngineScheduler 前展开图片位置，保留语义图片标记，将逐行特征 hash 单独保存在缓存区间中；hash 不替换语义 token。完整生成参数及真实观测仍不是此播放格式的内容。未知字段、非法请求及不支持的版本均拒绝。
+`qps` 和 `replay_speed` 二选一。QPS 模式按全局序号均匀发送，倍速模式保留源到达时间与突发。并发是全局预算，每个 Client 至少有一个并发槽和一条请求。计划时长最多 24 小时。Client 各自维护有界播放队列，单请求超时从原生 RPC 发送开始。主动停止时，未发请求计入 `unsent`，正在执行的请求按 `drain_timeout` 收尾。下次启动从新的请求 ID 起点开始。
 
-文件以 `MCKINP01` 标识输入格式 v1，之后每批为 4 字节大端压缩长度加一个 Zstd 压缩的 Protobuf InputChunk。帧必须为 single-segment、声明解压长度并带校验和，压缩及解压单批上限均为 4 MiB；每请求 Protobuf 上限 1 MiB，每批至多 1024 个请求。写入器按约 1 MiB 或 1024 请求封批，不累积整个文件。InputChunk.sequence 从 1 连续递增，末批只含 total_requests；缺末批、计数不符、截断或尾随数据均报错。InputChunk 仅用于文件分块，不决定请求发送或 Engine 计算的 batch。压缩输入和分片使用同一份格式与读写器。
-
-前缀采集文件的 `block_size` 统一表示**每个已记录的共享前缀块覆盖多少 token**。采集端在写出前缀键前确定这个跨度。如果记录的是 CP4 抽样后的键，基础块 128 对应的跨度就是 512，和基础块 512、CP1 的采集结果使用相同的 `block_size=512`。前缀格式只需要这个最终值。
-
-转换器直接按 `block_size` 将每个前缀块标签展开为 token 序列，最后按原始输入长度截断。共享关系的精度由采集时的跨度决定。当前 DeepSeek 源数据已记录 `block_size=512`，展开后的回放文件存储 `token_ids`。Client 和 Engine 回放时再按各自的启动配置生成缓存键。
-
-client0 在 start 的步骤预算内流式校验整个输入，按全局序号 `k % Client 数` 写本轮压缩分片；校验、封口、关闭和发布全部完成后才 prepare/begin。分片位于 `components/client-0/coordinator/<轮次>/shards/`，直接写压缩 `.part`，成功后原子发布为 `.binpb.zst`。input.json 只记录条数和摘要等元数据，不保存可读请求副本。准备失败不启动播放；源文件在准备期间发生可检测的大小、修改时间或文件身份变化会报错。
-
-每份 worker 计划只包含分片路径、条数、全局序号起点/步长、请求 ID 起点、SHA-256 和发流参数。LoadClient 的播放线程使用 ReplayInput.Reader 按批次解压，交给原有小队列；不把完整输入放进堆，也不把请求/响应经 client0 转发。请求 ID 在多轮 start 之间单调分配，主动停止留下的未发请求不会重新分配给后续轮次。播放读失败、条数或完整读取后的 SHA-256 不符使整组失败；主动 stop 不扫描未消费的后缀，剩余请求计入 unsent。
-
-masters 可省略，Client 默认持续发现本实验的全部 Master；显式填写时固定为该 step 的地址集合，播放期间只在其中选主备。qps 和 replay_speed 必须且只能提供一个正有限值。qps 模式按全局请求序号控制均匀发送；replay_speed 模式要求每条请求有 arrival_offset_ms，准备时检查时间非递减，播放线程按 offset/replay_speed 投递。所有分片保留同一个源起点，不按各自首条请求重新归零；相同时间允许突发，不再叠加 QPS 限速。concurrency 是全局预算。queue_capacity 默认每 Client 16，允许 1–100000；request_timeout 和 drain_timeout 默认 30s，允许 1ms–1h 的整毫秒值。计划时长最多 24h；每个 Client 至少分到一个请求和并发槽。准备时间计入 start 的 within/phase timeout，大文件需明确足够的预算。
-
-参与发压的 Client 在本轮固定；单请求 timeout 从 NativeClient 调用开始，不包含小队列等待。只支持本机多 JVM，未承诺跨机器时钟同步。准备后 30s 未收到 begin 的 Client 报错退出本轮。请求循环、多轮对话、ramp、动态参与者和运行时旧格式转换不在当前范围。
-
-```yaml
-- id: load
-  describe: 全体 Client 合计 24 QPS
-  interface: client/start
-  within: 60s
-  args:
-    requests_file: traffic.binpb.zst
-    qps: 24
-    concurrency: 16
-  wait_after: 10s
-- id: stop_load
-  describe: 收集全部 Client 的执行结果
-  interface: client/stop
-```
-
-测试代码通过 python/mock_framework/execution/test/helpers/input.py 构造 Protobuf Request 并写压缩文件（下面的导入用于 pytest 或将源码目录 python 加入 sys.path 的镜像终验脚本）：
-
-```python
-from mock_framework.execution.test.helpers.input import pb, write_inputs
-write_inputs("traffic.binpb.zst", (
-    pb.Request(token_ids=[1, 2, i + 3], max_new_tokens=3)
-    for i in range(20)
-))
-```
-
-测试写入器拒绝覆盖已有文件，生成失败删除本次不完整文件。Case 传入 JSONL 或标准二进制文件路径，由 Java ReplayInput 校验、读取并生成压缩分片。基础 Case 使用可读 JSONL 输入。控制接口仍传小型 HTTP 元数据，不在 JSON 控制报文中传请求数据。
-
-`RequestFilesTest` 在独立 48 MiB 堆的 JVM 中分片并完整播放解压后超过 64 MiB 的输入，覆盖非法输入、截断、校验和、内容变化和准备取消。跨语言测试验证 Python 写→Java 读、Java 写→Python 读；真实 Master 接线测试在 1/2 个 Client JVM 中播放并校验分片总量、全局请求 ID 和发压窗口内的合计 QPS。这些是有界读取和功能接线验证，不测量最大可达 QPS。
-
-`client/qps` 复用公共 Python 查询，统计 mock_client_requests_issued_total，是发出 QPS；最终检查选择实际发压窗口，不能用含空闲和收尾的实验全时长稀释目标。latest 在自然结束后可能为零，all 尚不支持；缺实例或采样不足按公共查询规则报错。各 Client 仅上报自己的指标，client0 不重复上报全局汇总，不再增加一套发压有效性门禁。
-
-每个 Client 在自己的 playback/<轮次>/ 保存计划与结果，client0 另在 coordinator/<轮次>/ 保存总计划、参与者和汇总。文件单写并原子替换，多 JVM 和后续轮次不会覆盖旧结果。每轮输入分片与逐请求执行证据分别保存，输入不作为已发送/已完成的证明；磁盘须容纳输入和各轮分片。Client 结果包含 produced/issued/finished/unsent、在途/队列余量、终态计数和异常，业务错误计数不等于执行异常。
-
-启动配方中的 Client 使用 java -jar <framework>/java/client/target/mock-client-1.0-SNAPSHOT-all.jar，由 Runner 注入配置、拓扑和独立输出目录。部分停止与队列/并发默认值的压力校准仍待讨论。
-
-### Client 逐请求记录与查询
-
-`NativeClient` 在实际执行边界记录 ISSUED、SCHEDULE_START、SCHEDULE_RESULT、FIRST_TOKEN 和 TERMINAL。同一个逻辑请求的主备尝试共用 request_id，issued 只计一次。记录包含墙钟毫秒、单调耗时、目标 Master、尝试序号、gRPC 状态与业务错误码、首 token 耗时、实际输出 token 数及终态。不记录输入 token 正文或完整响应，错误说明最多 4096 字符，截断会标记。Schedule 响应分别保留传输状态、原始业务 code（成功通常为 200）和可空 response_success；业务拒绝不会伪装成 gRPC 传输失败。Schedule 超时/取消的结果只表示 Client 观察，不证明远端未接收；Cancel 仍是尽力而为。
-
-新运行的每个 Client 每轮写入 `components/<client>/playback/<轮次>/requests.jsonl`。首行记录版本、Client、播放轮次和分片身份，随后每行记录一个有连续序号的事件，最后一行的 `seal` 记录 issued 和 finished 计数。文件可直接查看。64 位整数使用十进制字符串，避免 JavaScript 读取时丢失精度。
-
-`client/requests` 读取 `requests.jsonl`，校验请求序号、封口和汇总结果。回放输入和分片格式由各自的读写器处理。
-
-网络回调向有字节上限的队列追加事件。写线程定期批量写入 JSONL，刷新缓冲区并同步到磁盘。Client 等待最终封口同步成功后才完成。队列满、超大事件、写入失败或收尾超时会使 worker 报错，由 client0 停止整轮。进程意外退出时，已写出的行可供查看，完整性检查仍要求有效封口。
-
-`client/stop` 及 Runner 收尾使用 Java 返回的最终汇总，检查参与 Client、完成状态、队列、inflight、issued/finished、outcomes 和 errors，不再重复扫描请求文件。Java 在最终 Seal 写入后才发布完成状态，写盘/封口错误通过 errors 返回。只有显式调用 `client/requests` 时才流式读取文件并检查完整性；过滤和返回条数限制不会跳过其余记录的验证。事后文件缺失或损坏由该查询报错，不追溯改写已保存的 stop 结果。
-
-`client/requests` 是 Python Case 读取接口，不经过 Java 服务。默认查最新一轮、全部 Client；`targets` 使用现有 Client RPC 地址，`playback` 可选择历史轮次。`request_ids`、`outcome`、`since_ms`、`until_ms` 可筛选，其中时间按请求发送墙钟的 `[since_ms, until_ms)` 计算。返回 matched、筛选后 outcomes、records、truncated；limit 默认 20、范围 0–1000，只限制明细条数。明细按 Client 选择顺序和各自完成顺序返回，不承诺全局时间排序。运行中尚未封口的轮次报错；先 stop/收集再查询。
-
-```yaml
-- id: collected
-  describe: 停止并核对本轮全部请求
-  interface: client/stop
-- id: failed_requests
-  describe: 查看本轮失败请求
-  interface: client/requests
-  args: {outcome: error, limit: 20}
-```
-
-Case 的 start、stop、requests 各有一个 Step 文件。ClientManager 管理回放，`execution/evidence/client.py` 直接解析 JSONL 并校验请求和封口。镜像终验直接复用读取函数。不提供独立请求查询 CLI，也不增加 Java 查询服务、parser 类或存储抽象。
-
-### Python 指标查询与公共指标
-
-Java 产生指标并暴露 `/metrics`；Python 直接调用 Prometheus HTTP API，不经过 Engine 查询代理，也不新增 Java 查询服务。原始 PromQL 可在 Prometheus 存活期间查询其已采集的数据，框架不维护实例历史。
-
-公共 Engine 使用同一组指标含义和采集事件，Python 默认只实现一套公共语义查询。公共客户端处理 HTTP、超时和响应解析，指标函数处理 PromQL、单位、目标范围和结果形态。确有后端原生指标差异时，映射和公式放在 RTP/vLLM 对应 Python 模块中，Runner 直接调用；不为相同指标复制两份实现。原始 `prometheus/query` 走公共查询客户端，不进行后端改写或自动附加过滤。
-
-指标按实例上报、按查询语义聚合：总 QPS 求和；成功率和命中率分别汇总分子/分母后求比率；平均值按样本数加权；p99 不能平均各实例 p99，须合并兼容直方图或使用完整请求记录。时间窗口、目标覆盖和采样完整性要校验，缺数据不补零。语义查询只使用当前活动实例；显式 targets 也必须仍然活动，不根据时间窗重建过去的成员集合。需要查询已下线地址时，直接使用原始 PromQL。不同 Master 的状态保留逐实例结果，不取并集掩盖差异。
-
-去掉业务指标上的 RTP/vLLM `engine`、逻辑 `node`、JVM 和主动添加的实验 ID 标签，保留必要的角色与实例地址区分。各实例通过自己的 `/metrics` 暴露指标，Prometheus 使用 `instance` 区分目标。`host_ip`/`container_ip` 保持物理含义。实验默认独占 Prometheus，跨实验合并分析时再补来源标签，不能在合并后无法区分数据来源。
-
-一个真实完成的 Forward batch 记录一次耗时，不能按 batch 中请求数重复记录。请求终态按请求计数，token 按本轮实际计算和提交分别统计。新增两项 Forward 指标，不增加对应服务接口：
-
-- `rtp_llm_model_forward_us`：Prefill 完成 Forward 的窗口均值，单位微秒。目标生产 MTP Decode 版本缺少该时序。P/D 的最近一轮模拟实际耗时使用 `mock_model_forward_actual_us`。
-- `mock_model_forward_planned_us`：公式和可选噪声确定的本轮计划耗时，单位微秒。
-
-实际计时从提交本轮计算到公共执行层收到完成通知，包含计时器延迟和回调调度等待，在处理结果及提交 token/KV 前结束。计划和实际对同一完成 batch 各记一次，取消批次不补完成样本。差值可以揭示宿主调度/GC 等干扰，不能单独归因为 CPU 不足；Client TTFT 仍取真实接收时间。本仓 real `NormalExecutor.cc` 围绕 model_->forward 计时，`RtpLLMMetrics.cc` 将该字段注册并报告为 Gauge；本轮因此采用同名微秒 Gauge，计划耗时也用 Gauge。Gauge 保留最近一批，不能拿采样点平均值冒充逐批平均；吞吐仍使用累计 token 与耗时 Histogram 的 sum/count。KMonitor 与 Prometheus 的采样、聚合管线不据此宣称完全相同。
-
-### 待定边界与验收
-
-强制 group、分块 Prefill、抢占/重算、vLLM 对齐版本和 connector 范围仍待确定。当前 RTP 的有界合批只覆盖现有调度契约。
-
-验收关注可观察行为：两种 JVM 放置下缩容数量和流量总量一致；共 JVM 停单实例不影响其他实例；不同队列容器报告相同请求数；batch 内取消不损伤其他请求；取消/抢占无 KV 泄漏或提前复用；每批 Forward 只记一次；任一基础设施失败不产生虚假的整体 PASS。共享宿主的实际延迟可以不同，不承诺两种放置方式性能相同。
+`client0` 的 `input.json` 记录共享文件路径、请求总数与数据集摘要。各 Client 的计划另记录首个全局序号、步长和本地请求数。运行时校验被访问的记录和页，读失败会中止这一轮回放。控制接口只传计划和结果元数据。
 
 ## 当前代码职责
 

@@ -3,18 +3,13 @@ package org.flexlb.mock.client;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.github.luben.zstd.ZstdCompressCtx;
-import java.io.ByteArrayOutputStream;
-import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.zip.CRC32;
 import org.flexlb.mock.client.ClientProtocol.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -25,48 +20,16 @@ class IndexedTrafficTest {
     private Path fixture() throws Exception { return fixture(true); }
 
     private Path fixture(boolean image) throws Exception {
-        var rows = new ByteArrayOutputStream();
-        var index = new ByteArrayOutputStream();
+        var rows = new ArrayList<ByteBuffer>();
         for (int i = 0; i < 5; i++) {
             long leaf = i == 2 ? 2 : i % 2 == 0 ? 4 : 6;
             var row = ByteBuffer.allocate(i == 0 && image ? 40 : 24);
             row.putLong(i * 10).putLong(leaf).putInt(3).putInt(50);
             if (i == 0 && image) row.putLong(1).putInt(2).putInt(924);
-            record(index, ByteBuffer.allocate(12).putLong(rows.size()).putInt(row.capacity() + 4));
-            record(rows, row);
+            rows.add(row);
         }
-        var tables = new ByteArrayOutputStream();
-        index.writeTo(tables);
         var chains = ByteBuffer.allocate(40).putLong(1).putLong(0).putInt(4).putLong(5).putLong(2).putInt(2);
-        byte[] page;
-        try (var compressor = new ZstdCompressCtx()) {
-            page = compressor.setChecksum(true).compress(chains.array());
-        }
-        record(tables, ByteBuffer.allocate(24).putLong(1).putLong(rows.size()).putInt(page.length).putInt(2));
-        record(tables, ByteBuffer.allocate(8).putInt(1024).putInt(768));
-        rows.writeTo(tables);
-        tables.write(page);
-        var path = directory.resolve("traffic.mckidx");
-        try (var out = new DataOutputStream(Files.newOutputStream(path))) {
-            out.writeBytes("MCKIDX01");
-            out.writeLong(5);
-            out.writeLong(96 + 5 * 16);
-            out.writeLong(1);
-            out.writeLong(96 + 5 * 16 + 28);
-            out.writeLong(1);
-            out.writeLong(96 + 5 * 16 + 28 + 12);
-            out.writeLong(40);
-            out.write(MessageDigest.getInstance("SHA-256").digest(tables.toByteArray()));
-            tables.writeTo(out);
-        }
-        return path;
-    }
-
-    private static void record(ByteArrayOutputStream out, ByteBuffer row) throws IOException {
-        out.write(row.array());
-        var checksum = new CRC32();
-        checksum.update(row.array());
-        new DataOutputStream(out).writeInt((int) checksum.getValue());
+        return InputFixture.indexed(directory.resolve("traffic.mckidx"), rows, chains, 40, List.of(new int[]{1024, 768}));
     }
 
     @Test void reconstructsSharedTextAcrossAnInteriorBranchAndInsertsMedia() throws Exception {
@@ -98,10 +61,10 @@ class IndexedTrafficTest {
         assertEquals(List.of(1L, 3L), items.stream().map(Item::index).toList());
         assertEquals(List.of(101L, 103L), items.stream().map(Item::request_id).toList());
         assertEquals(List.of(5_000_000L, 15_000_000L), items.stream().map(item -> {
-            try { return ReplayInput.delayNanos(item.index(), item.input(), null, 2.0); }
+            try { return LoadClient.delayNanos(item.index(), item.input().getArrivalOffsetMs(), null, 2.0); }
             catch (IOException error) { throw new AssertionError(error); }
         }).toList());
-        assertEquals(10_000_000L, ReplayInput.delayNanos(1, items.getFirst().input(), 100.0, null));
+        assertEquals(10_000_000L, LoadClient.delayNanos(1, items.getFirst().input().getArrivalOffsetMs(), 100.0, null));
         var even = new Shard(1, null, path.toString(), 3, 0, 2, 100, identity, null, 2.0, 1, 4, 1000, 1000);
         assertThrows(IOException.class, () -> LoadClient.play(even, past, ignored -> fail()));
     }

@@ -19,11 +19,11 @@ import org.flexlb.mock.client.input.ClientInput.Request;
 
 /** One immutable dataset. All positions are absolute except request offsets relative to the payload. */
 final class IndexedTraffic implements AutoCloseable {
-    static final String SUFFIX = ".mckidx";
     private static final byte[] MAGIC = {'M', 'C', 'K', 'I', 'D', 'X', '0', '1'};
     private static final int HEADER = 96, INDEX = 16, CHAIN = 20, CHAIN_PAGE = 28, MEDIA = 12;
     private static final int CHAINS_PER_PAGE = 256, CACHE_CHAIN_PAGES = 128;
     private static final int REQUEST = 24, IMAGE = 16, MAX_IMAGES = 256;
+    private static final int MAX_REQUEST = 1024 * 1024;
     private static final int PAGE_BYTES = 4096, CACHE_PAGES = 256;
 
     record Entry(Request input, List<Integer> expectedImageTokens) {}
@@ -36,8 +36,6 @@ final class IndexedTraffic implements AutoCloseable {
     private final LinkedHashMap<Long, byte[]> pages = new LinkedHashMap<>(16, 0.75f, true);
 
     private final LinkedHashMap<Long, byte[]> chainPages = new LinkedHashMap<>(16, 0.75f, true);
-
-    static boolean isIndexed(String path) { return path.endsWith(SUFFIX); }
 
     IndexedTraffic(Path path) throws IOException {
         file = FileChannel.open(path, StandardOpenOption.READ);
@@ -89,7 +87,7 @@ final class IndexedTraffic implements AutoCloseable {
             var chain = chain(node);
             int length = Math.toIntExact(node - chain.first + 1);
             textCount = Math.addExact(textCount, length);
-            if (textCount > ReplayInput.MAX_REQUEST - images) throw invalid("request exceeds token limit");
+            if (textCount > MAX_REQUEST - images) throw invalid("request exceeds token limit");
             reversed.add(new Chain(chain.first, chain.parent, length, chain.symbol));
             node = chain.parent;
         }
@@ -111,7 +109,7 @@ final class IndexedTraffic implements AutoCloseable {
                 throw invalid("invalid image reference");
             var geometry = checked(table(media + (id - 1) * MEDIA, MEDIA));
             int width = geometry.getInt(), height = geometry.getInt();
-            if (width < 1 || height < 1) throw invalid("invalid media dimensions");
+            if (width < 1 || width > 32768 || height < 1 || height > 32768) throw invalid("invalid media dimensions");
             for (int t = previous; t < at; t++) request.addTokenIds(text[t]);
             request.addImages(Image.newBuilder().setUrl("mock-image:" + id).setWidth(width).setHeight(height)
                 .setOffset(request.getTokenIdsCount()));
@@ -121,7 +119,8 @@ final class IndexedTraffic implements AutoCloseable {
         }
         for (int t = previous; t < textCount; t++) request.addTokenIds(text[t]);
         var input = request.build();
-        ReplayInput.validate(input);
+        if (input.getTokenIdsCount() == 0 || input.getSerializedSize() > MAX_REQUEST)
+            throw invalid("invalid or oversized input");
         return new Entry(input, List.copyOf(expected));
     }
 

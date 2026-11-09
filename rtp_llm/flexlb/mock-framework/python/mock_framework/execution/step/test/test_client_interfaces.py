@@ -11,7 +11,7 @@ from mock_framework.execution.step import _metrics as metrics
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.roles import client as client_runtime
 from mock_framework.execution.roles.client import ClientManager
-from mock_framework.execution.test.helpers.input import read_inputs, write_inputs, pb
+from mock_framework.execution.test.helpers.input import write_inputs
 
 
 def context():
@@ -29,7 +29,7 @@ def context():
 
 
 def args():
-    return {'masters': ['master:1'], 'requests_file': str(FRAMEWORK / 'data/traffic/basic.jsonl'),
+    return {'masters': ['master:1'], 'requests_file': str(FRAMEWORK / 'data/traffic/basic.mckidx'),
             'qps': 10, 'concurrency': 2}
 
 
@@ -131,15 +131,14 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
                         'client': {'deployment': {'replicas': replicas}, 'config': {}}},
         'phases': [{'id': 'traffic', 'describe': 'Play and collect', 'timeout': '35s', 'steps': [
             {'id': 'start', 'describe': 'Start global request plan', 'interface': 'client/start', 'args': {
-                'masters': {'ref': 'globals.masters'}, 'requests_file': 'requests.binpb.zst',
+                'masters': {'ref': 'globals.masters'}, 'requests_file': 'requests.mckidx',
                 'qps': 4, 'concurrency': 4, 'queue_capacity': 8, 'request_timeout': '5s', 'drain_timeout': '5s'}, 'wait_after': '6s'},
             {'id': 'stop', 'describe': 'Collect every Client', 'interface': 'client/stop'}]}]}
     count = 720 if large_input else 12
-    source = tmp_path / 'requests.binpb.zst'
-    write_inputs(source, (pb.Request(token_ids=[index + 10000] * (1024 if large_input else 3), max_new_tokens=3)
+    source = tmp_path / 'requests.mckidx'
+    write_inputs(source, (([index + 10000] * (1024 if large_input else 3), 0, 3, 50, [])
                           for index in range(count)))
     if large_input:
-        assert sum(request.ByteSize() for request in read_inputs(source)) > 1024 * 1024
         start = data['phases'][0]['steps'][0]
         start['args'].update(qps=24, concurrency=16, queue_capacity=32)
         start['wait_after'] = '24s'
@@ -181,18 +180,12 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
             if json.loads(line).get('event') == 'process_started' and json.loads(line).get('node', '').startswith('client-')]
     assert len(set(pids)) == replicas
     manifest = json.loads((output / 'components/client-0/coordinator/1/input.json').read_text())
-    assert manifest['count'] == count and len(manifest['shards']) == replicas
-    seen = set()
-    for shard in manifest['shards']:
-        import hashlib
-        contents = Path(shard['path']).read_bytes()
-        assert hashlib.sha256(contents).hexdigest() == shard['sha256']
-        if large_input:
-            for request in read_inputs(shard['path']):
-                index = request.token_ids[0] - 10000
-                assert index not in seen
-                seen.add(index)
-    if large_input: assert seen == set(range(count))
+    assert manifest['count'] == count and manifest['path'] == str(source)
+    assert not (output / 'components/client-0/coordinator/1/shards').exists()
+    for i in range(replicas):
+        plan = json.loads((output / f'components/client-{i}/playback/1/plan.json').read_text())
+        assert plan['requests_file'] == str(source) and plan['sha256'] == manifest['sha256']
+        assert (plan['first_index'], plan['stride']) == (i, replicas)
     from mock_framework.execution.step.client_requests import playback_directories
     from mock_framework.execution.evidence.client import read_requests
     assert not (output / 'topology-history.json').exists()
@@ -256,8 +249,8 @@ def test_unknown_master_selection_is_rejected_before_start(monkeypatch):
 
 
 def test_file_input_resolves_against_case_and_only_sends_metadata(tmp_path, monkeypatch):
-    source = tmp_path / 'requests.binpb.zst'
-    write_inputs(source, [pb.Request(token_ids=[1], max_new_tokens=2)])
+    source = tmp_path / 'requests.mckidx'
+    write_inputs(source, [([1], 0, 2, 50, [])])
     ctx = context(); ctx.runtime.case = SimpleNamespace(directory=tmp_path)
     calls = []
     async def post(url, body): calls.append(body['args']); return {'accepted': True}
@@ -279,7 +272,9 @@ def test_removed_inline_input_is_rejected():
 
 def test_non_file_source_is_rejected_before_marking_client_pending(tmp_path):
     ctx = context(); ctx.runtime.case = SimpleNamespace(directory=tmp_path)
-    value = args(); value['requests_file'] = str(tmp_path)
+    directory = tmp_path / 'directory.mckidx'
+    directory.mkdir()
+    value = args(); value['requests_file'] = str(directory)
     with pytest.raises(ExecutionError, match='regular file'):
         asyncio.run(StepRegistry.standard().get('client/start').invoke(ctx, value))
     assert not ctx.runtime.clients.pending
@@ -309,12 +304,12 @@ def test_shared_requests_resolve_independently_of_case_directory(monkeypatch, tm
     ctx = context()
     ctx.runtime.case.directory = tmp_path / 'cases/example'
     ctx.runtime.case.shared_root = tmp_path / 'shared'
-    source = ctx.runtime.case.shared_root / 'data/traffic/example.binpb.zst'
+    source = ctx.runtime.case.shared_root / 'data/traffic/example.mckidx'
     source.parent.mkdir(parents=True)
     source.touch()
     async def start(body, query_time, timeout):
         assert body['requests_file'] == str(source)
         return True
     monkeypatch.setattr(ctx.runtime.clients, 'start_playback', start)
-    values = args() | {'requests_file': 'data/traffic/example.binpb.zst'}
+    values = args() | {'requests_file': 'data/traffic/example.mckidx'}
     assert asyncio.run(StepRegistry.standard().get('client/start').invoke(ctx, values))
