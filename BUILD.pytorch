@@ -117,21 +117,6 @@ cc_library(
 )
 
 cc_library(
-    name = "torch_stable",
-    srcs = ["torch/lib/libtorch_cpu.so"] + select({
-        "@//:using_cuda": ["torch/lib/libtorch_cuda.so"],
-        "//conditions:default": [],
-    }),
-    hdrs = glob([
-        "torch/include/**/*.h",
-        "torch/include/**/*.cuh",
-        "torch/include/**/*.hpp",
-    ], exclude = ["torch/include/google/**"]),
-    strip_include_prefix = "torch/include",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "torch_api",
     hdrs = glob([
         "torch/include/torch/csrc/api/include/**/*.h",

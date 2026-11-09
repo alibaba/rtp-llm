@@ -149,8 +149,8 @@ cc_library(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = select({
-        "//:using_cuda13_x86": ["@torch_2.11_py310_cuda//:torch_stable"],
-        "//:using_cuda13_arm": ["@torch_2.11_py310_cuda-aarch64//:torch_stable"],
+        "//:using_cuda13_x86": ["@torch_2.11_py310_cuda//:torch"],
+        "//:using_cuda13_arm": ["@torch_2.11_py310_cuda-aarch64//:torch"],
         "//conditions:default": [],
     }) + [
         "@local_config_cuda//cuda:cuda_headers",
