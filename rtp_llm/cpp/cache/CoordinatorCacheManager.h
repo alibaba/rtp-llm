@@ -222,13 +222,15 @@ protected:
                                          int                    seq_len,
                                          int                    remaining_tokens,
                                          int                    reserve_step,
-                                         bool                   enable_reuse_cache) const;
+                                         bool                   enable_reuse_cache,
+                                         int                    writeback_alignment_tokens = 0) const;
     virtual int   estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                      int  common_seq_len,
                                                      int  remaining_tokens,
                                                      int  reserve_step,
                                                      bool enable_reuse_cache,
-                                                     int  target_batch_size) const;
+                                                     int  target_batch_size,
+                                                     int  writeback_alignment_tokens = 0) const;
     virtual void  checkCPShardedMallocResult(const MallocInfo&) const;
     void          decrKVCacheRef(const KVCacheResource& kvcache_resource, DeviceBlockRefType ref_type);
     size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;

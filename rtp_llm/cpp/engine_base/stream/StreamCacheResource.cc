@@ -435,6 +435,7 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len, int reserve_step) co
 
 int StreamCacheResource::estimatePeakNeedBlocks(
     int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, int target_batch_size) const {
+    configureWritebackRetention();
     return resource_context_.cache_manager->estimatePeakNeedBlocks(batch_kv_cache_resource_,
                                                                    seq_len,
                                                                    common_seq_len,
@@ -456,6 +457,7 @@ void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
 absl::Status StreamCacheResource::initKVBlock() {
+    configureWritebackRetention();
     RTP_LLM_PROFILE_FUNCTION();
     // Decode side: first malloc should NOT use device cache, regardless of runtime config.
     // Follow-up allocations (incrKVBlock) use enableCacheLookup().
@@ -1048,6 +1050,17 @@ bool StreamCacheResource::writebackEnabled() const {
     return generate_config && resource_context_.cache_manager
            && resolveWritebackEnabled(resource_context_.cache_manager->writebackEnabled(),
                                       generate_config->enable_p2p_writeback);
+}
+
+void StreamCacheResource::configureWritebackRetention() const {
+    int alignment_tokens = 0;
+    if (stream_ && writebackEnabled() && !stream_->hasNumBeams() && !stream_->isFakeStream()) {
+        const int block_tokens = resource_context_.cache_manager->cacheConfig().seq_size_per_block;
+        const int cp_size      = std::max(1, stream_->getPrefillCpSize());
+        RTP_LLM_CHECK(block_tokens > 0 && cp_size <= std::numeric_limits<int>::max() / block_tokens);
+        alignment_tokens = block_tokens * cp_size;
+    }
+    batch_kv_cache_resource_->setWritebackAlignmentTokens(alignment_tokens);
 }
 
 bool StreamCacheResource::enableMemoryCache() const {

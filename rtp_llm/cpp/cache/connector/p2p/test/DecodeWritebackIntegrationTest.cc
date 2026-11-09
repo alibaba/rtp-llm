@@ -386,20 +386,22 @@ protected:
         DeviceTestBase::TearDown();
     }
 
-    void prepare(int  token_count         = 13,
-                 int  ready_count         = 12,
-                 int  input_length        = 4,
-                 bool reuse_cache         = true,
-                 bool request_reuse_cache = true,
-                 bool enable_device_cache = true) {
+    void prepare(int                 token_count         = 13,
+                 int                 ready_count         = 12,
+                 int                 input_length        = 4,
+                 bool                reuse_cache         = true,
+                 bool                request_reuse_cache = true,
+                 bool                enable_device_cache = true,
+                 std::optional<bool> request_writeback   = std::nullopt) {
         auto input = std::make_shared<GenerateInput>();
         input->input_ids =
             torch::tensor(std::vector<int>(tokens_.begin(), tokens_.begin() + input_length), torch::kInt32);
-        auto gc                 = std::make_shared<GenerateConfig>();
-        gc->max_new_tokens      = 32;
-        gc->unique_key          = "finished-writeback";
-        gc->reuse_cache         = request_reuse_cache;
-        gc->enable_device_cache = true;
+        auto gc                  = std::make_shared<GenerateConfig>();
+        gc->max_new_tokens       = 32;
+        gc->unique_key           = "finished-writeback";
+        gc->reuse_cache          = request_reuse_cache;
+        gc->enable_device_cache  = true;
+        gc->enable_p2p_writeback = request_writeback;
         gc->role_addrs.emplace_back(RoleType::PREFILL, "127.0.0.1", 0, prefill_port_);
         input->generate_config = gc;
         ResourceContext resources;
@@ -741,6 +743,120 @@ protected:
 TEST_F(DecodeWritebackLinearCpIntegrationTest, FinalStepReplicatesStateAndPublishesCanonicalPrefix) {
     checkWritebackAfterFinalStepCrossesBoundary();
 }
+
+// Exercise normal per-token allocation, so each retained block contains previously
+// computed KV rather than a backfilled hole at publication time.
+class DecodeWritebackSwaBoundaryIntegrationTest:
+    public DecodeWritebackIntegrationTestBase<CoordinatorCacheManager>,
+    public ::testing::WithParamInterface<std::tuple<int, bool, bool>> {
+protected:
+    int prefillCpSize() const override {
+        return std::get<0>(GetParam());
+    }
+    CacheConfig cacheConfig(RoleType) const override {
+        auto       config          = test::makeSimpleMhaCacheConfig(2, 128, 4, DataType::TYPE_FP16, 1, 2);
+        const auto full            = test::makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 2);
+        const auto swa             = test::makeMhaSpec("swa", 4 * prefillCpSize(), DataType::TYPE_FP16, 1, 2);
+        auto       policy          = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        policy.enable_prefix_reuse = true;
+        policy.sliding_window_size = 8 * prefillCpSize();
+        config.fromGroupedSpecs({full, swa},
+                                {{0}, {1}},
+                                {CacheGroupType::FULL, CacheGroupType::SWA},
+                                {"full", "swa"},
+                                {defaultCacheGroupPolicy(CacheGroupType::FULL), policy});
+        config.setGroupBlockLayout(
+            {"full", "swa"}, {128, 128}, {full->block_size_bytes(), swa->block_size_bytes()}, {0, 0});
+        return config;
+    }
+};
+
+TEST_P(DecodeWritebackSwaBoundaryIntegrationTest, AlignedWindowSurvivesDecodeAndTransfersComputedBytes) {
+    const int  alignment      = 4 * prefillCpSize();
+    const int  ready          = 3 * alignment - 1;
+    const int  endpoint       = 2 * alignment;
+    const bool writeback      = std::get<1>(GetParam());
+    const bool ordinary_reuse = std::get<2>(GetParam());
+    tokens_.resize(ready + 1);
+    std::iota(tokens_.begin(), tokens_.end(), 1);
+    tokens_.front() = 97;  // Keep this source disjoint from the fixture's seeded P prefix.
+    keys_           = calculateCacheKeys(tokens_.data(), endpoint, 4, config_.cache_key_hash_seed);
+    prepare(2, 1, 1, ordinary_reuse, ordinary_reuse, true, writeback);
+    stream_->generateConfig()->max_new_tokens = 64;
+    stream_->generate_status_->status         = StreamState::RUNNING;
+    for (int seq = 2; seq <= ready; ++seq) {
+        // Stand in for a completed forward pass with an identifiable byte pattern.
+        for (const auto& group : config_.topology().groups()) {
+            const auto& blocks = stream_->streamCacheResource().kvCache().blocks(0, group.tag);
+            for (int layer : config_.topology().layerIdsForGroup(group.tag)) {
+                for (size_t pos = 0; pos < blocks.size(); ++pos) {
+                    if (isNullBlockIdx(blocks[pos])) {
+                        continue;
+                    }
+                    for (const auto& block : source_->convertIndexToBuffer(layer, group.tag, blocks[pos], 1, 0)) {
+                        ASSERT_EQ(cudaMemset(block.addr, 10 * layer + pos + 1, block.size_bytes), cudaSuccess);
+                    }
+                }
+            }
+        }
+        StreamUpdateInfo update{torch::tensor({{tokens_[seq]}}, torch::kInt32), 1};
+        update.kv_ready_token_count = seq;
+        stream_->update(update);
+        ASSERT_FALSE(stream_->hasError());
+        if (seq < ready) {
+            ASSERT_TRUE(stream_->incrKVBlock().ok());
+        }
+    }
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    const auto& swa            = stream_->streamCacheResource().kvCache().blocks(0, "swa");
+    const int   first_required = endpoint / alignment - 2;
+    EXPECT_EQ(isNullBlockIdx(swa[first_required]), !writeback);
+    stream_->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    if (!writeback) {
+        EXPECT_EQ(sender_->started, 0);
+        EXPECT_EQ(context(), nullptr);
+        return;
+    }
+    ASSERT_TRUE(await([&]() { return sender_->started > 0; }));
+    auto write = context();
+    ASSERT_NE(write, nullptr);
+    ASSERT_NE(writeSource(), nullptr);
+    EXPECT_EQ(writeSource()->cacheKeys(), keys_);
+    sender_->release();
+    ASSERT_TRUE(await([&]() { return drained(); }));
+    ASSERT_TRUE(write->success()) << write->errorInfo().ToString();
+
+    auto input       = std::make_shared<GenerateInput>();
+    input->input_ids = torch::tensor(std::vector<int>(tokens_.begin(), tokens_.begin() + endpoint + 1), torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    ResourceContext resources;
+    resources.cache_manager = prefill_;
+    resources.role_type     = RoleType::PREFILL;
+    resources.reuse_cache   = true;
+    ModelConfig model;
+    model.max_seq_len = 64;
+    model.vocab_size  = 128;
+    auto reused       = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resources, nullptr);
+    ASSERT_TRUE(reused->initKVBlock().ok());
+    EXPECT_EQ(reused->initialReuseLength(), endpoint);
+    EXPECT_GT(reused->writebackFirstUseLength(), 0);
+    const auto& reused_swa = reused->streamCacheResource().kvCache().blocks(0, "swa");
+    for (int pos = first_required; pos < endpoint / alignment; ++pos) {
+        ASSERT_FALSE(isNullBlockIdx(reused_swa[pos]));
+        for (const auto& block : target_->convertIndexToBuffer(1, "swa", reused_swa[pos], 1, 0)) {
+            std::vector<uint8_t> bytes(block.size_bytes);
+            ASSERT_EQ(cudaMemcpy(bytes.data(), block.addr, bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+            EXPECT_TRUE(std::all_of(bytes.begin(), bytes.end(), [&](uint8_t value) { return value == 11 + pos; }));
+        }
+    }
+    reused->generate_status_->status = StreamState::FINISHED;
+    reused->releaseResource();
+}
+
+INSTANTIATE_TEST_SUITE_P(CpAndRequestSwitches,
+                         DecodeWritebackSwaBoundaryIntegrationTest,
+                         ::testing::Combine(::testing::Values(1, 2, 4), ::testing::Bool(), ::testing::Bool()));
 
 class DecodeWritebackHybridIntegrationTest:
     public DecodeWritebackIntegrationTestBase<CoordinatorCacheManager>,

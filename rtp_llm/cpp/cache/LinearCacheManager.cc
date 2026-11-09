@@ -68,7 +68,8 @@ int LinearCacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                                const BlockIndicesType& current_block_indices,
                                                int                     remaining_tokens,
                                                int                     reserve_step,
-                                               bool                    enable_reuse_cache) const {
+                                               bool                    enable_reuse_cache,
+                                               int /*extra_tail_blocks*/) const {
     const int current_seq_slots = (seq_len + seqSizePerBlock() - 1) / seqSizePerBlock();
     const int final_seq_slots   = (seq_len + remaining_tokens + seqSizePerBlock() - 1) / seqSizePerBlock();
     const int extra_blocks      = reserve_step ? reserve_step - 1 : 0;
@@ -111,7 +112,8 @@ int LinearCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                            int  remaining_tokens,
                                                            int  reserve_step,
                                                            bool enable_reuse_cache,
-                                                           int  target_batch_size) const {
+                                                           int  target_batch_size,
+                                                           int /*extra_tail_blocks*/) const {
     const int  batch_size = std::max(target_batch_size, 1);
     const auto seq_slots  = [&](int length) { return (length + seqSizePerBlock() - 1) / seqSizePerBlock(); };
 
@@ -280,7 +282,10 @@ bool LinearCacheManager::mallocImpl(BlockIds&                block_ids,
     return true;
 }
 
-void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids,
+                                             bool      enable_reuse_cache,
+                                             int       reserve_step,
+                                             int /*extra_tail_blocks*/) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
         return;

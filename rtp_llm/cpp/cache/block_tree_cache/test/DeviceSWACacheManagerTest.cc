@@ -210,6 +210,47 @@ TEST_F(DeviceSWACacheManagerTest, EstimatePeakMatchesActualAllocationBeforeClean
     }
 }
 
+TEST_F(DeviceSWACacheManagerTest, WritebackRetentionKeepsComputedWindowAtAlignedEndpoint) {
+    for (int alignment : {4, 8, 16}) {
+        const int block_tokens = 4;
+        const int margin       = 1 + (alignment - 2) / block_tokens;
+        auto      group        = makeReusableGroup(block_tokens);
+        BlockIds  blocks;
+        ASSERT_TRUE(group.malloc(blocks, 1, false));
+        std::vector<BlockIdxType> computed;
+        const int                 end = 4 * alignment + 1;
+        const int fresh_peak          = group.estimateInitialBatchPeakNeedBlocks(1, 1, end - 1, 0, false, 1, margin);
+        const int initial_count       = validBlockCount(blocks.blocks());
+        const int growth_peak         = group.estimatePeakNeedBlocks(1, blocks.blocks(), end - 1, 0, false, margin);
+        int       observed_peak       = initial_count;
+        for (int seq = 2; seq <= end; ++seq) {
+            ASSERT_TRUE(group.mallocForDecode(blocks, seq, false));
+            observed_peak = std::max(observed_peak, static_cast<int>(validBlockCount(blocks.blocks())));
+            computed.resize(blocks.blocksNum(), NULL_BLOCK_IDX);
+            for (size_t pos = 0; pos < blocks.blocksNum(); ++pos) {
+                if (!isNullBlockIdx(blocks.blocks()[pos]) && isNullBlockIdx(computed[pos])) {
+                    computed[pos] = blocks.blocks()[pos];
+                }
+            }
+            group.removeSkippedBlocks(blocks, false, 0, margin);
+            const int endpoint = seq / alignment * alignment;
+            if (endpoint >= 2 * block_tokens) {
+                const int end_slot = endpoint / block_tokens;
+                for (int pos = end_slot - 2; pos < end_slot; ++pos) {
+                    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[pos])) << "alignment=" << alignment << " seq=" << seq;
+                    EXPECT_EQ(blocks.blocks()[pos], computed[pos]);
+                }
+            }
+            EXPECT_LE(validBlockCount(blocks.blocks()), static_cast<size_t>(2 + margin));
+            EXPECT_EQ(group.policy().active_tail_blocks, 2u);
+        }
+        EXPECT_EQ(fresh_peak, observed_peak);
+        EXPECT_EQ(growth_peak, observed_peak - initial_count);
+        group.unreference(blocks.blocks());
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+    }
+}
+
 TEST_F(DeviceSWACacheManagerTest, EstimatePeakIncludesFirstDecodeReserveBeforeReleasingOldBlocks) {
     auto     group = makeGroup(1);
     BlockIds blocks;

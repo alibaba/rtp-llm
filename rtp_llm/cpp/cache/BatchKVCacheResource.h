@@ -182,6 +182,7 @@ public:
     }
 
     void swap(BatchKVCacheResource& other) noexcept {
+        std::swap(writeback_alignment_tokens_, other.writeback_alignment_tokens_);
         std::swap(decode_completion_submitted_, other.decode_completion_submitted_);
         std::swap(decode_completion_lifecycle_, other.decode_completion_lifecycle_);
         swapBlockStorage(other);
@@ -230,6 +231,16 @@ public:
         cache_keys_initialized_ = true;
     }
 
+    // Request-local retention only; does not change attention or transfer policy.
+    int writebackAlignmentTokens() const {
+        return writeback_alignment_tokens_;
+    }
+
+    void setWritebackAlignmentTokens(int tokens) {
+        RTP_LLM_CHECK(tokens >= 0);
+        writeback_alignment_tokens_ = tokens;
+    }
+
     bool lastBlockAligned() const {
         for (const auto& resource : batch_resource) {
             if (!resource.lastBlockAligned()) {
@@ -263,6 +274,7 @@ private:
     DecodePublicationLifecycle   decode_completion_lifecycle_;
     std::vector<KVCacheResource> batch_resource;  // [batch_size]
     bool                         cache_keys_initialized_{false};
+    int                          writeback_alignment_tokens_{0};
 };
 
 using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;

@@ -29,6 +29,18 @@
 namespace rtp_llm {
 namespace {
 
+// Rounding a writeback endpoint down can require an older SWA window.
+// Keep this margin separate from policy.active_tail_blocks, which is also
+// used to plan the receiver's required keys.
+int writebackExtraTailBlocks(int alignment_tokens, const SingleTypeCacheManager& group) {
+    if (alignment_tokens <= 1 || group.policy().group_type != CacheGroupType::SWA || !group.prefixReuseEnabled()) {
+        return 0;
+    }
+    const int group_tokens = group.seqSizePerBlock();
+    RTP_LLM_CHECK(group_tokens > 0);
+    return 1 + (alignment_tokens - 2) / group_tokens;
+}
+
 // CP shard helpers: when mapper is null/passthrough, all helpers no-op.
 inline CacheKeysType cpCanonicalCacheKeys(const std::shared_ptr<CPSlotMapper>& mapper, const CacheKeysType& full) {
     return (mapper && mapper->isSharded()) ? mapper->canonicalCacheKeys(full) : full;
@@ -566,13 +578,22 @@ int CoordinatorCacheManager::estimateBatchPeakNeedBlocks(const BatchKVCacheResou
     // A fresh resource follows initMalloc's two phases. Each group estimates that exact sequence so Linear groups can
     // distinguish the shared common tail from every sequence's private suffix tail.
     if (batch_kv_cache_resource->curBlocksNum() == 0) {
-        return estimateInitialBatchPeakNeedBlocks(
-            seq_len, clamped_common_len, remaining_tokens, reserve_step, enable_reuse_cache, target_width);
+        return estimateInitialBatchPeakNeedBlocks(seq_len,
+                                                  clamped_common_len,
+                                                  remaining_tokens,
+                                                  reserve_step,
+                                                  enable_reuse_cache,
+                                                  target_width,
+                                                  batch_kv_cache_resource->writebackAlignmentTokens());
     }
 
     // Initialized sequences have the same layout, and all subsequent growth is private per sequence.
-    const int per_sequence_growth = estimatePeakNeedBlocks(
-        batch_kv_cache_resource->cacheResource(0), seq_len, remaining_tokens, reserve_step, enable_reuse_cache);
+    const int per_sequence_growth = estimatePeakNeedBlocks(batch_kv_cache_resource->cacheResource(0),
+                                                           seq_len,
+                                                           remaining_tokens,
+                                                           reserve_step,
+                                                           enable_reuse_cache,
+                                                           batch_kv_cache_resource->writebackAlignmentTokens());
 
     // Full blocks remain shared when the batch expands, but every additional sequence needs a physical copy of the
     // current partial tail before it can diverge.
@@ -1151,10 +1172,12 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             return {true, 0};
         }
         for (int b = 0; b < batch_size; ++b) {
-            for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
-                const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
-                kv_cache_groups_[static_cast<size_t>(group_id)]->removeSkippedBlocks(
-                    kv_resource->mutableBlockIds(b, tag), malloc_info.reuse_cache, reserve_step);
+            for (const auto& group : kv_cache_groups_) {
+                group->removeSkippedBlocks(
+                    kv_resource->mutableBlockIds(b, group->tag()),
+                    malloc_info.reuse_cache,
+                    reserve_step,
+                    writebackExtraTailBlocks(kv_resource->writebackAlignmentTokens(), *group));
             }
         }
         return {true, 0};
@@ -1848,12 +1871,16 @@ int CoordinatorCacheManager::estimatePeakNeedBlocks(const KVCacheResource& kv_ca
                                                     int                    seq_len,
                                                     int                    remaining_tokens,
                                                     int                    reserve_step,
-                                                    bool                   enable_reuse_cache) const {
+                                                    bool                   enable_reuse_cache,
+                                                    int                    writeback_alignment_tokens) const {
     int need_blocks = 0;
-    for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
-        const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
-        need_blocks += kv_cache_groups_[static_cast<size_t>(group_id)]->estimatePeakNeedBlocks(
-            seq_len, kv_cache_resource.blocks(tag), remaining_tokens, reserve_step, enable_reuse_cache);
+    for (const auto& group : kv_cache_groups_) {
+        need_blocks += group->estimatePeakNeedBlocks(seq_len,
+                                                     kv_cache_resource.blocks(group->tag()),
+                                                     remaining_tokens,
+                                                     reserve_step,
+                                                     enable_reuse_cache,
+                                                     writebackExtraTailBlocks(writeback_alignment_tokens, *group));
     }
     return need_blocks;
 }
@@ -1863,11 +1890,18 @@ int CoordinatorCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                                 int  remaining_tokens,
                                                                 int  reserve_step,
                                                                 bool enable_reuse_cache,
-                                                                int  target_batch_size) const {
+                                                                int  target_batch_size,
+                                                                int  writeback_alignment_tokens) const {
     int peak_blocks = 0;
     for (const auto& group : kv_cache_groups_) {
-        peak_blocks += group->estimateInitialBatchPeakNeedBlocks(
-            seq_len, common_seq_len, remaining_tokens, reserve_step, enable_reuse_cache, target_batch_size);
+        peak_blocks +=
+            group->estimateInitialBatchPeakNeedBlocks(seq_len,
+                                                      common_seq_len,
+                                                      remaining_tokens,
+                                                      reserve_step,
+                                                      enable_reuse_cache,
+                                                      target_batch_size,
+                                                      writebackExtraTailBlocks(writeback_alignment_tokens, *group));
     }
     return peak_blocks;
 }

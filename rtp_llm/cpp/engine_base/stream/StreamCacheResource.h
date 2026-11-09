@@ -145,6 +145,8 @@ public:
     }
 
 private:
+    // P peer metadata is set after stream construction; refresh before estimation or first allocation.
+    void         configureWritebackRetention() const;
     void         clearCacheReuseState();
     void         finalizeReuseAccounting();
     void         recordCacheReuseMallocResult(const MallocResult& result);
