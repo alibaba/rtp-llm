@@ -275,9 +275,18 @@ def select_strategy(
     # overriding an operator's backend selection.
     if is_cuda() and torch.cuda.get_device_capability() == (9, 0):
         from .mega_sm90 import SM90MegaMoEStrategy, sm90_mega_moe_unavailable_reason
+        if forced == "gc_sm90_se":
+            from .gc_sm90_se import SM90GCMoESEStrategy
+
+            if SM90GCMoESEStrategy.can_handle(cfg):
+                return SM90GCMoESEStrategy
+            raise RuntimeError(
+                "gc_sm90_se requires decode, supported SM90 geometry, K32 "
+                "shared weights, Triton, and the gc_moe SM90 SE API"
+            )
         if forced not in (None, "mega_sm90") and strict:
             raise RuntimeError(
-                f"V4.1 SM90 requires mega_sm90; requested strategy {forced!r}"
+                f"V4.1 SM90 supports mega_sm90 and gc_sm90_se; requested strategy {forced!r}"
             )
         if SM90MegaMoEStrategy.can_handle(cfg, explicit=True):
             return SM90MegaMoEStrategy

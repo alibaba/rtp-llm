@@ -110,8 +110,6 @@ class SM90MegaMoEStrategy(RoutedExpertsStrategy):
         Hopper transform consumes natural scales and produces its own opaque
         physical layout.
         """
-        import deep_gemm
-
         from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
@@ -134,12 +132,19 @@ class SM90MegaMoEStrategy(RoutedExpertsStrategy):
         s2.copy_(layer_weights.pop(W.v4_routed_w2_s))
         torch.cuda.empty_cache()
 
-        self._mega_l1, self._mega_l2 = deep_gemm.transform_weights_for_mega_moe_sm90(
-            (w13, s13), (w2, s2), layout=_SM90_WEIGHT_LAYOUT
+        self._mega_l1, self._mega_l2 = self._transform_routed_weights(
+            (w13, s13), (w2, s2)
         )
         del w13, s13, w2, s2
         torch.cuda.empty_cache()
         self._mega_runtime_device = device
+
+    def _transform_routed_weights(self, l1, l2):
+        import deep_gemm
+
+        return deep_gemm.transform_weights_for_mega_moe_sm90(
+            l1, l2, layout=_SM90_WEIGHT_LAYOUT
+        )
 
     def setup_runtime(self) -> None:
         """Allocate the collective buffer and output rows outside the weight pool."""
