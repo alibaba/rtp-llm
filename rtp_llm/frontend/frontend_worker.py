@@ -392,15 +392,25 @@ class FrontendWorker:
         group_id: int = -1,
         **kwargs: Any,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        stream = self.pipeline.pipeline_async(
-            prompt=text,
-            request_id=request_id,
-            urls=urls,
-            generate_config=generate_config,
-            generate_env_config=self.generate_env_config,
-            group_size=group_size,
-            group_id=group_id,
-            **kwargs,
+        # The sync prelude of pipeline_async (generate-config creation, banned-combo
+        # parsing and the CPU-bound prompt encode) would otherwise block this uvicorn
+        # event loop for the whole tokenization of the prompt; run it in the default
+        # executor (the HF fast tokenizer releases the GIL) and iterate the returned
+        # async generator on the loop as before.
+        loop = asyncio.get_running_loop()
+        stream = await loop.run_in_executor(
+            None,
+            partial(
+                self.pipeline.pipeline_async,
+                prompt=text,
+                request_id=request_id,
+                urls=urls,
+                generate_config=generate_config,
+                generate_env_config=self.generate_env_config,
+                group_size=group_size,
+                group_id=group_id,
+                **kwargs,
+            ),
         )
         async for generate_response in stream:
             yield self._format_response_new(generate_response, generate_config)
