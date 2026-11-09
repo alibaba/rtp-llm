@@ -1442,6 +1442,19 @@ class W:
     v4_mtp_hc_head_base = "v4.mtp.hc_head_base"
     v4_mtp_hc_head_scale = "v4.mtp.hc_head_scale"
 
+    # HY V4. The MLA projection gate uses the existing generic
+    # attn_gate_{w,s} keys; sink and iHC stay isolated from DeepSeek-V4 mHC.
+    hy4_attn_sink = "hy4.attn.learnable_sink"
+    hy4_ihc_attn_fn = "hy4.ihc.attn.fn"
+    hy4_ihc_attn_scale = "hy4.ihc.attn.scale"
+    hy4_ihc_attn_base = "hy4.ihc.attn.base"
+    hy4_ihc_mlp_fn = "hy4.ihc.mlp.fn"
+    hy4_ihc_mlp_scale = "hy4.ihc.mlp.scale"
+    hy4_ihc_mlp_base = "hy4.ihc.mlp.base"
+    hy4_ihc_head_fn = "hy4.ihc.head.fn"
+    hy4_ihc_head_scale = "hy4.ihc.head.scale"
+    hy4_ihc_head_base = "hy4.ihc.head.base"
+
     gpt_style_tp_strategy: Dict[str, Any] = {
         embedding: sp_neg1,
         lm_head: sp_0_pad8,
@@ -1624,6 +1637,17 @@ class W:
         v4_mtp_hc_head_fn: sp_id,
         v4_mtp_hc_head_base: sp_id,
         v4_mtp_hc_head_scale: sp_id,
+        # Sink follows the local attention-head shard. iHC is replicated.
+        hy4_attn_sink: sp_0,
+        hy4_ihc_attn_fn: sp_id,
+        hy4_ihc_attn_scale: sp_id,
+        hy4_ihc_attn_base: sp_id,
+        hy4_ihc_mlp_fn: sp_id,
+        hy4_ihc_mlp_scale: sp_id,
+        hy4_ihc_mlp_base: sp_id,
+        hy4_ihc_head_fn: sp_id,
+        hy4_ihc_head_scale: sp_id,
+        hy4_ihc_head_base: sp_id,
     }
 
     weights_list = [

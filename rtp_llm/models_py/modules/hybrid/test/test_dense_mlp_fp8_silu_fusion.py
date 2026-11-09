@@ -8,6 +8,7 @@ Run:
     python -m pytest rtp_llm/models_py/modules/hybrid/test/test_dense_mlp_fp8_silu_fusion.py -v -s
 """
 
+import os
 import unittest
 
 import torch
@@ -23,6 +24,14 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear impo
 )
 from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 from rtp_llm.test.utils.numeric_util import calc_diff, per_block_cast_to_fp8
+
+# DeepGEMM defaults to a relative JIT directory, while Bazel may launch NVCC
+# from another working directory. Use an absolute test-only cache before the
+# first lazy DeepGEMM import/JIT invocation.
+os.environ.setdefault(
+    "DG_JIT_CACHE_DIR",
+    os.path.join(os.environ.get("TEST_TMPDIR", "/tmp"), "deep_gemm_cache"),
+)
 
 
 def _build_fp8_linear(N: int, K: int, device: str) -> CudaFp8DeepGEMMLinear:
@@ -74,6 +83,7 @@ class TestDenseMLPFp8SiluFusion(unittest.TestCase):
         mlp_fused.is_gated = True
         mlp_fused.up_proj = up_linear
         mlp_fused.down_proj = down_linear
+        mlp_fused._fuse_silu_mxfp8_quant = False
         mlp_fused._fuse_silu_quant = down_linear.K % 128 == 0
         if mlp_fused._fuse_silu_quant and down_linear.scale_ue8m0:
             mlp_fused._fuse_silu_quant = down_linear.K % 512 == 0
@@ -87,6 +97,7 @@ class TestDenseMLPFp8SiluFusion(unittest.TestCase):
         mlp_unfused.is_gated = True
         mlp_unfused.up_proj = up_linear
         mlp_unfused.down_proj = down_linear
+        mlp_unfused._fuse_silu_mxfp8_quant = False
         mlp_unfused._fuse_silu_quant = False
 
         return mlp_fused, mlp_unfused

@@ -1232,6 +1232,23 @@ static SpeculativeExecutorStreamOutputPtr makeFakeSPOutputBuffer(
     return sp_buffer;
 }
 
+static size_t mtpHiddenSize(const ModelConfig& model_config) {
+    // Match vLLM's MTP hand-off contract: only DeepSeek V4, identified by its
+    // layer compression schedule, consumes the wide pre-hc_head residual.
+    const int64_t hc_mult = model_config.attn_config.layer_compress_ratios.empty() ? 1 : model_config.hc_mult;
+    return model_config.hidden_size * hc_mult;
+}
+
+bool MtpExecutor::supportsForwardOverlapHiddenState(const ModelConfig& target, const ModelConfig& draft) {
+    if (target.hc_mult == 1) {
+        return true;
+    }
+    // HY4 returns post-iHC [T, H]; PyWrappedModel clones graph outputs before hand-off.
+    return target.model_type == "hy_v4" && draft.model_type == "hy_v4_mtp"
+           && mtpHiddenSize(target) == target.hidden_size && draft.hidden_size == target.hidden_size
+           && draft.hc_mult == 1;
+}
+
 static void ensureSpOutputTokenGpuMirrors(const SpeculativeExecutorStreamOutputPtr& sp_buffer) {
     // Mirrors should already be device-resident from the buffer's construction
     // site (MtpExecutor::prepareStreams + makeFakeSPOutputBuffer). Only the
@@ -1266,18 +1283,14 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
     auto fake_stream =
         makeFakeStream(max_new_tokens, 1 + max_new_tokens, model_config, runtime_config, resource_context);
 
-    // Fake SP buffer's hidden_states stands in for the target's pre-output
-    // residual that the draft consumes (DSv4: [T, hc_mult*hidden_size];
-    // non-DSv4 keeps hc_mult=1 so the shape is plain [T, hidden_size]).
-    const auto fake_hidden_size = model_config.hidden_size * model_config.hc_mult;
+    // The fake buffer follows the draft hand-off: compressed DSv4 retains
+    // hc_mult streams; HY4 hands off the single stream after hc_head.
+    const auto fake_hidden_size = mtpHiddenSize(model_config);
     const bool fused_init =
         mtpFusionEnabled()
         && (fake_hidden_size * c10::elementSize(dataTypeToTorchType(model_config.data_type))) % 4 == 0;
-    auto sp_buffer = makeFakeSPOutputBuffer(model_config.data_type,
-                                            model_config.hidden_size * model_config.hc_mult,
-                                            model_config.vocab_size,
-                                            max_new_tokens,
-                                            fused_init);
+    auto sp_buffer = makeFakeSPOutputBuffer(
+        model_config.data_type, fake_hidden_size, model_config.vocab_size, max_new_tokens, fused_init);
 
     auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 
@@ -1407,7 +1420,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // being recorded.
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true), false) {
     data_type_        = params.model_config_.data_type;
-    hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
+    hidden_size_      = mtpHiddenSize(params.model_config_);
     propose_step_     = propose_params->gen_num_per_circle;
     vocab_size_       = params.model_config_.vocab_size;
     draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
@@ -1427,11 +1440,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     mtp_indexer_topk_ = draft_model_config.attn_config.indexer_topk;
     // Forward overlap consumes per-request MTP GPU state, independently of
     // indexer sharing (including GLM-5.1 models without an indexer). Preserve
-    // the supported execution layout; HC graph outputs may use borrowed storage.
+    // the supported execution layout and model-specific hidden-state contract.
     forward_overlap_supported_ = has_python_draft_model && params.hw_kernel_config.enable_cuda_graph
                                  && !params.device_resource_config.enable_layer_micro_batch && !context_parallel_enabled
                                  && draft_model_config.num_layers == 1 && propose_step_ >= 1
-                                 && params.model_config_.hc_mult == 1;
+                                 && supportsForwardOverlapHiddenState(params.model_config_, draft_model_config);
     RTP_LLM_LOG_INFO(
         "[MTP indexer share] enabled=%d %s=%s model_capability=%d python_draft=%d python_api_capability=%d "
         "layer_micro_batch=%d context_parallel=%d layers=%ld topk=%ld propose_step=%zu",

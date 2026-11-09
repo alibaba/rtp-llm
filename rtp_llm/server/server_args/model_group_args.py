@@ -109,3 +109,11 @@ def init_model_group_args(parser, model_args):
         default=False,
         help="仅为GLM5.2压缩shared层未使用的Indexer KV cache，默认关闭",
     )
+    model_group.add_argument(
+        "--enable_shared_indexer_kv_cache",
+        env_name="ENABLE_SHARED_INDEXER_KV_CACHE",
+        bind_to=(model_args, "enable_shared_indexer_kv_cache"),
+        type=str2bool,
+        default=None,
+        help="Compress HY4 target Indexer KV slots (default on); GLM5 uses enable_glm52_shared_indexer_kv_cache",
+    )

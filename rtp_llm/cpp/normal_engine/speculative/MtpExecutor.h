@@ -201,6 +201,7 @@ protected:
     // correctness while bookkeeping overlaps the next step.
     bool useDropBroadSync() const;
     bool useForwardOverlap() const;
+    static bool supportsForwardOverlapHiddenState(const ModelConfig& target, const ModelConfig& draft);
 
     bool shouldSkipFakeStreamForStop(const GptModelInputs& model_input, const char* phase) const;
 

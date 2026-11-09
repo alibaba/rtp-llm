@@ -421,13 +421,21 @@ def test_regular_decoder_waits_for_prefetch_before_moe(drain_prefetch) -> None:
     layer._drain_pinned_mla_before_moe = drain_prefetch
     layer._fuse_input_norm_quant = False
     layer.input_layernorm = lambda *_: (hidden, residual)
-    layer.self_attn = Mock(side_effect=lambda *a, **kw: calls.append("attention") or hidden)
+    layer.self_attn = Mock(
+        side_effect=lambda *a, **kw: calls.append("attention") or hidden
+    )
     layer._fwd_mlp_or_moe = Mock(
         side_effect=lambda *a: calls.append("moe") or (hidden, residual)
     )
-    working = SimpleNamespace(wait_prefetch_complete=lambda: calls.append("prefetch_ready"))
-    layer.forward(hidden, residual, SimpleNamespace(pinned_mla_groups={3: (working, 1)}))
-    assert calls == ["attention"] + (["prefetch_ready"] if drain_prefetch else []) + ["moe"]
+    working = SimpleNamespace(
+        wait_prefetch_complete=lambda: calls.append("prefetch_ready")
+    )
+    layer.forward(
+        hidden, residual, SimpleNamespace(pinned_mla_groups={3: (working, 1)})
+    )
+    assert calls == ["attention"] + (["prefetch_ready"] if drain_prefetch else []) + [
+        "moe"
+    ]
 
 
 def test_dense_decoder_uses_existing_mlp_path() -> None:
@@ -503,6 +511,7 @@ def test_prepacked_mega_moe_skips_input_packer(
     op._mega_y = torch.empty((16, 8), dtype=torch.bfloat16)
     op._mega_l1_w = op._mega_l1_sf = torch.empty(0)
     op._mega_l2_w = op._mega_l2_sf = torch.empty(0)
+    op._fp8_weight_recipe = (128, 128)
     op._input_packer = Mock()
     op._maybe_pre_kernel_barrier = Mock()
     deep_gemm = SimpleNamespace(

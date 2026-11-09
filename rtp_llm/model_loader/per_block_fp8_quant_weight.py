@@ -5,7 +5,11 @@ from typing import Any, Dict, List, Optional, Union
 
 import torch
 
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, QuantizationConfig
+from rtp_llm.config.quant_config import (
+    Fp8BlockWiseQuantConfig,
+    Fp8MxBlockWiseQuantConfig,
+    QuantizationConfig,
+)
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.linear_attn_weight import (
@@ -272,6 +276,10 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             quant_config, Fp8BlockWiseQuantConfig
         ):
             return False
+        # MXFP8 has a 1x32 scale layout and must use Mxfp8Weight rather than
+        # this loader's 128x128 block-scale transforms.
+        if isinstance(quant_config, Fp8MxBlockWiseQuantConfig):
+            return False
         name = src_weight_info.name
         if name not in cls.w8a8_weight_list:
             return False
@@ -387,7 +395,9 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             for sub_w in weights
         ]
         qkv_s_list = [
-            CkptWeightInfo(sub_w.name[: -len(W_SUFFIX)] + self.qs_suffix, sub_w.merge_fun)
+            CkptWeightInfo(
+                sub_w.name[: -len(W_SUFFIX)] + self.qs_suffix, sub_w.merge_fun
+            )
             for sub_w in weights
         ]
         kernel = create_w8a8_fp8_per_block_weight(
@@ -461,7 +471,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
 
         scale = W8A8Fp8PerBlockLinearAttnAtomicWeight(
             scale_key,
-            [CkptWeightInfo(w_name + self.qs_suffix, src_weight_info.weights[0].merge_fun)],
+            [
+                CkptWeightInfo(
+                    w_name + self.qs_suffix, src_weight_info.weights[0].merge_fun
+                )
+            ],
             identity,
             src_weight_info.config,
             torch.float32,
@@ -486,7 +500,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         scale = create_w8a8_fp8_per_block_weight(
             src_weight_info,
             scale_key,
-            [CkptWeightInfo(w_name + self.qs_suffix, src_weight_info.weights[0].merge_fun)],
+            [
+                CkptWeightInfo(
+                    w_name + self.qs_suffix, src_weight_info.weights[0].merge_fun
+                )
+            ],
             data_type=self.scale_dtype,
             config=src_weight_info.config,
         )

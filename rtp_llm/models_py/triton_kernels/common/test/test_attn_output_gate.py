@@ -13,6 +13,7 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.mxfp8_ops import mxfp8_quant_act_packed
 from rtp_llm.models_py.modules.base.cuda.attn_output_gate import SigmoidMulInplace
 from rtp_llm.models_py.triton_kernels.common.attn_output_gate import (
     sigmoid_mul_fp8_quant_fwd,
@@ -24,11 +25,23 @@ DTYPES = [torch.bfloat16, torch.float16]
 
 
 def _ref_sigmoid_mul(attn_output: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-    """fp32 reference: out = attn_output * sigmoid(gate), cast back to dtype."""
-    return (attn_output.float() * torch.sigmoid(gate.float())).to(attn_output.dtype)
+    """Match the eager operator's dtype boundaries exactly."""
+    return attn_output * torch.sigmoid(gate)
 
 
 class TestSigmoidMulInplace(unittest.TestCase):
+    def test_quant_rejects_invalid_shapes_before_launch(self):
+        for x, gate, group, ue8m0 in (
+            (torch.empty(2, 128), torch.empty(1, 128), 128, False),
+            (torch.empty(2, 2, 128), torch.empty(2, 2, 128), 128, False),
+            (torch.empty(2, 129), torch.empty(2, 129), 128, False),
+            (torch.empty(2, 384), torch.empty(2, 384), 128, True),
+            (torch.empty(2, 96), torch.empty(2, 96), 32, True),
+        ):
+            with self.subTest(shape=x.shape, group=group, ue8m0=ue8m0):
+                with self.assertRaises(AssertionError):
+                    sigmoid_mul_fp8_quant_fwd(x, gate, group, ue8m0)
+
     @classmethod
     def setUpClass(cls):
         if not torch.cuda.is_available():
@@ -130,6 +143,40 @@ class TestSigmoidMulFp8Quant(unittest.TestCase):
         gate = torch.empty(0, 2048, device="cuda", dtype=torch.bfloat16)
         fp8_out, scale_out = sigmoid_mul_fp8_quant_fwd(attn, gate)
         self.assertEqual(fp8_out.shape, (0, 2048))
+
+    def test_mxfp8_group32_power_of_two_matches_flashinfer(self):
+        major, _ = torch.cuda.get_device_capability()
+        if major < 10:
+            self.skipTest("FlashInfer MXFP8 quantization requires SM100+")
+
+        for T, H in [(1, 2048), (1024, 2048), (1024, 16384)]:
+            with self.subTest(T=T, H=H):
+                torch.manual_seed(2026 + T)
+                attn = torch.randn(T, H, device="cuda", dtype=torch.bfloat16)
+                gate = torch.randn(T, H, device="cuda", dtype=torch.bfloat16)
+                gated = (attn * torch.sigmoid(gate)).to(torch.bfloat16)
+                ref_fp8, ref_scale_packed = mxfp8_quant_act_packed(gated)
+
+                fp8_out, scale_out = sigmoid_mul_fp8_quant_fwd(
+                    attn,
+                    gate,
+                    quant_group_size=32,
+                    scale_ue8m0=True,
+                    round_scale_to_pow2=True,
+                    column_major_scales=True,
+                )
+
+                self.assertEqual(scale_out.dtype, torch.int32)
+                self.assertEqual(scale_out.shape, ref_scale_packed.shape)
+                self.assertEqual(scale_out.stride(), ref_scale_packed.stride())
+                self.assertTrue(
+                    torch.equal(fp8_out.view(torch.uint8), ref_fp8.view(torch.uint8)),
+                    msg=f"MXFP8 data mismatch for T={T}, H={H}",
+                )
+                self.assertTrue(
+                    torch.equal(scale_out, ref_scale_packed),
+                    msg=f"MXFP8 packed scale mismatch for T={T}, H={H}",
+                )
 
 
 if __name__ == "__main__":

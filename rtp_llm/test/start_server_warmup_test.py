@@ -7,6 +7,26 @@ from unittest.mock import Mock, patch
 from rtp_llm import start_server
 
 
+class Hy4StartupWarmupPolicyTest(unittest.TestCase):
+    def test_hy4_prefill_uses_existing_auto_and_explicit_disable_policy(self):
+        configs = SimpleNamespace(model_args=SimpleNamespace(model_type="hy_v4"))
+        for flag, prefill, expected in (
+            ("auto", True, True),
+            ("0", True, False),
+            ("auto", False, False),
+        ):
+            with self.subTest(flag=flag, prefill=prefill), patch.dict(
+                os.environ, {"DSV4_STARTUP_REAL_WARMUP": flag}
+            ), patch.object(
+                start_server, "_role_is_prefill", return_value=prefill
+            ), patch.object(
+                start_server, "_is_startup_real_warmup_entry_rank", return_value=True
+            ):
+                self.assertEqual(
+                    start_server._should_run_startup_real_warmup(configs), expected
+                )
+
+
 class ServiceDrainingPropagationTest(unittest.TestCase):
     def test_each_launch_passes_a_fresh_event_to_all_process_groups(self):
         configs = Mock()

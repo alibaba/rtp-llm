@@ -1,5 +1,12 @@
 
 py_test(
+    name = "shared_indexer_kv_test",
+    srcs = ["shared_indexer_kv_test.py"],
+    data = ["//rtp_llm:sdk"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "grammar_compile_threads_test",
     srcs = [
         "grammar_compile_threads_test.py",

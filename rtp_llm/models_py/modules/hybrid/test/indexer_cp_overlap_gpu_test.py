@@ -120,6 +120,7 @@ def run_case(rank, lengths, owner, fused, zero_queries, side, prologue=False):
     model = Indexer.__new__(Indexer)
     torch.nn.Module.__init__(model)
     model.index_n_heads = 32
+    model.use_hadamard = True
     model.index_head_dim = 128
     model.index_topk = 2048
     model._kv_owner_tokens_per_block = owner

@@ -4,6 +4,15 @@ load("//bazel:arch_select.bzl", "requirement")
 requirement(["torch", "triton", "flash-mla"])
 
 py_test(
+    name = "test_capture_cache_slots",
+    srcs = ["test_capture_cache_slots.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "cp_kv_padded_pack_test",
     srcs = ["cp_kv_padded_pack_test.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
@@ -113,8 +122,8 @@ py_test(
         ":triton",
         ":flash-mla",
     ],
-    tags = ["manual"],
-    exec_properties = {"gpu": "L20D_DEV"},
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
 
 py_test(
@@ -137,6 +146,7 @@ py_test(
 
 py_test(
     name = "sparse_mla_fp8_decode_op_test",
+    main = "sparse_mla_decode_op_test.py",
     srcs = ["sparse_mla_decode_op_test.py"],
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
@@ -191,8 +201,8 @@ py_test(
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
-    tags = ["manual"],
-    exec_properties = {"gpu": "L20D_DEV"},
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
 
 py_test(
@@ -216,6 +226,14 @@ py_test(
     srcs = ["prefill_rollback_test.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     tags = ["manual"],
+)
+
+py_library(
+    name = "cp_kv_prefetch_test_support",
+    testonly = True,
+    srcs = ["cp_kv_prefetch_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    visibility = ["//rtp_llm/models_py/triton_kernels/common/test:__pkg__"],
 )
 
 py_test(

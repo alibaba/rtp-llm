@@ -61,8 +61,19 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    tags = ["H20"],
-    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+    tags = ["H20_CU13"],
+    exec_properties = {'gpu': "H20_CU13", 'gpu_count': '1'},
+)
+
+py_test(
+    name = "test_fused_strided_rmsnorm",
+    srcs = ["test_fused_strided_rmsnorm.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {'gpu': "H20_CU13", 'gpu_count': '1'},
 )
 
 # Perf target driven by skill rtp-kernel-benchmark.
@@ -83,10 +94,10 @@ py_test(
     name = "test_prefill_cpu_path",
     srcs = ["test_prefill_cpu_path.py"],
     deps = [
+        "//rtp_llm/models_py/modules/factory/attention/cuda_mla_impl/test:cp_kv_prefetch_test_support",
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
-        "//rtp_llm/models_py:kernels",
     ],
     env = {"GPU_COUNT": "1"},
-    tags = ["H20"],
-    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )

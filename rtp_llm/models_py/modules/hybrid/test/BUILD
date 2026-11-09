@@ -1,5 +1,13 @@
 test_envs = {}
 
+py_test(
+    name = "decoder_cache_test",
+    srcs = ["decoder_cache_test.py"],
+    deps = ["//rtp_llm/models_py:decoder_cache_helpers"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
 flashinfer_test_envs = {
     "FLASHINFER_JIT_VERBOSE": "1",  # Enable verbose JIT compilation logs
 }
@@ -7,6 +15,27 @@ flashinfer_test_envs = {
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
+
+py_test(
+    name = "test_hy4_mxfp8_qc_reuse",
+    srcs = ["test_hy4_mxfp8_qc_reuse.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_hy4_mxfp8_qc_reuse_baseline",
+    srcs = ["test_hy4_mxfp8_qc_reuse.py"],
+    main = "test_hy4_mxfp8_qc_reuse.py",
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+    env = {
+        "RTP_LLM_CP_PREFILL_PIPELINE_OPT": "0",
+        "RTP_GLM5_PREFILL_OPTIMIZE": "0",
+    },
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
 
 py_test(
     name = "glm5_cmp_test",

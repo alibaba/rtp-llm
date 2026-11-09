@@ -14,6 +14,46 @@ from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 
 
 class IndexerProloguePrefetchTest(unittest.TestCase):
+    def test_generic_decoder_propagates_hy4_draft_cp_policy(self):
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.models_py.model_desc import generic_moe
+        from rtp_llm.ops import MoeConfig, ParallelismConfig
+
+        for model_type in ("hy_v4_mtp", "glm_5", "glm_5_mtp"):
+            config = ModelConfig()
+            config.model_type = model_type
+            config.num_layers = 1
+            config.attn_config.use_mla = True
+            config.attn_config.is_sparse = True
+            config.indexer_types = ["full"]
+            with patch.object(
+                generic_moe,
+                "MlaAttention",
+                side_effect=RuntimeError("capture constructor"),
+            ) as constructor:
+                with self.assertRaisesRegex(RuntimeError, "capture constructor"):
+                    generic_moe.GenericMoeDecoderLayer(
+                        config, ParallelismConfig(), {}, {}, 0, MoeConfig()
+                    )
+            self.assertEqual(
+                constructor.call_args.kwargs["decode_ignores_prefill_cp"],
+                model_type == "hy_v4_mtp",
+            )
+
+    def test_multi_token_cp_policy_is_opt_in(self):
+        op = Indexer.__new__(Indexer)
+        torch.nn.Module.__init__(op)
+        op._prefill_cp_enabled = lambda: True
+        for opt_in in (False, True):
+            op.decode_ignores_prefill_cp = opt_in
+            self.assertTrue(op._is_sparse_prefill_cp(NS(is_prefill=True)))
+            self.assertFalse(op._is_sparse_prefill_cp(NS(is_prefill=False)))
+            for role in ("is_target_verify", "is_draft_extend"):
+                self.assertEqual(
+                    op._is_sparse_prefill_cp(NS(is_prefill=True, **{role: True})),
+                    not opt_in,
+                )
+
     def protocol(self, early=True, fail=None, consume=True, captured=False):
         calls = []
 
@@ -46,6 +86,7 @@ class IndexerProloguePrefetchTest(unittest.TestCase):
             k_norm=lambda x: x,
             wq_b=lambda *a, **k: torch.zeros(2, 128),
             index_n_heads=1,
+            use_hadamard=True,
             index_head_dim=128,
             _is_sparse_prefill_cp=lambda a: True,
             _prefill_cp_fused_quant_enabled=lambda: True,
@@ -222,6 +263,48 @@ class IndexerProloguePrefetchTest(unittest.TestCase):
                             else ["body"]
                         ),
                     )
+
+    def test_mla_prefetch_and_projection_share_one_hidden_quantization(self):
+        for supplied in (False, True):
+            with self.subTest(supplied=supplied):
+                observed = []
+
+                @contextmanager
+                def prepare(hidden, cache, attn, cp, fp8, scale):
+                    observed.append((fp8, scale))
+                    yield None
+
+                def body(hidden, fmha, cache, fp8, scale, *args, **kwargs):
+                    observed.append((fp8, scale))
+
+                obj = NS(
+                    indexer=NS(prefetch_cp_k=prepare),
+                    reuse_topk_indices=False,
+                    _reuse_mxfp8_hidden_quant=True,
+                    _forward_impl=body,
+                )
+                fmha = NS(is_sparse=lambda: True, attn_inputs=None, cp_params=None)
+                fp8 = torch.empty(2, 6144, dtype=torch.float8_e4m3fn)
+                scale = torch.empty(2, 48, dtype=torch.int32)
+                with patch(
+                    "rtp_llm.models_py.modules.hybrid.mla_attention._prefill_optimization.ENABLED",
+                    True,
+                ), patch(
+                    "rtp_llm.models_py.modules.hybrid.mla_attention.mxfp8_quant_act_packed",
+                    return_value=(fp8, scale),
+                ) as quant:
+                    MlaAttention.forward(
+                        obj,
+                        torch.zeros(2, 6144, dtype=torch.bfloat16),
+                        fmha,
+                        x_fp8=fp8 if supplied else None,
+                        x_scale=scale if supplied else None,
+                    )
+                self.assertEqual(quant.call_count, int(not supplied))
+                self.assertEqual(len(observed), 2)
+                for q, scale_arg in observed:
+                    self.assertIs(q, fp8)
+                    self.assertIs(scale_arg, scale)
 
 
 if __name__ == "__main__":

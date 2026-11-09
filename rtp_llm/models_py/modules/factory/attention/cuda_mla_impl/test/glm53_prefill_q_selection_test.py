@@ -215,6 +215,52 @@ class QPreselectionControlTest(unittest.TestCase):
                         op._gather_sharded_kv_cache.call_count, int(sharded)
                     )
 
+    def test_hy4_sink_without_local_queries_preserves_none_and_kv_protocol(self):
+        for missing_ids in (False, True):
+            for prepared in (False, True):
+                for q_rows in (0, 4):
+                    with self.subTest(
+                        missing_ids=missing_ids, prepared=prepared, q_rows=q_rows
+                    ):
+                        op = _minimal_op(torch.empty(0, dtype=torch.long))
+                        if missing_ids:
+                            op.total_local_ids = None
+                        op.kv_cache_sharded = True
+                        op.sharded_slot_mapping = None
+                        op._gather = object()
+                        op._allocate_fused_kv = Mock(return_value=torch.empty(3, 6))
+                        op._gather_sharded_kv_cache = Mock()
+                        op._attend_gather = Mock(
+                            side_effect=AssertionError("no local queries to attend")
+                        )
+                        op._attend_with_kvcache = Mock(
+                            side_effect=AssertionError("no local queries to attend")
+                        )
+                        with _local_transport() as gather:
+                            result = op.forward(
+                                torch.empty(q_rows, 2, 6),
+                                torch.empty(3, 5),
+                                torch.empty(3, 1),
+                                torch.ones(3, 1, dtype=torch.int32),
+                                torch.zeros(3),
+                                object(),
+                                prepared_kv=torch.empty(3, 6) if prepared else None,
+                                attn_sink=torch.tensor([0.25, -0.5]),
+                            )
+                        self.assertIsNone(result)
+                        self.assertEqual(gather.call_count, int(not prepared))
+                        self.assertEqual(
+                            op.kv_cache_write_op.forward.call_count, int(not prepared)
+                        )
+                        self.assertEqual(
+                            op._gather_sharded_kv_cache.call_count, int(not prepared)
+                        )
+                        self.assertEqual(
+                            op._allocate_fused_kv.call_count, int(not prepared)
+                        )
+                        op._attend_gather.assert_not_called()
+                        op._attend_with_kvcache.assert_not_called()
+
     def test_preselected_input_validation(self):
         for index, selected_rows, original_rows in (
             ([0, 2], 3, 4),  # Q rows do not match selected ids.
@@ -351,6 +397,7 @@ class QPreselectionCudaTest(unittest.TestCase):
             self.LATENT,
             self.ROPE,
         )
+        op.bf16_num_heads = self.HEADS
         op.scale = (self.NOPE + self.ROPE) ** -0.5
         op.use_cuda_graph = graph
         op.kv_restore_unpad_indices = torch.arange(data.rows, device=self.device)

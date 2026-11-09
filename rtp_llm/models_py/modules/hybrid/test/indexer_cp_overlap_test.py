@@ -126,6 +126,7 @@ class IndexerCPOverlapTest(unittest.TestCase):
                 prepare_cp_history=lambda *a: prepare(),
                 finish_cp_history=lambda *a: step("patch_new"),
             ),
+            use_hadamard=True,
             _prefill_cp_fused_quant_enabled=lambda: fused,
             _fused_forward_prefill_cp_early_k=fused_call,
             _get_q_k_bf16=lambda *args: (NS(), NS()),

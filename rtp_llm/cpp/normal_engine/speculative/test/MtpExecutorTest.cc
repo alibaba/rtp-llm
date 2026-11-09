@@ -518,6 +518,28 @@ public:
     }
 };
 
+TEST_F(MtpExecutorTest, testForwardOverlapHiddenStateContract) {
+    ModelConfig target;
+    ModelConfig draft;
+    target.hidden_size = draft.hidden_size = 8;
+    target.hc_mult = draft.hc_mult = 1;
+    EXPECT_TRUE(MtpExecutor::supportsForwardOverlapHiddenState(target, draft));
+    target.hc_mult = 4;
+    EXPECT_FALSE(MtpExecutor::supportsForwardOverlapHiddenState(target, draft));
+    target.model_type = "hy_v4";
+    EXPECT_FALSE(MtpExecutor::supportsForwardOverlapHiddenState(target, draft));
+    draft.model_type = "hy_v4_mtp";
+    EXPECT_TRUE(MtpExecutor::supportsForwardOverlapHiddenState(target, draft));
+    target.attn_config.layer_compress_ratios = {1, 4};
+    EXPECT_FALSE(MtpExecutor::supportsForwardOverlapHiddenState(target, draft));
+    target.attn_config.layer_compress_ratios.clear();
+    draft.hc_mult = 4;
+    EXPECT_FALSE(MtpExecutor::supportsForwardOverlapHiddenState(target, draft));
+    draft.hc_mult = 1;
+    draft.hidden_size = 16;
+    EXPECT_FALSE(MtpExecutor::supportsForwardOverlapHiddenState(target, draft));
+}
+
 TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
     auto identity_map = torch::arange(4, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
     spec::FastTopKSampler sampler(identity_map);
@@ -1315,6 +1337,28 @@ TEST_F(MtpExecutorTest, testForwardOverlapDynamicRoundsMatchBarrierPath) {
     checkTensorEqual(overlap.logprobs, barrier.logprobs);
     checkTensorEqual(overlap.top_ids, barrier.top_ids);
     checkTensorEqual(overlap.top_logprobs, barrier.top_logprobs);
+}
+
+TEST_F(MtpExecutorTest, testFakeDecodeHiddenWidthDistinguishesHy4AndCompressedResiduals) {
+    MtpExecutorTestConfig test_config;
+    auto                  components = createMtpExecutorComponents(test_config);
+    components.model_config.hc_mult  = 4;
+    auto make_fake_stream            = [&]() {
+        return MtpExecutor::createMinFakeDecodeStream(test_config.gen_num_per_cycle,
+                                                      components.model_config,
+                                                      components.runtime_config,
+                                                      components.resource_context,
+                                                      test_config.vocab_size);
+    };
+    auto hy4 = make_fake_stream();
+    ASSERT_TRUE(hy4->getSPOutputBuffer());
+    ASSERT_TRUE(hy4->getSPOutputBuffer()->hidden_states.defined());
+    EXPECT_EQ(hy4->getSPOutputBuffer()->hidden_states.size(-1), components.model_config.hidden_size);
+
+    components.model_config.attn_config.layer_compress_ratios = {4};
+    auto compressed                                           = make_fake_stream();
+    ASSERT_TRUE(compressed->getSPOutputBuffer());
+    EXPECT_EQ(compressed->getSPOutputBuffer()->hidden_states.size(-1), components.model_config.hidden_size * 4);
 }
 
 TEST_F(MtpExecutorTest, testFakeDecodeStreamGetsReusableIndexerSeedBeforeColdCheck) {

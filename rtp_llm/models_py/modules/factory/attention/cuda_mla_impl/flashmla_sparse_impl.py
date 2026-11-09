@@ -44,6 +44,10 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
 )
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla import (
     fused_qk_rope_cat_cache_mla,
+    validate_mla_cache_device,
+)
+from rtp_llm.models_py.triton_kernels.sparse_mla.pad_query_heads import (
+    maybe_pad_query_heads,
 )
 from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 from rtp_llm.ops import (
@@ -91,6 +95,28 @@ def _allocate_prefill_fused_kv(
 ) -> torch.Tensor:
     """Allocate the layer-local BF16 gather destination after Indexer."""
     return torch.empty((total_kv_len, width), dtype=torch.bfloat16, device=device)
+
+
+def _fp8_sparse_padded_heads(num_heads: int) -> int:
+    """Return the 64/128-head envelope accepted by FP8 sparse FlashMLA."""
+    return 64 if num_heads <= 64 else 128
+
+
+def _is_sm100_or_newer(device: Optional[torch.device] = None) -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        return torch.cuda.get_device_capability(device)[0] >= 10
+    except (AssertionError, RuntimeError):
+        return False
+
+
+def _bf16_sparse_padded_heads(
+    num_heads: int, device: Optional[torch.device] = None
+) -> int:
+    """Return the head envelope required by BF16 sparse FlashMLA prefill."""
+    padding_multiple = 128 if _is_sm100_or_newer(device) else 64
+    return (num_heads + padding_multiple - 1) // padding_multiple * padding_multiple
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +198,52 @@ class SparseMlaOp(object):
         )
         return global_2d.unsqueeze(1)
 
+    def _pad_query_and_sink(
+        self,
+        q: torch.Tensor,
+        attn_sink: Optional[torch.Tensor],
+        kernel_heads: Optional[int] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], int]:
+        """Pad HY V4 TP-local heads to FlashMLA's 64/128-head ABI.
+
+        Padded sinks are ``-inf`` so they add exactly zero to the softmax
+        denominator. A zero sink would incorrectly create an extra exp(0).
+        """
+        actual_heads = q.size(1)
+        kernel_heads = self.num_heads if kernel_heads is None else kernel_heads
+        if actual_heads > kernel_heads:
+            raise ValueError(
+                f"query has {actual_heads} heads but FlashMLA was planned for "
+                f"{kernel_heads}"
+            )
+        if attn_sink is not None and attn_sink.numel() != actual_heads:
+            raise ValueError(
+                f"attention sink has {attn_sink.numel()} heads, expected {actual_heads}"
+            )
+        if attn_sink is not None and attn_sink.device != q.device:
+            raise ValueError(
+                "attention sink and query must be on the same device, got "
+                f"{attn_sink.device} and {q.device}"
+            )
+        if actual_heads == kernel_heads:
+            return q, attn_sink, actual_heads
+        q_padded = (
+            maybe_pad_query_heads(q, kernel_heads) if fuse_kernels_enabled() else None
+        )
+        if q_padded is None:
+            q_padded = q.new_zeros((q.size(0), kernel_heads, q.size(2)))
+            q_padded[:, :actual_heads].copy_(q)
+        if attn_sink is not None:
+            sink_padded = torch.full(
+                (kernel_heads,),
+                -torch.inf,
+                dtype=torch.float32,
+                device=attn_sink.device,
+            )
+            sink_padded[:actual_heads].copy_(attn_sink)
+            attn_sink = sink_padded
+        return q_padded, attn_sink, actual_heads
+
     def forward(
         self,
         q: torch.Tensor,
@@ -180,20 +252,28 @@ class SparseMlaOp(object):
         kv_scale: Optional[torch.Tensor] = None,
         layer_id: int = 0,
         physical_indices: Optional[torch.Tensor] = None,
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """q: [T, H, qk_head_dim], kv: [total_kv_len, 1, kv_lora_rank+rope].
 
         Returns [T, H, kv_lora_rank].
         """
+        q, attn_sink, actual_heads = self._pad_query_and_sink(q, attn_sink)
         global_indices = (
             self._convert_topk_indices_to_global(topk_indices)
             if physical_indices is None
             else physical_indices
         )
+        sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
         out, _, _ = flash_mla_sparse_fwd(
-            q, kv, global_indices, self.scale, d_v=self.kv_lora_rank
+            q,
+            kv,
+            global_indices,
+            self.scale,
+            d_v=self.kv_lora_rank,
+            **sink_kwargs,
         )
-        return out
+        return out[:, :actual_heads]
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +315,13 @@ class SparseMlaFp8Op(SparseMlaOp):
 
     def __init__(self, *args, **kwargs):
         self.use_cuda_graph = bool(kwargs.pop("use_cuda_graph", False))
+        bf16_prefill_num_heads = kwargs.pop("bf16_prefill_num_heads", None)
         super().__init__(*args, **kwargs)
+        self.bf16_num_heads = (
+            self.num_heads
+            if bf16_prefill_num_heads is None
+            else int(bf16_prefill_num_heads)
+        )
         # In CUDA graph mode the captured kernels keep the scheduler storage
         # address. Replacing this object during replay leaves the graph with a
         # dangling/stale pointer, so plan() must refresh it in place.
@@ -331,11 +417,12 @@ class SparseMlaFp8Op(SparseMlaOp):
         kv_scale: Optional[torch.Tensor] = None,
         layer_id: int = 0,
         physical_indices: Optional[torch.Tensor] = None,
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self._gather is not None and physical_indices is None:
-            return self._forward_gather(q, kv, topk_indices)
+            return self._forward_gather(q, kv, topk_indices, attn_sink)
         return self._forward_with_kvcache(
-            q, kv, topk_indices, layer_id, physical_indices
+            q, kv, topk_indices, layer_id, physical_indices, attn_sink
         )
 
     def _forward_gather(
@@ -343,8 +430,14 @@ class SparseMlaFp8Op(SparseMlaOp):
         q: torch.Tensor,
         kv_cache_fp8: torch.Tensor,
         topk_indices: torch.Tensor,
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """gather + flash_mla_sparse_fwd (prefill fast path)."""
+        q, attn_sink, actual_heads = self._pad_query_and_sink(
+            q,
+            attn_sink,
+            self.bf16_num_heads,
+        )
         ws = self._gather
         assert (
             ws is not None
@@ -383,14 +476,16 @@ class SparseMlaFp8Op(SparseMlaOp):
         raw_global = topk_2d + offsets.unsqueeze(1)
         global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
 
+        sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
         out, _, _ = flash_mla_sparse_fwd(
             q,
             fused_kv.unsqueeze(1),  # [total_kv_len, 1, dim]
             global_indices,
             self.scale,
             d_v=self.kv_lora_rank,
+            **sink_kwargs,
         )
-        return out
+        return out[:, :actual_heads]
 
     def _forward_with_kvcache(
         self,
@@ -399,8 +494,10 @@ class SparseMlaFp8Op(SparseMlaOp):
         topk_indices: torch.Tensor,
         layer_id: int = 0,
         physical_indices: Optional[torch.Tensor] = None,
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """flash_mla_with_kvcache directly on FP8 paged cache."""
+        q, attn_sink, actual_heads = self._pad_query_and_sink(q, attn_sink)
         assert self._sched_meta is not None
         if layer_id == 0:
             self._sched_meta.tile_scheduler_metadata = None
@@ -421,6 +518,7 @@ class SparseMlaFp8Op(SparseMlaOp):
             .unsqueeze(0)
         )
 
+        sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
         attn_out, _ = flash_mla_with_kvcache(
             q=q.unsqueeze(0),
             k_cache=kv_cache,
@@ -432,8 +530,9 @@ class SparseMlaFp8Op(SparseMlaOp):
             is_fp8_kvcache=True,
             indices=global_indices,
             softmax_scale=self.scale,
+            **sink_kwargs,
         )
-        return attn_out.squeeze(0)
+        return attn_out.squeeze(0)[:, :actual_heads]
 
 
 # ---------------------------------------------------------------------------
@@ -492,8 +591,17 @@ class SparseMlaImpl(MlaImplBase):
         op_kwargs = {"parallelism_config": parallelism_config}
         if issubclass(op_cls, SparseMlaFp8Op):
             op_kwargs["use_cuda_graph"] = is_cuda_graph
+        has_hy4_sink = any(W.hy4_attn_sink in layer for layer in weights)
+        kernel_num_heads = attn_configs.head_num
+        if has_hy4_sink:
+            # HY4's SM100 FlashMLA wheel has native h64/d576/sink kernels.
+            # Avoid the compatibility h128 lanes; the h64 specialization is
+            # mathematically equivalent within BF16 rounding error.
+            kernel_num_heads = _fp8_sparse_padded_heads(kernel_num_heads)
+            if issubclass(op_cls, SparseMlaFp8Op):
+                op_kwargs["bf16_prefill_num_heads"] = kernel_num_heads
         self.fmha_impl: SparseMlaOp = op_cls(
-            attn_configs.head_num,
+            kernel_num_heads,
             attn_configs.kv_lora_rank,
             attn_configs.rope_head_dim,
             attn_configs.nope_head_dim,
@@ -533,6 +641,10 @@ class SparseMlaImpl(MlaImplBase):
         self.fmha_params = rtp_llm_ops.SparseMlaParams()
         self.rope_params = self.fmha_params
         self.prepare(attn_inputs)
+        if self.is_cuda_graph:
+            # Warmup and capture share dummy block tables. Disable their writes;
+            # prepare_cuda_graph restores live slots in this buffer before replay.
+            self.fmha_params.slot_mapping.fill_(-1)
 
     def _refresh_paged_mqa_schedule_metadata(
         self, attn_inputs: PyAttentionInputs, forbid_realloc: bool
@@ -778,6 +890,7 @@ class SparseMlaImpl(MlaImplBase):
         layer_id: int,
         topk_indices: Optional[torch.Tensor] = None,
         kv_prefetched: bool = False,
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Sparse MLA forward. q: [T, H, qk_head_dim], topk: [T, (H,) topk] (req-local).
         Returns [T, H, nope_head_dim]."""
@@ -799,6 +912,8 @@ class SparseMlaImpl(MlaImplBase):
                 device=q.device,
             )
             write_slots = torch.arange(q.shape[0], dtype=torch.int64, device=q.device)
+
+        validate_mla_cache_device(cache_target.kv_cache_base, q.device)
 
         # 1. RoPE on q_pe and k_pe; write KV to cache + optional store
         q_pe = q[:, :, self.nope_head_dim :]
@@ -852,7 +967,12 @@ class SparseMlaImpl(MlaImplBase):
         if working_entry is not None:
             attention_kwargs["physical_indices"] = working.physical_indices
         attn_output = self.fmha_impl.forward(
-            q_transformed, kv_input, topk_indices, layer_id=layer_id, **attention_kwargs
+            q_transformed,
+            kv_input,
+            topk_indices,
+            layer_id=layer_id,
+            **attention_kwargs,
+            **({"attn_sink": attn_sink} if attn_sink is not None else {}),
         )
 
         # 4. Project attention output via W_vc → final output

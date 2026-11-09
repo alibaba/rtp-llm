@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+
 from rtp_llm.models_py.kernels.cuda import prefill_cpu_ops as ops
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
@@ -133,6 +134,8 @@ class PrefillCpuGpuTest(unittest.TestCase):
 
         layer = GenericMoeLayer.__new__(GenericMoeLayer)
         torch.nn.Module.__init__(layer)
+        layer._hy4_fp32_router = False
+        layer.gate_weight = None
         layer.gate_chunk_rows = 8192
         layer.gate = torch.nn.Linear(
             512, 256, bias=False, device="cuda", dtype=torch.bfloat16
@@ -291,6 +294,8 @@ class PrefillCpuGpuTest(unittest.TestCase):
 
         layer = GenericMoeLayer.__new__(GenericMoeLayer)
         torch.nn.Module.__init__(layer)
+        layer._hy4_fp32_router = False
+        layer.gate_weight = None
         layer.gate_chunk_rows = 0
         layer.gate = torch.nn.Identity()
         layer.correction_bias = torch.randn(256, device="cuda", dtype=torch.float32)

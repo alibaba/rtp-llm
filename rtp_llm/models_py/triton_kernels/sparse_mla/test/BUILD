@@ -1,4 +1,13 @@
 py_test(
+    name = "test_mla_cache_device",
+    srcs = ["test_mla_cache_device.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_cp_indexed_copy",
     srcs = ["test_cp_indexed_copy.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
@@ -23,8 +32,8 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    tags = ["H20"],
-    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+    tags = ["H20_CU13"],
+    exec_properties = {'gpu': 'H20_CU13', 'gpu_count': '1'},
 )
 
 py_test(
@@ -34,8 +43,8 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    tags = ["H20"],
-    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+    tags = ["H20_CU13"],
+    exec_properties = {'gpu': 'H20_CU13', 'gpu_count': '1'},
 )
 
 py_test(
@@ -45,8 +54,8 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    tags = ["H20"],
-    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+    tags = ["H20_CU13"],
+    exec_properties = {'gpu': 'H20_CU13', 'gpu_count': '1'},
 )
 
 py_test(
@@ -56,8 +65,8 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    tags = ["H20"],
-    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+    tags = ["H20_CU13"],
+    exec_properties = {'gpu': 'H20_CU13', 'gpu_count': '1'},
 )
 
 py_test(
@@ -67,8 +76,8 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    tags = ["H20"],
-    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+    tags = ["H20_CU13"],
+    exec_properties = {'gpu': 'H20_CU13', 'gpu_count': '1'},
 )
 
 py_test(
@@ -87,4 +96,25 @@ py_test(
     env = {"GPU_COUNT": "1"},
     tags = ["L20_CU13"],
     exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_mla_norm_pair_hy4_optimized",
+    srcs = ["test_mla_norm_pair.py"],
+    main = "test_mla_norm_pair.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1", "RTP_GLM5_PREFILL_OPTIMIZE": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "test_pad_query_heads",
+    srcs = ["test_pad_query_heads.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {'gpu': 'H20_CU13', 'gpu_count': '1'},
 )

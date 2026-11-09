@@ -104,6 +104,7 @@ class CausalAttention(nn.Module):
             and sigmoid_mul_fp8_quant_fwd is not None
             and isinstance(self.o_proj, CudaFp8GEMMLinear)
             and self.o_proj.K % 128 == 0
+            and (not self.o_proj.scale_ue8m0 or (self.o_proj.K // 128) % 4 == 0)
         )
 
     def forward(

@@ -40,8 +40,16 @@ contention noise, not a real loss zone.
 import torch
 import triton
 import triton.language as tl
+
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
+)
+from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+    MX_BLOCK,
+    _float_to_ue8m0,
+    _ue8m0_to_inv_scale,
+    create_mxfp8_packed_scale,
+    mxfp8_quant_act_packed,
 )
 from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
@@ -93,6 +101,7 @@ def _fused_strided_rmsnorm_singlepass_kernel(
     HAS_BF16_OUT: tl.constexpr,
     HAS_FP8_OUT: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
+    MXFP8_SEMANTICS: tl.constexpr,
 ):
     """Single-pass strided RMSNorm with optional fp8 quant.
 
@@ -134,23 +143,39 @@ def _fused_strided_rmsnorm_singlepass_kernel(
         # the ``1e-10`` floor (fp64 promotion in Triton) and run both
         # divisions through fp64 to get IEEE-RNE-correct fp32 scale + fp8
         # bucket, bit-aligned with sgl_per_token_group_quant_fp8.
-        absmax = tl.maximum(tl.max(abs_2d, axis=1), 1e-4)
+        absmax = tl.max(abs_2d, axis=1)
+        if not MXFP8_SEMANTICS:
+            absmax = tl.maximum(absmax, 1e-4)
 
         # Match sgl_per_token_group_quant_fp8 byte-exact: IEEE-RNE fp32 div
         # for both scale and per-element val/scale, fp64-promoted to escape
         # Triton's ``div.approx.f32`` default.
         if SCALE_UE8M0:
-            s_init = _ieee_rn_div_f32(
-                absmax, tl.full(absmax.shape, fp8_max, tl.float32)
-            )
-            s, exp_field = _ue8m0_pow2_round(s_init)
-            s_bcast = tl.reshape(s, (num_groups, 1))
-            s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
-            fp8_2d = tl.clamp(
-                _ieee_rn_div_f32(normed_2d, s_full),
-                fp8_min,
-                fp8_max,
-            ).to(fp8_out_ptr.dtype.element_ty)
+            if MXFP8_SEMANTICS:
+                normalized_max = absmax * tl.full(absmax.shape, 1.0 / 448.0, tl.float32)
+                exp_field = _float_to_ue8m0(normalized_max)
+                inv_scale = _ue8m0_to_inv_scale(exp_field)
+                inv_scale_full = tl.broadcast_to(
+                    tl.reshape(inv_scale, (num_groups, 1)),
+                    (num_groups, GROUP_SIZE),
+                )
+                fp8_2d = tl.clamp(
+                    normed_2d * inv_scale_full,
+                    fp8_min,
+                    fp8_max,
+                ).to(fp8_out_ptr.dtype.element_ty)
+            else:
+                s_init = _ieee_rn_div_f32(
+                    absmax, tl.full(absmax.shape, fp8_max, tl.float32)
+                )
+                s, exp_field = _ue8m0_pow2_round(s_init)
+                s_bcast = tl.reshape(s, (num_groups, 1))
+                s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
+                fp8_2d = tl.clamp(
+                    _ieee_rn_div_f32(normed_2d, s_full),
+                    fp8_min,
+                    fp8_max,
+                ).to(fp8_out_ptr.dtype.element_ty)
             fp8_flat = tl.reshape(fp8_2d, (BLOCK_N,))
             tl.store(fp8_out_ptr + token_id * stride_o_t + offs, fp8_flat, mask=mask)
 
@@ -213,11 +238,16 @@ def _baseline_strided_rmsnorm_fp8_quant(
     eps: float,
     group_size: int,
     scale_ue8m0: bool,
+    mxfp8_semantics: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     import flashinfer.norm
-    from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 
     normed = flashinfer.norm.rmsnorm(x.contiguous(), weight, eps=eps)
+    if mxfp8_semantics:
+        return mxfp8_quant_act_packed(normed)
+
+    from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+
     return sgl_per_token_group_quant_fp8(
         normed,
         group_size=group_size,
@@ -234,11 +264,17 @@ def _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
     eps: float,
     group_size: int,
     scale_ue8m0: bool,
+    mxfp8_semantics: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     import flashinfer.norm
-    from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 
     bf16_out = flashinfer.norm.rmsnorm(x.contiguous(), weight, eps=eps)
+    if mxfp8_semantics:
+        fp8_out, scale = mxfp8_quant_act_packed(bf16_out)
+        return bf16_out, fp8_out, scale
+
+    from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+
     fp8_out, scale = sgl_per_token_group_quant_fp8(
         bf16_out,
         group_size=group_size,
@@ -314,6 +350,7 @@ def fused_strided_rmsnorm(
             True,
             False,
             False,
+            False,
         ),
         num_warps=_select_num_warps(H),
     )
@@ -326,6 +363,7 @@ def fused_strided_rmsnorm_per_token_fp8_quant(
     eps: float = 1e-6,
     group_size: int = 128,
     scale_ue8m0: bool = False,
+    mxfp8_semantics: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """RMSNorm + per-token-group fp8 quant on a strided input.
 
@@ -340,23 +378,29 @@ def fused_strided_rmsnorm_per_token_fp8_quant(
     assert weight.dim() == 1 and weight.shape[0] == x.shape[1]
     T, H = x.shape
     assert H % group_size == 0
+    if mxfp8_semantics:
+        assert group_size == MX_BLOCK and scale_ue8m0
     if scale_ue8m0:
         assert (H // group_size) % 4 == 0, "UE8M0 requires num_groups divisible by 4"
 
     block_n = triton.next_power_of_2(H)
     if block_n > MAX_INREG_H or x.stride(-1) != 1:
         return _baseline_strided_rmsnorm_fp8_quant(
-            x, weight, eps, group_size, scale_ue8m0
+            x, weight, eps, group_size, scale_ue8m0, mxfp8_semantics
         )
 
     fp8_out = torch.empty((T, H), dtype=torch.float8_e4m3fn, device=x.device)
-    scale_out = create_per_token_group_quant_fp8_output_scale(
-        x_shape=(T, H),
-        device=x.device,
-        group_size=group_size,
-        column_major_scales=True,
-        scale_tma_aligned=True,
-        scale_ue8m0=scale_ue8m0,
+    scale_out = (
+        create_mxfp8_packed_scale(T, H, x.device)
+        if mxfp8_semantics
+        else create_per_token_group_quant_fp8_output_scale(
+            x_shape=(T, H),
+            device=x.device,
+            group_size=group_size,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=scale_ue8m0,
+        )
     )
     if T == 0:
         return fp8_out, scale_out
@@ -389,6 +433,7 @@ def fused_strided_rmsnorm_per_token_fp8_quant(
             False,
             True,
             scale_ue8m0,
+            mxfp8_semantics,
         ),
         num_warps=_select_num_warps(H),
     )
@@ -401,6 +446,7 @@ def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
     eps: float = 1e-6,
     group_size: int = 128,
     scale_ue8m0: bool = False,
+    mxfp8_semantics: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """RMSNorm + per-token-group fp8 quant + bf16 normed output.
 
@@ -412,24 +458,30 @@ def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
     assert weight.dim() == 1 and weight.shape[0] == x.shape[1]
     T, H = x.shape
     assert H % group_size == 0
+    if mxfp8_semantics:
+        assert group_size == MX_BLOCK and scale_ue8m0
     if scale_ue8m0:
         assert (H // group_size) % 4 == 0, "UE8M0 requires num_groups divisible by 4"
 
     block_n = triton.next_power_of_2(H)
     if block_n > MAX_INREG_H or x.stride(-1) != 1:
         return _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
-            x, weight, eps, group_size, scale_ue8m0
+            x, weight, eps, group_size, scale_ue8m0, mxfp8_semantics
         )
 
     bf16_out = torch.empty((T, H), dtype=torch.bfloat16, device=x.device)
     fp8_out = torch.empty((T, H), dtype=torch.float8_e4m3fn, device=x.device)
-    scale_out = create_per_token_group_quant_fp8_output_scale(
-        x_shape=(T, H),
-        device=x.device,
-        group_size=group_size,
-        column_major_scales=True,
-        scale_tma_aligned=True,
-        scale_ue8m0=scale_ue8m0,
+    scale_out = (
+        create_mxfp8_packed_scale(T, H, x.device)
+        if mxfp8_semantics
+        else create_per_token_group_quant_fp8_output_scale(
+            x_shape=(T, H),
+            device=x.device,
+            group_size=group_size,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=scale_ue8m0,
+        )
     )
     if T == 0:
         return bf16_out, fp8_out, scale_out
@@ -462,6 +514,7 @@ def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
             True,
             True,
             scale_ue8m0,
+            mxfp8_semantics,
         ),
         num_warps=_select_num_warps(H),
     )

@@ -17,14 +17,22 @@ from rtp_llm.utils.model_weight import W
 # (silu_and_mul) and one launch (per_token_group_quant_8bit) per forward.
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
+    from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+        silu_mul_mxfp8_quant_act_packed_fused,
+    )
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
         CudaFp8GEMMLinear,
+    )
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
+        CudaMxfp8Linear,
     )
     from rtp_llm.models_py.triton_kernels.common.activation import (
         silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd,
     )
 else:
     CudaFp8GEMMLinear = None  # type: ignore
+    CudaMxfp8Linear = None  # type: ignore
+    silu_mul_mxfp8_quant_act_packed_fused = None  # type: ignore
 
 _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
     ActivationType.Swiglu: FusedSiluAndMul,
@@ -118,12 +126,29 @@ class DenseMLP(nn.Module):
         )
         if self._fuse_silu_quant and self.down_proj.scale_ue8m0:
             self._fuse_silu_quant = self.down_proj.K % 512 == 0
+        # HY4's MXFP8 down projections use 1x32 UE8M0 scales.  This is a
+        # separate contract from the existing group-128 FP8 fusion above.
+        self._fuse_silu_mxfp8_quant = (
+            fuse_kernels_enabled(hw_kernel_config)
+            and self.is_gated
+            and CudaMxfp8Linear is not None
+            and isinstance(self.down_proj, CudaMxfp8Linear)
+            and silu_mul_mxfp8_quant_act_packed_fused is not None
+            and self.down_proj.K % 128 == 0
+        )
 
     @property
     def accepts_fp8_input(self) -> bool:
+        # This flag is consumed by generic group-128 FP8 producer fusions.
+        # MXFP8 has a different group size and scale layout, so keep the
+        # capability contracts separate.
         return CudaFp8GEMMLinear is not None and isinstance(
             self.up_proj, CudaFp8GEMMLinear
         )
+
+    @property
+    def accepts_mxfp8_input(self) -> bool:
+        return CudaMxfp8Linear is not None and isinstance(self.up_proj, CudaMxfp8Linear)
 
     def forward(
         self,
@@ -132,11 +157,24 @@ class DenseMLP(nn.Module):
         x_scale: "Optional[torch.Tensor]" = None,
         skip_allreduce: bool = False,
     ):
-        if x_fp8 is not None and x_scale is not None and self.accepts_fp8_input:
+        if (
+            x_fp8 is not None
+            and x_scale is not None
+            and (self.accepts_fp8_input or self.accepts_mxfp8_input)
+        ):
             up = self.up_proj(x_fp8, input_scales=x_scale)
         else:
             up = self.up_proj(x)
-        if self._fuse_silu_quant and up.dim() == 2:
+        if (
+            self._fuse_silu_mxfp8_quant
+            and up.dim() == 2
+            and up.is_cuda
+            and up.dtype == torch.bfloat16
+            and up.shape[-1] == 2 * self.down_proj.K
+        ):
+            fp8_out, scale_out = silu_mul_mxfp8_quant_act_packed_fused(up.contiguous())
+            output = self.down_proj(fp8_out, input_scales=scale_out)
+        elif self._fuse_silu_quant and up.dim() == 2:
             scale_ue8m0 = self.down_proj.scale_ue8m0
             fp8_out, scale_out = (
                 silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
@@ -147,7 +185,16 @@ class DenseMLP(nn.Module):
             )
             output = self.down_proj(fp8_out, input_scales=scale_out)
         else:
-            activated = self.act_fn(up)
+            if (
+                self.is_gated
+                and CudaMxfp8Linear is not None
+                and isinstance(self.down_proj, CudaMxfp8Linear)
+                and up.dtype == torch.bfloat16
+            ):
+                gate, value = up.chunk(2, dim=-1)
+                activated = torch.nn.functional.silu(gate) * value
+            else:
+                activated = self.act_fn(up)
             output = self.down_proj(activated)
         if not skip_allreduce and self.parallelism_config.get_ffn_tp_size() > 1:
             output = all_reduce(output, group=Group.TP)

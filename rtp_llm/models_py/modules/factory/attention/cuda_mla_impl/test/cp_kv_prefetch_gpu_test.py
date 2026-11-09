@@ -100,6 +100,8 @@ def run_case(rank, prefixes, lengths, producer):
         ((n + size * owner - 1) // (size * owner)) * owner for n in totals
     ]
     op = SimpleNamespace(
+        num_heads=64,
+        bf16_num_heads=64,
         kv_lora_rank=512,
         qk_rope_head_dim=64,
         use_cuda_graph=False,
@@ -126,6 +128,9 @@ def run_case(rank, prefixes, lengths, producer):
         _allocate_fused_kv=lambda: torch.empty(
             (sum(totals), 576), dtype=torch.bfloat16
         ),
+    )
+    op._pad_query_and_sink = lambda q, sink, kernel_heads=None: (
+        SparseMlaFp8CPOp._pad_query_and_sink(op, q, sink, kernel_heads)
     )
     op._pack_sharded_kv_cache = (
         lambda cache, out: SparseMlaFp8CPOp._pack_sharded_kv_cache(op, cache, out)

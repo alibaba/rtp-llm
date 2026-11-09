@@ -11,8 +11,8 @@ with a single Triton kernel that:
   - reads ``x`` (bf16/fp16) and casts to fp32 in-register (no separate cast kernel),
   - reads ``w`` as fp32 (DSV3.2 ``weights_proj.weight`` is loaded as fp32 in
     ``models/deepseek_v2.py``); falls back to fp32 cast for bf16/fp16 weight too,
-  - does ``out[t, n] = sum_k x[t, k] * w[n, k]`` in fp32 (TF32 tensor cores
-    on H20+), keeping the same precision as the original fp32 GEMM,
+  - does ``out[t, n] = sum_k x[t, k] * w[n, k]`` with either the legacy
+    single-pass TF32 fast path or a three-pass TF32x3 high-precision path,
   - multiplies by ``q_scale[t, n, 1]`` and a constant ``scale`` in epilogue.
 
 The fp32 path is required because DSV3.2 indexer logits feed into a top-k
@@ -42,6 +42,7 @@ from typing import Optional, Union
 import torch
 import triton
 import triton.language as tl
+
 from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 MAX_K = 8192
@@ -66,6 +67,7 @@ def _fused_logits_head_gate_kernel(
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
     W_IS_TRANSPOSED: tl.constexpr,
+    HIGH_PRECISION: tl.constexpr,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
@@ -89,14 +91,10 @@ def _fused_logits_head_gate_kernel(
                 mask=mask_k[:, None] & mask_n[None, :],
                 other=0.0,
             ).to(tl.float32)
-            # Single-pass TF32 tensor cores. The original tf32x3 (3-pass for
-            # fp32 emulation) was 3x slower; empirical measurement on DSV3.2
-            # K=7168 N=64 shows tf32 has mean_rel 0.09% (not 1.4% as a stale
-            # comment claimed) and top-32 recall=0.9999 vs cuBLAS fp32. The
-            # downstream consumer is fp8_paged_mqa_logits + top-k selection,
-            # which is already FP8-quantized — 0.09% drift in weights is well
-            # below the FP8 noise floor.
-            acc += tl.dot(x, w, out_dtype=tl.float32, input_precision="tf32")
+            if HIGH_PRECISION:
+                acc += tl.dot(x, w, out_dtype=tl.float32, input_precision="tf32x3")
+            else:
+                acc += tl.dot(x, w, out_dtype=tl.float32, input_precision="tf32")
         else:
             # [BLOCK_N, BLOCK_K] with K as inner dim (coalesced: stride_w_k=1)
             w = tl.load(
@@ -104,7 +102,20 @@ def _fused_logits_head_gate_kernel(
                 mask=mask_n[:, None] & mask_k[None, :],
                 other=0.0,
             ).to(tl.float32)
-            acc += tl.dot(x, tl.trans(w), out_dtype=tl.float32, input_precision="tf32")
+            if HIGH_PRECISION:
+                acc += tl.dot(
+                    x,
+                    tl.trans(w),
+                    out_dtype=tl.float32,
+                    input_precision="tf32x3",
+                )
+            else:
+                acc += tl.dot(
+                    x,
+                    tl.trans(w),
+                    out_dtype=tl.float32,
+                    input_precision="tf32",
+                )
 
     # Load q_scale [BLOCK_M, BLOCK_N] (already squeezed from [T, N, 1])
     qs = tl.load(
@@ -185,6 +196,7 @@ def fused_logits_head_gate(
     weight: torch.Tensor,
     scale_const: float,
     fallback_proj: Optional[torch.nn.Module] = None,
+    high_precision: bool = False,
 ) -> torch.Tensor:
     """Fused ``cast + GEMV + 2 muls`` for indexer's _get_logits_head_gate.
 
@@ -195,6 +207,8 @@ def fused_logits_head_gate(
         scale_const: ``softmax_scale * weights_scale`` (Python float).
         fallback_proj: optional callable used only when the fast path bails out
                        (matches the original ``self.weights_proj``).
+        high_precision: use TF32x3 for the large-T dot. HY4 enables this because
+                        these logits directly determine a discrete top-k set.
 
     Returns:
         ``[T, N, 1]`` fp32 tensor.
@@ -230,11 +244,8 @@ def fused_logits_head_gate(
     #  - small-T (T <= 32): per-(token, head) program, explicit reduce. Avoids
     #    tl.dot's BLOCK_M>=16 minimum which wastes compute at small T.
     #    Best with contiguous weight; callers should pre-contiguify at init.
-    #  - large-T (T > 32): tiled tl.dot with input_precision="tf32".
-    #    Empirical on DSV3.2 (K=7168, N=64): tf32 mean_rel=0.09%, top-32
-    #    recall=0.9999 vs cuBLAS fp32 — well within the downstream FP8
-    #    paged-mqa-logits noise floor. The single-pass TF32 path is 1.6-3x
-    #    faster than the prior 3-pass tf32x3 (1024->44us, 8192->68us on B300).
+    #  - large-T (T > 32): tiled tl.dot. The legacy path uses single-pass TF32;
+    #    high_precision uses TF32x3 to avoid changing boundary top-k entries.
     #    Handles both contiguous and transposed weight via W_IS_TRANSPOSED.
     use_fast_path = (
         x.dtype in (torch.bfloat16, torch.float16)
@@ -311,6 +322,7 @@ def fused_logits_head_gate(
                 BLOCK_K,
                 BLOCK_N,
                 w_is_transposed,
+                bool(high_precision),
             ),
             num_warps=num_warps,
             num_stages=3,

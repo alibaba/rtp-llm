@@ -51,33 +51,33 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
         config.kv_scale_stride_bytes = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
         size_t indexer_slot_num      = config.layer_num;
         if (model_config.enable_glm52_shared_indexer_kv_cache) {
-            RTP_LLM_CHECK_WITH_INFO(!is_mtp, "GLM5.2 shared Indexer KV cache must not be enabled for the MTP model");
-            RTP_LLM_CHECK_WITH_INFO(model_config.model_type == "glm_5",
-                                    "GLM5.2 shared Indexer KV cache only supports model_type=glm_5");
+            RTP_LLM_CHECK_WITH_INFO(!is_mtp, "DSA shared Indexer KV cache must not be enabled for the MTP model");
+            RTP_LLM_CHECK_WITH_INFO((model_config.model_type == "glm_5" || model_config.model_type == "hy_v4"),
+                                    "DSA shared Indexer KV cache only supports GLM5 and HY4 target models");
             const auto& mapping = model_config.glm52_indexer_kv_slot_mapping;
             RTP_LLM_CHECK_WITH_INFO(mapping.size() == config.layer_num,
-                                    "GLM5.2 Indexer KV mapping size(%zu) != layer_num(%u)",
+                                    "DSA Indexer KV mapping size(%zu) != layer_num(%u)",
                                     mapping.size(),
                                     config.layer_num);
             RTP_LLM_CHECK_WITH_INFO(!mapping.empty() && mapping.front() == 0,
-                                    "GLM5.2 Indexer KV mapping must start at physical slot 0");
+                                    "DSA Indexer KV mapping must start at physical slot 0");
 
             int  previous_slot = -1;
             bool has_shared    = false;
             for (size_t layer_id = 0; layer_id < mapping.size(); ++layer_id) {
                 const int slot = mapping[layer_id];
                 RTP_LLM_CHECK_WITH_INFO(slot == previous_slot || slot == previous_slot + 1,
-                                        "invalid GLM5.2 Indexer KV slot at layer %zu: slot=%d previous=%d",
+                                        "invalid DSA Indexer KV slot at layer %zu: slot=%d previous=%d",
                                         layer_id,
                                         slot,
                                         previous_slot);
                 has_shared |= slot == previous_slot;
                 previous_slot = slot;
             }
-            RTP_LLM_CHECK_WITH_INFO(has_shared, "GLM5.2 Indexer KV mapping contains no shared layer");
+            RTP_LLM_CHECK_WITH_INFO(has_shared, "DSA Indexer KV mapping contains no shared layer");
             indexer_slot_num                = static_cast<size_t>(previous_slot + 1);
             config.layer_to_indexer_kv_slot = mapping;
-            RTP_LLM_LOG_INFO("GLM5.2 shared Indexer KV cache enabled: logical_layers=%u, physical_slots=%zu, "
+            RTP_LLM_LOG_INFO("DSA shared Indexer KV cache enabled: logical_layers=%u, physical_slots=%zu, "
                              "shared_layers=%zu",
                              config.layer_num,
                              indexer_slot_num,

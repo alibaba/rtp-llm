@@ -56,3 +56,11 @@ py_test(
     tags = ["H20"],
     exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
 )
+
+py_test(
+    name = "mxfp8_linear_test",
+    srcs = ["mxfp8_linear_test.py"],
+    deps = py_test_deps,
+    tags = ["SM103_CU13"],
+    exec_properties = {'gpu': "SM103_CU13", 'gpu_count': '1'},
+)

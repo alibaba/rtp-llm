@@ -539,6 +539,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         top_k: int,
         parallelism_config: Optional[ParallelismConfig] = None,
         use_cuda_graph: bool = False,
+        bf16_prefill_num_heads: Optional[int] = None,
     ):
         super().__init__(
             num_heads=num_heads,
@@ -549,6 +550,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             softmax_extra_scale=softmax_extra_scale,
             top_k=top_k,
             use_cuda_graph=use_cuda_graph,
+            bf16_prefill_num_heads=bf16_prefill_num_heads,
         )
         self.attn_inputs = None
         self.cp_info = None
@@ -1141,6 +1143,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         gathered_kv: Optional[
             Tuple[torch.Tensor, torch.Tensor, Optional[torch.cuda.Stream]]
         ] = None,
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Attend in total_local_ids order, then restore the original local rows.
 
@@ -1159,11 +1162,6 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-
-        # A short tail can leave this rank with padding only. It must still
-        # gather and write KV before returning rows for the following layers.
-        if self.total_local_ids.numel() == 0:
-            return q.new_zeros((q.size(0), q.size(1), self.kv_lora_rank))
 
         no_q_work = (
             topk is None
@@ -1200,9 +1198,15 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         else:
             q0 = q[self.total_local_ids].contiguous()
         if self._gather is not None:
-            out0 = self._attend_gather(q0, kv_cache, topk, prepared_kv)
+            out0 = self._attend_gather(
+                q0,
+                kv_cache,
+                topk,
+                prepared_kv,
+                **({"attn_sink": attn_sink} if attn_sink is not None else {}),
+            )
         else:
-            out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id)
+            out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id, attn_sink)
 
         if use_identity_q or defer_output_scatter:
             return out0
@@ -1475,10 +1479,12 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         kv_cache,
         topk: torch.Tensor,
         layer_id: int,
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """flash_mla_with_kvcache on FP8 paged cache (CP equivalent of non-CP baseline)."""
         if self.kv_cache_sharded:
-            return self._attend_gather(q0, kv_cache, topk)
+            return self._attend_gather(q0, kv_cache, topk, attn_sink=attn_sink)
+        q0, attn_sink, actual_heads = self._pad_query_and_sink(q0, attn_sink)
         kv_cache_flat = _as_uint8(
             kv_cache.kv_cache_base.view(-1, 1, kv_cache.kv_cache_base.size(-1))
         )
@@ -1486,6 +1492,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             kv_cache_flat = kv_cache_flat.unsqueeze(-2)
         global_topk = self._convert_topk_indices_to_global(topk).squeeze(1).unsqueeze(0)
         meta = self._fp8_kernel_metadata_q0
+        sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
         attn_out, _ = flash_mla_with_kvcache(
             q=q0.unsqueeze(0),
             k_cache=kv_cache_flat,
@@ -1497,8 +1504,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             is_fp8_kvcache=True,
             indices=global_topk,
             softmax_scale=self.scale,
+            **sink_kwargs,
         )
-        return attn_out.squeeze(0)
+        return attn_out.squeeze(0)[:, :actual_heads]
 
     def _attend_gather(
         self,
@@ -1506,10 +1514,14 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         kv_cache,
         topk: torch.Tensor,
         prepared_kv: Optional[Union[torch.Tensor, _RankMajorKv]] = None,
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """gather + flash_mla_sparse_fwd. After CP all-gather/restore/write, the paged
         cache has the full per-request KV; the CP plan supplies the per-q-token
         workspace offset for the sparse attention indices."""
+        q0, attn_sink, actual_heads = self._pad_query_and_sink(
+            q0, attn_sink, self.bf16_num_heads
+        )
         ws = self._gather
         assert ws is not None and self.precomputed_kv_offsets is not None
         restore_indices = None
@@ -1562,14 +1574,16 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             global_indices = offset_cp_topk(
                 topk_2d, offsets, restore_indices, fused_kv.shape[0]
             ).unsqueeze(1)
+        sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
         out, _, _ = flash_mla_sparse_fwd(
             q0,
             fused_kv.unsqueeze(1),
             global_indices,
             self.scale,
             d_v=self.kv_lora_rank,
+            **sink_kwargs,
         )
-        return out
+        return out[:, :actual_heads]
 
     # Compatibility implementation from 70f1ecde04. Selected once at import.
     if not PREFILL_OPTIMIZATIONS_ENABLED:
@@ -1585,6 +1599,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             top_k: int,
             parallelism_config: Optional[ParallelismConfig] = None,
             use_cuda_graph: bool = False,
+            bf16_prefill_num_heads: Optional[int] = None,
         ):
             super().__init__(
                 num_heads=num_heads,
@@ -1595,6 +1610,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 softmax_extra_scale=softmax_extra_scale,
                 top_k=top_k,
                 use_cuda_graph=use_cuda_graph,
+                bf16_prefill_num_heads=bf16_prefill_num_heads,
             )
             self.attn_inputs = None
             self.cp_info = None
@@ -1989,6 +2005,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             original_q_len: Optional[int] = None,
             prepared_kv: Optional[torch.Tensor] = None,
             defer_output_scatter: bool = False,
+            attn_sink: Optional[torch.Tensor] = None,
         ) -> torch.Tensor:
             """Attend in total_local_ids order, then restore the original local rows.
 
@@ -2043,9 +2060,21 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             else:
                 q0 = q[self.total_local_ids].contiguous()
             if self._gather is not None:
-                out0 = self._attend_gather(q0, kv_cache, topk, prepared_kv)
+                out0 = self._attend_gather(
+                    q0,
+                    kv_cache,
+                    topk,
+                    prepared_kv,
+                    **({"attn_sink": attn_sink} if attn_sink is not None else {}),
+                )
             else:
-                out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id)
+                out0 = self._attend_with_kvcache(
+                    q0,
+                    kv_cache,
+                    topk,
+                    layer_id,
+                    **({"attn_sink": attn_sink} if attn_sink is not None else {}),
+                )
 
             if use_identity_q or defer_output_scatter:
                 return out0
@@ -2168,10 +2197,14 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             kv_cache,
             topk: torch.Tensor,
             prepared_kv: Optional[torch.Tensor] = None,
+            attn_sink: Optional[torch.Tensor] = None,
         ) -> torch.Tensor:
             """gather + flash_mla_sparse_fwd. After CP all-gather/restore/write, the paged
             cache has the full per-request KV; the CP plan supplies the per-q-token
             workspace offset for the sparse attention indices."""
+            q0, attn_sink, actual_heads = self._pad_query_and_sink(
+                q0, attn_sink, self.bf16_num_heads
+            )
             ws = self._gather
             assert ws is not None and self.precomputed_kv_offsets is not None
             fused_kv = prepared_kv
@@ -2227,8 +2260,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 global_indices,
                 self.scale,
                 d_v=self.kv_lora_rank,
+                **({"attn_sink": attn_sink} if attn_sink is not None else {}),
             )
-            return out
+            return out[:, :actual_heads]
 
         _attend_gather = _baseline__attend_gather
 
@@ -2744,11 +2778,19 @@ class SparseMlaCpImpl(SparseMlaImpl):
         layer_id: int,
         topk_indices: Optional[torch.Tensor],
         prepared_kv=None,
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         workspace = self._glm53_prefill_workspace
         try:
             return self._forward_impl(
-                q, compressed_kv, k_pe, kv_cache, layer_id, topk_indices, prepared_kv
+                q,
+                compressed_kv,
+                k_pe,
+                kv_cache,
+                layer_id,
+                topk_indices,
+                prepared_kv,
+                **({"attn_sink": attn_sink} if attn_sink is not None else {}),
             )
         finally:
             # GLM's large MoE follows attention in every layer. Return the slot
@@ -2766,6 +2808,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         layer_id: int,
         topk_indices: Optional[torch.Tensor],
         prepared_kv=None,
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """CP sparse MLA forward. q: [total_q_len, H, qk_head_dim]; topk_indices
         is request-local. Returns [total_q_len, H, nope_head_dim]."""
@@ -2862,6 +2905,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             prepared_kv=fused_kv,
             defer_output_scatter=defer_output_scatter,
             gathered_kv=gathered_kv,
+            **({"attn_sink": attn_sink} if attn_sink is not None else {}),
         )
         pipeline = getattr(self, "_cross_layer_prefetch", None)
         if pipeline is not None:
@@ -2999,6 +3043,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             layer_id: int,
             topk_indices: Optional[torch.Tensor],
             prepared_kv=None,
+            attn_sink: Optional[torch.Tensor] = None,
         ) -> torch.Tensor:
             """CP sparse MLA forward. q: [total_q_len, H, qk_head_dim]; topk_indices
             is request-local. Returns [total_q_len, H, nope_head_dim]."""
@@ -3074,6 +3119,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
                 original_q_len=original_q_len,
                 prepared_kv=fused_kv,
                 defer_output_scatter=defer_output_scatter,
+                **({"attn_sink": attn_sink} if attn_sink is not None else {}),
             )
             pipeline = getattr(self, "_cross_layer_prefetch", None)
             if pipeline is not None:

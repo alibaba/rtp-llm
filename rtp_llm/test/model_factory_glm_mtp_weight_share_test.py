@@ -69,7 +69,7 @@ class GlmMtpGlobalWeightShareTest(unittest.TestCase):
         propose = self._make_propose()
 
         self.assertTrue(
-            ModelFactory._share_glm5_mtp_global_weights(self.target, propose)
+            ModelFactory._share_mtp_global_weights(self.target, propose)
         )
         self.assertIs(propose.weight.global_weights[W.embedding], self.target_embedding)
         self.assertIs(propose.weight.global_weights[W.lm_head], self.target_lm_head)
@@ -81,17 +81,33 @@ class GlmMtpGlobalWeightShareTest(unittest.TestCase):
         old_lm_head = propose.weight.global_weights[W.lm_head]
 
         self.assertFalse(
-            ModelFactory._share_glm5_mtp_global_weights(self.target, propose)
+            ModelFactory._share_mtp_global_weights(self.target, propose)
         )
         self.assertIs(propose.weight.global_weights[W.embedding], old_embedding)
         self.assertIs(propose.weight.global_weights[W.lm_head], old_lm_head)
         self.assertIs(propose.py_model.embed_tokens.weight, old_embedding)
 
+    def test_hy4_named_mtp_layout_shares_globals_at_offset_zero(self):
+        self.target.model_config.model_type = "hy_v4"
+        propose = self._make_propose(model_type="hy_v4_mtp", mtp_layer_offset=0)
+
+        self.assertTrue(ModelFactory._share_mtp_global_weights(self.target, propose))
+        self.assertIs(propose.weight.global_weights[W.embedding], self.target_embedding)
+        self.assertIs(propose.weight.global_weights[W.lm_head], self.target_lm_head)
+        self.assertIs(propose.py_model.embed_tokens.weight, self.target_embedding)
+
+    def test_different_model_families_do_not_share_globals(self):
+        propose = self._make_propose(model_type="hy_v4_mtp", mtp_layer_offset=0)
+
+        self.assertFalse(ModelFactory._share_mtp_global_weights(self.target, propose))
+        self.assertIs(propose.weight.global_weights[W.embedding], self.propose_embedding)
+        self.assertIs(propose.weight.global_weights[W.lm_head], self.propose_lm_head)
+
     def test_standalone_mtp_layout_is_not_shared(self):
         propose = self._make_propose(mtp_layer_offset=0)
 
         self.assertFalse(
-            ModelFactory._share_glm5_mtp_global_weights(self.target, propose)
+            ModelFactory._share_mtp_global_weights(self.target, propose)
         )
         self.assertIs(
             propose.weight.global_weights[W.embedding], self.propose_embedding
@@ -102,7 +118,7 @@ class GlmMtpGlobalWeightShareTest(unittest.TestCase):
             propose = self._make_propose(ckpt_path=other_ckpt)
 
             self.assertFalse(
-                ModelFactory._share_glm5_mtp_global_weights(self.target, propose)
+                ModelFactory._share_mtp_global_weights(self.target, propose)
             )
             self.assertIs(
                 propose.weight.global_weights[W.embedding], self.propose_embedding
@@ -114,7 +130,7 @@ class GlmMtpGlobalWeightShareTest(unittest.TestCase):
         propose.py_model.embed_tokens.weight = unexpected
 
         self.assertFalse(
-            ModelFactory._share_glm5_mtp_global_weights(self.target, propose)
+            ModelFactory._share_mtp_global_weights(self.target, propose)
         )
         self.assertIs(
             propose.weight.global_weights[W.embedding], self.propose_embedding
@@ -129,7 +145,7 @@ class GlmMtpGlobalWeightShareTest(unittest.TestCase):
         )
 
         self.assertFalse(
-            ModelFactory._share_glm5_mtp_global_weights(self.target, propose)
+            ModelFactory._share_mtp_global_weights(self.target, propose)
         )
         self.assertIs(
             propose.weight.global_weights[W.embedding], self.propose_embedding
@@ -143,7 +159,7 @@ class GlmMtpGlobalWeightShareTest(unittest.TestCase):
         )
 
         self.assertTrue(
-            ModelFactory._share_glm5_mtp_global_weights(self.target, propose)
+            ModelFactory._share_mtp_global_weights(self.target, propose)
         )
         self.assertIs(propose.weight.global_weights[W.embedding], self.target_embedding)
         self.assertIs(propose.weight.global_weights[W.lm_head], self.target_lm_head)
@@ -157,7 +173,7 @@ class GlmMtpGlobalWeightShareTest(unittest.TestCase):
         del embedding, lm_head
 
         self.assertTrue(
-            ModelFactory._share_glm5_mtp_global_weights(self.target, propose)
+            ModelFactory._share_mtp_global_weights(self.target, propose)
         )
         self.assertIsNone(embedding_ref())
         self.assertIsNone(lm_head_ref())

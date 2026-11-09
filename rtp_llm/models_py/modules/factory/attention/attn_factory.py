@@ -32,6 +32,8 @@ def get_mla_impl(
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
+    force_sparse_mla: bool = False,
+    decode_ignores_prefill_cp: bool = False,
 ) -> MlaImplBase:
 
     # MTP target-verify arrives with is_prefill=True (sequence_lengths is empty in
@@ -81,14 +83,20 @@ def get_mla_impl(
         use_fast_path = (
             attn_inputs.is_prefill
             and not use_decode_mla
+            and not force_sparse_mla
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
             )
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
         )
 
-        if not use_fast_path and not impl.support_parallelism_config(
-            parallelism_config
+        if (
+            not use_fast_path
+            and not (
+                decode_ignores_prefill_cp
+                and (not attn_inputs.is_prefill or use_decode_mla)
+            )
+            and not impl.support_parallelism_config(parallelism_config)
         ):
             continue
 
@@ -191,6 +199,8 @@ def get_fmha_impl(
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
+    _force_sparse_mla: bool = False,
+    _decode_ignores_prefill_cp: bool = False,
 ) -> FMHAImplBase:
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
@@ -265,10 +275,14 @@ class AttnImplFactory(object):
             is_cuda_graph,
             model_config.max_seq_len,
             parallelism_config,
+            model_config.force_sparse_mla,
+            model_config.model_type in ("hy_v4", "hy_v4_mtp"),
         )
         if not is_cuda_graph and str(getattr(model_config, "model_type", "")) in (
             "glm_5",
             "glm_5_mtp",
+            "hy_v4",
+            "hy_v4_mtp",
         ):
             enable_workspace = getattr(instance, "enable_glm53_prefill_workspace", None)
             if enable_workspace is not None:

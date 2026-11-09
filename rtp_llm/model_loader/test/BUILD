@@ -6,9 +6,9 @@ py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,
-    tags = ["H20"],
+    tags = ["H20_CU13"],
     exec_properties = {
-        'gpu': 'H20',
+        'gpu': "H20_CU13",
     },
 )
 
@@ -38,4 +38,11 @@ py_test(
     name = "test_loader_fastsafetensors",
     srcs = ["test_loader_fastsafetensors.py"],
     deps = py_test_deps,
+)
+py_test(
+    name = "test_mega_moe_fp8_to_fp4",
+    srcs = ["test_mega_moe_fp8_to_fp4.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )

@@ -20,6 +20,7 @@
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
 #include "rtp_llm/models_py/bindings/cuda/UserBuffersOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
+#include "rtp_llm/models_py/bindings/cuda/Hy4IhcOp.h"
 #include "rtp_llm/models_py/bindings/cuda/PagedKvCacheCopy.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
@@ -114,6 +115,16 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("weight"),
                   py::arg("beta"),
                   py::arg("eps"));
+
+    rtp_ops_m.def("fuse_hy4_ihc_head",
+                  &fuse_hy4_ihc_head,
+                  "AOT fused HY4 iHC head kernel",
+                  py::arg("channels"),
+                  py::arg("fn_weight"),
+                  py::arg("scale"),
+                  py::arg("base"),
+                  py::arg("norm_eps"),
+                  py::arg("hc_eps"));
 
     rtp_ops_m.def("per_token_group_quant_int8",
                   &per_token_group_quant_int8,

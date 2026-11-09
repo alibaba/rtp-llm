@@ -69,10 +69,12 @@ def make_source(cls, wrapper_cls):
     ):
         setattr(model, name, torch.ones(2, 2))
     model._num_shared_experts = 1
+    model._fp8_weight_recipe = (128, 128)
     wrapper = wrapper_cls.__new__(wrapper_cls)
     nn.Module.__init__(wrapper)
     wrapper.mega_moe = model
     wrapper.expert_num = 4
+    wrapper._activation_clamp = None
     return wrapper
 
 
@@ -202,9 +204,12 @@ class MtpMegaBufShareTest(unittest.TestCase):
             "_use_mega_moe_fused_shared",
         ):
             setattr(moe, name, None)
+        moe.gate_weight = None
+        moe._hy4_fp32_router = False
         moe.fused_moe = make_source(*VARIANTS[0])
         layer = GenericMoeDecoderLayer.__new__(GenericMoeDecoderLayer)
         nn.Module.__init__(layer)
+        layer._drain_pinned_mla_before_moe = False
         for name in (
             "layer_idx",
             "self_attn",
@@ -254,6 +259,7 @@ class MtpMegaBufShareTest(unittest.TestCase):
             "embed_tokens",
             "pre_fc_norm_embedding",
             "pre_fc_norm_hidden",
+            "_mtp_frontend_native",
             "fc",
             "norm",
         ):

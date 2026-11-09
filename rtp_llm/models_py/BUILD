@@ -1,5 +1,11 @@
 load("//bazel:arch_select.bzl", "requirement")
 
+py_library(
+    name = "decoder_cache_helpers",
+    srcs = ["model_desc/decoder_cache.py"],
+    visibility = ["//visibility:public"],
+)
+
 # Leaf startup flags are also imported by standalone collective/kernel users.
 py_library(
     name = "optimization_settings",
@@ -93,6 +99,59 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+py_test(
+    name = "hy4_ihc_aot_test",
+    srcs = ["modules/hy_v4/test_ihc_aot.py"],
+    main = "modules/hy_v4/test_ihc_aot.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "hy4_ihc_test",
+    srcs = ["modules/hy_v4/test_ihc.py"],
+    main = "modules/hy_v4/test_ihc.py",
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "hy4_mega_moe_layout_test",
+    srcs = ["modules/glm5_mega_moe/test_fused_moe_wrapper_layout.py"],
+    main = "modules/glm5_mega_moe/test_fused_moe_wrapper_layout.py",
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
+py_test(
+    name = "hy4_attention_sink_test",
+    srcs = ["modules/factory/attention/cuda_mla_impl/test_hy4_sink.py"],
+    main = "modules/factory/attention/cuda_mla_impl/test_hy4_sink.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
+
+py_test(
+    name = "hy4_attention_contract_test",
+    srcs = ["modules/factory/attention/cuda_mla_impl/hy4_attention_contract_test.py"],
+    main = "modules/factory/attention/cuda_mla_impl/hy4_attention_contract_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
+
+py_test(
+    name = "hy4_attention_contract_baseline_test",
+    srcs = ["modules/factory/attention/cuda_mla_impl/hy4_attention_contract_test.py"],
+    main = "modules/factory/attention/cuda_mla_impl/hy4_attention_contract_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"RTP_LLM_CP_PREFILL_PIPELINE_OPT": "0"},
+)
+
 py_library(
     name = "dsv4_fused_kernel_sources",
     srcs = [
@@ -153,7 +212,7 @@ py_library(
     name = "models",
     srcs = glob([
         "model_desc/*.py",
-        "model_desc/cuda_graph/*.py"
+        "model_desc/**/*.py",
     ]),
     deps = [
         ":utils",
