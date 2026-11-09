@@ -1618,9 +1618,8 @@ class KimiLinearDecoderLayer(nn.Module):
                 )
                 norm_done = True
             else:
-                residual, hidden_states, post, comb = self.attn_hc.fused_post_pre(
-                    hidden_states, residual, post, comb
-                )
+                residual = self.attn_hc.post(hidden_states, residual, post, comb)
+                hidden_states, post, comb = self.attn_hc.pre(residual)
         if not norm_done:
             hidden_states = self.input_layernorm(
                 hidden_states, hidden_states if _INPLACE_HC_NORM else None
@@ -1665,9 +1664,8 @@ class KimiLinearDecoderLayer(nn.Module):
             )
             self._wait_pinned_mla_before_moe(fmha_impl)
         else:
-            residual, hidden_states, post, comb = self.ffn_hc.fused_post_pre(
-                hidden_states, residual, post, comb
-            )
+            residual = self.ffn_hc.post(hidden_states, residual, post, comb)
+            hidden_states, post, comb = self.ffn_hc.pre(residual)
             self._wait_pinned_mla_before_moe(fmha_impl)
             hidden_states = self.post_attention_layernorm(
                 hidden_states, hidden_states if _INPLACE_HC_NORM else None
