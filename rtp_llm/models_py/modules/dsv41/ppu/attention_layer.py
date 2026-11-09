@@ -5,6 +5,7 @@ import io
 import json
 import math
 import os
+from itertools import accumulate
 from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
@@ -56,7 +57,38 @@ OPTIMIZED_DIAGNOSTICS_ENV = "RTP_V41_PPU_OPTIMIZED_DIAGNOSTICS"
 OPTIMIZED_LATE_FOCUS_ENV = "RTP_V41_PPU_OPTIMIZED_LATE_FOCUS"
 PREFILL_DENSE_FP4_SCORE_ENV = "RTP_V41_PPU_PREFILL_DENSE_FP4_SCORE"
 PREFILL_SPARSE_FP4_SCORE_ENV = "RTP_V41_PPU_PREFILL_SPARSE_FP4_SCORE"
+CP8_WO_A_BMM_ENV = "RTP_V41_PPU_CP8_WO_A_BMM"
+CP8_INDEXER_REQUEST_SLICES_ENV = "RTP_V41_PPU_CP8_INDEXER_REQUEST_SLICES"
 _OPTIMIZED_LATE_FOCUS_LAYERS = (16, 20, 20, 20, 21, 20, 22, 20)
+
+
+def _project_wo_a(output, weight, groups, rank, *, batched):
+    if (
+        batched
+        and output.is_cuda
+        and output.dtype == weight.dtype == torch.bfloat16
+        and output.is_contiguous()
+        and weight.is_contiguous()
+        and not torch.is_grad_enabled()
+    ):
+        projected = output.new_empty((output.shape[0], groups, rank))
+        grouped_weight = weight.view(groups, rank, output.shape[-1])
+        torch.bmm(
+            output.transpose(0, 1), grouped_weight.transpose(1, 2),
+            out=projected.transpose(0, 1),
+        )
+        return projected
+    return torch.stack([
+        F.linear(output[:, i].contiguous(), weight[i * rank:(i + 1) * rank].contiguous())
+        for i in range(groups)
+    ], dim=1)
+
+
+def _indexer_request_slices(lengths, rows, requests):
+    if lengths is None or len(lengths) != requests or sum(lengths) != rows:
+        return None
+    boundaries = tuple(accumulate(lengths, initial=0))
+    return tuple(slice(start, stop) for start, stop in zip(boundaries, boundaries[1:]))
 
 
 def optimized_diagnostics_enabled():
@@ -419,7 +451,7 @@ class SharedPPUAttention(PPUAttentionProjections):
             index_k_norm=getattr(self, "index_k_norm", None),
         )
 
-    def _select(self, x, qr, context, cache, shared, *, prefill=False):
+    def _select(self, x, qr, context, cache, shared, *, prefill=False, request_slices=None):
         g, source = self.geometry, self.kv_source_layer_id
         if not self.is_index_source:
             return shared["topk"][self.index_source_layer_id]
@@ -469,8 +501,13 @@ class SharedPPUAttention(PPUAttentionProjections):
             raw = F.linear(x, self.index_weights) if projection is None else projection(x, self.index_weights)
             weights = raw.float() * (g.index_head_dim * g.index_n_heads) ** -0.5
             for rid, count in enumerate(counts):
-                rows = torch.where(context.request_ids == rid)[0]
-                if not rows.numel() or not count:
+                if request_slices is None:
+                    rows = torch.where(context.request_ids == rid)[0]
+                    row_count = rows.numel()
+                else:
+                    rows = request_slices[rid]
+                    row_count = rows.stop - rows.start
+                if not row_count or not count:
                     continue
                 packed = cache.read_source(source, rid, global_entries=count)[1]
                 sparse_fp4 = sparse_enabled and block * candidate_k < count <= 1 << 20
@@ -491,17 +528,21 @@ class SharedPPUAttention(PPUAttentionProjections):
                     decoded = x.new_empty((count, g.index_head_dim))
                     self.ops.decode_kv(packed, pool_tag="indexer_kv", descriptor=cache.descriptors(source)["indexer_kv"], out=decoded)
                     keys = V41QuantizedTensor(decoded, None, "bf16")
-                    chunk_rows = rows.numel()
+                    chunk_rows = row_count
                 key_positions = (
                     None if native_fp4 else torch.arange(count, device=x.device) * ratio
                 )
-                for chunk_index, chunk in enumerate(rows.split(chunk_rows)):
+                for chunk_index, start in enumerate(range(0, row_count, chunk_rows)):
+                    stop = min(start + chunk_rows, row_count)
+                    chunk = rows[start:stop] if request_slices is None else slice(
+                        rows.start + start, rows.start + stop,
+                    )
                     q = _quantized_indexer_query(index_q[chunk])
                     if sparse_fp4:
                         visible = (context.positions[chunk] + 1) // ratio
                         plan = _prefill_sparse_plan(
                             shared,
-                            (rid, chunk_index, chunk.numel(), count, ratio, block),
+                            (rid, chunk_index, stop - start, count, ratio, block),
                             candidates[chunk],
                             visible,
                             count,
@@ -665,7 +706,18 @@ class SharedPPUAttention(PPUAttentionProjections):
         use_cp_workspace = cache.sharded and cp is not None and cp.cp_size > 1 and diagnostic is None
         if self.compress_ratio and (not use_cp_workspace or self.is_index_source):
             cache.prepare_source(self.kv_source_layer_id)
-        selected = self._select(x, qr, context, cache, shared, prefill=state.prefill) if self.compress_ratio else None
+        full_cp8 = (
+            use_cp_workspace and state.prefill and cp.cp_size == 8
+            and cp.gather_restore_positions is None
+        )
+        request_slices = None
+        if full_cp8 and self.is_index_source and enabled(CP8_INDEXER_REQUEST_SLICES_ENV):
+            request_slices = _indexer_request_slices(
+                cp.chunk_lengths_per_req, x.shape[0], len(cache.lengths),
+            )
+        selected = self._select(
+            x, qr, context, cache, shared, prefill=state.prefill, request_slices=request_slices,
+        ) if self.compress_ratio else None
         if diagnostic is not None:
             diagnostic_swa_before = cache._copy_rows((self.layer_id, "swa_kv"), 0, full_pos[real])
             diagnostic_global_before = None
@@ -723,10 +775,10 @@ class SharedPPUAttention(PPUAttentionProjections):
                 )
             diagnostic_output = output
         output = _rope_tail(output, freqs, inverse=True).reshape(-1, g.o_groups, g.n_heads * g.head_dim // g.o_groups)
-        projected = torch.stack([
-            F.linear(output[:, i].contiguous(), self.wo_a.weight[i * g.o_lora_rank:(i + 1) * g.o_lora_rank].contiguous())
-            for i in range(g.o_groups)
-        ], 1)
+        projected = _project_wo_a(
+            output, self.wo_a.weight, g.o_groups, g.o_lora_rank,
+            batched=full_cp8 and enabled(CP8_WO_A_BMM_ENV),
+        )
         result = self.wo_b(projected.flatten(1))
         if diagnostic is not None:
             _optimized_record_layer(
