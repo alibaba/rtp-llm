@@ -51,6 +51,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
         tier_heaps.device = std::make_unique<EvictionHeap>(device_policy);
         tier_heaps.host   = std::make_unique<EvictionHeap>(host_policy);
         tier_heaps.disk   = std::make_unique<EvictionHeap>(disk_policy);
+        tier_heaps.next_device_reclaim_log.resize(tree_->groupSets()[group_set_id]->devicePools().size());
     }
 }
 
@@ -246,7 +247,81 @@ size_t BlockTreeEvictor::reclaimDeviceBlocksLocked(size_t group_set_id, size_t m
                                             /*force_drop=*/true,
                                             num_blocks,
                                             std::min(reclaimed, num_blocks));
+    if (reclaimed == 0 && num_blocks > 0) {
+        logZeroDeviceReclaimLocked(
+            group_set_id, member_group_id, num_blocks, eviction_batch_context.rejected_candidates.size());
+    }
     return reclaimed;
+}
+
+void BlockTreeEvictor::logZeroDeviceReclaimLocked(size_t group_set_id,
+                                                  size_t member_group_id,
+                                                  size_t required_blocks,
+                                                  size_t rejected_candidates) {
+    auto&      tier_heaps = heaps_[group_set_id];
+    auto&      next_log   = tier_heaps.next_device_reclaim_log[member_group_id];
+    const auto now        = std::chrono::steady_clock::now();
+    if (now < next_log) {
+        return;
+    }
+    next_log = now + std::chrono::seconds(5);
+
+    const auto& group_set  = tree_->groupSets()[group_set_id];
+    const auto& pool       = group_set->devicePools()[member_group_id];
+    const auto  stats      = pool->referenceStats();
+    const auto& heap       = *tier_heaps.device;
+    const auto  candidates = heap.size();
+    // Frozen state is read from every member pool after the diagnostic rate limit.
+    const bool has_unfrozen_candidate = heap.best([&group_set, group_set_id](TreeNode* node) {
+        const auto& blocks = node->group_set_resources[group_set_id].device_blocks;
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            if (!isNullBlockIdx(blocks[i]) && group_set->devicePools()[i]->isFrozen(blocks[i])) {
+                return false;
+            }
+        }
+        return true;
+    }).has_value();
+    // A candidate covers at most one block in the requested member pool. The
+    // difference is only a lower bound, since candidates may share blocks or hold other references.
+    const auto cache_only_outside_heap_min =
+        stats.tree.cache_only_blocks - std::min(stats.tree.cache_only_blocks, candidates);
+    size_t pending_eviction_releases = 0;
+    {
+        std::lock_guard<std::mutex> lock(pending_release_mutex_);
+        const auto                  pending = pending_release_counts_.find(pool.get());
+        if (pending != pending_release_counts_.end()) {
+            pending_eviction_releases = pending->second;
+        }
+    }
+
+    // Reference counts can overlap. Candidate counts are tree nodes, not physical blocks.
+    RTP_LLM_LOG_WARNING(
+        "BTC on-demand DEVICE reclaim returned zero: pool=%s group_set=%zu group_type=%s required_blocks=%zu "
+        "total_blocks=%zu free_blocks=%zu active_blocks=%zu cache_only_blocks=%zu cache_only_outside_heap_min=%zu "
+        "device_candidate_nodes=%zu has_unfrozen_candidate=%d rejected_candidate_nodes=%zu pending_eviction_releases=%zu "
+        "cache_ref_blocks=%zu load_ref_blocks=%zu eviction_target_ref_blocks=%zu store_ref_blocks=%zu "
+        "frozen_ref_blocks=%zu request_ref_blocks=%zu remote_connector_ref_blocks=%zu pd_connector_ref_blocks=%zu",
+        pool->poolName().c_str(),
+        group_set_id,
+        metricCacheGroupTypeName(group_set->groupType()),
+        required_blocks,
+        stats.tree.total_blocks,
+        stats.tree.free_blocks,
+        stats.tree.active_blocks,
+        stats.tree.cache_only_blocks,
+        cache_only_outside_heap_min,
+        candidates,
+        has_unfrozen_candidate,
+        rejected_candidates,
+        pending_eviction_releases,
+        stats.tree.blocksWithRef(BlockTreeRefType::CACHE),
+        stats.tree.blocksWithRef(BlockTreeRefType::LOAD),
+        stats.tree.blocksWithRef(BlockTreeRefType::EVICTION),
+        stats.tree.blocksWithRef(BlockTreeRefType::STORE),
+        stats.tree.blocksWithRef(BlockTreeRefType::FROZEN),
+        stats.request_ref_blocks,
+        stats.remote_connector_ref_blocks,
+        stats.pd_connector_ref_blocks);
 }
 
 bool BlockTreeEvictor::dropLocked(size_t                 group_set_id,
