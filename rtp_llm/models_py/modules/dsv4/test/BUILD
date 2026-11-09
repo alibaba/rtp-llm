@@ -12,6 +12,14 @@ _MODEL_TEST_DEPS = [
     "//rtp_llm:testlib",
 ]
 
+# Source GLM53 mHC initial-pre contract: keep one-token reductions across
+# decode/verify padding and prefill token shards without changing other models.
+dsv4_sm100_py_test(
+    name = "test_glm53_mhc_pre_batch_invariance",
+    tags = ["manual"],
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py:tile_kernels_mhc"],
+)
+
 # CPU math and mocked transport tests still need the CUDA13 Python import
 # closure. Run them alongside GPU tests, with one isolated process per file.
 _CP_HELPER_TESTS = [

@@ -237,3 +237,14 @@ py_library(
     visibility = ["//visibility:public"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "glm53_indexer_state_cache_test",
+    srcs = ["glm53_indexer_state_cache_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+    tags = [
+        "L20_CU13",
+        "open_skip",
+    ],
+    exec_properties = {"gpu": "L20_CU13"},
+)

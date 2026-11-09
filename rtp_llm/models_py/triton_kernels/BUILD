@@ -49,6 +49,12 @@ py_library(
 )
 
 py_library(
+    name = "glm53_kda",
+    srcs = glob(["glm53_kda/*.py"]),
+    deps = [":autotune_cache", ":common", ":fla"],
+)
+
+py_library(
     name = "moe",
     srcs = glob(["moe/*.py"]),
     deps = ["//rtp_llm/models_py:utils"],
@@ -95,6 +101,7 @@ py_library(
         ":autotune_cache",
         ":fla",
         ":kimi_kda",
+        ":glm53_kda",
         ":causal_conv1d",
         ":moe",
         ":common",

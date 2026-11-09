@@ -616,8 +616,8 @@ decord==0.6.0 \
 deep-ep==2.1.0+a56d615 \
     --hash=sha256:76c04452cfbd8acf363ceeea1b59dc95b970fc945f86dec5b39bbb1b200dfcf0
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
-deep-gemm==2.8.0+122e18b.cu132 \
-    --hash=sha256:5d5afc1d58bb24f7c8a460f74e8dff39a99d7a6ebae35152cdcfd5f393ead080
+deep-gemm==2.8.2+b0673a4.cu132 \
+    --hash=sha256:e44fd8979e08c71d87588cae18a503cb1803f9dbd6ff777eeb0f628a3aca3c6f
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \

@@ -1,0 +1,503 @@
+# Fused recurrent KDA kernel for rtp-llm decode.
+# Combines fla's gate logic (USE_GATE_IN_KERNEL, softplus, A_log, dt_bias)
+# with rtp-llm's block_map-based continuous batching for ssm_state indexing.
+
+import logging
+import os
+from typing import Optional
+
+import torch
+import triton
+import triton.language as tl
+from rtp_llm.models_py.triton_kernels.fla.op import exp, softplus
+
+logger = logging.getLogger(__name__)
+
+
+def _verify_launch_config():
+    value = os.environ.get("GLM53_KDA_VERIFY_CONFIG", "16,1,3")
+    if value in ("", "0"):
+        return None
+    try:
+        config = tuple(int(part) for part in value.split(","))
+    except ValueError as error:
+        raise ValueError("GLM53_KDA_VERIFY_CONFIG must be BV,warps,stages") from error
+    if (
+        len(config) != 3
+        or config[0] not in (8, 16, 32, 64)
+        or config[1] not in (1, 2, 4, 8)
+        or config[2] not in (1, 2, 3)
+    ):
+        raise ValueError("unsupported GLM53_KDA_VERIFY_CONFIG")
+    logger.info("GLM53 KDA verify launch config: %s", config)
+    return config
+
+
+_VERIFY_LAUNCH_CONFIG = _verify_launch_config()
+_HOIST_GATE_ENABLED = os.environ.get("GLM53_KDA_HOIST_GATE", "1") == "1"
+# T includes the target token: MTP4 requires T=5, not the old T=4 path.
+# The changed BV/warp reduction can change rounding; =0 restores that path.
+_FAST_VERIFY_ENABLED = os.environ.get("GLM53_KDA_FAST_VERIFY", "1") == "1"
+# Roll back the additional T=2/6/8 shapes without losing the existing MTP4 path.
+_WIDE_VERIFY_ENABLED = os.environ.get("GLM53_KDA_WIDE_VERIFY", "1") == "1"
+
+
+@triton.jit
+def cal_block_idx(x, seq_size_per_block):
+    return (x - 1) // seq_size_per_block
+
+
+@triton.heuristics(
+    {
+        "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
+        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+        "IS_CONTINUOUS_BATCHING": lambda args: args["block_map"] is not None,
+        "HAS_DT_BIAS": lambda args: args["dt_bias"] is not None,
+        "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
+    }
+)
+@triton.jit(do_not_specialize=["N", "T"])
+def fused_recurrent_kda_fwd_kernel(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    A_log,
+    dt_bias,
+    o,
+    h0,
+    ht,
+    cu_seqlens,
+    block_map,
+    sequence_lengths,
+    max_block_size: tl.int64,
+    lower_bound,
+    scale: tl.constexpr,
+    N: tl.int64,
+    T: tl.int64,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    stride_init_state_token: tl.constexpr,
+    stride_final_state_token: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr,
+    INPLACE_FINAL_STATE: tl.constexpr,
+    IS_BETA_HEADWISE: tl.constexpr,
+    USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    IS_CONTINUOUS_BATCHING: tl.constexpr,
+    SEQ_SIZE_PER_BLOCK: tl.constexpr,
+    USE_GATE_IN_KERNEL: tl.constexpr,
+    HAS_DT_BIAS: tl.constexpr,
+    USE_LOWER_BOUND: tl.constexpr,
+    APPLY_BETA_SIGMOID: tl.constexpr,
+    ALLOW_NEG_EIGVAL: tl.constexpr,
+    STATE_V_FIRST: tl.constexpr,
+    STORE_STATES: tl.constexpr,
+    HOIST_GATE: tl.constexpr,
+    num_stages: tl.constexpr,
+):
+    pid = tl.program_id(0).to(tl.int64)
+    NV = tl.cdiv(V, BV)
+    NK = tl.cdiv(K, BK)
+    i_k = pid % NK
+    pid_rest = pid // NK
+    i_v = pid_rest % NV
+    i_nh = pid_rest // NV
+    i_n, i_hv = i_nh // HV, i_nh % HV
+    i_h = i_hv // (HV // H)
+
+    if IS_VARLEN:
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
+            cu_seqlens + i_n + 1
+        ).to(tl.int64)
+        T = eos - bos
+    else:
+        bos, eos = i_n * T, i_n * T + T
+
+    if IS_CONTINUOUS_BATCHING:
+        sequence_length = tl.load(sequence_lengths + i_n).to(tl.int64)
+    else:
+        sequence_length = 0
+
+    if T <= 0:
+        return
+
+    o_k = i_k * BK + tl.arange(0, BK).to(tl.int64)
+    o_v = i_v * BV + tl.arange(0, BV).to(tl.int64)
+
+    p_q = q + (bos * H + i_h) * K + o_k
+    p_k = k + (bos * H + i_h) * K + o_k
+    p_v = v + (bos * HV + i_hv) * V + o_v
+    if IS_BETA_HEADWISE:
+        p_beta = beta + (bos * HV + i_hv) * V + o_v
+    else:
+        p_beta = beta + bos * HV + i_hv
+    # KDA: g is per-dim [B, T, HV, K]
+    p_g = g + (bos * HV + i_hv) * K + o_k
+    p_o = o + (bos * HV + i_hv) * V + o_v
+
+    mask_k = o_k < K
+    mask_v = o_v < V
+    mask_h = mask_v[:, None] & mask_k[None, :]
+
+    # Match FLA's transpose_state_layout=True arithmetic: keep the register
+    # tile [V,K], while translating addresses to RTP's canonical [K,V] cache.
+    b_h = tl.zeros([BV, BK], dtype=tl.float32)
+    if USE_INITIAL_STATE:
+        if IS_CONTINUOUS_BATCHING:
+            load_block_offset = cal_block_idx(sequence_length - 1, SEQ_SIZE_PER_BLOCK)
+            read_block_id = tl.load(
+                block_map + i_n * max_block_size + load_block_offset
+            ).to(tl.int64)
+            if read_block_id <= 0:
+                return
+            p_h0 = h0 + read_block_id * stride_init_state_token + i_hv * K * V
+        else:
+            p_h0 = h0 + (i_n * HV + i_hv) * K * V
+        if STATE_V_FIRST:
+            p_h0 = p_h0 + o_v[:, None] * K + o_k[None, :]
+        else:
+            p_h0 = p_h0 + o_k[None, :] * V + o_v[:, None]
+        b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+
+    if HOIST_GATE and USE_GATE_IN_KERNEL:
+        gate_rate_invariant = exp(tl.load(A_log + i_hv).to(tl.float32))
+        if HAS_DT_BIAS:
+            gate_bias_invariant = tl.load(
+                dt_bias + i_hv * K + o_k, mask=mask_k, other=0
+            ).to(tl.float32)
+
+    for i_t in tl.range(0, T, num_stages=num_stages):
+        b_q = tl.load(p_q, mask=mask_k, other=0, eviction_policy="evict_last").to(
+            tl.float32
+        )
+        b_k = tl.load(p_k, mask=mask_k, other=0, eviction_policy="evict_last").to(
+            tl.float32
+        )
+        b_v = tl.load(p_v, mask=mask_v, other=0, eviction_policy="evict_first").to(
+            tl.float32
+        )
+
+        if USE_QK_L2NORM_IN_KERNEL:
+            b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
+            b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+        b_q = b_q * scale
+
+        # Load raw gate and apply gate activation if needed.
+        b_g = tl.load(p_g, mask=mask_k, other=0, eviction_policy="evict_last").to(
+            tl.float32
+        )
+        if USE_GATE_IN_KERNEL:
+            if HOIST_GATE:
+                gate_rate = gate_rate_invariant
+                if HAS_DT_BIAS:
+                    b_g = b_g + gate_bias_invariant
+            else:
+                b_A = tl.load(A_log + i_hv).to(tl.float32)
+                if HAS_DT_BIAS:
+                    b_bias = tl.load(
+                        dt_bias + i_hv * K + o_k,
+                        mask=mask_k,
+                        other=0,
+                    ).to(tl.float32)
+                    b_g = b_g + b_bias
+                gate_rate = exp(b_A)
+            if USE_LOWER_BOUND:
+                b_gk = lower_bound * tl.sigmoid(gate_rate * b_g)
+            else:
+                b_gk = -gate_rate * softplus(b_g)
+        else:
+            b_gk = b_g
+
+        b_h *= exp(b_gk[None, :])
+
+        b_v -= tl.sum(b_h * b_k[None, :], 1)
+        if IS_BETA_HEADWISE:
+            b_beta = tl.load(
+                p_beta,
+                mask=mask_v,
+                other=0,
+                eviction_policy="evict_first",
+            ).to(tl.float32)
+        else:
+            b_beta = tl.load(p_beta, eviction_policy="evict_last").to(tl.float32)
+        if APPLY_BETA_SIGMOID:
+            b_beta = tl.sigmoid(b_beta)
+            if ALLOW_NEG_EIGVAL:
+                b_beta = b_beta * 2
+        b_v *= b_beta
+
+        b_h += b_v[:, None] * b_k[None, :]
+        b_o = tl.sum(b_h * b_q[None, :], 1)
+        tl.store(
+            p_o,
+            b_o.to(p_o.dtype.element_ty),
+            mask=mask_v,
+            eviction_policy="evict_first",
+        )
+
+        if IS_CONTINUOUS_BATCHING and STORE_STATES:
+            if INPLACE_FINAL_STATE:
+                write_block_offset = (
+                    cal_block_idx(sequence_length, SEQ_SIZE_PER_BLOCK) + i_t
+                )
+                write_block_id = tl.load(
+                    block_map + i_n * max_block_size + write_block_offset
+                ).to(tl.int64)
+                p_ht = ht + write_block_id * stride_final_state_token
+            else:
+                p_ht = ht + (bos + i_t) * stride_final_state_token
+            p_ht = p_ht + i_hv * K * V
+            if STATE_V_FIRST:
+                p_ht = p_ht + o_v[:, None] * K + o_k[None, :]
+            else:
+                p_ht = p_ht + o_k[None, :] * V + o_v[:, None]
+            tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+
+        p_q += H * K
+        p_k += H * K
+        p_o += HV * V
+        p_v += HV * V
+        p_g += HV * K
+        p_beta += HV * (V if IS_BETA_HEADWISE else 1)
+
+    if not IS_CONTINUOUS_BATCHING and STORE_STATES:
+        p_ht = ht + (i_n * HV + i_hv) * K * V
+        if STATE_V_FIRST:
+            p_ht = p_ht + o_v[:, None] * K + o_k[None, :]
+        else:
+            p_ht = p_ht + o_k[None, :] * V + o_v[:, None]
+        tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+
+
+def fused_recurrent_kda_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor,
+    A_log: Optional[torch.Tensor] = None,
+    dt_bias: Optional[torch.Tensor] = None,
+    inplace_final_state: bool = True,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    block_map: Optional[torch.Tensor] = None,
+    seq_size_per_block: int = 1,
+    sequence_lengths: Optional[torch.Tensor] = None,
+    use_qk_l2norm_in_kernel: bool = False,
+    use_gate_in_kernel: bool = False,
+    use_beta_sigmoid_in_kernel: bool = False,
+    allow_neg_eigval: bool = False,
+    lower_bound: Optional[float] = None,
+    state_v_first: bool = False,
+    decode_low_warps: bool = False,
+    store_states: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not store_states and (
+        block_map is None or initial_state is None or not inplace_final_state
+    ):
+        raise ValueError(
+            "KDA no-store verification requires an existing paged state pool"
+        )
+    B, T, H, K, V = *k.shape, v.shape[-1]
+    HV = v.shape[2]
+    N = B if cu_seqlens is None else len(cu_seqlens) - 1
+    BK, BV = triton.next_power_of_2(K), 32
+    num_warps = 4
+    num_stages = 2
+    if (
+        decode_low_warps
+        and block_map is not None
+        and (
+            (T == 1 and 16 <= N <= 64)
+            or (T == 4 and cu_seqlens is None and 1 <= N <= 64)
+            or (
+                _VERIFY_LAUNCH_CONFIG is not None
+                and N == 48
+                and T == 4
+                and cu_seqlens is None
+            )
+        )
+        and H == HV == 64
+        and K == V == 128
+        and not state_v_first
+        and initial_state is not None
+        and initial_state.dtype == torch.float32
+    ):
+        capability = torch.cuda.get_device_capability(q.device)
+        # Keep the K reduction inside one warp. The four-token MTP verify
+        # path otherwise pays for cross-warp reductions on every checkpoint.
+        # SM103 retains its existing single-token tuning until verify is measured.
+        if capability == (10, 0) or (T == 1 and capability == (10, 3)):
+            BV, num_warps = 16, 1
+        # Keep experimental tuning inside the measured full-batch verify
+        # domain (T=4 already uses BV=16 and one warp upstream).
+        # Other devices, shapes and single-token decode retain their
+        # existing launch configuration and FP32 state arithmetic.
+        if (
+            capability == (10, 0)
+            and N == 48
+            and T == 4
+            and cu_seqlens is None
+            and _VERIFY_LAUNCH_CONFIG is not None
+        ):
+            BV, num_warps, num_stages = _VERIFY_LAUNCH_CONFIG
+    legacy_verify_shape = (N == 48 and 2 <= T <= 6) or (T == 5 and 16 <= N <= 64)
+    # The wider schedule is measured on SM100 with the native 128-token,
+    # FP32 K-first paged state. Keep the state tape and replay contracts intact.
+    wide_verify_shape = (
+        _WIDE_VERIFY_ENABLED
+        and 8 <= N <= 64
+        and T in (2, 6, 8)
+        and seq_size_per_block == 128
+        and sequence_lengths is not None
+        and inplace_final_state
+        and store_states
+    )
+    if (
+        _FAST_VERIFY_ENABLED
+        and decode_low_warps
+        and (legacy_verify_shape or wide_verify_shape)
+        and cu_seqlens is None
+        and block_map is not None
+        and H == HV == 64
+        and K == V == 128
+        and not state_v_first
+        and initial_state is not None
+        and initial_state.dtype == torch.float32
+        and torch.cuda.get_device_capability(q.device) == (10, 0)
+    ):
+        BV, num_warps, num_stages = _VERIFY_LAUNCH_CONFIG or (16, 1, 3)
+    NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
+    assert NK == 1, "NK > 1 is not supported yet"
+
+    o = torch.zeros_like(v)
+    if inplace_final_state:
+        assert initial_state is not None
+        final_state = initial_state
+    else:
+        state_shape = (N, HV, V, K) if state_v_first else (N, HV, K, V)
+        final_state = q.new_empty(*state_shape, dtype=torch.float32)
+
+    stride_init_state_token = (
+        initial_state.stride(0) if initial_state is not None else 1
+    )
+    stride_final_state_token = final_state.stride(0) if final_state is not None else 1
+
+    max_block_size = 0
+    if block_map is not None:
+        assert block_map.ndim == 2, "block_map must be a 2D tensor"
+        max_block_size = block_map.shape[1]
+
+    grid = (NK * NV * N * HV,)
+    fused_recurrent_kda_fwd_kernel[grid](
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        o=o,
+        h0=initial_state,
+        ht=final_state,
+        cu_seqlens=cu_seqlens,
+        block_map=block_map,
+        sequence_lengths=sequence_lengths,
+        max_block_size=max_block_size,
+        lower_bound=lower_bound,
+        scale=scale,
+        N=N,
+        T=T,
+        H=H,
+        HV=HV,
+        K=K,
+        V=V,
+        BK=BK,
+        BV=BV,
+        stride_init_state_token=stride_init_state_token,
+        stride_final_state_token=stride_final_state_token,
+        IS_BETA_HEADWISE=beta.ndim == v.ndim,
+        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        INPLACE_FINAL_STATE=inplace_final_state,
+        SEQ_SIZE_PER_BLOCK=seq_size_per_block,
+        USE_GATE_IN_KERNEL=use_gate_in_kernel,
+        APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
+        ALLOW_NEG_EIGVAL=allow_neg_eigval,
+        STATE_V_FIRST=state_v_first,
+        STORE_STATES=store_states,
+        HOIST_GATE=(
+            _HOIST_GATE_ENABLED
+            and N == 48
+            and (T == 4 or (_FAST_VERIFY_ENABLED and 2 <= T <= 6))
+            and cu_seqlens is None
+            and H == HV == 64
+            and K == V == 128
+            and initial_state is not None
+            and initial_state.dtype == torch.float32
+        ),
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+    return o, final_state
+
+
+def fused_recurrent_kda(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float = None,
+    initial_state: torch.Tensor = None,
+    A_log: Optional[torch.Tensor] = None,
+    dt_bias: Optional[torch.Tensor] = None,
+    inplace_final_state: bool = True,
+    use_qk_l2norm_in_kernel: bool = False,
+    use_gate_in_kernel: bool = False,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    block_map: Optional[torch.Tensor] = None,
+    seq_size_per_block: int = 1,
+    sequence_lengths: Optional[torch.Tensor] = None,
+    use_beta_sigmoid_in_kernel: bool = False,
+    allow_neg_eigval: bool = False,
+    lower_bound: Optional[float] = None,
+    state_v_first: bool = False,
+    decode_low_warps: bool = False,
+    store_states: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if scale is None:
+        scale = k.shape[-1] ** -0.5
+    if beta is None:
+        beta = torch.ones_like(q[..., 0])
+    o, final_state = fused_recurrent_kda_fwd(
+        q=q,
+        k=k,
+        v=v,
+        g=g.contiguous(),
+        beta=beta.contiguous(),
+        scale=scale,
+        initial_state=initial_state,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        inplace_final_state=inplace_final_state,
+        cu_seqlens=cu_seqlens,
+        block_map=block_map,
+        seq_size_per_block=seq_size_per_block,
+        sequence_lengths=sequence_lengths,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_gate_in_kernel=use_gate_in_kernel,
+        use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+        allow_neg_eigval=allow_neg_eigval,
+        lower_bound=lower_bound,
+        state_v_first=state_v_first,
+        decode_low_warps=decode_low_warps,
+        store_states=store_states,
+    )
+    return o, final_state

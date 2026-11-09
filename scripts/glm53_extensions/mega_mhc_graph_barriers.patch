@@ -1,0 +1,25 @@
+--- a/csrc/apis/mega_mhc.hpp
++++ b/csrc/apis/mega_mhc.hpp
+@@ -3,0 +4 @@
++#include <vector>
+@@ -29,0 +31 @@
++    static std::unordered_map<int, std::vector<torch::Tensor>> spare_barriers_by_device;
+@@ -32,5 +34,13 @@
+-        // Warm up each stream before capture so one-time zeroing is not replayed with the graph.
+-        DG_HOST_ASSERT(c10::cuda::currentStreamCaptureStatusMayInitCtx() == c10::cuda::CaptureStatus::None);
+-        split_barriers = torch::zeros(
+-            {mhc_layout::kNumSplitBarriers, mhc_layout::kNumMaxMBlocks, mhc_layout::kSplitBarrierLineBytes},
+-            options.dtype(torch::kByte));
++        auto& spares = spare_barriers_by_device[static_cast<int>(stream.device_index())];
++        if (spares.empty()) {
++            // RTP warms on its execution stream and captures on a distinct
++            // stream. Allocate zeroed, independent per-stream barriers before
++            // capture; never allocate or zero a new barrier inside a graph.
++            DG_HOST_ASSERT(c10::cuda::currentStreamCaptureStatusMayInitCtx() == c10::cuda::CaptureStatus::None);
++            for (int i = 0; i < 8; ++i)
++                spares.emplace_back(torch::zeros(
++                    {mhc_layout::kNumSplitBarriers, mhc_layout::kNumMaxMBlocks, mhc_layout::kSplitBarrierLineBytes},
++                    options.dtype(torch::kByte)));
++        }
++        split_barriers = spares.back();
++        spares.pop_back();
