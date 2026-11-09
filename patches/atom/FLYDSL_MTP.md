@@ -1,10 +1,10 @@
 # RTP FlyDSL GDN MTP adapter
 
-On supported ROCm RTP targets, `ATOM_RTP_ENABLE_REPLAYSSM` selects the path:
-`1` (default) uses FlyDSL with hybrid replay; `0` uses plain FlyDSL;
-`legacy` selects the old ReplaySSM implementation for comparison.
-The former `ATOM_RTP_REPLAY_HYBRID` and `ATOM_RTP_FLYDSL_GDN_MTP`
-switches are ignored. Unsupported hybrid-consensus topologies retain FlyDSL.
+RTP consumes the existing `atom.utils.envs.ATOM_ENABLE_REPLAYSSM` setting.
+On supported ROCm RTP targets, unset/`1` selects FlyDSL with hybrid replay;
+`0` selects plain FlyDSL. No RTP-specific ReplaySSM switch is needed.
+Retired RTP-specific switches are ignored. Unsupported hybrid-consensus
+topologies retain FlyDSL. Standalone and SGLang keep their native semantics.
 
 
 The chain kernel is extended with independent initial read slots; each verify

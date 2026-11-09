@@ -635,20 +635,20 @@ new file mode 100644
 --- /dev/null
 +++ b/atom/plugin/rtpllm/utils/replay_policy.py
 @@ -0,0 +1,14 @@
-+"""One RTP ReplaySSM switch: 1=hybrid (ROCm default), 0=FlyDSL, legacy=old replay."""
-+import os
++"""Use ATOM's existing ReplaySSM switch for the RTP hybrid implementation."""
 +import torch
++from atom.utils import envs
 +
 +
 +def replay_mode():
-+    mode = os.getenv("ATOM_RTP_ENABLE_REPLAYSSM", "1" if torch.version.hip else "0")
-+    if mode not in ("0", "1", "legacy"):
-+        raise ValueError("ATOM_RTP_ENABLE_REPLAYSSM must be 0, 1 or legacy")
-+    return mode
++    override = envs.ATOM_ENABLE_REPLAYSSM
++    enabled = bool(torch.version.hip) if override is None else override
++    return "1" if enabled else "0"
 +
 +
 +def flydsl_mtp_enabled():
-+    return bool(torch.version.hip) and replay_mode() != "legacy"
++    # ReplaySSM selects the hybrid algorithm, which also uses FlyDSL MTP.
++    return bool(torch.version.hip)
 diff --git a/atom/plugin/rtpllm/utils/replayssm_rtp.py b/atom/plugin/rtpllm/utils/replayssm_rtp.py
 new file mode 100644
 --- /dev/null

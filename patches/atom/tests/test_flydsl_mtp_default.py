@@ -1,42 +1,36 @@
-"""CPU-only unified ReplaySSM policy regression against the patched wheel."""
+"""RTP must consume the existing ATOM ReplaySSM environment setting."""
+import os
+from unittest.mock import patch
+import torch
+from atom.utils import envs
 import importlib.metadata
 import importlib.util
-import os
-import sys
-import types
-from pathlib import Path
-from unittest.mock import patch
+
+# Load only the policy module; importing the RTP utils package initializes GPU kernels.
+source = importlib.metadata.distribution("atom").locate_file(
+    "atom/plugin/rtpllm/utils/replay_policy.py")
+spec = importlib.util.spec_from_file_location("replay_policy_test", source)
+policy = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(policy)
+replay_mode = policy.replay_mode
+flydsl_mtp_enabled = policy.flydsl_mtp_enabled
 
 
 def test_default_policy():
-    source = Path(importlib.metadata.distribution("atom").locate_file(
-        "atom/plugin/rtpllm/utils/replay_policy.py"))
-    torch = types.SimpleNamespace(version=types.SimpleNamespace(hip="7.0"))
-    with patch.dict(sys.modules, {"torch": torch}):
-        spec = importlib.util.spec_from_file_location("policy_test", source)
-        policy = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(policy)
-    for hip, value, expected, flydsl in [
-        ("7", None, "1", True), ("7", "1", "1", True),
-        ("7", "0", "0", True), ("7", "legacy", "legacy", False),
-        (None, None, "0", False),
+    for hip, value, override, mode in [
+        ("7", None, None, "1"), ("7", "1", True, "1"),
+        ("7", "0", False, "0"), (None, None, None, "0"),
     ]:
-        torch.version.hip = hip
-        env = {"ATOM_RTP_REPLAY_HYBRID": "1", "ATOM_RTP_FLYDSL_GDN_MTP": "0"}
+        old = {"ATOM_RTP_ENABLE_REPLAYSSM": "legacy",
+               "ATOM_RTP_REPLAY_HYBRID": "0", "ATOM_RTP_FLYDSL_GDN_MTP": "0"}
         if value is not None:
-            env["ATOM_RTP_ENABLE_REPLAYSSM"] = value
-        with patch.dict(os.environ, env, clear=True):
-            assert policy.replay_mode() == expected
-            assert policy.flydsl_mtp_enabled() == flydsl
-    with patch.dict(os.environ, {"ATOM_RTP_ENABLE_REPLAYSSM": "invalid"}, clear=True):
-        try:
-            policy.replay_mode()
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("Invalid replay mode was accepted")
+            old["ATOM_ENABLE_REPLAYSSM"] = value
+        with patch.dict(os.environ, old, clear=True), patch.object(torch.version, "hip", hip):
+            assert envs.ATOM_ENABLE_REPLAYSSM is override
+            assert replay_mode() == mode
+            assert flydsl_mtp_enabled() == bool(hip)
 
 
 if __name__ == "__main__":
     test_default_policy()
-    print("Unified ReplaySSM policy PASS")
+    print("Native ATOM ReplaySSM policy PASS")
