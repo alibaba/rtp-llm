@@ -559,6 +559,34 @@ class RtpSchedulerTest {
         }
     }
 
+    @Test void schedulerMetricsCountOnlyPostAdmissionQueuesAndKvLoading() throws Exception {
+        var config = config("prefill", "1", 2, 0, true);
+        var remote = new CompletableFuture<Integer>();
+        try (var cache = new KvCacheManager(2, 8, 0, true, keys -> remote);
+             var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
+            var sequence = new CacheSequence(2, List.of(1, 2, 3, 4, 5), List.of());
+            scheduler.enqueue(new EngineScheduler.Input("restore", 1, 0, 5, 1, 0, System.nanoTime(),
+                Long.MAX_VALUE, sequence, true, false, 0, false), new Listener());
+            assertNull(scheduler.schedule());
+            var text = scheduler.metrics().scrape();
+            assertEquals(0, RtpMetricsTest.mean(text, "rtp_llm_wait_stream_size", ""));
+            assertEquals(1, RtpMetricsTest.mean(text, "rtp_llm_loading_cache_stream_size", ""));
+
+            scheduler.enqueue(input(2, false), new Listener());
+            var forward = scheduler.schedule();
+            assertEquals(List.of(2L), ids(forward));
+            scheduler.enqueue(input(3, false), new Listener());
+            text = scheduler.metrics().scrape();
+            assertEquals(1, RtpMetricsTest.sample(text, "rtp_llm_scheduler_requests", "state=\"waiting\""));
+            assertEquals(0, RtpMetricsTest.mean(text, "rtp_llm_wait_stream_size", ""));
+            assertEquals(2, RtpMetricsTest.sample(text, "rtp_llm_wait_stream_size_count", ""));
+            assertEquals(1, RtpMetricsTest.sample(text, "rtp_llm_running_stream_size_sum", ""));
+            assertEquals(1, RtpMetricsTest.mean(text, "rtp_llm_loading_cache_stream_size", ""));
+            complete(scheduler, forward, config);
+            drain(scheduler);
+        }
+    }
+
     @Test void asynchronousKvPreparationWakesEngineAndCancellationReleasesLease() throws Exception {
         for (boolean cancel : List.of(false, true)) {
             var config = config("prefill", "1", 2, 0, true);
@@ -855,7 +883,7 @@ class RtpSchedulerTest {
                 assertEquals(6, request.snapshot().generated());
                 assertEquals(width == 1 ? 5 : 2, rounds);
                 var metrics = scheduler.metrics().scrape();
-                assertEquals(0, RtpMetricsTest.sample(metrics, "rtp_llm_wait_stream_size", ""));
+                assertEquals(0, RtpMetricsTest.mean(metrics, "rtp_llm_wait_stream_size", ""));
                 assertEquals(5, RtpMetricsTest.sample(metrics, "rtp_llm_forward_tokens_total", "kind=\"output\""));
                 assertEquals(16, cache.snapshot(0, false).freeBlocks());
             }

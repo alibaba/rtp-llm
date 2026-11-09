@@ -138,7 +138,7 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
             assert query('rtp_llm_input_token_length{job="mock"}') == []
             native = query('rtp_llm_kv_cache_left_seq{job="mock"}')
             assert len(native) == 2 and all(float(row['value'][1]) >= 0 for row in native)
-            assert len(query('rtp_llm_wait_stream_size{job="mock"}')) == 2
+            assert len(query('rtp_llm_wait_stream_size_count{job="mock"}')) == 2
             assert query('mock_engine_requests_started_total{job="mock"}') == []
             result = await task
             assert result['status'] == ('FAIL' if mode == 'gate_fail' else 'PASS'), result

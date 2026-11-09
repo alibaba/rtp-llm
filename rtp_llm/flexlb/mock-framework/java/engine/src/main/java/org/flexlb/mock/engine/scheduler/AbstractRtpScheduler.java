@@ -185,6 +185,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
                 running.add(stream); selected.add(stream);
             }
         }
+        queueSnapshot(true);
         if (selected.isEmpty()) return null;
         var members = new ArrayList<Member>();
         for (var stream : selected) {
@@ -522,19 +523,24 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         return true;
     }
     @Override public List<Request> requests() { return new ArrayList<>(active.values()); }
-    @Override public QueueSnapshot queues() {
-        int queued = 0, executing = 0, loading = 0, ready = 0;
-        var waitingMembers = waitingStreams();
+    @Override public QueueSnapshot queues() { return queueSnapshot(false); }
+
+    private QueueSnapshot queueSnapshot(boolean reportRound) {
+        int queued = 0, executing = 0, kvLoading = 0, protocolWaiting = 0, ready = 0;
         for (var stream : active.values()) {
             if (stream.state.terminating()) continue;
             if (running.contains(stream)) executing++;
-            else if (stream.phase == KV_PREPARING) loading++;
-            else if (waitingMembers.contains(stream) || stream.phase == Phase.CAPACITY) queued++;
-            else if (stream.phase == READY || stream.phase == TRANSFERRING || stream.phase == TRANSFERRED) ready++;
-            else loading++;
+            else switch (stream.phase) {
+                case QUEUED, CAPACITY -> queued++;
+                case KV_PREPARING -> kvLoading++;
+                case READY, TRANSFERRING, TRANSFERRED -> ready++;
+                case WAITING_LOAD, RUNNING, FORWARD -> protocolWaiting++;
+            }
         }
-        return new QueueSnapshot(queued, executing, loading, ready);
+        if (reportRound) metrics.schedulerRound(queued, executing, kvLoading);
+        return new QueueSnapshot(queued, executing, kvLoading + protocolWaiting, ready);
     }
+
     @Override public long nextDeadline() {
         return active.values().stream().filter(stream -> !stream.state.terminating())
             .mapToLong(stream -> stream.input.deadline()).min().orElse(Long.MAX_VALUE);
