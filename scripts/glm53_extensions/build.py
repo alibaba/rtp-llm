@@ -475,9 +475,13 @@ def extend_wheel(wheel, output):
                     continue
                 digest = hashlib.sha256()
                 size = 0
-                with source.open(info) as old, target.open(
-                    info, "w", force_zip64=True
-                ) as new:
+                # Offsets and ZIP64 extra fields belong to the source archive.
+                entry = zipfile.ZipInfo(name, info.date_time)
+                entry.compress_type = info.compress_type
+                entry.create_system = info.create_system
+                entry.external_attr = info.external_attr
+                entry.file_size = info.file_size
+                with source.open(info) as old, target.open(entry, "w") as new:
                     for block in iter(lambda: old.read(1024 * 1024), b""):
                         new.write(block)
                         digest.update(block)

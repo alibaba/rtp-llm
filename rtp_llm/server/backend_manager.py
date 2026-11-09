@@ -125,6 +125,9 @@ class BackendManager(object):
             skip_deepep = engine_config.moe_config.moe_strategy in (
                 "mega_moe",
                 "mega_moe_se",
+                "mega_moe_fp8",
+                "mega_moe_fp8_se",
+                "mega_moe_fused",
             )
             if skip_deepep and engine_config.moe_config.use_deepep_moe:
                 logging.info(
