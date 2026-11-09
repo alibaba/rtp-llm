@@ -338,6 +338,7 @@ build:ascend --linkopt="-lhccl"
 build:ascend --copt=-Wno-deprecated-declarations
 build:ascend --copt="-Wno-error=unused-result"
 build:ascend --copt="-Wno-error=array-bounds"
+build:ascend --copt="-Wno-error"
 build:ascend --copt=-Wno-tautological-compare
 build:ascend --copt=-Wno-array-parameter
 build:ascend --copt=-Wno-unused-variable
