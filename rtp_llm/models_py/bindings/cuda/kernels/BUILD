@@ -209,6 +209,20 @@ cc_library(
 )
 
 cc_library(
+    name = "topk_v3_tie_break",
+    srcs = ["topk_v3_tie_break.cu"],
+    hdrs = ["topk_v3_tie_break.h", "topk_v3_tie_break.cuh"],
+    deps = [
+        ":topk_v3",
+        ":cuda_utils_common",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = dsv4_indexer_topk_cuda_copts,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_graph_prepare",
     srcs = ["cuda_graph_prepare.cu"],
     hdrs = ["cuda_graph_prepare.h"],

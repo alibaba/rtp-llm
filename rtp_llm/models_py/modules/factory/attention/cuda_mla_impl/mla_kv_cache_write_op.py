@@ -19,9 +19,13 @@ class MlaKVCacheWriteOp:
     def __init__(
         self,
         kv_cache_dtype: KvCacheDataType,
+        *,
+        fp8_nope: bool = False,
     ) -> None:
         self.kv_cache_type = (
-            "fp8_ds_mla" if kv_cache_dtype == KvCacheDataType.FP8 else "auto"
+            ("fp8_glm53_mla" if fp8_nope else "fp8_ds_mla")
+            if kv_cache_dtype == KvCacheDataType.FP8
+            else "auto"
         )
         # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode
         self.scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
@@ -33,6 +37,7 @@ class MlaKVCacheWriteOp:
         kv_cache: Optional[LayerKVCache],
         fmha_params: rtp_llm_ops.SparseMlaParams,
         total_global_ids: torch.Tensor = None,
+        slot_mapping_override: Optional[torch.Tensor] = None,
     ) -> None:
         """Write compressed KV and position-encoded key to MLA cache.
 
@@ -42,15 +47,16 @@ class MlaKVCacheWriteOp:
             kv_cache: MLA KV cache with compressed layout
         """
         if kv_cache is not None:
+            slots = slot_mapping_override
+            if slots is None:
+                slots = fmha_params.slot_mapping
+                if total_global_ids is not None:
+                    slots = slots[total_global_ids]
             compute_ops.concat_and_cache_mla(
                 append_ckv_t,
                 key_pe,
                 kv_cache.kv_cache_base,
-                (
-                    fmha_params.slot_mapping
-                    if total_global_ids is None
-                    else fmha_params.slot_mapping[total_global_ids]
-                ),
+                slots,
                 self.kv_cache_type,
                 self.scale,
             )
