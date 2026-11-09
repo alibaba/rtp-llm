@@ -389,7 +389,8 @@ class IndexerOp(nn.Module):
         if self._ppu_stable_topk:
             from rtp_llm.models_py.kernels.ppu.indexer_topk import stable_topk
 
-            stable_topk(logits, row_starts, row_ends, output)
+            stable_topk(logits, row_starts, row_ends, output, max_seq_len)
+            return
         else:
             rtp_llm_ops.topk_v3_tie_break(
                 logits,
@@ -1021,6 +1022,19 @@ class IndexerOp(nn.Module):
 
         return topk_result
 
+    def _prefill_all_keys_fit(self, fmha_params, num_kv_tokens: int) -> bool:
+        # This is common CPU metadata, including cached prefixes. Never infer
+        # the bound from the local query count, which can differ across ranks.
+        maximum = int(getattr(fmha_params, "prefill_max_kv_len", num_kv_tokens))
+        return self._ppu_stable_topk and 0 <= maximum <= self.index_topk
+
+    def _all_topk_ragged_cp(self, rows, num_kv_tokens, starts, ends, offsets, device):
+        from rtp_llm.models_py.kernels.ppu.indexer_topk import all_token_indices
+
+        output = torch.empty((rows, self.index_topk), dtype=torch.int32, device=device)
+        all_token_indices(starts, ends, output, num_kv_tokens, offsets)
+        return output
+
     def _get_topk_ragged_cp(
         self,
         q_fp8: torch.Tensor,
@@ -1097,6 +1111,22 @@ class IndexerOp(nn.Module):
             q0 = q_fp8[:0]
             weights_sq0 = weights_sq[:0]
 
+        prefill_max_kv_len = int(
+            getattr(fmha_params, "prefill_max_kv_len", total_kv_tokens)
+        )
+        if self._prefill_all_keys_fit(fmha_params, total_kv_tokens):
+            # Every causal key is selected, independently of its score. Keys
+            # have already been cached by quant_q_k_cp/quant_k_cp_only. All CP
+            # ranks share this CPU bound, so none enters the KV collectives.
+            return self._all_topk_ragged_cp(
+                q0.shape[0],
+                total_kv_tokens,
+                precomputed_ks,
+                precomputed_ke,
+                precomputed_topk_off,
+                device,
+            )
+
         # Full KV from cache (KV not split).
         k_fp8 = torch.empty(
             (total_kv_tokens, self.index_head_dim),
@@ -1170,9 +1200,6 @@ class IndexerOp(nn.Module):
         if not has_local_ids:
             return torch.empty((0, self.index_topk), dtype=torch.int32, device=device)
         kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
-        prefill_max_kv_len = int(
-            getattr(fmha_params, "prefill_max_kv_len", total_kv_tokens)
-        )
 
         def run_part_logits_topk(
             q_part: torch.Tensor,

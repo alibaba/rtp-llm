@@ -172,6 +172,9 @@ class DenseMLP(nn.Module):
             fp8_out, scale_out = silu_mul_fp8_quantize_128(
                 up.contiguous(),
                 gate_first=True,
+                column_major_scales=self.down_proj.prefers_column_major_scales(
+                    up.shape[0]
+                ),
             )
             output = self.down_proj(fp8_out, input_scales=scale_out)
         elif output is None and self._fuse_silu_quant and up.dim() == 2:

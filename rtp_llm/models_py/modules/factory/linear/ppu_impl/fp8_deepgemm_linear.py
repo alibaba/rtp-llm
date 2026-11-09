@@ -29,6 +29,11 @@ class PpuFp8DeepGemmLinear(LinearBase):
 
     QUANT_METHOD = "FP8_PER_BLOCK"
 
+    @staticmethod
+    def prefers_column_major_scales(rows: int) -> bool:
+        """Let fused producers target the default large-M SDK layout."""
+        return rows > 64 and rows % 4 == 0
+
     @classmethod
     def can_handle(
         cls,
@@ -111,21 +116,32 @@ class PpuFp8DeepGemmLinear(LinearBase):
         input: torch.Tensor,
         input_scales: Optional[torch.Tensor] = None,
         *,
-        block_scaled: bool = False,
+        block_scaled: Optional[bool] = None,
     ) -> torch.Tensor:
-        """Use explicit K128 scale/add arithmetic when ``block_scaled`` is set."""
+        """Use K128 FP32 scale/add arithmetic for the optimized small-M path.
+
+        Large prefill matrices retain the SDK GEMM. An explicit selection is
+        available for numerical comparisons and callers that need one backend.
+        """
         if input.shape[-1] != self.k:
             raise ValueError(
                 f"FP8 Linear expected input K={self.k}, got {input.shape[-1]}"
             )
         output_shape = (*input.shape[:-1], self.n)
         input_2d = input.reshape(-1, self.k)
+        if block_scaled is None:
+            block_scaled = input_2d.shape[0] <= 64
         if input_scales is None:
             if input.dtype != torch.bfloat16:
                 raise ValueError(
                     f"FP8 Linear expects BF16 input without scales, got {input.dtype}"
                 )
-            input_q, input_scale = fp8_quantize_128(input_2d)
+            # The SDK otherwise transposes these scales in a separate kernel.
+            # A four-row multiple meets both supported SDK layout contracts.
+            input_q, input_scale = fp8_quantize_128(
+                input_2d,
+                column_major_scales=not block_scaled and input_2d.shape[0] % 4 == 0,
+            )
         else:
             if input.dtype != torch.float8_e4m3fn or not input_2d.is_contiguous():
                 raise ValueError(
@@ -135,12 +151,18 @@ class PpuFp8DeepGemmLinear(LinearBase):
                 input_scales.dtype != torch.float32
                 or input_scales.shape != (input_2d.shape[0], self.k // 128)
                 or input_scales.device != input.device
-                or not input_scales.is_contiguous()
+                or not (
+                    input_scales.is_contiguous()
+                    or input_scales.stride() == (1, input_2d.shape[0])
+                )
             ):
                 raise ValueError(
-                    "prequantized FP8 Linear scales must be contiguous FP32 [M, K/128]"
+                    "prequantized FP8 Linear scales must be row- or column-major FP32 [M, K/128]"
                 )
             input_q, input_scale = input_2d, input_scales
+            if block_scaled and not input_scale.is_contiguous():
+                # The exact small-M kernel still consumes row-major scales.
+                input_scale = input_scale.contiguous()
         if input_2d.shape[0] == 0:
             return torch.empty(output_shape, device=input.device, dtype=torch.bfloat16)
 

@@ -3,6 +3,74 @@ load("@arch_config//:arch_select.bzl", "requirement")
 requirement(["deep_gemm", "flashinfer-python", "numpy", "torch"])
 
 py_test(
+    name = "test_group_topk",
+    srcs = ["test_group_topk.py"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
+    tags = ["PPU-ZW810E", "manual"],
+    target_compatible_with = select({
+        "//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        "//rtp_llm/models_py:internal_kernels",
+        "//rtp_llm/models_py:ppu_modules",
+        ":torch",
+    ],
+)
+
+py_test(
+    name = "test_ragged_fp8_quant",
+    srcs = ["test_ragged_fp8_quant.py"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
+    tags = ["PPU-ZW810E", "manual"],
+    target_compatible_with = select({
+        "//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        "//rtp_llm/models_py:internal_kernels",
+        "//rtp_llm/models_py:ppu_modules",
+        ":torch",
+    ],
+)
+
+py_test(
+    name = "test_sparse_mla_decode",
+    srcs = ["test_sparse_mla_decode.py"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
+    tags = ["PPU-ZW810E", "manual"],
+    target_compatible_with = select({
+        "//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        "//rtp_llm/models_py:internal_kernels",
+        "//rtp_llm/models_py:ppu_modules",
+        ":torch",
+    ],
+)
+
+py_test(
+    name = "test_fp8_normal_layout",
+    srcs = ["test_fp8_normal_layout.py"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
+    tags = ["PPU-ZW810E", "manual"],
+    target_compatible_with = select({
+        "//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        "//rtp_llm/models_py:internal_kernels",
+        "//rtp_llm/models_py:ppu_modules",
+        ":torch",
+    ],
+)
+
+py_test(
     name = "test_fp8_pd_strategy",
     srcs = ["test_fp8_pd_strategy.py"],
     env = {"GPU_COUNT": "1"},
@@ -66,6 +134,23 @@ py_test(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = ["//rtp_llm/models_py:ppu_modules", ":torch"],
+)
+
+py_test(
+    name = "test_indexer_k_rope",
+    srcs = ["test_indexer_k_rope.py"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
+    tags = ["PPU-ZW810E", "manual"],
+    target_compatible_with = select({
+        "//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        "//rtp_llm/models_py:ppu_modules",
+        "//rtp_llm/models_py/triton_kernels:triton_kernels",
+        ":torch",
+    ],
 )
 
 py_test(

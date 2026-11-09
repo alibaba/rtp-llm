@@ -13,6 +13,7 @@ from torch import nn
 from rtp_llm.models_py.model_desc import glm5
 from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
 from rtp_llm.models_py.modules.hybrid import indexer
+from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 from rtp_llm.utils.model_weight import W
 
 
@@ -48,7 +49,7 @@ class Glm5IndexerQueryScaleTest(TestCase):
             scale_fmt="none",
             query_scale_fmt="ue8m0",
             is_neox_style=False,
-            **kwargs
+            **kwargs,
         )
 
     def test_all_query_paths_match_sgl_and_key_cache_bytes_are_unchanged(self):
@@ -156,6 +157,7 @@ class Glm5IndexerQueryScaleTest(TestCase):
             self.assertEqual(
                 observed[-1]["indexer_query_scale_fmt"], "ue8m0" if ppu else None
             )
+            self.assertEqual(observed[-1]["indexer_layernorm_eps"], 1e-6)
 
         attn = SimpleNamespace(
             indexer_head_num=1,
@@ -191,6 +193,52 @@ class Glm5IndexerQueryScaleTest(TestCase):
             )
         self.assertEqual(module.indexer_op.query_scale_fmt, "ue8m0")
         self.assertEqual(module.indexer_op.scale_fmt, "none")
+
+        # Verify the separate epsilon reaches the actual Indexer without
+        # changing either MLA RMSNorm. Small-variance keys expose the difference.
+        mla_config = SimpleNamespace(
+            **vars(attn),
+            head_num=64,
+            nope_head_dim=128,
+            kv_lora_rank=512,
+            v_head_dim=128,
+            q_lora_rank=512,
+            is_sparse=True,
+        )
+        weights[W.mla_q_a_ln_gamma] = torch.ones(
+            512, device="cuda", dtype=torch.bfloat16
+        )
+        weights[W.mla_kv_a_ln_gamma] = torch.ones(
+            512, device="cuda", dtype=torch.bfloat16
+        )
+        with patch.object(
+            indexer.LinearFactory,
+            "create_linear_from_weights",
+            return_value=nn.Identity(),
+        ):
+            attention = MlaAttention(
+                mla_config,
+                parallel,
+                weights,
+                0,
+                1e-5,
+                None,
+                hw_kernel_config=SimpleNamespace(enable_fuse_kernels=False),
+                global_weights={W.rope_cos_sin_cache: self.cache},
+                indexer_layernorm_eps=1e-6,
+            )
+        self.assertEqual(attention.q_a_layernorm.variance_epsilon, 1e-5)
+        self.assertEqual(attention.kv_a_layernorm.variance_epsilon, 1e-5)
+        self.assertEqual(attention.indexer.k_norm.variance_epsilon, 1e-6)
+        key = torch.linspace(-0.002, 0.002, 128, device="cuda").bfloat16()[None]
+        expected = torch.nn.functional.layer_norm(
+            key.float(), (128,), eps=1e-6
+        ).bfloat16()
+        self.assertTrue(
+            torch.allclose(
+                attention.indexer.k_norm(key), expected, atol=0.004, rtol=0.004
+            )
+        )
 
 
 if __name__ == "__main__":

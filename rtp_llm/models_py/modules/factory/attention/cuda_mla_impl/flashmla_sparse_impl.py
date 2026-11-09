@@ -420,6 +420,23 @@ class SparseMlaFp8Op(SparseMlaOp):
             kv_cache = kv_cache.unsqueeze(-2)
 
         rows = q.shape[0]
+        if (
+            _IS_PPU
+            and self._decode_phase
+            and self.kv_lora_rank == 512
+            and self.qk_rope_head_dim == 64
+        ):
+            from rtp_llm.models_py.kernels.ppu.sparse_mla_decode import (
+                sparse_mla_fp8_decode,
+            )
+
+            return sparse_mla_fp8_decode(
+                q,
+                kv_cache,
+                self._convert_topk_indices_to_global(topk_indices),
+                self.scale,
+            )
+
         # dim0 is the batch axis and PPU sizes num_splits by (bs+1,), so the
         # flattened [1, T, ...] form serializes T independent decode rows into
         # one bs=1 request. One query token per request is exactly the case

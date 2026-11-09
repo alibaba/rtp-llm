@@ -235,6 +235,9 @@ class Glm5MoeDecoderLayer(nn.Module):
                 stable_topk=True,
                 # Match GLM's SGL indexer: UE8M0 Q, ordinary FP32 K scales.
                 indexer_query_scale_fmt="ue8m0" if is_ppu() else None,
+                # Indexer LayerNorm has its own epsilon; it must not inherit
+                # the residual/MLA RMSNorm epsilon from the model config.
+                indexer_layernorm_eps=1e-6,
             )
         else:
             attn_configs = config.getAttentionConfigs(

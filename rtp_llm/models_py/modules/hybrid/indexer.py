@@ -302,6 +302,44 @@ class Indexer(nn.Module):
 
         return query, key
 
+    def _forward_all_keys_prefill_cp(
+        self, x, kv_cache, fmha_params, cp_params, x_fp8, x_scale
+    ):
+        from rtp_llm.models_py.kernels.ppu.indexer_k_rope import fused_indexer_k_rope
+
+        if x_fp8 is not None and x_scale is not None:
+            key = self.wk(x_fp8, input_scales=x_scale)
+        else:
+            key = self.wk(x)
+        key = fused_indexer_k_rope(
+            self.k_norm(key),
+            cp_params.full_rope_pos_ids,
+            self.cos_sin_cache,
+            self.is_neox_style,
+        )
+        # Decode still needs exactly the same K cache, including CP restore,
+        # all-gather and sharded physical slot mapping.
+        slot_mapping = (
+            cp_params.sharded_slot_mapping
+            if bool(getattr(cp_params, "kv_cache_sharded", False))
+            else fmha_params.slot_mapping
+        )
+        self.indexer_op.quant_k_cp_only(
+            key, kv_cache, slot_mapping, cp_params.kv_restore_unpad_indices
+        )
+        return self.indexer_op._all_topk_ragged_cp(
+            (
+                0
+                if cp_params.total_local_ids is None
+                else int(cp_params.total_local_ids.numel())
+            ),
+            cp_params.total_kv_len,
+            cp_params.precomputed_ks,
+            cp_params.precomputed_ke,
+            cp_params.precomputed_topk_off,
+            x.device,
+        )
+
     def _get_k_bf16(
         self,
         x: torch.Tensor,
@@ -403,6 +441,28 @@ class Indexer(nn.Module):
 
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None, "cp_params is required for sparse prefill CP"
+
+            if (
+                self._prefill_cp_fused_quant_enabled()
+                and cp_params.full_rope_pos_ids is not None
+                and hidden_states.dtype == torch.bfloat16
+                and self.cos_sin_cache.dtype == torch.float32
+                and self.cos_sin_cache.stride(-1) == 1
+                and cp_params.full_rope_pos_ids.is_contiguous()
+                and self.indexer_op._prefill_all_keys_fit(
+                    fmha_params, cp_params.total_kv_len
+                )
+            ):
+                # Every causal key is selected; Q and head weights cannot
+                # affect the result. Retain K production for later decode.
+                return self._forward_all_keys_prefill_cp(
+                    hidden_states,
+                    kv_cache,
+                    fmha_params,
+                    cp_params,
+                    x_fp8,
+                    x_scale,
+                )
 
         # Fused Q-RoPE-Hadamard-Quant path: single Triton kernel does
         # RoPE + 128-pt Hadamard + ue8m0 FP8 quant for Q (decode only).

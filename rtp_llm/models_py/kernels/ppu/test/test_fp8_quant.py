@@ -17,6 +17,75 @@ class MaskedFp8QuantTest(unittest.TestCase):
         self.assertTrue(torch.cuda.is_available(), "This test requires a PPU worker")
         torch.manual_seed(7331)
 
+    def test_dense_column_major_scales_preserve_quantized_values(self):
+        for rows in [0, 1, 3, 16, 17, 128, 129, 4096]:
+            for hidden in [256, 6144]:
+                with self.subTest(rows=rows, hidden=hidden):
+                    x = torch.randn(rows, hidden, device="cuda", dtype=torch.bfloat16)
+                    old_q, old_s = fp8_quantize_128(x)
+                    q, scales = fp8_quantize_128(x, column_major_scales=True)
+                    self.assertTrue(
+                        torch.equal(q.view(torch.uint8), old_q.view(torch.uint8))
+                    )
+                    self.assertTrue(torch.equal(scales, old_s))
+                    self.assertEqual(scales.shape, old_s.shape)
+                    self.assertEqual(scales.stride(0), 1)
+                    if rows:
+                        self.assertEqual(scales.stride(1), rows)
+
+    def test_dense_column_major_graph_reads_new_values(self):
+        x = torch.randn(17, 256, device="cuda", dtype=torch.bfloat16)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            fp8_quantize_128(x, column_major_scales=True)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            q, scales = fp8_quantize_128(x, column_major_scales=True)
+        for value in [0.0, 1e-7, 1.0, 1000.0]:
+            x.fill_(value)
+            graph.replay()
+            ref_q, ref_s = fp8_quantize_128(x)
+            self.assertTrue(torch.equal(q.view(torch.uint8), ref_q.view(torch.uint8)))
+            self.assertTrue(torch.equal(scales, ref_s))
+
+    def test_dense_default_sdk_uses_scales_without_a_layout_copy(self):
+        from unittest.mock import patch
+
+        import deep_gemm
+
+        import rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_deepgemm_linear as linear
+
+        w = torch.randn(256, 256, device="cuda").to(torch.float8_e4m3fn)
+        ws = torch.ones(2, 2, device="cuda")
+        with patch.object(linear.PpuFp8DeepGemmLinear, "_maybe_warmup"):
+            layer = linear.PpuFp8DeepGemmLinear(w, ws)
+        for rows in [65, 128, 256, 4096]:
+            x = torch.randn(rows, 256, device="cuda", dtype=torch.bfloat16)
+            q, row_scales = fp8_quantize_128(x)
+            expected = layer(q, input_scales=row_scales, block_scaled=False)
+            observed = []
+            original = linear.fp8_gemm_nt
+
+            def inspect_layout(lhs, rhs, output):
+                observed.append(lhs[1])
+                return original(lhs, rhs, output)
+
+            with patch.object(linear, "fp8_gemm_nt", side_effect=inspect_layout):
+                actual = layer(x)
+            self.assertTrue(torch.equal(actual, expected))
+            self.assertEqual(len(observed), 1)
+            if rows % 4 == 0:
+                scales = observed[0]
+                self.assertEqual(scales.stride(), (1, rows))
+                self.assertEqual(
+                    deep_gemm.get_col_major_tma_aligned_tensor(scales).data_ptr(),
+                    scales.data_ptr(),
+                )
+            else:
+                self.assertTrue(observed[0].is_contiguous())
+
     def assert_reference(self, x, counts, q, scales):
         reference_q, reference_s = fp8_quantize_128(x.reshape(-1, x.shape[-1]))
         reference_q = reference_q.view(x.shape)

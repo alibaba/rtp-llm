@@ -65,6 +65,13 @@ class BlockScaledFp8GemmTest(TestCase):
                     )
                     q, s = fp8_quantize_128(x)
                     y = fp8_block_scaled_matmul(q, w, s, ws)
+                    if m <= 64:
+                        with patch.object(linear.PpuFp8DeepGemmLinear, "_maybe_warmup"):
+                            layer = linear.PpuFp8DeepGemmLinear(
+                                w.view(k, n), ws.view(k // 128, (n + 127) // 128)
+                            )
+                        self.assertTrue(torch.equal(layer(q, input_scales=s), y))
+                        del layer
                     record = {
                         "id": f"m{m}_n{n}_k{k}",
                         "q_sha256": sha(q),
@@ -97,7 +104,7 @@ class BlockScaledFp8GemmTest(TestCase):
                 torch.equal(fp8_block_scaled_matmul(q, w, s, ws), expected.bfloat16())
             )
 
-    def test_linear_opt_in_prequant_bias_and_graph_new_values(self):
+    def test_linear_default_prequant_bias_and_graph_new_values(self):
         k, n, m = 256, 128, 7
         w = torch.ones(n, k, device="cuda", dtype=torch.float8_e4m3fn)
         ws = torch.ones(1, 2, device="cuda")
@@ -107,7 +114,7 @@ class BlockScaledFp8GemmTest(TestCase):
         x = torch.ones(m, k, device="cuda", dtype=torch.bfloat16)
 
         def forward():
-            return layer(x, block_scaled=True)
+            return layer(x)
 
         forward()
         torch.cuda.synchronize()
@@ -127,7 +134,9 @@ class BlockScaledFp8GemmTest(TestCase):
             output.fill_(7)
 
         with patch.object(linear, "fp8_gemm_nt", side_effect=native) as native_call:
-            self.assertTrue(torch.equal(layer(x), torch.full_like(y, 8)))
+            self.assertTrue(
+                torch.equal(layer(x, block_scaled=False), torch.full_like(y, 8))
+            )
             native_call.assert_called_once()
         empty = layer(
             torch.empty(0, k, device="cuda", dtype=torch.bfloat16), block_scaled=True

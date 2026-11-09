@@ -55,7 +55,9 @@ class FusedQuantTest(TestCase):
                 scales = torch.empty(
                     rows, hidden // 128, device="cuda", dtype=torch.float32
                 )
-                _fp8_quant_128[(rows, hidden // 128)](x, q, scales, hidden, num_warps=4)
+                _fp8_quant_128[(rows, hidden // 128)](
+                    x, q, scales, rows, hidden, False, num_warps=4
+                )
                 self.assert_quant_equal(fp8_quantize_128(x), (q, scales))
         cases = json.loads(
             Path(__file__).with_name("test_fp8_quant_sgl_golden.json").read_text()
@@ -172,6 +174,45 @@ class FusedQuantTest(TestCase):
             linear(q)
         with self.assertRaises(ValueError):
             linear(q, input_scales=scale[:, :1])
+
+    def test_fused_column_scales_preserve_values_and_both_gemm_backends(self):
+        torch.manual_seed(1988)
+        for rows in [1, 7, 64, 68, 128, 512]:
+            for hidden in [512, 2048, 6144]:
+                x = torch.randn(rows, hidden * 2, device="cuda", dtype=torch.bfloat16)
+                for gate_first in [False, True]:
+                    actual = silu_mul_fp8_quantize_128(
+                        x, gate_first=gate_first, column_major_scales=True
+                    )
+                    self.assert_quant_equal(actual, self.baseline(x, gate_first))
+                    self.assertEqual(actual[1].stride(), (1, rows))
+                weight = torch.randn(hidden, device="cuda", dtype=torch.bfloat16)
+                source = x[:, :hidden]
+                expected = flashinfer.norm.rmsnorm(
+                    source.contiguous(), weight, eps=1e-5
+                )
+                y, q, scales = (
+                    fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
+                        source, weight, 1e-5, column_major_scales=True
+                    )
+                )
+                self.assertTrue(torch.equal(y, expected))
+                self.assert_quant_equal((q, scales), fp8_quantize_128(expected))
+                self.assertEqual(scales.stride(), (1, rows))
+        w = torch.randn(256, 512, device="cuda").to(torch.float8_e4m3fn)
+        ws = torch.rand(2, 4, device="cuda") * 0.01
+        with patch.object(PpuFp8DeepGemmLinear, "_maybe_warmup"):
+            linear = PpuFp8DeepGemmLinear(w.reshape(512, 256), ws.reshape(4, 2))
+        for rows in [1, 7, 64, 68, 128]:
+            x = torch.randn(rows, 512, device="cuda", dtype=torch.bfloat16)
+            q, scales = fp8_quantize_128(x, column_major_scales=True)
+            for backend in [True, False]:
+                self.assertTrue(
+                    torch.equal(
+                        linear(x, block_scaled=backend),
+                        linear(q, input_scales=scales, block_scaled=backend),
+                    )
+                )
 
     def test_norm_and_residual_match_native_rounding_and_strides(self):
         torch.manual_seed(6117)

@@ -43,6 +43,9 @@ from rtp_llm.models_py.kernels.ppu.int8_kernel.fused_silu_mul_int8_quant import 
     silu_and_mul_masked_per_token_quant_int8_fwd,
 )
 from rtp_llm.models_py.kernels.ppu.int8_kernel.int8_quant import per_token_quant_int8
+from rtp_llm.models_py.kernels.ppu.ragged_fp8_quant import (
+    ragged_silu_mul_fp8_quantize_128,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -256,7 +259,9 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
         # alignment == 0 and launch 0-grid Triton scatter / 0-size DeepGEMM.
         if token_num == 0:
             return CombineForwardPayload(
-                fused_expert_output=torch.empty_like(payload.expert_x)
+                fused_expert_output=torch.empty_like(
+                    payload.expert_x, dtype=payload.expert_x_origin_dtype
+                )
             )
         if token_num <= self.masked_max_token_num:
             return self.execute_masked(
@@ -961,7 +966,11 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
             )
         return hidden_states_scale.contiguous()
 
-    def _to_local_expert_ids(self, topk_idx: torch.Tensor) -> torch.Tensor:
+    def _to_local_expert_ids(
+        self, topk_idx: torch.Tensor, *, already_local: bool = False
+    ) -> torch.Tensor:
+        if already_local:
+            return topk_idx
         local = topk_idx - self.start_expert_id
         return torch.where(
             (local >= 0) & (local < self.num_experts_per_partition), local, -1
@@ -979,7 +988,9 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
         with configure_deep_gemm_num_sms(self.num_gemm_sms):
             hidden_states = payload.expert_x
             hidden_states_scale = self._get_dispatch_scale(payload)
-            topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
+            topk_idx = self._to_local_expert_ids(
+                payload.expert_topk_ids, already_local=payload.expert_ids_are_local
+            )
             topk_weights = payload.expert_topk_weights
             tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens
 
@@ -1083,15 +1094,28 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
     ) -> CombineForwardPayload:
         hidden_states = payload.expert_x
         hidden_states_scale = self._get_dispatch_scale(payload)
-        topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
+        topk_idx = self._to_local_expert_ids(
+            payload.expert_topk_ids, already_local=payload.expert_ids_are_local
+        )
         topk_weights = payload.expert_topk_weights
         tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens_cpu
         if isinstance(tokens_per_expert, torch.Tensor):
             tokens_per_expert = tokens_per_expert.tolist()
 
         expert_alignment = 1 if self.use_nopad else self.EXPERT_ALIGNMENT
-        aligned_tokens = [align(count, expert_alignment) for count in tokens_per_expert]
-        all_tokens = sum(aligned_tokens)
+        if tokens_per_expert is None:
+            if not self.use_nopad:
+                raise ValueError("GPU-only expert counts require the nopad executor")
+            # A received row can select at most top_k local experts. GEMM's
+            # ragged scheduler uses the device counts and skips unused capacity.
+            all_tokens = hidden_states.shape[0] * min(
+                self.top_k, self.num_experts_per_partition
+            )
+        else:
+            aligned_tokens = [
+                align(count, expert_alignment) for count in tokens_per_expert
+            ]
+            all_tokens = sum(aligned_tokens)
         device = hidden_states.device
         hidden_states_shape = hidden_states.shape
         if all_tokens <= 0:
@@ -1119,11 +1143,19 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
         input_q = torch.empty(
             (all_tokens, self.hidden_size), device=device, dtype=torch.float8_e4m3fn
         )
-        input_scale = torch.empty(
-            (all_tokens, self.hidden_size // self.DEEPGEMM_BLOCK_SHAPE[1]),
-            device=device,
-            dtype=torch.float32,
-        )
+        scale_groups = self.hidden_size // self.DEEPGEMM_BLOCK_SHAPE[1]
+        if tokens_per_expert is None:
+            # ep_scatter writes the SDK's scale layout directly. Avoid a
+            # transpose/copy of the entire conservative receive capacity.
+            input_scale = torch.empty(
+                (scale_groups, align(all_tokens, 4)),
+                device=device,
+                dtype=torch.float32,
+            ).T[:all_tokens]
+        else:
+            input_scale = torch.empty(
+                (all_tokens, scale_groups), device=device, dtype=torch.float32
+            )
         ep_scatter(
             hidden_states,
             hidden_states_scale,
@@ -1167,7 +1199,14 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
         dispose_tensor(input_q)
         dispose_tensor(input_scale)
 
-        if self._fuse_silu_quant:
+        if self._fuse_silu_quant and tokens_per_expert is None:
+            # Only the live packed prefix was produced by the ragged GEMM.
+            # Keep its length on device and skip unoccupied capacity rows.
+            down_q, down_scale = ragged_silu_mul_fp8_quantize_128(
+                gateup_output, token_counts
+            )
+            dispose_tensor(gateup_output)
+        elif self._fuse_silu_quant:
             down_q, down_scale = silu_mul_fp8_quantize_128(
                 gateup_output,
                 gate_first=False,

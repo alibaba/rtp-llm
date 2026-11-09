@@ -65,6 +65,7 @@ class MlaAttention(nn.Module):
         reuse_topk_indices: bool = False,
         stable_topk: bool = False,
         indexer_query_scale_fmt: Optional[str] = None,
+        indexer_layernorm_eps: Optional[float] = None,
     ):
         super().__init__()
         self.attn_config = attn_config
@@ -92,7 +93,11 @@ class MlaAttention(nn.Module):
                 weights,
                 global_weights,
                 layer_idx,
-                layernorm_eps,
+                (
+                    layernorm_eps
+                    if indexer_layernorm_eps is None
+                    else indexer_layernorm_eps
+                ),
                 quant_config,
                 hw_kernel_config,
                 parallelism_config,
@@ -313,6 +318,11 @@ class MlaAttention(nn.Module):
             # q_b_proj is fp8 we additionally emit fp8+scale (F1b dual output)
             # so q_b_proj can use input_scales= and skip its internal quant.
             if self._fuse_q_a_norm_mode == "fp8_dual":
+                quant_options = {}
+                if _DEVICE_TYPE == DeviceType.Ppu:
+                    quant_options["column_major_scales"] = (
+                        self.q_b_proj.prefers_column_major_scales(q.shape[0])
+                    )
                 q_c, q_c_fp8, q_c_scale = (
                     fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
                         q,
@@ -320,6 +330,7 @@ class MlaAttention(nn.Module):
                         self.q_a_layernorm.variance_epsilon,
                         group_size=128,
                         scale_ue8m0=self.q_b_proj.scale_ue8m0,
+                        **quant_options,
                     )
                 )
             elif self._fuse_q_a_norm_mode == "bf16":

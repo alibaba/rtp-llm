@@ -21,18 +21,20 @@ def _sum32_descending(x, ROWS: tl.constexpr):
     return a + b
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS"])
 def _rmsnorm_quant(
     x_ptr,
     weight_ptr,
     out_ptr,
     q_ptr,
     scales_ptr,
+    ROWS,
     H: tl.constexpr,
     EPS: tl.constexpr,
     X_STRIDE: tl.constexpr,
     BLOCK: tl.constexpr,
     QUANTIZE: tl.constexpr,
+    COLUMN_MAJOR: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     lanes = tl.arange(0, BLOCK // 8)
@@ -73,7 +75,10 @@ def _rmsnorm_quant(
         quantized = quantized.to(q_ptr.dtype.element_ty).reshape((BLOCK,))
         tl.store(q_ptr + row * H + cols, quantized, cols < H)
         groups = tl.arange(0, BLOCK // 128)
-        tl.store(scales_ptr + row * (H // 128) + groups, scale, groups < H // 128)
+        scale_offset = (
+            row + groups * ROWS if COLUMN_MAJOR else row * (H // 128) + groups
+        )
+        tl.store(scales_ptr + scale_offset, scale, groups < H // 128)
 
 
 def _run(
@@ -82,6 +87,7 @@ def _run(
     eps: float,
     residual: Optional[torch.Tensor],
     quantize: bool,
+    column_major_scales: bool = False,
 ):
     if x.ndim != 2:
         raise ValueError("PPU fused RMSNorm expects [M, H]")
@@ -111,16 +117,23 @@ def _run(
         if quantize:
             from rtp_llm.models_py.kernels.ppu.fp8_quant import fp8_quantize_128
 
-            q, scales = fp8_quantize_128(out.contiguous())
+            q, scales = fp8_quantize_128(
+                out.contiguous(), column_major_scales=column_major_scales
+            )
             return out, q, scales
         return out, out, out
     out = torch.empty((rows, hidden), device=x.device, dtype=x.dtype)
     q = torch.empty_like(out, dtype=torch.float8_e4m3fn) if quantize else out
-    scales = (
-        torch.empty((rows, hidden // 128), device=x.device, dtype=torch.float32)
-        if quantize
-        else out
-    )
+    if quantize:
+        scales = (
+            torch.empty((hidden // 128, rows), device=x.device, dtype=torch.float32).T
+            if column_major_scales
+            else torch.empty(
+                (rows, hidden // 128), device=x.device, dtype=torch.float32
+            )
+        )
+    else:
+        scales = out
     if rows:
         _rmsnorm_quant[(rows,)](
             x,
@@ -128,11 +141,13 @@ def _run(
             out,
             q,
             scales,
+            rows,
             hidden,
             eps,
             x.stride(0),
             triton.next_power_of_2(hidden),
             quantize,
+            column_major_scales,
             num_warps=4 if hidden <= 2048 else 8,
             enable_fp_fusion=False,
         )
@@ -149,10 +164,12 @@ def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
     eps=1e-6,
     group_size=128,
     scale_ue8m0=False,
+    *,
+    column_major_scales=False,
 ):
     if group_size != 128 or scale_ue8m0:
         raise ValueError("PPU dense FP8 uses groups of 128 with FP32 scales")
-    return _run(x, weight, eps, None, True)
+    return _run(x, weight, eps, None, True, column_major_scales)
 
 
 def fused_add_rmsnorm_fp8_quant_with_bf16_output(

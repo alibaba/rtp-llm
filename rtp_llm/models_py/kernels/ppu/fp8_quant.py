@@ -5,8 +5,10 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
-def _fp8_quant_128(x_ptr, q_ptr, scale_ptr, HIDDEN: tl.constexpr):
+@triton.jit(do_not_specialize=["ROWS"])
+def _fp8_quant_128(
+    x_ptr, q_ptr, scale_ptr, ROWS, HIDDEN: tl.constexpr, COLUMN_MAJOR: tl.constexpr
+):
     row = tl.program_id(0)
     group = tl.program_id(1)
     cols = group * 128 + tl.arange(0, 128)
@@ -18,16 +20,20 @@ def _fp8_quant_128(x_ptr, q_ptr, scale_ptr, HIDDEN: tl.constexpr):
     value = x * (448.0 / amax)
     q = tl.minimum(tl.maximum(value, -448.0), 448.0).to(q_ptr.dtype.element_ty)
     tl.store(q_ptr + row * HIDDEN + cols, q)
-    tl.store(scale_ptr + row * (HIDDEN // 128) + group, scale)
+    offset = row + group * ROWS if COLUMN_MAJOR else row * (HIDDEN // 128) + group
+    tl.store(scale_ptr + offset, scale)
 
 
-@triton.jit(do_not_specialize=["TOTAL_GROUPS"])
+@triton.jit(do_not_specialize=["TOTAL_GROUPS", "ROWS"])
 def _fp8_quant_128_tiled(
     x_ptr,
     q_ptr,
     scale_ptr,
     TOTAL_GROUPS,
+    ROWS,
+    HIDDEN_GROUPS: tl.constexpr,
     GROUPS: tl.constexpr,
+    COLUMN_MAJOR: tl.constexpr,
 ):
     group = tl.program_id(0) * GROUPS + tl.arange(0, GROUPS)
     offset = group[:, None] * 128 + tl.arange(0, 128)[None, :]
@@ -36,11 +42,18 @@ def _fp8_quant_128_tiled(
     scale = amax / 448.0
     q = tl.clamp(x * (448.0 / amax[:, None]), -448.0, 448.0).to(q_ptr.dtype.element_ty)
     tl.store(q_ptr + offset, q, group[:, None] < TOTAL_GROUPS)
-    tl.store(scale_ptr + group, scale, group < TOTAL_GROUPS)
+    scale_offset = (
+        group // HIDDEN_GROUPS + (group % HIDDEN_GROUPS) * ROWS
+        if COLUMN_MAJOR
+        else group
+    )
+    tl.store(scale_ptr + scale_offset, scale, group < TOTAL_GROUPS)
 
 
-def fp8_quantize_128(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize contiguous BF16 [M, K] with row-major FP32 group scales.
+def fp8_quantize_128(
+    x: torch.Tensor, *, column_major_scales: bool = False
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize BF16 [M, K], optionally writing SDK column-major scales.
 
     The FP32 scale and quantization order match SGLang's per-token-group
     quantizer; no BF16 reciprocal or intermediate product is introduced.
@@ -51,7 +64,14 @@ def fp8_quantize_128(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     if hidden == 0 or hidden % 128:
         raise ValueError("hidden size must be a positive multiple of 128")
     q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
-    scales = torch.empty((rows, hidden // 128), device=x.device, dtype=torch.float32)
+    if column_major_scales:
+        scales = torch.empty(
+            (hidden // 128, rows), device=x.device, dtype=torch.float32
+        ).T
+    else:
+        scales = torch.empty(
+            (rows, hidden // 128), device=x.device, dtype=torch.float32
+        )
     if rows >= 16:
         groups = rows * (hidden // 128)
         _fp8_quant_128_tiled[(triton.cdiv(groups, 4),)](
@@ -59,11 +79,16 @@ def fp8_quantize_128(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             q,
             scales,
             groups,
+            rows,
+            hidden // 128,
             4,
+            column_major_scales,
             num_warps=4,
         )
     elif rows:
-        _fp8_quant_128[(rows, hidden // 128)](x, q, scales, hidden, num_warps=4)
+        _fp8_quant_128[(rows, hidden // 128)](
+            x, q, scales, rows, hidden, column_major_scales, num_warps=4
+        )
     return q, scales
 
 
@@ -76,6 +101,7 @@ def _silu_mul_fp8_quant_128(
     HIDDEN: tl.constexpr,
     GATE_FIRST: tl.constexpr,
     GROUPS: tl.constexpr,
+    COLUMN_MAJOR: tl.constexpr,
 ):
     groups = tl.program_id(0) * GROUPS + tl.arange(0, GROUPS)
     row = groups // (HIDDEN // 128)
@@ -94,13 +120,15 @@ def _silu_mul_fp8_quant_128(
         q_ptr.dtype.element_ty
     )
     tl.store(q_ptr + row[:, None] * HIDDEN + cols, quantized, row[:, None] < ROWS)
-    tl.store(scale_ptr + groups, scale, row < ROWS)
+    scale_offset = row + (groups % (HIDDEN // 128)) * ROWS if COLUMN_MAJOR else groups
+    tl.store(scale_ptr + scale_offset, scale, row < ROWS)
 
 
 def silu_mul_fp8_quantize_128(
     x: torch.Tensor,
     *,
     gate_first: bool,
+    column_major_scales: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse SiLU/multiply and FP8 quantization, retaining the BF16 boundary.
 
@@ -113,7 +141,14 @@ def silu_mul_fp8_quantize_128(
         raise ValueError("SiLU activation width must be a positive multiple of 256")
     hidden = width // 2
     q = torch.empty((rows, hidden), device=x.device, dtype=torch.float8_e4m3fn)
-    scales = torch.empty((rows, hidden // 128), device=x.device, dtype=torch.float32)
+    if column_major_scales:
+        scales = torch.empty(
+            (hidden // 128, rows), device=x.device, dtype=torch.float32
+        ).T
+    else:
+        scales = torch.empty(
+            (rows, hidden // 128), device=x.device, dtype=torch.float32
+        )
     if rows:
         _silu_mul_fp8_quant_128[(triton.cdiv(rows * (hidden // 128), 4),)](
             x,
@@ -123,6 +158,7 @@ def silu_mul_fp8_quantize_128(
             hidden,
             gate_first,
             4,
+            column_major_scales,
             num_warps=4,
             enable_fp_fusion=False,
         )
