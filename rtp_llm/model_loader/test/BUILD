@@ -79,3 +79,9 @@ py_test(
         'gpu': 'MI308X-ROCM7',
     },
 )
+
+py_test(
+    name = "test_compressed_tensors_nvfp4",
+    srcs = ["test_compressed_tensors_nvfp4.py"],
+    deps = py_test_deps,
+)

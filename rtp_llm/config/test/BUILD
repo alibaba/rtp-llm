@@ -103,3 +103,19 @@ py_test(
         "//rtp_llm:config_ops",
     ],
 )
+
+py_test(
+    name = "compressed_tensors_nvfp4_test",
+    srcs = ["compressed_tensors_nvfp4_test.py"],
+    data = ["fixtures/nvfp4/config.json", "fixtures/nvfp4/q_proj_tile.json"],
+    deps = ["//rtp_llm:config"],
+)
+
+py_test(
+    name = "compressed_tensors_nvfp4_gpu_test",
+    srcs = ["compressed_tensors_nvfp4_gpu_test.py"],
+    data = ["fixtures/nvfp4/q_proj_tile.json"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    exec_properties = {"gpu": "SM100_ARM_CU13"},
+    tags = ["SM100_ARM_CU13"],
+)

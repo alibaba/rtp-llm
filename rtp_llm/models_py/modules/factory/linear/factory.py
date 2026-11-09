@@ -281,6 +281,7 @@ class LinearFactory:
         fp4_methods = [
             "FP4",
             "modelopt_fp4",
+            "COMPRESSED_TENSORS_NVFP4",
         ]
         if quant_method not in fp4_methods:
             return False
