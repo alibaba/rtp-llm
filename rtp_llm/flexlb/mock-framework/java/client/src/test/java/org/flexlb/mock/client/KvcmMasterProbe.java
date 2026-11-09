@@ -16,7 +16,7 @@ public final class KvcmMasterProbe {
     public static void main(String[] args) throws Exception {
         var json = new ObjectMapper();
         int prefillCpSize = args.length > 4 ? Integer.parseInt(args[4]) : 1;
-        int inputTokens = Math.max(32, 32 * prefillCpSize);
+        int inputTokens = Math.max(32, 24 * prefillCpSize);
         try (var client = new NativeClient(() -> List.of(args[0]), event -> {}, 1000, 0L, prefillCpSize)) {
             NativeClient.Result last = null;
             for (long id : List.of(8001L, 8002L)) {

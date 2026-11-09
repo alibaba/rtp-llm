@@ -22,7 +22,7 @@ uv run --locked mock-case compile <case目录>/case.yaml \
 
 ### ID 命名要求
 
-新增或修改 Case 时，ID 统一使用小写 `snake_case`，并在同一个 Case 中全局唯一。Case ID 描述场景并与目录名一致，例如 `version_regression`；Phase ID 描述阶段，例如 `startup`、`performance`。
+新增或修改 Case 时，ID 统一使用小写 `snake_case`，并在同一个 Case 中全局唯一。Case ID 描述场景并与目录名一致，例如 `performance_regression`；Phase ID 描述阶段，例如 `startup`、`performance`。
 
 Step ID 必须采用“动作 + 对象”，必要时追加统计量或时序条件。启动和停止使用 `start_client`、`stop_client`；读取并保存结果使用 `get_master_a`；带断言的检查使用 `check_master_leader`、`check_prefill_tps`、`check_client_ttft_p95`、`check_client_success_rate_after_drain`。不要只写 `traffic`、`leader`、`drain` 或指标名。ID 用于引用和事件定位，具体参数、阈值与说明放在 args、expect 和 describe 中。重命名时同步更新 Step 引用及 View 的 annotation_steps。
 
@@ -51,22 +51,22 @@ phases:
       - id: check_master_leader
         describe: 检查唯一主 Master
         interface: master/get
-        args: {is_leader: true}
-        expect: {count: 1}
+        args: { is_leader: true }
+        expect: { count: 1 }
         wait_after: 1s
       - id: get_leader_prefill_engines
         describe: 记录主 Master 的 Prefill 发现结果
         interface: master/engine/get
         args:
-          targets: {ref: steps.check_master_leader}
+          targets: { ref: steps.check_master_leader }
           role: prefill
       - id: check_prefill_tps
         describe: 检查所有 Prefill 的计算吞吐
         interface: engine/prefill/tps
         args:
-          targets: {ref: globals.prefill}
+          targets: { ref: globals.prefill }
           range: [-60s, 0s]
-        expect: {gte: 1}
+        expect: { gte: 1 }
 ```
 
 省略 targets 等价于该操作域全部实例；显式空列表、重复地址或未知地址报错。全局发现信息在 step 开始时取值；已保存的 step 返回值保持原样，不跟着发现变化自动改写。Client 控制接口单独约定：start 作用于全部已配置 Client，stop 无参数；指标接口仍可指定 targets。
@@ -90,16 +90,16 @@ phases:
 
 以下查询均从 Runner 管理的 Prometheus 取数，支持上文的 range、mode 和实例 targets：
 
-| 接口 | 指标口径 |
-| --- | --- |
-| `client/qps` | Client 已发请求 counter 的增量 / 时长，不是成功完成速率。 |
-| `engine/prefill/tps` | Prefill 的 Real 同名 gauge `rtp_llm_context_tps`。 |
-| `engine/prefill/tps_with_cache` | Prefill 的 `rtp_llm_context_tps_with_cache`，吞吐包含复用 token。 |
-| `engine/decode/tps` | Decode 已提交输出 token counter 的增量 / 墙钟时长。 |
-| `engine/cache/hit_rate` | Prefill 实际复用 token / 查询输入 token 的增量比值。 |
-| `client/success_rate` | 成功终态 / 全部终态的增量比值，包括 error、timeout、cancelled。必须显式指定 range。 |
-| `client/ttft` | 调用开始到收到首 token 的延迟，包含所有收到首 token 的请求。 |
-| `client/tpot` | 首末 token 间隔 / 首 token 之后的 token 数，只统计成功且输出多于一个 token 的请求。 |
+| 接口                            | 指标口径                                                                            |
+| ------------------------------- | ----------------------------------------------------------------------------------- |
+| `client/qps`                    | Client 已发请求 counter 的增量 / 时长，不是成功完成速率。                           |
+| `engine/prefill/tps`            | Prefill 的 Real 同名 gauge `rtp_llm_context_tps`。                                  |
+| `engine/prefill/tps_with_cache` | Prefill 的 `rtp_llm_context_tps_with_cache`，吞吐包含复用 token。                   |
+| `engine/decode/tps`             | Decode 已提交输出 token counter 的增量 / 墙钟时长。                                 |
+| `engine/cache/hit_rate`         | Prefill 实际复用 token / 查询输入 token 的增量比值。                                |
+| `client/success_rate`           | 成功终态 / 全部终态的增量比值，包括 error、timeout、cancelled。必须显式指定 range。 |
+| `client/ttft`                   | 调用开始到收到首 token 的延迟，包含所有收到首 token 的请求。                        |
+| `client/tpot`                   | 首末 token 间隔 / 首 token 之后的 token 数，只统计成功且输出多于一个 token 的请求。 |
 
 TTFT、TPOT 查询支持 `statistic: mean`（默认）、`p95`、`p99`，返回单位为秒，断言可以写 `lte: 200ms`。Prefill TPS 接口读取有效执行速率，Decode TPS 接口读取已提交输出的墙钟速率，两者分母不同；均不读取原生 generate/total 窗口计数。吞吐单位为 tokens/s，QPS 为 requests/s，比率为 0–1。`client/stop` 收集全部已发请求的终态；区间成功率不能替代这项完整性检查。
 
@@ -117,17 +117,26 @@ uv run --locked mock-case run <case目录>/case.yaml \
 
 ```yaml
 zookeeper:
-  command: [<Java21>, -cp, <ZooKeeper 的 classpath>, org.flexlb.mock.zookeeper.ZookeeperNode]
+  command:
+    [
+      <Java21>,
+      -cp,
+      <ZooKeeper 的 classpath>,
+      org.flexlb.mock.zookeeper.ZookeeperNode,
+    ]
 components:
   master:
     command: [<Java21>, -cp, <Master的classpath>, org.flexlb.MasterNode]
     startup_timeout: 60s
   prefill:
-    command: [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.engine.EngineMain]
+    command:
+      [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.engine.EngineMain]
   decode:
-    command: [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.engine.EngineMain]
+    command:
+      [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.engine.EngineMain]
   vit:
-    command: [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.engine.EngineMain]
+    command:
+      [<Java21>, -cp, <Engine JAR绝对路径>, org.flexlb.mock.engine.EngineMain]
 ```
 
 配方必须覆盖 Case 实际声明的组件。组件通过 `MOCK_CONFIG_FILE` 读取本实例配置和完整 environment；`MOCK_NODE_ID`、`MOCK_COMPONENT`、`MOCK_OUTPUT_DIR` 提供身份和目录。初始化并绑定端口后原子发布 `MOCK_READY_FILE`，启动超时或提前退出都失败并回收已有进程。
@@ -138,10 +147,10 @@ components:
 
 Case 使用 `engine/scale` 调整 Engine 实例数。必填参数 `direction` 为 `out`（扩容）或 `in`（缩容）。`role` 默认为 `prefill`，`count` 指定时取值为 1–1024。返回实际新增或关闭的服务地址列表。
 
-| direction | 参数 |
-| --- | --- |
-| `out` | `count` 默认 1。复用该角色的 Case config，角色必须已配置。`targets` 仅适用于缩容。 |
-| `in` | `targets` 省略时选择该角色全部活动实例，`count` 省略时关闭整个候选集。指定 `count` 时按候选顺序只选一次。显式 `targets` 保持输入顺序，否则按创建顺序。 |
+| direction | 参数                                                                                                                                                   |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `out`     | `count` 默认 1。复用该角色的 Case config，角色必须已配置。`targets` 仅适用于缩容。                                                                     |
+| `in`      | `targets` 省略时选择该角色全部活动实例，`count` 省略时关闭整个候选集。指定 `count` 时按候选顺序只选一次。显式 `targets` 保持输入顺序，否则按创建顺序。 |
 
 空集合、重复/失效地址和超过候选数量的 count 在任何停止前报错。操作成功表示实例与发现文件更新完成，不表示 Master 已传播更新；在后续 step 读取各 Master 的实际观察。部分执行后失败会保留已知事件并结束实验，不重试或伪造整体回滚。
 
@@ -149,14 +158,14 @@ Case 使用 `engine/scale` 调整 Engine 实例数。必填参数 `direction` �
 - id: added
   describe: 增加一个Decode
   interface: engine/scale
-  args: {direction: out, role: decode, count: 1}
+  args: { direction: out, role: decode, count: 1 }
 - id: removed
   describe: 关闭刚增加的实例
   interface: engine/scale
   args:
     direction: in
     role: decode
-    targets: {ref: steps.added}
+    targets: { ref: steps.added }
 ```
 
 主动下线会终止该实例的在途请求；生产 Master 淘汰旧地址前仍可能有路由失败，不能将当前操作称为无损缩容。Case 应按场景判断过渡期错误和收敛后的成功率。生命周期验收持续记录请求结果，验证两种 JVM 放置下剩余实例继续服务、真实 Master 最终移除旧地址、新实例能接请求，以及历史指标仍可查询。另用故意保留旧 Prometheus target 的场景检查采集不会串到新实例，并注入第二个创建/停止失败，检查已完成操作不重放、整次实验报错并清理。
@@ -183,22 +192,22 @@ Python 运行环境持续存活；`ProcessSupervisor` 持有进程并监视退�
 - id: old_leader
   describe: 查询当前主节点
   interface: master/get
-  args: {is_leader: true}
-  expect: {count: 1}
+  args: { is_leader: true }
+  expect: { count: 1 }
 - id: stopped
   describe: 停止原主 JVM
   interface: master/stop
-  args: {targets: {ref: steps.old_leader}}
+  args: { targets: { ref: steps.old_leader } }
   wait_after: 10s
 - id: elected
   describe: 检查剩余实例产生唯一新主
   interface: master/get
-  args: {is_leader: true}
-  expect: {count: 1}
+  args: { is_leader: true }
+  expect: { count: 1 }
 - id: added
   describe: 补回一个独立 Master JVM
   interface: master/start
-  args: {count: 1}
+  args: { count: 1 }
   within: 60s
 ```
 
