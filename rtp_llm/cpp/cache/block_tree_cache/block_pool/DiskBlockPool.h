@@ -79,11 +79,15 @@ public:
                             const std::vector<void*>& dsts,
                             size_t                    bytes_per_block,
                             Callback                  callback);
-    BlockIOStatus asyncWrite(DiskIOExecutor&                 executor,
-                             const BlockIdList&              blocks,
-                             const std::vector<const void*>& srcs,
-                             size_t                          bytes_per_block,
-                             Callback                        callback);
+    // Non-null buffers must cover bytes_per_block and stay leased until completion.
+    // Requires storage_bytes <= bytes_per_block <= strideBytes(), bytes_per_block > 0.
+    // Workers zero writable padding [storage_bytes, bytes_per_block) before I/O.
+    BlockIOStatus asyncWrite(DiskIOExecutor&           executor,
+                             const BlockIdList&        blocks,
+                             const std::vector<void*>& srcs,
+                             size_t                    bytes_per_block,
+                             size_t                    storage_bytes,
+                             Callback                  callback);
 
     size_t             payloadBytes() const;
     size_t             strideBytes() const;

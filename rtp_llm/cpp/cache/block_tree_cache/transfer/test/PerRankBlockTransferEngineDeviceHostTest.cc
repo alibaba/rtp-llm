@@ -1383,7 +1383,13 @@ public:
         return StatusDiskBlockIO::read(reads);
     }
 
+    DiskBlockIOStatus write(const std::vector<DiskWrite>& writes) override {
+        write_batch_sizes.push_back(writes.size());
+        return StatusDiskBlockIO::write(writes);
+    }
+
     std::vector<size_t> batch_sizes;
+    std::vector<size_t> write_batch_sizes;
 };
 
 class BlockingDiskBlockIO: public DiskBlockIO {
@@ -1544,7 +1550,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskDirectRoundTripWithout
     }
 }
 
-TEST(PerRankBlockTransferEngineIntegrationTest, DeviceToDiskRejectsMultipleDescriptors) {
+TEST(PerRankBlockTransferEngineIntegrationTest, LegacyDeviceToDiskBatchesMultipleDescriptors) {
     ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
     TempDirGuard     temp_dir("per_rank_device_to_disk_batch");
     constexpr size_t payload_bytes = 80;
@@ -1554,18 +1560,35 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceToDiskRejectsMultipleDescr
     auto device_pool = makeDevicePool({{64, 16}}, 2, "per_rank_device_to_disk_batch");
     auto group       = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
     auto engine      = makeEngine({group}, {}, true);
+    ASSERT_FALSE(engine->asyncEnabled());
 
     std::vector<TransferDescriptor> descriptors;
     for (size_t index = 0; index < 2; ++index) {
         descriptors.push_back(makeDescriptor(
             Tier::DEVICE, Tier::DISK, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0));
+        for (const auto& buffer : device_pool->convertIndexToBuffer(0, descriptors.back().source_blocks.front()))
+            ASSERT_EQ(cudaMemset(buffer.addr, int(index + 23), buffer.size_bytes), cudaSuccess);
     }
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     auto context = engine->execute(makeTransferTask(descriptors));
     ASSERT_NE(context, nullptr);
     context->waitDone();
-    EXPECT_FALSE(context->success());
-    EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
-    EXPECT_EQ(direct_io->lastWriteBytes(), 0u);
+    ASSERT_TRUE(context->success());
+    EXPECT_EQ(context->result().block_errors, std::vector<CacheCopyError>(2, CacheCopyError::NONE));
+    EXPECT_EQ(direct_io->lastWriteBytes(), disk_pool->strideBytes());
+    HostStagingBlockPool read_pool(1, disk_pool->strideBytes());
+    auto                 reads = read_pool.tryMallocBatch(1);
+    ASSERT_TRUE(reads);
+    const auto  record = reads->front().blockBuffer(payload_bytes);
+    const auto* bytes  = static_cast<const uint8_t*>(record.base);
+    for (size_t index = 0; index < descriptors.size(); ++index) {
+        ASSERT_EQ(disk_pool->read(descriptors[index].singleBlockAt(Tier::DISK), record.base, disk_pool->strideBytes()),
+                  BlockIOStatus::OK);
+        EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + payload_bytes),
+                  std::vector<uint8_t>(payload_bytes, uint8_t(index + 23)));
+        EXPECT_TRUE(std::all_of(
+            bytes + payload_bytes, bytes + disk_pool->strideBytes(), [](uint8_t byte) { return byte == 0; }));
+    }
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DeviceToDiskFailureReleasesStaging) {
@@ -1589,8 +1612,9 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceToDiskFailureReleasesStagi
     device_failed->waitDone();
     EXPECT_FALSE(device_failed->success());
     EXPECT_EQ(device_failed->errorInfo().code(), ErrorCode::INVALID_PARAMS);
-    EXPECT_EQ(device_failed->errorInfo().ToString(),
-              "device-to-disk device-to-staging failed: invalid block transfer request");
+    EXPECT_EQ(
+        device_failed->errorInfo().ToString(),
+        "device-to-disk transfer failed, stage=device-to-staging, descriptor_range=[0,1): invalid block transfer request");
     EXPECT_EQ(device_failed->result().copy_error, CacheCopyError::INVALID_REQUEST);
     EXPECT_EQ(device_failed->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::INVALID_REQUEST}));
 
@@ -1599,7 +1623,9 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceToDiskFailureReleasesStagi
     disk_failed->waitDone();
     EXPECT_FALSE(disk_failed->success());
     EXPECT_EQ(disk_failed->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
-    EXPECT_EQ(disk_failed->errorInfo().ToString(), "device-to-disk staging-to-disk failed: disk block transfer failed");
+    EXPECT_EQ(
+        disk_failed->errorInfo().ToString(),
+        "device-to-disk transfer failed, stage=staging-to-disk, descriptor_range=[0,1): disk block transfer failed");
     EXPECT_EQ(disk_failed->result().copy_error, CacheCopyError::IO_FAILED);
     EXPECT_EQ(disk_failed->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::IO_FAILED}));
 
@@ -1686,6 +1712,21 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceUsesMinimumOfBatchLimi
     ASSERT_TRUE(swa_context->success());
     EXPECT_EQ(full_io_ptr->batch_sizes, (std::vector<size_t>{2, 2, 1}));
     EXPECT_EQ(swa_io_ptr->batch_sizes, (std::vector<size_t>{3, 2}));
+
+    const auto store = [&engine](const std::vector<TransferDescriptor>& loads) {
+        std::vector<TransferDescriptor> stores;
+        for (const auto& descriptor : loads)
+            stores.push_back(TransferDescriptor::deviceToDisk(
+                descriptor.group_set_id, descriptor.target_blocks, descriptor.singleBlockAt(Tier::DISK)));
+        auto context = engine->execute(makeTransferTask(stores));
+        context->waitDone();
+        EXPECT_TRUE(context->success());
+        EXPECT_EQ(context->result().block_errors, std::vector<CacheCopyError>(stores.size(), CacheCopyError::NONE));
+    };
+    store(full_descriptors);
+    store(swa_descriptors);
+    EXPECT_EQ(full_io_ptr->write_batch_sizes, (std::vector<size_t>{2, 2, 1}));
+    EXPECT_EQ(swa_io_ptr->write_batch_sizes, (std::vector<size_t>{3, 2}));
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DiskToDeviceReturnsPendingContext) {
@@ -1704,7 +1745,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskToDeviceReturnsPendingContex
     std::vector<uint8_t>  disk_data(disk_pool->strideBytes(), 0x5A);
     ASSERT_EQ(disk_pool->write(disk_block, disk_data.data(), disk_data.size()), BlockIOStatus::OK);
 
-    auto context = engine->legacy_->device_disk_executor_->executeDiskToDevice(
+    auto context = engine->legacy_->device_disk_executor_->execute(
         makeTransferTask({makeDescriptor(Tier::DISK, Tier::DEVICE, {device_block}, NULL_BLOCK_IDX, disk_block, 0)}),
         {group.get()});
     ASSERT_NE(context, nullptr);

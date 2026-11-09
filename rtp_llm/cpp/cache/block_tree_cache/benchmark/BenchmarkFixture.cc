@@ -119,7 +119,7 @@ std::shared_ptr<HostBlockPool> BenchmarkFixture::createHostPool(size_t          
     config->physical_block_count = usable_count + 1;
     config->payload_bytes        = payload_bytes;
     config->stride_bytes =
-        alignUp(enable_crc ? CrcBlockCopyBatch::encodedBytes(payload_bytes) : payload_bytes, kPoolAlignment);
+        alignUp(enable_crc ? CrcCopyWorkspace::encodedBytes(payload_bytes) : payload_bytes, kPoolAlignment);
     config->alignment = kPoolAlignment;
 
     auto pool = std::make_shared<HostBlockPool>(config);
@@ -134,7 +134,7 @@ BlockTreeDiskBlockPoolPtr BenchmarkFixture::createDiskPool(size_t             pa
                                                            bool               buffered_io,
                                                            bool               enable_crc) {
     const size_t stride_bytes =
-        alignUp(enable_crc ? CrcBlockCopyBatch::encodedBytes(payload_bytes) : payload_bytes, kPoolAlignment);
+        alignUp(enable_crc ? CrcCopyWorkspace::encodedBytes(payload_bytes) : payload_bytes, kPoolAlignment);
 
     auto config             = std::make_shared<BlockTreeDiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;
@@ -163,7 +163,7 @@ GroupSetPtr BenchmarkFixture::createFullGroupSet(std::vector<DeviceBlockPoolPtr>
     size_t payload   = 0;
     for (const auto& tag : group_tags)
         payload += topology->blockSizeBytesForGroup(tag);
-    const auto storage = enable_crc ? CrcBlockCopyBatch::encodedBytes(payload) : payload;
+    const auto storage = enable_crc ? CrcCopyWorkspace::encodedBytes(payload) : payload;
     group_set->initialize(
         group_set_id, std::move(topology), group_tags, {0, storage, alignUp(storage, kPoolAlignment), enable_crc});
     return group_set;
@@ -183,7 +183,7 @@ GroupSetPtr BenchmarkFixture::createSWAGroupSet(std::vector<DeviceBlockPoolPtr> 
     size_t payload = 0;
     for (const auto& tag : group_tags)
         payload += topology->blockSizeBytesForGroup(tag);
-    const auto storage = enable_crc ? CrcBlockCopyBatch::encodedBytes(payload) : payload;
+    const auto storage = enable_crc ? CrcCopyWorkspace::encodedBytes(payload) : payload;
     group_set->initialize(
         group_set_id, std::move(topology), group_tags, {0, storage, alignUp(storage, kPoolAlignment), enable_crc});
     return group_set;

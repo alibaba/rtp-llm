@@ -16,10 +16,11 @@
 namespace rtp_llm {
 
 // One direction's CRC backend; no business callbacks run here. Async calls,
-// including poll(), stopAdmission() and drain(), are serialized by the WorkLoop
+// including poll(), stopAdmission() and stopAndWaitForIo(), are serialized by the WorkLoop
 // owner. Lifecycle callers may access it only after joining that owner. Legacy
 // workers share a separate instance per direction and synchronize slot use.
-// drain() proves physical completion but leaves stage callbacks for poll().
+// stopAndWaitForIo() closes admission and proves physical completion, leaving
+// stage callbacks for poll(); it does not wait for business settlement.
 class CrcTransferService {
 public:
     using DoneCallback = std::function<void(TransferResult)>;
@@ -42,9 +43,10 @@ public:
                         const std::vector<TransferDescriptor>& descriptors,
                         const std::vector<const GroupSet*>&    groups);
 
-    // false = Busy, without submission or callback. true transfers responsibility
-    // for exactly one result: immediate errors call done in this stack, accepted
-    // work calls it from poll(). A preparation exception precedes CUDA
+    // false = Busy, without submission or callback; the caller retries later.
+    // true = handled: this service has taken responsibility for exactly one result,
+    // not necessarily a successful CUDA submission. Immediate errors call done
+    // in this stack; accepted work calls it from poll(). A preparation exception precedes CUDA
     // submission and has no callback. Callbacks must not allocate, throw or reenter
     // this service. They only fill the owner's already allocated stage record.
     // The caller keeps the storage behind hosts and business block references
@@ -55,10 +57,10 @@ public:
                    DoneCallback                           done);
     // Scans every device. Safe slots retire before their callbacks run.
     // true means undelivered work remains. Async slot access needs no mutex.
-    // Result-mapping exceptions propagate from poll() and drain().
+    // Result-mapping exceptions propagate from poll() and stopAndWaitForIo().
     bool poll();
     void stopAdmission();
-    void drain();
+    void stopAndWaitForIo();
 
 private:
     struct Operation {
@@ -68,7 +70,7 @@ private:
         DoneCallback                    done;
     };
     struct Slot {
-        std::unique_ptr<CrcBlockCopyBatch> copy;
+        std::unique_ptr<CrcCopyWorkspace>  copy;
         int                                device{0};
         // TODO(legacy removal): remove updating; only legacy workers use it.
         bool                       updating{false};

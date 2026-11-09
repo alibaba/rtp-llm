@@ -71,7 +71,7 @@ struct BlockTreeCacheConfig {
     int host_cache_sync_timeout_ms{10000};
     int disk_cache_sync_timeout_ms{30000};
 
-    // Async: blocks per Load/Offload pair, split between FULL/SWA and directions.
+    // Async: blocks per Load/Offload pair, split by direction and shared by groups.
     // Legacy: rank-wide byte budget measured in maximum-stride blocks.
     size_t device_disk_staging_block_count{128};
     // Shared descriptor batching limit for watermark planning and all transfer directions.

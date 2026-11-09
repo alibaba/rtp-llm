@@ -164,8 +164,8 @@ struct Workspace {
     Workspace(Layout shape, size_t l2, int max_backings): layout(std::move(shape)) {
         maxBackings          = max_backings;
         p                    = layout.payload();
-        e                    = CrcBlockCopyBatch::encodedBytes(p);
-        stride               = CrcBlockCopyBatch::encodedBytes(maximumLayoutPayload());
+        e                    = CrcCopyWorkspace::encodedBytes(p);
+        stride               = CrcCopyWorkspace::encodedBytes(maximumLayoutPayload());
         hostStride           = e;  // Ordinary HOST pool uses the encoded 16-byte-aligned record stride.
         const size_t minimum = std::max(kEvictMultiplier * l2, size_t(4 * maxBackings) * p);
         poolBlocks           = int((minimum + p - 1) / p) + 1;  // block 0 is the framework sentinel
@@ -242,7 +242,7 @@ __global__ void checkSyncPool(const unsigned char* actual,
 struct Benchmark {
     Workspace                            w;
     FrameworkCopies                      framework;
-    CrcBlockCopyBatch                    production;
+    CrcCopyWorkspace                     production;
     std::vector<rtp_llm::CrcCopyFailure> failures;
     std::vector<unsigned char>           cpuOracle;
     std::vector<uint32_t>                recordCrc;
@@ -566,7 +566,7 @@ static void mixedCrcSelfTest() {
             for (size_t i = 0; i < bytes; ++i)
                 payload[i] = pattern(i + size_t(b + 1) * 1000003 + round * 733);
             std::memcpy(record, payload, bytes);
-            const size_t encoded = rtp_llm::CrcBlockCopyBatch::encodedBytes(bytes);
+            const size_t encoded = rtp_llm::CrcCopyWorkspace::encodedBytes(bytes);
             std::memset(record + bytes, 0x7b, encoded - 4 - bytes);
             const uint32_t crc = cpuCrc(payload, bytes);
             std::memcpy(record + encoded - 4, &crc, 4);
@@ -603,7 +603,7 @@ static void mixedCrcSelfTest() {
             const auto&  item    = items[b];
             const auto*  record  = static_cast<const unsigned char*>(item.host);
             const auto*  payload = expected.data() + size_t(b) * slot + 17;
-            const size_t encoded = rtp_llm::CrcBlockCopyBatch::encodedBytes(item.payload_bytes);
+            const size_t encoded = rtp_llm::CrcCopyWorkspace::encodedBytes(item.payload_bytes);
             requireSync(std::memcmp(record, payload, item.payload_bytes) == 0, "mixed store CPU payload mismatch");
             uint32_t footer = 0;
             std::memcpy(&footer, record + encoded - 4, 4);
@@ -811,7 +811,7 @@ void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& pr
        << ",\"measured_h2d_verified\":true"
        << ",\"correctness_only\":" << (options.correctnessOnly ? "true" : "false")
        << ",\"boundary\":\"prebuilt per-API inputs; complete synchronous calls including internal descriptors, checks, locks, metadata H2D, kernels, CPU pack/unpack for main_staged, data transfers, synchronization and CRC verdict\""
-       << ",\"production_source\":\"directly linked current workspace CrcBlockCopyBatch and legacy DeviceHostCopyStrategy\""
+       << ",\"production_source\":\"directly linked current workspace CrcCopyWorkspace and legacy DeviceHostCopyStrategy\""
        << ",\"main_staged_source\":\"" << mainStagedSourceCommit() << "\""
        << ",\"model\":\"DeepSeek-V4-Flash-0731\",\"target_layers\":43,\"kv_cache_sharded\":true"
        << ",\"copy3d_stream\":\"independent Torch nondefault pooled stream\""
@@ -1054,14 +1054,14 @@ int run(int argc, char** argv) {
     int driver = 0, runtime = 0;
     cu(cudaDriverGetVersion(&driver));
     cu(cudaRuntimeGetVersion(&runtime));
-    requireSync(driver >= 13000 && runtime >= 13000 && CrcBlockCopyBatch::available(),
+    requireSync(driver >= 13000 && runtime >= 13000 && CrcCopyWorkspace::available(),
                 "CUDA13 runtime, driver and CRC backend are required");
     if (options.tileThreadProfile)
         return runTileThreadProfile(os, options, prop, driver, runtime);
     metadata(os, options, prop, driver, runtime);
     os.flush();
     knownVector();
-    mixedCrcSelfTest<CrcBlockCopyBatch>();
+    mixedCrcSelfTest<CrcCopyWorkspace>();
     os << "{\"type\":\"mixed_crc_selftest\",\"variant\":\"integrated_crc\",\"success\":true}\n";
     std::mt19937           source_rng(options.seed), order_rng(options.seed ^ 0x728193U);
     const std::vector<int> block_counts = measuredBlockCounts(options);

@@ -20,6 +20,8 @@ class LegacyTransferEngine;
 
 class PerRankBlockTransferEngine {
 public:
+    // Async disk queue sizes are derived from Q and the effective batch limit;
+    // disk_io_config supplies the shared read/write thread counts.
     explicit PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
                                         bool                     enable_disk_cache                        = false,
                                         DeviceHostCopyOptions    device_host_options                      = {},
@@ -36,15 +38,20 @@ public:
     virtual ~PerRankBlockTransferEngine();
 
     virtual std::shared_ptr<TransferAsyncContext> execute(TransferTask task);
-    // Initialized once from M and all async staging capacities, shared by both
-    // directions. Legacy keeps M; Device->Disk keeps its single-item contract.
-    size_t              batchLimit(Tier source, Tier target) const noexcept;
+    // Shared by every direction. WorkLoop bounds M by its staging capacities;
+    // legacy uses M and splits Device/Disk work further to fit its staging pool.
+    size_t batchLimit() const noexcept {
+        return max_descriptors_per_batch_;
+    }
     void                cancelPendingStagingTransfers();
+    // Monitoring compatibility: async reports outstanding batches, including
+    // callbacks; offload maps to background. Legacy reports task-pool queues.
     BlockTreeQueueSizes queueSizes() const;
     void                stopAdmission();
     // External lifecycle thread only, never from a WorkLoop callback.
-    // The caller serializes drain() and destruction; sequential repeats are safe.
-    void drain();
+    // Closes admission and waits for all local transfers, callbacks and cleanup.
+    // The caller serializes shutdown() and destruction; sequential repeats are safe.
+    void shutdown();
     // External thread waits for callbacks and cleanup without closing admission.
     void waitForIdle();
     // Engine-wide disk scheduling configuration, shared by every WorkLoop.

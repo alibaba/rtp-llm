@@ -133,7 +133,7 @@ std::string CrcDumpWriter::write(const CrcCopyItem&        item,
         if (item.dump_metadata)
             metadata = item.dump_metadata();
         const auto   failure                 = capture_snapshot();
-        const size_t encoded                 = CrcBlockCopyBatch::encodedBytes(item.payload_bytes);
+        const size_t encoded                 = CrcCopyWorkspace::encodedBytes(item.payload_bytes);
         const size_t footer_offset           = encoded - sizeof(uint32_t);
         const bool   cpu_captured            = failure.cpu_snapshot.size() == encoded;
         const bool   gpu_captured            = failure.staging_snapshot.size() == encoded;

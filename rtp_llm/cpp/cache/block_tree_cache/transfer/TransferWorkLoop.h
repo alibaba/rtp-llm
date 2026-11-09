@@ -1,7 +1,5 @@
 #pragma once
 
-#include <array>
-#include <atomic>
 #include <condition_variable>
 #include <cstdlib>
 #include <exception>
@@ -11,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -27,21 +26,20 @@ namespace rtp_llm {
 class DiskIOExecutor;
 
 // One direction owner. Disk workers fill their Entry's result and publish its
-// completion flag; CRC stage callbacks run in this owner's stack.
+// completion queue under mutex_; CRC stage callbacks run in this owner's stack.
 // Business references stay upstream. The borrowed disk executor, when needed,
-// outlives this owner through drain/join; pass nullptr only for routes without Disk.
+// outlives this owner's shutdown/join; pass nullptr only for routes without Disk.
 class TransferWorkLoop {
 public:
     using BeforeCompleteCallback = std::function<void(const TransferResult&)>;
-    using StagingPools           = std::array<std::shared_ptr<HostStagingBlockPool>, 2>;  // FULL, SWA
 
     TransferWorkLoop(std::vector<GroupSetPtr>                       groups,
                      std::unique_ptr<CrcTransferService>            crc,
                      DiskIOExecutor*                                disk_io_executor,
-                     CrcCopyDirection                               direction,
+                     TransferDirection                              direction,
                      size_t                                         batch_limit,
                      size_t                                         queue_capacity,
-                     StagingPools                                   staging,
+                     std::shared_ptr<HostStagingBlockPool>          staging,
                      std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
                      int64_t                                        world_rank       = 0,
                      size_t                                         worker_index     = 0);
@@ -51,7 +49,8 @@ public:
 
     void start();
     // PerRank validates a single homogeneous batch before submission.
-    // Check deadlines on admission, initial planning and staging acquisition.
+    // Each stage expires during resource waits and before submission.
+    // Submitted stages retain their buffers until completion, even after deadline.
     std::shared_ptr<TransferAsyncContext> execute(TransferTask task, BeforeCompleteCallback before_complete = {});
     // Fixed limit supplied by PerRank for both direction owners.
     size_t batchLimit() const noexcept {
@@ -61,16 +60,18 @@ public:
     void cancelPendingStagingTransfers();
     // External lifecycle thread only; never wait from a WorkLoop callback.
     // Closes admission, drains callbacks and joins.
-    // The caller serializes drain() and destruction; sequential repeats are safe.
-    void drain();
+    // The caller serializes shutdown() and destruction; sequential repeats are safe.
+    void shutdown();
     void waitForIdle();
     // Accepted Entries, including incoming, resource waits, I/O and callbacks.
-    size_t queueSize() const;
+    size_t outstandingBatches() const;
 
 private:
     struct Entry;
     using Entries = std::list<std::unique_ptr<Entry>>;
-    // Owner-thread-only, intrusive, allocation-free indexes. An Entry belongs to at most one.
+    using WaitDeadlines = std::multimap<TransferTask::Clock::time_point, Entry*>;
+    // Intrusive, allocation-free indexes. The disk completion queue uses mutex_;
+    // other queues belong to the owner. An Entry belongs to at most one queue.
     struct Queue {
         Entry* head{nullptr};
         Entry* tail{nullptr};
@@ -79,6 +80,7 @@ private:
         }
         void   push(Entry& entry);
         Entry* pop();
+        void   remove(Entry& entry);
         Queue  take();
     };
     enum class Step {
@@ -89,7 +91,7 @@ private:
     };
     // Constructed by the submitter; otherwise owned by the WorkLoop. While a Disk
     // operation is pending, its callback exclusively writes result; the owner
-    // waits for disk_io_done (acquire) before accessing it. Each Entry is one batch.
+    // consumes its mutex-published completion before accessing it. Each Entry is one batch.
     struct Entry {
         Entry(TransferTask task, BeforeCompleteCallback before_complete);
         TransferTask                               task;
@@ -102,7 +104,9 @@ private:
         HostStagingBlockPool::HostStagingBlockBatch staging;
         Entries::iterator                           position;
         Entry*                                      next{nullptr};
-        std::atomic<bool>                           disk_io_done{false};
+        Entry*                                      previous{nullptr};
+        Queue*                                      waiting_on{nullptr};
+        std::optional<WaitDeadlines::iterator>      wait_deadline;
         bool                                        initial_plan{true}, step_started{false};
         TransferStageTimer                          task_timer, queue_timer, batch_timer, staging_timer, step_timer;
     };
@@ -115,6 +119,7 @@ private:
     bool               plan(Entry& entry);
     bool               acquireStaging(Entry& entry, bool waiting = false);
     void               releaseStaging(Entry& entry);
+    void               retryStaging(StagingResource& resource);
     void               tryStep(Entry& entry);
     void               submitCrc(Entry& entry);
     void               submitDisk(Entry& entry);
@@ -126,9 +131,10 @@ private:
     void               finish(Entry& entry);
     void               fail(Entry& entry, TransferResult result);
     void               cancelStaging();
+    void               waitForResource(Entry& entry, Queue& waiting);
+    void               removeWaiter(Entry& entry);
+    void               expireResourceWaiters();
     const GroupSetPtr& group(const Entry& entry) const;
-    StagingResource&   stagingResource(const Entry& entry);
-    static size_t      stagingIndex(CacheGroupType type);
     static bool        isCrc(Step step);
     TransferStageTimer timer(const TransferTask& task,
                              const char*         stage,
@@ -164,19 +170,21 @@ private:
     // Initialized before start(); CRC is exclusive to this owner until join.
     std::vector<GroupSetPtr>                       groups_;
     std::unique_ptr<CrcTransferService>            crc_;
-    DiskIOExecutor* const                          disk_io_executor_;  // Owned by the engine through drain/join.
-    CrcCopyDirection                               direction_;
+    DiskIOExecutor* const                          disk_io_executor_;  // Owned by the engine through shutdown/join.
+    TransferDirection                              direction_;
     size_t                                         batch_limit_, capacity_;
     std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;
     int64_t                                        world_rank_;
     std::string                                    thread_name_;
 
     // ==================== Owner-thread-only state: no lock ====================
-    // Declared before entries_ so pools outlive all Entry leases.
-    std::array<StagingResource, 2> staging_;
+    // One private pool per direction owner, shared by all cache group types.
+    // Declared before entries_ so the pool outlives all Entry leases.
+    StagingResource                staging_;
     std::map<int, Queue>           crc_waiting_;
     Entries                        entries_;
-    Queue                          ready_, completed_, disk_pending_;
+    Queue                          ready_, completed_;
+    WaitDeadlines                  wait_deadlines_;
     bool                           has_crc_pending_{false};
 
     // ==================== Shared state: protected by mutex_ ====================
@@ -186,12 +194,10 @@ private:
     bool                    accepting_{true}, cancel_staging_{false};
     size_t                  entry_count_{0};
     Entries                 incoming_;
-    // Notifications to scan disk_pending_, not the number of unconsumed results.
-    // A running scan may consume results whose notifications arrive after it started.
-    size_t disk_done_count_{0};
+    Queue                   disk_completed_;
 
     // ==================== Lifecycle: caller-serialized ====================
-    // start() runs once before external use; the lifecycle caller serializes drain/join.
+    // start() runs once before external use; the lifecycle caller serializes shutdown/join.
     std::thread thread_;
 };
 

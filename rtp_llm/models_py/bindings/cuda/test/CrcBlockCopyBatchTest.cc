@@ -24,8 +24,8 @@
 #include <gtest/gtest.h>
 
 namespace rtp_llm {
-struct CrcBlockCopyBatchTestPeer {
-    static void hook(CrcBlockCopyBatch& copy, std::function<int(const char*, void*, void*)> hook) {
+struct CrcCopyWorkspaceTestPeer {
+    static void hook(CrcCopyWorkspace& copy, std::function<int(const char*, void*, void*)> hook) {
         copy.setTestHook(std::move(hook));
     }
 };
@@ -50,7 +50,7 @@ struct Block {
     size_t               encoded;
     std::vector<uint8_t> expected;
     explicit Block(size_t size, int seed = 0):
-        bytes(size), encoded(CrcBlockCopyBatch::encodedBytes(size)), expected(size) {
+        bytes(size), encoded(CrcCopyWorkspace::encodedBytes(size)), expected(size) {
         cudaCheck(cudaHostAlloc(reinterpret_cast<void**>(&host), encoded, cudaHostAllocDefault));
         auto error = cudaMalloc(reinterpret_cast<void**>(&device), bytes);
         if (error != cudaSuccess) {
@@ -132,7 +132,7 @@ struct GuardedBlock {
 
     explicit GuardedBlock(size_t payload, unsigned seed):
         bytes(payload),
-        encoded(CrcBlockCopyBatch::encodedBytes(payload)),
+        encoded(CrcCopyWorkspace::encodedBytes(payload)),
         host_allocation(encoded + kHostPrefix + 64, true),
         device_allocation(bytes + kDevicePrefix + 64),
         host(host_allocation.data() + kHostPrefix),
@@ -232,7 +232,7 @@ std::vector<CrcCopyItem> itemsFor(const GuardedBlocks& blocks, size_t count, siz
 
 class CrcBatchTest: public ::testing::Test {
     void SetUp() override {
-        if (!CrcBlockCopyBatch::available())
+        if (!CrcCopyWorkspace::available())
             GTEST_SKIP() << "CUDA13 CRC backend unavailable";
         int        count  = 0;
         const auto result = cudaGetDeviceCount(&count);
@@ -274,9 +274,9 @@ protected:
 };
 
 TEST(CrcBlockCopyLayoutTest, EncodedSizeIsCheckedAndAligned) {
-    EXPECT_EQ(CrcBlockCopyBatch::encodedBytes(4080), 4096u);
-    EXPECT_EQ(CrcBlockCopyBatch::encodedBytes(4096), 4112u);
-    EXPECT_THROW(CrcBlockCopyBatch::encodedBytes(std::numeric_limits<size_t>::max()), std::overflow_error);
+    EXPECT_EQ(CrcCopyWorkspace::encodedBytes(4080), 4096u);
+    EXPECT_EQ(CrcCopyWorkspace::encodedBytes(4096), 4112u);
+    EXPECT_THROW(CrcCopyWorkspace::encodedBytes(std::numeric_limits<size_t>::max()), std::overflow_error);
 }
 
 struct CudaGate {
@@ -318,7 +318,7 @@ struct CudaGate {
     }
 };
 
-CrcCopyState waitCrc(CrcBlockCopyBatch& copy) {
+CrcCopyState waitCrc(CrcCopyWorkspace& copy) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     for (;;) {
         const auto result = copy.poll();
@@ -333,12 +333,12 @@ CrcCopyState waitCrc(CrcBlockCopyBatch& copy) {
 TEST_F(CrcBatchTest, AsyncStoreWaitsForBothBranchesAndKeepsWorkspaceExclusive) {
     for (const char* branch : {"store_crc", "store_dma"}) {
         Block             block(8193, 3);
-        CrcBlockCopyBatch copy(0, 1, block.bytes, 3);
+        CrcCopyWorkspace  copy(0, 1, block.bytes, 3);
         // CUDA module loading can synchronize a cold first kernel launch.
         // Load both kernels before installing the adversarial host callback.
         ASSERT_EQ(copy.store({block.item(true)}, failures_), CrcCopyState::OK);
         CudaGate gate;
-        CrcBlockCopyBatchTestPeer::hook(copy, [&](const char* point, void* main, void* dma) {
+        CrcCopyWorkspaceTestPeer::hook(copy, [&](const char* point, void* main, void* dma) {
             if (std::strcmp(point, branch) == 0)
                 gate.install(std::strcmp(branch, "store_dma") == 0 ? dma : main);
             return int(cudaSuccess);
@@ -356,7 +356,7 @@ TEST_F(CrcBatchTest, AsyncStoreWaitsForBothBranchesAndKeepsWorkspaceExclusive) {
         EXPECT_THROW(copy.poll(), std::invalid_argument);
         EXPECT_EQ(std::memcmp(block.host, block.expected.data(), block.bytes), 0);
         EXPECT_EQ(block.footer(), crc32c(block.expected.data(), block.bytes));
-        CrcBlockCopyBatchTestPeer::hook(copy, {});
+        CrcCopyWorkspaceTestPeer::hook(copy, {});
         const auto next = copy.trySubmit({block.item()}, CrcCopyDirection::LOAD);
         ASSERT_EQ(next, CrcCopyState::PENDING);
         EXPECT_EQ(waitCrc(copy), CrcCopyState::OK);
@@ -366,10 +366,10 @@ TEST_F(CrcBatchTest, AsyncStoreWaitsForBothBranchesAndKeepsWorkspaceExclusive) {
 
 TEST_F(CrcBatchTest, AsyncAdmissionDoesNotWaitForSynchronousWorkspaceOwner) {
     Block             block(8193);
-    CrcBlockCopyBatch copy(0, 1, block.bytes, 1);
+    CrcCopyWorkspace  copy(0, 1, block.bytes, 1);
     ASSERT_EQ(copy.store({block.item()}, failures_), CrcCopyState::OK);
     CudaGate gate;
-    CrcBlockCopyBatchTestPeer::hook(copy, [&](const char* point, void*, void* dma) {
+    CrcCopyWorkspaceTestPeer::hook(copy, [&](const char* point, void*, void* dma) {
         if (std::strcmp(point, "store_dma") == 0)
             gate.install(dma);
         return int(cudaSuccess);
@@ -390,11 +390,11 @@ TEST_F(CrcBatchTest, AsyncLoadWaitsForScatterAndPreservesIndependentCrc) {
     GuardedBlock block(16385, 97);
     block.writeCpuRecord();
     block.resetDevice(false);
-    CrcBlockCopyBatch copy(0, 1, block.bytes, 3);
+    CrcCopyWorkspace copy(0, 1, block.bytes, 3);
     ASSERT_EQ(copy.load({block.item()}, failures_), CrcCopyState::OK);
     block.resetDevice(false);
     CudaGate gate;
-    CrcBlockCopyBatchTestPeer::hook(copy, [&](const char* point, void* main, void*) {
+    CrcCopyWorkspaceTestPeer::hook(copy, [&](const char* point, void* main, void*) {
         if (std::strcmp(point, "scatter") == 0)
             gate.install(main);
         return int(cudaSuccess);
@@ -416,9 +416,9 @@ TEST_F(CrcBatchTest, AsyncPageableRejectedBeforeUploadAndSynchronousRemainsCompa
     std::vector<uint8_t> pageable(block.encoded, 0x71);
     auto                 item = block.item();
     item.host                 = pageable.data();
-    CrcBlockCopyBatch copy(0, 1, block.bytes, 1);
+    CrcCopyWorkspace  copy(0, 1, block.bytes, 1);
     int               uploads = 0;
-    CrcBlockCopyBatchTestPeer::hook(copy, [&](const char* point, void*, void*) {
+    CrcCopyWorkspaceTestPeer::hook(copy, [&](const char* point, void*, void*) {
         if (std::strcmp(point, "metadata") == 0)
             ++uploads;
         return int(cudaSuccess);
@@ -448,7 +448,7 @@ TEST_F(CrcBatchTest, AsyncRegisteredHostRecordsArePinnedWithIndependentAliasOffs
     auto item           = block.item();
     item.host           = static_cast<uint8_t*>(allocation) + 3;
     item.capacity_bytes = 4093;
-    CrcBlockCopyBatch copy(0, 1, block.bytes, 1);
+    CrcCopyWorkspace  copy(0, 1, block.bytes, 1);
     const auto        operation = copy.trySubmit({item}, CrcCopyDirection::STORE);
     ASSERT_EQ(operation, CrcCopyState::PENDING);
     EXPECT_EQ(waitCrc(copy), CrcCopyState::OK);
@@ -468,8 +468,8 @@ TEST_F(CrcBatchTest, AsyncPartialMetadataJoinAndQueryFailuresDrainInlineBeforeRe
         size_t            drains = 0;
         cudaStream_t      stream = nullptr, copy_stream = nullptr;
         const auto        owner = std::this_thread::get_id();
-        CrcBlockCopyBatch copy(0, 1, block.bytes, 1);
-        CrcBlockCopyBatchTestPeer::hook(copy, [&](const char* point, void* main, void* dma) {
+        CrcCopyWorkspace  copy(0, 1, block.bytes, 1);
+        CrcCopyWorkspaceTestPeer::hook(copy, [&](const char* point, void* main, void* dma) {
             if (std::strcmp(point, "drain") == 0) {
                 ++drains;
                 EXPECT_EQ(std::this_thread::get_id(), owner);
@@ -493,7 +493,7 @@ TEST_F(CrcBatchTest, AsyncPartialMetadataJoinAndQueryFailuresDrainInlineBeforeRe
         ASSERT_EQ(drains, 1u);
         EXPECT_EQ(cudaStreamQuery(stream), cudaSuccess);
         EXPECT_EQ(cudaStreamQuery(copy_stream), cudaSuccess);
-        CrcBlockCopyBatchTestPeer::hook(copy, {});
+        CrcCopyWorkspaceTestPeer::hook(copy, {});
         ASSERT_EQ(copy.store({block.item()}, failures_), CrcCopyState::OK);
         EXPECT_EQ(block.footer(), crc32c(block.expected.data(), block.bytes));
     }
@@ -504,10 +504,10 @@ TEST_F(CrcBatchTest, AsyncDiagnosticCopyFailuresDrainBeforePollReturns) {
         Block             block(35);
         size_t            drains = 0;
         const auto        owner  = std::this_thread::get_id();
-        CrcBlockCopyBatch copy(0, 1, block.bytes, 1, makeDumpWriter());
+        CrcCopyWorkspace  copy(0, 1, block.bytes, 1, makeDumpWriter());
         ASSERT_EQ(copy.store({block.item()}, failures_), CrcCopyState::OK);
         block.host[0] ^= 1;
-        CrcBlockCopyBatchTestPeer::hook(copy, [&](const char* point, void*, void*) {
+        CrcCopyWorkspaceTestPeer::hook(copy, [&](const char* point, void*, void*) {
             if (std::strcmp(point, "drain") == 0) {
                 ++drains;
                 EXPECT_EQ(std::this_thread::get_id(), owner);
@@ -526,8 +526,8 @@ TEST_F(CrcBatchTest, AsyncSuccessSkipsDiagnosticsAndMismatchFinishesDiagnosticsI
     Block             block(35);
     size_t            result_copies = 0, snapshots = 0, drains = 0;
     const auto        owner = std::this_thread::get_id();
-    CrcBlockCopyBatch copy(0, 1, block.bytes, 1, makeDumpWriter());
-    CrcBlockCopyBatchTestPeer::hook(copy, [&](const char* point, void*, void*) {
+    CrcCopyWorkspace  copy(0, 1, block.bytes, 1, makeDumpWriter());
+    CrcCopyWorkspaceTestPeer::hook(copy, [&](const char* point, void*, void*) {
         if (std::strcmp(point, "result_copy") == 0) {
             ++result_copies;
             EXPECT_EQ(std::this_thread::get_id(), owner);
@@ -567,7 +567,7 @@ TEST_F(CrcBatchTest, AsyncSuccessSkipsDiagnosticsAndMismatchFinishesDiagnosticsI
 
 TEST_F(CrcBatchTest, AsyncFullTailAndWaveReuseWithIndependentRecords) {
     auto              blocks = makeGuardedBlocks(5, {35, (1u << 20) + 19u, (2u << 20) + 35u});
-    CrcBlockCopyBatch copy(0, 5, (2u << 20) + 35u, 15);
+    CrcCopyWorkspace  copy(0, 5, (2u << 20) + 35u, 15);
     for (size_t count : {5u, 1u, 4u, 2u, 5u}) {
         for (auto& block : blocks)
             block->writeCpuRecord();
@@ -593,8 +593,8 @@ TEST(CrcAsyncDrainDeathTest, UnprovableCompletionAbortsBeforeReuse) {
             {
                 cudaCheck(cudaSetDevice(0));
                 Block             block(35);
-                CrcBlockCopyBatch copy(0, 1, block.bytes, 1);
-                CrcBlockCopyBatchTestPeer::hook(copy, [phase](const char* point, void*, void*) {
+                CrcCopyWorkspace  copy(0, 1, block.bytes, 1);
+                CrcCopyWorkspaceTestPeer::hook(copy, [phase](const char* point, void*, void*) {
                     return int(std::strcmp(point, phase) == 0 || std::strcmp(point, "drain") == 0 ? cudaErrorUnknown :
                                                                                                     cudaSuccess);
                 });
@@ -609,7 +609,7 @@ TEST_F(CrcBatchTest, KnownCastagnoliVector) {
     Block       block(9);
     const char* input = "123456789";
     cudaCheck(cudaMemcpy(block.device, input, 9, cudaMemcpyHostToDevice));
-    CrcBlockCopyBatch copy(0, 1, 9, 1);
+    CrcCopyWorkspace copy(0, 1, 9, 1);
     ASSERT_EQ(copy.store({block.item()}, failures_), CrcCopyState::OK);
     EXPECT_EQ(std::memcmp(block.host, input, 9), 0);
     EXPECT_EQ(block.footer(), 0xe3069283U);
@@ -621,7 +621,7 @@ TEST_F(CrcBatchTest, ColdFoldTablesAtExactPayloadCapacity) {
         SCOPED_TRACE(bytes);
         GuardedBlock block(bytes, static_cast<unsigned>(bytes));
         {
-            CrcBlockCopyBatch copy(0, 1, bytes, 3);
+            CrcCopyWorkspace copy(0, 1, bytes, 3);
             ASSERT_EQ(copy.store({block.item()}, failures_), CrcCopyState::OK);
             EXPECT_TRUE(failures_.empty());
             block.expectRecord(true);
@@ -630,7 +630,7 @@ TEST_F(CrcBatchTest, ColdFoldTablesAtExactPayloadCapacity) {
         block.writeCpuRecord();
         block.resetDevice(false);
         {
-            CrcBlockCopyBatch copy(0, 1, bytes, 3);
+            CrcCopyWorkspace copy(0, 1, bytes, 3);
             ASSERT_EQ(copy.load({block.item()}, failures_), CrcCopyState::OK);
             EXPECT_TRUE(failures_.empty());
             block.expectDevice(true);
@@ -641,7 +641,7 @@ TEST_F(CrcBatchTest, ColdFoldTablesAtExactPayloadCapacity) {
 
 TEST_F(CrcBatchTest, MixedRaggedBatchRoundTripAndReuse) {
     Block                    a(35, 1), b(4096, 2), c(96, 3);
-    CrcBlockCopyBatch        copy(0, 3, 4096, 9);
+    CrcCopyWorkspace         copy(0, 3, 4096, 9);
     std::vector<CrcCopyItem> items{a.item(true), b.item(true), c.item(true)};
     for (int round = 0; round < 3; ++round) {
         for (auto* block : {&a, &b, &c}) {
@@ -676,7 +676,7 @@ TEST_F(CrcBatchTest, MixedRaggedBatchRoundTripAndReuse) {
 
 TEST_F(CrcBatchTest, LastItemCorruptionScattersAllItemsAndReports) {
     Block             a(35, 1), b(96, 2);
-    CrcBlockCopyBatch copy(0, 2, 96, 6, makeDumpWriter(1));
+    CrcCopyWorkspace  copy(0, 2, 96, 6, makeDumpWriter(1));
     auto              items = std::vector<CrcCopyItem>{a.item(true), b.item(true)};
     for (bool footer : {false, true}) {
         for (auto* block : {&a, &b})
@@ -708,7 +708,7 @@ TEST_F(CrcBatchTest, LastItemCorruptionScattersAllItemsAndReports) {
 
 TEST_F(CrcBatchTest, FailureSnapshotsKeepCheckedStagingEvenWhenHostChangesAfterVerdict) {
     Block             block(35, 7);
-    CrcBlockCopyBatch copy(0, 1, 35, 3, makeDumpWriter());
+    CrcCopyWorkspace  copy(0, 1, 35, 3, makeDumpWriter());
     auto              item = block.item(true);
     ASSERT_EQ(copy.store({item}, failures_), CrcCopyState::OK);
     block.host[1] ^= 1;
@@ -738,7 +738,7 @@ TEST_F(CrcBatchTest, FailureSnapshotsKeepCheckedStagingEvenWhenHostChangesAfterV
 
 TEST_F(CrcBatchTest, DumpFailureDoesNotChangeVerdictAndSuccessNeverBuildsMetadata) {
     Block             block(35, 7);
-    CrcBlockCopyBatch copy(0, 1, 35, 3, makeDumpWriter());
+    CrcCopyWorkspace  copy(0, 1, 35, 3, makeDumpWriter());
     unsigned          metadata_calls = 0;
     bool              fail_metadata  = false;
     auto              item           = block.item();
@@ -769,7 +769,7 @@ TEST_F(CrcBatchTest, DumpFailureDoesNotChangeVerdictAndSuccessNeverBuildsMetadat
 
 TEST_F(CrcBatchTest, SlotWriterDumpsAndReportsFailure) {
     Block             block(35, 7);
-    CrcBlockCopyBatch copy(0, 1, 35, 3, makeDumpWriter());
+    CrcCopyWorkspace  copy(0, 1, 35, 3, makeDumpWriter());
     ASSERT_EQ(copy.store({block.item()}, failures_), CrcCopyState::OK);
     block.host[1] ^= 1;
     EXPECT_EQ(copy.load({block.item()}, failures_), CrcCopyState::CRC_MISMATCH);
@@ -782,7 +782,7 @@ TEST_F(CrcBatchTest, SlotWriterDumpsAndReportsFailure) {
 
 TEST_F(CrcBatchTest, DumpFailureDoesNotSkipLaterFailures) {
     Block             a(35, 1), b(96, 2);
-    CrcBlockCopyBatch copy(0, 2, 96, 6, makeDumpWriter());
+    CrcCopyWorkspace  copy(0, 2, 96, 6, makeDumpWriter());
     auto              items = std::vector<CrcCopyItem>{a.item(true), b.item(true)};
     ASSERT_EQ(copy.store(items, failures_), CrcCopyState::OK);
     items[0].dump_metadata = []() -> CrcCopyMetadata { throw std::runtime_error("dump unavailable"); };
@@ -807,7 +807,7 @@ TEST_F(CrcBatchTest, DumpFailureDoesNotSkipLaterFailures) {
 
 TEST_F(CrcBatchTest, LoadIgnoresPaddingAndReportsCorruption) {
     Block             block(35, 7);
-    CrcBlockCopyBatch copy(0, 1, 35, 3);
+    CrcCopyWorkspace  copy(0, 1, 35, 3);
     ASSERT_EQ(copy.store({block.item(true)}, failures_), CrcCopyState::OK);
     const auto                 item = block.item(true);
     const std::vector<uint8_t> untouched(block.bytes, 0xd3);
@@ -832,7 +832,7 @@ TEST_F(CrcBatchTest, LoadIgnoresPaddingAndReportsCorruption) {
 
 TEST_F(CrcBatchTest, PlainHostRecordsRoundTripAndReportCorruption) {
     Block             block(35, 7);
-    CrcBlockCopyBatch copy(0, 1, 35, 3);
+    CrcCopyWorkspace  copy(0, 1, 35, 3);
     // Pageable std::vector storage exercises the same load path as pinned
     // storage; the observable contract stays the same.
     std::vector<uint8_t> record(block.encoded, 0x6b);
@@ -869,7 +869,7 @@ TEST_F(CrcBatchTest, PlainHostRecordsRoundTripAndReportCorruption) {
 
 TEST_F(CrcBatchTest, MisalignedPinnedHostRecordVerifies) {
     Block             block(35, 7);
-    CrcBlockCopyBatch copy(0, 1, 35, 3);
+    CrcCopyWorkspace  copy(0, 1, 35, 3);
     // Pinned storage whose record starts one byte past the allocation base;
     // the declared capacity still covers the record.
     TestAllocation backing(block.encoded + 16, true);
@@ -895,7 +895,7 @@ TEST_F(CrcBatchTest, MisalignedPinnedHostRecordVerifies) {
 
 TEST_F(CrcBatchTest, MixedPinnedAndPlainHostRecordsVerifyTogether) {
     Block             pinned(35, 1), plain(96, 2);
-    CrcBlockCopyBatch copy(0, 2, 96, 6);
+    CrcCopyWorkspace  copy(0, 2, 96, 6);
     // Mixed host allocation kinds in one batch.
     std::vector<uint8_t> plain_record(plain.encoded, 0x6b);
     auto                 items = std::vector<CrcCopyItem>{pinned.item(true), plain.item(true)};
@@ -929,7 +929,7 @@ TEST_F(CrcBatchTest, LargeBatchLoadPipelinesWavesAndVerifies) {
     // the copy stream while the SMs CRC wave w. 6 * ~0.8MB crosses the 4MiB
     // threshold.
     auto              blocks = makeGuardedBlocks(6, {732672, 878160});
-    CrcBlockCopyBatch copy(0, 6, 878160, 6 * 3);
+    CrcCopyWorkspace  copy(0, 6, 878160, 6 * 3);
     auto              items = itemsFor(blocks, 6);
     for (auto& block : blocks)
         block->resetDevice(true);
@@ -982,7 +982,7 @@ TEST_F(CrcBatchTest, H2dWaveThresholdAndCountBoundaries) {
     // the serial path because a single wave buys no overlap.
     {
         auto              blocks = makeGuardedBlocks(2, {2195400});
-        CrcBlockCopyBatch copy(0, 2, 2195400, 2 * 3);
+        CrcCopyWorkspace  copy(0, 2, 2195400, 2 * 3);
         auto              items = itemsFor(blocks, 2);
         for (auto& block : blocks)
             block->resetDevice(true);
@@ -1006,7 +1006,7 @@ TEST_F(CrcBatchTest, H2dWaveThresholdAndCountBoundaries) {
     }
     {
         auto              blocks = makeGuardedBlocks(1, {4400000});
-        CrcBlockCopyBatch copy(0, 1, 4400000, 3);
+        CrcCopyWorkspace  copy(0, 1, 4400000, 3);
         auto              items = itemsFor(blocks, 1);
         blocks[0]->resetDevice(true);
         ASSERT_EQ(copy.store(items, failures_), CrcCopyState::OK);
@@ -1032,7 +1032,7 @@ TEST_F(CrcBatchTest, ExactH2dThresholdAndThreeWaveBatchesReuseWorkspace) {
         {{1398108, 1398108, 1398108}, threshold + 32},
         {{2097148, 2097132}, threshold - 16},
     };
-    CrcBlockCopyBatch copy(0, 3, 2097164, 9);
+    CrcCopyWorkspace copy(0, 3, 2097164, 9);
     for (const auto& test : cases) {
         SCOPED_TRACE(::testing::Message() << "encoded=" << test.encoded_bytes << " count=" << test.payloads.size());
         auto   blocks = makeGuardedBlocks(test.payloads.size(), test.payloads);
@@ -1054,7 +1054,7 @@ TEST_F(CrcBatchTest, ExactH2dThresholdAndThreeWaveBatchesReuseWorkspace) {
 
 TEST_F(CrcBatchTest, FailuresAcrossH2dWavesKeepIndicesAndRecover) {
     auto              blocks = makeGuardedBlocks(6, {732672, 878160});
-    CrcBlockCopyBatch copy(0, 6, 878160, 18);
+    CrcCopyWorkspace  copy(0, 6, 878160, 18);
     const auto        items = itemsFor(blocks, blocks.size());
     ASSERT_EQ(copy.store(items, failures_), CrcCopyState::OK);
     // Waves contain 2/2/1/1 records. Damage payloads and a footer in three
@@ -1098,8 +1098,8 @@ TEST_F(CrcBatchTest, FailuresAcrossH2dWavesKeepIndicesAndRecover) {
 TEST_F(CrcBatchTest, BatchedMixedRecordsInteroperateWithSingleRecordCopies) {
     constexpr size_t  full = 732672, swa = 878160;
     auto              blocks = makeGuardedBlocks(32, {35, 16383, 16384, 16385, 32768, 32769, full, swa});
-    CrcBlockCopyBatch batched(0, 32, swa, 32 * 3);
-    CrcBlockCopyBatch single(0, 1, swa, 3);
+    CrcCopyWorkspace  batched(0, 32, swa, 32 * 3);
+    CrcCopyWorkspace  single(0, 1, swa, 3);
     for (size_t count : {16u, 32u}) {
         SCOPED_TRACE(count);
         auto items = itemsFor(blocks, count);
@@ -1130,7 +1130,7 @@ TEST_F(CrcBatchTest, BatchedMixedRecordsInteroperateWithSingleRecordCopies) {
 
 TEST_F(CrcBatchTest, LargeBatchCorruptionStillScattersAndRecovers) {
     auto              blocks = makeGuardedBlocks(32, {49157, 65535, 65536, 65537, 32769});
-    CrcBlockCopyBatch copy(0, 32, 65537, 32 * 3);
+    CrcCopyWorkspace  copy(0, 32, 65537, 32 * 3);
     const auto        items = itemsFor(blocks, 32);
     for (auto& block : blocks)
         block->writeCpuRecord();
@@ -1161,7 +1161,7 @@ TEST_F(CrcBatchTest, WorkspaceReuseAcrossBatchSizesAndPayloadShapes) {
     constexpr size_t  swa   = 878160;
     auto              large = makeGuardedBlocks(32, {35, 16383, 16384, 16385, 32768, 32769, 732672, swa});
     auto              tiny  = makeGuardedBlocks(32, {1, 9, 15, 16, 17, 16383, 16384});
-    CrcBlockCopyBatch copy(0, 32, swa, 32 * 3);
+    CrcCopyWorkspace  copy(0, 32, swa, 32 * 3);
     size_t            round = 0;
     for (size_t count : {1u, 2u, 4u, 8u, 16u, 32u, 32u, 16u, 1u, 32u}) {
         SCOPED_TRACE(::testing::Message() << "round=" << round << " count=" << count);
@@ -1206,19 +1206,125 @@ TEST_F(CrcBatchTest, WorkspaceReuseAcrossBatchSizesAndPayloadShapes) {
     }
 }
 
+TEST_F(CrcBatchTest, FoldTablesKeepValidPrefixAndReuseMatricesAcrossMessageOrder) {
+    auto             blocks = makeGuardedBlocks(32, {35, 37});
+    CrcCopyWorkspace copy(0, 32, 37, 32 * 3);
+    size_t           builds = 0, uploads = 0;
+    CrcCopyWorkspaceTestPeer::hook(copy, [&](const char* point, void*, void*) {
+        builds += std::strcmp(point, "fold_build") == 0;
+        uploads += std::strcmp(point, "fold_upload") == 0;
+        return int(cudaSuccess);
+    });
+    size_t round = 0;
+    for (size_t count : {32u, 21u, 32u, 32u}) {
+        const size_t rotation = round == 3 ? 1 : 0;
+        const auto   items    = itemsFor(blocks, count, rotation);
+        for (auto& block : blocks) {
+            block->writeCpuRecord();
+            block->resetDevice(false);
+        }
+        ASSERT_EQ(copy.trySubmit(items, CrcCopyDirection::LOAD), CrcCopyState::PENDING);
+        ASSERT_EQ(waitCrc(copy), CrcCopyState::OK);
+        ASSERT_EQ(copy.finish(), CrcCopyState::OK);
+        for (size_t index = 0; index < count; ++index)
+            blocks[(index + rotation) % blocks.size()]->expectDevice(true);
+        for (size_t index = 0; index < count; ++index)
+            blocks[(index + rotation) % blocks.size()]->resetHost();
+        ASSERT_EQ(copy.store(items, failures_), CrcCopyState::OK);
+        for (size_t index = 0; index < count; ++index)
+            blocks[(index + rotation) % blocks.size()]->expectRecord(true);
+        EXPECT_EQ(builds, 2u);
+        EXPECT_EQ(uploads, round == 3 ? 2u : 1u);
+        ++round;
+    }
+}
+
+TEST_F(CrcBatchTest, FoldCacheSeparatesBlockCountsWhenBatchMaximumChanges) {
+    auto             blocks = makeGuardedBlocks(2, {35, 32769});
+    CrcCopyWorkspace copy(0, 2, 32769, 2 * 3);
+    size_t           builds = 0, uploads = 0;
+    CrcCopyWorkspaceTestPeer::hook(copy, [&](const char* point, void*, void*) {
+        builds += std::strcmp(point, "fold_build") == 0;
+        uploads += std::strcmp(point, "fold_upload") == 0;
+        return int(cudaSuccess);
+    });
+    size_t round = 0;
+    for (size_t count : {2u, 1u, 2u}) {
+        for (auto& block : blocks)
+            block->resetHost();
+        ASSERT_EQ(copy.store(itemsFor(blocks, count), failures_), CrcCopyState::OK);
+        for (size_t index = 0; index < count; ++index)
+            blocks[index]->expectRecord(true);
+        EXPECT_EQ(builds, round == 0 ? 2u : 3u);
+        EXPECT_EQ(uploads, round + 1);
+        ++round;
+    }
+}
+
+TEST_F(CrcBatchTest, FoldHostCacheSurvivesFailedUploadButDeviceSignatureDoesNot) {
+    GuardedBlock     block(35, 91);
+    CrcCopyWorkspace copy(0, 1, block.bytes, 3);
+    size_t           builds = 0, uploads = 0;
+    CrcCopyWorkspaceTestPeer::hook(copy, [&](const char* point, void*, void*) {
+        builds += std::strcmp(point, "fold_build") == 0;
+        if (std::strcmp(point, "fold_upload") == 0 && ++uploads == 1)
+            return int(cudaErrorInvalidValue);
+        return int(cudaSuccess);
+    });
+    ASSERT_EQ(copy.store({block.item()}, failures_), CrcCopyState::DEVICE_ERROR);
+    ASSERT_EQ(copy.store({block.item()}, failures_), CrcCopyState::OK);
+    block.expectRecord(true);
+    EXPECT_EQ(builds, 1u);
+    EXPECT_EQ(uploads, 2u);
+}
+
+TEST_F(CrcBatchTest, FoldCacheEvictsOldGeometryAndRebuildsCorrectly) {
+    CrcCopyWorkspace copy(0, 1, 145, 3);
+    size_t           builds = 0;
+    CrcCopyWorkspaceTestPeer::hook(copy, [&](const char* point, void*, void*) {
+        builds += std::strcmp(point, "fold_build") == 0;
+        return int(cudaSuccess);
+    });
+    for (size_t length = 129; length <= 145; ++length) {
+        GuardedBlock block(length, unsigned(length));
+        ASSERT_EQ(copy.store({block.item()}, failures_), CrcCopyState::OK);
+        block.expectRecord(true);
+    }
+    EXPECT_EQ(builds, 17u);
+    GuardedBlock first(129, 192);
+    ASSERT_EQ(copy.store({first.item()}, failures_), CrcCopyState::OK);
+    first.expectRecord(true);
+    EXPECT_EQ(builds, 18u);
+}
+
 TEST_F(CrcBatchTest, InvalidAndOverflowingCapacitiesAreRejectedBeforeAllocation) {
     const size_t maximum     = std::numeric_limits<size_t>::max();
     const size_t int_maximum = size_t(std::numeric_limits<int>::max());
-    EXPECT_THROW(CrcBlockCopyBatch(-1, 1, 35, 1), std::invalid_argument);
-    EXPECT_THROW(CrcBlockCopyBatch(0, 0, 35, 1), std::invalid_argument);
-    EXPECT_THROW(CrcBlockCopyBatch(0, 1, 0, 1), std::invalid_argument);
-    EXPECT_THROW(CrcBlockCopyBatch(0, 1, 35, 0), std::invalid_argument);
-    EXPECT_THROW(CrcBlockCopyBatch(0, int_maximum + 1, 35, 1), std::invalid_argument);
-    EXPECT_THROW(CrcBlockCopyBatch(0, 1, 35, int_maximum + 1), std::invalid_argument);
-    EXPECT_THROW(CrcBlockCopyBatch(0, 1, maximum, 1), std::overflow_error);
-    EXPECT_THROW(CrcBlockCopyBatch(0, 2, maximum - 19, 1), std::overflow_error);
+    EXPECT_THROW(CrcCopyWorkspace(-1, 1, 35, 1), std::invalid_argument);
+    EXPECT_THROW(CrcCopyWorkspace(0, 0, 35, 1), std::invalid_argument);
+    EXPECT_THROW(CrcCopyWorkspace(0, 1, 0, 1), std::invalid_argument);
+    EXPECT_THROW(CrcCopyWorkspace(0, 1, 35, 0), std::invalid_argument);
+    EXPECT_THROW(CrcCopyWorkspace(0, int_maximum + 1, 35, 1), std::invalid_argument);
+    EXPECT_THROW(CrcCopyWorkspace(0, 1, 35, int_maximum + 1), std::invalid_argument);
+    EXPECT_THROW(CrcCopyWorkspace(0, 1, maximum, 1), std::overflow_error);
+    EXPECT_THROW(CrcCopyWorkspace(0, 2, maximum - 19, 1), std::overflow_error);
     const size_t above_uint32 = size_t(std::numeric_limits<uint32_t>::max()) + 1;
-    EXPECT_THROW(CrcBlockCopyBatch(0, 1, above_uint32, 1), std::invalid_argument);
+    EXPECT_THROW(CrcCopyWorkspace(0, 1, above_uint32, 1), std::invalid_argument);
+}
+
+TEST_F(CrcBatchTest, MemoryEstimateMatchesConstructedWorkspaces) {
+    for (const size_t items : {1u, 3u, 32u}) {
+        for (const size_t payload : {35u, 4096u, 1048577u}) {
+            SCOPED_TRACE("items=" + std::to_string(items) + " payload=" + std::to_string(payload));
+            const auto       usage = CrcCopyWorkspace::memoryUsage(items, payload, items * 3);
+            CrcCopyWorkspace copy(0, items, payload, items * 3);
+            EXPECT_EQ(usage.device_bytes, copy.deviceMemoryBytes());
+            EXPECT_EQ(usage.host_bytes, copy.hostMemoryBytes());
+            EXPECT_GT(usage.device_bytes, items * CrcCopyWorkspace::encodedBytes(payload));
+        }
+    }
+    EXPECT_THROW(CrcCopyWorkspace::memoryUsage(1, std::numeric_limits<size_t>::max(), 1), std::overflow_error);
+    EXPECT_THROW(CrcCopyWorkspace::memoryUsage(0, 35, 1), std::invalid_argument);
 }
 
 TEST_F(CrcBatchTest, SharedWorkspaceSerializesConcurrentMixedShapeCalls) {
@@ -1230,7 +1336,7 @@ TEST_F(CrcBatchTest, SharedWorkspaceSerializesConcurrentMixedShapeCalls) {
         second_sizes.push_back(350000 + i * 23);
     }
     std::array<GuardedBlocks, 2>      blocks{makeGuardedBlocks(16, first_sizes), makeGuardedBlocks(16, second_sizes)};
-    CrcBlockCopyBatch                 copy(0, 16, second_sizes.back(), 16 * 3);
+    CrcCopyWorkspace                  copy(0, 16, second_sizes.back(), 16 * 3);
     std::array<std::exception_ptr, 2> failures{};
     std::mutex                        start_mutex;
     std::condition_variable           start_condition;
@@ -1281,7 +1387,7 @@ TEST_F(CrcBatchTest, SharedWorkspaceSerializesConcurrentMixedShapeCalls) {
 
 TEST_F(CrcBatchTest, InvalidGeometryNeverWritesTargets) {
     Block                    block(35, 4);
-    CrcBlockCopyBatch        copy(0, 1, 35, 3);
+    CrcCopyWorkspace         copy(0, 1, 35, 3);
     const auto               valid = block.item(true);
     std::vector<CrcCopyItem> cases;
     auto                     bad = valid;
@@ -1324,9 +1430,9 @@ TEST_F(CrcBatchTest, InvalidGeometryNeverWritesTargets) {
     EXPECT_EQ(copy.store({}, failures_), CrcCopyState::INVALID_ARGS);
     EXPECT_EQ(copy.load({}, failures_), CrcCopyState::INVALID_ARGS);
     EXPECT_EQ(copy.store({valid, valid}, failures_), CrcCopyState::INVALID_ARGS);
-    CrcBlockCopyBatch fewer_tiles(0, 1, 35, 2);
+    CrcCopyWorkspace fewer_tiles(0, 1, 35, 2);
     EXPECT_EQ(fewer_tiles.store({valid}, failures_), CrcCopyState::INVALID_ARGS);
-    CrcBlockCopyBatch two(0, 2, 35, 6);
+    CrcCopyWorkspace two(0, 2, 35, 6);
     EXPECT_EQ(two.store({valid, valid}, failures_), CrcCopyState::INVALID_ARGS);  // aliasing host backing
 }
 }  // namespace
