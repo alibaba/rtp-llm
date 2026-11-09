@@ -34,6 +34,10 @@ try:
 except (ImportError, AttributeError, ValueError) as _e:
     logging.warning(f"flash_mla not available: {_e}. Requires CUDA >= 12.9")
 
+from rtp_llm.models_py.model_desc.block_map import (
+    AttentionInputs,
+    select_attention_inputs_for_tag,
+)
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
@@ -1001,7 +1005,9 @@ class SparseMlaImpl(MlaImplBase):
             attn_inputs=attn_inputs,
         )
 
-    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+    def prepare_cuda_graph(self, group_inputs: AttentionInputs) -> None:
+        self.glm53_group_inputs = group_inputs
+        attn_inputs = select_attention_inputs_for_tag(group_inputs, "full")
         # Reuse main's device-only fill for ordinary decode. Target verification
         # and other prefill-shaped requests use main's SparseMlaParams plan.
         if (
