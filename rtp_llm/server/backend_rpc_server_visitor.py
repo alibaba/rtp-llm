@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
@@ -179,6 +180,11 @@ class BackendRPCServerVisitor:
             master_config=master_config,
         )
         self.recent_cache_key_window = RecentCacheKeyWindow()
+        # Prefill-pod pinning: pod ip -> last time the master actually chose it.
+        # Used to keep every step of a session on one prefill pod so its KV
+        # prefix stays local (a mid-session migration loses the whole prefix:
+        # reuse_len=0 for the full prompt).
+        self._prefill_pod_seen: dict = {}
         self.pd_route_retry_on_unavailable = self._pd_route_retry_on_unavailable()
         self.request_id_factory: Optional[Callable[[], int]] = None
 
@@ -546,6 +552,7 @@ class BackendRPCServerVisitor:
                     ExceptionType.ROUTE_ERROR, "master changed the selected ViT route"
                 )
             input.generate_config.role_addrs = route_result.role_addrs
+            self._pin_prefill_addr(input)
             input.enqueued_by_master = route_result.enqueued_by_master
             route_logger.debug(
                 "master route success, request_id=%s, addrs=%s",
@@ -626,6 +633,44 @@ class BackendRPCServerVisitor:
                 input.request_id,
                 missing_roles,
             )
+
+    def _pin_prefill_addr(self, input: GenerateInput) -> None:
+        """Pin this request's PREFILL role to a stable, content-derived pod.
+
+        Every step of a session shares the same leading tokens, so hashing the
+        first tokens assigns the whole session to one prefill pod identically
+        across all frontend worker processes with no shared state. The
+        candidate set is the pods the master has actually chosen recently, so
+        pods that stop being chosen (restart/drain) leave the pin set on their
+        own. Without the pin the master's TTFT-tie rotation can migrate a
+        session between prefill pods, and the migration step loses the entire
+        KV prefix (reuse_len=0 on the full prompt).
+        """
+        addrs = input.generate_config.role_addrs
+        if not addrs:
+            return
+        prefill_addrs = [a for a in addrs if a.role == RoleType.PREFILL]
+        if len(prefill_addrs) != 1:
+            return
+        chosen = prefill_addrs[0]
+        now = time.time()
+        # Learn the master's live choices; entries expire quickly so a pod
+        # that stops being chosen leaves the pin set.
+        self._prefill_pod_seen = {
+            ip: ts for ip, ts in self._prefill_pod_seen.items() if now - ts < 60
+        }
+        self._prefill_pod_seen[chosen.ip] = now
+        live = sorted(self._prefill_pod_seen)
+        if len(live) < 2:
+            # With a single candidate there is nothing to pin against.
+            return
+        tokens = input.token_ids.reshape(-1)
+        if tokens.numel() == 0:
+            return
+        head = tuple(tokens[: min(1024, tokens.numel())].tolist())
+        pinned = live[hash(head) % len(live)]
+        if pinned != chosen.ip:
+            chosen.ip = pinned
 
     async def route_ips(self, input: GenerateInput):
         # PD node selection span: master routing is a real RPC round-trip that
