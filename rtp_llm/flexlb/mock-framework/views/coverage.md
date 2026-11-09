@@ -20,7 +20,7 @@ TPS 以当前分支 Real 的 `RtpLLMMetrics.h/.cc` 和 `MtpExecutor.cc` 为合�
 | prefill | 10379 | prefill tps | 已上报 | rtp_llm_context_tps |
 | prefill | 10368 | prefill wall tps | 已上报 | rtp_llm_context_wall_tps |
 | prefill | 10381 | input wall tps | 已上报 | rtp_llm_context_wall_tps |
-| prefill | 218 | timeout qps | 待埋点 | rtp_llm_framework_qps |
+| prefill | 218 | timeout qps | 已上报 | rtp_llm_framework_requests_total{outcome="timeout"} |
 | prefill | 10373 | total tps | 已上报 | rtp_llm_total_tps |
 | prefill | 10370 | prefill tps with cache | 已上报 | rtp_llm_context_tps_with_cache |
 | prefill | 10372 | prefill wall tps with cache | 已上报 | rtp_llm_context_wall_tps_with_cache |
@@ -52,7 +52,7 @@ TPS 以当前分支 Real 的 `RtpLLMMetrics.h/.cc` 和 `MtpExecutor.cc` 为合�
 | prefill | 150 | query batch size | 已上报 | rtp_llm_query_batch_size |
 | prefill | 327 | remote running stream size | 待埋点 | rtp_llm_remote_running_stream_size |
 | prefill | 122 | context batch size | 已上报 | rtp_llm_context_batch_size |
-| prefill | 127 | waiting stream size | 已上报 | rtp_llm_wait_stream_size |
+| prefill | 127 | waiting / KV loading stream size | 已上报 | rtp_llm_wait_stream_size / rtp_llm_loading_cache_stream_size |
 | prefill | 124 | batch max seq len | 已上报 | rtp_llm_max_seq_len |
 | prefill | 226 | batch max seq len when has context | 已上报 | rtp_llm_max_seq_len_when_has_context |
 | prefill | 125 | input token length | 已上报 | rtp_llm_input_token_length |
@@ -103,7 +103,7 @@ TPS 以当前分支 Real 的 `RtpLLMMetrics.h/.cc` 和 `MtpExecutor.cc` 为合�
 | prefill | 10635 | rtp_llm_kv_cache_frozen_ref_blocks | 待埋点 | rtp_llm_kv_cache_frozen_ref_blocks |
 | decode | 10369 | decode tps | 已上报 | rtp_llm_generate_tps |
 | decode | 10383 | output wall tps | 已上报 | rate(rtp_llm_forward_tokens_total{kind="output"}) |
-| decode | 218 | timeout qps | 待埋点 | rtp_llm_framework_qps |
+| decode | 218 | timeout qps | 已上报 | rtp_llm_framework_requests_total{outcome="timeout"} |
 | decode | 10373 | total tps | 已上报 | rtp_llm_total_tps |
 | decode | 231 | model forward rt | 生产基线缺席，Mock 诊断独立展示 | rtp_llm_model_forward_us |
 | decode | 10081 | wall tps report interval | 已上报 | rtp_llm_wall_tps_report_interval_us |
@@ -133,7 +133,7 @@ TPS 以当前分支 Real 的 `RtpLLMMetrics.h/.cc` 和 `MtpExecutor.cc` 为合�
 | decode | 149 | iterate count | 已上报 | rtp_llm_iterate_count |
 | decode | 150 | query batch size | 已上报 | rtp_llm_query_batch_size |
 | decode | 327 | remote running stream size | 待埋点 | rtp_llm_remote_running_stream_size |
-| decode | 127 | waiting stream size | 已上报 | rtp_llm_wait_stream_size |
+| decode | 127 | waiting / KV loading stream size | 已上报 | rtp_llm_wait_stream_size / rtp_llm_loading_cache_stream_size |
 | decode | 124 | batch max seq len | 已上报 | rtp_llm_max_seq_len |
 | decode | 226 | batch max seq len when has context | 纯 Decode 不适用 | rtp_llm_max_seq_len_when_has_context |
 | decode | 125 | input token length | 已上报 | rtp_llm_input_token_length |

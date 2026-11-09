@@ -99,7 +99,7 @@ def test_provider_disables_pull_and_receives_role_metrics(tmp_path, push_provide
             with pytest.raises(urllib.error.HTTPError) as error:
                 urllib.request.urlopen(f'http://127.0.0.1:{port}/metrics', timeout=1)
             assert error.value.code == 404
-            expected = 'py_rtp_vit_qps' if role == 'VIT' else 'rtp_llm_wait_stream_size'
+            expected = 'py_rtp_vit_qps' if role == 'VIT' else 'rtp_llm_kv_cache_left_seq'
             assert expected in capture.read_text()
             log.seek(0)
             assert '"metrics_backend":"kmonitor"' in log.read()

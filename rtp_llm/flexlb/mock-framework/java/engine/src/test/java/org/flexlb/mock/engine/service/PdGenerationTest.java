@@ -206,7 +206,7 @@ class PdGenerationTest {
                     assertEquals(output, active.getRunningTaskInfo(0).getRequestId());
                     assertEquals(32, active.getAvailableKvCache());
                     assertEquals(0, metric(p, "rtp_llm_requests_started_total", ""));
-                    assertEquals(0, metric(p, "rtp_llm_wait_stream_size", ""));
+                    assertEquals(0, metric(p, "rtp_llm_scheduler_requests", "state=\"waiting\""));
                     response.onError(Status.UNAVAILABLE.withDescription("V unavailable").asRuntimeException());
                     call.error(Status.Code.UNAVAILABLE);
                     var ended = p.status();

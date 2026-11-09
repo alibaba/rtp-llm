@@ -324,11 +324,11 @@ RTP 后端的 RtpMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独
 
 TPOT 的计时从选批和 KV 准备完成后、开始构造批输入时开始，到模拟计算完成回调进入输出处理前结束。它独立于原有 `rtp_llm_step_latency_us` 的“调度返回到处理完输出”边界。分母使用现有简化 Decode 模型给出的本轮验收 token 数，对应 Real 验证阶段 `accept_len` 的采样位置，不新增 draft、verify 或 acceptance 内部指标。EOS、max_new_tokens、max_seq_len 限制只截断交付量，不回写本轮验收统计。选批前已取消的 stream 不参与；入批后取消但计算已完成的 stream 仍参与该批统计，其 token 不交付；整轮计算中止而无完成结果时不产生 TPOT 样本。Prefill 不产生该 Decode 指标。
 
-RTP 原生观测直接导出：`rtp_llm_wait_stream_size`、`rtp_llm_running_stream_size`、`rtp_llm_kv_cache_left_seq`（Tokens）、`rtp_llm_kv_cache_{total,free,available,used}_blocks`（Blocks）和 `rtp_llm_kv_cache_used_ratio`（0–100，不可用比例）。Host 暂只上报 total/free/used Blocks，不用 free 冒充 available。loading/ready 仍是调度器阶段辅助观测，不冒充 real 的加载缓存队列。
+选批完成后采样 `rtp_llm_wait_stream_size`、`rtp_llm_running_stream_size` 和 `rtp_llm_loading_cache_stream_size`。有排队或加载请求的空批轮次也采样。KMonitor 每轮接收原始样本，Prometheus 用 `_sum`、`_count` 计算调度轮均值。`rtp_llm_scheduler_requests` 继续在采集时读取实时队列，用于排查。KV 容量、索引条目数和占用率使用周期采样。
 
 Prefill 的 context TPS 用计算 token／执行时间，含缓存 TPS 用输入 token／执行时间；执行边界从本批调度开始到处理完输出，与辅助累计执行秒数一致。墙钟 TPS 使用对应 token／实际 TPS 窗口。Decode 的 generate 和 total 保留 Real 的窗口计数，使用本轮验收 token，包含完成计算后才取消的成员，不受 EOS、最大输出长度截断；已提交输出独立保留在 Forward output Counter 中，用它计算真实交付吞吐。不得把原生 generate/total 当作 token/s，也不得对它们求 rate。窗口计数的可比性依赖实际报告间隔，跨部署不能直接比较不同长度窗口的原始数值。
 
-TPS 的各 priority 共用整批有效执行时间和墙钟窗口，分桶分子相加等于本实例总量。空闲报告 priority=0 的零值；仍有 Forward 在执行且没有新的完成结果时不报假零、不重置 TPS 窗口，直到完成或失败后结束这段窗口。失败不虚构执行 token。QPS 有独立的周期边界，终态统计不受长 Forward 延迟影响。`rtp_llm_framework_qps` 统计终态，不是接纳；error 包含 timeout，cancel 单列。Real 与 Mock 周期边界可能不同，不能要求逐点相等。
+TPS 的各 priority 共用整批有效执行时间和墙钟窗口，分桶分子相加等于本实例总量。空闲报告 priority=0 的零值；仍有 Forward 在执行且没有新的完成结果时不报假零、不重置 TPS 窗口，直到完成或失败后结束这段窗口。失败不虚构执行 token。`rtp_llm_framework_qps`、`rtp_llm_framework_error_qps` 和 `rtp_llm_cancel_qps` 按请求终态上报。error 包含 timeout，cancel 单列。Prometheus 对对应 `_total` 计数器求 rate。
 
 没有 real 同名指标的真实观测，以 RTP Prometheus 辅助 Counter/Histogram 保留供 Python 门禁和统计使用，不拿它们的累计值直接冒充线上 QPS/TPS Gauge。理论 Forward、ViT 运行图片数和 hash 缓存预算保留 `mock_` 前缀。此次更名不保留旧 `mock_engine_*` 别名；旧实验保持原始 view.json 和 TSDB，不承诺新查询可以直接读取旧指标名。
 
@@ -445,7 +445,7 @@ LLM Mock Engine 的装配类统一命名为 `execution/LLMMockEngine`，缓存�
 | `py_rtp_vit_embedding_batch_size` / `forward_rt` | 每次 Forward 的工作 chunk 数 / 实际模拟执行毫秒。不是 RPC 数，也不是 embedding 行数。 |
 | `py_rtp_vit_embedding_queue_size` / `queue_wait_rt` / `embedding_rt` | 等待 Forward 的队列项数 / 首次入批前等待毫秒 / 成功工作提交 GPU 队列到 Forward 完成毫秒。最后一个不含下载和调用者晚取结果的时间。 |
 | `py_rtp_vit_embedding_overload_qps` | GPU scheduler 拒绝提交次数；CPU admission 拒绝走错误指标，不混为 GPU 队列溢出。 |
-| `py_rtp_vit_preprocess_queue_size` | 尚未完成准备的媒体数，含排队和执行中；不含等待 Forward 的工作。 |
+| `py_rtp_vit_preprocess_queue_size` | 提交准备与离开准备时采样，包含排队和执行中的媒体。 |
 | `py_rtp_vit_preprocess_rt` / `download_rt` / `preprocess_other_rt` | 成功准备的总毫秒 / 下载毫秒 / 两者之差；跳过下载不制造样本。Mock 非下载部分只有读取尺寸、摘要及几何规划，没有真实像素处理。 |
 | `rtp_llm_vit_image_fetch_rt_us` | 成功下载微秒；当前 DeepSeek V4.1 图片规划使用 `model=deepseek_v41,mm_type=image`。 |
 | `py_rtp_vit_embedding_cache_{hit,miss,inflight,eviction}_qps` | 每 key 获取时区分驻留命中、新工作、共享等待；eviction 只计逻辑结果被容量淘汰，GPU→CPU 保留不计。GPU 淘汰且 CPU 放不下也必须计。 |
