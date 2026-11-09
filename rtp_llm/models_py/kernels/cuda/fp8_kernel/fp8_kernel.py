@@ -219,6 +219,11 @@ def sgl_per_token_group_quant_fp8(
 # 0-dim aten::zeros per step). Buffer identity is per process per device;
 # the forward pass is single-threaded per rank, and the reset + two kernel
 # launches stay stream-ordered.
+# Constraint: the accumulator is shared per device, so dynamic per-tensor
+# quantization must stay on the rank's main stream. The side-stream surfaces
+# that run fp8 linears (moe shared_overlap / ep_tbo) are gated to DECODE
+# nvfp4/DeepEP layouts that do not take this path today; enabling them
+# requires keying this pool by stream.
 _dynamic_scale_accumulators: "dict" = {}
 
 
