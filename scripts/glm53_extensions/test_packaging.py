@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import struct
 import tempfile
 import unittest
 import warnings
@@ -72,6 +73,25 @@ class PackagingTest(unittest.TestCase):
         with zipfile.ZipFile(self.wheel) as package:
             self.assertEqual(len(package.namelist()), len(set(package.namelist())))
         build.check_wheel(self.wheel)
+
+    def test_repack_rebuilds_zip64_metadata(self):
+        # The Bazel wheel can carry ZIP64 offsets that no longer apply after
+        # repacking. Python reads these fields permissively, while uv rejects them.
+        name = "rtp_llm/libs/unchanged.so"
+        with zipfile.ZipFile(self.wheel, "w") as out:
+            for path, data in self.original.items():
+                entry = zipfile.ZipInfo(path)
+                if path == name:
+                    entry.extra = struct.pack("<HHQ", 1, 8, 100)
+                    entry.create_system = 3
+                    entry.external_attr = 0o100755 << 16
+                out.writestr(entry, data)
+        build.extend_wheel(self.wheel, self.payload)
+        with zipfile.ZipFile(self.wheel) as package:
+            entry = package.getinfo(name)
+            self.assertEqual(entry.extra, b"")
+            self.assertEqual(entry.external_attr >> 16, 0o100755)
+            self.assertEqual(package.read(name), self.original[name])
 
     def test_missing_native_binary_leaves_original_wheel_unchanged(self):
         original = self.wheel.read_bytes()
