@@ -20,8 +20,14 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     configure_kv_cache_event_host_ip_port,
     load_gpu_nic_affinity,
+    resolve_local_world_size,
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
+)
+from rtp_llm.server.engine_cpu_affinity import (
+    EngineCpuPlacement,
+    plan_engine_cpu_affinity,
+    resolve_engine_cpu,
 )
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
@@ -64,6 +70,7 @@ def local_rank_start(
     pipe_writer=None,
     expected_parent_pid: Optional[int] = None,
     service_draining=None,
+    engine_cpu_plan: Optional[dict[int, EngineCpuPlacement]] = None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     if expected_parent_pid is not None:
@@ -96,6 +103,18 @@ def local_rank_start(
         py_env_configs.distribute_config.set_local_rank(local_rank)
         configure_kv_cache_event_host_ip_port(py_env_configs)
         setup_cuda_device_and_accl_env(local_rank)
+        py_env_configs.engine_cpu_id = -1
+        if (
+            getattr(py_env_configs, "engine_cpu_affinity", "off") == "auto"
+            and torch.cuda.is_available()
+        ):
+            if engine_cpu_plan is None:
+                engine_cpu_plan = plan_engine_cpu_affinity({world_rank: local_rank})
+            placement = engine_cpu_plan.get(world_rank)
+            if placement is not None:
+                py_env_configs.engine_cpu_id = resolve_engine_cpu(
+                    world_rank, local_rank, placement
+                )
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
@@ -184,11 +203,18 @@ def _create_rank_processes(
     cuda_device_list = _get_cuda_device_list()
     _validate_dp_configuration(py_env_configs)
 
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
+    world_ranks = range(pc.world_rank, pc.world_rank + local_world_size)
+    engine_cpu_plan = {}
+    if getattr(py_env_configs, "engine_cpu_affinity", "off") == "auto":
+        rank_device_count = resolve_local_world_size(pc)
+        engine_cpu_plan = plan_engine_cpu_affinity(
+            {rank: rank % rank_device_count for rank in world_ranks}
+        )
     parent_pid = os.getpid()
-    for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
+    for world_rank in world_ranks:
         reader, writer = ctx.Pipe(duplex=False)
         rank_pipe_readers.append(reader)
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
         proc = ctx.Process(
             target=local_rank_start,
@@ -199,6 +225,7 @@ def _create_rank_processes(
                 writer,
                 parent_pid,
                 service_draining,
+                engine_cpu_plan,
             ),
             name=f"rank-{world_rank}",
         )

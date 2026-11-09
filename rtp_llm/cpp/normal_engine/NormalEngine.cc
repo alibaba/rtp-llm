@@ -19,8 +19,10 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include <ATen/Parallel.h>
 #include <c10/core/InferenceMode.h>
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -41,12 +43,49 @@
 
 #ifdef __linux__
 #include <malloc.h>
+#include <sched.h>
+#include <unistd.h>
 #endif
 
 using namespace std;
 namespace rtp_llm {
 
 namespace {
+#ifdef __linux__
+void bindEngineThreadToCpu(int cpu, int64_t rank) {
+    const auto cpu_count =
+        std::max({static_cast<long>(CPU_SETSIZE), static_cast<long>(cpu) + 1, sysconf(_SC_NPROCESSORS_CONF)});
+    const auto set_size  = CPU_ALLOC_SIZE(cpu_count);
+    std::unique_ptr<cpu_set_t, decltype(&std::free)> mask(CPU_ALLOC(cpu_count), &std::free);
+    if (!mask) {
+        RTP_LLM_LOG_WARNING("Engine CPU affinity skipped: rank=%ld could not allocate CPU mask", rank);
+        return;
+    }
+    if (sched_getaffinity(0, set_size, mask.get()) != 0) {
+        RTP_LLM_LOG_WARNING("Engine CPU affinity skipped: rank=%ld sched_getaffinity: %s", rank, std::strerror(errno));
+        return;
+    }
+    if (!CPU_ISSET_S(cpu, set_size, mask.get())) {
+        RTP_LLM_LOG_WARNING("Engine CPU affinity skipped: rank=%ld cpu=%d is outside the thread's CPU mask", rank, cpu);
+        return;
+    }
+
+    CPU_ZERO_S(set_size, mask.get());
+    CPU_SET_S(cpu, set_size, mask.get());
+    if (sched_setaffinity(0, set_size, mask.get()) != 0) {
+        RTP_LLM_LOG_WARNING(
+            "Engine CPU affinity skipped: rank=%ld cpu=%d sched_setaffinity: %s", rank, cpu, std::strerror(errno));
+        return;
+    }
+    if (sched_getaffinity(0, set_size, mask.get()) != 0 || CPU_COUNT_S(set_size, mask.get()) != 1
+        || !CPU_ISSET_S(cpu, set_size, mask.get())) {
+        RTP_LLM_LOG_WARNING("Engine CPU affinity could not be verified: rank=%ld tid=%d cpu=%d", rank, gettid(), cpu);
+        return;
+    }
+    RTP_LLM_LOG_INFO("Engine CPU affinity applied: rank=%ld tid=%d cpu=%d", rank, gettid(), cpu);
+}
+#endif
+
 // 释放glibc缓存的host内存，将其归还给操作系统
 // 在模型加载完成后调用，可以显著减少常驻内存占用
 void releaseHostMemoryCache() {
@@ -163,6 +202,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
     runtime_config(params.runtime_config),
+    engine_cpu_id_(params.engine_cpu_id),
     eplb_config(params.eplb_config),
     pd_sep_config(params.pd_sep_config),
     profiling_debug_logging_config(params.profiling_debug_logging_config),
@@ -842,6 +882,13 @@ void NormalEngine::loop() {
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
+#ifdef __linux__
+    if (engine_cpu_id_ >= 0) {
+        // OpenMP may restore the initial affinity on the thread's first ATen CPU operation.
+        (void)at::get_num_threads();
+        bindEngineThreadToCpu(engine_cpu_id_, parallelism_config.world_rank);
+    }
+#endif
     while (running_) {
         auto status = step();
         if (!status.ok()) {

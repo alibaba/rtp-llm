@@ -27,6 +27,10 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_bf16.h"
 
+#include <cuda_runtime_api.h>
+#include <stdexcept>
+#include <string>
+
 using namespace rtp_llm;
 
 namespace torch_ext {
@@ -335,6 +339,14 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {
+    rtp_ops_m.def("get_device_pci_bus_id", [](int device_id) {
+        char       bus_id[32] = {};
+        const auto status    = cudaDeviceGetPCIBusId(bus_id, sizeof(bus_id), device_id);
+        if (status != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaDeviceGetPCIBusId: ") + cudaGetErrorString(status));
+        }
+        return std::string(bus_id);
+    });
     registerBasicCudaOps(rtp_ops_m);
     registerSelectTopkOp(rtp_ops_m);
     registerGroupTopKOp(rtp_ops_m);

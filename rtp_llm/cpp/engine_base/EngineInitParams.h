@@ -117,6 +117,7 @@ struct EngineInitParams {
     py::object                   py_sp_model;
     py::object                   weight_manager;
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
+    int                          engine_cpu_id    = -1;
 
 public:
     void showDebugInfo() const {

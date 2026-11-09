@@ -291,6 +291,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
         params.server_config    = engine_config.attr("server_config");
         params.grammar_config   = engine_config.attr("grammar_config").cast<GrammarConfig>();
+        params.engine_cpu_id    = py::getattr(engine_config, "engine_cpu_id", py::int_(-1)).cast<int>();
         model_id_++;
         if (parallelism_config.tp_rank == 0) {
             // kmon metric init

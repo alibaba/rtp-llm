@@ -16,6 +16,20 @@ from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
 
+class EngineCpuAffinityArgumentsTest(TestCase):
+    def test_opt_in_and_cli_overrides_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(server_args.setup_args([]).engine_cpu_affinity, "off")
+            configs = server_args.setup_args(["--engine_cpu_affinity", "auto"])
+            self.assertEqual(configs.engine_cpu_affinity, "auto")
+        with patch.dict(os.environ, {"ENGINE_CPU_AFFINITY": "auto"}, clear=True):
+            self.assertEqual(server_args.setup_args([]).engine_cpu_affinity, "auto")
+            configs = server_args.setup_args(["--engine_cpu_affinity", "off"])
+            self.assertEqual(configs.engine_cpu_affinity, "off")
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {
