@@ -72,6 +72,7 @@ void cudaProfilerEnd();
 // Status queries
 // ===================================================================
 
+ExecStatus    getGpuExecStatus();
 torch::Device getTorchCudaDevice();
 
 // ===================================================================

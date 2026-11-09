@@ -436,7 +436,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         kwargs = (
             {"assume_all_topk_valid": True}
             if self._fp8_routed
-            else {"shared_recipe": _SHARED_RECIPE}
+            else {"shared_recipe": _SHARED_RECIPES[128]}
         )
         getattr(deep_gemm, self._kernel_name)(
             y,

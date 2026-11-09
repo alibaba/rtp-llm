@@ -738,7 +738,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     const auto& draft_parallel = propose_params->getEngineInitParams().parallelism_config;
     mtp_indexer_share_enabled_ =
         !is_dspark_ && !params.py_sp_model.is_none() && pythonDraftSupportsMtpIndexerShare(params.py_sp_model)
-        && params.hw_kernel_config.enable_cuda_graph && !params.device_resource_config.enable_layer_micro_batch
+        && params.hw_kernel_config.enable_cuda_graph
         && !params.parallelism_config.prefill_cp_config.is_enabled() && !draft_parallel.prefill_cp_config.is_enabled()
         && draft_config.index_share_for_mtp_iteration && draft_config.num_layers == 1
         && draft_config.attn_config.indexer_topk > 0 && propose_step_ >= 3;

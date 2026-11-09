@@ -354,8 +354,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         params.sp_config.type == SP_TYPE_NONE && params.parallelism_config.role_type == RoleType::PDFUSION
         && params.parallelism_config.dp_size > 1 && py::hasattr(py_model_, "prepare_moe_forward");
     if (mtp_indexer_role_ != MtpIndexerRole::NORMAL) {
-        RTP_LLM_CHECK_WITH_INFO(static_cast<int>(device_props_.enable_layer_micro_batch) == 0 && enable_cuda_graph_
-                                    && dspark_model_role_ == DSparkModelRole::NONE,
+        RTP_LLM_CHECK_WITH_INFO(enable_cuda_graph_ && dspark_model_role_ == DSparkModelRole::NONE,
                                 "MTP index sharing requires a fixed ordinary CUDA graph wrapper");
         RTP_LLM_CHECK(py::hasattr(py_model_, "set_mtp_indexer_role"));
         py_model_.attr("set_mtp_indexer_role")(static_cast<int>(mtp_indexer_role_));
