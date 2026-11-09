@@ -19,6 +19,11 @@
 
     <dependencies>
         <dependency>
+            <groupId>com.github.luben</groupId>
+            <artifactId>zstd-jni</artifactId>
+            <version>1.5.5-11</version>
+        </dependency>
+        <dependency>
             <groupId>org.flexlb</groupId>
             <artifactId>flexlb-common</artifactId>
             <version>${project.version}</version>
