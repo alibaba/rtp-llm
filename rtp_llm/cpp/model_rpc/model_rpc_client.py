@@ -9,7 +9,7 @@ from typing import Any, AsyncGenerator, Dict, Optional, Union
 
 import grpc
 import torch
-from google.protobuf.wrappers_pb2 import StringValue
+from google.protobuf.wrappers_pb2 import BoolValue, StringValue
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -35,9 +35,9 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.server.request_headers import (
     dashscope_greennet_metadata,
     extract_correlation_request_id,
+    extract_input_inspection_enabled,
     extract_qos_priority,
     extract_trace_id,
-    extract_workspace_region,
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
@@ -1675,10 +1675,17 @@ class ModelRpcClient(object):
                 continue
             vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
             mm_inputs_pb = _make_multimodal_inputs_pb(input_pb)
-            region = extract_workspace_region(input_py.headers)
+            region = input_py.headers.get("region")
             if region:
                 # Request-level: one value for every multimodal input in this PB.
                 mm_inputs_pb.region = region
+            input_inspection_enabled = extract_input_inspection_enabled(
+                input_py.headers
+            )
+            if input_inspection_enabled is not None:
+                mm_inputs_pb.input_inspection_enabled.CopyFrom(
+                    BoolValue(value=input_inspection_enabled)
+                )
             channel = await self._channel_pool.get(vit_addr)
             stub = MultimodalRpcServiceStub(channel)
             try:

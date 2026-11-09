@@ -67,9 +67,12 @@ def _reset_download_region(token) -> None:
 class _PreprocessTaskError(Exception):
     """Keep task I/O failures distinct from broken pool communication."""
 
-    def __init__(self, error: Exception):
+    def __init__(
+        self, error: Exception, samples: Optional[List[VitMetricSample]] = None
+    ):
         super().__init__(error)
         self.error = error
+        self.samples = samples or []
 
 
 @dataclass
@@ -103,6 +106,12 @@ def _run_preprocess_task(
                 region_token = _set_download_region(region)
                 try:
                     result = preprocess_func(mm_inputs, vit_config, **preprocess_params)
+                except Exception as error:
+                    if preprocess_metrics.samples:
+                        raise _PreprocessTaskError(
+                            error, preprocess_metrics.samples
+                        ) from error
+                    raise
                 finally:
                     _reset_download_region(region_token)
     return PreprocessTaskResult(
@@ -217,7 +226,10 @@ def _worker_process_task(
         return payload
     except BaseException as error:
         if inspection_task is not None and _worker_inspection is not None:
-            _worker_inspection.failed(inspection_task, error)
+            _worker_inspection.failed(
+                inspection_task,
+                error.error if isinstance(error, _PreprocessTaskError) else error,
+            )
         raise
 
 
@@ -356,6 +368,9 @@ class LocalPreprocessExecutor(PreprocessExecutor):
             work_item.preprocess_received_at = time.monotonic()
             work_item.preprocess_ready = True
             work_item.preprocess_ready_event.set()
+        except _PreprocessTaskError as error:
+            _report_vit_preprocess_samples(error.samples)
+            raise error.error from error
         except Exception as e:
             logging.error(f"Error in local preprocessing: {e}", exc_info=True)
             raise
@@ -537,7 +552,14 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
 
         def completed(_result):
             if inspection_task is not None and isinstance(_result, BaseException):
-                channel.finish(inspection_task.task_id, error=_result)
+                channel.finish(
+                    inspection_task.task_id,
+                    error=(
+                        _result.error
+                        if isinstance(_result, _PreprocessTaskError)
+                        else _result
+                    ),
+                )
             work_item.preprocess_received_at = time.monotonic()
             self._finish_preprocess_task(task_id)
             work_item.preprocess_ready = True
@@ -644,6 +666,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                 self._consecutive_timeouts = 0
             _report_preprocess_timing(preprocess_time, download_time)
         except _PreprocessTaskError as e:
+            _report_vit_preprocess_samples(e.samples)
             logging.error("Preprocessing task failed: %s", e.error, exc_info=True)
             raise e.error from e
         except multiprocessing.pool.TimeoutError:

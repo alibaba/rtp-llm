@@ -96,6 +96,7 @@ def get_mm_cache_metadata(
     binary_hashes=False,
     external_request_id="",
     region=None,
+    input_inspection_enabled=None,
 ):
     if engine is None or engine.is_proxy_mode:
         # Routing metadata belongs to the exact worker selected by FlexLB.
@@ -113,8 +114,13 @@ def get_mm_cache_metadata(
         )
     except ValueError as error:
         raise OverflowError(str(error)) from error
-    inspection_enabled = (
+    greennet_enabled = (
         engine._greennet_enabled() if hasattr(engine, "_greennet_enabled") else False
+    )
+    # A request-level disable wins over the process configuration; enable and
+    # unset both follow it (enable still requires the provider to be on).
+    inspection_enabled = (
+        greennet_enabled if input_inspection_enabled is not False else False
     )
     if inspection_enabled:
         for entry in metadata["entries"]:
@@ -153,6 +159,7 @@ def get_mm_cache_metadata(
         service_name=service_name,
         external_request_id=external_request_id,
         region=region,
+        input_inspection_enabled=input_inspection_enabled,
         **kwargs,
     )
     if len(results) != len(missing_keys):

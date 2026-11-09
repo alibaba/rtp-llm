@@ -273,6 +273,12 @@ py_library(
 )
 
 py_library(
+    name = "vit_metrics",
+    srcs = ["multimodal/vit_metrics.py"],
+    deps = ["//rtp_llm/metrics:metrics"],
+)
+
+py_library(
     name = "multimodal",
     srcs = glob([
         "multimodal/*.py",

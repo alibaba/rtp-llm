@@ -17,6 +17,7 @@ REQUEST_HEADER_NAMES = (
     "eagleeye-traceid",
     "x-b3-traceid",
     "x-dashscope-inner-qos-level",
+    "x-dashscope-datainspection",
 )
 CORRELATION_HEADER_NAMES = (
     "x-dashscope-request-id",
@@ -102,17 +103,15 @@ def dashscope_greennet_metadata(headers: Optional[Mapping[str, Any]]) -> tuple:
     return metadata
 
 
-def extract_workspace_region(headers: Optional[Mapping[str, Any]]) -> Optional[str]:
-    """读取网关注入的 x_dashscope_inner_workspace_meta, 提取 region 字段。
+def extract_workspace_region(ds_attrs: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Extract only region from workspace metadata in decoded ds_header_attributes.
 
-    该 header 是 JSON 字符串, 形如
-    '{"model_logging_policy":"default","region":"ap-southeast-1",...}'。
-    与 dashscope-serving request_region.extract_request_region 一致: 解析失败、
-    非 dict、region 非字符串时返回 None (等价无 workspace 信息)。
+    Missing or malformed metadata and blank/non-string regions return None.
+    No alternate headers or nested request paths are consulted.
     """
-    if not headers:
+    if not ds_attrs:
         return None
-    raw = headers.get("x_dashscope_inner_workspace_meta")
+    raw = ds_attrs.get("x-dashscope-inner-workspace-meta")
     if not raw:
         return None
     if isinstance(raw, str):
@@ -129,6 +128,57 @@ def extract_workspace_region(headers: Optional[Mapping[str, Any]]) -> Optional[s
     region = meta.get("region")
     if isinstance(region, str) and region.strip():
         return region.strip()
+    return None
+
+
+_DATA_INSPECTION_HEADER = "x-dashscope-datainspection"
+_INSPECTION_DISABLED_VALUES = frozenset(
+    {"disable", "disabled", "false", "0", "off", "no", "n"}
+)
+_INSPECTION_ENABLED_VALUES = frozenset(
+    {"enable", "enabled", "true", "1", "on", "yes", "y"}
+)
+
+
+def extract_input_inspection_enabled(
+    headers: Optional[Mapping[str, Any]],
+) -> Optional[bool]:
+    """Parse the request-scoped input-inspection override.
+
+    ``x-dashscope-datainspection`` carries a JSON object such as
+    ``{"input": "disable", "output": "disable"}``; only ``input`` is
+    consumed. An absent, empty, malformed, or key-less header follows the
+    process configuration (``None``). ``disable`` forces inspection off
+    regardless of configuration; ``enable`` still requires the provider to
+    be enabled.
+    """
+    if not headers:
+        return None
+    raw = None
+    try:
+        for key, value in headers.items():
+            if str(key).lower() == _DATA_INSPECTION_HEADER:
+                raw = value
+                break
+    except Exception:
+        return None
+    raw = _normalize_header_value(raw)
+    if raw is None:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    directive = payload.get("input")
+    if not isinstance(directive, str):
+        return None
+    directive = directive.strip().lower()
+    if directive in _INSPECTION_DISABLED_VALUES:
+        return False
+    if directive in _INSPECTION_ENABLED_VALUES:
+        return True
     return None
 
 

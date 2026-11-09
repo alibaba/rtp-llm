@@ -38,7 +38,7 @@ from rtp_llm.dash_sc.codec import (
     parse_sampling_params,
     prepend_to_generated_ids_tensor,
 )
-from rtp_llm.dash_sc.inference.servicer import stream_log_tag
+from rtp_llm.dash_sc.inference.servicer import _make_generate_input, stream_log_tag
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.server.request_headers import dashscope_greennet_metadata
 from rtp_llm.utils.base_model_datatypes import (
@@ -1277,11 +1277,71 @@ class DashScGrpcRequestTest(TestCase):
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
 
-    def test_parse_workspace_meta_dash_key_from_ds_header_attributes(self) -> None:
-        meta = json.dumps({"model_logging_policy": "default", "region": "cn-beijing"})
-        req = self._tpm_request({"x-dashscope-inner-workspace-meta": meta})
-        headers = parse_request_controls(req).request_headers
-        self.assertEqual(headers["x_dashscope_inner_workspace_meta"], meta)
+    def test_parse_workspace_region_from_ds_header_attributes(self) -> None:
+        meta = json.dumps(
+            {
+                "model_logging_policy": "default",
+                "region": "cn-beijing",
+                "service_site": "asia-pacific-china",
+            }
+        )
+        req = self._tpm_request(
+            {
+                "x-dashscope-inner-workspace-meta": meta,
+                "x-dashscope-inner-gateway-region": "different-gateway",
+                "workspace_id": "ws-example",
+                "x-dashscope-workspace": "ws-example",
+            }
+        )
+        controls = parse_request_controls(req)
+        self.assertEqual(controls.request_headers, {"region": "cn-beijing"})
+        generate_input = _make_generate_input(
+            request_id=1,
+            input_ids_list=[1],
+            generate_config=GenerateConfig(),
+            invocation_metadata=(),
+            request_headers=controls.request_headers,
+        )
+        self.assertEqual(generate_input.headers, {"region": "cn-beijing"})
+        self.assertNotIn(
+            "region",
+            parse_request_controls(self._tpm_request({})).request_headers,
+        )
+
+    def test_parse_workspace_region_ignores_other_sources(self) -> None:
+        meta = json.dumps({"region": "cn-beijing"})
+        req = self._tpm_request(
+            {
+                "x_dashscope_inner_workspace_meta": meta,
+                "x-dashscope-inner-gateway-region": "cn-beijing",
+            }
+        )
+        req.parameters["header"].string_param = json.dumps(
+            {"attributes": {"x_dashscope_inner_workspace_meta": meta}}
+        )
+        controls = parse_request_controls(
+            req, invocation_metadata=(("x-dashscope-inner-workspace-meta", meta),)
+        )
+        self.assertNotIn("region", controls.request_headers)
+        self.assertEqual(controls.request_headers, {})
+
+    def test_parse_workspace_region_invalid_values(self) -> None:
+        for value in (
+            None,
+            "",
+            "not-json",
+            "null",
+            "[]",
+            "{}",
+            '{"region": 123}',
+            '{"region": " "}',
+        ):
+            with self.subTest(value=value):
+                controls = parse_request_controls(
+                    self._tpm_request({"x-dashscope-inner-workspace-meta": value})
+                )
+                self.assertNotIn("region", controls.request_headers)
+                self.assertEqual(controls.request_headers, {})
 
     def test_parse_enable_estimated_usage(self) -> None:
         for value, expected in (

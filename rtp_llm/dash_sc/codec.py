@@ -33,7 +33,10 @@ from rtp_llm.dash_sc.structural_tag import (
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
-from rtp_llm.server.request_headers import extract_request_headers
+from rtp_llm.server.request_headers import (
+    extract_request_headers,
+    extract_workspace_region,
+)
 from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
@@ -1454,14 +1457,18 @@ def parse_request_controls(
         if value is not None:
             request_headers[header_name] = value
 
-    # The gateway serializes this header with dash separators inside
-    # ``ds_header_attributes``; normalize to the underscore name read
-    # downstream (``extract_workspace_region``).
-    workspace_meta = _normalize_non_empty_str(
-        ds_attrs.get("x-dashscope-inner-workspace-meta")
+    # Request-level download region parsed from the gateway workspace metadata.
+    region = extract_workspace_region(ds_attrs)
+    if region is not None:
+        request_headers["region"] = region
+
+    # Request-scoped content-inspection override, forwarded verbatim so the
+    # ViT RPC can parse it; an empty value means "follow configuration".
+    inspection = _jsonable_to_string(
+        _lookup_ds_request_control(ds_attrs, "x-dashscope-datainspection")
     )
-    if workspace_meta is not None:
-        request_headers["x_dashscope_inner_workspace_meta"] = workspace_meta
+    if inspection is not None:
+        request_headers["x-dashscope-datainspection"] = inspection
 
     # Keep the full upstream ID for inspection; tracing may truncate its copy.
     for header_name in ("x-dashscope-request-id", "x-dashscope-requestid"):

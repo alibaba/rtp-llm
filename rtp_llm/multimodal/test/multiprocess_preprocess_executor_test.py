@@ -1,9 +1,12 @@
 import threading
+import pickle
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call, patch
 
 from rtp_llm.multimodal import mm_preprocess
+from rtp_llm.metrics import AccMetrics
+from rtp_llm.multimodal.vit_metrics import record_vit_preprocess_value
 from rtp_llm.multimodal.mm_preprocess import (
     MultiprocessPreprocessExecutor,
     _PreprocessTaskError,
@@ -30,6 +33,65 @@ class _WorkItem:
 
 
 class MultiprocessPreprocessExecutorTest(unittest.TestCase):
+    def test_counter_samples_survive_success_and_failed_worker_results(self):
+        metric = AccMetrics.MM_DOWNLOAD_PROXY_QPS_METRIC
+        for failed in (False, True):
+            with self.subTest(failed=failed), patch.object(
+                mm_preprocess.kmonitor, "report"
+            ) as report:
+
+                def preprocess(_inputs, _config, **_params):
+                    record_vit_preprocess_value(metric, 1, {"region": "cn-beijing"})
+                    if failed:
+                        raise ValueError("download failed")
+                    return "embedding input"
+
+                mm_preprocess._worker_preprocess_func = preprocess
+                mm_preprocess._worker_vit_config = SimpleNamespace()
+                mm_preprocess._worker_preprocess_params = {}
+                if failed:
+                    with self.assertRaises(_PreprocessTaskError) as raised:
+                        _worker_process_task([])
+                    error = pickle.loads(pickle.dumps(raised.exception))
+                    report.assert_not_called()
+                    executor = MultiprocessPreprocessExecutor.__new__(
+                        MultiprocessPreprocessExecutor
+                    )
+                    executor._preprocess_queue_lock = threading.Lock()
+                    executor._pending_preprocess_tasks = set()
+                    with self.assertRaisesRegex(ValueError, "download failed"):
+                        executor.get_result(_WorkItem(error))
+                else:
+                    payload = pickle.loads(pickle.dumps(_worker_process_task([])))
+                    report.assert_not_called()
+                    result, _, _ = mm_preprocess._unpack_preprocess_result(payload)
+                    self.assertEqual(result, "embedding input")
+                self.assertEqual(
+                    [c for c in report.call_args_list if c.args[0] == metric],
+                    [call(metric, 1.0, {"region": "cn-beijing"})],
+                )
+
+    def test_local_failure_reports_samples_and_preserves_error(self):
+        metric = AccMetrics.MM_DOWNLOAD_PROXY_QPS_METRIC
+
+        def fail(_inputs, _config, **_params):
+            record_vit_preprocess_value(metric, 1, {"region": "cn-beijing"})
+            raise ValueError("download failed")
+
+        with patch.object(mm_preprocess.kmonitor, "report") as report:
+            executor = mm_preprocess.LocalPreprocessExecutor(
+                fail, SimpleNamespace(), {}
+            )
+            item = SimpleNamespace(
+                should_preprocess=True,
+                capture_inspection_sources=False,
+                mm_inputs=[],
+                region=None,
+            )
+            with self.assertRaisesRegex(ValueError, "download failed"):
+                executor.submit(item)
+            report.assert_any_call(metric, 1.0, {"region": "cn-beijing"})
+
     def setUp(self):
         self._saved = (
             mm_preprocess._worker_preprocess_func,
@@ -76,7 +138,6 @@ class MultiprocessPreprocessExecutorTest(unittest.TestCase):
 
         self.assertIs(raised.exception, original)
         executor._rebuild_pool.assert_not_called()
-
 
     def test_queue_wait_timeout_without_progress_counts_toward_rebuild(self):
         executor = MultiprocessPreprocessExecutor.__new__(

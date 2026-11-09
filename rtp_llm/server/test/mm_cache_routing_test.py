@@ -1069,6 +1069,8 @@ class MMCacheApiTest(unittest.TestCase):
                     "user_id": "uid-http",
                     "service_name": "service-http",
                     "external_request_id": "dash-hash-http",
+                    "region": None,
+                    "input_inspection_enabled": None,
                 },
             )
 
