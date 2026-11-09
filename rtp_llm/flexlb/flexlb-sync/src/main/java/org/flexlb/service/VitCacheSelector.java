@@ -2,6 +2,7 @@ package org.flexlb.service;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.opentelemetry.api.trace.Span;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.RoutingConfig;
@@ -13,6 +14,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.VitCacheDirectory.Candidate;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.Logger;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -26,6 +28,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /** Least-inflight-media routing, optionally preceded by cache affinity. */
 @Component
@@ -51,6 +54,9 @@ public class VitCacheSelector {
                     && (instance == null || Objects.equals(instance, candidate.instance()));
         }
     }
+
+    /** Keep the exact load sample used for this candidate's routing decision. */
+    private record LoadedCandidate(Candidate candidate, WorkerStatus.VitLoad sample) {}
 
     private record MatchScore(int hashHits, int embeddingHits, int gpuHits, int pendingHits)
             implements Comparable<MatchScore> {
@@ -100,6 +106,10 @@ public class VitCacheSelector {
     }
 
     public ServerStatus select(BalanceContext ctx, String group) {
+        return traceSelection(ctx, "select", span -> selectImpl(ctx, group, span));
+    }
+
+    private ServerStatus selectImpl(BalanceContext ctx, String group, Span span) {
         RoutingConfig.VitConfig config = ctx.getConfig() == null
                 ? new RoutingConfig.VitConfig() : ctx.getConfig().getRouter().getRoles().getVit();
         boolean affinity = config.isCacheAffinityEnabled();
@@ -110,19 +120,20 @@ public class VitCacheSelector {
             return errorStatus(StrategyErrorType.INVALID_REQUEST);
         }
         if (!affinity) {
-            return selectLeastInflight(ctx, group, config);
+            return selectLeastInflight(ctx, group, config, span);
         }
         keys = new ArrayList<>(new LinkedHashSet<>(keys));
         Map<String, Candidate> candidates = directory.candidates(group, keys);
         // A cold key's placement is published atomically with its selection.
         synchronized (pending) {
-            return selectAffinity(ctx, group, config, keys, candidates);
+            return selectAffinity(ctx, group, config, keys, candidates, span);
         }
     }
 
     private ServerStatus selectLeastInflight(
-            BalanceContext ctx, String group, RoutingConfig.VitConfig config) {
+            BalanceContext ctx, String group, RoutingConfig.VitConfig config, Span span) {
         WorkerStatus selected = null;
+        WorkerStatus.VitLoad selectedSample = null;
         String address = null;
         long bestLoad = Long.MAX_VALUE;
         int ties = 0;
@@ -132,31 +143,36 @@ public class VitCacheSelector {
             if (group != null && !Objects.equals(group, worker.getGroup())) {
                 continue;
             }
-            long load = load(worker, nowNanos, config);
+            WorkerStatus.VitLoad sample = worker.vitLoad();
+            long load = load(sample, nowNanos, config);
             if (load < bestLoad) {
                 bestLoad = load;
                 ties = 0;
             }
             if (load == bestLoad && ThreadLocalRandom.current().nextInt(++ties) == 0) {
                 selected = worker;
+                selectedSample = sample;
                 address = entry.address();
             }
         }
-        return checkedStatus(selected, address, ctx.getRequestId(), group);
+        ServerStatus result = checkedStatus(selected, address, ctx.getRequestId(), group);
+        if (result.isSuccess()) {
+            recordLoad(span, selectedSample, nowNanos, config);
+        }
+        return result;
     }
 
-    private static long load(WorkerStatus worker, long nowNanos, RoutingConfig.VitConfig config) {
-        WorkerStatus.VitLoad sample = worker.vitLoad();
+    private static long load(WorkerStatus.VitLoad sample, long nowNanos, RoutingConfig.VitConfig config) {
         return sample != null && nowNanos - sample.receivedNanos()
                 <= TimeUnit.MILLISECONDS.toNanos(config.getLoadMaxAgeMs())
                 ? sample.inflightInputs() : Long.MAX_VALUE;
     }
 
     private ServerStatus selectAffinity(BalanceContext ctx, String group,
-            RoutingConfig.VitConfig config, List<String> keys, Map<String, Candidate> candidates) {
+            RoutingConfig.VitConfig config, List<String> keys, Map<String, Candidate> candidates, Span span) {
         long now = System.currentTimeMillis();
         long nowNanos = System.nanoTime();
-        List<Candidate> best = new ArrayList<>();
+        List<LoadedCandidate> best = new ArrayList<>();
         MatchScore bestScore = null;
         long bestLoad = Long.MAX_VALUE;
         for (Candidate candidate : candidates.values()) {
@@ -172,7 +188,8 @@ public class VitCacheSelector {
             }
             MatchScore score = new MatchScore(
                     candidate.hashHits(), candidate.embeddingHits(), candidate.gpuHits(), pendingHits);
-            long load = load(candidate.worker(), nowNanos, config);
+            WorkerStatus.VitLoad sample = candidate.worker().vitLoad();
+            long load = load(sample, nowNanos, config);
             int comparison = bestScore == null ? 1 : score.compareTo(bestScore);
             if (comparison == 0) { comparison = Long.compare(bestLoad, load); }
             if (comparison > 0) {
@@ -181,13 +198,14 @@ public class VitCacheSelector {
                 bestLoad = load;
             }
             if (comparison >= 0) {
-                best.add(candidate);
+                best.add(new LoadedCandidate(candidate, sample));
             }
         }
         if (best.isEmpty()) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
-        Candidate selected = best.get(ThreadLocalRandom.current().nextInt(best.size()));
+        LoadedCandidate selectedLoad = best.get(ThreadLocalRandom.current().nextInt(best.size()));
+        Candidate selected = selectedLoad.candidate();
         ServerStatus result = checkedStatus(selected.worker(), selected.worker().getIpPort(), ctx.getRequestId(), group);
         if (!result.isSuccess()) {
             return result;
@@ -200,6 +218,7 @@ public class VitCacheSelector {
                 pending.put(key, new Placement(selected.worker(), selected.instance(), now + ttl));
             }
         }
+        recordLoad(span, selectedLoad.sample(), nowNanos, config);
         return result;
     }
 
@@ -222,6 +241,10 @@ public class VitCacheSelector {
      * after replacement; generation zero is not a wildcard.
      */
     public ServerStatus validate(BalanceContext ctx, String group) {
+        return traceSelection(ctx, "validate", span -> validateImpl(ctx, group, span));
+    }
+
+    private ServerStatus validateImpl(BalanceContext ctx, String group, Span span) {
         ServerStatus selected = ctx.getRequest().getSelectedVit();
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
@@ -236,7 +259,79 @@ public class VitCacheSelector {
                     || selected.getWorkerGeneration() != pin.generationId()) {
                 return errorStatus(StrategyErrorType.NO_VIT_WORKER);
             }
+            // Validation does not reselect by load: report its current snapshot separately.
+            if (span != null) {
+                try {
+                    RoutingConfig.VitConfig config = ctx.getConfig() == null
+                            ? new RoutingConfig.VitConfig() : ctx.getConfig().getRouter().getRoles().getVit();
+                    recordLoad(span, worker.vitLoad(), System.nanoTime(), config);
+                } catch (RuntimeException ignored) {
+                    // Telemetry must not affect endpoint validation.
+                }
+            }
             return status(worker, ctx.getRequestId());
+        }
+    }
+
+    private static void recordLoad(Span span, WorkerStatus.VitLoad sample, long nowNanos,
+                                   RoutingConfig.VitConfig config) {
+        if (span == null) { return; }
+        try {
+            if (sample == null) {
+                FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_LOAD_STATE, "missing");
+                return;
+            }
+            long ageNanos = nowNanos - sample.receivedNanos();
+            FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_MM_INFLIGHT_INPUTS, sample.inflightInputs());
+            FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_LOAD_SAMPLE_AGE_MS,
+                    TimeUnit.NANOSECONDS.toMillis(Math.max(0, ageNanos)));
+            FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_LOAD_STATE,
+                    ageNanos <= TimeUnit.MILLISECONDS.toNanos(config.getLoadMaxAgeMs()) ? "fresh" : "stale");
+        } catch (RuntimeException ignored) {
+            // The unknown-load routing sentinel must never be exported as a media count.
+        }
+    }
+
+    private ServerStatus traceSelection(BalanceContext ctx, String operation, Function<Span, ServerStatus> action) {
+        if (!FlexlbTrace.isEnabled()) {
+            return action.apply(null);
+        }
+        var parent = ctx == null ? null : ctx.getTraceContext();
+        var span = FlexlbTrace.startInternal("rtp_llm.flexlb.vit." + operation, parent);
+        var traceContext = span == null ? null : FlexlbTrace.withSpan(span, parent);
+        try {
+            if (ctx != null) {
+                FlexlbTrace.setRequestAttributes(span, ctx.getRequestId());
+                var request = ctx.getRequest();
+                if (request != null) {
+                    FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_ROUTE_ONLY, request.isVitRouteOnly());
+                    FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_KEY_COUNT,
+                            request.getCacheAffinityKeys() == null ? 0L : (long) request.getCacheAffinityKeys().size());
+                }
+                FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_CACHE_AFFINITY,
+                        ctx.getConfig() != null && ctx.getConfig().getRouter().getRoles().getVit().isCacheAffinityEnabled());
+            }
+        } catch (RuntimeException ignored) {
+            // Observability must not change selector validation or admission.
+        }
+        try {
+            ServerStatus result = action.apply(span);
+            FlexlbTrace.setAttribute(span, FlexlbTrace.SCHEDULE_CODE, (long) result.getCode());
+            if (result.isSuccess()) {
+                FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_ADDRESS,
+                        result.getServerIp() + ":" + result.getGrpcPort());
+                FlexlbTrace.setAttribute(span, FlexlbTrace.VIT_WORKER_GENERATION, result.getWorkerGeneration());
+            } else {
+                FlexlbTrace.markBusinessError(traceContext, result.getCode(),
+                        operation.equals("validate") ? "VIT_ROUTE_STALE" : "VIT_SELECTION_REJECTED");
+            }
+            return result;
+        } catch (RuntimeException | Error error) {
+            // Do not export exception messages: they can contain cache keys/URLs.
+            FlexlbTrace.markBusinessError(traceContext, -1, "VIT_ROUTING_ERROR");
+            throw error;
+        } finally {
+            FlexlbTrace.finish(span);
         }
     }
 

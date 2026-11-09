@@ -1,6 +1,18 @@
 load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
 
 py_test(
+    name = "test_vit_media_tracing",
+    srcs = ["test_vit_media_tracing.py"],
+    deps = ["//rtp_llm:telemetry"] + telemetry_test_deps(),
+)
+
+py_test(
+    name = "test_vit_rpc_tracing",
+    srcs = ["test_vit_rpc_tracing.py"],
+    deps = ["//rtp_llm:telemetry", "//rtp_llm:grpcio"] + telemetry_test_deps(),
+)
+
+py_test(
     name = "test_tracing",
     srcs = ["test_tracing.py"],
     # unittest style (repo convention, no pytest dependency). telemetry_test_deps()

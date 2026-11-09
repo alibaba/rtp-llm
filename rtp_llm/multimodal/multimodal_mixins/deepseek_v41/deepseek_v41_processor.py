@@ -24,6 +24,7 @@ from rtp_llm.multimodal.vit_metrics import (
     record_vit_preprocess_value,
     vit_preprocess_timer,
 )
+from rtp_llm.telemetry import vit_media
 
 register_heif_opener()
 _METRIC_TAGS = {"model": "deepseek_v41", "mm_type": "image"}
@@ -50,6 +51,7 @@ def _image_download_chunks(response, deadline, cancellation_event):
         yield from response.iter_content(chunk_size=1)
 
 
+@vit_media.download
 def load_image_source(
     url,
     download_headers="",

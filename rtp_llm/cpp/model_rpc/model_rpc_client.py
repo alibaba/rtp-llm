@@ -1689,11 +1689,19 @@ class ModelRpcClient(object):
             channel = await self._channel_pool.get(vit_addr)
             stub = MultimodalRpcServiceStub(channel)
             try:
-                await stub.WaitGreenNetVerdict(
+                from rtp_llm.telemetry.vit_rpc import vit_client_span
+
+                with vit_client_span(
+                    "WaitGreenNetVerdict",
+                    vit_addr,
                     mm_inputs_pb,
-                    timeout=VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0,
-                    metadata=dashscope_greennet_metadata(input_py.headers),
-                )
+                    dashscope_greennet_metadata(input_py.headers),
+                ) as metadata:
+                    await stub.WaitGreenNetVerdict(
+                        mm_inputs_pb,
+                        timeout=VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0,
+                        metadata=metadata,
+                    )
             except grpc.RpcError as e:
                 error_details = ErrorDetailsPB()
                 metadata = e.trailing_metadata() or {}

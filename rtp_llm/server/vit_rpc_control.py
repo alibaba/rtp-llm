@@ -5,6 +5,8 @@ from concurrent import futures
 
 import grpc
 
+from rtp_llm.telemetry.vit_rpc import VitServerTraceInterceptor
+
 
 class _StatusExecutorInterceptor(grpc.ServerInterceptor):
     def __init__(self, executor):
@@ -42,7 +44,10 @@ def create_vit_rpc_server(max_workers=200):
     try:
         server = grpc.server(
             data_executor,
-            interceptors=[_StatusExecutorInterceptor(status_executor)],
+            interceptors=[
+                _StatusExecutorInterceptor(status_executor),
+                VitServerTraceInterceptor(),
+            ],
             options=[
                 ("grpc.max_send_message_length", 1024 * 1024 * 1024),
                 ("grpc.max_receive_message_length", 1024 * 1024 * 1024),

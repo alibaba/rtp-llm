@@ -23,6 +23,7 @@ cc_library(
         "//rtp_llm/cpp/model_rpc:multimodal_pb_converter",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "//rtp_llm/cpp/multimodal_processor/transport:mm_remote_output_transport_core",
+        "//rtp_llm/cpp/telemetry:telemetry",
         "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = copts(),

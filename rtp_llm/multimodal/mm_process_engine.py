@@ -62,6 +62,7 @@ from rtp_llm.multimodal.multimodal_util import (
     vit_emb_cache_,
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, VitSeparation
+from rtp_llm.telemetry import vit_media
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
@@ -547,6 +548,7 @@ class MMProcessEngine:
     def _shutdown_greennet_loop(self):
         self._inspection.close()
 
+    @vit_media.request
     def _embed_with_greennet_sync(
         self,
         mm_inputs: List[MultimodalInput],
@@ -749,6 +751,7 @@ class MMProcessEngine:
         finally:
             self._cancel_greennet(handle)
 
+    @vit_media.request
     def wait_greennet_verdict(
         self,
         mm_inputs: List[MultimodalInput],
@@ -908,6 +911,7 @@ class MMProcessEngine:
             raise
         return res
 
+    @vit_media.request
     def mm_embedding_impl(
         self,
         mm_inputs: List[MultimodalInput],
@@ -1091,6 +1095,17 @@ class MMProcessEngine:
                     region=region,
                 )
                 work_items.append(work_item)
+                # Work-item order survives legacy GreenNet URL rewriting.
+                work_item.media_traces = vit_media.current()[index : index + len(batch)]
+                for media in work_item.media_traces:
+                    media.attribute(
+                        vit_media.MEDIA + "cache_state",
+                        work_item.cache_state or "disabled",
+                    )
+                    if work_item.cache_entry is not None:
+                        media.link(
+                            getattr(work_item.cache_entry, "_vit_media_context", None)
+                        )
                 work_item.capture_inspection_sources = capture_inspection_sources
                 if isinstance(inspection_handle, SourceInspection):
                     inspection_handle.bind_work_item(work_item, index)
@@ -1239,6 +1254,7 @@ class MMProcessEngine:
         )
         return MMEmbeddingRes(emb_res, pos_res, extra_res, feature_hashes)
 
+    @vit_media.request
     def async_submit(
         self,
         mm_inputs: List[MultimodalInput],
@@ -1272,6 +1288,7 @@ class MMProcessEngine:
             raise
 
     @_measure_vit_request
+    @vit_media.request
     def get_embedding_result(
         self,
         mm_inputs: List[MultimodalInput],
@@ -1365,12 +1382,15 @@ class MMProcessEngine:
                     verdict.message or "data inspection failed",
                 )
             results = []
-            for cache_key, entry in claims:
+            for input_index, (cache_key, entry) in enumerate(claims):
                 current_entry = entry
                 remaining = max(0.0, deadline - time.monotonic())
-                entry.wait_ready(
-                    timeout=remaining, cancellation_event=cancellation_event
-                )
+                with vit_media.stage(
+                    "cache_wait", vit_media.current()[input_index : input_index + 1]
+                ):
+                    entry.wait_ready(
+                        timeout=remaining, cancellation_event=cancellation_event
+                    )
                 if self._greennet_enabled() and not entry.greennet_passed:
                     raise FtRuntimeException(
                         ExceptionType.MM_PROCESS_ERROR,
@@ -1472,12 +1492,14 @@ class MMProcessEngine:
 
         claims: List[Tuple[str, MMEmbeddingCacheEntry]] = []
         pending: List[Tuple[MultimodalInput, str, MMEmbeddingCacheEntry]] = []
+        media_inputs = vit_media.select_inputs(mm_inputs)
         try:
-            for mm_input, cache_key in inputs:
+            for input_index, (mm_input, cache_key) in enumerate(inputs):
                 with self._async_task_lock:
                     if self._stopped:
                         raise RuntimeError("MMProcessEngine stopped")
                     state, entry = self._async_cache.try_acquire(cache_key)
+                    vit_media.claim(media_inputs[input_index], entry, state)
                     claims.append((cache_key, entry))
                     if state != "miss" and cached_inspection_inputs is not None:
                         cached_inspection_inputs.append(mm_input)
@@ -1660,6 +1682,7 @@ class MMProcessEngine:
         error: Exception,
     ) -> None:
         self.report_vit_error(error, entry)
+        vit_media.finish_producer(entry, error)
         try:
             if (
                 isinstance(error, FtRuntimeException)
@@ -1730,6 +1753,7 @@ class MMProcessEngine:
                 # implementations; it is still an exceptional ViT result.
                 self._fail_async_compute(cache_key, entry, callback_error)
             finally:
+                vit_media.finish_producer(entry)
                 try:
                     self._forget_async_task_locked(entry)
                 except Exception as cleanup_error:
@@ -1741,6 +1765,7 @@ class MMProcessEngine:
                     self.report_vit_error(cleanup_error, entry)
                     logging.exception("Failed to release ViT async admission slot")
 
+    @vit_media.compute_task
     def _run_async_compute(
         self,
         mm_inputs: List[MultimodalInput],
@@ -1824,6 +1849,9 @@ class MMProcessEngine:
             submitted = 0
             try:
                 for mm_input, cache_key, entry in active_pending:
+                    media = getattr(entry, "_vit_media_producer", None)
+                    if media is not None:
+                        media.begin("compute.queue")
                     future = self._async_compute_executor.submit(
                         self._run_async_compute,
                         [mm_input],

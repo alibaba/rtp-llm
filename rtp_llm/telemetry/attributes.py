@@ -73,7 +73,13 @@ ACS_ARMS_TENANT_SPAN_POLICY = "acs.arms.tenant.span.policy"  # value: "mask"
 # this distinct from the platform-indexed request_id key, which represents the
 # generated engine request and creates a model-topology node in Unitrace.
 RTP_LLM_EXTERNAL_REQUEST_ID = "rtp_llm.external_request_id"
+# Explicit lookup companion to the standard OTel trace_id, not a business ID.
+RTP_LLM_REQUEST_TRACE_ID = "rtp_llm.request_trace_id"
 RTP_LLM_PD_SEP = "rtp_llm.pd_sep"
+RTP_LLM_VIT_INPUT_COUNT = "rtp_llm.vit.input_count"
+RTP_LLM_VIT_KEY_COUNT = "rtp_llm.vit.key_count"
+RTP_LLM_VIT_CACHE_PROBE = "rtp_llm.vit.cache_probe"
+RTP_LLM_VIT_ROUTE_ONLY = "rtp_llm.vit.route_only"
 RTP_LLM_CACHE_TOTAL_REUSE_LEN = "rtp_llm.cache.total_reuse_len"
 RTP_LLM_CACHE_LOCAL_REUSE_LEN = "rtp_llm.cache.local_reuse_len"
 RTP_LLM_CACHE_REMOTE_REUSE_LEN = "rtp_llm.cache.remote_reuse_len"

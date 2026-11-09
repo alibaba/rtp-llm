@@ -40,6 +40,15 @@ public final class FlexlbTrace {
     public static final AttributeKey<Long> BATCH_SIZE = AttributeKey.longKey("rtp_llm.batch_size");
     public static final AttributeKey<String> PREFILL_ADDRESS = AttributeKey.stringKey("rtp_llm.prefill_address");
     public static final AttributeKey<String> DECODE_ADDRESS = AttributeKey.stringKey("rtp_llm.decode_address");
+    public static final AttributeKey<String> VIT_ADDRESS = AttributeKey.stringKey("rtp_llm.vit_address");
+    public static final AttributeKey<Long> VIT_WORKER_GENERATION = AttributeKey.longKey("rtp_llm.vit.worker_generation");
+    public static final AttributeKey<Boolean> VIT_ROUTE_ONLY = AttributeKey.booleanKey("rtp_llm.vit.route_only");
+    public static final AttributeKey<Boolean> VIT_CACHE_AFFINITY = AttributeKey.booleanKey("rtp_llm.vit.cache_affinity");
+    public static final AttributeKey<Long> VIT_KEY_COUNT = AttributeKey.longKey("rtp_llm.vit.key_count");
+    /** Raw worker sample, accompanied by freshness; never the routing MAX_VALUE sentinel. */
+    public static final AttributeKey<Long> VIT_MM_INFLIGHT_INPUTS = AttributeKey.longKey("rtp_llm.vit.mm_inflight_inputs");
+    public static final AttributeKey<Long> VIT_LOAD_SAMPLE_AGE_MS = AttributeKey.longKey("rtp_llm.vit.load_sample_age_ms");
+    public static final AttributeKey<String> VIT_LOAD_STATE = AttributeKey.stringKey("rtp_llm.vit.load_state");
     public static final AttributeKey<String> DISPATCH_REASON = AttributeKey.stringKey("rtp_llm.dispatch_reason");
     public static final AttributeKey<String> SCHEDULE_MODE = AttributeKey.stringKey("flexlb.schedule.mode");
     public static final AttributeKey<Long> SCHEDULE_CODE = AttributeKey.longKey("flexlb.schedule.code");

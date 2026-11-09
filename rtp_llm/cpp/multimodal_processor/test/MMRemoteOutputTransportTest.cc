@@ -15,6 +15,12 @@
 #include "rtp_llm/cpp/multimodal_processor/transport/MMRemoteOutputTransport.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/grpc/MMGrpcTransport.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/rdma/MMRdmaReader.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
+#include "rtp_llm/cpp/telemetry/RpcTraceHelper.h"
+#include "opentelemetry/exporters/memory/in_memory_span_exporter_factory.h"
+#include "opentelemetry/exporters/memory/in_memory_span_data.h"
+#include "opentelemetry/sdk/trace/span_data.h"
+#include "opentelemetry/trace/scope.h"
 
 // Orchestration of the LLM-side output transport: which reader gets a receipt and what happens
 // when the encoder answers with a data plane that does not match the configured mode. The data
@@ -484,5 +490,90 @@ TEST(MMRemoteOutputTransportTest, typedRequestBudgetDoesNotExtendConfiguredRpcBu
     request.set_timeout_ms(8000);
     EXPECT_EQ(resolveRpcTimeoutMs(request, 5000), 5000);
     EXPECT_EQ(resolveRpcTimeoutMs(request, 10000), 8000);
+}
+
+class MMGrpcTraceTest: public ::testing::Test {
+protected:
+    class Service: public MultimodalRpcService::Service {
+        grpc::Status RemoteMultimodalEmbedding(grpc::ServerContext*      context,
+                                               const MultimodalInputsPB* request,
+                                               MultimodalOutputPB*) override {
+            grpc::Status                   status = request->request_id() == 43 ?
+                                                        grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "private error") :
+                                                        grpc::Status::OK;
+            telemetry::GrpcStatusSpanGuard guard(telemetry::startRpcServerSpan("test_vit_worker", context), &status);
+            return status;
+        }
+    } service_;
+    std::shared_ptr<opentelemetry::exporter::memory::InMemorySpanData> data_;
+    std::unique_ptr<grpc::Server>                                      server_;
+    int                                                                port_ = 0;
+
+    void SetUp() override {
+        telemetry::TelemetryRuntime::shutdown(5000);
+        auto exporter = opentelemetry::exporter::memory::InMemorySpanExporterFactory::Create(data_);
+        telemetry::TelemetryConfig config;
+        config.enabled = true;
+        config.role    = "test";
+        ASSERT_TRUE(telemetry::TelemetryRuntime::initWithExporter(std::move(exporter), config));
+        grpc::ServerBuilder builder;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port_);
+        builder.RegisterService(&service_);
+        server_ = builder.BuildAndStart();
+        ASSERT_NE(server_, nullptr);
+    }
+
+    void TearDown() override {
+        if (server_) {
+            server_->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(3));
+        }
+        telemetry::TelemetryRuntime::shutdown(5000);
+    }
+};
+
+TEST_F(MMGrpcTraceTest, ScopedVitParentCrossesRealTransportAndPreservesFailures) {
+    namespace trace = opentelemetry::trace;
+    auto client     = createGrpcMMControlClient(std::make_shared<MMTransportMetrics>(nullptr), 1000);
+    auto parent     = telemetry::TelemetryRuntime::tracer()->StartSpan("rtp_llm.vit");
+    {
+        trace::Scope scope(parent);
+        for (int id : {42, 43}) {
+            MultimodalInputsPB request;
+            request.set_request_id(id);
+            DeadlineBudget budget(3000);
+            auto           result = client->request("127.0.0.1:" + std::to_string(port_), request, budget);
+            EXPECT_EQ(result.ok(), id == 42);
+            if (!result.ok()) {
+                EXPECT_EQ(result.status().code(), ErrorCode::CONCURRENCY_LIMIT_ERROR);
+            }
+        }
+    }
+    EXPECT_FALSE(trace::Tracer::GetCurrentSpan()->GetContext().IsValid());
+    parent->End();
+    ASSERT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+    auto spans = data_->GetSpans();
+    ASSERT_EQ(spans.size(), 5u);
+    int clients = 0;
+    int errors  = 0;
+    for (const auto& span : spans) {
+        EXPECT_EQ(span->GetTraceId(), parent->GetContext().trace_id());
+        if (span->GetStatus() == trace::StatusCode::kError) {
+            ++errors;
+        }
+        if (span->GetSpanKind() == trace::SpanKind::kClient) {
+            ++clients;
+            EXPECT_EQ(span->GetParentSpanId(), parent->GetContext().span_id());
+        }
+        if (span->GetName() == "test_vit_worker") {
+            bool found_parent = false;
+            for (const auto& candidate : spans) {
+                found_parent |= candidate->GetSpanKind() == trace::SpanKind::kClient
+                                && candidate->GetSpanId() == span->GetParentSpanId();
+            }
+            EXPECT_TRUE(found_parent);
+        }
+    }
+    EXPECT_EQ(clients, 2);
+    EXPECT_EQ(errors, 2);
 }
 }  // namespace rtp_llm

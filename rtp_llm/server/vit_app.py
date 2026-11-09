@@ -310,15 +310,21 @@ class VitEndpointServer:
         if self.mm_process_engine is None:
             return
 
+        from rtp_llm.telemetry import init_telemetry
+
+        init_telemetry(role="vit")
         self.rpc_server.add_insecure_port(f"0.0.0.0:{grpc_port}")
         self.rpc_server.start()
         logging.info(f"Vit Server started on grpc port {grpc_port} (bind=0.0.0.0)")
 
     def stop(self):
         if self.rpc_server is not None:
-            self.rpc_server.stop(grace=None)
+            self.rpc_server.stop(grace=None).wait(timeout=2.0)
         if self.mm_rpc_server is not None:
             self.mm_rpc_server.stop()
+        from rtp_llm.telemetry import shutdown_telemetry
+
+        shutdown_telemetry()
 
     def worker_status(self):
         if self.mm_process_engine is None:

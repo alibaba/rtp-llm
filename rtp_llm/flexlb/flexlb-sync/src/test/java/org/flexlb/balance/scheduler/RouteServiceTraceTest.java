@@ -40,6 +40,23 @@ class RouteServiceTraceTest {
     }
 
     @Test
+    void vitOnlyLabelsScheduleWithoutCreatingSchedulerOwnership() {
+        RequestScheduler scheduler = mock(RequestScheduler.class);
+        RouteService service = new RouteService(scheduler, mock(RecentCacheKeyTraceReporter.class));
+        BalanceContext ctx = new BalanceContext(new FlexlbConfig());
+        Request request = new Request();
+        request.setVitRouteOnly(true);
+        ctx.setRequest(request);
+        Span span = mock(Span.class);
+        when(span.storeInContext(any(Context.class))).thenCallRealMethod();
+        ctx.setTraceContext(Context.root().with(span));
+        assertFalse(service.route(ctx).join().isSuccess());
+        verify(span).setAttribute(FlexlbTrace.VIT_ROUTE_ONLY, true);
+        verify(span).setAttribute(FlexlbTrace.SCHEDULE_MODE, "VIT_ONLY");
+        verifyNoInteractions(scheduler);
+    }
+
+    @Test
     void modesKeepOriginalFutureOwnershipAndCompatibleTraceLabels() {
         for (String mode : new String[] {"DIRECT", "QUEUE", "BATCH"}) {
             FlexlbConfig config = new FlexlbConfig();

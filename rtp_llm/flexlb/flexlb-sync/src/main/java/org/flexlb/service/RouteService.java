@@ -37,7 +37,10 @@ public class RouteService {
      * @return Routing result
      */
     public CompletableFuture<Response> route(BalanceContext balanceContext) {
+        FlexlbTrace.setScheduleAttribute(balanceContext.getTraceContext(), FlexlbTrace.VIT_ROUTE_ONLY,
+                balanceContext.getRequest() != null && balanceContext.getRequest().isVitRouteOnly());
         if (balanceContext.getRequest() != null && balanceContext.getRequest().isVitRouteOnly()) {
+            FlexlbTrace.setScheduleAttribute(balanceContext.getTraceContext(), FlexlbTrace.SCHEDULE_MODE, "VIT_ONLY");
             return CompletableFuture.completedFuture(router == null
                     ? Response.error(StrategyErrorType.NO_VIT_WORKER) : router.routeVit(balanceContext));
         }

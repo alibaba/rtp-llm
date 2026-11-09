@@ -29,6 +29,7 @@ from rtp_llm.multimodal.vit_metrics import (
     collect_vit_preprocess_metrics,
 )
 from rtp_llm.ops import MultimodalInput
+from rtp_llm.telemetry import vit_media
 from rtp_llm.utils.time_util import Timer
 
 if TYPE_CHECKING:
@@ -68,11 +69,15 @@ class _PreprocessTaskError(Exception):
     """Keep task I/O failures distinct from broken pool communication."""
 
     def __init__(
-        self, error: Exception, samples: Optional[List[VitMetricSample]] = None
+        self,
+        error: Exception,
+        samples: Optional[List[VitMetricSample]] = None,
+        trace_timings=None,
     ):
         super().__init__(error)
         self.error = error
         self.samples = samples or []
+        self.trace_timings = trace_timings
 
 
 @dataclass
@@ -83,6 +88,7 @@ class PreprocessTaskResult:
     samples: List[VitMetricSample]
     started_at: float
     finished_at: float
+    trace_timings: Any = None
 
     def __iter__(self):
         # Preserve the existing internal result-unpacking helper contract.
@@ -95,10 +101,13 @@ def _run_preprocess_task(
     vit_config: VitConfig,
     preprocess_params: dict,
     region: Optional[str] = None,
+    trace_spec=None,
 ) -> PreprocessTaskResult:
     """Run preprocessing and return total and media-load durations in ms."""
     started_at = time.monotonic()
-    with collect_vit_preprocess_metrics() as preprocess_metrics:
+    with vit_media.collect_worker(
+        trace_spec, preprocess=True
+    ) as timings, collect_vit_preprocess_metrics() as preprocess_metrics:
         with collect_download_timing() as download_timing:
             with Timer() as route_timer:
                 # Expose the passthrough workspace region to the downloader
@@ -107,9 +116,9 @@ def _run_preprocess_task(
                 try:
                     result = preprocess_func(mm_inputs, vit_config, **preprocess_params)
                 except Exception as error:
-                    if preprocess_metrics.samples:
+                    if preprocess_metrics.samples or timings is not None:
                         raise _PreprocessTaskError(
-                            error, preprocess_metrics.samples
+                            error, preprocess_metrics.samples, timings
                         ) from error
                     raise
                 finally:
@@ -121,6 +130,7 @@ def _run_preprocess_task(
         preprocess_metrics.samples,
         started_at,
         time.monotonic(),
+        timings,
     )
 
 
@@ -181,6 +191,7 @@ def _worker_process_task(
     deadline: Optional[float] = None,
     inspection_task=None,
     region: Optional[str] = None,
+    trace_spec=None,
 ) -> PreprocessTaskResult:
     """
     只接收变化的 `mm_inputs` 参数。
@@ -204,6 +215,7 @@ def _worker_process_task(
                 _worker_vit_config,
                 params,
                 region=region,
+                trace_spec=trace_spec,
             )
         except (OSError, EOFError) as error:
             # For example, PIL's UnidentifiedImageError is an OSError. Letting it
@@ -360,6 +372,9 @@ class LocalPreprocessExecutor(PreprocessExecutor):
                 self.vit_config,
                 params,
                 region=work_item.region,
+                trace_spec=vit_media.worker_spec(
+                    getattr(work_item, "media_traces", ())
+                ),
             )
             result, preprocess_time, download_time, samples = payload
             self._set_result(work_item, result)
@@ -369,6 +384,9 @@ class LocalPreprocessExecutor(PreprocessExecutor):
             work_item.preprocess_ready = True
             work_item.preprocess_ready_event.set()
         except _PreprocessTaskError as error:
+            vit_media.consume(
+                getattr(work_item, "media_traces", ()), error.trace_timings
+            )
             _report_vit_preprocess_samples(error.samples)
             raise error.error from error
         except Exception as e:
@@ -383,6 +401,10 @@ class LocalPreprocessExecutor(PreprocessExecutor):
 
         try:
             payload = work_item.future.get()
+            vit_media.consume(
+                getattr(work_item, "media_traces", ()),
+                getattr(payload, "trace_timings", None),
+            )
             _, preprocess_time, download_time = _unpack_preprocess_result(payload)
             _report_result_path(work_item, payload)
             _report_preprocess_timing(preprocess_time, download_time)
@@ -547,7 +569,9 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                 time.monotonic() + work_item.remaining_timeout_s()
             )
             inspection_task, work_item.inspection_future = channel.register(
-                work_item.inspection_request, deadline
+                work_item.inspection_request,
+                deadline,
+                media_traces=getattr(work_item, "media_traces", ()),
             )
 
         def completed(_result):
@@ -575,6 +599,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                     work_item.deadline,
                     inspection_task,
                     work_item.region,
+                    vit_media.worker_spec(getattr(work_item, "media_traces", ())),
                 ),
                 callback=completed,
                 error_callback=completed,
@@ -654,6 +679,10 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
 
         try:
             payload = work_item.future.get(timeout=work_item.remaining_timeout_s())
+            vit_media.consume(
+                getattr(work_item, "media_traces", ()),
+                getattr(payload, "trace_timings", None),
+            )
             (
                 result,
                 preprocess_time,
@@ -666,6 +695,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                 self._consecutive_timeouts = 0
             _report_preprocess_timing(preprocess_time, download_time)
         except _PreprocessTaskError as e:
+            vit_media.consume(getattr(work_item, "media_traces", ()), e.trace_timings)
             _report_vit_preprocess_samples(e.samples)
             logging.error("Preprocessing task failed: %s", e.error, exc_info=True)
             raise e.error from e

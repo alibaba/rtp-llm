@@ -285,6 +285,7 @@ py_library(
         "multimodal/**/*.py",
     ]),
     deps = [
+        ":telemetry",
         ":utils",
         ":Pillow",
         ":pillow-heif",
@@ -483,6 +484,7 @@ py_library(
         "telemetry/*.py",
     ]),
     visibility = ["//visibility:public"],
+    deps = [":grpcio"],
     # The tracing SDK is optional at runtime; tracing.py degrades to a no-op
     # when the import is unavailable, so telemetry never blocks inference.
 )

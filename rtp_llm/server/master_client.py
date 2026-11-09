@@ -241,6 +241,9 @@ class MasterClient:
                 # The platform indexes the internal ID's string form for span search.
                 # Same contract as the generate_stream_call / fetch_response spans.
                 client_span.set_attribute(trace_attrs.REQUEST_ID, str(request_id))
+                client_span.set_attribute(
+                    trace_attrs.RTP_LLM_VIT_ROUTE_ONLY, request_pb.vit_route_only
+                )
             try:
                 response = await stub.Schedule(
                     request_pb,
@@ -704,11 +707,19 @@ class MasterClient:
         started = time.monotonic()
         try:
             channel = await self._vit_channels.get(f"{address.ip}:{address.grpc_port}")
-            response = await MultimodalRpcServiceStub(channel).GetMultimodalHashes(
+            from rtp_llm.telemetry.vit_rpc import vit_client_span
+
+            with vit_client_span(
+                "GetMultimodalHashes",
+                f"{address.ip}:{address.grpc_port}",
                 request,
-                timeout=timeout_sec,
-                metadata=dashscope_greennet_metadata(headers),
-            )
+                dashscope_greennet_metadata(headers),
+            ) as metadata:
+                response = await MultimodalRpcServiceStub(channel).GetMultimodalHashes(
+                    request,
+                    timeout=timeout_sec,
+                    metadata=metadata,
+                )
             return metadata_from_proto(response)
         except grpc.RpcError as error:
             if (

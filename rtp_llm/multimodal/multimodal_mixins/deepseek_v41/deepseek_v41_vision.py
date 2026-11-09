@@ -19,6 +19,7 @@ from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import (
     ResizeTables,
     prepare_resize_tables,
 )
+from rtp_llm.multimodal.mm_preprocess_result import MMPreprocessResult
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
     _METRIC_TAGS,
     V41ImageProcessorConfig,
@@ -45,7 +46,7 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
 )
 from rtp_llm.multimodal.vit_metrics import vit_preprocess_timer
-from rtp_llm.multimodal.mm_preprocess_result import MMPreprocessResult
+from rtp_llm.telemetry import vit_media
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
@@ -577,40 +578,41 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
             if deadline is not None
             else time.monotonic() + 60
         )
-        for media in mm_inputs:
-            with vit_preprocess_timer(
-                GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, _METRIC_TAGS
-            ):
-                payload = load_image_source(
-                    media.url,
-                    vit_config.download_headers,
-                    max_file_size_kb=vit_config.mm_image_max_file_size_kb,
-                    deadline=deadline,
-                )
-            if capture_inspection_sources:
-                inspection_sources.append(payload.getvalue())
-            try:
-                with Image.open(payload) as image:
-                    if gpu_preprocess:
-                        rgb = _rgb_tensor(image)
-                        _, _, target_h, target_w = plan_image_grid(
-                            rgb.shape[1], rgb.shape[0], processor_config
-                        )
-                        tables = prepare_resize_tables(
-                            tuple(rgb.shape[:2]),
-                            (target_h, target_w),
-                            patch_size=processor_config.vision_patch_size,
-                        )
-                        results.append(_DecodedImage(rgb, tables))
-                    else:
-                        patches, vit_h, vit_w, _, _ = preprocess_image(
-                            image, processor_config
-                        )
-                        results.append(_RuntimeImage(patches, vit_h, vit_w))
-            except OSError as error:
-                from rtp_llm.multimodal.mm_error_messages import MMErr
+        for media_index, media in enumerate(mm_inputs):
+            with vit_media.input_scope(media_index):
+                with vit_preprocess_timer(
+                    GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, _METRIC_TAGS
+                ):
+                    payload = load_image_source(
+                        media.url,
+                        vit_config.download_headers,
+                        max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+                        deadline=deadline,
+                    )
+                if capture_inspection_sources:
+                    inspection_sources.append(payload.getvalue())
+                try:
+                    with Image.open(payload) as image:
+                        if gpu_preprocess:
+                            rgb = _rgb_tensor(image)
+                            _, _, target_h, target_w = plan_image_grid(
+                                rgb.shape[1], rgb.shape[0], processor_config
+                            )
+                            tables = prepare_resize_tables(
+                                tuple(rgb.shape[:2]),
+                                (target_h, target_w),
+                                patch_size=processor_config.vision_patch_size,
+                            )
+                            results.append(_DecodedImage(rgb, tables))
+                        else:
+                            patches, vit_h, vit_w, _, _ = preprocess_image(
+                                image, processor_config
+                            )
+                            results.append(_RuntimeImage(patches, vit_h, vit_w))
+                except OSError as error:
+                    from rtp_llm.multimodal.mm_error_messages import MMErr
 
-                raise ValueError(MMErr.IMG_OPEN) from error
+                    raise ValueError(MMErr.IMG_OPEN) from error
         # Preserve the original scalar contract; existing embedding interfaces
         # already accept ordered image groups for multi-media work items.
         data = results[0] if len(results) == 1 else results

@@ -12,7 +12,7 @@ py_library(
 py_library(
     name = "vit_rpc_control",
     srcs = ["vit_rpc_control.py"],
-    deps = ["//rtp_llm:grpcio"],
+    deps = ["//rtp_llm:grpcio", "//rtp_llm:telemetry"],
 )
 
 py_library(

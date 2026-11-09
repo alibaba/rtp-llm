@@ -127,6 +127,9 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "//rtp_llm/cpp/multimodal_processor/transport:mm_remote_output_transport_core",
         "//rtp_llm/cpp/multimodal_processor/transport/grpc:mm_grpc_transport",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/telemetry:telemetry",
+        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
         "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_reader",
         "//rtp_llm/cpp/rdma_transport",
         # Building inline receipts for the real terminal. Lean target, no engine behind it.

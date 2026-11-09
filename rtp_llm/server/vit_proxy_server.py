@@ -375,6 +375,11 @@ class WorkerConnectionPool:
                         ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
                     ],
                 )
+                from rtp_llm.telemetry.vit_rpc import VitClientTraceInterceptor
+
+                channel = grpc.intercept_channel(
+                    channel, VitClientTraceInterceptor(worker_address)
+                )
                 stub = MultimodalRpcServiceStub(channel)
                 self.channels[worker_address] = channel
                 self.stubs[worker_address] = stub
@@ -1038,6 +1043,9 @@ class VitProxyServer:
 
     def start(self):
         """启动代理服务器"""
+        from rtp_llm.telemetry import init_telemetry
+
+        init_telemetry(role="vit_proxy")
         self.rpc_server = create_vit_rpc_server()
 
         self.proxy_servicer = VitProxyRpcServer(
@@ -1059,11 +1067,14 @@ class VitProxyServer:
     def stop(self):
         """停止代理服务器"""
         if self.rpc_server:
-            self.rpc_server.stop(grace=None)
+            self.rpc_server.stop(grace=None).wait(timeout=2.0)
             logging.info("VIT Proxy Server stopped")
         if self.proxy_servicer:
             self.proxy_servicer.cancel_status_probes()
         self.connection_pool.close_all()
+        from rtp_llm.telemetry import shutdown_telemetry
+
+        shutdown_telemetry()
 
     def wait_for_termination(self):
         """等待服务器终止"""

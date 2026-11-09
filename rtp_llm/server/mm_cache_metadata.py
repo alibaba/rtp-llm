@@ -7,6 +7,7 @@ from typing import Optional, Sequence
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalHashResponsePB
+from rtp_llm.telemetry import vit_media
 
 MAX_METADATA_KEYS = 256
 MAX_METADATA_ROWS = 1048576
@@ -141,7 +142,8 @@ def get_mm_cache_metadata(
         for item in inputs.multimodal_inputs
     ):
         raise ValueError("hash submission requires URL inputs without tensors")
-    by_key = {item.cache_key(): item for item in trans_mm_input(inputs)}
+    original_inputs = trans_mm_input(inputs)
+    by_key = {item.cache_key(): item for item in original_inputs}
     if not missing.issubset(by_key) or not by_key.keys() <= set(keys):
         raise ValueError("multimodal inputs do not match requested cache keys")
     missing_keys = [key for key in dict.fromkeys(keys) if key in missing]
@@ -150,18 +152,19 @@ def get_mm_cache_metadata(
         if cancellation_event is not None
         else {}
     )
-    results = engine.get_embedding_result(
-        [by_key[key] for key in missing_keys],
-        request_id=inputs.request_id,
-        timeout_ms=timeout_ms,
-        hashes_only=True,
-        user_id=user_id,
-        service_name=service_name,
-        external_request_id=external_request_id,
-        region=region,
-        input_inspection_enabled=input_inspection_enabled,
-        **kwargs,
-    )
+    with vit_media.original_input_indices(original_inputs):
+        results = engine.get_embedding_result(
+            [by_key[key] for key in missing_keys],
+            request_id=inputs.request_id,
+            timeout_ms=timeout_ms,
+            hashes_only=True,
+            user_id=user_id,
+            service_name=service_name,
+            external_request_id=external_request_id,
+            region=region,
+            input_inspection_enabled=input_inspection_enabled,
+            **kwargs,
+        )
     if len(results) != len(missing_keys):
         raise FtRuntimeException(
             ExceptionType.MM_PROCESS_ERROR, "ViT returned incomplete feature hashes"

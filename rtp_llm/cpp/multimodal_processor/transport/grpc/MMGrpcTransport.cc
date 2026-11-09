@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/grpc/MMGrpcError.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/telemetry/RpcTraceHelper.h"
 
 namespace rtp_llm {
 
@@ -25,6 +26,31 @@ inline constexpr const char* kReasonGrpcError          = "grpc_error";
 inline constexpr const char* kReasonReleaseQueueFull   = "release_queue_full";
 inline constexpr const char* kReasonReleaseClientStop  = "release_client_stopping";
 inline constexpr size_t      kMaxPendingReleaseHandles = 1024;
+
+opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> startEmbeddingRpcSpan(const std::string& endpoint,
+                                                                                   int64_t            request_id) {
+    if (!telemetry::TelemetryRuntime::isActive()) {
+        return {};
+    }
+    try {
+        auto parent = opentelemetry::trace::Tracer::GetCurrentSpan();
+        if (!parent->GetContext().IsValid()) {
+            return {};
+        }
+        const auto separator = endpoint.rfind(':');
+        const auto host      = separator == std::string::npos ? endpoint : endpoint.substr(0, separator);
+        const auto port      = separator == std::string::npos ? 0 : std::stoi(endpoint.substr(separator + 1));
+        return telemetry::startChildClientSpan("rtp_llm.vit.remote_multimodal_embedding",
+                                               parent,
+                                               host,
+                                               port,
+                                               request_id,
+                                               0,
+                                               "MultimodalRpcService/RemoteMultimodalEmbedding");
+    } catch (...) {
+        return {};
+    }
+}
 
 std::vector<std::string> uniqueReleaseHandles(const std::vector<std::string>& handles) {
     std::vector<std::string>        unique;
@@ -100,11 +126,16 @@ public:
             deadline = std::min(deadline, server_context->deadline());
         }
         context->set_deadline(deadline);
-        MultimodalOutputPB receipt;
-        const int64_t      request_bytes = request_pb.ByteSizeLong();
-        const auto         start         = std::chrono::steady_clock::now();
-        auto               status        = stub->RemoteMultimodalEmbedding(context.get(), request_pb, &receipt);
-        const int64_t      cost_us =
+        MultimodalOutputPB             receipt;
+        const int64_t                  request_bytes = request_pb.ByteSizeLong();
+        const auto                     start         = std::chrono::steady_clock::now();
+        grpc::Status                   status;
+        auto                           span = startEmbeddingRpcSpan(endpoint, request_pb.request_id());
+        telemetry::GrpcStatusSpanGuard span_guard(span, &status);
+        telemetry::injectSpanToClientContext(context.get(), span);
+        status = stub->RemoteMultimodalEmbedding(context.get(), request_pb, &receipt);
+        span_guard.finish();
+        const int64_t cost_us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
         metrics_->reportRpcMetrics(endpoint, cost_us, request_bytes, receipt.ByteSizeLong());
 

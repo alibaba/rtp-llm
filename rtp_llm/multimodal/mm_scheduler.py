@@ -8,8 +8,9 @@ import threading
 import time
 import traceback
 from collections import Counter
-from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor, wait
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from concurrent.futures import wait
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Callable, List, Optional
 
@@ -25,6 +26,7 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MMWorkEstimate,
     MultiModalEmbeddingInterface,
 )
+from rtp_llm.telemetry import vit_media
 from rtp_llm.utils.time_util import Timer, current_time_ms
 
 if TYPE_CHECKING:
@@ -82,6 +84,7 @@ class MMSchedulerRequestTooLargeError(MMSchedulerError, ValueError):
     """
 
 
+@vit_media.embedding_batch
 def _run_embedding(
     mm_part: MultiModalEmbeddingInterface,
     items: List[MMWorkItem],
@@ -334,6 +337,7 @@ class MMScheduler:
     def _enqueue_chunk(self, chunk: _EmbeddingChunk) -> None:
         """Put a chunk into the waiting queue and stamp its queue-entry time."""
         chunk.enqueued_at = time.monotonic()
+        vit_media.enqueue(chunk.work_items)
         chunk.queue_wait_reported = False
         self._waiting.put(chunk)
         if self._prefetch_fill_batch:

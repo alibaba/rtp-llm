@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
+#include "opentelemetry/trace/scope.h"
 
 using namespace std;
 
@@ -316,7 +317,14 @@ ErrorInfo LocalRpcServer::updateMultimodalFeaturesWithTrace(
     } catch (...) {}
     grpc::Status                   status;
     telemetry::GrpcStatusSpanGuard guard(span, &status, telemetry::SpanStatusSemantics::Logical);
+    // Multimodal transport executes synchronously on this thread. Scope only
+    // this operation so its outbound RPC inherits the ViT span; restore the
+    // previous context on every return/exception (executor threads are reused).
+    std::unique_ptr<opentelemetry::trace::Scope> active_span;
     try {
+        if (span != nullptr) {
+            active_span = std::make_unique<opentelemetry::trace::Scope>(span);
+        }
         guard.setAttribute(telemetry::kAttrRequestId, std::to_string(input->request_id));
     } catch (...) {}
 
@@ -746,8 +754,8 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         for (const auto& group : cache_manager->cacheConfig().topology().groups()) {
             // Match the HBM publisher's eligibility, including its exact tag exclusions.
             if (!cacheGroupPublishesEvents(group.policy)
-                || group.policy.memory_placement != CacheMemoryPlacement::DEVICE
-                || group.tag == "csa_state" || group.tag == "swa_kv") {
+                || group.policy.memory_placement != CacheMemoryPlacement::DEVICE || group.tag == "csa_state"
+                || group.tag == "swa_kv") {
                 continue;
             }
             if (group.policy.group_type == CacheGroupType::LINEAR) {
@@ -1214,7 +1222,8 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "remote task budget must be positive");
         }
         const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            context->deadline() - std::chrono::system_clock::now()).count();
+                                      context->deadline() - std::chrono::system_clock::now())
+                                      .count();
         if (remaining_ms <= 0) {
             return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "remote task expired before execution");
         }

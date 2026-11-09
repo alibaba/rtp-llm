@@ -20,6 +20,7 @@ from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCacheEntry
 from rtp_llm.multimodal.mm_work_item import _input_has_url
 from rtp_llm.multimodal.source_download_executor import SourceDownloadExecutor
 from rtp_llm.ops import MultimodalInput
+from rtp_llm.telemetry import vit_media
 
 # Per-request override of the process-wide GreenNet switch. ``None`` follows
 # the provider configuration; ``False`` forces inspection off; ``True`` still
@@ -179,6 +180,7 @@ class MMInspectionCoordinator:
                 self._greennet_loop_thread = thread
         return self._greennet_loop
 
+    @vit_media.inspection
     def _begin_greennet(
         self,
         mm_inputs: List[MultimodalInput],
@@ -257,9 +259,10 @@ class MMInspectionCoordinator:
                     )
             if abandoned.is_set():
                 raise asyncio.CancelledError()
-            handle = await self._greennet_provider.preprocess_and_submit(
-                req, source_inputs if source_inputs is not None else mm_inputs
-            )
+            with vit_media.stage("greennet.prepare"):
+                handle = await self._greennet_provider.preprocess_and_submit(
+                    req, source_inputs if source_inputs is not None else mm_inputs
+                )
             # A provider may finish concurrently with timeout, or even suppress
             # cancellation. Keep ownership until the waiting thread takes it.
             with ownership_lock:
@@ -294,10 +297,13 @@ class MMInspectionCoordinator:
 
             async def wait_verdict():
                 try:
-                    return await asyncio.wait_for(
-                        handle.wait_result(),
-                        timeout=max(0.0, deadline - time.monotonic()),
-                    )
+                    with vit_media.stage("greennet"):
+                        verdict = await asyncio.wait_for(
+                            handle.wait_result(),
+                            timeout=max(0.0, deadline - time.monotonic()),
+                        )
+                        vit_media.record_verdict(verdict)
+                        return verdict
                 except asyncio.TimeoutError as error:
                     # Python 3.10 has distinct asyncio/concurrent timeout types.
                     # Keep the public threaded engine's existing exception contract.
@@ -369,12 +375,15 @@ class MMInspectionCoordinator:
                             return verdict
                     if not source_inputs:
                         return GreenNetVerdict(passed=True)
-                    handle = await self._greennet_provider.submit_sources(
-                        request, source_inputs, sources
-                    )
-                    # The provider owns the source bytes until its task finishes.
-                    del sources
-                    return await handle.wait_result()
+                    with vit_media.stage("greennet"):
+                        handle = await self._greennet_provider.submit_sources(
+                            request, source_inputs, sources
+                        )
+                        # The provider owns the source bytes until its task finishes.
+                        del sources
+                        verdict = await handle.wait_result()
+                        vit_media.record_verdict(verdict)
+                        return verdict
 
                 return await asyncio.wait_for(
                     run(), timeout=max(0.0, deadline - time.monotonic())

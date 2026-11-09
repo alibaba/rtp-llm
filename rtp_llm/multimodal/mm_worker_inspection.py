@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+from rtp_llm.telemetry import vit_media
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,13 @@ class WorkerInspectionTask:
     task_id: int
     deadline: float
     request: Any
+    trace_spec: Any = None
+
+
+@dataclass
+class WorkerInspectionResult:
+    value: Any
+    trace_timings: Any
 
 
 class WorkerInspectionChannel:
@@ -44,6 +52,7 @@ class WorkerInspectionChannel:
         )
         self._free = list(range(len(self.tokens)))
         self._pending = {}
+        self._trace_media = {}
         self._next_id = 0
         self._condition = threading.Condition()
         self._closed = False
@@ -65,7 +74,7 @@ class WorkerInspectionChannel:
             self.max_concurrency,
         )
 
-    def register(self, request, deadline):
+    def register(self, request, deadline, media_traces=()):
         with self._condition:
             while not self._free and not self._closed:
                 remaining = deadline - time.monotonic()
@@ -82,10 +91,18 @@ class WorkerInspectionChannel:
                 )
             slot = self._free.pop()
             self._next_id += 1
-            task = WorkerInspectionTask(slot, self._next_id, deadline, request)
+            task = WorkerInspectionTask(
+                slot,
+                self._next_id,
+                deadline,
+                request,
+                vit_media.worker_spec(media_traces),
+            )
             future = concurrent.futures.Future()
             self.tokens[slot] = task.task_id
             self._pending[task.task_id] = (task, future)
+            if task.trace_spec is not None:
+                self._trace_media[task.task_id] = media_traces
 
         def cancelled(completed):
             if completed.cancelled():
@@ -96,12 +113,13 @@ class WorkerInspectionChannel:
         future.add_done_callback(cancelled)
         return task, future
 
-    def finish(self, task_id, verdict=None, error=None):
+    def finish(self, task_id, verdict=None, error=None, trace_timings=None):
         with self._condition:
             pending = self._pending.pop(task_id, None)
             if pending is None:
                 return
             task, future = pending
+            media = self._trace_media.pop(task_id, ())
             with self.tokens.get_lock():
                 self.tokens[task.slot] = 0
                 self.running[task.slot] = 0
@@ -109,6 +127,7 @@ class WorkerInspectionChannel:
             self._free.append(task.slot)
             self._condition.notify_all()
         # Future callbacks may re-enter the channel or the engine. No locks held.
+        vit_media.consume(media, trace_timings)
         try:
             if error is not None:
                 future.set_exception(error)
@@ -125,8 +144,12 @@ class WorkerInspectionChannel:
             try:
                 kind, task_id, value = self.results.get(timeout=0.1)
                 if kind == "done":
+                    trace_timings = None
+                    if isinstance(value, WorkerInspectionResult):
+                        trace_timings = value.trace_timings
+                        value = value.value
                     if isinstance(value, GreenNetVerdict):
-                        self.finish(task_id, verdict=value)
+                        self.finish(task_id, verdict=value, trace_timings=trace_timings)
                     else:
                         kind, message = value
                         error = (
@@ -134,7 +157,7 @@ class WorkerInspectionChannel:
                             if kind == "timeout"
                             else RuntimeError(message)
                         )
-                        self.finish(task_id, error=error)
+                        self.finish(task_id, error=error, trace_timings=trace_timings)
             except queue.Empty:
                 pass
             except (EOFError, OSError):
@@ -236,46 +259,68 @@ class WorkerInspectionRunner:
             )
             self.thread.start()
         asyncio.run_coroutine_threadsafe(
-            self._inspect(task, mm_inputs, sources), self.loop
+            self._inspect(task, mm_inputs, sources, time.time_ns()), self.loop
         )
 
-    async def _inspect(self, task, mm_inputs, sources):
+    async def _inspect(self, task, mm_inputs, sources, queued_ns=None):
+        with vit_media.collect_worker(task.trace_spec) as timings:
+            if timings is not None and queued_ns is not None:
+                timings.record("greennet.dispatch", queued_ns, time.time_ns())
+            completion = []
+            try:
+                await self._inspect_impl(task, mm_inputs, sources, completion)
+            finally:
+                # As before, a cleanup failure must not swallow a verdict/error
+                # already produced by inspection. Publish after cleanup so its
+                # cancelled stages have also finished recording timestamps.
+                if completion:
+                    value = completion[0]
+                    if timings is not None:
+                        value = WorkerInspectionResult(value, timings)
+                    self.results.put(("done", task.task_id, value))
+
+    async def _inspect_impl(self, task, mm_inputs, sources, completion):
         handle = None
 
         async def inspect():
             nonlocal handle
-            if self.provider is None:
-                self.provider = self.factory()
-            handle = await self.provider.submit_sources(
-                task.request, mm_inputs, sources
-            )
-            sources.clear()
-            verdict = await handle.wait_result()
-            if not isinstance(verdict, GreenNetVerdict):
-                raise RuntimeError("CPU inspection returned no verdict")
-            return verdict
+            with vit_media.stage("greennet"):
+                if self.provider is None:
+                    self.provider = self.factory()
+                handle = await self.provider.submit_sources(
+                    task.request, mm_inputs, sources
+                )
+                sources.clear()
+                verdict = await handle.wait_result()
+                if not isinstance(verdict, GreenNetVerdict):
+                    raise RuntimeError("CPU inspection returned no verdict")
+                vit_media.record_verdict(verdict)
+                return verdict
 
         running = None
         acquired = False
         try:
-            while self.active(task):
-                if self._acquire(task, len(mm_inputs)):
-                    acquired = True
-                    break
-                await asyncio.sleep(0.01)
-            if not self.active(task):
-                raise asyncio.CancelledError()
+            with vit_media.stage("greennet.queue"):
+                while self.active(task):
+                    if self._acquire(task, len(mm_inputs)):
+                        acquired = True
+                        break
+                    await asyncio.sleep(0.01)
+                if not self.active(task):
+                    raise asyncio.CancelledError()
             running = asyncio.create_task(inspect())
             while self.active(task):
                 done, _ = await asyncio.wait([running], timeout=0.05)
                 if done:
-                    self.results.put(("done", task.task_id, running.result()))
+                    completion.append(running.result())
                     return
             raise asyncio.CancelledError()
         except asyncio.CancelledError:
-            self.failed(task, "cancelled or expired")
+            kind = "timeout" if time.monotonic() >= task.deadline else "error"
+            completion.append((kind, "CPU inspection failed: cancelled or expired"))
         except Exception as error:
-            self.failed(task, error)
+            kind = "timeout" if time.monotonic() >= task.deadline else "error"
+            completion.append((kind, f"CPU inspection failed: {error}"))
         finally:
             if running is not None and not running.done():
                 running.cancel()

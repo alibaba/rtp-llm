@@ -26,6 +26,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 )
 from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.telemetry import vit_media
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
@@ -261,6 +262,7 @@ def retry_on_assertion_error(retries: int = 3):
     return decorator
 
 
+@vit_media.download
 def get_json_result_from_url(url: str, download_headers: str = ""):
     """Get JSON result from URL.
 
@@ -370,6 +372,7 @@ def _download_http_content(
             response.close()
 
 
+@vit_media.download
 def get_bytes_io_from_url(
     url: str,
     download_headers: str = "",
@@ -429,6 +432,7 @@ def get_bytes_io_from_url(
     else:
         # Each caller needs an independent cursor because cache hits may be read
         # concurrently by different preprocessing workers.
+        vit_media.download_cache_hit()
         cached_bytes = cached_res.getvalue()
         _validate_file_size(len(cached_bytes), max_file_size_kb)
         return BytesIO(cached_bytes)

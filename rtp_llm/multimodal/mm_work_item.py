@@ -162,6 +162,7 @@ class MMWorkItem:
         self.region: Optional[str] = region
 
         self.preprocess_result: Optional[Any] = None
+        self.media_traces = ()
         self.capture_inspection_sources = False
         self.inspection_sources: Optional[List[bytes]] = None
         self.inspection_request = None
