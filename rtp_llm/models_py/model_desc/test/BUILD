@@ -184,6 +184,29 @@ py_test(
     tags = ["L20_CU13"],
 )
 
+py_test(
+    name = "kimi_k3_capture_control_flow_test",
+    srcs = ["kimi_k3_capture_control_flow_test.py"],
+    data = ["//rtp_llm/models_py:kimi_k3_capture_control_flow_test_sources"],
+)
+
+py_test(
+    name = "kimi_k3_hidden_state_capture_test",
+    srcs = [
+        "kimi_k3_hidden_state_capture_test.py",
+        "kimi_k3_mtp_cp_hidden_test.py",
+        "kimi_k31_cache_routing_test.py",
+    ],
+    deps = py_test_deps + [
+        "//rtp_llm:models",
+        "//rtp_llm/models_py:models",
+    ],
+    env = {"GPU_COUNT": "0"},
+    # CPU tensors, but imports the same native CUDA bindings as the K3 fixtures.
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
 # K3.1 CP handoff uses the shared K3 modeling without a full checkpoint.
 [
     py_test(

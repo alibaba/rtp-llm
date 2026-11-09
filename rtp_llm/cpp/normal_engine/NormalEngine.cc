@@ -903,8 +903,9 @@ std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr
     } catch (const std::invalid_argument& error) {
         // Keep invalid request handling on the stream error path instead of exposing
         // validation exceptions to direct engine callers or RPC adapters.
-        auto safe_input             = std::make_shared<GenerateInput>(*input);
-        auto safe_config            = std::make_shared<GenerateConfig>(*input->generate_config);
+        auto safe_input = std::make_shared<GenerateInput>(*input);
+        // Do not carry rejected capture/beam settings into the constructor validation.
+        auto safe_config            = std::make_shared<GenerateConfig>();
         safe_config->max_new_tokens = 1;
         safe_input->generate_config = std::move(safe_config);
         auto stream                 = std::make_shared<NormalGenerateStream>(
@@ -940,6 +941,11 @@ std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr
     if (selection_error.hasError()) {
         stream->reportError(selection_error.code(), selection_error.ToString());
     }
+    if (parallelism_config.tp_rank == 0 && executor_ && stream->shouldCaptureHiddenStates()
+        && !model_config_.hidden_state_capture_layer_ids.empty()) {
+        stream->setHiddenStateCaptureReservation(
+            executor_->tryReserveHiddenStateCapture(stream->streamId(), stream->inputLength()));
+    }
     return stream;
 }
 
@@ -947,16 +953,21 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
     auto stream = createStream(input);
     // DecodeRpcServer allocates the destination KV table before enqueue/P-D handoff.
     setStreamReserveSteps(*stream);
-    (void)validateStreamForScheduling(stream);
+    if (!validateStreamForScheduling(stream)) {
+        stream->cancelHiddenStateCapture();
+    }
     return stream;
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     setStreamReserveSteps(*stream);
     if (!validateStreamForScheduling(stream)) {
+        stream->cancelHiddenStateCapture();
         return;
     }
-    (void)scheduler_->enqueue(stream);
+    if (!scheduler_->enqueue(stream).ok()) {
+        stream->cancelHiddenStateCapture();
+    }
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
@@ -993,6 +1004,9 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
                 stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
             }
         }
+        for (const auto& stream : streams) {
+            stream->cancelHiddenStateCapture();
+        }
         return {std::vector<bool>(streams.size(), false), std::move(streams)};
     }
 
@@ -1000,6 +1014,8 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
         if (validateStreamForScheduling(streams[i])) {
             schedulable_indexes.push_back(i);
             schedulable_streams.push_back(streams[i]);
+        } else {
+            streams[i]->cancelHiddenStateCapture();
         }
     }
 
@@ -1007,6 +1023,9 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     std::vector<bool> enqueue_successes(streams.size(), false);
     for (size_t i = 0; i < schedulable_indexes.size(); ++i) {
         enqueue_successes[schedulable_indexes[i]] = schedulable_result.first[i];
+        if (!schedulable_result.first[i]) {
+            schedulable_streams[i]->cancelHiddenStateCapture();
+        }
     }
     return {std::move(enqueue_successes), std::move(streams)};
 }

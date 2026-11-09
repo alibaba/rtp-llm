@@ -256,6 +256,24 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     EXPECT_EQ(hints[GptModelInputIndex::kernelSeqSizePerBlock], 16);
 }
 
+TEST_F(ModelDataTest, testCaptureWorkerHealthUsesExistingTpShapeControl) {
+    GptModelInputs inputs;
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::hiddenStateCaptureWorkerFailed], 0);
+    inputs.capture_worker_failed = true;
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::hiddenStateCaptureWorkerFailed], 1);
+}
+
+TEST_F(ModelDataTest, testCapturePlanningMirrorUsesCpuTpPayloadWithoutDeviceReadback) {
+    GptModelInputs inputs;
+    inputs.capture_hidden_states     = true;
+    inputs.capture_input_lengths_cpu = torch::tensor({3, 2}, torch::kInt32);
+    const auto hints                 = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::capturePlanningLengthRows], 2);
+    EXPECT_TRUE(inputs.capture_input_lengths_cpu.device().is_cpu());
+    inputs.capture_hidden_states = false;
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::capturePlanningLengthRows], 0);
+}
+
 namespace {
 
 void expectIntTensor(const torch::Tensor& actual, const torch::Tensor& expected) {

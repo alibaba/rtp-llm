@@ -1,5 +1,8 @@
 
 #pragma once
+
+#include <new>
+#include <stdexcept>
 #include <algorithm>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/HiddenStateCapturePublisher.h"
@@ -100,7 +103,8 @@ public:
     void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
-    std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
+    bool                             hiddenStateCaptureHasFatalFailure() const override;
+    HiddenStateCaptureReservationPtr tryReserveHiddenStateCapture(int64_t request_id, int64_t valid_tokens) override;
 
 private:
     friend struct test::PyWrappedModelTestPeer;
@@ -131,6 +135,7 @@ private:
     torch::Tensor runCustomOutput(const torch::Tensor& rows);
     torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
     bool          shouldCaptureHiddenStates(const GptModelInputs& inputs);
+    void          discardHiddenStateCapture(const GptModelInputs& inputs, const std::string& reason);
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
@@ -159,6 +164,7 @@ private:
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties                   device_props_;
+    const int64_t                                   hidden_size_;
     const bool                                      enable_prefill_cp_;
     const DSparkModelRole                           dspark_model_role_;
     const bool                                      track_cache_store_completion_;
@@ -189,7 +195,9 @@ private:
     bool enable_device_perf_{false};
     bool check_nan_{false};
 
-    std::unique_ptr<HiddenStateCapturePublisher> hidden_state_capture_publisher_;
+    bool                                         hidden_state_capture_configured_{false};
+    bool                                         hidden_state_capture_supported_{false};
+    std::shared_ptr<HiddenStateCapturePublisher> hidden_state_capture_publisher_;
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::shared_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
@@ -218,6 +226,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       bool                      allow_cuda_graph,
                                       bool                      track_cache_store_completion):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
+    hidden_size_(params.hidden_size),
     // Every prefill-shaped forward of a CP-enabled model goes through the
     // standard split/gather path — including the DSpARK draft commit, whose
     // incremental-prefill geometry CP-splits like any prompt while its
@@ -659,43 +668,63 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                          static_cast<int>(has_mtp_hidden_buffer_));
     }
 
-    if (!params.hidden_state_capture_layer_ids.empty()) {
-        RTP_LLM_CHECK_WITH_INFO(
-            !(int(device_props_.enable_layer_micro_batch) && device_props_.enable_prefill_cp),
-            "hidden-state capture does not support context parallel combined with layer micro-batching");
-        RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "supports_hidden_state_capture")
-                                    && py_model_.attr("supports_hidden_state_capture").cast<bool>(),
-                                "configured Python model does not support hidden-state capture");
-        RTP_LLM_CHECK_WITH_INFO(params.hidden_size > 0, "hidden-state capture requires a positive hidden size");
-        RTP_LLM_CHECK_WITH_INFO(params.hidden_state_capture_dtype == HiddenStateCaptureDtype::BF16
-                                    || params.hidden_state_capture_dtype == HiddenStateCaptureDtype::FP8_E4M3,
-                                "unsupported hidden-state capture dtype: %d",
-                                static_cast<int>(params.hidden_state_capture_dtype));
+    hidden_state_capture_configured_ = !params.hidden_state_capture_layer_ids.empty();
+    if (hidden_state_capture_configured_) {
+        try {
+            if (device_props_.ffn_as_service
+                || params.parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate) {
+                throw std::invalid_argument("hidden-state capture is disabled for the FFN wire protocol");
+            }
+            if (int(device_props_.enable_layer_micro_batch) && device_props_.enable_prefill_cp) {
+                throw std::invalid_argument("hidden-state capture does not support CP with layer micro-batching");
+            }
+            if (!py::hasattr(py_model_, "supports_hidden_state_capture")
+                || !py_model_.attr("supports_hidden_state_capture").cast<bool>()) {
+                throw std::invalid_argument("configured Python model does not support hidden-state capture");
+            }
+            if (params.hidden_size <= 0
+                || (params.hidden_state_capture_dtype != HiddenStateCaptureDtype::BF16
+                    && params.hidden_state_capture_dtype != HiddenStateCaptureDtype::FP8_E4M3)) {
+                throw std::invalid_argument("invalid hidden-state capture layout or dtype");
+            }
 #if USING_ROCM
-        RTP_LLM_CHECK_WITH_INFO(
-            params.hidden_state_capture_dtype != HiddenStateCaptureDtype::FP8_E4M3,
-            "TorchSpec hidden-state capture does not support FP8 on ROCm because TorchSpec stores float8_e4m3fn, "
-            "while ROCm requires float8_e4m3fnuz");
+            if (params.hidden_state_capture_dtype == HiddenStateCaptureDtype::FP8_E4M3) {
+                throw std::invalid_argument("TorchSpec FP8 capture is unsupported on ROCm");
+            }
 #endif
-        std::unordered_set<int64_t> unique_capture_layer_ids;
-        for (const auto layer_id : params.hidden_state_capture_layer_ids) {
-            RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_num_,
-                                    "hidden-state capture layer id %ld is outside [0, %zu)",
-                                    layer_id,
-                                    layer_num_);
-            RTP_LLM_CHECK_WITH_INFO(unique_capture_layer_ids.insert(layer_id).second,
-                                    "hidden-state capture layer ids must be unique; duplicate id %ld",
-                                    layer_id);
-        }
-        if (!device_props_.ffn_as_service) {
-            hidden_state_capture_publisher_ = std::make_unique<HiddenStateCapturePublisher>(
+            std::unordered_set<int64_t> unique_ids;
+            for (const auto id : params.hidden_state_capture_layer_ids) {
+                if (id < 0 || static_cast<size_t>(id) >= layer_num_ || !unique_ids.insert(id).second) {
+                    throw std::invalid_argument("capture layer IDs must be unique and within model layers");
+                }
+            }
+            hidden_state_capture_publisher_ = std::make_shared<HiddenStateCapturePublisher>(
                 static_cast<int64_t>(params.hidden_state_capture_layer_ids.size()),
                 params.hidden_size,
                 params.hidden_state_capture_dtype,
                 dataTypeToTorchType(description_.data_type),
                 params.parallelism_config.tp_rank == 0,
                 params.parallelism_config.local_rank,
-                params.metrics_reporter);
+                params.metrics_reporter,
+                HiddenStateCaptureLimits{params.hidden_state_capture_max_inflight_samples,
+                                         params.hidden_state_capture_max_inflight_bytes,
+                                         params.hidden_state_capture_max_inflight_tokens,
+                                         params.hidden_state_capture_max_pending_batches,
+                                         params.hidden_state_capture_poll_interval_ms,
+                                         params.hidden_state_capture_max_retained_bytes},
+                params.hidden_state_capture_layer_ids);
+            hidden_state_capture_supported_ = true;
+        } catch (const c10::Error&) {
+            throw;
+        } catch (const std::bad_alloc&) {
+            throw;
+        } catch (const py::error_already_set& error) {
+            if (HiddenStateCapturePublisher::isFatalPythonError(error.value())) {
+                throw;
+            }
+            RTP_LLM_LOG_WARNING("capture initialization disabled: %s", error.what());
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_WARNING("capture initialization disabled: %s", error.what());
         }
     }
 

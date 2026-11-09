@@ -125,6 +125,13 @@ class ModelConfig(CppModelConfig):
         "hidden_size",
         "hidden_state_capture_layer_ids",
         "hidden_state_capture_dtype",
+        "hidden_state_capture_max_inflight_samples",
+        "hidden_state_capture_max_inflight_bytes",
+        "hidden_state_capture_max_inflight_tokens",
+        "hidden_state_capture_max_pending_batches",
+        "hidden_state_capture_poll_interval_ms",
+        "hidden_state_capture_max_retained_bytes",
+
         "attn_config",
         "special_tokens",
         "quant_algo",
@@ -679,6 +686,21 @@ class ModelConfig(CppModelConfig):
                 )
             capture_dtype = capture_dtype_by_name[capture_dtype_name]
 
+        capture_limits = {}
+        for name in (
+            "hidden_state_capture_max_inflight_samples",
+            "hidden_state_capture_max_inflight_bytes",
+            "hidden_state_capture_max_inflight_tokens",
+            "hidden_state_capture_max_pending_batches",
+            "hidden_state_capture_poll_interval_ms",
+            "hidden_state_capture_max_retained_bytes",
+        ):
+            if name in model_override_args:
+                value = model_override_args[name]
+                if type(value) is not int or value <= 0 or value > 2**63 - 1:
+                    raise ValueError(f"{name} must be a positive int64")
+                capture_limits[name] = value
+
         # Apply only after all capture overrides have been validated so an
         # invalid later field cannot leave an earlier field partially updated.
         self.apply_rope_scaling_override(model_override_args)
@@ -686,6 +708,8 @@ class ModelConfig(CppModelConfig):
             self.hidden_state_capture_layer_ids = layer_ids
         if capture_dtype is not None:
             self.hidden_state_capture_dtype = capture_dtype
+        for name, value in capture_limits.items():
+            setattr(self, name, value)
 
     def init_precision_config(
         self, kv_cache_config: Optional[Any], act_type: Optional[str]

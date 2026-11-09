@@ -1013,6 +1013,19 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         HiddenStateCaptureModelRole::TARGET, role_type_, warm_up_, params.model_config_.hidden_state_capture_layer_ids);
     model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_max_inflight_samples =
+        params.model_config_.hidden_state_capture_max_inflight_samples;
+    model_init_params.hidden_state_capture_max_inflight_bytes =
+        params.model_config_.hidden_state_capture_max_inflight_bytes;
+    model_init_params.hidden_state_capture_max_inflight_tokens =
+        params.model_config_.hidden_state_capture_max_inflight_tokens;
+    model_init_params.hidden_state_capture_max_pending_batches =
+        params.model_config_.hidden_state_capture_max_pending_batches;
+    model_init_params.hidden_state_capture_poll_interval_ms =
+        params.model_config_.hidden_state_capture_poll_interval_ms;
+    model_init_params.hidden_state_capture_max_retained_bytes =
+        params.model_config_.hidden_state_capture_max_retained_bytes;
+
 #if USING_CUDA || USING_ROCM
     const size_t max_reserved_step = params.sp_config.speculativeReserveStep();
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
@@ -1315,6 +1328,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(tp_sync_input)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        if (isTpRank0()) {
+            model_input.capture_worker_failed = model_ && model_->hiddenStateCaptureHasFatalFailure();
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         target_only = model_input.skip_lm_head;
         if (model_input.skip_run) {
@@ -1404,17 +1420,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         if (metrics_reporter_) {
             collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
         }
-        cudaSyncAndCheck();
+        cuda_graph::graphGetCurrentStream().synchronize();
+        cudaCheckLastError();
         releaseAllModelBuffers();
-        if (auto deferred_capture_error = model_->takeDeferredHiddenStateCaptureError();
-            deferred_capture_error.has_value()) {
-            for (const auto& stream : streams) {
-                if (!stream->hasError()) {
-                    stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *deferred_capture_error);
-                }
-            }
-            return absl::OkStatus();
-        }
         if (isTpRank0()) {
             return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
         }
@@ -1482,6 +1490,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         // Hidden-state capture belongs to the target prefill only. Clear it
         // before the existing sync republishes the draft input to all TP ranks.
         model_input.capture_hidden_states = false;
+        if (isTpRank0()) {
+            model_input.capture_worker_failed = model_ && model_->hiddenStateCaptureHasFatalFailure();
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
         int64_t     start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -1553,29 +1564,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         return absl::OkStatus();
     }
 
-    // Do not consume the target publisher error until every required draft/FFN/DP
-    // alignment forward has completed. If alignment itself fails, the publisher's
-    // sticky fail-closed state preserves the capture error for the next request.
-    if (auto deferred_capture_error = model_->takeDeferredHiddenStateCaptureError();
-        deferred_capture_error.has_value()) {
-        if (metrics_reporter_) {
-            collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
-        }
-        cudaSyncAndCheck();
-        releaseAllModelBuffers();
-        for (const auto& stream : streams) {
-            if (!stream->hasError()) {
-                stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *deferred_capture_error);
-            }
-        }
-        return absl::OkStatus();
-    }
-
     if (target_only) {
         if (metrics_reporter_) {
             collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
         }
-        cudaSyncAndCheck();
+        cuda_graph::graphGetCurrentStream().synchronize();
+        cudaCheckLastError();
         releaseAllModelBuffers();
         if (isTpRank0()) {
             return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
@@ -1758,6 +1752,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // tpSyncModelInputs so every TP rank enters and leaves the same collective.
         model_input.skip_run = shouldSkipEmptyDecode(streams.empty(), enable_ffn_disaggregate_);
         if (model_input.skip_run) {
+            if (isTpRank0()) {
+                model_input.capture_worker_failed = model_ && model_->hiddenStateCaptureHasFatalFailure();
+            }
             tpSyncModelInputs(model_input, parallelism_config_);
             return absl::OkStatus();
         }
@@ -1768,6 +1765,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (alignment_only) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(alignment_only_tp_sync)");
+        if (isTpRank0()) {
+            model_input.capture_worker_failed = model_ && model_->hiddenStateCaptureHasFatalFailure();
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
             return absl::OkStatus();
@@ -1798,6 +1798,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                     dspark_round_state, proposal_input, buffer_holder_);
                 ensureModelInputsOnCuda(proposal_input, "decode.prepare_dspark_proposal");
             }
+            if (isTpRank0()) {
+                proposal_input.capture_worker_failed = model_ && model_->hiddenStateCaptureHasFatalFailure();
+            }
             tpSyncModelInputs(proposal_input, parallelism_config_);
             if (proposal_input.skip_run) {
                 return absl::OkStatus();
@@ -1826,6 +1829,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 ensureModelInputsOnCuda(model_input, "decode.prepare_dspark_target_verify");
             }
             applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
+            if (isTpRank0()) {
+                model_input.capture_worker_failed = model_ && model_->hiddenStateCaptureHasFatalFailure();
+            }
             tpSyncModelInputs(model_input, parallelism_config_);
             ensureModelInputsOnCuda(model_input, "decode.dspark_target_verify_after_tp_sync");
         }
@@ -1845,6 +1851,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                         stream_groups, cache_manager_->cacheConfig(), model_input, buffer_holder_, replay_rounds));
                 }
                 ensureModelInputsOnCuda(model_input, "decode.prepare_decode_input");
+            }
+            if (isTpRank0()) {
+                model_input.capture_worker_failed = model_ && model_->hiddenStateCaptureHasFatalFailure();
             }
             tpSyncModelInputs(model_input, parallelism_config_);
             if (model_input.skip_run) {
@@ -2899,6 +2908,10 @@ void MtpExecutor::startProfileStep(bool is_fake_stream) {
         profile_step_start_();
         profile_step_started_ = true;
     }
+}
+
+HiddenStateCaptureReservationPtr MtpExecutor::tryReserveHiddenStateCapture(int64_t request_id, int64_t valid_tokens) {
+    return !warm_up_ && model_ ? model_->tryReserveHiddenStateCapture(request_id, valid_tokens) : nullptr;
 }
 
 absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {

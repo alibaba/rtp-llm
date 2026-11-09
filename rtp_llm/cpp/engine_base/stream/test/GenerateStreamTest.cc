@@ -2043,6 +2043,93 @@ TEST_F(GenerateStreamTest, testChunkedPrefillReturnsOnlyCommittedTokenProbabilit
     }
 }
 
+TEST_F(GenerateStreamTest, testExplicitCaptureRequiresFirstFullPrompt) {
+    GenerateStreamBuilder builder;
+    builder.enableHiddenStateCapture();
+    const auto make_capture = [&](RoleType role) {
+        return builder.createChunkedContextStream({1, 2, 3}, role, 0, [](GenerateInput&, GenerateConfig& config) {
+            config.max_new_tokens        = 4;
+            config.capture_hidden_states = true;
+            config.reuse_cache           = false;
+        });
+    };
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        SCOPED_TRACE(static_cast<int>(role));
+        auto stream = make_capture(role);
+        ASSERT_FALSE(stream->hasError());
+        EXPECT_TRUE(stream->shouldCaptureHiddenStates());
+        EXPECT_TRUE(stream->requiresFullContextForCapture());
+        EXPECT_FALSE(stream->reuseCache());
+        EXPECT_EQ(stream->contextLength(), stream->inputLength());
+        EXPECT_EQ(stream->generateConfig()->max_new_tokens, 4);
+        markRunning(stream);
+        stream->step();
+        stream->setIsContextStream(false);
+        EXPECT_FALSE(stream->shouldCaptureHiddenStates());
+        // Even a later context fallback for the same request must not republish it.
+        stream->setIsContextStream(true);
+        EXPECT_FALSE(stream->shouldCaptureHiddenStates());
+    }
+    EXPECT_FALSE(make_capture(RoleType::DECODE)->shouldCaptureHiddenStates());
+
+    auto reused = make_capture(RoleType::PREFILL);
+    reused->setReuseLength(1);
+    EXPECT_FALSE(reused->shouldCaptureHiddenStates());
+    auto chunked = make_capture(RoleType::PREFILL);
+    chunked->setChunkSize(2);
+    EXPECT_FALSE(chunked->shouldCaptureHiddenStates());
+    auto fake = make_capture(RoleType::PREFILL);
+    fake->setIsFakeStream(true);
+    EXPECT_FALSE(fake->shouldCaptureHiddenStates());
+    auto fake_query                         = make_capture(RoleType::PREFILL);
+    fake_query->generateInput()->fake_query = true;
+    EXPECT_FALSE(fake_query->shouldCaptureHiddenStates());
+    auto failed = make_capture(RoleType::PREFILL);
+    failed->reportError(ErrorCode::EXECUTION_EXCEPTION, "existing error");
+    EXPECT_FALSE(failed->shouldCaptureHiddenStates());
+    auto verify = make_capture(RoleType::PREFILL);
+    verify->setScoreLen(2);
+    EXPECT_FALSE(verify->shouldCaptureHiddenStates());
+    auto validation                                  = make_capture(RoleType::PREFILL);
+    validation->generateConfig()->num_validate_token = 1;
+    EXPECT_FALSE(validation->shouldCaptureHiddenStates());
+    auto extended = make_capture(RoleType::PREFILL);
+    extended->setSeqLength(4);
+    EXPECT_FALSE(extended->shouldCaptureHiddenStates());
+}
+
+TEST_F(GenerateStreamTest, testExplicitCaptureRejectsConfiguredChunksExceptFakeWarmup) {
+    GenerateStreamBuilder builder;
+    builder.enableHiddenStateCapture();
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        for (const int64_t chunk_size : {2, 8}) {
+            SCOPED_TRACE(testing::Message() << "role=" << static_cast<int>(role) << " chunk=" << chunk_size);
+            auto stream = builder.createChunkedContextStream(
+                {1, 2, 3}, role, chunk_size, [](GenerateInput&, GenerateConfig& config) {
+                    config.max_new_tokens        = 4;
+                    config.capture_hidden_states = true;
+                    config.reuse_cache           = false;
+                });
+            ASSERT_TRUE(stream->hasError());
+            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: hidden_state_capture");
+            EXPECT_EQ(stream->curBlocksNum(), 0);
+            EXPECT_FALSE(stream->shouldCaptureHiddenStates());
+
+            auto fake = builder.createChunkedContextStream(
+                {1, 2, 3}, role, chunk_size, [](GenerateInput& input, GenerateConfig& config) {
+                    input.fake_query             = true;
+                    config.max_new_tokens        = 4;
+                    config.capture_hidden_states = true;
+                    config.reuse_cache           = false;
+                });
+            EXPECT_FALSE(fake->hasError());
+            EXPECT_FALSE(fake->chunkedPrefillEnabled());
+            EXPECT_FALSE(fake->shouldCaptureHiddenStates());
+        }
+    }
+}
+
 TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
     GenerateStreamBuilder builder;
     const auto            input_ids = makeInputIds(9);

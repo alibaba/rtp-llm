@@ -350,7 +350,7 @@ public:
         event_name_ = std::move(name);
     }
 
-    std::optional<std::string> takeDeferredHiddenStateCaptureError() override {
+    std::optional<std::string> takeDeferredHiddenStateCaptureError() {
         if (deferred_hidden_state_capture_error_.has_value() && forward_trace_ != nullptr) {
             forward_trace_->push_back(forward_trace_label_ + ".capture_error_taken");
         }
@@ -1032,17 +1032,13 @@ public:
 
         auto status = components.executor->process({target_only_stream});
         ASSERT_TRUE(status.ok());
-        if (deferred_capture_error.has_value()) {
+        if (existing_stream_error) {
             EXPECT_TRUE(target_only_stream->hasError());
             auto output = target_only_stream->nextOutput();
             ASSERT_FALSE(output.ok());
-            if (existing_stream_error) {
-                EXPECT_EQ(output.status().code(), ErrorCode::INVALID_PARAMS);
-                EXPECT_EQ(target_only_stream->stopReason(), "existing request error");
-                EXPECT_NE(output.status().ToString().find("existing request error"), std::string::npos);
-            } else {
-                EXPECT_NE(output.status().ToString().find(*deferred_capture_error), std::string::npos);
-            }
+            EXPECT_EQ(output.status().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_EQ(target_only_stream->stopReason(), "existing request error");
+            EXPECT_NE(output.status().ToString().find("existing request error"), std::string::npos);
         } else {
             EXPECT_FALSE(target_only_stream->hasError());
             EXPECT_TRUE(target_only_stream->hasEvent(StreamEvents::GenerateDone));
@@ -1065,9 +1061,6 @@ public:
         if (expect_draft_forward) {
             expected_forward_trace.push_back("draft");
         }
-        if (deferred_capture_error.has_value()) {
-            expected_forward_trace.push_back("target.capture_error_taken");
-        }
         EXPECT_EQ(forward_trace, expected_forward_trace);
         EXPECT_EQ(target_model->forwardCount(), 1);
         EXPECT_EQ(draft_model->forwardCount(), expect_draft_forward ? 1 : 0);
@@ -1076,8 +1069,10 @@ public:
         EXPECT_EQ(target_sampler->forwardCount(), 0);
     }
 
-    void runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers = true,
-                                      bool native_mla_draft = false);
+    void runSingleBatchPrefillScenario(bool simulate_cp_mutation,
+                                       bool with_cp_hidden_buffers = true,
+                                       bool native_mla_draft       = false,
+                                       bool capture_hidden_states  = false);
     void runSingleBatchDecodeScenario(bool with_prefill_only);
 
     void setupAlignmentModel(FakeModel*          model,
@@ -1791,8 +1786,10 @@ TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     }
 }
 
-void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers,
-                                                 bool native_mla_draft) {
+void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation,
+                                                    bool with_cp_hidden_buffers,
+                                                    bool native_mla_draft,
+                                                    bool capture_hidden_states) {
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle = 4;
     auto components               = createMtpExecutorComponents(test_config);
@@ -1815,6 +1812,10 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     // Create context stream
     GenerateStreamPtr stream1 = createContextStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3});
+    if (capture_hidden_states) {
+        stream1->generateConfig()->capture_hidden_states = true;
+        stream1->generateConfig()->reuse_cache           = false;
+    }
     if (simulate_cp_mutation) {
         stream1->generateConfig()->max_new_tokens = 8;
         components.fake_target_model->setPostForwardInputMutation(torch::tensor({0, 1}, torch::kInt32),
@@ -1833,6 +1834,14 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     target_output.logits           = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({(int64_t)batch_size, 4});
     target_output.all_hidden_states =
         torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
+    const auto target_hidden_states    = target_output.all_hidden_states;
+    target_input.capture_hidden_states = capture_hidden_states;
+    if (capture_hidden_states) {
+        // Packed capture rows must not replace the separate pre-final-norm MTP recurrence.
+        target_output.mtp_target_hidden_states =
+            simulate_cp_mutation ? target_hidden_states.narrow(0, 0, 2) : target_hidden_states;
+        target_output.all_hidden_states = torch::full({4, 6}, -42.0f, torch::kFloat32);
+    }
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
 
@@ -1843,13 +1852,13 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     draft_input.input_lengths      = torch::tensor({4}, torch::kInt32);
     draft_input.prefix_lengths     = torch::tensor({0}, torch::kInt32);
     draft_input.lm_output_indexes  = torch::tensor({3}, torch::kInt32);
-    draft_input.last_hidden_states = target_output.all_hidden_states;
+    draft_input.last_hidden_states = target_hidden_states;
     draft_output.logits            = torch::tensor({0.5f, 0.6f, 0.7f, 0.8f}).reshape({(int64_t)batch_size, 4});
     draft_output.all_hidden_states =
         torch::tensor({0.11f, 0.12f, 0.13f, 0.14f, 0.15f, 0.16f, 0.17f, 0.18f}).reshape({4, 2});
     if (simulate_cp_mutation && with_cp_hidden_buffers) {
         // Global token geometry is restored, but hidden rows stay CP-local.
-        draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, 2);
+        draft_input.last_hidden_states = target_hidden_states.narrow(0, 0, 2);
         components.fake_target_model->setMtpTargetHiddenStates(draft_input.last_hidden_states);
         components.fake_draft_model->setMtpLastHiddenStates(draft_output.all_hidden_states.narrow(0, 3, 1).clone());
         draft_output.all_hidden_states = draft_output.all_hidden_states.narrow(0, 0, 2);
@@ -1863,11 +1872,11 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
         components.fake_draft_model->setMtpLastHiddenStates(torch::Tensor());
         components.fake_target_model->restore_mtp_hidden = [&](torch::Tensor local) {
             EXPECT_EQ(local.size(0), 2);
-            EXPECT_TRUE(local.equal(target_output.all_hidden_states.narrow(0, 0, 2)));
+            EXPECT_TRUE(local.equal(target_hidden_states.narrow(0, 0, 2)));
             restored_mla_hidden = true;
-            return target_output.all_hidden_states;
+            return target_hidden_states;
         };
-        draft_input.last_hidden_states = target_output.all_hidden_states;
+        draft_input.last_hidden_states = target_hidden_states;
         draft_output.all_hidden_states =
             torch::tensor({0.11f, 0.12f, 0.13f, 0.14f, 0.15f, 0.16f, 0.17f, 0.18f}).reshape({4, 2});
     }
@@ -1926,17 +1935,29 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.17, 0.18});
-    if (simulate_cp_mutation) {
-        EXPECT_EQ(target_model->forwardCount(), 1);
-        EXPECT_EQ(draft_model->forwardCount(), 1);
-        EXPECT_EQ(draft_sampler->forwardCount(), 1);
-        EXPECT_EQ(speculative_sampler->forwardCount(), 0);
-        EXPECT_EQ(target_sampler->forwardCount(), 1);
-    }
+    EXPECT_EQ(target_model->forwardCount(), 1);
+    EXPECT_EQ(draft_model->forwardCount(), 1);
+    EXPECT_EQ(draft_sampler->forwardCount(), 1);
+    EXPECT_EQ(speculative_sampler->forwardCount(), 0);
+    EXPECT_EQ(target_sampler->forwardCount(), 1);
 }
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     runSingleBatchPrefillScenario(/*simulate_cp_mutation=*/false);
+}
+
+TEST_F(MtpExecutorTest, testGenerationCapturePreservesSamplingAndPrenormMtpHandoff) {
+    runSingleBatchPrefillScenario(/*simulate_cp_mutation=*/false,
+                                  /*with_cp_hidden_buffers=*/true,
+                                  /*native_mla_draft=*/false,
+                                  /*capture_hidden_states=*/true);
+}
+
+TEST_F(MtpExecutorTest, testGenerationCaptureRestoresCpPrenormHiddenForNativeMlaDraft) {
+    runSingleBatchPrefillScenario(/*simulate_cp_mutation=*/true,
+                                  /*with_cp_hidden_buffers=*/true,
+                                  /*native_mla_draft=*/true,
+                                  /*capture_hidden_states=*/true);
 }
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefillRestoresCpInputBeforeDraftShift) {
@@ -1964,16 +1985,16 @@ TEST_F(MtpExecutorTest, testTargetOnlyRunsDraftPrefillForMultiDpAlignmentWithout
     runTargetOnlyPrefillScenario(RoleType::PREFILL, false, true, true);
 }
 
-TEST_F(MtpExecutorTest, testDeferredCaptureErrorCompletesFfnDraftAlignmentBeforeFailing) {
+TEST_F(MtpExecutorTest, testCaptureTelemetryDoesNotBreakFfnDraftAlignment) {
     runTargetOnlyPrefillScenario(RoleType::PREFILL, true, false, true, false, "injected capture failure");
 }
 
-TEST_F(MtpExecutorTest, testDeferredCaptureErrorDoesNotOverwriteExistingStreamError) {
+TEST_F(MtpExecutorTest, testCaptureTelemetryDoesNotOverwriteExistingStreamError) {
     runTargetOnlyPrefillScenario(
         RoleType::PREFILL, false, false, false, false, "injected capture failure", SP_TYPE_MTP, true);
 }
 
-TEST_F(MtpExecutorTest, testDeferredCaptureErrorCompletesMultiDpDraftAlignmentBeforeFailing) {
+TEST_F(MtpExecutorTest, testCaptureTelemetryDoesNotBreakMultiDpDraftAlignment) {
     runTargetOnlyPrefillScenario(RoleType::PREFILL, false, true, true, false, "injected capture failure");
 }
 
@@ -1985,7 +2006,7 @@ TEST_F(MtpExecutorTest, testDSparkTargetOnlySingleDpRunsCommitBeforeDispatch) {
     runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, true, false, std::nullopt, SP_TYPE_DSPARK);
 }
 
-TEST_F(MtpExecutorTest, testDSparkDeferredCaptureErrorSingleDpRunsCommitBeforeFailing) {
+TEST_F(MtpExecutorTest, testDSparkCaptureTelemetrySingleDpStillFinishes) {
     runTargetOnlyPrefillScenario(
         RoleType::PREFILL, false, false, true, false, "injected dspark capture failure", SP_TYPE_DSPARK);
 }
@@ -2002,12 +2023,12 @@ TEST_F(MtpExecutorTest, testDSparkTargetOnlyRestoresCpInputBeforeCommitAlignment
     runTargetOnlyPrefillScenario(RoleType::PREFILL, true, false, true, true, std::nullopt, SP_TYPE_DSPARK);
 }
 
-TEST_F(MtpExecutorTest, testDSparkDeferredCaptureErrorCompletesFfnCommitAlignmentBeforeFailing) {
+TEST_F(MtpExecutorTest, testDSparkCaptureTelemetryPreservesFfnCommitAlignment) {
     runTargetOnlyPrefillScenario(
         RoleType::PREFILL, true, false, true, false, "injected dspark capture failure", SP_TYPE_DSPARK);
 }
 
-TEST_F(MtpExecutorTest, testDSparkDeferredCaptureErrorCompletesMultiDpCommitAlignmentBeforeFailing) {
+TEST_F(MtpExecutorTest, testDSparkCaptureTelemetryPreservesMultiDpCommitAlignment) {
     runTargetOnlyPrefillScenario(
         RoleType::PREFILL, false, true, true, false, "injected dspark capture failure", SP_TYPE_DSPARK);
 }

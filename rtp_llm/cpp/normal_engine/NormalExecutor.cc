@@ -158,6 +158,19 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         warm_up_,
         params.model_config_.hidden_state_capture_layer_ids);
     model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_max_inflight_samples =
+        params.model_config_.hidden_state_capture_max_inflight_samples;
+    model_init_params.hidden_state_capture_max_inflight_bytes =
+        params.model_config_.hidden_state_capture_max_inflight_bytes;
+    model_init_params.hidden_state_capture_max_inflight_tokens =
+        params.model_config_.hidden_state_capture_max_inflight_tokens;
+    model_init_params.hidden_state_capture_max_pending_batches =
+        params.model_config_.hidden_state_capture_max_pending_batches;
+    model_init_params.hidden_state_capture_poll_interval_ms =
+        params.model_config_.hidden_state_capture_poll_interval_ms;
+    model_init_params.hidden_state_capture_max_retained_bytes =
+        params.model_config_.hidden_state_capture_max_retained_bytes;
+
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
         const auto& model_cache_config =
@@ -225,6 +238,11 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     cudaProfilerBegin();
 }
 
+HiddenStateCaptureReservationPtr NormalExecutor::tryReserveHiddenStateCapture(int64_t request_id,
+                                                                              int64_t valid_tokens) {
+    return !warm_up_ && model_ ? model_->tryReserveHiddenStateCapture(request_id, valid_tokens) : nullptr;
+}
+
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (schedule_time_us <= 0) {
@@ -280,6 +298,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // GPU packed-buffer path instead of CPU execBroadcastCpu/unpack loops.
         ensureModelInputsOnCuda(model_input, "process.before_tp_sync");
 
+        if (tp_rank_ == 0) {
+            model_input.capture_worker_failed = model_ && model_->hiddenStateCaptureHasFatalFailure();
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
             return absl::OkStatus();
@@ -382,18 +403,6 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
-        cudaSyncAndCheck();
-        model_->releaseBuffers();
-        for (const auto& stream : streams) {
-            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *capture_error);
-        }
-        if (profile_step_finish_) {
-            profile_step_finish_();
-        }
-        return absl::OkStatus();
-    }
-
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
         cudaSyncAndCheck();
         model_->releaseBuffers();
@@ -468,7 +477,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         int64_t      start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         absl::Status result;
         if (zero_token_batch) {
-            cudaSyncAndCheck();
+            // Serving completion must not fence the independent training publisher stream.
+            cuda_graph::graphGetCurrentStream().synchronize();
+            cudaCheckLastError();
             result = batch_stream_processor_->dispatchPrefillOnly(stream_groups,
                                                                   model_output.generation_prefill_cuda_graph_status);
         } else {

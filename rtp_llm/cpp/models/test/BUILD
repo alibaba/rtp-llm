@@ -32,6 +32,29 @@ test_deps = [
 ] + torch_deps() + cuda13_torch_link_deps
 
 cc_test(
+    name = "hidden_state_capture_publisher_test",
+    srcs = ["HiddenStateCapturePublisherTest.cc"],
+    copts = test_copts,
+    deps = test_deps + ["@local_config_python//:python_lib"],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+    timeout = "moderate",
+)
+
+cc_test(
+    name = "hidden_state_capture_publisher_multi_gpu_test",
+    srcs = ["HiddenStateCapturePublisherTest.cc"],
+    args = ["--gtest_filter=HiddenStateCapturePublisherTest.NonzeroDeviceAndNondefaultProducerStreamCoverAllWorkerPhases"],
+    copts = test_copts,
+    deps = test_deps + ["@local_config_python//:python_lib"],
+    env = {"TEST_USING_DEVICE": "CUDA", "GPU_COUNT": "2", "CAPTURE_TEST_REQUIRE_TWO_GPUS": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "2"},
+    tags = ["H20_CU13"],
+    timeout = "moderate",
+)
+
+cc_test(
     name = "model_data_test",
     srcs = [
         "ModelDataTest.cc",

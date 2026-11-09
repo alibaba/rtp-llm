@@ -409,22 +409,34 @@ private:
 
 class RtpLLMHiddenStateCaptureMetricsCollector final {
 public:
-    bool batch_qps                  = false;
-    bool publish_success_qps        = false;
-    bool failure_qps                = false;
-    bool initialization_failure_qps = false;
-    bool layout_failure_qps         = false;
-    bool prepare_failure_qps        = false;
-    bool quantize_failure_qps       = false;
-    bool store_failure_qps          = false;
-    bool shutdown_failure_qps       = false;
-    bool hard_contract_failure_qps  = false;
-    bool request_error_failure_qps  = false;
-    bool operational_failure_qps    = false;
-    bool duplicate_request_id_qps   = false;
-    bool broken_rejection_qps       = false;
-    bool bf16_publish_qps           = false;
-    bool fp8_publish_qps            = false;
+    bool    reservation_qps            = false;
+    bool    quota_rejection_qps        = false;
+    bool    queue_rejection_qps        = false;
+    bool    cleanup_query_failure_qps  = false;
+    int64_t retained_tasks             = 0;
+    int64_t retained_bytes             = 0;
+    bool    has_quota                  = false;
+    int64_t inflight_samples           = 0;
+    int64_t inflight_bytes             = 0;
+    int64_t inflight_tokens            = 0;
+    int64_t pending_batches            = 0;
+    int64_t cleanup_pending_samples    = 0;
+    bool    batch_qps                  = false;
+    bool    publish_success_qps        = false;
+    bool    failure_qps                = false;
+    bool    initialization_failure_qps = false;
+    bool    layout_failure_qps         = false;
+    bool    prepare_failure_qps        = false;
+    bool    quantize_failure_qps       = false;
+    bool    store_failure_qps          = false;
+    bool    shutdown_failure_qps       = false;
+    bool    hard_contract_failure_qps  = false;
+    bool    request_error_failure_qps  = false;
+    bool    operational_failure_qps    = false;
+    bool    duplicate_request_id_qps   = false;
+    bool    broken_rejection_qps       = false;
+    bool    bf16_publish_qps           = false;
+    bool    fp8_publish_qps            = false;
 
     bool    has_publish_latency       = false;
     bool    has_quantize_latency      = false;
@@ -451,6 +463,17 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMHiddenStateCaptureMetricsCollector* collector);
 
 public:
+    kmonitor::MutableMetric* retained_tasks_metric             = nullptr;
+    kmonitor::MutableMetric* retained_bytes_metric             = nullptr;
+    kmonitor::MutableMetric* reservation_qps_metric            = nullptr;
+    kmonitor::MutableMetric* quota_rejection_qps_metric        = nullptr;
+    kmonitor::MutableMetric* queue_rejection_qps_metric        = nullptr;
+    kmonitor::MutableMetric* cleanup_query_failure_qps_metric  = nullptr;
+    kmonitor::MutableMetric* inflight_samples_metric           = nullptr;
+    kmonitor::MutableMetric* inflight_bytes_metric             = nullptr;
+    kmonitor::MutableMetric* inflight_tokens_metric            = nullptr;
+    kmonitor::MutableMetric* pending_batches_metric            = nullptr;
+    kmonitor::MutableMetric* cleanup_pending_samples_metric    = nullptr;
     kmonitor::MutableMetric* batch_qps_metric                  = nullptr;
     kmonitor::MutableMetric* publish_success_qps_metric        = nullptr;
     kmonitor::MutableMetric* failure_qps_metric                = nullptr;

@@ -51,6 +51,12 @@ public:
     // Startup-only target-prefill capture profile. An empty layer list disables capture.
     std::vector<int64_t>    hidden_state_capture_layer_ids = {};
     HiddenStateCaptureDtype hidden_state_capture_dtype     = HiddenStateCaptureDtype::BF16;
+    int64_t                 hidden_state_capture_max_inflight_samples = 64;
+    int64_t                 hidden_state_capture_max_inflight_bytes   = 1073741824;
+    int64_t                 hidden_state_capture_max_inflight_tokens  = 131072;
+    int64_t                 hidden_state_capture_max_pending_batches  = 8;
+    int64_t                 hidden_state_capture_poll_interval_ms     = 1000;
+    int64_t                 hidden_state_capture_max_retained_bytes   = 2147483648;
 
     // Attention configuration - contains all attention-related params
     AttentionConfigs      attn_config;

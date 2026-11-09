@@ -845,9 +845,27 @@ public:
         score_stream_ = stream;
     }
 
-    bool reuseCache() const {
+    // Capture is request-scoped: even deployment policy must not turn prefix reuse back on.
+    bool requiresFullContextForCapture() const {
         const auto& config = *generate_input_->generate_config;
-        return config.reuse_cache && !config.isPrefillOnly();
+        return config.isPrefillOnly() || config.capture_hidden_states;
+    }
+
+    bool shouldCaptureHiddenStates() const;
+    bool hasHiddenStateCaptureReservation() const {
+        return hidden_state_capture_reservation_ && hidden_state_capture_reservation_->active();
+    }
+    void setHiddenStateCaptureReservation(HiddenStateCaptureReservationPtr reservation) {
+        hidden_state_capture_reservation_ = std::move(reservation);
+    }
+    void cancelHiddenStateCapture() const {
+        if (hidden_state_capture_reservation_) {
+            hidden_state_capture_reservation_->cancel();
+        }
+    }
+
+    bool reuseCache() const {
+        return generate_input_->generate_config->reuse_cache && !requiresFullContextForCapture();
     }
 
     bool enableDeviceCache() const {
@@ -1012,6 +1030,7 @@ protected:
     std::shared_ptr<std::condition_variable> consumer_cv_;
 
     GenerateStreamPtr propose_stream_ = nullptr;
+    HiddenStateCaptureReservationPtr hidden_state_capture_reservation_;
     GenerateStreamPtr score_stream_   = nullptr;
 
     size_t                             propose_step_         = 0;

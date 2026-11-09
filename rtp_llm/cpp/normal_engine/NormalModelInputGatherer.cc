@@ -883,10 +883,10 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
             }
             const bool stream_prefill_only = isPrefillOnly(stream);
             if (!has_execution_mode) {
-                has_execution_mode = true;
-                prefill_only       = stream_prefill_only;
-            } else if (prefill_only != stream_prefill_only) {
-                mixed_execution_modes = true;
+                has_execution_mode    = true;
+                prefill_only          = stream_prefill_only;
+            } else {
+                mixed_execution_modes |= prefill_only != stream_prefill_only;
             }
         }
     };
@@ -897,7 +897,7 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
         // stream list, so a rank-local early return would fork the collective sequence.
         // Mark every affected request instead; the gathered batch remains shape-valid
         // and any model output is ignored by the errored streams.
-        const auto report_mixed_mode_error = [](const auto& streams) {
+        const auto report_mixed_mode_error = [&](const auto& streams) {
             for (const auto& stream : streams) {
                 if (!stream->hasError()) {
                     stream->reportError(ErrorCode::INVALID_PARAMS, kMixedExecutionModeBatchError);
@@ -908,12 +908,39 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
         report_mixed_mode_error(context_streams);
     }
 
+    const auto cancel_capture = [&] {
+        for (const auto& stream : stream_groups.allStreams()) {
+            stream->cancelHiddenStateCapture();
+        }
+    };
+    const bool capture_hidden_states =
+        !config_.warm_up && !mixed_execution_modes && !stream_groups.isFakeStream()
+        && (config_.role_type == RoleType::PREFILL || config_.role_type == RoleType::PDFUSION) && decode_streams.empty()
+        && !context_streams.empty()
+        && std::all_of(context_streams.begin(), context_streams.end(), [](const auto& stream) {
+               return stream->shouldCaptureHiddenStates() && stream->hasHiddenStateCaptureReservation();
+           });
+    if (!capture_hidden_states) {
+        cancel_capture();
+    }
     auto model_input                  = allocateModelInputBuffers(stream_groups);
     model_input.skip_lm_head          = prefill_only;
-    model_input.capture_hidden_states = prefill_only;
+    // Error/fake/decode rows are still retained for TP shape alignment, but must never be published.
+    model_input.capture_hidden_states = capture_hidden_states;
     initializeKvCacheMetadata(model_input);
-    RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
-    RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
+    auto status = processDecodeStreams(model_input, stream_groups);
+    if (status.ok()) {
+        status = processContextStreams(model_input, stream_groups, host_holder);
+    }
+    if (!status.ok()) {
+        cancel_capture();
+        return status;
+    }
+    if (capture_hidden_states) {
+        // These owner-only tensors survive TP sync and CP/SP rewriting without a D2H wait.
+        model_input.capture_input_lengths_cpu = model_input.input_lengths.clone();
+        model_input.capture_request_ids_cpu   = model_input.request_id.clone();
+    }
     // No host mirrors are kept for ModelInputsLogger: it snapshots every tensor
     // in place (device-side clone + per-device c10::Event) and only pays the D2H
     // on its own worker thread, so it reads post-publish CUDA members directly.

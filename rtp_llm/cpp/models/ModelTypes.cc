@@ -129,6 +129,14 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::needAllHiddenStates] = inputs.need_all_hidden_states;
     shape_hints[GptModelInputIndex::skipLmHead]          = inputs.skip_lm_head;
     shape_hints[GptModelInputIndex::captureHiddenStates] = inputs.capture_hidden_states;
+    shape_hints[GptModelInputIndex::hiddenStateCaptureWorkerFailed] = inputs.capture_worker_failed;
+    if (inputs.capture_hidden_states && inputs.capture_input_lengths_cpu.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.capture_input_lengths_cpu.device().is_cpu()
+                                    && inputs.capture_input_lengths_cpu.dim() == 1
+                                    && inputs.capture_input_lengths_cpu.scalar_type() == torch::kInt32,
+                                "capture planning lengths must be CPU int32 metadata");
+        shape_hints[GptModelInputIndex::capturePlanningLengthRows] = inputs.capture_input_lengths_cpu.numel();
+    }
     shape_hints[GptModelInputIndex::mtpHiddenStates] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.numel() : 0;
     shape_hints[GptModelInputIndex::mtpHiddenStatesDtype] =
@@ -286,6 +294,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.need_all_hidden_states    = has_flag(GptModelInputControlFlag::kControlNeedAllHiddenStates);
     inputs.skip_lm_head              = shape_hints_ptr[GptModelInputIndex::skipLmHead];
     inputs.capture_hidden_states     = shape_hints_ptr[GptModelInputIndex::captureHiddenStates];
+    inputs.capture_worker_failed     = shape_hints_ptr[GptModelInputIndex::hiddenStateCaptureWorkerFailed];
     inputs.need_moe_gating           = has_flag(GptModelInputControlFlag::kControlNeedMoeGating);
     inputs.warmup                    = has_flag(GptModelInputControlFlag::kControlWarmup);
     inputs.skip_run                  = has_flag(GptModelInputControlFlag::kControlSkipRun);
@@ -438,6 +447,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.input_lengths        = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                {checkedHint(GptModelInputIndex::inputLengths, "inputLengths")},
                                         pickAlloc(GptModelInputDeviceBit::kDeviceBitInputLengths));
+        const auto capture_length_rows =
+            checkedHint(GptModelInputIndex::capturePlanningLengthRows, "capturePlanningLengthRows");
+        inputs.capture_input_lengths_cpu =
+            capture_length_rows ? allocBuf(rtp_llm::DataType::TYPE_INT32, {capture_length_rows}) : torch::Tensor();
         inputs.sequence_lengths     = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                {checkedHint(GptModelInputIndex::sequenceLengths, "sequenceLengths")},
                                            pickAlloc(GptModelInputDeviceBit::kDeviceBitSequenceLengths));
@@ -575,6 +588,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         collect(inputs.engram_token_windows);
     }
     collect(inputs.input_lengths);
+    if (shape_hints_ptr[GptModelInputIndex::capturePlanningLengthRows]) {
+        collect(inputs.capture_input_lengths_cpu);
+    }
     collect(inputs.sequence_lengths);
     if (inputs.linear_replay) {
         for (auto* tensor : inputs.linear_replay->tensors()) {

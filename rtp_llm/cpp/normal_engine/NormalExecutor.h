@@ -51,6 +51,7 @@ public:
     using ModelFactory = std::function<std::unique_ptr<ModelBase>(const GptModelInitParams&)>;
     static ModelFactory test_model_factory;
 
+    HiddenStateCaptureReservationPtr tryReserveHiddenStateCapture(int64_t request_id, int64_t valid_tokens) override;
     bool updateEplbConfig(const EPLBConfig& config) override;
 
 protected:
