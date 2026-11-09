@@ -1462,6 +1462,14 @@ def parse_request_controls(
     if region is not None:
         request_headers["region"] = region
 
+    # Request-scoped content-inspection override, forwarded verbatim so the
+    # ViT RPC can parse it; an empty value means "follow configuration".
+    inspection = _jsonable_to_string(
+        _lookup_ds_request_control(ds_attrs, "x-dashscope-datainspection")
+    )
+    if inspection is not None:
+        request_headers["x-dashscope-datainspection"] = inspection
+
     # Keep the full upstream ID for inspection; tracing may truncate its copy.
     for header_name in ("x-dashscope-request-id", "x-dashscope-requestid"):
         value = _normalize_non_empty_str(

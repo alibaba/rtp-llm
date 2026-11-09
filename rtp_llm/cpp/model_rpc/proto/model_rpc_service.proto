@@ -203,6 +203,10 @@ message MultimodalInputsPB {
     // gateway-injected x_dashscope_inner_workspace_meta header. One value
     // applies to every multimodal_inputs entry of this request.
     string region = 6;
+    // Request-scoped content-inspection override parsed by the sender from
+    // x-dashscope-datainspection. Unset follows the process configuration;
+    // false forces inspection off; true still requires the provider enabled.
+    google.protobuf.BoolValue input_inspection_enabled = 7;
 }
 
 enum TensorDataTypePB {

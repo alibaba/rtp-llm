@@ -11,6 +11,7 @@ import concurrent.futures
 import logging
 import threading
 import time
+from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Any, List, Optional, Tuple
 
@@ -19,6 +20,13 @@ from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCacheEntry
 from rtp_llm.multimodal.mm_work_item import _input_has_url
 from rtp_llm.multimodal.source_download_executor import SourceDownloadExecutor
 from rtp_llm.ops import MultimodalInput
+
+# Per-request override of the process-wide GreenNet switch. ``None`` follows
+# the provider configuration; ``False`` forces inspection off; ``True`` still
+# requires the provider to be enabled.
+input_inspection_override: ContextVar[Optional[bool]] = ContextVar(
+    "input_inspection_override", default=None
+)
 
 
 class InspectionTimeoutError(concurrent.futures.TimeoutError):
@@ -121,8 +129,12 @@ class MMInspectionCoordinator:
 
     def _greennet_enabled(self) -> bool:
         # Effective enablement (internal source present AND runtime flag on).
+        # A per-request ``disable`` overrides the process-wide switch; a
+        # per-request ``enable`` still requires the provider to be enabled.
         # When off, every greennet path is skipped so behavior is identical to
         # the pre-greennet engine — no asyncio loop, no rewrite, no inspect.
+        if input_inspection_override.get() is False:
+            return False
         return self._greennet_provider.is_enabled()
 
     def _request_scoped_inspection(self) -> bool:

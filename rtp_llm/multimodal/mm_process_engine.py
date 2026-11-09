@@ -5,6 +5,7 @@ import multiprocessing.pool
 import os
 import threading
 import time
+from contextlib import contextmanager
 from functools import wraps
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -28,7 +29,11 @@ from rtp_llm.multimodal.mm_embedding_cache import (
     MMHashKeyCache,
     ShardedMMEmbeddingCache,
 )
-from rtp_llm.multimodal.mm_inspection import MMInspectionCoordinator, SourceInspection
+from rtp_llm.multimodal.mm_inspection import (
+    MMInspectionCoordinator,
+    SourceInspection,
+    input_inspection_override,
+)
 from rtp_llm.multimodal.mm_preprocess import (
     LocalPreprocessExecutor,
     MultiprocessPreprocessExecutor,
@@ -59,6 +64,20 @@ from rtp_llm.multimodal.multimodal_util import (
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, VitSeparation
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+
+
+@contextmanager
+def _input_inspection_scope(enabled: Optional[bool]):
+    """Apply a request-level GreenNet override for the current context.
+
+    ``None`` follows the process-wide configuration, ``False`` forces input
+    inspection off, and ``True`` still requires the provider to be enabled.
+    """
+    token = input_inspection_override.set(enabled)
+    try:
+        yield
+    finally:
+        input_inspection_override.reset(token)
 
 
 def _embedding_token_length(embeddings: List[Any]) -> int:
@@ -535,27 +554,29 @@ class MMProcessEngine:
         user_id: str = "",
         service_name: str = "",
         external_request_id: str = "",
+        input_inspection_enabled: Optional[bool] = None,
     ) -> MMEmbeddingRes:
         """Run one synchronous request and account for every failure boundary."""
         if not self.is_proxy_mode:
             _report_vit_metric(AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"})
         try:
-            self.mm_part.validate_inputs(mm_inputs)
-            result = self._embed_with_greennet_sync_impl(
-                mm_inputs,
-                request_id=request_id,
-                user_id=user_id,
-                service_name=service_name,
-                external_request_id=external_request_id,
-            )
-            embedding_length = _embedding_token_length(result.embeddings)
-            _report_vit_metric(
-                GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
-                embedding_length,
-            )
-            if not self.is_proxy_mode:
-                _report_vit_metric(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
-            return result
+            with _input_inspection_scope(input_inspection_enabled):
+                self.mm_part.validate_inputs(mm_inputs)
+                result = self._embed_with_greennet_sync_impl(
+                    mm_inputs,
+                    request_id=request_id,
+                    user_id=user_id,
+                    service_name=service_name,
+                    external_request_id=external_request_id,
+                )
+                embedding_length = _embedding_token_length(result.embeddings)
+                _report_vit_metric(
+                    GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
+                    embedding_length,
+                )
+                if not self.is_proxy_mode:
+                    _report_vit_metric(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
+                return result
         except Exception as error:
             self.report_vit_error(error)
             raise
@@ -738,6 +759,7 @@ class MMProcessEngine:
         service_name: str = "",
         external_request_id: str = "",
         region: Optional[str] = None,
+        input_inspection_enabled: Optional[bool] = None,
     ) -> GreenNetVerdict:
         """Block until every input's greennet verdict is decided; return the
         first non-passing verdict (first-failure-wins), else a passing verdict.
@@ -745,6 +767,31 @@ class MMProcessEngine:
         Called by the VIT RPC's ``WaitGreenNetVerdict`` handler before prefill.
         If an input was never async-submitted (cache miss), kick its compute
         now so the verdict gets produced."""
+        with _input_inspection_scope(input_inspection_enabled):
+            return self._wait_greennet_verdict_impl(
+                mm_inputs,
+                timeout_ms=timeout_ms,
+                request_id=request_id,
+                cancellation_event=cancellation_event,
+                user_id=user_id,
+                service_name=service_name,
+                external_request_id=external_request_id,
+                region=region,
+                input_inspection_enabled=input_inspection_enabled,
+            )
+
+    def _wait_greennet_verdict_impl(
+        self,
+        mm_inputs: List[MultimodalInput],
+        timeout_ms: int = VitConfig.DEFAULT_MM_TIMEOUT_MS,
+        request_id: int = 0,
+        cancellation_event: Optional[threading.Event] = None,
+        user_id: str = "",
+        service_name: str = "",
+        external_request_id: str = "",
+        region: Optional[str] = None,
+        input_inspection_enabled: Optional[bool] = None,
+    ) -> GreenNetVerdict:
         claims: List[Tuple[str, MMEmbeddingCacheEntry]] = []
         cached_inspection_inputs: List[MultimodalInput] = []
         current_entry: Optional[MMEmbeddingCacheEntry] = None
@@ -774,6 +821,7 @@ class MMProcessEngine:
                 service_name=service_name,
                 external_request_id=external_request_id,
                 region=region,
+                input_inspection_enabled=input_inspection_enabled,
                 cached_inspection_inputs=(
                     cached_inspection_inputs
                     if self._request_scoped_inspection()
@@ -829,6 +877,7 @@ class MMProcessEngine:
         user_id: str = "",
         service_name: str = "",
         external_request_id: str = "",
+        input_inspection_enabled: Optional[bool] = None,
     ) -> MMEmbeddingRes:
         """Process multimodal inputs from C++ interface."""
         try:
@@ -849,6 +898,7 @@ class MMProcessEngine:
             user_id=user_id,
             service_name=service_name,
             external_request_id=external_request_id,
+            input_inspection_enabled=input_inspection_enabled,
         )
         try:
             with cuda_graph_gate.operation():
@@ -863,13 +913,15 @@ class MMProcessEngine:
         mm_inputs: List[MultimodalInput],
         request_id: int = 0,
         external_request_id: str = "",
+        input_inspection_enabled: Optional[bool] = None,
     ) -> MMEmbeddingRes:
         """Core implementation for multimodal embedding processing."""
-        result, _ = self._mm_embedding_impl(
-            mm_inputs,
-            request_id=request_id,
-            external_request_id=external_request_id,
-        )
+        with _input_inspection_scope(input_inspection_enabled):
+            result, _ = self._mm_embedding_impl(
+                mm_inputs,
+                request_id=request_id,
+                external_request_id=external_request_id,
+            )
         return result
 
     def _mm_embedding_impl(
@@ -1195,6 +1247,7 @@ class MMProcessEngine:
         service_name: str = "",
         external_request_id: str = "",
         region: Optional[str] = None,
+        input_inspection_enabled: Optional[bool] = None,
     ) -> List[str]:
         """Asynchronously submit multimodal URLs for embedding computation.
 
@@ -1211,6 +1264,7 @@ class MMProcessEngine:
                 service_name=service_name,
                 external_request_id=external_request_id,
                 region=region,
+                input_inspection_enabled=input_inspection_enabled,
             )
             return [cache_key for cache_key, _ in claims]
         except Exception as error:
@@ -1229,6 +1283,7 @@ class MMProcessEngine:
         service_name: str = "",
         external_request_id: str = "",
         region: Optional[str] = None,
+        input_inspection_enabled: Optional[bool] = None,
     ) -> List[MMEmbeddingRes]:
         """Retrieve embedding results, blocking until ready if necessary.
 
@@ -1238,6 +1293,33 @@ class MMProcessEngine:
         If complete, returns immediately. With hashes_only, return sidecar hashes
         without exporting embeddings or promoting a CPU entry with cached hashes.
         """
+        with _input_inspection_scope(input_inspection_enabled):
+            return self._get_embedding_result_impl(
+                mm_inputs,
+                timeout_ms=timeout_ms,
+                request_id=request_id,
+                cancellation_event=cancellation_event,
+                hashes_only=hashes_only,
+                user_id=user_id,
+                service_name=service_name,
+                external_request_id=external_request_id,
+                region=region,
+                input_inspection_enabled=input_inspection_enabled,
+            )
+
+    def _get_embedding_result_impl(
+        self,
+        mm_inputs: List[MultimodalInput],
+        timeout_ms: int = 120000,
+        request_id: int = 0,
+        cancellation_event: Optional[threading.Event] = None,
+        hashes_only: bool = False,
+        user_id: str = "",
+        service_name: str = "",
+        external_request_id: str = "",
+        region: Optional[str] = None,
+        input_inspection_enabled: Optional[bool] = None,
+    ) -> List[MMEmbeddingRes]:
         claims: List[Tuple[str, MMEmbeddingCacheEntry]] = []
         cached_inspection_inputs: List[MultimodalInput] = []
         current_entry: Optional[MMEmbeddingCacheEntry] = None
@@ -1257,6 +1339,7 @@ class MMProcessEngine:
                 service_name=service_name,
                 external_request_id=external_request_id,
                 region=region,
+                input_inspection_enabled=input_inspection_enabled,
                 cached_inspection_inputs=(
                     cached_inspection_inputs
                     if self._request_scoped_inspection()
@@ -1375,6 +1458,7 @@ class MMProcessEngine:
         cached_inspection_inputs: Optional[List[MultimodalInput]] = None,
         external_request_id: str = "",
         region: Optional[str] = None,
+        input_inspection_enabled: Optional[bool] = None,
     ) -> List[Tuple[str, MMEmbeddingCacheEntry]]:
         self._raise_if_async_request_cancelled(request_id, cancellation_event)
         # Validate every input before creating any shared PENDING entries.
@@ -1422,6 +1506,7 @@ class MMProcessEngine:
                 service_name=service_name,
                 external_request_id=external_request_id,
                 region=region,
+                input_inspection_enabled=input_inspection_enabled,
             )
             self._raise_if_async_request_cancelled(request_id, cancellation_event)
             return claims
@@ -1667,6 +1752,7 @@ class MMProcessEngine:
         service_name: str = "",
         external_request_id: str = "",
         region: Optional[str] = None,
+        input_inspection_enabled: Optional[bool] = None,
     ) -> Optional[concurrent.futures.Future]:
         if time.monotonic() >= deadline:
             error = FtRuntimeException(
@@ -1685,6 +1771,7 @@ class MMProcessEngine:
             service_name=service_name,
             external_request_id=external_request_id,
             region=region,
+            input_inspection_enabled=input_inspection_enabled,
         )
 
     def _submit_async_compute_batch(
@@ -1696,6 +1783,7 @@ class MMProcessEngine:
         service_name: str = "",
         external_request_id: str = "",
         region: Optional[str] = None,
+        input_inspection_enabled: Optional[bool] = None,
     ) -> None:
         if not pending:
             return
@@ -1746,6 +1834,7 @@ class MMProcessEngine:
                         service_name,
                         external_request_id,
                         region,
+                        input_inspection_enabled,
                     )
                     self._async_tasks[entry].future = future
                     future.add_done_callback(
@@ -1764,6 +1853,35 @@ class MMProcessEngine:
                 raise
 
     def _async_compute(
+        self,
+        mm_inputs: List[MultimodalInput],
+        cache_key: str,
+        entry: MMEmbeddingCacheEntry,
+        request_id: int = 0,
+        user_id: str = "",
+        service_name: str = "",
+        *,
+        deadline: float,
+        external_request_id: str = "",
+        region: Optional[str] = None,
+        input_inspection_enabled: Optional[bool] = None,
+    ) -> Optional[concurrent.futures.Future]:
+        # Executor threads do not inherit the submitting request's context, so
+        # the override must be applied here for _begin_greennet to see it.
+        with _input_inspection_scope(input_inspection_enabled):
+            return self._async_compute_impl(
+                mm_inputs,
+                cache_key,
+                entry,
+                request_id,
+                user_id=user_id,
+                service_name=service_name,
+                deadline=deadline,
+                external_request_id=external_request_id,
+                region=region,
+            )
+
+    def _async_compute_impl(
         self,
         mm_inputs: List[MultimodalInput],
         cache_key: str,

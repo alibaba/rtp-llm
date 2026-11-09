@@ -71,6 +71,20 @@ def _multimodal_inputs_region(multimodal_inputs):
     return getattr(multimodal_inputs, "region", "") or None
 
 
+def _multimodal_inputs_input_inspection_enabled(multimodal_inputs):
+    """Read the request-level input-inspection override from the inputs message.
+
+    Unset means "follow configuration"; a present value forces the
+    request-scoped decision (false disables inspection, true still requires
+    the provider to be enabled).
+    """
+    if multimodal_inputs is None:
+        return None
+    if not multimodal_inputs.HasField("input_inspection_enabled"):
+        return None
+    return multimodal_inputs.input_inspection_enabled.value
+
+
 _EXCEPTION_CATEGORY_TO_GRPC_STATUS = {
     ExceptionCategory.BAD_REQUEST: grpc.StatusCode.INVALID_ARGUMENT,
     ExceptionCategory.TOO_LONG: grpc.StatusCode.INVALID_ARGUMENT,
@@ -189,6 +203,9 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                     cancellation_event=cancellation,
                     binary_hashes=True,
                     region=_multimodal_inputs_region(inputs),
+                    input_inspection_enabled=(
+                        _multimodal_inputs_input_inspection_enabled(inputs)
+                    ),
                 )
             )
         except NotImplementedError as error:
@@ -237,6 +254,9 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 service_name=headers.get("x-dashscope-service", ""),
                 external_request_id=extract_correlation_request_id(headers),
                 region=_multimodal_inputs_region(multimodal_inputs),
+                input_inspection_enabled=(
+                    _multimodal_inputs_input_inspection_enabled(multimodal_inputs)
+                ),
             )
             return EmptyPB()
         except FtRuntimeException as error:
@@ -267,6 +287,9 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 service_name=headers.get("x-dashscope-service", ""),
                 external_request_id=extract_correlation_request_id(headers),
                 region=_multimodal_inputs_region(multimodal_inputs),
+                input_inspection_enabled=(
+                    _multimodal_inputs_input_inspection_enabled(multimodal_inputs)
+                ),
             )
             if verdict is None:
                 raise RuntimeError("ViT GreenNet returned no verdict")
@@ -363,6 +386,9 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 service_name=headers.get("x-dashscope-service", ""),
                 external_request_id=extract_correlation_request_id(headers),
                 region=_multimodal_inputs_region(multimodal_inputs),
+                input_inspection_enabled=(
+                    _multimodal_inputs_input_inspection_enabled(multimodal_inputs)
+                ),
             )
             res = merge_embedding_results(results)
             output_pb = self._transport.transfer(multimodal_inputs, res)
