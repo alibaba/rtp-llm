@@ -10,13 +10,15 @@ from pathlib import Path
 from unittest import TestCase, main
 from unittest.mock import patch
 
+from rtp_llm.config.collective_config import CollectiveConfig
+from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_ENV_CASES
 from rtp_llm.ops import HWKernelConfig, RoleType, TaskType
 from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
 
-class Qwen4AllReduceArgumentsTest(TestCase):
+class AllReduceArgumentsTest(TestCase):
     def test_default_auto_and_retired_environment(self):
         from rtp_llm.server.server_args import server_args
 
@@ -24,46 +26,56 @@ class Qwen4AllReduceArgumentsTest(TestCase):
             env = {} if value is None else {"FT_DISABLE_CUSTOM_AR": value}
             with self.subTest(value=value), patch.dict(os.environ, env, clear=True):
                 configs = server_args.setup_args([])
-                self.assertEqual(configs.qwen4_all_reduce_backend, "auto")
-                self.assertIsNone(configs.qwen4_all_reduce_large_prefill)
+                self.assertEqual(configs.all_reduce_backend, "auto")
+                self.assertIsNone(configs.all_reduce_large_prefill)
                 self.assertFalse(hasattr(configs, "ft_disable_custom_ar_override"))
 
     def test_retired_cli_is_rejected(self):
         from rtp_llm.server.server_args import server_args
 
-        for option in ("--ft_disable_custom_ar", "--ffn_sp_size"):
+        for option, value in (
+            ("--ft_disable_custom_ar", "1"),
+            ("--ffn_sp_size", "1"),
+            ("--qwen4_all_reduce_backend", "nccl"),
+            ("--qwen4_all_reduce_large_prefill", "1"),
+        ):
             with self.subTest(option=option), patch.dict(os.environ, {}, clear=True):
                 with patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
-                    server_args.setup_args([option, "1"])
+                    server_args.setup_args([option, value])
 
     def test_backend_and_large_prefill_cli_override_environment(self):
         from rtp_llm.server.server_args import server_args
 
         env = {
-            "RTP_LLM_QWEN4_ALL_REDUCE_BACKEND": "sm120_ipc",
-            "RTP_LLM_QWEN4_ALL_REDUCE_LARGE_PREFILL": "1",
+            "RTP_LLM_ALL_REDUCE_BACKEND": "sm120_ipc",
+            "RTP_LLM_ALL_REDUCE_LARGE_PREFILL": "1",
         }
         with patch.dict(os.environ, env, clear=True):
             configs = server_args.setup_args([])
-            self.assertEqual(configs.qwen4_all_reduce_backend, "sm120_ipc")
-            self.assertTrue(configs.qwen4_all_reduce_large_prefill)
+            self.assertEqual(configs.all_reduce_backend, "sm120_ipc")
+            self.assertTrue(configs.all_reduce_large_prefill)
             configs = server_args.setup_args(
                 [
-                    "--qwen4_all_reduce_backend",
+                    "--all_reduce_backend",
                     "nccl",
-                    "--qwen4_all_reduce_large_prefill",
+                    "--all_reduce_large_prefill",
                     "0",
                 ]
             )
-            self.assertEqual(configs.qwen4_all_reduce_backend, "nccl")
-            self.assertFalse(configs.qwen4_all_reduce_large_prefill)
+            self.assertEqual(configs.all_reduce_backend, "nccl")
+            self.assertFalse(configs.all_reduce_large_prefill)
+            environment = dict(os.environ)
+            policy = EngineConfig.create(configs).collective_config
+            self.assertEqual(policy, CollectiveConfig("nccl", False))
+            self.assertEqual(pickle.loads(pickle.dumps(policy)), policy)
+            self.assertEqual(dict(os.environ), environment)
 
     def test_invalid_backend_is_rejected(self):
         from rtp_llm.server.server_args import server_args
 
         with patch.dict(os.environ, {}, clear=True), patch("sys.stderr", io.StringIO()):
             with self.assertRaises(SystemExit):
-                server_args.setup_args(["--qwen4_all_reduce_backend", "invalid"])
+                server_args.setup_args(["--all_reduce_backend", "invalid"])
 
 
 class CacheConfigArgumentsTest(TestCase):

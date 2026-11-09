@@ -8,14 +8,14 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
-from rtp_llm.config.qwen4_collective_config import Qwen4CollectiveOptions
+from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
 
 _SMALL_BYTES = 32 * 2560 * 2
 _PREFILL_ROWS = (4093, 4094, 4095, 4096, 8192, 12288, 16384)
 
 
-class Qwen4IpcAllReduce:
+class IpcAllReduce:
     def __init__(self, group, device, options):
         from .flashinfer_ipc_all_reduce import FlashInferIpcAllReduce
 
@@ -73,6 +73,7 @@ class Qwen4IpcAllReduce:
             self.group, [max_bytes, admitted], "prefill_budget"
         )
         if not all(peer == [max_bytes, True] for peer in peers):
+            logging.info("Large-prefill IPC startup admission declined: %s", peers)
             return
         from .flashinfer_ipc_all_reduce import (
             FlashInferIpcAllReduce,
@@ -88,6 +89,7 @@ class Qwen4IpcAllReduce:
             return
         workspace.large_prefill = True
         self._prefill_workspace = workspace
+        logging.info("Large-prefill IPC prepared: capacity_bytes=%s", max_bytes)
 
     def should_use(self, tensor):
         if (
@@ -148,25 +150,11 @@ class Qwen4IpcAllReduce:
         self.disabled = True
 
 
-_communicator: Optional[Qwen4IpcAllReduce] = None
+_communicator: Optional[IpcAllReduce] = None
 _canonical_p2p = None
 _group = None
 _options = None
-_configured_options = Qwen4CollectiveOptions()
 _capture_active = False
-
-
-def configure_collectives(py_env_configs):
-    """Install parsed overrides in each spawned rank, without model-name gates."""
-    global _configured_options
-    options = Qwen4CollectiveOptions(
-        backend=py_env_configs.qwen4_all_reduce_backend,
-        large_prefill=py_env_configs.qwen4_all_reduce_large_prefill,
-    )
-    options.validate_topology(py_env_configs.parallelism_config)
-    if _group is not None and options != _options:
-        raise RuntimeError("Destroy the distributed environment before changing policy")
-    _configured_options = options
 
 
 def prepare_collective_workspaces(model_configs, engine_config):
@@ -183,7 +171,7 @@ def _capability_error(device, options):
             or torch.cuda.get_device_capability(device) != (12, 0)
         ):
             return "requires NVIDIA SM120"
-        size = 2 if options.backend == "sm120_ipc" else 8
+        size = 2 if options.all_reduce_backend == "sm120_ipc" else 8
         if torch.cuda.device_count() < size:
             return f"requires at least {size} visible GPUs"
         if not all(
@@ -192,7 +180,7 @@ def _capability_error(device, options):
             for peer in range(size)
         ):
             return "direct peer access unavailable"
-        if options.backend == "sm120_ipc":
+        if options.all_reduce_backend == "sm120_ipc":
             from flashinfer.comm import cuda_ipc, vllm_ar
 
             if not hasattr(cuda_ipc, "cudart") or not hasattr(
@@ -204,16 +192,15 @@ def _capability_error(device, options):
     return None
 
 
-def init_qwen4_allreduce(group, device, parallelism, options=None):
+def init_all_reduce(group, device, parallelism, options: CollectiveConfig):
     """Negotiate one backend before entering optional GPU setup on any rank."""
     global _communicator, _canonical_p2p, _group, _options
-    options = options or _configured_options
     error = None
     try:
         options.validate_topology(parallelism)
     except ValueError as exception:
         error = str(exception)
-    state = [options.backend, options.large_prefill, error, _group is group]
+    state = [options.all_reduce_backend, options.large_prefill, error, _group is group]
     peers = exchange_group_state(group, state, "policy")
     if any(peer[2] is not None for peer in peers):
         raise ValueError(f"Invalid AllReduce configuration: {peers}")
@@ -229,51 +216,74 @@ def init_qwen4_allreduce(group, device, parallelism, options=None):
         return _communicator
 
     candidate = options
-    if options.backend == "auto":
+    if options.all_reduce_backend == "auto":
         # Only TP2 IPC is automatically admitted. TP8 P2P remains an explicit
         # experiment; unsupported DP/PP/CP topologies keep their current backend.
-        candidate = replace(options, backend="sm120_ipc", large_prefill=None)
+        candidate = replace(options, all_reduce_backend="sm120_ipc", large_prefill=None)
         try:
             candidate.validate_topology(parallelism)
         except ValueError:
-            candidate = Qwen4CollectiveOptions("nccl")
+            candidate = CollectiveConfig("nccl")
         else:
             candidate = replace(candidate, large_prefill=options.large_prefill)
-    _group, _options = group, options
-    if options.backend == "nccl":
-        return None
-
-    reason = (
-        None if candidate.backend == "nccl" else _capability_error(device, candidate)
-    )
-    state = [candidate.backend, socket.gethostname(), reason]
-    peers = exchange_group_state(group, state, "capabilities")
-    if any(
-        peer[0] == "nccl"
-        or peer[0] != state[0]
-        or peer[1] != state[1]
-        or peer[2] is not None
-        for peer in peers
-    ):
-        logging.warning(
-            "AllReduce %s unavailable; all TP ranks use NCCL: %s",
-            candidate.backend,
-            peers,
+    communicator = None
+    canonical_p2p = None
+    fallback_reason = None
+    if options.all_reduce_backend != "nccl":
+        reason = (
+            None
+            if candidate.all_reduce_backend == "nccl"
+            else _capability_error(device, candidate)
         )
-        return None
-    if candidate.backend == "sm120_p2p":
-        from .canonical_p2p import init_canonical_p2p
+        state = [candidate.all_reduce_backend, socket.gethostname(), reason]
+        peers = exchange_group_state(group, state, "capabilities")
+        if any(
+            peer[0] == "nccl"
+            or peer[0] != state[0]
+            or peer[1] != state[1]
+            or peer[2] is not None
+            for peer in peers
+        ):
+            fallback_reason = f"unsupported topology or capabilities: {peers}"
+            if options.all_reduce_backend != "auto":
+                logging.warning(
+                    "AllReduce %s unavailable; all TP ranks use NCCL: %s",
+                    options.all_reduce_backend,
+                    fallback_reason,
+                )
+        elif candidate.all_reduce_backend == "sm120_p2p":
+            from .canonical_p2p import init_canonical_p2p
 
-        _canonical_p2p = init_canonical_p2p(group, device, requested=True)
-    else:
-        from .flashinfer_ipc_all_reduce import IpcInitializationError
+            canonical_p2p = init_canonical_p2p(group, device, requested=True)
+            if canonical_p2p is None:
+                fallback_reason = "P2P initialization unavailable"
+        else:
+            from .flashinfer_ipc_all_reduce import IpcInitializationError
 
-        try:
-            _communicator = Qwen4IpcAllReduce(group, device, candidate)
-        except IpcInitializationError as error:
-            logging.warning(
-                "IPC initialization unavailable; all TP ranks use NCCL: %s", error
-            )
+            try:
+                communicator = IpcAllReduce(group, device, candidate)
+            except IpcInitializationError as error:
+                fallback_reason = str(error)
+                logging.warning(
+                    "IPC initialization unavailable; all TP ranks use NCCL: %s", error
+                )
+
+    # Only a completed setup or an agreed NCCL fallback is idempotent. Leave
+    # the state untouched when negotiation or optional construction raises.
+    _communicator, _canonical_p2p = communicator, canonical_p2p
+    _group, _options = group, options
+    logging.info(
+        "AllReduce policy: requested_backend=%s, effective_backend=%s, "
+        "large_prefill=%s, fallback_reason=%s",
+        options.all_reduce_backend,
+        (
+            candidate.all_reduce_backend
+            if communicator is not None or canonical_p2p is not None
+            else "nccl"
+        ),
+        options.large_prefill,
+        fallback_reason,
+    )
     return _communicator
 
 
@@ -301,7 +311,7 @@ def end_graph_capture():
         _communicator.finish_graph_capture()
 
 
-def get_qwen4_allreduce():
+def get_all_reduce():
     return _communicator
 
 
@@ -309,7 +319,7 @@ def get_canonical_p2p():
     return _canonical_p2p
 
 
-def destroy_qwen4_allreduce():
+def destroy_all_reduce():
     global _communicator, _canonical_p2p, _group, _options
     try:
         if _communicator is not None:

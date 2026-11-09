@@ -729,8 +729,8 @@ class PyEnvConfigs:
         self.master_config: MasterConfig = MasterConfig()
         self.jit_config = JITConfig()
         self.py_hw_kernel_config: HWKernelConfig = HWKernelConfig()
-        self.qwen4_all_reduce_backend: str = "auto"
-        self.qwen4_all_reduce_large_prefill: Optional[bool] = None
+        self.all_reduce_backend: str = "auto"
+        self.all_reduce_large_prefill: Optional[bool] = None
         self.sp_config = SpeculativeExecutionConfig()
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()

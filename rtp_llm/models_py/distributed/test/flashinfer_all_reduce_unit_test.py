@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+
+from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.distributed import flashinfer_all_reduce as flashinfer_ar
 
@@ -57,17 +59,17 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
 
         with (
             patch.object(
-                collective, "_get_qwen4_allreduce", return_value=communicator_module
+                collective, "_get_all_reduce_module", return_value=communicator_module
             ),
             patch.object(collective, "_get_group", return_value=group),
         ):
-            collective._init_qwen4_allreduce(config)
+            collective._init_all_reduce(config, CollectiveConfig())
 
-        communicator_module.init_qwen4_allreduce.assert_called_once_with(
+        communicator_module.init_all_reduce.assert_called_once_with(
             group,
             torch.device("cuda", 0),
             config,
-            None,
+            CollectiveConfig(),
         )
 
     def test_shape_and_dtype_eligibility(self):
@@ -124,9 +126,9 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         fast_path.all_reduce_into.side_effect = lambda source, target: target.copy_(
             reduced
         )
-        module = SimpleNamespace(get_qwen4_allreduce=lambda: fast_path)
+        module = SimpleNamespace(get_all_reduce=lambda: fast_path)
 
-        with patch.object(collective, "_get_qwen4_allreduce", return_value=module):
+        with patch.object(collective, "_get_all_reduce_module", return_value=module):
             result = collective.all_reduce(tensor, collective.Group.TP)
         self.assertIs(result, tensor)
         torch.testing.assert_close(tensor, reduced)
@@ -140,9 +142,9 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         fast_path.should_use.return_value = True
         reduced = torch.full_like(tensor, 2)
         fast_path.all_reduce.return_value = reduced
-        module = SimpleNamespace(get_qwen4_allreduce=lambda: fast_path)
+        module = SimpleNamespace(get_all_reduce=lambda: fast_path)
 
-        with patch.object(collective, "_get_qwen4_allreduce", return_value=module):
+        with patch.object(collective, "_get_all_reduce_module", return_value=module):
             result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
         self.assertIs(result, reduced)
         torch.testing.assert_close(tensor, original)
@@ -152,9 +154,9 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         fast_path = MagicMock()
         fast_path.should_use.return_value = True
         fast_path.all_reduce_into.side_effect = lambda source, target: target.fill_(2)
-        module = SimpleNamespace(get_qwen4_allreduce=lambda: fast_path)
+        module = SimpleNamespace(get_all_reduce=lambda: fast_path)
 
-        with patch.object(collective, "_get_qwen4_allreduce", return_value=module):
+        with patch.object(collective, "_get_all_reduce_module", return_value=module):
             result = collective.all_reduce(tensor, collective.Group.TP, inplace=True)
         self.assertIs(result, tensor)
         torch.testing.assert_close(tensor, torch.full_like(tensor, 2))

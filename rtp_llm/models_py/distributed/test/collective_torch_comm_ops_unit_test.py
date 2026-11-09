@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+
 from rtp_llm.models_py.distributed import collective_torch as collective
 
 
@@ -113,12 +114,12 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
 
         with (
             patch.object(collective, "_get_rocm_rccl", return_value=None),
-            patch.object(collective, "_get_qwen4_allreduce") as flashinfer,
+            patch.object(collective, "_get_all_reduce_module") as flashinfer,
             patch.object(collective, "_get_symm_mem") as symm_mem,
             patch.object(collective, "_get_group", return_value=object()),
             patch.object(torch.distributed, "all_reduce", side_effect=reduce_in_place),
         ):
-            flashinfer.return_value.get_qwen4_allreduce.return_value = None
+            flashinfer.return_value.get_all_reduce.return_value = None
             symm_mem.return_value.get_symm_mem_communicator.return_value = None
             result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
 

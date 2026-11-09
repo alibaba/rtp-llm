@@ -97,5 +97,5 @@ _QWEN4_SMOKE_ARGS = (
     + " --seq_size_per_block 128 --fp8_kv_cache 1 --reuse_cache 1"
     + " --moe_strategy nvfp4_cutlass"
     + " --sp_type mtp --sp_model_type qwen4_exp_mtp --gen_num_per_cycle 3"
-    + " --enable_cuda_graph 1 --qwen4_all_reduce_backend sm120_ipc"
+    + " --enable_cuda_graph 1 --all_reduce_backend sm120_ipc"
 )

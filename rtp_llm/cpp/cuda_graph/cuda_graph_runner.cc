@@ -2072,7 +2072,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         }
         RTP_LLM_LOG_INFO("Capture for %s %d begin.", key_type, key);
         PyModelOutputs outputs;
-        auto           collectives = py::module_::import("rtp_llm.models_py.distributed.qwen4_all_reduce");
+        auto           collectives = py::module_::import("rtp_llm.models_py.distributed.all_reduce");
         collectives.attr("begin_graph_capture")();
         try {
             // From this point until finish_capture_session() returns, an

@@ -107,8 +107,8 @@ py_test(
 )
 
 py_test(
-    name = "qwen4_all_reduce_unit_test",
-    srcs = ["qwen4_all_reduce_unit_test.py"],
+    name = "all_reduce_unit_test",
+    srcs = ["all_reduce_unit_test.py"],
     deps = [
         "//rtp_llm:testlib",
         "//rtp_llm/models_py/distributed:collective_torch",
@@ -211,4 +211,14 @@ py_test(
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
     env = {"GPU_COUNT": "2", "TEST_USING_DEVICE": "CUDA"},
+)
+
+py_test(
+    name = "collective_initialization_test",
+    srcs = ["collective_initialization_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
 )

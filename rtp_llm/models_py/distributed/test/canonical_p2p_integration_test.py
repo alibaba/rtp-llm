@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch.distributed as dist
 
-from rtp_llm.config.qwen4_collective_config import Qwen4CollectiveOptions
+from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.distributed.canonical_p2p import init_canonical_p2p
@@ -47,21 +47,21 @@ def _worker():
     pc.world_rank = rank
     set_parallelism_config(pc)
     collective._parallelism_config = pc
-    module = collective._get_qwen4_allreduce()
-    collective._init_qwen4_allreduce(pc, Qwen4CollectiveOptions())
+    module = collective._get_all_reduce_module()
+    collective._init_all_reduce(pc, CollectiveConfig())
     if collective._canonical_p2p is not None:
         raise RuntimeError("default NCCL policy initialized the P2P backend")
-    module.destroy_qwen4_allreduce()
+    module.destroy_all_reduce()
     try:
-        collective._init_qwen4_allreduce(
+        collective._init_all_reduce(
             pc,
-            Qwen4CollectiveOptions(backend="nccl" if rank == 7 else "sm120_p2p"),
+            CollectiveConfig(all_reduce_backend="nccl" if rank == 7 else "sm120_p2p"),
         )
     except ValueError:
         pass
     else:
         raise RuntimeError("rank policy mismatch was accepted")
-    collective._init_qwen4_allreduce(pc, Qwen4CollectiveOptions(backend="sm120_p2p"))
+    collective._init_all_reduce(pc, CollectiveConfig(all_reduce_backend="sm120_p2p"))
     communicator = collective._canonical_p2p
     if communicator is None:
         raise RuntimeError("requested supported communicator unavailable")
@@ -278,7 +278,7 @@ def _worker():
             )
         )
         print("integration GPU gates passed", flush=True)
-    module.destroy_qwen4_allreduce()
+    module.destroy_all_reduce()
     collective._canonical_p2p = None
     del communicator
     dist.destroy_process_group()

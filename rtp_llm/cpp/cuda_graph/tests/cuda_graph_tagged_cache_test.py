@@ -972,7 +972,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     )
 
     def test_native_runner_owns_collective_capture_lifecycle(self):
-        from rtp_llm.models_py.distributed import qwen4_all_reduce
+        from rtp_llm.models_py.distributed import all_reduce
 
         communicator = MagicMock()
         communicator.allow_ipc_capture = False
@@ -994,7 +994,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 )
                 return super().forward(inputs, fmha_impl)
 
-        with patch.object(qwen4_all_reduce, "_communicator", communicator):
+        with patch.object(all_reduce, "_communicator", communicator):
             runner = CudaGraphRunner()
             runner.init_decode(
                 Model(),
@@ -1387,9 +1387,9 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     0,
                 )
             self.assertEqual(model.forward_calls, 4)
-            from rtp_llm.models_py.distributed import qwen4_all_reduce
+            from rtp_llm.models_py.distributed import all_reduce
 
-            self.assertFalse(qwen4_all_reduce._capture_active)
+            self.assertFalse(all_reduce._capture_active)
             return model_ref
 
         retained_model = trigger_dirty_capture()

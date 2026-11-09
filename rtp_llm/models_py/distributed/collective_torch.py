@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Union
 import torch
 import torch.distributed
 
+from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 # ParallelMode enum values matching C++ rtp_llm::ParallelMode in OpData.h
@@ -36,7 +37,7 @@ _initialized: bool = False  # Track if we've initialized (to prevent double init
 _cpu_tp_broadcaster_base_path: Optional[str] = None
 _rocm_rccl = None
 _symm_mem = None
-_qwen4_allreduce = None
+_all_reduce_module = None
 _canonical_p2p = None
 
 
@@ -64,28 +65,29 @@ def _get_symm_mem():
     return _symm_mem
 
 
-def _get_qwen4_allreduce():
-    global _qwen4_allreduce
-    if _qwen4_allreduce is None:
-        from rtp_llm.models_py.distributed import qwen4_all_reduce
+def _get_all_reduce_module():
+    global _all_reduce_module
+    if _all_reduce_module is None:
+        from rtp_llm.models_py.distributed import all_reduce
 
-        _qwen4_allreduce = qwen4_all_reduce
-    return _qwen4_allreduce
+        _all_reduce_module = all_reduce
+    return _all_reduce_module
 
 
-def _init_qwen4_allreduce(
+def _init_all_reduce(
     parallelism_config: ParallelismConfig,
-    qwen4_collective_options=None,
+    collective_config: CollectiveConfig,
 ) -> None:
     global _canonical_p2p
     if parallelism_config.tp_size <= 1:
+        collective_config.validate_topology(parallelism_config)
         return
-    module = _get_qwen4_allreduce()
-    module.init_qwen4_allreduce(
+    module = _get_all_reduce_module()
+    module.init_all_reduce(
         _get_group(Group.TP),
         torch.device("cuda", parallelism_config.local_rank),
         parallelism_config,
-        qwen4_collective_options,
+        collective_config,
     )
     _canonical_p2p = module.get_canonical_p2p()
 
@@ -159,11 +161,14 @@ def init_distributed_environment(
     nccl_init_port: int,
     backend: str = "nccl",
     timeout: Optional[int] = None,
+    *,
+    collective_config: Optional[CollectiveConfig] = None,
 ):
     """Initialize distributed environment and create process groups.
 
     This function creates DP, TP, and DP_AND_TP process groups using torch.distributed.
-    It can only be called once unless destroy_distributed_environment() has been called.
+    Repeated initialization with the same group and collective policy is idempotent.
+    Destroy the environment before changing its collective policy.
 
     Args:
         parallelism_config: Configuration for parallelism setup (sizes, ranks, etc.)
@@ -171,11 +176,16 @@ def init_distributed_environment(
         nccl_init_port: Port for torch.distributed init_process_group (tcp://ip:port).
         backend: Distributed backend (default: "nccl")
         timeout: Timeout in seconds for process group initialization
+        collective_config: AllReduce policy; omitted means automatic selection.
+            Independent of the Torch process group backend.
 
     Raises:
-        RuntimeError: If already initialized and not destroyed
+        RuntimeError: If changing a live collective policy without destroying it
     """
     global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
+
+    if collective_config is None:
+        collective_config = CollectiveConfig()
 
     # Check if already initialized (and not destroyed)
     if _initialized and torch.distributed.is_initialized():
@@ -197,7 +207,7 @@ def init_distributed_environment(
         rocm_rccl = _get_rocm_rccl()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
-        _init_qwen4_allreduce(parallelism_config)
+        _init_all_reduce(parallelism_config, collective_config)
         return
 
     _normalize_parallelism_ranks(parallelism_config)
@@ -231,7 +241,7 @@ def init_distributed_environment(
         _register_process_groups_to_cpp()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
-        _init_qwen4_allreduce(parallelism_config)
+        _init_all_reduce(parallelism_config, collective_config)
         return
 
     logging.info(
@@ -271,7 +281,7 @@ def init_distributed_environment(
     if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
-    _init_qwen4_allreduce(parallelism_config)
+    _init_all_reduce(parallelism_config, collective_config)
 
 
 def _create_process_groups(
@@ -483,7 +493,7 @@ def _register_process_groups_to_cpp():
             dest.copy_(tensor)
             return dest
         target = dest if dest is not None else tensor
-        qwen4_ar = _get_qwen4_allreduce().get_qwen4_allreduce()
+        all_reduce_comm = _get_all_reduce_module().get_all_reduce()
         if (
             op == 0
             and mode == _CPP_PARALLEL_MODE_TP
@@ -493,21 +503,21 @@ def _register_process_groups_to_cpp():
             and tensor.dtype == target.dtype
             and tensor.device == target.device
             and target.is_contiguous()
-            and qwen4_ar is not None
-            and pg is qwen4_ar.group
+            and all_reduce_comm is not None
+            and pg is all_reduce_comm.group
             and not (
                 _canonical_p2p is not None
                 and pg is _canonical_p2p.group
                 and _canonical_p2p.should_use(tensor)
             )
-            and qwen4_ar.should_use_cpp_small(tensor)
+            and all_reduce_comm.should_use_cpp_small(tensor)
         ):
-            return qwen4_ar.all_reduce_into(tensor, target)
+            return all_reduce_comm.all_reduce_into(tensor, target)
         if dest is not None:
             target.copy_(tensor)
         device_id = torch.cuda.current_device()
         gpu_t, was_cpu = _ensure_cuda(target, device_id)
-        qwen4_ar = _get_qwen4_allreduce().get_qwen4_allreduce()
+        all_reduce_comm = _get_all_reduce_module().get_all_reduce()
         if (
             op == 0
             and mode == _CPP_PARALLEL_MODE_TP
@@ -521,11 +531,11 @@ def _register_process_groups_to_cpp():
             op == 0
             and mode == _CPP_PARALLEL_MODE_TP
             and not was_cpu
-            and qwen4_ar is not None
-            and pg is qwen4_ar.group
-            and qwen4_ar.should_use_cpp_small(gpu_t)
+            and all_reduce_comm is not None
+            and pg is all_reduce_comm.group
+            and all_reduce_comm.should_use_cpp_small(gpu_t)
         ):
-            result = qwen4_ar.all_reduce(gpu_t)
+            result = all_reduce_comm.all_reduce(gpu_t)
             # The C++ callback returns the original destination storage.
             gpu_t.copy_(result)
         else:
@@ -681,7 +691,7 @@ def destroy_distributed_environment():
         )
 
         destroy_user_buffers_communicator()
-    _get_qwen4_allreduce().destroy_qwen4_allreduce()
+    _get_all_reduce_module().destroy_all_reduce()
 
     try:
         import librtp_compute_ops
@@ -714,8 +724,7 @@ def destroy_distributed_environment():
 def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     """Get process group for the specified group type.
 
-    This function checks if the distributed environment is initialized.
-    If not initialized and _parallelism_config is available, it will attempt to initialize.
+    Requires explicit initialization with the full rendezvous and collective policy.
 
     Args:
         group: Group type (DP, TP, or DP_AND_TP)
@@ -724,25 +733,16 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
         Process group for the specified group type
 
     Raises:
-        RuntimeError: If distributed environment is not initialized and cannot be auto-initialized
+        RuntimeError: If distributed environment is not explicitly initialized
         ValueError: If group type is invalid
     """
     global _parallelism_config, _initialized
 
-    # Check if we need to initialize
     if not torch.distributed.is_initialized() or not _initialized:
-        if _parallelism_config is not None:
-            # Auto-initialize if we have the config
-            logging.info(
-                "Auto-initializing distributed environment from stored parallelism_config"
-            )
-            init_distributed_environment(_parallelism_config)
-        else:
-            raise RuntimeError(
-                "Distributed environment is not initialized. "
-                "Call init_distributed_environment(parallelism_config) first, "
-                "or ensure parallelism_config is available for auto-initialization."
-            )
+        raise RuntimeError(
+            "Distributed environment is not initialized. "
+            "Call init_distributed_environment() with the complete configuration first."
+        )
 
     # Determine the actual key to use in _group_map
     group_key = group
@@ -834,14 +834,14 @@ def all_reduce(
         if _canonical_p2p is not None and _canonical_p2p.should_use(tensor):
             return _canonical_p2p.all_reduce(tensor, inplace=inplace)
 
-        qwen4_ar = _get_qwen4_allreduce().get_qwen4_allreduce()
-        if qwen4_ar is not None and qwen4_ar.should_use(tensor):
+        all_reduce_comm = _get_all_reduce_module().get_all_reduce()
+        if all_reduce_comm is not None and all_reduce_comm.should_use(tensor):
             if inplace:
                 # IPC first stages the input, so the registered reduction may
                 # write directly back into its original destination. Avoid a
                 # second device copy at every model-layer collective.
-                return qwen4_ar.all_reduce_into(tensor, tensor)
-            return qwen4_ar.all_reduce(tensor)
+                return all_reduce_comm.all_reduce_into(tensor, tensor)
+            return all_reduce_comm.all_reduce(tensor)
 
         symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(

@@ -97,9 +97,6 @@ def local_rank_start(
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
         install_oom_dump()
-        from rtp_llm.models_py.distributed.qwen4_all_reduce import configure_collectives
-
-        configure_collectives(py_env_configs)
         from rtp_llm.server.backend_manager import BackendManager
 
         backend_manager = BackendManager(py_env_configs)

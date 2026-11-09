@@ -4,10 +4,10 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from rtp_llm.config.qwen4_collective_config import Qwen4CollectiveOptions
+from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.config.server_config_setup import set_parallelism_config
+from rtp_llm.models_py.distributed import all_reduce as all_reduce_module
 from rtp_llm.models_py.distributed import collective_torch as collective
-from rtp_llm.models_py.distributed import qwen4_all_reduce as qwen4_ar
 from rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce import (
     FlashInferIpcAllReduce,
     IpcInitializationError,
@@ -36,16 +36,17 @@ def model_config(hidden=2560, dtype=torch.bfloat16):
     return SimpleNamespace(hidden_size=hidden, compute_dtype=dtype)
 
 
-class Qwen4AllReduceUnitTest(unittest.TestCase):
+class AllReduceUnitTest(unittest.TestCase):
     def setUp(self):
         self.group = object()
         self.device = torch.device("cuda", 0)
-        self.options = Qwen4CollectiveOptions("sm120_ipc")
+        self.options = CollectiveConfig("sm120_ipc")
         self.patches = [
-            patch.object(qwen4_ar, "_configured_options", Qwen4CollectiveOptions()),
-            patch.object(qwen4_ar.dist, "get_world_size", return_value=2),
-            patch.object(qwen4_ar.dist, "get_rank", return_value=0),
-            patch.object(qwen4_ar, "exchange_group_state", side_effect=self.agree),
+            patch.object(all_reduce_module.dist, "get_world_size", return_value=2),
+            patch.object(all_reduce_module.dist, "get_rank", return_value=0),
+            patch.object(
+                all_reduce_module, "exchange_group_state", side_effect=self.agree
+            ),
         ]
         for item in self.patches:
             item.start()
@@ -56,52 +57,97 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
         return [value, value]
 
     def cleanup(self):
-        qwen4_ar.destroy_qwen4_allreduce()
+        all_reduce_module.destroy_all_reduce()
         for item in reversed(self.patches):
             item.stop()
 
     def init(self, options=None):
-        return qwen4_ar.init_qwen4_allreduce(
-            self.group, self.device, topology(), options
+        return all_reduce_module.init_all_reduce(
+            self.group,
+            self.device,
+            topology(),
+            options if options is not None else CollectiveConfig(),
         )
 
     def test_auto_selects_supported_ipc_without_a_model_name(self):
         with (
-            patch.object(qwen4_ar, "_capability_error", return_value=None),
-            patch.object(qwen4_ar, "Qwen4IpcAllReduce") as factory,
+            patch.object(all_reduce_module, "_capability_error", return_value=None),
+            patch.object(all_reduce_module, "IpcAllReduce") as factory,
         ):
             self.assertIs(self.init(), factory.return_value)
-            self.assertEqual(factory.call_args.args[2].backend, "sm120_ipc")
+            self.assertEqual(factory.call_args.args[2].all_reduce_backend, "sm120_ipc")
 
     def test_explicit_nccl_never_probes_or_allocates(self):
         with (
-            patch.object(qwen4_ar, "_capability_error") as probe,
-            patch.object(qwen4_ar, "Qwen4IpcAllReduce") as factory,
+            patch.object(all_reduce_module, "_capability_error") as probe,
+            patch.object(all_reduce_module, "IpcAllReduce") as factory,
+            self.assertLogs(level="INFO") as logs,
         ):
-            self.assertIsNone(self.init(Qwen4CollectiveOptions("nccl")))
+            self.assertIsNone(self.init(CollectiveConfig("nccl")))
         probe.assert_not_called()
         factory.assert_not_called()
+        self.assertTrue(all(record.levelname == "INFO" for record in logs.records))
+        self.assertIn("requested_backend=nccl, effective_backend=nccl", logs.output[-1])
 
     def test_auto_unsupported_topology_falls_back(self):
         with (
-            patch.object(qwen4_ar, "_capability_error") as probe,
-            patch.object(qwen4_ar, "Qwen4IpcAllReduce") as factory,
+            patch.object(all_reduce_module, "_capability_error") as probe,
+            patch.object(all_reduce_module, "IpcAllReduce") as factory,
+            self.assertLogs(level="INFO") as logs,
         ):
             self.assertIsNone(
-                qwen4_ar.init_qwen4_allreduce(self.group, self.device, topology(8))
+                all_reduce_module.init_all_reduce(
+                    self.group, self.device, topology(8), CollectiveConfig()
+                )
             )
         probe.assert_not_called()
         factory.assert_not_called()
+        self.assertTrue(all(record.levelname == "INFO" for record in logs.records))
+        self.assertIn("requested_backend=auto, effective_backend=nccl", logs.output[-1])
+        self.assertIn("unsupported topology", logs.output[-1])
+
+    def test_auto_unsupported_capabilities_are_an_informational_selection(self):
+        with (
+            patch.object(
+                all_reduce_module,
+                "_capability_error",
+                return_value="requires NVIDIA SM120",
+            ),
+            patch.object(all_reduce_module, "IpcAllReduce") as factory,
+            self.assertLogs(level="INFO") as logs,
+        ):
+            self.assertIsNone(self.init())
+        factory.assert_not_called()
+        self.assertTrue(all(record.levelname == "INFO" for record in logs.records))
+        self.assertIn("effective_backend=nccl", logs.output[-1])
+        self.assertIn("requires NVIDIA SM120", logs.output[-1])
+
+    def test_explicit_backend_capability_failure_is_a_warning(self):
+        with (
+            patch.object(
+                all_reduce_module,
+                "_capability_error",
+                return_value="direct peer access unavailable",
+            ),
+            self.assertLogs(level="INFO") as logs,
+        ):
+            self.assertIsNone(self.init(self.options))
+        warnings = [record for record in logs.records if record.levelname == "WARNING"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("AllReduce sm120_ipc unavailable", warnings[0].getMessage())
+        self.assertIn(
+            "requested_backend=sm120_ipc, effective_backend=nccl", logs.output[-1]
+        )
 
     def test_options_reject_invalid_combinations(self):
         for backend, large in (("invalid", False), ("nccl", True), ("sm120_p2p", True)):
             with self.subTest(backend=backend), self.assertRaises(ValueError):
-                Qwen4CollectiveOptions(backend, large)
+                CollectiveConfig(backend, large)
 
     def test_explicit_wrong_topology_fails_before_probe(self):
-        with patch.object(qwen4_ar, "_capability_error") as probe:
+        with patch.object(all_reduce_module, "_capability_error") as probe:
             with self.assertRaisesRegex(ValueError, "TP8"):
-                self.init(Qwen4CollectiveOptions("sm120_p2p"))
+                self.init(CollectiveConfig("sm120_p2p"))
         probe.assert_not_called()
 
     def test_rank_policy_mismatch_fails_before_optional_initialization(self):
@@ -109,8 +155,10 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
             return [state, ["nccl", None, None, False]]
 
         with (
-            patch.object(qwen4_ar, "exchange_group_state", side_effect=disagree),
-            patch.object(qwen4_ar, "_capability_error") as probe,
+            patch.object(
+                all_reduce_module, "exchange_group_state", side_effect=disagree
+            ),
+            patch.object(all_reduce_module, "_capability_error") as probe,
             self.assertRaisesRegex(ValueError, "differs across TP ranks"),
         ):
             self.init(self.options)
@@ -123,9 +171,11 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
             return self.agree(group, value, tag)
 
         with (
-            patch.object(qwen4_ar, "exchange_group_state", side_effect=peer_failed),
-            patch.object(qwen4_ar, "_capability_error", return_value=None),
-            patch.object(qwen4_ar, "Qwen4IpcAllReduce") as factory,
+            patch.object(
+                all_reduce_module, "exchange_group_state", side_effect=peer_failed
+            ),
+            patch.object(all_reduce_module, "_capability_error", return_value=None),
+            patch.object(all_reduce_module, "IpcAllReduce") as factory,
         ):
             self.assertIsNone(self.init(self.options))
         factory.assert_not_called()
@@ -137,19 +187,21 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
             return self.agree(group, state, tag)
 
         with (
-            patch.object(qwen4_ar, "exchange_group_state", side_effect=disagree),
-            patch.object(qwen4_ar, "_capability_error", return_value=None),
-            patch.object(qwen4_ar, "Qwen4IpcAllReduce") as factory,
+            patch.object(
+                all_reduce_module, "exchange_group_state", side_effect=disagree
+            ),
+            patch.object(all_reduce_module, "_capability_error", return_value=None),
+            patch.object(all_reduce_module, "IpcAllReduce") as factory,
         ):
             self.assertIsNone(self.init())
         factory.assert_not_called()
 
     def test_agreed_local_setup_failure_can_fall_back(self):
         with (
-            patch.object(qwen4_ar, "_capability_error", return_value=None),
+            patch.object(all_reduce_module, "_capability_error", return_value=None),
             patch.object(
-                qwen4_ar,
-                "Qwen4IpcAllReduce",
+                all_reduce_module,
+                "IpcAllReduce",
                 side_effect=IpcInitializationError("allocation failed"),
             ),
         ):
@@ -157,31 +209,113 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
 
     def test_collective_failure_propagates(self):
         with (
-            patch.object(qwen4_ar, "_capability_error", return_value=None),
+            patch.object(all_reduce_module, "_capability_error", return_value=None),
             patch.object(
-                qwen4_ar,
-                "Qwen4IpcAllReduce",
+                all_reduce_module,
+                "IpcAllReduce",
                 side_effect=RuntimeError("collective failed"),
             ),
             self.assertRaisesRegex(RuntimeError, "collective failed"),
         ):
             self.init(self.options)
 
+    def test_failed_ipc_construction_does_not_commit_policy_and_can_retry(self):
+        communicator = MagicMock()
+        with (
+            patch.object(all_reduce_module, "_capability_error", return_value=None),
+            patch.object(
+                all_reduce_module,
+                "IpcAllReduce",
+                side_effect=[RuntimeError("collective failed"), communicator],
+            ) as factory,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "collective failed"):
+                self.init(self.options)
+            self.assertIsNone(all_reduce_module._group)
+            self.assertIsNone(all_reduce_module._options)
+            self.assertIsNone(all_reduce_module.get_all_reduce())
+            self.assertIs(self.init(self.options), communicator)
+            self.assertIs(self.init(self.options), communicator)
+        self.assertEqual(factory.call_count, 2)
+
+    def test_failed_capability_agreement_does_not_commit_policy_and_can_retry(self):
+        def fail_capabilities(group, state, tag):
+            if tag == "capabilities":
+                raise RuntimeError("store failed")
+            return self.agree(group, state, tag)
+
+        with (
+            patch.object(all_reduce_module, "_capability_error", return_value=None),
+            patch.object(all_reduce_module, "IpcAllReduce") as factory,
+        ):
+            with (
+                patch.object(
+                    all_reduce_module,
+                    "exchange_group_state",
+                    side_effect=fail_capabilities,
+                ),
+                self.assertRaisesRegex(RuntimeError, "store failed"),
+            ):
+                self.init(self.options)
+            self.assertIsNone(all_reduce_module._group)
+            self.assertIsNone(all_reduce_module._options)
+            factory.assert_not_called()
+            self.assertIs(self.init(self.options), factory.return_value)
+        factory.assert_called_once()
+
+    def test_failed_p2p_construction_does_not_commit_policy_and_can_retry(self):
+        communicator = MagicMock()
+        policy = CollectiveConfig("sm120_p2p")
+        with (
+            patch.object(all_reduce_module, "_capability_error", return_value=None),
+            patch(
+                "rtp_llm.models_py.distributed.canonical_p2p.init_canonical_p2p",
+                side_effect=[RuntimeError("P2P setup failed"), communicator],
+            ) as factory,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "P2P setup failed"):
+                all_reduce_module.init_all_reduce(
+                    self.group, self.device, topology(8), policy
+                )
+            self.assertIsNone(all_reduce_module._group)
+            self.assertIsNone(all_reduce_module._options)
+            self.assertIsNone(all_reduce_module.get_canonical_p2p())
+            all_reduce_module.init_all_reduce(
+                self.group, self.device, topology(8), policy
+            )
+            self.assertIs(all_reduce_module.get_canonical_p2p(), communicator)
+        self.assertEqual(factory.call_count, 2)
+
+    def test_agreed_fallback_remains_idempotent(self):
+        with (
+            patch.object(all_reduce_module, "_capability_error", return_value=None),
+            patch.object(
+                all_reduce_module,
+                "IpcAllReduce",
+                side_effect=IpcInitializationError("allocation failed"),
+            ) as factory,
+        ):
+            self.assertIsNone(self.init(self.options))
+            self.assertIsNone(self.init(self.options))
+        factory.assert_called_once()
+        self.assertIs(all_reduce_module._group, self.group)
+        self.assertEqual(all_reduce_module._options, self.options)
+
     def test_initialization_is_idempotent_and_rebuilds_after_destroy(self):
         with (
-            patch.object(qwen4_ar, "_capability_error", return_value=None),
-            patch.object(qwen4_ar, "Qwen4IpcAllReduce") as factory,
+            patch.object(all_reduce_module, "_capability_error", return_value=None),
+            patch.object(all_reduce_module, "IpcAllReduce") as factory,
         ):
             first = self.init(self.options)
             self.assertIs(self.init(self.options), first)
             factory.assert_called_once()
-            qwen4_ar.destroy_qwen4_allreduce()
+            all_reduce_module.destroy_all_reduce()
             first.destroy.assert_called_once()
             self.init(self.options)
             self.assertEqual(factory.call_count, 2)
 
     def test_policy_change_requires_teardown(self):
-        self.init(Qwen4CollectiveOptions("nccl"))
+        self.init(CollectiveConfig("nccl"))
         with self.assertRaisesRegex(RuntimeError, "before changing"):
             self.init(self.options)
 
@@ -190,11 +324,11 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
         module.get_canonical_p2p.return_value = None
         pc = topology()
         with (
-            patch.object(collective, "_get_qwen4_allreduce", return_value=module),
+            patch.object(collective, "_get_all_reduce_module", return_value=module),
             patch.object(collective, "_get_group", return_value=self.group),
         ):
-            collective._init_qwen4_allreduce(pc, self.options)
-        module.init_qwen4_allreduce.assert_called_once_with(
+            collective._init_all_reduce(pc, self.options)
+        module.init_all_reduce.assert_called_once_with(
             self.group, self.device, pc, self.options
         )
 
@@ -216,8 +350,8 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
             ),
             patch.object(torch.cuda, "is_current_stream_capturing", return_value=False),
         ):
-            context = qwen4_ar.Qwen4IpcAllReduce(
-                self.group, self.device, Qwen4CollectiveOptions("sm120_ipc", large)
+            context = all_reduce_module.IpcAllReduce(
+                self.group, self.device, CollectiveConfig("sm120_ipc", large)
             )
             if prepare:
                 context.prepare_large_prefill([model_config()], engine_config())
@@ -360,7 +494,7 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
         configs = [model_config(5120), model_config()]
         config = engine_config(kv_mb=5120, runtime_mb=4096)
         with (
-            patch.object(qwen4_ar, "_communicator", context),
+            patch.object(all_reduce_module, "_communicator", context),
             patch.object(
                 torch.cuda, "mem_get_info", return_value=(10 * 1024**3, 72 * 1024**3)
             ) as probe,
@@ -368,8 +502,8 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
                 "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.FlashInferIpcAllReduce"
             ) as factory,
         ):
-            qwen4_ar.prepare_collective_workspaces(configs, config)
-            qwen4_ar.prepare_collective_workspaces(configs, config)
+            all_reduce_module.prepare_collective_workspaces(configs, config)
+            all_reduce_module.prepare_collective_workspaces(configs, config)
         probe.assert_called_once()
         factory.assert_called_once()
         self.assertTrue(context.large_prefill)
@@ -381,7 +515,7 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
                 torch.cuda, "mem_get_info", return_value=(10 * 1024**3, 72 * 1024**3)
             ),
             patch.object(
-                qwen4_ar,
+                all_reduce_module,
                 "exchange_group_state",
                 return_value=[[8192 * 2560 * 2, True], [16384 * 2560 * 2, True]],
             ),
@@ -414,7 +548,7 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
                 side_effect=lambda _: events.append("init"),
             ),
             patch.object(
-                qwen4_ar,
+                all_reduce_module,
                 "prepare_collective_workspaces",
                 side_effect=lambda *args: events.append("prepare"),
             ) as prepare,
@@ -440,7 +574,7 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
             ),
             patch.object(torch.cuda, "is_current_stream_capturing", return_value=False),
             patch.object(
-                qwen4_ar,
+                all_reduce_module,
                 "exchange_group_state",
                 return_value=[[16384 * 2560 * 2, True], [16384 * 2560 * 2, False]],
             ),
@@ -454,18 +588,18 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
     def test_capture_registers_and_restores_admission(self):
         communicator = MagicMock()
         communicator.allow_ipc_capture = False
-        with patch.object(qwen4_ar, "_communicator", communicator):
-            qwen4_ar.begin_graph_capture()
+        with patch.object(all_reduce_module, "_communicator", communicator):
+            all_reduce_module.begin_graph_capture()
             self.assertTrue(communicator.allow_ipc_capture)
-            qwen4_ar.end_graph_capture()
+            all_reduce_module.end_graph_capture()
             self.assertFalse(communicator.allow_ipc_capture)
         communicator.finish_graph_capture.assert_called_once()
 
     def test_capture_failure_restores_without_registration(self):
         communicator = MagicMock()
-        with patch.object(qwen4_ar, "_communicator", communicator):
-            qwen4_ar.begin_graph_capture()
-            qwen4_ar.abort_graph_capture()
+        with patch.object(all_reduce_module, "_communicator", communicator):
+            all_reduce_module.begin_graph_capture()
+            all_reduce_module.abort_graph_capture()
             self.assertFalse(communicator.allow_ipc_capture)
         communicator.finish_graph_capture.assert_not_called()
 
@@ -474,27 +608,12 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
         communicator.finish_graph_capture.side_effect = RuntimeError(
             "registration failed"
         )
-        with patch.object(qwen4_ar, "_communicator", communicator):
-            qwen4_ar.begin_graph_capture()
+        with patch.object(all_reduce_module, "_communicator", communicator):
+            all_reduce_module.begin_graph_capture()
             with self.assertRaisesRegex(RuntimeError, "registration failed"):
-                qwen4_ar.end_graph_capture()
+                all_reduce_module.end_graph_capture()
             self.assertFalse(communicator.allow_ipc_capture)
-            self.assertFalse(qwen4_ar._capture_active)
-
-    def test_configure_installs_cli_override_without_environment_mutation(self):
-        import os
-
-        config = SimpleNamespace(
-            qwen4_all_reduce_backend="nccl",
-            qwen4_all_reduce_large_prefill=False,
-            parallelism_config=topology(),
-        )
-        environment = dict(os.environ)
-        qwen4_ar.configure_collectives(config)
-        self.assertEqual(dict(os.environ), environment)
-        with patch.object(qwen4_ar, "_capability_error") as probe:
-            self.assertIsNone(self.init())
-        probe.assert_not_called()
+            self.assertFalse(all_reduce_module._capture_active)
 
     def test_unaligned_views_keep_backend_and_output_contract(self):
         for capturing in (False, True):
@@ -537,9 +656,9 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
         fast_path.should_use.return_value = True
         fast_path.all_reduce_into.side_effect = lambda source, target: target.fill_(2)
         fast_path.all_reduce.return_value = torch.full_like(tensor, 3)
-        module = SimpleNamespace(get_qwen4_allreduce=lambda: fast_path)
+        module = SimpleNamespace(get_all_reduce=lambda: fast_path)
         with (
-            patch.object(collective, "_get_qwen4_allreduce", return_value=module),
+            patch.object(collective, "_get_all_reduce_module", return_value=module),
             patch.object(collective, "_canonical_p2p", None),
         ):
             self.assertIs(collective.all_reduce(tensor, collective.Group.TP), tensor)

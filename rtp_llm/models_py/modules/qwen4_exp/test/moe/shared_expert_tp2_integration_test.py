@@ -605,7 +605,7 @@ def _qualify_local_shared_buckets(layer, source, rank, tiny_calls):
 
 def _worker(rank, port):
     from rtp_llm.models_py.distributed import collective_torch as ct
-    from rtp_llm.models_py.distributed.qwen4_all_reduce import get_qwen4_allreduce
+    from rtp_llm.models_py.distributed.all_reduce import get_all_reduce
     from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import Qwen4TargetReduce
     from rtp_llm.ops import NcclCommConfig
 
@@ -623,7 +623,7 @@ def _worker(rank, port):
         nccl,
         port,
     )
-    communicator = get_qwen4_allreduce()
+    communicator = get_all_reduce()
     assert communicator is not None and communicator.cpp_small_enabled
     communicator.allow_ipc_capture = True
     reducer = Qwen4TargetReduce(communicator)

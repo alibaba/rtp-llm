@@ -13,9 +13,9 @@ import torch.multiprocessing as mp
 def _worker(rank, store):
     import flashinfer.comm
 
-    from rtp_llm.config.qwen4_collective_config import Qwen4CollectiveOptions
+    from rtp_llm.config.collective_config import CollectiveConfig
     from rtp_llm.config.server_config_setup import set_parallelism_config
-    from rtp_llm.models_py.distributed import qwen4_all_reduce as qwen4_ar
+    from rtp_llm.models_py.distributed import all_reduce as all_reduce_module
     from rtp_llm.ops import ParallelismConfig
 
     torch.cuda.set_device(rank)
@@ -34,16 +34,16 @@ def _worker(rank, store):
     set_parallelism_config(pc)
 
     def initialize(large=False, backend="sm120_ipc"):
-        qwen4_ar.destroy_qwen4_allreduce()
-        return qwen4_ar.init_qwen4_allreduce(
+        all_reduce_module.destroy_all_reduce()
+        return all_reduce_module.init_all_reduce(
             group,
             device,
             pc,
-            Qwen4CollectiveOptions(backend, large),
+            CollectiveConfig(backend, large),
         )
 
     def prepare(max_tokens=32768):
-        qwen4_ar.prepare_collective_workspaces(
+        all_reduce_module.prepare_collective_workspaces(
             [SimpleNamespace(hidden_size=2560, compute_dtype=torch.bfloat16)],
             SimpleNamespace(
                 runtime_config=SimpleNamespace(
@@ -153,11 +153,11 @@ def _worker(rank, store):
         communicator.all_reduce(value)
         torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph()
-        qwen4_ar.begin_graph_capture()
+        all_reduce_module.begin_graph_capture()
         with torch.cuda.graph(graph):
             assert communicator.should_use(value)
             output = communicator.all_reduce(value)
-        qwen4_ar.end_graph_capture()
+        all_reduce_module.end_graph_capture()
         assert not communicator.allow_ipc_capture
         captures.append((value, output, graph))
     for value, output, graph in captures:
@@ -175,18 +175,18 @@ def _worker(rank, store):
     value = storage[rank:].view(4, 2560)
     assert communicator.should_use(value)
     original = value.clone()
-    qwen4_ar.begin_graph_capture()
+    all_reduce_module.begin_graph_capture()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         result = communicator.all_reduce(value)
-    qwen4_ar.end_graph_capture()
+    all_reduce_module.end_graph_capture()
     graph.replay()
     torch.testing.assert_close(result, torch.full_like(result, 3), rtol=0, atol=0)
     torch.testing.assert_close(value, original, rtol=0, atol=0)
     communicator.all_reduce_into(value, value)
     torch.testing.assert_close(value, torch.full_like(value, 3), rtol=0, atol=0)
     torch.cuda.synchronize()
-    qwen4_ar.destroy_qwen4_allreduce()
+    all_reduce_module.destroy_all_reduce()
     dist.destroy_process_group()
 
 

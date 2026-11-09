@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 from rtp_llm.models_py.distributed import collective_torch
-from rtp_llm.models_py.distributed.qwen4_all_reduce import get_qwen4_allreduce
+from rtp_llm.models_py.distributed.all_reduce import get_all_reduce
 
 # Model close can also run on a single rank after partial initialization.
 # Retain IPC mappings until process exit rather than freeing a peer's input.
@@ -76,7 +76,7 @@ class Qwen4TargetReduce:
 
 def prepare_target_reduce(config, parallelism):
     role = str(getattr(parallelism, "role_type", "")).rsplit(".", 1)[-1]
-    communicator = get_qwen4_allreduce()
+    communicator = get_all_reduce()
     if not (
         not getattr(config, "is_mtp", False)
         and role in ("DECODE", "PDFUSION")
@@ -102,7 +102,7 @@ def prepare_target_reduce(config, parallelism):
 
 def all_reduce_target_graph(tensor, group):
     if tensor.is_cuda and group == collective_torch.Group.TP:
-        communicator = get_qwen4_allreduce()
+        communicator = get_all_reduce()
         if communicator is not None and communicator.should_use_registered_graph_input(
             tensor
         ):
