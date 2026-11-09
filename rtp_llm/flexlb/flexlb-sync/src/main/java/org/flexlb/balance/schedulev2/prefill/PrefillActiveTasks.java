@@ -53,7 +53,7 @@ public final class PrefillActiveTasks {
             Map<String, DispatchedRequest> localPublishReservations = new HashMap<>(old.localPublishReservations());
             localPublishReservations.put(id, record);
             if (capacitySnapshot.compareAndSet(old, new PrefillCapacitySnapshot(old.workerStatus(),
-                    Map.copyOf(localPublishReservations), old.workerActiveRequestIds()))) {
+                    Collections.unmodifiableMap(localPublishReservations), old.workerActiveRequestIds()))) {
                 return null;
             }
         }

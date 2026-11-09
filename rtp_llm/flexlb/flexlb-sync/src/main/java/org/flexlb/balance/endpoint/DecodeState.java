@@ -25,6 +25,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -1362,7 +1363,8 @@ final class DecodeState {
             DecodeRoutingView before = routingViewLocked();
             List<WorkerStatusFact> facts = doCalibrate(observation.engine(), observation.finishedTasks());
             status.publishPreparedStatus(prepared);
-            return new CalibrationResult(List.copyOf(facts), placementCapacityImproved(before, routingViewLocked()));
+            facts = facts.isEmpty() ? List.of() : Collections.unmodifiableList(facts);
+            return new CalibrationResult(facts, placementCapacityImproved(before, routingViewLocked()));
         } finally {
             lock.unlock();
         }
@@ -1403,7 +1405,7 @@ final class DecodeState {
         } finally {
             lock.unlock();
         }
-        return List.copyOf(facts);
+        return facts.isEmpty() ? List.of() : Collections.unmodifiableList(facts);
     }
 
     private List<WorkerStatusFact> doCalibrate(WorkerStatus.EngineObservation engine,
