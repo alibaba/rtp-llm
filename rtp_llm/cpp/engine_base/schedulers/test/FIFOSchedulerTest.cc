@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <memory>
 #include <numeric>
+#include <thread>
 #include "torch/all.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
@@ -5696,6 +5697,137 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
     ASSERT_EQ(result.value().size(), 4);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 4);
+}
+
+TEST_F(FIFOSchedulerTest, testPrefillAdmissionCoalescerDisabledByDefault) {
+    autil::EnvGuard env("PREFILL_ADMISSION_COALESCE_MS", "0");
+    CacheConfig     cache_config = makeMhaCacheConfig(1, 8, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto            cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 8;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    FIFOScheduler scheduler(runtime_config,
+                            model_config,
+                            PDSepConfig{},
+                            ParallelismConfig{},
+                            ModelSpecificConfig{},
+                            cache_manager);
+
+    auto stream = makeStream({1}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    const auto start   = std::chrono::steady_clock::now();
+    auto       result  = scheduler.schedule();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result->size(), 1);
+    EXPECT_LT(elapsed.count(), 80);
+}
+
+TEST_F(FIFOSchedulerTest, testPrefillAdmissionCoalescerWaitsForSecondContext) {
+    autil::EnvGuard env("PREFILL_ADMISSION_COALESCE_MS", "100");
+    CacheConfig     cache_config = makeMhaCacheConfig(1, 8, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto            cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 8;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    FIFOScheduler scheduler(runtime_config,
+                            model_config,
+                            PDSepConfig{},
+                            ParallelismConfig{},
+                            ModelSpecificConfig{},
+                            cache_manager);
+    EXPECT_EQ(scheduler.prefill_admission_coalesce_ms_, 100);
+
+    auto first  = makeStream({1}, model_config, runtime_config, resource_context);
+    auto second = makeStream({2}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+
+    auto future = std::async(std::launch::async, [&scheduler] { return scheduler.schedule(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    ASSERT_TRUE(scheduler.enqueue(second).ok());
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto result = future.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result->size(), 2);
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler.runningStreamsSize(), 2);
+}
+
+TEST_F(FIFOSchedulerTest, testPrefillAdmissionCoalescerTimesOutForSingleContext) {
+    autil::EnvGuard env("PREFILL_ADMISSION_COALESCE_MS", "100");
+    CacheConfig     cache_config = makeMhaCacheConfig(1, 8, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto            cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 8;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    FIFOScheduler scheduler(runtime_config,
+                            model_config,
+                            PDSepConfig{},
+                            ParallelismConfig{},
+                            ModelSpecificConfig{},
+                            cache_manager);
+
+    auto first = makeStream({1}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    const auto start   = std::chrono::steady_clock::now();
+    auto       result  = scheduler.schedule();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result->size(), 1);
+    EXPECT_GE(elapsed.count(), 60);
+    EXPECT_LT(elapsed.count(), 600);
+}
+
+TEST_F(FIFOSchedulerTest, testPrefillAdmissionCoalescerStopWakes) {
+    autil::EnvGuard env("PREFILL_ADMISSION_COALESCE_MS", "100");
+    CacheConfig     cache_config = makeMhaCacheConfig(1, 8, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto            cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 8;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    FIFOScheduler scheduler(runtime_config,
+                            model_config,
+                            PDSepConfig{},
+                            ParallelismConfig{},
+                            ModelSpecificConfig{},
+                            cache_manager);
+
+    auto first = makeStream({1}, model_config, runtime_config, resource_context);
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    auto future = std::async(std::launch::async, [&scheduler] { return scheduler.schedule(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    ASSERT_TRUE(scheduler.stop().ok());
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    auto result = future.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result->empty());
 }
 
 }  // namespace rtp_llm

@@ -13,6 +13,17 @@
 using namespace std;
 namespace rtp_llm {
 
+namespace {
+
+int readPrefillAdmissionCoalesceMs() {
+    // Default off. Keep the experiment bounded so a bad env cannot hold
+    // prefill admission indefinitely or turn the scheduler into a busy loop.
+    const int value = autil::EnvUtil::getEnv("PREFILL_ADMISSION_COALESCE_MS", 0);
+    return std::clamp(value, 0, 250);
+}
+
+}  // namespace
+
 FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_config,
                              const ModelConfig&                     model_config,
                              const PDSepConfig&                     pd_sep_config,
@@ -34,7 +45,8 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
         static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
     prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
-                         1) {
+                         1),
+    prefill_admission_coalesce_ms_(readPrefillAdmissionCoalesceMs()) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
                      "max_batch_tokens_without_cache is [%zu], cp_force_single_prefill is [%d], "
                      "prefill_cp_size is [%zu], max_inited_kv_cache_streams is [%zu], "
@@ -46,6 +58,8 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                      prefill_cp_size_,
                      max_inited_kv_cache_streams_,
                      static_cast<long long>(poll_interval_.count()));
+    RTP_LLM_LOG_INFO("prefill admission coalesce window is [%d] ms",
+                     prefill_admission_coalesce_ms_);
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -649,9 +663,21 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         || !waiting_group_queue_.empty()) {
         cond_.wait_for(lock, poll_interval_, [this] { return waitPredicate(); });
     } else if (!waiting_streams_.empty()) {
-        // No running work can release capacity. Poll PD-held block releases without turning a
-        // large retryable queue into a tight malloc/eviction loop.
-        cond_.wait_for(lock, std::chrono::milliseconds(100), [this] { return waitPredicate(); });
+        if (prefill_admission_coalesce_ms_ > 0 && running_streams_.empty() && new_streams_.empty()
+            && waiting_streams_.size() == 1 && waiting_streams_.front()->isContextStream()) {
+            // Hold the first context at an empty prefill boundary so an independent
+            // context arriving within the bounded window can share one execution
+            // batch. Enqueue/stop notify this wait; the normal admission path below
+            // still owns token, KV and batch limits.
+            schedule_trigger_ = false;
+            cond_.wait_for(lock,
+                           std::chrono::milliseconds(prefill_admission_coalesce_ms_),
+                           [this] { return stop_.load(std::memory_order_relaxed) || waiting_streams_.size() >= 2; });
+        } else {
+            // No running work can release capacity. Poll PD-held block releases without turning a
+            // large retryable queue into a tight malloc/eviction loop.
+            cond_.wait_for(lock, std::chrono::milliseconds(100), [this] { return waitPredicate(); });
+        }
     } else {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }

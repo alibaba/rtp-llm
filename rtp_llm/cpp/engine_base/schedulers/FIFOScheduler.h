@@ -127,6 +127,11 @@ private:
     // cache loads/waiters. CP padding is included. 0 disables it.
     const size_t max_batch_tokens_without_cache_ = 0;
     const size_t prefill_cp_size_                = 1;
+    // Default-off prefill admission coalescing window. A positive value holds an
+    // empty-boundary single context briefly so an independently arriving context
+    // can share the same execution batch. Existing admission/token/KV limits remain
+    // authoritative. Read once from PREFILL_ADMISSION_COALESCE_MS.
+    const int prefill_admission_coalesce_ms_ = 0;
 
     // Consumed (exchanged to 0) from the const fillExtraMetrics() reporting hook.
     mutable std::atomic<int64_t> pending_group_fallback_count_ = 0;
