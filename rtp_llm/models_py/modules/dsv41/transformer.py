@@ -25,6 +25,9 @@ from rtp_llm.models_py.modules.dsv41.bounded_replay import (
 )
 from rtp_llm.models_py.modules.dsv41.cp import CPContext, build_cp_context
 from rtp_llm.models_py.modules.dsv41.hc import build_hc_head
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    synchronized_moe_chunk_plan,
+)
 
 
 @dataclass
@@ -506,11 +509,14 @@ class V4Transformer(nn.Module):
         h = self.embed(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
         layer_forward_range = _profiler.make_layer_forward_range()
-        for layer_idx, layer in enumerate(self.layers):
-            with layer_forward_range(layer_idx):
-                h = layer.forward_decode(
-                    h, attn_metadata, input_ids_2d, kv_cache=kv_cache
-                )
+        with synchronized_moe_chunk_plan(
+            self.layers, input_ids_2d.numel(), input_ids_2d.device
+        ):
+            for layer_idx, layer in enumerate(self.layers):
+                with layer_forward_range(layer_idx):
+                    h = layer.forward_decode(
+                        h, attn_metadata, input_ids_2d, kv_cache=kv_cache
+                    )
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
         # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
         # return that directly (the next reshape would no-op anyway).
@@ -621,18 +627,19 @@ class V4Transformer(nn.Module):
             [0, S], dtype=torch.int64, device=input_ids.device
         )  # [2]
         layer_forward_range = _profiler.make_layer_forward_range()
-        for li, layer in enumerate(self.layers):
-            with layer_forward_range(li):
-                h_flat = layer(
-                    h_flat,
-                    input_ids_flat,
-                    positions,
-                    cu_seqlens,
-                    kv_cache=kv_cache,
-                    block_tables_by_type=block_tables_by_type,
-                )
-                if _rt_on:
-                    _rt.record(f"layer{li:02d}_out", h_flat)
+        with synchronized_moe_chunk_plan(self.layers, S, input_ids.device):
+            for li, layer in enumerate(self.layers):
+                with layer_forward_range(li):
+                    h_flat = layer(
+                        h_flat,
+                        input_ids_flat,
+                        positions,
+                        cu_seqlens,
+                        kv_cache=kv_cache,
+                        block_tables_by_type=block_tables_by_type,
+                    )
+                    if _rt_on:
+                        _rt.record(f"layer{li:02d}_out", h_flat)
         h = h_flat.unsqueeze(0)  # [1, S, hc, d]
         h = self._hc_head_reduce(h)  # [B, S, d]
         if _rt_on:
