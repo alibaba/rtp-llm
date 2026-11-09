@@ -39,6 +39,26 @@ class DecodeStateTest {
     }
 
     @Test
+    void extractedRecordsExposeAccessorsWithoutChangingObjectIdentity() throws Exception {
+        DecodeRequestState request = new DecodeRequestState(100L, 200L, 50, 1L);
+        request.setLastSeenAtMs(123L);
+        request.setWaitingForWorkerFinishedReport(true);
+        assertEquals(123L, request.getLastSeenAtMs());
+        assertTrue(request.isWaitingForWorkerFinishedReport());
+        assertEquals(1L, request.getReservationToken());
+        assertEquals(Object.class, DecodeRequestState.class.getMethod("equals", Object.class).getDeclaringClass());
+        assertEquals(Object.class, DecodeRequestState.class.getMethod("toString").getDeclaringClass());
+
+        PreemptionClaim claim = new PreemptionClaim(2L, ClaimOwner.SHADOW_IN_FLIGHT, 100L, 200L);
+        claim.setOwner(ClaimOwner.ENGINE_CONFIRMED);
+        claim.setReturnedInstruction(true);
+        assertEquals(ClaimOwner.ENGINE_CONFIRMED, claim.getOwner());
+        assertTrue(claim.isReturnedInstruction());
+        assertEquals(2L, claim.getAttemptToken());
+        assertEquals(Object.class, PreemptionClaim.class.getMethod("equals", Object.class).getDeclaringClass());
+    }
+
+    @Test
     void requestStatusRefreshesExpiryAndOtherRequestsDoNot() {
         WorkerStatus status = status();
         DecodeState state = new DecodeState(status);
