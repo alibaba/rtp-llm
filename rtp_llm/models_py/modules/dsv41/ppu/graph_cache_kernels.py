@@ -117,13 +117,20 @@ def _kernels():
         tl.store(pool + block * POOL_STRIDE + target, value, column < WIDTH)
 
     @triton.jit
-    def store_prefill_csa(pool, plan, rows, WIDTH: tl.constexpr):
+    def store_prefill_csa(pool, plan, rows, scores, WIDTH: tl.constexpr, SEPARATE: tl.constexpr):
         item = tl.program_id(0).to(tl.int64)
         target = tl.load(plan + 2 * item)
         source = tl.load(plan + 2 * item + 1)
-        column = tl.arange(0, WIDTH)
-        value = tl.load(rows + source * WIDTH + column)
-        tl.store(pool + target + column, value)
+        if SEPARATE:
+            column = tl.arange(0, WIDTH // 2)
+            value = tl.load(rows + source * (WIDTH // 2) + column)
+            score = tl.load(scores + source * (WIDTH // 2) + column)
+            tl.store(pool + target + column, value)
+            tl.store(pool + target + WIDTH // 2 + column, score)
+        else:
+            column = tl.arange(0, WIDTH)
+            value = tl.load(rows + source * WIDTH + column)
+            tl.store(pool + target + column, value)
 
     @triton.jit
     def assemble_cp_prefill_indices(
@@ -229,7 +236,7 @@ def try_write_cp_prefill_rows(pool, placement, host_table, request, start, rows,
     return stop - first
 
 
-def try_write_prefill_csa(pool, placement, host_table, request, start, length, rows):
+def try_write_prefill_csa(pool, placement, host_table, request, start, length, rows, *, scores=None):
     """Deduplicate latest raw states by physical address on the host."""
     end = start + rows.shape[0]
     last_page = (end - 1) // pool.span + 1
@@ -239,6 +246,7 @@ def try_write_prefill_csa(pool, placement, host_table, request, start, length, r
     owned_start = placement.rank * entries
     cycle = placement.full_entries
     first_page = start // pool.span
+    width = rows.shape[1] if scores is None else 2 * rows.shape[1]
     plan = {}
     for page, block in enumerate(host_table[request, first_page:last_page].tolist(), first_page):
         begin = max(start, page * pool.span)
@@ -250,11 +258,11 @@ def try_write_prefill_csa(pool, placement, host_table, request, start, length, r
         for offset in range(entries):
             last = stop - 1 - (stop - 1 - owned_start - offset) % cycle
             if last >= begin:
-                target = block * pool.tensor.stride(0) + offset * rows.shape[1]
+                target = block * pool.tensor.stride(0) + offset * width
                 plan[target] = last - start
     if plan:
         indices = torch.tensor(tuple(plan.items()), dtype=torch.int64).to(pool.tensor.device, non_blocking=True)
-        _kernels().store_prefill_csa[(len(plan),)](pool.tensor, indices, rows, rows.shape[1])
+        _kernels().store_prefill_csa[(len(plan),)](pool.tensor, indices, rows, scores, width, scores is not None)
     owned = _owned_before(end, cycle, owned_start, entries) - _owned_before(start, cycle, owned_start, entries)
     return owned, len(plan)
 

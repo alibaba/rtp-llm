@@ -200,7 +200,19 @@ class SharedNativeCache(NativeCacheBridge):
         self._copy_rows(key, request, positions, rows)
         self.writes.append(write)
 
-    def _try_store_prefill_range(self, key, request, start, rows):
+    def try_insert_csa_fields(self, layer, request, start, values, scores):
+        """Write separate producer fields directly into the existing CSA row."""
+        if not (
+            values.shape == scores.shape
+            and values.dtype in (torch.bfloat16, torch.float32)
+            and scores.dtype in (torch.bfloat16, torch.float32)
+            and scores.is_contiguous()
+            and scores.device == values.device
+        ):
+            return False
+        return self._try_store_prefill_range((layer, "csa_state"), request, start, values, scores=scores)
+
+    def _try_store_prefill_range(self, key, request, start, rows, *, scores=None):
         if (
             os.environ.get("RTP_V41_PPU_CP8_FUSED_COMPRESSED_STORE", "1") != "1"
             or not self.cp8_row_prep_enabled()
@@ -231,7 +243,7 @@ class SharedNativeCache(NativeCacheBridge):
                 return False
         else:
             counts = try_write_prefill_csa(
-                pool, placement, host, request, start, self.lengths[request], rows,
+                pool, placement, host, request, start, self.lengths[request], rows, scores=scores,
             )
             if counts is None:
                 return False

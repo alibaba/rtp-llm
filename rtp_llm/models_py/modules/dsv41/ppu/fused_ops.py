@@ -94,7 +94,7 @@ def _kernel():
         cosine = tl.load(address, mask=rotates, other=1.0)
         sine = tl.load(address + 1, mask=rotates, other=0.0)
         if INVERSE:
-            sine = -sine
+            sine = (sine.to(tl.int32, bitcast=True) ^ -2147483648).to(tl.float32, bitcast=True)
         rotated_real, rotated_imag = complex_multiply(real, imag, cosine, sine)
         tl.store(destination + pair * 2, tl.where(rotates, rotated_real, real))
         tl.store(destination + pair * 2 + 1, tl.where(rotates, rotated_imag, imag))

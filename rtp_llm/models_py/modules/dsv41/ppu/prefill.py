@@ -385,6 +385,7 @@ def _global_write_ranges(positions, request_ids, append_starts, prefill_layout):
 
 
 _PRODUCER_TILE_ENTRIES = 8192
+_DIRECT_PRODUCER_WRITE_ENV = "RTP_V41_PPU_CP8_DIRECT_PRODUCER_WRITE"
 
 
 def _producer_tiles(requests, ratio):
@@ -442,9 +443,18 @@ def _tiled_producer_inputs(
             counts = tuple((request[2] - request[1]) // ratio for request in tile)
             # Keep the GEMM shape of each request. Tile the row-local norm,
             # rotary embedding and codec around that BF16 rounding boundary.
-            projected = torch.cat(
-                [F.linear(rows, layer.index_wk.weight) for rows in latent.split(counts)]
-            )
+            weight = layer.index_wk.weight
+            if (
+                os.environ.get(_DIRECT_PRODUCER_WRITE_ENV, "0") == "1"
+                and not torch.is_grad_enabled()
+                and weight.is_contiguous()
+                and weight.dtype == latent.dtype
+            ):
+                projected = latent.new_empty((latent.shape[0], weight.shape[0]))
+                for rows, out in zip(latent.split(counts), projected.split(counts)):
+                    torch.mm(rows, weight.T, out=out)
+            else:
+                projected = torch.cat([F.linear(rows, weight) for rows in latent.split(counts)])
             projected = _rms_norm(projected, layer.index_k_norm, eps)
             packed_index = (
                 pack_rotary(projected, freqs, entry_positions, global_pool=False)
@@ -594,10 +604,20 @@ def _produce_global(
             state_positions = positions[state_rows]
             if not state_positions.numel():
                 continue
-            state = torch.cat((values[state_rows], scores[state_rows]), dim=-1).float()
+            state_values, state_scores = values[state_rows], scores[state_rows]
+            state_start = max(start, append)
+            if (
+                handle is None
+                and isinstance(state_rows, slice)
+                and isinstance(cache, SharedNativeCache)
+                and os.environ.get(_DIRECT_PRODUCER_WRITE_ENV, "0") == "1"
+                and cache.try_insert_csa_fields(layer_id, rid, state_start, state_values, state_scores)
+            ):
+                continue
+            state = torch.cat((state_values, state_scores), dim=-1).float()
             if handle is None:
                 cache.insert_request_rows(
-                    layer_id, "csa_state", rid, state_positions, state, start=max(start, append)
+                    layer_id, "csa_state", rid, state_positions, state, start=state_start
                 )
             else:
                 state_slots = cache.slots_at_positions(layer_id, "csa_state", rid, state_positions)
