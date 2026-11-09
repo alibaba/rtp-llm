@@ -33,7 +33,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     public record RtpTransferResult(boolean prefillFinished, RequestFailure failure) implements TransferResult {}
 
 
-    enum Phase { QUEUED, CAPACITY, KV_PREPARING, WAITING_LOAD, TRANSFERRING, TRANSFERRED, RUNNING, FORWARD, READY }
+    enum Phase { QUEUED, CAPACITY, WAITING_LOAD, TRANSFERRING, TRANSFERRED, RUNNING, FORWARD, READY }
     private final TaskHistory history;
     private final Object lock;
     protected final RtpConfig config;
@@ -54,11 +54,11 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         final RequestState state;
         final ArrayDeque<Notice> notices = new ArrayDeque<>();
         KvCacheManager.Lease lease;
-        KvCacheManager.Preparation preparation;
+        KvCacheManager.Failed preparation;
         long preparationStarted;
         boolean cacheMatchRequested;
 
-        int reused, remoteReused, outputToken;
+        int reused, outputToken;
         boolean prefillFinished;
         final long begun = System.nanoTime();
         long enqueuedAt = begun, waitNanos, firstToken;
@@ -81,7 +81,6 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         @Override public RequestState.Snapshot snapshot() { synchronized (lock) { return state.snapshot(); } }
         @Override public Progress progress() { synchronized (lock) { return progress; } }
         @Override public int reused() { synchronized (lock) { return reused; } }
-        @Override public int remoteReused() { synchronized (lock) { return remoteReused; } }
 
     }
     private record Member(GenerateStream request, RequestState.Use use, ComputeModel.Plan step) {}
@@ -149,15 +148,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     @Override public void prepareKvAndCheckTimeouts() {
         for (var stream : List.copyOf(active.values())) {
             if (!live(stream)) continue;
-            if (stream.preparation instanceof KvCacheManager.Loading loading) {
-                var result = loading.poll();
-                if (result instanceof KvCacheManager.Loading) continue;
-                stream.preparation = null;
-                stream.phase = prefill() ? QUEUED : Phase.CAPACITY;
-                completePreparation(stream, result);
-            } else if (!prefill() && stream.lease == null) {
-                prepare(stream);
-            }
+            if (!prefill() && stream.lease == null) prepare(stream);
         }
     }
 
@@ -223,7 +214,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         for (var stream : List.copyOf(queue)) {
             boolean ownedBefore = capped && ownsKv(stream);
             try {
-                if (!live(stream) || stream.preparation instanceof KvCacheManager.Loading) continue;
+                if (!live(stream)) continue;
                 if (admitted.size() >= config.maxGenerateBatchSize() || config.forceSinglePrefill() && !admitted.isEmpty()) break;
                 if (uncachedLimit > 0 && uncached >= uncachedLimit) continue;
                 if (stream.lease == null && capped && initialized >= config.maxInitedKvStreams()) continue;
@@ -238,7 +229,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         }
     }
     private boolean ownsKv(GenerateStream stream) {
-        return active.get(stream.input.identity()) == stream && (stream.lease != null || stream.preparation instanceof KvCacheManager.Loading);
+        return active.get(stream.input.identity()) == stream && stream.lease != null;
     }
     protected void removeWaiting(GenerateStream stream) { waiting.remove(stream); }
 
@@ -397,7 +388,6 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             stream.waitNanos = Math.max(0, now - stream.timingStarted);
         removeWaiting(stream);
         running.remove(stream);
-        if (stream.preparation instanceof KvCacheManager.Loading loading) loading.close();
         stream.preparation = null;
         stream.state.finish(failure);
     }
@@ -473,8 +463,8 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     private boolean prepare(GenerateStream stream) {
         if (stream.lease != null) return true;
         stream.preparationStarted = System.nanoTime();
-        if (stream.preparation instanceof KvCacheManager.Failed failed)
-            return completePreparation(stream, failed.retry());
+        if (stream.preparation != null)
+            return completePreparation(stream, stream.preparation.retry());
         boolean reuse = canReuseLocalKv(stream);
         var keys = stream.input.keys();
         if (prefill())
@@ -486,12 +476,6 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     }
 
     private boolean completePreparation(GenerateStream stream, KvCacheManager.Preparation result) {
-        if (result instanceof KvCacheManager.Loading loading) {
-            stream.preparation = loading;
-            stream.phase = KV_PREPARING;
-            stream.canRun = 0;
-            return false;
-        }
         if (result instanceof KvCacheManager.Failed failed) {
             stream.preparation = failed;
             if (failed.failure() == KvCacheManager.Failure.PERMANENT)
@@ -503,7 +487,6 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         stream.waitNanos = Math.max(0, System.nanoTime() - stream.timingStarted);
         stream.lease = ready.lease();
         stream.reused = Math.toIntExact(stream.lease.reusedTokens());
-        stream.remoteReused = ready.remoteReusedTokens();
         stream.state.attach(stream.lease, () -> {
             if (!config.reuseCache() || !config.deviceCache() || !stream.input.reuse()) return;
             // The final sampled token has not entered a Forward and owns no computed KV.
@@ -515,7 +498,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         if (stream.cacheMatchRequested) metrics.cacheMatched(ready.matchNanos());
         if (config.reuseCache() && stream.input.reuse())
             metrics.prepared((long) (stream.input.tokens() / config.cacheBlockSize()) * config.cacheBlockSize(),
-                stream.reused - stream.remoteReused, System.nanoTime() - stream.preparationStarted);
+                stream.reused, System.nanoTime() - stream.preparationStarted);
         if (!prefill()) {
             stream.phase = WAITING_LOAD;
             enqueue(stream, () -> { if (liveForDelivery(stream)) stream.listener.allocated(stream); }, false);
@@ -526,19 +509,18 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     @Override public QueueSnapshot queues() { return queueSnapshot(false); }
 
     private QueueSnapshot queueSnapshot(boolean reportRound) {
-        int queued = 0, executing = 0, kvLoading = 0, protocolWaiting = 0, ready = 0;
+        int queued = 0, executing = 0, protocolWaiting = 0, ready = 0;
         for (var stream : active.values()) {
             if (stream.state.terminating()) continue;
             if (running.contains(stream)) executing++;
             else switch (stream.phase) {
                 case QUEUED, CAPACITY -> queued++;
-                case KV_PREPARING -> kvLoading++;
                 case READY, TRANSFERRING, TRANSFERRED -> ready++;
                 case WAITING_LOAD, RUNNING, FORWARD -> protocolWaiting++;
             }
         }
-        if (reportRound) metrics.schedulerRound(queued, executing, kvLoading);
-        return new QueueSnapshot(queued, executing, kvLoading + protocolWaiting, ready);
+        if (reportRound) metrics.schedulerRound(queued, executing);
+        return new QueueSnapshot(queued, executing, protocolWaiting, ready);
     }
 
     @Override public long nextDeadline() {

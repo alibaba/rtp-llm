@@ -4,7 +4,7 @@
 
 事件类原指标名在本表表示逻辑指标：Prometheus 使用该名的 `_sum` / `_count` 累计系列计算事件加权均值，KMonitor 使用原名提交原始样本；不再导出裸事件窗口均值 Gauge。
 
-状态表示源码中是否有对应导出，不表示每次实验必有样本。待埋点项仅保留查询/说明，不增加虚假指标；资源项因共享 JVM 归属未接线，暂不绑定每 Engine 查询。
+状态表示源码中是否有对应导出，不表示每次实验必有样本。待埋点项仅保留查询/说明，不增加虚假指标；Engine 进程资源项暂未接入。
 
 TPS 以当前分支 Real 的 `RtpLLMMetrics.h/.cc` 和 `MtpExecutor.cc` 为合同：context 是有效执行速率，context wall 是实际窗口墙钟速率，generate/total 是报告窗口 token 数。Decode 分子为本轮验收量，独立于交付截断；各 priority 共享整批时间。ViT embedding TPS 已接入原始计算 token 的累计速率；命中与 in-flight 去重不重复计数。P/D KV 仅展示本地 Device 池，真实 CacheStore 传输阶段没有样本。
 

@@ -169,7 +169,7 @@ async def progress(ctx, args: Empty) -> int:
     for node in ctx.runtime.topology.active():
         if node['role'] == 'client':
             value = await post(node['control'], {'interface': 'worker/state', 'args': {'sequence': 1},
-                'context': {'run': 'foreground', 'query_time': ctx.query_time, 'observation': None, 'timeout_ms': 1000}})
+                'timeout_ms': 1000})
             successes += value['outcomes']['success']
     return successes
 

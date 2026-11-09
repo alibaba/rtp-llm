@@ -29,7 +29,7 @@ Master 使用 127.0.0.1、127.0.0.2 等地址，相同 HTTP 端口，gRPC=HTTP+2
 
 原生输入与配置不叠加 Mock 自定的 URL 长度、图片数量、图片边长、特征行数、并发 1024 等上限。保留输入格式、正数和整数溢出校验，以及原生配置对应的计算、队列和缓存预算。
 
-节点仅监听本机回环地址；每个实例独立绑定原生 gRPC、控制 HTTP 和指标端点，共 JVM 不合并这些端点。`endpoints.json` 写实际地址、支持的 RPC 和阶段范围；`/health` 只列已绑定的公共接口，当前 Engine 没有绑定 Case 查询接口，Python 查询直接访问 Prometheus。
+节点仅监听本机回环地址；每个实例独立绑定原生 gRPC、控制 HTTP 和指标端点。`endpoints.json` 写实际地址、支持的 RPC 和阶段范围；`/health` 只列已绑定的公共接口，当前 Engine 没有绑定 Case 查询接口，Python 查询直接访问 Prometheus。
 
 ```yaml
 environment:
@@ -140,7 +140,7 @@ P/D/V 的入口统一为 `java -jar java/engine/target/mock-engine-service-1.0-S
 
 EngineMain 在本地发布配置、端点和 ready，Whale 模式仅记录启动日志。HTTP 健康检查与原生 CheckHealth 使用相同检查链。内部执行故障使进程非零退出，TERM 触发资源释放。
 
-镜像和 CI 使用方法见 [Whale 镜像与启动](whale-engine.md)。无论是否共 JVM，VP/PD 都走 TCP、只传元数据。
+镜像和 CI 使用方法见 [Whale 镜像与启动](whale-engine.md)。VP/PD 都走 TCP、只传元数据。
 
 ## Compute、Forward、Decode 和 EOS
 
@@ -324,7 +324,7 @@ RTP 后端的 RtpMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独
 
 TPOT 的计时从选批和 KV 准备完成后、开始构造批输入时开始，到模拟计算完成回调进入输出处理前结束。它独立于原有 `rtp_llm_step_latency_us` 的“调度返回到处理完输出”边界。分母使用现有简化 Decode 模型给出的本轮验收 token 数，对应 Real 验证阶段 `accept_len` 的采样位置，不新增 draft、verify 或 acceptance 内部指标。EOS、max_new_tokens、max_seq_len 限制只截断交付量，不回写本轮验收统计。选批前已取消的 stream 不参与；入批后取消但计算已完成的 stream 仍参与该批统计，其 token 不交付；整轮计算中止而无完成结果时不产生 TPOT 样本。Prefill 不产生该 Decode 指标。
 
-选批完成后采样 `rtp_llm_wait_stream_size`、`rtp_llm_running_stream_size` 和 `rtp_llm_loading_cache_stream_size`。有排队或加载请求的空批轮次也采样。KMonitor 每轮接收原始样本，Prometheus 用 `_sum`、`_count` 计算调度轮均值。`rtp_llm_scheduler_requests` 继续在采集时读取实时队列，用于排查。KV 容量、索引条目数和占用率使用周期采样。
+选批完成后采样 `rtp_llm_wait_stream_size` 和 `rtp_llm_running_stream_size`。本地 KV 同步准备，同轮的 `rtp_llm_loading_cache_stream_size` 为 0。KMonitor 接收原始样本，Prometheus 用 `_sum` 和 `_count` 计算轮均值。`rtp_llm_scheduler_requests` 用于实时排查。KV 容量、索引条目数和占用率使用周期采样。
 
 Prefill 的 context TPS 用计算 token／执行时间，含缓存 TPS 用输入 token／执行时间；执行边界从本批调度开始到处理完输出，与辅助累计执行秒数一致。墙钟 TPS 使用对应 token／实际 TPS 窗口。Decode 的 generate 和 total 保留 Real 的窗口计数，使用本轮验收 token，包含完成计算后才取消的成员，不受 EOS、最大输出长度截断；已提交输出独立保留在 Forward output Counter 中，用它计算真实交付吞吐。不得把原生 generate/total 当作 token/s，也不得对它们求 rate。窗口计数的可比性依赖实际报告间隔，跨部署不能直接比较不同长度窗口的原始数值。
 
@@ -332,7 +332,7 @@ TPS 的各 priority 共用整批有效执行时间和墙钟窗口，分桶分子
 
 没有 real 同名指标的真实观测，以 RTP Prometheus 辅助 Counter/Histogram 保留供 Python 门禁和统计使用，不拿它们的累计值直接冒充线上 QPS/TPS Gauge。理论 Forward、ViT 运行图片数和 hash 缓存预算保留 `mock_` 前缀。此次更名不保留旧 `mock_engine_*` 别名；旧实验保持原始 view.json 和 TSDB，不承诺新查询可以直接读取旧指标名。
 
-P/D 已补 `rtp_llm_{context,generate}_batch_size`、执行 Token 数、最长序列、逐请求等待/首 Token/总延迟、输入/输出长度与迭代数；`rtp_llm_stream_loading_cache_latency_us` 只统计 allocator loading 阶段，PD 协议等待不再混入。Query batch 的 native 语义是 beam 数，不能用调度批大小代替。
+P/D 已补 `rtp_llm_{context,generate}_batch_size`、执行 Token 数、最长序列、逐请求等待/首 Token/总延迟、输入/输出长度与迭代数。Query batch 的 native 语义是 beam 数，不能用调度批大小代替。
 
 ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embedding 队列/等待/Forward/合批、请求图片数/输出长度，以及缓存命中/未命中/在途合并/淘汰和逻辑驻留量均按 real 名称导出。实际读取时提供 rtp_llm_vit_image_fetch_rt_us（μs）；成功完成图片准备后采样总耗时、下载及其余耗时（ms）。其余耗时包括读尺寸、内容摘要和几何计算。跳过读取时这些指标无样本。py_rtp_vit_preprocess_queue_size 是尚未完成准备的工作数（含排队和执行），py_rtp_vit_embedding_rt 仅计成功工作的就绪排队加 Forward，py_rtp_vit_request_rt 覆盖阻塞媒体调用的成功/失败全程，包括缓存命中等待但不含 RPC 传输和输出编码。未实现的像素预处理和 CUDA Graph 指标不补零。详见 [指标覆盖与边界](../views/README.md)。
 
@@ -393,29 +393,17 @@ KVCM Reporter 发布有效块事件、快照和心跳。它不承担 KV payload 
 real 的依据为 `cpp/engine_base/stream/GenerateStream.cc`、`GenerateStateMachine.cc`、`cpp/model_rpc/RpcServerRuntimeMeta.h`、`LocalRpcServer.cc`、`cpp/metrics/RtpLLMMetrics.cc` 和 `cache/block_tree_cache/storage_backend/kvcm/KVCMStorageBackend.cc`。
 
 - WorkerStatus 的 `phase/is_waiting` 描述当前任务：缓存准备中、有 Lease 为 KV_ALLOCATED/is_waiting=true，首次进入 Forward 为 RUNNING。real LocalRpcServer 未填写 waiting_query_len/running_query_len，Mock 同样保留 protobuf 默认 0；不能用这两个字段判断在途请求，应读任务列表。
-- 活动 TaskInfo 的 execution_time_ms=-1、waiting_time_ms=0，终态才提交实际耗时。waiting 不是累计队列驻留时间：每次离开 WAITING 更新为请求起点至本次转换的时间；正常加载后再次进入 RUNNING 时，包含加载和重新排队。若在 LOADING_CACHE 内取消，保留此前离开 WAITING 时的等待值。execution_time_ms=终态总耗时−waiting_time_ms，因此取消加载的执行耗时可能包含加载时间，不能解释成纯计算。D 的正常 GENERATE 开始重置执行计时起点，原请求 deadline 不变。
-- `rtp_llm_wait_stream_size` 仅统计等待调度队列；`rtp_llm_loading_cache_stream_size` 仅统计 allocator CACHE_LOADING，不含 D 的 ALLOCATE/LOAD 协议等待。通用 rtp_llm_scheduler_requests 的 loading 仍可包含协议等待，两者不是同一语义。
-- `rtp_llm_wait_latency_us` 使用上述冻结的 waiting；`rtp_llm_stream_enqueue_to_canrun_us` 为首次调度准入之前的等待，`rtp_llm_stream_canrun_to_running_us` 包含缓存准备到首次运行；`rtp_llm_stream_loading_cache_latency_us` 为进入加载到调度器观察完成，`rtp_llm_stream_load_done_to_running_us` 为观察完成到首次运行。单位均为微秒；按 real 的终态触发和 REPORT_GAUGE 行为省略零样本，不把 PD 零耗时传输的 RPC 等待冒充缓存加载耗时。
+- 活动 TaskInfo 的 execution_time_ms=-1、waiting_time_ms=0。终态提交实际耗时，execution_time_ms 为总耗时减 waiting_time_ms。D 的 GENERATE 开始重置执行计时起点，沿用请求 deadline。
+- `rtp_llm_wait_stream_size` 统计等待调度队列。实时 `rtp_llm_scheduler_requests` 的 loading 可包含 D 的协议等待。
+- `rtp_llm_wait_latency_us` 记录调度等待，`rtp_llm_stream_enqueue_to_canrun_us` 为首次调度准入之前的等待，`rtp_llm_stream_canrun_to_running_us` 包含缓存准备到首次运行。单位均为微秒。
 
-### 缓存与远端指标
+### 本地缓存准备指标
 
-| 名称 | 单位／触发边界 |
+| 名称 | 单位和触发点 |
 | --- | --- |
-| rtp_llm_device_input_length | tokens，完整输入 key 数乘 block stride，不是原始输入的未取整长度。 |
-| rtp_llm_stream_cache_device_reuse_length / memory_reuse_length / remote_reuse_length | tokens，缓存准备成功或安全回退时的有效来源；查询命中未读成功不算 remote reuse。 |
-| rtp_llm_kv_cache_load_qps / load_fail_qps | 次/s，异步准备结算；失败回退或取消计失败，纯本地立即完成不计异步 load。 |
-| rtp_llm_kv_cache_load_prepare_latency_us / load_wait_latency_us | 微秒，同步准备耗时／准备返回后至调度器结算的等待。 |
-| rtp_llm_kv_cache_match_to_ready_latency_us | 微秒，准备起点至结算；保留 real 的 load_attempted=true/false 标签。 |
-| rtp_llm_remote_match_qps / match_fail_qps / match_time_us | 次/s、微秒，实际调用远端 match；失败和无匹配分别处理。 |
-| rtp_llm_remote_match_reuse_block_num / remote_valid_hit_ratio | 远端匹配块数／(本地+远端匹配块数)/请求 key 数，ratio 为 0–1；非零远端匹配时才记录 ratio，尚不保证 read 成功。 |
-| rtp_llm_remote_read_qps / read_fail_qps / read_task_cost_time_us / read_token_num | 次/s、微秒、tokens；按实际 read 调用，只有成功读取才记录非零逻辑 tokens，不乘 TP 或 payload group 数。 |
-| rtp_llm_remote_write_qps / write_fail_qps / write_task_cost_time_us / write_cache_block_num | 次/s、微秒、blocks；包含 write 完成确认。适配器返回实际成功发布块数，已存在可返回 0；后台写失败可见，不改变已完成请求结果。 |
-| rtp_llm_kv_cache_load_ref_blocks / store_ref_blocks / active_blocks | blocks，Device 池拉取当前状态；统计去重块数，不是引用次数；取消请求后未停止的 I/O 仍占用引用。沿用 pool_name/tier 标签。 |
-| mock_remote_cache_in_flight / mock_remote_cache_rejected_qps | 次、次/s，operation=read/write；Mock 自身逻辑在途任务、未实际调用后端的任务。无完全对应的 native 统计边界，所以保留 mock 前缀。 |
-
-延迟/长度事件沿用上述 EventMetrics 规则；Prometheus 的累计 sum/count 保留事件权重，KMonitor 接收原始样本。没有真实 SDK、StartWrite/FinishWrite 分段或 payload 时，不导出对应 SDK、写会话分段、字节或带宽数据。指标回调失败不改变 I/O 结果。
-
-请求类零值规则对齐 Real 的 REPORT_GAUGE：等待/首 token 耗时、输出长度、迭代次数和 reuse_length 为零时不产生样本。KV 复用类使用直接 Report，kv_cache_reuse_length 等仍包含零命中样本；不能统一过滤零值。
+| rtp_llm_device_input_length | tokens，完整输入块覆盖的 token 数。 |
+| rtp_llm_stream_cache_device_reuse_length | tokens，本地 KV 准入时复用的 token 数。 |
+| rtp_llm_kv_cache_match_to_ready_latency_us | 微秒，从准备到 KV 就绪，load_attempted=false。 |
 
 ### 输出交付边界
 

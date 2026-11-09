@@ -139,12 +139,12 @@ final class RtpMetrics {
         }.register(registry);
     }
 
-    void schedulerRound(int waiting, int running, int loading) {
-        boolean active = waiting > 0 || running > 0 || loading > 0;
+    void schedulerRound(int waiting, int running) {
+        boolean active = waiting > 0 || running > 0;
         if (active || schedulingActive) {
             events.observe("rtp_llm_wait_stream_size", waiting);
             events.observe("rtp_llm_running_stream_size", running);
-            events.observe("rtp_llm_loading_cache_stream_size", loading);
+            events.observe("rtp_llm_loading_cache_stream_size", 0); // KV prepare is synchronous.
         }
         schedulingActive = active;
     }

@@ -15,19 +15,19 @@ class EndpointRegistry:
     def __init__(self, directory):
         self.directory = directory
         self._active = {}
-        self._publishers = []
+        self._publish_discovery = None
 
     def active(self, role=None):
         return copy.deepcopy([node for node in self._active.values() if role is None or node['role'] == role])
 
-    def add_publisher(self, publish):
-        self._publishers.append(publish)
+    def set_discovery_publisher(self, publish):
+        self._publish_discovery = publish
 
     def publish(self):
         snapshot = self.active()
         write_json(self.directory / 'topology.json', snapshot)
-        for publish in self._publishers:
-            publish(copy.deepcopy(snapshot))
+        if self._publish_discovery is not None:
+            self._publish_discovery(snapshot)
 
     def register(self, name, role, control, endpoint=None):
         if name in self._active:
@@ -62,7 +62,7 @@ class RunEnvironment:
         self.masters = MasterRole(component=case.environment.get('master'), recipe=launch['components'].get('master'),
             environment=case.environment, election=launch.get('zookeeper'), supervisor=self.supervisor,
             topology=self.topology, records=records, monitoring=self.monitoring)
-        self.topology.add_publisher(self.masters.publish_discovery)
+        self.topology.set_discovery_publisher(self.masters.publish_discovery)
         self.engines = EngineRole(supervisor=self.supervisor, topology=self.topology, records=records,
             environment=case.environment, recipes=launch['components'], monitoring=self.monitoring)
         self.clients = ClientManager(environment=case.environment, component=case.environment.get('client'), recipe=launch['components'].get('client'),

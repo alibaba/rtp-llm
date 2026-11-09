@@ -15,15 +15,21 @@ from mock_framework.execution import ExecutionError
 def test_topology_readers_and_publishers_cannot_mutate_current_instances(tmp_path):
     topology = EndpointRegistry(tmp_path)
     received = []
-    topology.add_publisher(lambda nodes: nodes[0].update(rpc='corrupted') if nodes else None)
-    topology.add_publisher(lambda nodes: received.append(nodes))
+    def publish(nodes):
+        received.append(nodes)
+        if nodes:
+            nodes[0]['rpc'] = 'corrupted'
+
+    topology.set_discovery_publisher(publish)
     endpoint = {'rpc': '127.0.0.1:1001', 'control': 'http://127.0.0.1:1002', 'extra': {'value': 1}}
     topology.register('prefill-0', 'prefill', endpoint['control'], endpoint)
     endpoint['extra']['value'] = 2
     topology.active()[0]['extra']['value'] = 3
     assert topology.active('decode') == []
     assert topology.active()[0]['extra']['value'] == 1
-    assert received[-1][0]['rpc'] == '127.0.0.1:1001'
+    assert received[-1][0]['rpc'] == 'corrupted'
+    assert topology.active()[0]['rpc'] == '127.0.0.1:1001'
+    assert json.loads((tmp_path / 'topology.json').read_text())[0]['rpc'] == '127.0.0.1:1001'
     with pytest.raises(ExecutionError, match='identity'):
         topology.register('prefill-0', 'prefill', endpoint['control'], endpoint)
     with pytest.raises(ExecutionError, match='RPC address'):
