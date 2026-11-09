@@ -108,7 +108,7 @@ def _resolve_state_pages(
 ) -> tuple[list[int], list[list[int]]]:
     """Return the read page and speculative write pages for each sequence.
 
-    ``sequence_lengths`` is RTP's ``sequence_lengths_plus_1_d``: its value is
+    ``sequence_lengths`` is RTP's ``sequence_lengths_plus_1_device``: its value is
     the total sequence length after the first token in this invocation.  RTP's
     continuous-batching contract reads the state before that token from
     ``(length - 2) // block_size`` and stores every speculative token in a

@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
 from rtp_llm.models_py.model_desc.block_map import (
@@ -29,7 +30,13 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     RMSResNorm,
 )
-from rtp_llm.device.device_type import DeviceType, get_device_type
+from rtp_llm.models_py.triton_kernels.causal_conv1d import (
+    CausalConv1dMetadata,
+    causal_conv1d_fn,
+    causal_conv1d_update,
+    prepare_causal_conv1d_metadata,
+)
+from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
 from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_decode import (
     AiterFlydslGdnDecodeStateMetadata,
@@ -45,11 +52,21 @@ from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_prefill import (
     is_aiter_flydsl_gdn_prefill_available,
     is_aiter_flydsl_gdn_prefill_supported,
 )
+from rtp_llm.models_py.triton_kernels.fla.block import (
+    load_initial_state_from_block_map,
+    store_ssm_state_to_block_map,
+)
 from rtp_llm.models_py.triton_kernels.fla.chunk import (
+    chunk_gated_delta_rule,
     chunk_gated_delta_rule_flydsl_with_cache_store,
     is_flydsl_chunk_gdn_enabled,
     is_flydsl_chunk_gdn_shape_supported,
 )
+from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
+    fused_recurrent_gated_delta_rule,
+)
+from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -96,17 +113,22 @@ else:
         prepare_causal_conv1d_metadata,
     )
     from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
+    from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
     from rtp_llm.models_py.triton_kernels.fla.block import (
         load_initial_state_from_block_map,
         store_ssm_state_to_block_map,
     )
     from rtp_llm.models_py.triton_kernels.fla.chunk import (
         chunk_gated_delta_rule,
+        chunk_gated_delta_rule_flydsl_with_cache_store,
+        is_flydsl_chunk_gdn_enabled,
+        is_flydsl_chunk_gdn_shape_supported,
     )
     from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
         fused_recurrent_gated_delta_rule,
     )
     from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +152,24 @@ class _AiterFlydslGdnDecodeCacheEntry:
     read_indices: torch.Tensor
     write_indices: torch.Tensor
     invalid_row_flags: torch.Tensor
+
+# ROCm Aiter FlyDSL GDN kernels are imported unconditionally: module-level
+# code below (class bodies, __init__ type annotations) references these names
+# on every platform; calls are guarded at runtime.
+from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_decode import (
+    AiterFlydslGdnDecodeStateMetadata,
+    _is_aiter_flydsl_gdn_decode_disabled,
+    aiter_flydsl_gdn_decode,
+    is_aiter_flydsl_gdn_decode_supported,
+    prepare_aiter_flydsl_gdn_decode_state_indices,
+    validate_aiter_flydsl_gdn_decode_real_state_indices,
+)
+from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_prefill import (
+    build_aiter_flydsl_gdn_prefill_metadata,
+    chunk_gated_delta_rule_aiter_flydsl_with_intermediate_states,
+    is_aiter_flydsl_gdn_prefill_available,
+    is_aiter_flydsl_gdn_prefill_supported,
+)
 
 
 class Qwen3NextMetadata(object):
@@ -202,8 +242,6 @@ def _maybe_write_cp_cache_store(
 
 def _is_aiter_flydsl_gdn_prefill_enabled() -> bool:
     """Automatically select the complete optional ROCm backend when present."""
-    if _IS_ASCEND:
-        return False
     return is_aiter_flydsl_gdn_prefill_available()
 
 
@@ -586,11 +624,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         # M >= 2048: scatter_qkv (Triton, SGLang port) avoids the .view() ->
         # .contiguous() copies that torch.split + view triggers. Below 2048,
         # kernel launch overhead beats the savings (microbench measured).
-        if (
-            mixed_qkv.shape[0] >= 2048
-            and self.head_k_dim == self.head_v_dim
-            and not _IS_ASCEND
-        ):
+        if mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
             query, key, value = scatter_qkv(
                 mixed_qkv,
                 self.local_num_k_heads,
@@ -628,7 +662,6 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         )
         use_flydsl_chunk_gdn = (
             not use_aiter_flydsl_gdn
-            and not _IS_ASCEND
             and is_flydsl_chunk_gdn_enabled()
             and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)
         )
@@ -792,15 +825,16 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         )
         origin_shape = mixed_qkv.shape
         mixed_qkv = mixed_qkv.reshape(batch, seq, -1).transpose(1, 2)
-        # The AscendC operator consumes the raw paged pool view
-        # (pages, state_len, dim); the Triton kernel keeps (page, dim, state).
+        # Single consumer path: causal_conv1d_update dispatches to the
+        # device-metadata AscendC operator for single-token decode (shared by
+        # eager and aclgraph capture); conv_states is the raw pool view
+        # (pages, state_len, dim).
         out = causal_conv1d_update(
             mixed_qkv,
-            conv_states if _IS_ASCEND else conv_states.transpose(1, 2),
+            conv_states,
             self.conv_weights,
             bias=None,
             activation="silu",
-            cache_seqlens=None,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
@@ -1011,6 +1045,7 @@ class Qwen3NextAttention(CausalAttention):
         layernorm_eps: float,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        layer_idx: int = 0,
     ):
         super().__init__(
             attn_config,
@@ -1019,6 +1054,7 @@ class Qwen3NextAttention(CausalAttention):
             layernorm_eps,
             quant_config,
             hw_kernel_config=hw_kernel_config,
+            layer_idx=layer_idx,
         )
         # maybe fuse gate in qkv_proj later
         self.gate = LinearFactory.create_linear_from_weights(
@@ -1280,11 +1316,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 seq_size_per_block,
             )
 
-        if (
-            full_mixed_qkv.shape[0] >= 2048
-            and gdn.head_k_dim == gdn.head_v_dim
-            and not _IS_ASCEND
-        ):
+        if full_mixed_qkv.shape[0] >= 2048 and gdn.head_k_dim == gdn.head_v_dim:
             query, key, value = scatter_qkv(
                 full_mixed_qkv,
                 gdn.local_num_k_heads,
@@ -1307,8 +1339,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             value = value.view(1, -1, gdn.local_num_v_heads, gdn.head_v_dim)
 
         use_flydsl_chunk_gdn = (
-            not _IS_ASCEND
-            and is_flydsl_chunk_gdn_enabled()
+            is_flydsl_chunk_gdn_enabled()
             and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)
         )
         if use_flydsl_chunk_gdn:
@@ -1379,11 +1410,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
 
         # Per-head gated RMSNorm (weight is [head_dim], not [hidden]).
         local_attn_out = self.norm(
-            local_attn_out.reshape(-1, self.head_v_dim),
-            z.reshape(-1, self.head_v_dim),
-        )
-        local_attn_out = local_attn_out.reshape(
-            -1, self.local_num_v_heads * self.head_v_dim
+            local_attn_out.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
         )
         local_attn_out = self.out_proj(local_attn_out)
         return local_attn_out
@@ -1463,6 +1490,8 @@ class Qwen3NextDecoderLayer(nn.Module):
             attn_configs = config.getAttentionConfigs(
                 parallelism_config.get_attn_tp_size()
             )
+            # layer_idx must reach CausalAttention: hybrid models pick the KV
+            # cache group (and thus the block table / slot mapping) by layer.
             self.self_attn = Qwen3NextAttention(
                 attn_configs,
                 parallelism_config,
@@ -1470,6 +1499,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 config.quant_config,
                 hw_kernel_config=hw_kernel_config,
+                layer_idx=layer_idx,
             )
 
         if config.moe_style in (1, 2):
@@ -1870,10 +1900,6 @@ class Qwen35Model(Qwen3NextModel):
         text_tokens_mask = inputs.embedding_inputs.text_tokens_mask
         mm_features = inputs.multimodal_inputs.multimodal_features
         mm_feature_locs = inputs.multimodal_inputs.mm_features_locs
-
-        inputs_embeds = self.embed_tokens(
-            input_ids, position_ids, token_type_ids, text_tokens_mask
-        )
         hidden_states = self.multimodal_embedding_injector(
             inputs_embeds, mm_features, mm_feature_locs
         )
