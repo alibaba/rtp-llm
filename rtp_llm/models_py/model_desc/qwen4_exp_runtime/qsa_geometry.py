@@ -14,13 +14,14 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
 from .qsa_cache_views import (
     _block_table,
     _required_blocks_verdict,
+    _side_tables_verdict,
     _typed_2d_pool,
     _validate_required_blocks,
     qsa_assert_valid,
     qsa_strict_validation_enabled,
 )
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
-from .qsa_step_plan import get_prefill_step_plan
+from .qsa_step_plan import get_prefill_step_plan, host_input_mirror
 
 
 def _draft_incremental_prefill_geometry(
@@ -116,24 +117,9 @@ def _draft_incremental_prefill_geometry(
             pool_blocks=int(kv_pool.shape[0]),
             tag=INDEXER_KV_TAG,
         )
-    else:
-        qsa_assert_valid(
-            _required_blocks_verdict(
-                kv_table,
-                step.required_kv_columns,
-                pool_blocks=int(kv_pool.shape[0]),
-            ),
-            "QSA cache 'indexer_kv' block table does not cover or resolve the "
-            "draft incremental tail",
-        )
-
-    # A completed group may read committed raw keys preceding the new rows.
-    # Validate that source tail and every destination absolute state page.
-    # Production folds the per-request, per-block state_table[i, j].item()
-    # loop into one required-blocks verdict over the full [0, required) prefix
-    # window (a superset of the old tail window); strict mode keeps the
-    # original per-block diagnostics.
-    if qsa_strict_validation_enabled():
+        # A completed group may read committed raw keys preceding the new
+        # rows. Validate that source tail and every destination absolute
+        # state page, keeping the original per-block diagnostics.
         state_table_width = int(state_table.shape[1])
         for request_idx, (prefix, length) in enumerate(
             zip(step.prefix_values, step.lengths)
@@ -156,14 +142,22 @@ def _draft_incremental_prefill_geometry(
                         "to an unallocated or out-of-range physical block"
                     )
     else:
+        # Both verdict groups validate step-frozen inputs (the same table
+        # tensors and required-column vectors for every layer of a step)
+        # against this layer's pool block counts, so one dual-table
+        # reduction plus one async assert replaces the two separate
+        # verdict/assert pairs per layer (six device launches -> two).
         qsa_assert_valid(
-            _required_blocks_verdict(
+            _side_tables_verdict(
+                kv_table,
+                step.required_kv_columns,
                 state_table,
                 step.required_state_columns_device,
-                pool_blocks=int(state_pool.shape[0]),
+                kv_pool_blocks=int(kv_pool.shape[0]),
+                state_pool_blocks=int(state_pool.shape[0]),
             ),
-            "QSA cache 'indexer_state' draft incremental tail is not covered or "
-            "resolves to an unallocated or out-of-range physical block",
+            "QSA cache 'indexer_kv'/'indexer_state' block table does not cover "
+            "or resolve the draft incremental tail",
         )
 
     return IncrementalPrefillPlan(
@@ -276,17 +270,21 @@ def _target_verify_geometry(
         )
     if graph_target and prefixes.device.type != "cpu":
         raise RuntimeError("qwen4_exp QSA target Graph requires host prefixes")
-    if graph_target and bool(torch.any(prefixes < 0).item()):
+    # Request-data sign check on the host source/mirror: the graph branch
+    # already read the pinned host tensor for free, and the eager branch now
+    # does the same instead of synchronizing the device copy per layer. A
+    # device source (RTP_LLM_DEVICE_INPUT) is read back once per model step
+    # through the shared mirror cache.
+    prefixes_host = host_input_mirror(self.main_inputs, "prefix_lengths")
+    if prefixes_host is None:
+        prefixes_host = prefixes
+    if bool(torch.any(prefixes_host < 0).item()):
         raise RuntimeError(
             "qwen4_exp QSA target-verify prefix lengths must be non-negative"
         )
     prefixes_device = prefixes.to(
         device=device, dtype=torch.int32, non_blocking=True
     ).contiguous()
-    if not graph_target and bool(torch.any(prefixes_device < 0).item()):
-        raise RuntimeError(
-            "qwen4_exp QSA target-verify prefix lengths must be non-negative"
-        )
 
     expected_cu = torch.arange(
         0,
@@ -305,9 +303,17 @@ def _target_verify_geometry(
             "qwen4_exp QSA target-verify cu_seqlens do not match gamma+1"
         )
     if not graph_target:
-        if not bool(torch.equal(cu_seqlens, expected_cu)):
-            raise RuntimeError(
-                "qwen4_exp QSA target-verify cu_seqlens do not match gamma+1"
+        if qsa_strict_validation_enabled():
+            if not bool(torch.equal(cu_seqlens, expected_cu)):
+                raise RuntimeError(
+                    "qwen4_exp QSA target-verify cu_seqlens do not match gamma+1"
+                )
+        else:
+            # Per eager target-verify layer: enqueue-only device verdict; a
+            # mismatch traps fail-stop at the next host synchronization.
+            qsa_assert_valid(
+                (cu_seqlens == expected_cu).all(),
+                "qwen4_exp QSA target-verify cu_seqlens do not match gamma+1",
             )
     cu_kv_seqlens = self.main_inputs.cu_kv_seqlens_device
     if (
@@ -321,9 +327,17 @@ def _target_verify_geometry(
     if not graph_target:
         expected_cu_kv = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
         expected_cu_kv[1:] = (prefixes_device + query_len).cumsum(0)
-        if not bool(torch.equal(cu_kv_seqlens, expected_cu_kv)):
-            raise RuntimeError(
-                "qwen4_exp QSA target-verify cu_kv_seqlens do not match prefix+gamma+1"
+        if qsa_strict_validation_enabled():
+            if not bool(torch.equal(cu_kv_seqlens, expected_cu_kv)):
+                raise RuntimeError(
+                    "qwen4_exp QSA target-verify cu_kv_seqlens do not match "
+                    "prefix+gamma+1"
+                )
+        else:
+            qsa_assert_valid(
+                (cu_kv_seqlens == expected_cu_kv).all(),
+                "qwen4_exp QSA target-verify cu_kv_seqlens do not match "
+                "prefix+gamma+1",
             )
 
     positions = self.main_inputs.combo_position_ids
@@ -341,11 +355,15 @@ def _target_verify_geometry(
         ).reshape(batch_size, query_len, 3)
         expected_positions = prefixes_device[:, None, None] + offsets[None, :, None]
         expected_positions = expected_positions.expand(-1, -1, 3)
-        if not bool(torch.equal(positions, expected_positions)):
-            raise RuntimeError(
-                "qwen4_exp QSA target-verify only supports contiguous text-only "
-                "MRoPE whose three axes equal prefix+j"
-            )
+        message = (
+            "qwen4_exp QSA target-verify only supports contiguous text-only "
+            "MRoPE whose three axes equal prefix+j"
+        )
+        if qsa_strict_validation_enabled():
+            if not bool(torch.equal(positions, expected_positions)):
+                raise RuntimeError(message)
+        else:
+            qsa_assert_valid((positions == expected_positions).all(), message)
 
     kv_tokens_per_block = int(self.indexer_kv_cache.seq_size_per_block)
     state_tokens_per_block = int(self.indexer_state_cache.seq_size_per_block)
@@ -405,11 +423,12 @@ def _target_verify_geometry(
         compressed_lengths = visible_lengths // ratio
     else:
         visible_lengths, compressed_lengths, query_positions, block_starts = metadata
-    max_ctx_len = (
-        (int(prefixes.max().item()) + query_len) // ratio
-        if prefixes.device.type == "cpu"
-        else int(compressed_lengths.max().item())
-    )
+    # Host arithmetic on the prefix mirror: a device-resident source
+    # (RTP_LLM_DEVICE_INPUT) is read back once per model step by the mirror
+    # cache instead of reducing the device copy in every layer.  The mirror
+    # max equals the legacy device ``compressed_lengths.max()`` because
+    # floor-division is monotone in the visible length.
+    max_ctx_len = (int(prefixes_host.max().item()) + query_len) // ratio
     if graph_target:
         required_host = (max_ctx_len + kv_entries_per_block - 1) // kv_entries_per_block
         if required_host > int(kv_table.shape[1]):
@@ -446,13 +465,19 @@ def _target_verify_geometry(
     # window (a superset of the old tail window); strict mode keeps the
     # original per-block diagnostics. Host prefix values come from the pinned
     # prefix_lengths mirror for both graph and eager modes.
-    prefix_values = prefixes.tolist()
+    # Host prefix values from the mirror: a device-resident source was already
+    # read back once per model step by the sign check above.
+    prefix_values = prefixes_host.tolist()
+    # Pinned host staging: the eager branch below uploads it asynchronously, so
+    # the verdict's ``required_columns.to(device)`` stays a no-op instead of a
+    # pageable blocking H2D that synchronizes the stream in every layer.
     required_state_columns = torch.tensor(
         [
             (prefix + query_len + state_tokens_per_block - 1) // state_tokens_per_block
             for prefix in prefix_values
         ],
         dtype=torch.int32,
+        pin_memory=True,
     )
     if qsa_strict_validation_enabled():
         state_table_width = int(state_table.shape[1])
@@ -488,10 +513,16 @@ def _target_verify_geometry(
                 "target-verify tail"
             )
     else:
+        # Async upload from pinned staging: the blocking pageable H2D inside
+        # the verdict synchronizes the stream in every eager target-verify
+        # layer.
+        required_state_columns_device = required_state_columns.to(
+            device=device, non_blocking=True
+        )
         qsa_assert_valid(
             _required_blocks_verdict(
                 state_table,
-                required_state_columns,
+                required_state_columns_device,
                 pool_blocks=int(state_pool.shape[0]),
             ),
             "QSA cache 'indexer_state' target-verify tail is not covered or "

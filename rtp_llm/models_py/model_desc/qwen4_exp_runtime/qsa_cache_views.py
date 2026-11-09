@@ -131,6 +131,62 @@ def _required_blocks_verdict(
     )
 
 
+def _side_tables_verdict(
+    kv_table: torch.Tensor,
+    kv_required_columns: torch.Tensor,
+    state_table: torch.Tensor,
+    state_required_columns: torch.Tensor,
+    *,
+    kv_pool_blocks: int,
+    state_pool_blocks: int,
+) -> torch.Tensor:
+    """0-dim boolean verdict covering BOTH side-cache block tables at once.
+
+    Supported CUDA geometries fold the two one-program reductions into a
+    single Triton launch (:func:`dual_required_blocks_verdict`); anything
+    else combines the two single-table verdicts (each already
+    Triton-or-torch) with one bitwise ``AND``.  Both tables and their
+    required-column vectors must share one device and shape geometry, which
+    the incremental-prefill geometry caller guarantees.
+    """
+    for table, required in (
+        (kv_table, kv_required_columns),
+        (state_table, state_required_columns),
+    ):
+        if required.dim() != 1 or int(required.numel()) != int(table.shape[0]):
+            raise RuntimeError("QSA block table has invalid required-column geometry")
+    if (
+        kv_table.is_cuda
+        and torch.version.hip is None
+        and kv_required_columns.is_cuda
+        and state_table.is_cuda
+        and state_required_columns.is_cuda
+    ):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_validation_triton import (
+            dual_required_blocks_supported,
+            dual_required_blocks_verdict,
+        )
+
+        if dual_required_blocks_supported(
+            kv_table, kv_required_columns, state_table, state_required_columns
+        ):
+            return dual_required_blocks_verdict(
+                kv_table,
+                kv_required_columns,
+                state_table,
+                state_required_columns,
+                kv_pool_blocks=kv_pool_blocks,
+                state_pool_blocks=state_pool_blocks,
+            )
+    kv_verdict = _required_blocks_verdict(
+        kv_table, kv_required_columns, pool_blocks=kv_pool_blocks
+    )
+    state_verdict = _required_blocks_verdict(
+        state_table, state_required_columns, pool_blocks=state_pool_blocks
+    )
+    return kv_verdict & state_verdict
+
+
 def _validate_required_blocks(
     table: torch.Tensor,
     required_columns: torch.Tensor,

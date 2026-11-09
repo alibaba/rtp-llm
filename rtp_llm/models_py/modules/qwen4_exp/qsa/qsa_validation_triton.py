@@ -88,6 +88,160 @@ def required_blocks_verdict(
     return result == 0
 
 
+@triton.jit(
+    do_not_specialize=[
+        "KV_BATCH",
+        "KV_WIDTH",
+        "KV_POOL_BLOCKS",
+        "STATE_BATCH",
+        "STATE_WIDTH",
+        "STATE_POOL_BLOCKS",
+    ]
+)
+def _dual_table_required_blocks_kernel(
+    kv_table_ptr,
+    kv_required_ptr,
+    state_table_ptr,
+    state_required_ptr,
+    result_ptr,
+    KV_ROW_STRIDE,
+    KV_COL_STRIDE,
+    KV_REQUIRED_STRIDE,
+    STATE_ROW_STRIDE,
+    STATE_COL_STRIDE,
+    STATE_REQUIRED_STRIDE,
+    KV_BATCH,
+    KV_WIDTH,
+    KV_POOL_BLOCKS,
+    STATE_BATCH,
+    STATE_WIDTH,
+    STATE_POOL_BLOCKS,
+    N: tl.constexpr,
+):
+    # Both reductions share the fixed lane grid; each table's active window
+    # is its own BATCH * WIDTH prefix of the same arange, with the same
+    # per-table terms as _validate_required_blocks_kernel.
+    offset = tl.arange(0, N)
+
+    kv_row = offset // KV_WIDTH
+    kv_column = offset % KV_WIDTH
+    kv_active = offset < KV_BATCH * KV_WIDTH
+    kv_required = tl.load(
+        kv_required_ptr + kv_row * KV_REQUIRED_STRIDE, mask=kv_active, other=0
+    )
+    kv_block = tl.load(
+        kv_table_ptr + kv_row * KV_ROW_STRIDE + kv_column * KV_COL_STRIDE,
+        mask=kv_active,
+        other=0,
+    )
+    kv_invalid = kv_active & (
+        (kv_required < 0)
+        | (kv_required > KV_WIDTH)
+        | (kv_block >= KV_POOL_BLOCKS)
+        | ((kv_column < kv_required) & (kv_block <= 0))
+    )
+
+    state_row = offset // STATE_WIDTH
+    state_column = offset % STATE_WIDTH
+    state_active = offset < STATE_BATCH * STATE_WIDTH
+    state_required = tl.load(
+        state_required_ptr + state_row * STATE_REQUIRED_STRIDE,
+        mask=state_active,
+        other=0,
+    )
+    state_block = tl.load(
+        state_table_ptr + state_row * STATE_ROW_STRIDE + state_column * STATE_COL_STRIDE,
+        mask=state_active,
+        other=0,
+    )
+    state_invalid = state_active & (
+        (state_required < 0)
+        | (state_required > STATE_WIDTH)
+        | (state_block >= STATE_POOL_BLOCKS)
+        | ((state_column < state_required) & (state_block <= 0))
+    )
+
+    valid = (tl.max(kv_invalid.to(tl.int32), 0) == 0) & (
+        tl.max(state_invalid.to(tl.int32), 0) == 0
+    )
+    tl.store(result_ptr, valid.to(tl.int8))
+
+
+def dual_required_blocks_supported(
+    kv_table: torch.Tensor,
+    kv_required_columns: torch.Tensor,
+    state_table: torch.Tensor,
+    state_required_columns: torch.Tensor,
+) -> bool:
+    """Keep the shared one-program reduction bounded; others fall back."""
+    return (
+        kv_table.is_cuda
+        and torch.version.hip is None
+        and kv_required_columns.is_cuda
+        and state_table.is_cuda
+        and state_required_columns.is_cuda
+        and kv_table.device == kv_required_columns.device
+        and kv_table.device == state_table.device
+        and kv_table.device == state_required_columns.device
+        and kv_table.dtype == torch.int32
+        and state_table.dtype == torch.int32
+        and kv_required_columns.dtype == torch.int32
+        and state_required_columns.dtype == torch.int32
+        and kv_table.dim() == 2
+        and state_table.dim() == 2
+        and kv_required_columns.dim() == 1
+        and state_required_columns.dim() == 1
+        and kv_table.shape[0] == kv_required_columns.numel()
+        and state_table.shape[0] == state_required_columns.numel()
+        and 0 < kv_table.shape[0] * kv_table.shape[1] <= _MAX_ELEMENTS
+        and 0 < state_table.shape[0] * state_table.shape[1] <= _MAX_ELEMENTS
+    )
+
+
+def dual_required_blocks_verdict(
+    kv_table: torch.Tensor,
+    kv_required_columns: torch.Tensor,
+    state_table: torch.Tensor,
+    state_required_columns: torch.Tensor,
+    *,
+    kv_pool_blocks: int,
+    state_pool_blocks: int,
+) -> torch.Tensor:
+    """One-launch verdict over BOTH side-cache block tables (True=valid).
+
+    The warm light-layer census paid six device launches per layer on the two
+    separate verdict groups (two reductions, two ``result == 0`` conversions
+    and two asserts).  Both groups validate step-frozen inputs, so this
+    reduction covers both tables in one program and stores the combined
+    boolean directly (no elementwise conversion), for one kernel plus one
+    async assert per layer.  The fixed ``N`` lane bound and the
+    ``do_not_specialize`` shape arguments keep one compiled variant per
+    stride-alignment class for every supported table shape.
+    """
+    result = torch.empty((), dtype=torch.int8, device=kv_table.device)
+    _dual_table_required_blocks_kernel[(1,)](
+        kv_table,
+        kv_required_columns,
+        state_table,
+        state_required_columns,
+        result,
+        KV_ROW_STRIDE=kv_table.stride(0),
+        KV_COL_STRIDE=kv_table.stride(1),
+        KV_REQUIRED_STRIDE=kv_required_columns.stride(0),
+        STATE_ROW_STRIDE=state_table.stride(0),
+        STATE_COL_STRIDE=state_table.stride(1),
+        STATE_REQUIRED_STRIDE=state_required_columns.stride(0),
+        KV_BATCH=kv_table.shape[0],
+        KV_WIDTH=kv_table.shape[1],
+        KV_POOL_BLOCKS=kv_pool_blocks,
+        STATE_BATCH=state_table.shape[0],
+        STATE_WIDTH=state_table.shape[1],
+        STATE_POOL_BLOCKS=state_pool_blocks,
+        N=_MAX_ELEMENTS,
+    )
+    return result.view(torch.bool)
+
+
 @triton.jit
 def _main_geometry_verdict_kernel(
     table_ptr,

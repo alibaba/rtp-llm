@@ -77,7 +77,13 @@ def _prepare_paged_inputs(
         raise ValueError("decode selected_indices and qkv must share one CUDA device")
 
     if self.is_target_verify:
-        input_lengths = self.attn_inputs.input_lengths
+        # Host-mirror comparison: the pinned engine source is free, and a
+        # device source (RTP_LLM_DEVICE_INPUT) is read back once per model
+        # step by the shared mirror cache instead of synchronizing the device
+        # copy in every layer.
+        input_lengths = host_input_mirror(self.attn_inputs, "input_lengths")
+        if input_lengths is None:
+            input_lengths = self.attn_inputs.input_lengths
         if input_lengths.numel() != batch or bool(
             torch.any(input_lengths != query_len).item()
         ):
@@ -92,6 +98,17 @@ def _prepare_paged_inputs(
         raise RuntimeError("qwen4_exp sparse GQA Graph requires host lengths")
     if graph_paged and bool(torch.any(lengths_source < 0).item()):
         raise ValueError("qwen4_exp sparse GQA sequence lengths must be non-negative")
+    # Host mirror of the length source shared by the sign check below and the
+    # capacity preflight: the pinned engine source passes through for free,
+    # and a device source (RTP_LLM_DEVICE_INPUT) is read back once per model
+    # step by the mirror cache instead of synchronizing the device copy in
+    # every layer.
+    lengths_mirror = host_input_mirror(
+        self.attn_inputs,
+        "prefix_lengths" if self.is_target_verify else "sequence_lengths",
+    )
+    if lengths_mirror is None:
+        lengths_mirror = lengths_source
     cached = getattr(self, "_qsa_target_visible_lengths", None)
     self._qsa_target_visible_lengths = None
     if graph_paged and self.is_target_verify and cached is not None:
@@ -110,10 +127,15 @@ def _prepare_paged_inputs(
         sequence_lengths = lengths_source.to(
             device=qkv.device, dtype=torch.int32, non_blocking=True
         ).contiguous()
-        if not graph_paged and bool(torch.any(sequence_lengths < 0).item()):
-            raise ValueError(
-                "qwen4_exp sparse GQA sequence lengths must be non-negative"
-            )
+        if not graph_paged:
+            if lengths_mirror.device.type == "cpu":
+                invalid_lengths = bool(torch.any(lengths_mirror < 0).item())
+            else:
+                invalid_lengths = bool(torch.any(sequence_lengths < 0).item())
+            if invalid_lengths:
+                raise ValueError(
+                    "qwen4_exp sparse GQA sequence lengths must be non-negative"
+                )
         query_offsets = torch.arange(
             1, query_len + 1, device=qkv.device, dtype=torch.int32
         )
@@ -185,16 +207,28 @@ def _prepare_paged_inputs(
 
     if not graph_paged:
         required_columns = (kv_lens[:, -1] + page_size - 1) // page_size
-    exceeds_capacity = (
-        bool(
+    # Capacity preflight on the host mirror: the graph branch already computed
+    # it from the pinned host lengths, and the eager branch now does the same
+    # (the host formula equals the legacy device ``required_columns``
+    # reduction) instead of a per-layer device readback.
+    if lengths_mirror.device.type == "cpu":
+        exceeds_capacity = bool(
+            torch.any(
+                (lengths_mirror + query_len + page_size - 1) // page_size
+                > int(block_table.shape[1])
+            ).item()
+        )
+    elif graph_paged:
+        exceeds_capacity = bool(
             torch.any(
                 (lengths_source + query_len + page_size - 1) // page_size
                 > int(block_table.shape[1])
             ).item()
         )
-        if graph_paged
-        else bool(torch.any(required_columns > int(block_table.shape[1])).item())
-    )
+    else:
+        exceeds_capacity = bool(
+            torch.any(required_columns > int(block_table.shape[1])).item()
+        )
     if exceeds_capacity:
         raise RuntimeError(
             "qwen4_exp sparse GQA main block table does not cover the visible KV"
@@ -216,13 +250,26 @@ def _prepare_paged_inputs(
     ).unsqueeze(0)
     required = columns < required_columns.unsqueeze(1)
     invalid = required & ((block_table <= 0) | (block_table >= cache_blocks))
-    if bool(torch.any(invalid).item()):
-        raise RuntimeError(
+    if qsa_strict_validation_enabled():
+        if bool(torch.any(invalid).item()):
+            raise RuntimeError(
+                "qwen4_exp sparse GQA visible KV resolves to an unallocated or "
+                "out-of-range physical block"
+            )
+    else:
+        # Engine/allocator invariant: one enqueue-only device verdict replaces
+        # the per-layer host-synchronizing scalar read; strict mode keeps the
+        # exact legacy diagnostics.
+        qsa_assert_valid(
+            ~torch.any(invalid),
             "qwen4_exp sparse GQA visible KV resolves to an unallocated or "
-            "out-of-range physical block"
+            "out-of-range physical block",
         )
 
-    if selected_indices.numel():
+    if qsa_strict_validation_enabled() and selected_indices.numel():
+        # The per-request selection re-check duplicates the FMHA entry
+        # validation (_validate_sparse_paged_indices is a superset); strict
+        # mode keeps it for its exact per-request diagnostics.
         if int(selected_indices.min().item()) < -1:
             raise ValueError("selected indices may only use -1 as padding")
         invalid_visible = (selected_indices >= 0) & (

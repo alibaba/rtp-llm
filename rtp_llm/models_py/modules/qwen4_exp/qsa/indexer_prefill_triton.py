@@ -505,8 +505,9 @@ def write_zero_prefix_prefill(
 # gather -> fp32 mean -> k-norm -> block-start RoPE -> bf16 kv write. Both
 # consume the frozen Qwen4ExpPrefillStepPlan tables (P2), so the launches
 # never rebuild metadata. Snapshots of BOTH pools still finish before the
-# first mutation: the same snapshot -> write transaction the zero-prefix
-# writer uses, restorable through restore_padded_indexer_cache.
+# first mutation, taken by ONE launch whose grid spans both snapshot index
+# ranges: the same snapshot -> write transaction the zero-prefix writer uses,
+# restorable through restore_padded_indexer_cache.
 # ---------------------------------------------------------------------------
 
 _PREFIX_REUSE_FUSED_STATS = {"attempts": 0, "hits": 0}
@@ -518,68 +519,69 @@ def prefix_reuse_fused_stats() -> dict:
 
 
 @triton.jit
-def _prefix_reuse_state_snapshot(
+def _prefix_reuse_snapshots(
     cu,
     prefixes,
-    table,
-    pool,
-    slots,
-    original,
-    WIDTH,
+    state_table,
+    state_pool,
+    state_slots,
+    original_state,
+    kv_table,
+    kv_pool,
+    kv_slots,
+    original_kv,
+    STATE_WIDTH,
+    KV_WIDTH,
     PAGES,
-):
-    request, page = tl.program_id(0), tl.program_id(1)
-    length = tl.load(cu + request + 1) - tl.load(cu + request)
-    prefix = tl.load(prefixes + request)
-    r, d = tl.arange(0, STATE_RING_ROWS), tl.arange(0, INDEXER_HEAD_DIM)
-    end = tl.minimum((page + 1) * 128, length)
-    position = end - 1 - (end - 1 - r + 8) % 8
-    valid = position >= page * 128
-    # Prefixes are page aligned, so a local page index addresses the same
-    # ring rows as the absolute one; only the table column shifts.
-    column = prefix // 128 + page
-    block = tl.load(
-        table + request * WIDTH + column,
-        mask=(page * 128 < length) & (column < WIDTH),
-        other=0,
-    )
-    slot = block * 8 + r
-    row = (request * PAGES + page) * 8 + r
-    value = tl.load(
-        pool + slot[:, None].to(tl.int64) * 128 + d[None, :],
-        mask=valid[:, None],
-        other=0,
-    )
-    tl.store(slots + row, tl.where(valid, slot, -1))
-    tl.store(original + row[:, None] * 128 + d[None, :], value)
-
-
-@triton.jit
-def _prefix_reuse_kv_snapshot(
-    cu,
-    prefixes,
-    table,
-    pool,
-    slots,
-    original,
-    WIDTH,
     GROUPS,
 ):
-    request, group = tl.program_id(0), tl.program_id(1)
+    """Both prefix-reuse pool snapshots in one launch.
+
+    Grid axis 1 spans ``max(PAGES, GROUPS)``: programs below ``PAGES`` run
+    the state-ring snapshot body and programs below ``GROUPS`` the
+    compressed-KV snapshot body (the retired two-launch pair, verbatim
+    math), so the transaction opens with one launch instead of two.
+    """
+    request, index = tl.program_id(0), tl.program_id(1)
     length = tl.load(cu + request + 1) - tl.load(cu + request)
     prefix = tl.load(prefixes + request)
-    valid = group < length // 4
-    start = prefix + group * 4
-    column = start // 128
-    block = tl.load(
-        table + request * WIDTH + column, mask=valid & (column < WIDTH), other=0
-    )
-    slot = block * 32 + (start // 4) % 32
-    d = tl.arange(0, INDEXER_HEAD_DIM)
-    row = request * GROUPS + group
-    value = tl.load(pool + slot.to(tl.int64) * 128 + d, mask=valid, other=0)
-    tl.store(slots + row, tl.where(valid, slot, -1))
-    tl.store(original + row * 128 + d, value)
+    if index < PAGES:
+        r, d = tl.arange(0, STATE_RING_ROWS), tl.arange(0, INDEXER_HEAD_DIM)
+        end = tl.minimum((index + 1) * 128, length)
+        position = end - 1 - (end - 1 - r + 8) % 8
+        valid = position >= index * 128
+        # Prefixes are page aligned, so a local page index addresses the same
+        # ring rows as the absolute one; only the table column shifts.
+        column = prefix // 128 + index
+        block = tl.load(
+            state_table + request * STATE_WIDTH + column,
+            mask=(index * 128 < length) & (column < STATE_WIDTH),
+            other=0,
+        )
+        slot = block * 8 + r
+        row = (request * PAGES + index) * 8 + r
+        value = tl.load(
+            state_pool + slot[:, None].to(tl.int64) * 128 + d[None, :],
+            mask=valid[:, None],
+            other=0,
+        )
+        tl.store(state_slots + row, tl.where(valid, slot, -1))
+        tl.store(original_state + row[:, None] * 128 + d[None, :], value)
+    if index < GROUPS:
+        valid = index < length // 4
+        start = prefix + index * 4
+        column = start // 128
+        block = tl.load(
+            kv_table + request * KV_WIDTH + column,
+            mask=valid & (column < KV_WIDTH),
+            other=0,
+        )
+        slot = block * 32 + (start // 4) % 32
+        d = tl.arange(0, INDEXER_HEAD_DIM)
+        row = request * GROUPS + index
+        value = tl.load(kv_pool + slot.to(tl.int64) * 128 + d, mask=valid, other=0)
+        tl.store(kv_slots + row, tl.where(valid, slot, -1))
+        tl.store(original_kv + row * 128 + d, value)
 
 
 @triton.jit
@@ -972,29 +974,23 @@ def write_prefix_reuse_prefill(
         original_kv,
         padded_slots=True,
     )
-    _prefix_reuse_state_snapshot[(batch, pages)](
+    _prefix_reuse_snapshots[(batch, max(pages, groups))](
         cu_seqlens,
         prefixes,
         state_table,
         state_pool,
         state_slots,
         original_state,
-        WIDTH=state_table.shape[1],
+        kv_table,
+        kv_pool,
+        kv_slots,
+        original_kv,
+        STATE_WIDTH=state_table.shape[1],
+        KV_WIDTH=kv_table.shape[1],
         PAGES=pages,
+        GROUPS=groups,
         num_warps=4,
     )
-    if groups:
-        _prefix_reuse_kv_snapshot[(batch, groups)](
-            cu_seqlens,
-            prefixes,
-            kv_table,
-            kv_pool,
-            kv_slots,
-            original_kv,
-            WIDTH=kv_table.shape[1],
-            GROUPS=groups,
-            num_warps=4,
-        )
     # All allocations and snapshot launches precede any mutation.
     try:
         _prefix_reuse_q_prep[(batch, maximum, head_num)](

@@ -18,7 +18,7 @@ where entries were written, so the caller can set up the actual pool views throu
 """
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal, Optional, Sequence
 
 import torch
 
@@ -133,6 +133,788 @@ def _capture_tensor_slots(
     return unique_slots, original
 
 
+def _resolve_blocks(
+    table: torch.Tensor,
+    requests: torch.Tensor,
+    logical_blocks: torch.Tensor,
+    *,
+    pool_blocks: int,
+    tag: str,
+    required: torch.Tensor,
+    invalid_block_policy: InvalidBlockPolicy,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Resolve token/page block-table lookups without flattening batches.
+
+    ``requests`` / ``logical_blocks`` may be [N] or [N, M] grade; the returned
+    ``blocks`` keep that shape.  ``required`` marks entries whose logical page
+    must resolve to an allocated physical block (async device assert on CUDA,
+    exact legacy host error in strict mode).
+    """
+    width = int(table.shape[1])
+    in_bounds = (logical_blocks >= 0) & (logical_blocks < width)
+    safe_columns = logical_blocks.clamp(0, max(width - 1, 0))
+    blocks = table[requests, safe_columns].to(torch.long)
+    out_of_pool = required & in_bounds & (blocks >= pool_blocks)
+    if qsa_strict_validation_enabled():
+        if bool(torch.any(out_of_pool).item()):
+            raise IndexError(f"{tag} physical block is outside pool size {pool_blocks}")
+    else:
+        qsa_assert_valid(
+            ~torch.any(out_of_pool),
+            f"{tag} physical block is outside pool size {pool_blocks}",
+        )
+    # The allocated mask stays materialized: the write plan below needs it
+    # to mask out unresolved slots.
+    allocated = in_bounds & (blocks > 0) & (blocks < pool_blocks)
+    missing = required & ~allocated
+    if invalid_block_policy == "raise":
+        if qsa_strict_validation_enabled():
+            if bool(torch.any(missing).item()):
+                raise ValueError(f"{tag} resolves to an unallocated logical block")
+        else:
+            qsa_assert_valid(
+                ~torch.any(missing),
+                f"{tag} resolves to an unallocated logical block",
+            )
+    return blocks, allocated
+
+
+@dataclass(frozen=True)
+class IndexerWriterGeometry:
+    """Layer-independent geometry for one step's vectorized indexer write.
+
+    Everything here depends only on the step's ``cu_seqlens`` /
+    ``start_positions`` / block tables / pool shapes -- never on the layer's
+    ``raw_keys`` or pool *contents*.  A step plan freezes it once and every
+    layer's writer consumes the same tensors, replacing the per-call eager
+    chain (``arange``/``repeat_interleave``/resolve/assert launches) that the
+    draft tail window paid per call.
+
+    ``kv_slots`` is the writer's result row (``-1`` where nothing is written)
+    and ``kv_write_slots``/``state_slots_safe`` are the clamped destinations
+    the full-shape masked-scatter write path uses (invalid rows write back
+    their gathered originals, so the pool is untouched).  ``state_slots_unique``
+    is a host fact: no request spans more than ``state_ring_entries`` new
+    tokens, so two tokens of one call can never map to the same state slot
+    (positions of one request are consecutive; two positions collide only when
+    they differ by a multiple of the ring size).
+    """
+
+    # Config the bundle was validated against (host checks on reuse).
+    ratio: int
+    kv_tokens_per_block: int
+    state_tokens_per_block: int
+    state_ring_entries: int
+    kv_entries_per_block: int
+    token_count: int
+    batch_size: int
+    invalid_block_policy: InvalidBlockPolicy
+    device: torch.device
+    kv_pool_blocks: int
+    state_pool_blocks: int
+    # Identity of the tensors this geometry was derived from; a rebound or
+    # in-place edited source falls the writer back to the inline build.
+    cu_seqlens: torch.Tensor
+    start_positions: torch.Tensor
+    kv_block_table: torch.Tensor
+    state_block_table: torch.Tensor
+    source_fingerprints: dict[str, tuple[int, int] | None]
+    # Host facts.
+    lengths: tuple[int, ...]
+    state_slots_unique: bool
+    # Device geometry tensors ([B] / [T] / [T, ratio] grade).
+    batch_lengths: torch.Tensor
+    request_ids: torch.Tensor
+    positions: torch.Tensor
+    row_starts: torch.Tensor
+    row_lengths: torch.Tensor
+    state_slots: torch.Tensor
+    state_allocated: torch.Tensor
+    state_slots_safe: torch.Tensor
+    completed: torch.Tensor
+    block_starts: torch.Tensor
+    kv_blocks: torch.Tensor
+    kv_allocated: torch.Tensor
+    kv_entry: torch.Tensor
+    kv_write_slots: torch.Tensor
+    kv_slots: torch.Tensor
+    source_rows: torch.Tensor
+    source_slots: torch.Tensor
+    source_in_current: torch.Tensor
+    source_valid: torch.Tensor
+    group_sources_valid: torch.Tensor
+    kv_write_valid: torch.Tensor
+
+
+def _writer_geometry_fingerprint(tensor: torch.Tensor) -> tuple[int, int] | None:
+    if not isinstance(tensor, torch.Tensor):
+        return None
+    if torch.is_inference(tensor):
+        return (int(tensor.data_ptr()), -1)
+    return (int(tensor.data_ptr()), int(tensor._version))
+
+
+def writer_geometry_applies(
+    geometry: IndexerWriterGeometry | None,
+    cu_seqlens: torch.Tensor,
+    start_positions: torch.Tensor,
+    kv_block_table: torch.Tensor,
+    state_block_table: torch.Tensor,
+    kv_pool: torch.Tensor,
+    state_pool: torch.Tensor,
+    *,
+    token_count: int,
+    ratio: int,
+    kv_tokens_per_block: int,
+    state_tokens_per_block: int,
+    invalid_block_policy: InvalidBlockPolicy,
+) -> bool:
+    """Whether the frozen geometry still describes this writer invocation.
+
+    Host-only checks (identity, fingerprints, shapes, config ints): a mismatch
+    makes the caller fall back to the legacy inline build instead of trusting a
+    stale bundle.  Block tables are compared by tensor identity *and*
+    fingerprint so a rebound or in-place edited table between layers can never
+    feed layer 1's resolved blocks to layer 2.
+    """
+    if geometry is None:
+        return False
+    if (
+        geometry.ratio != ratio
+        or geometry.kv_tokens_per_block != kv_tokens_per_block
+        or geometry.state_tokens_per_block != state_tokens_per_block
+        or geometry.state_ring_entries != int(state_pool.shape[1])
+        or geometry.kv_entries_per_block != kv_tokens_per_block // ratio
+        or geometry.token_count != token_count
+        or geometry.batch_size != int(cu_seqlens.numel()) - 1
+    ):
+        return False
+    if geometry.kv_pool_blocks != int(kv_pool.shape[0]):
+        return False
+    if geometry.state_pool_blocks != int(state_pool.shape[0]):
+        return False
+    if geometry.invalid_block_policy != invalid_block_policy:
+        return False
+    if geometry.device != cu_seqlens.device:
+        return False
+    sources = (
+        ("cu_seqlens", cu_seqlens),
+        ("start_positions", start_positions),
+        ("kv_block_table", kv_block_table),
+        ("state_block_table", state_block_table),
+    )
+    for name, tensor in sources:
+        if getattr(geometry, name) is not tensor:
+            return False
+        if geometry.source_fingerprints.get(name) != _writer_geometry_fingerprint(
+            tensor
+        ):
+            return False
+    return True
+
+
+def build_indexer_writer_geometry(
+    cu_seqlens: torch.Tensor,
+    start_positions: torch.Tensor,
+    kv_block_table: torch.Tensor,
+    state_block_table: torch.Tensor,
+    *,
+    token_count: int,
+    ratio: int,
+    kv_tokens_per_block: int,
+    state_tokens_per_block: int,
+    state_ring_entries: int,
+    kv_pool_blocks: int,
+    state_pool_blocks: int,
+    invalid_block_policy: InvalidBlockPolicy,
+    host_lengths: Optional[Sequence[int]] = None,
+    host_prefixes: Optional[Sequence[int]] = None,
+    device_positions: Optional[torch.Tensor] = None,
+    device_block_starts: Optional[torch.Tensor] = None,
+    trusted_tables: bool = False,
+) -> IndexerWriterGeometry:
+    """Freeze one step's writer geometry (token/page resolution included).
+
+    Mirrors the legacy per-call leading chain of
+    ``_write_indexer_cache_vectorized`` -- same resolution semantics and (by
+    default) the same assert messages -- but on full ``[T]`` / ``[T, ratio]``
+    shapes with no compression, so nothing in here synchronizes with the host.
+
+    ``host_lengths`` / ``host_prefixes`` (the step plan's pinned mirrors) turn
+    every ``[T]``/``[T, ratio]`` integer index tensor into pure host arithmetic
+    riding two pinned uploads, replacing the device
+    ``arange``/``repeat_interleave``/``remainder``/compare chains.  Without
+    them the device chain of the legacy path computes the same values.
+
+    ``trusted_tables=True`` (the incremental step plan, whose build already
+    proved ``cu_seqlens`` equals the expected partition and validated every
+    required table column through the required-blocks verdicts) skips the
+    redundant cu/resolve asserts: every lookup below stays inside the
+    verdict-checked column window, so the coverage is identical.
+    """
+    device = cu_seqlens.device
+    batch_size = int(cu_seqlens.numel()) - 1
+    kv_entries_per_block = kv_tokens_per_block // ratio
+    state_width = int(state_block_table.shape[1])
+    kv_width = int(kv_block_table.shape[1])
+
+    host_lengths_known = (
+        host_lengths is not None
+        and len(host_lengths) == batch_size
+        and sum(host_lengths) == token_count
+    )
+    host_prefixes_known = (
+        host_prefixes is not None and len(host_prefixes) == batch_size
+    )
+
+    # Guarded mirrors: ``lengths_values`` is read below even when only one of
+    # the two host facts is available, and the device chain then fills every
+    # index tensor without host arithmetic.
+    lengths_values: list[int] = []
+    prefixes_values: list[int] = []
+    host_arithmetic = host_lengths_known and host_prefixes_known
+    if host_arithmetic:
+        lengths_values = [int(value) for value in host_lengths]
+        prefixes_values = [int(value) for value in host_prefixes]
+        if not trusted_tables:
+            _assert_host_mirrors_match_sources(
+                cu_seqlens,
+                start_positions,
+                lengths_values,
+                prefixes_values,
+                token_count,
+            )
+        # One host pass builds every integer index tensor; two pinned uploads
+        # replace the device staging chains.
+        req: list[int] = []
+        pos: list[int] = []
+        row_start: list[int] = []
+        row_len: list[int] = []
+        req_off: list[int] = []
+        done: list[bool] = []
+        bstart: list[int] = []
+        state_col: list[int] = []
+        state_good: list[bool] = []
+        state_off: list[int] = []
+        kv_col: list[int] = []
+        kv_good: list[bool] = []
+        kv_ent: list[int] = []
+        src_req: list[int] = []
+        src_col: list[int] = []
+        src_good: list[bool] = []
+        src_cur: list[bool] = []
+        src_off: list[int] = []
+        src_row: list[int] = []
+        cu_running = 0
+        top_row = max(token_count - 1, 0)
+        for request_idx, (prefix, length) in enumerate(
+            zip(prefixes_values, lengths_values)
+        ):
+            for row in range(length):
+                position = prefix + row
+                group_start = position - position % ratio
+                req.append(request_idx)
+                pos.append(position)
+                row_start.append(prefix)
+                row_len.append(length)
+                req_off.append(cu_running)
+                done.append((position + 1) % ratio == 0)
+                bstart.append(group_start)
+                column = position // state_tokens_per_block
+                state_col.append(min(max(column, 0), max(state_width - 1, 0)))
+                state_good.append(0 <= column < state_width)
+                state_off.append(position % state_ring_entries)
+                column = group_start // kv_tokens_per_block
+                kv_col.append(min(max(column, 0), max(kv_width - 1, 0)))
+                kv_good.append(0 <= column < kv_width)
+                kv_ent.append((group_start // ratio) % kv_entries_per_block)
+                for offset in range(ratio):
+                    source_position = group_start + offset
+                    source_local = source_position - prefix
+                    in_current = 0 <= source_local < length
+                    column = source_position // state_tokens_per_block
+                    src_req.append(request_idx)
+                    src_col.append(
+                        min(max(column, 0), max(state_width - 1, 0))
+                    )
+                    src_good.append(0 <= column < state_width)
+                    src_cur.append(in_current)
+                    src_off.append(source_position % state_ring_entries)
+                    src_row.append(
+                        min(max(cu_running + source_local, 0), top_row)
+                    )
+            cu_running += length
+
+        host_int = torch.tensor(
+            req + pos + row_start + row_len + req_off + bstart
+            + state_col + state_off + kv_col + kv_ent
+            + src_req + src_col + src_off + src_row
+            + lengths_values,
+            dtype=torch.long,
+        )
+        host_bool = torch.tensor(
+            done + state_good + kv_good + src_good + src_cur, dtype=torch.bool
+        )
+        if device.type == "cuda":
+            device_int = host_int.pin_memory().to(device=device, non_blocking=True)
+            device_bool = host_bool.pin_memory().to(
+                device=device, non_blocking=True
+            )
+        else:
+            device_int = host_int.to(device)
+            device_bool = host_bool.to(device)
+
+        def _int_view(count):
+            nonlocal device_int
+            view = device_int[:count]
+            device_int = device_int[count:]
+            return view
+
+        def _bool_view(count):
+            nonlocal device_bool
+            view = device_bool[:count]
+            device_bool = device_bool[count:]
+            return view
+
+        request_ids = _int_view(token_count)
+        positions = _int_view(token_count)
+        row_starts = _int_view(token_count)
+        row_lengths = _int_view(token_count)
+        request_offsets = _int_view(token_count)
+        block_starts = _int_view(token_count)
+        state_columns = _int_view(token_count)
+        state_offsets = _int_view(token_count)
+        kv_columns = _int_view(token_count)
+        kv_entry = _int_view(token_count)
+        completed = _bool_view(token_count)
+        state_in_bounds = _bool_view(token_count)
+        kv_in_bounds = _bool_view(token_count)
+        source_count = token_count * ratio
+        source_requests = _int_view(source_count).view(token_count, ratio)
+        source_columns = _int_view(source_count).view(token_count, ratio)
+        source_offsets = _int_view(source_count).view(token_count, ratio)
+        source_rows = _int_view(source_count).view(token_count, ratio)
+        source_in_bounds = _bool_view(source_count).view(token_count, ratio)
+        source_in_current = _bool_view(source_count).view(token_count, ratio)
+        # The batch length mirror rides the same pinned upload (a separate
+        # pageable host->device staging would violate the step-build
+        # contract that every host-built upload is pinned).
+        batch_lengths = _int_view(batch_size)
+    else:
+        # Device chain (the legacy staging): identical values, no host facts.
+        cu = cu_seqlens.to(torch.long)
+        starts = start_positions.to(torch.long)
+        lengths = cu[1:] - cu[:-1]
+        if not trusted_tables:
+            invalid_cu = (
+                (cu[0] != 0)
+                | (cu[-1] != token_count)
+                | torch.any(lengths < 0)
+                | torch.any(starts < 0)
+            )
+            if qsa_strict_validation_enabled():
+                if bool(invalid_cu.item()):
+                    raise ValueError(
+                        "cu_seqlens must be monotonic from 0 to "
+                        "raw_keys.shape[0], and start_positions must be "
+                        "non-negative"
+                    )
+            else:
+                qsa_assert_valid(
+                    ~invalid_cu,
+                    "cu_seqlens must be monotonic from 0 to raw_keys.shape[0],"
+                    " and start_positions must be non-negative",
+                )
+        flat_indices = torch.arange(token_count, dtype=torch.long, device=device)
+        request_ids = torch.repeat_interleave(
+            torch.arange(batch_size, dtype=torch.long, device=device),
+            lengths,
+            output_size=token_count,
+        )
+        if device_positions is not None and int(device_positions.shape[0]) == token_count:
+            positions = device_positions
+        else:
+            local_indices = flat_indices - cu.index_select(0, request_ids)
+            positions = starts.index_select(0, request_ids) + local_indices
+        row_starts = starts.index_select(0, request_ids)
+        row_lengths = lengths.index_select(0, request_ids)
+        request_offsets = cu.index_select(0, request_ids)
+        completed = (positions + 1).remainder(ratio) == 0
+        if device_block_starts is not None and int(
+            device_block_starts.shape[0]
+        ) == token_count:
+            block_starts = device_block_starts
+        else:
+            block_starts = positions - positions.remainder(ratio)
+        state_logical = positions // state_tokens_per_block
+        state_in_bounds = (state_logical >= 0) & (state_logical < state_width)
+        state_columns = state_logical.clamp(0, max(state_width - 1, 0))
+        state_offsets = positions % state_ring_entries
+        kv_logical = block_starts // kv_tokens_per_block
+        kv_in_bounds = (kv_logical >= 0) & (kv_logical < kv_width)
+        kv_columns = kv_logical.clamp(0, max(kv_width - 1, 0))
+        kv_entry = (block_starts // ratio).remainder(kv_entries_per_block)
+        source_offsets = torch.arange(ratio, dtype=torch.long, device=device)
+        source_positions = block_starts[:, None] + source_offsets[None, :]
+        source_local = source_positions - row_starts[:, None]
+        source_in_current = (source_local >= 0) & (
+            source_local < row_lengths[:, None]
+        )
+        source_requests = request_ids[:, None].expand(-1, ratio)
+        source_logical = source_positions // state_tokens_per_block
+        source_in_bounds = (source_logical >= 0) & (source_logical < state_width)
+        source_columns = source_logical.clamp(0, max(state_width - 1, 0))
+        source_offsets = source_positions.remainder(state_ring_entries)
+        source_rows = (request_offsets[:, None] + source_local).clamp(
+            0, max(token_count - 1, 0)
+        )
+
+    # Table lookups: three gathers, nothing else touches the tables.
+    state_blocks = state_block_table[request_ids, state_columns].to(torch.long)
+    source_blocks = state_block_table[source_requests, source_columns].to(
+        torch.long
+    )
+    kv_blocks = kv_block_table[request_ids, kv_columns].to(torch.long)
+
+    if not trusted_tables:
+        _assert_resolved_blocks(
+            tag="indexer_state",
+            required=torch.ones(token_count, dtype=torch.bool, device=device),
+            in_bounds=state_in_bounds,
+            blocks=state_blocks,
+            pool_blocks=state_pool_blocks,
+            invalid_block_policy=invalid_block_policy,
+        )
+        _assert_resolved_blocks(
+            tag="indexer_state source",
+            required=(~source_in_current) & completed[:, None],
+            in_bounds=source_in_bounds,
+            blocks=source_blocks,
+            pool_blocks=state_pool_blocks,
+            invalid_block_policy=invalid_block_policy,
+        )
+        group_pre_valid = torch.all(source_in_current | (
+            source_in_bounds & (source_blocks > 0) & (source_blocks < state_pool_blocks)
+        ), dim=1)
+        _assert_resolved_blocks(
+            tag="indexer_kv",
+            required=group_pre_valid & completed,
+            in_bounds=kv_in_bounds,
+            blocks=kv_blocks,
+            pool_blocks=kv_pool_blocks,
+            invalid_block_policy=invalid_block_policy,
+        )
+
+    state_allocated = state_in_bounds & (state_blocks > 0) & (
+        state_blocks < state_pool_blocks
+    )
+    source_allocated = source_in_bounds & (source_blocks > 0) & (
+        source_blocks < state_pool_blocks
+    )
+    kv_allocated = kv_in_bounds & (kv_blocks > 0) & (kv_blocks < kv_pool_blocks)
+    state_slots = torch.where(
+        state_allocated, state_blocks * state_ring_entries + state_offsets, -1
+    )
+    state_slots_safe = state_slots.clamp(min=0)
+    source_valid = source_in_current | source_allocated
+    group_sources_valid = torch.all(source_valid, dim=1)
+    source_slots = (
+        source_blocks.clamp(0, state_pool_blocks - 1) * state_ring_entries
+        + source_offsets
+    )
+
+    kv_write_valid = completed & group_sources_valid & kv_allocated
+    # Slot zero is the framework-reserved block: valid destinations always sit
+    # above it (``allocated`` requires block > 0), so invalid rows redirect
+    # there and write back its own original in the full-shape scatter.
+    kv_write_slots = torch.where(
+        kv_write_valid,
+        kv_blocks.clamp(0, kv_pool_blocks - 1) * kv_entries_per_block + kv_entry,
+        0,
+    )
+    kv_slots = torch.where(kv_write_valid, kv_write_slots, -1)
+
+    # Host facts only: with the step's length mirror the uniqueness verdict is
+    # pure host arithmetic; without it the conservative False keeps the legacy
+    # write path (no device readback here, ever).
+    host_length_values = lengths_values if host_lengths_known else []
+    state_slots_unique = bool(
+        host_length_values and max(host_length_values) <= state_ring_entries
+    )
+    if state_slots_unique:
+        # The full-shape masked-scatter write is exact only when no two rows
+        # resolve to the same destination slot.  Within one request that holds
+        # whenever the request spans at most ``state_ring_entries`` new tokens
+        # (consecutive positions); across requests it is the allocator's
+        # per-request block disjointness.  Enforce both once per step with an
+        # async device assert instead of a host sync: a violation is a broken
+        # engine/allocator invariant and traps fail-stop, matching
+        # ``qsa_assert_valid``'s contract.
+        sorted_state = torch.sort(state_slots_safe).values
+        qsa_assert_valid(
+            ~torch.any(
+                (sorted_state[1:] == sorted_state[:-1]) & (sorted_state[1:] > 0)
+            ),
+            "indexer writer state destinations must be unique; the state block "
+            "table shares a physical block across requests",
+        )
+        sorted_kv = torch.sort(kv_write_slots).values
+        qsa_assert_valid(
+            ~torch.any((sorted_kv[1:] == sorted_kv[:-1]) & (sorted_kv[1:] > 0)),
+            "indexer writer KV destinations must be unique; the KV block table "
+            "shares a physical block across requests",
+        )
+
+    if not host_arithmetic:
+        batch_lengths = (cu[1:] - cu[:-1]).to(torch.long)
+    return IndexerWriterGeometry(
+        ratio=ratio,
+        kv_tokens_per_block=kv_tokens_per_block,
+        state_tokens_per_block=state_tokens_per_block,
+        state_ring_entries=state_ring_entries,
+        kv_entries_per_block=kv_entries_per_block,
+        token_count=token_count,
+        batch_size=batch_size,
+        invalid_block_policy=invalid_block_policy,
+        device=device,
+        kv_pool_blocks=kv_pool_blocks,
+        state_pool_blocks=state_pool_blocks,
+        cu_seqlens=cu_seqlens,
+        start_positions=start_positions,
+        kv_block_table=kv_block_table,
+        state_block_table=state_block_table,
+        source_fingerprints={
+            name: _writer_geometry_fingerprint(tensor)
+            for name, tensor in (
+                ("cu_seqlens", cu_seqlens),
+                ("start_positions", start_positions),
+                ("kv_block_table", kv_block_table),
+                ("state_block_table", state_block_table),
+            )
+        },
+        lengths=tuple(host_length_values),
+        state_slots_unique=state_slots_unique,
+        batch_lengths=batch_lengths,
+        request_ids=request_ids,
+        positions=positions,
+        row_starts=row_starts,
+        row_lengths=row_lengths,
+        state_slots=state_slots,
+        state_allocated=state_allocated,
+        state_slots_safe=state_slots_safe,
+        completed=completed,
+        block_starts=block_starts,
+        kv_blocks=kv_blocks,
+        kv_allocated=kv_allocated,
+        kv_entry=kv_entry,
+        kv_write_slots=kv_write_slots,
+        kv_slots=kv_slots,
+        source_rows=source_rows,
+        source_slots=source_slots,
+        source_in_current=source_in_current,
+        source_valid=source_valid,
+        group_sources_valid=group_sources_valid,
+        kv_write_valid=kv_write_valid,
+    )
+
+
+def _assert_host_mirrors_match_sources(
+    cu_seqlens: torch.Tensor,
+    start_positions: torch.Tensor,
+    lengths: list[int],
+    prefixes: list[int],
+    token_count: int,
+) -> None:
+    """Host-derived geometry is only valid if it describes the real sources.
+
+    The host path builds every index tensor from the mirrors, so the device
+    ``cu_seqlens`` / ``start_positions`` must agree with them.  One async
+    verdict per source (no host sync); strict mode keeps the legacy
+    fail-fast host comparison with the legacy message.
+    """
+    cu_values = [0]
+    for length in lengths:
+        if length < 0:
+            raise ValueError(
+                "cu_seqlens must be monotonic from 0 to raw_keys.shape[0], and "
+                "start_positions must be non-negative"
+            )
+        cu_values.append(cu_values[-1] + length)
+    if cu_values[-1] != token_count or any(
+        prefix < 0 for prefix in prefixes
+    ):
+        raise ValueError(
+            "cu_seqlens must be monotonic from 0 to raw_keys.shape[0], and "
+            "start_positions must be non-negative"
+        )
+    expected_cu = torch.tensor(
+        cu_values, dtype=cu_seqlens.dtype, device=cu_seqlens.device
+    )
+    expected_starts = torch.tensor(
+        prefixes, dtype=start_positions.dtype, device=start_positions.device
+    )
+    message = (
+        "cu_seqlens must be monotonic from 0 to raw_keys.shape[0], and "
+        "start_positions must be non-negative"
+    )
+    cu_verdict = torch.equal if qsa_strict_validation_enabled() else (
+        lambda a, b: (a == b).all()
+    )
+    cu_ok = cu_verdict(cu_seqlens, expected_cu)
+    starts_ok = cu_verdict(start_positions, expected_starts)
+    if qsa_strict_validation_enabled():
+        if not bool(cu_ok) or not bool(starts_ok):
+            raise ValueError(message)
+    else:
+        qsa_assert_valid(cu_ok & starts_ok, message)
+
+
+def _assert_resolved_blocks(
+    *,
+    tag: str,
+    required: torch.Tensor,
+    in_bounds: torch.Tensor,
+    blocks: torch.Tensor,
+    pool_blocks: int,
+    invalid_block_policy: InvalidBlockPolicy,
+) -> None:
+    """The resolve asserts of the legacy chain over pre-gathered blocks."""
+    out_of_pool = required & in_bounds & (blocks >= pool_blocks)
+    if qsa_strict_validation_enabled():
+        if bool(torch.any(out_of_pool).item()):
+            raise IndexError(
+                f"{tag} physical block is outside pool size {pool_blocks}"
+            )
+    else:
+        qsa_assert_valid(
+            ~torch.any(out_of_pool),
+            f"{tag} physical block is outside pool size {pool_blocks}",
+        )
+    missing = required & ~(in_bounds & (blocks > 0) & (blocks < pool_blocks))
+    if invalid_block_policy == "raise":
+        if qsa_strict_validation_enabled():
+            if bool(torch.any(missing).item()):
+                raise ValueError(
+                    f"{tag} resolves to an unallocated logical block"
+                )
+        else:
+            qsa_assert_valid(
+                ~torch.any(missing),
+                f"{tag} resolves to an unallocated logical block",
+            )
+
+
+def _write_indexer_cache_full_shape(
+    raw_keys: torch.Tensor,
+    geometry: IndexerWriterGeometry,
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+    k_norm_gamma: torch.Tensor,
+    kv_pool: torch.Tensor,
+    state_pool: torch.Tensor,
+    *,
+    norm_eps: float,
+    capture_undo: bool,
+    rope_is_token_aligned: bool,
+) -> dict:
+    """Compression-free writer for a step whose geometry is frozen.
+
+    Every destination stays full-shape: no ``torch.nonzero`` compression, no
+    masked-select gathers, no ``argsort``/``unique`` chains and therefore no
+    device-to-host synchronization.  Writes are masked scatters where invalid
+    rows write back their own gathered original, so untouched pool entries keep
+    their bytes; the uniqueness of the written slots is a host fact of the
+    frozen geometry (``state_slots_unique``) plus the geometry build's async
+    cross-request-block-disjointness assert.
+
+    Byte-for-byte this produces the same pool contents, ``state_slots`` /
+    ``kv_slots`` rows and write counts as the legacy compressed path.
+    """
+    device = raw_keys.device
+    token_count = geometry.token_count
+    head_dim = int(raw_keys.shape[1])
+    ratio = geometry.ratio
+    kv_flat = kv_pool.flatten(0, 1)
+    state_flat = state_pool.flatten(0, 1)
+
+    if not rope_is_token_aligned:
+        # Same coverage contract as the legacy path (rope tables are per-call
+        # arguments, so the check cannot ride the frozen geometry): the [B]-grade
+        # start/length pair sum, exactly as the legacy writer computes it.
+        # Strict validation never reaches this path: the dispatch keeps the
+        # legacy writer with its exact host diagnostics.
+        qsa_assert_valid(
+            torch.all(
+                (geometry.start_positions.to(torch.long) + geometry.batch_lengths)
+                <= int(rope_cos.shape[-2])
+            ),
+            f"RoPE tables cover {rope_cos.shape[-2]} positions, need more",
+        )
+
+    # Capture every destination's original before the first mutation; the
+    # gathered rows double as the write-back source for invalid rows and as the
+    # undo payload, so undo capture adds no launches.
+    original_kv = kv_flat.index_select(0, geometry.kv_write_slots)
+    original_state = state_flat.index_select(0, geometry.state_slots_safe)
+
+    gathered_raw = raw_keys.index_select(0, geometry.source_rows.reshape(-1)).view(
+        token_count, ratio, head_dim
+    )
+    gathered_state = state_flat.index_select(
+        0, geometry.source_slots.reshape(-1)
+    ).view(token_count, ratio, head_dim)
+    gathered = torch.where(
+        geometry.source_in_current.unsqueeze(-1),
+        gathered_raw.float(),
+        gathered_state,
+    )
+    pooled = gathered.mean(dim=1).to(raw_keys.dtype)
+    pooled = exact_head_rms_norm(pooled, k_norm_gamma, norm_eps)
+    if rope_is_token_aligned:
+        cos = rope_cos
+        sin = rope_sin
+    elif rope_cos.dim() == 2:
+        cos = rope_cos.index_select(0, geometry.block_starts)
+        sin = rope_sin.index_select(0, geometry.block_starts)
+    else:
+        cos = rope_cos[geometry.request_ids, geometry.block_starts]
+        sin = rope_sin[geometry.request_ids, geometry.block_starts]
+    pooled = apply_partial_rope(pooled, cos, sin).to(torch.bfloat16)
+
+    kv_values = torch.where(
+        geometry.kv_write_valid.unsqueeze(-1), pooled, original_kv
+    )
+    kv_flat.scatter_(
+        0, geometry.kv_write_slots.unsqueeze(-1).expand(-1, head_dim), kv_values
+    )
+    state_values = torch.where(
+        geometry.state_allocated.unsqueeze(-1), raw_keys.float(), original_state
+    )
+    state_flat.scatter_(
+        0, geometry.state_slots_safe.unsqueeze(-1).expand(-1, head_dim), state_values
+    )
+
+    result = {
+        "state_slots": geometry.state_slots,
+        "kv_slots": geometry.kv_slots,
+        "completed": geometry.completed,
+        # 0-dim device tensors: no production consumer reads these back,
+        # so they stay lazy instead of two host-synchronizing sums.
+        "num_state_writes": geometry.state_allocated.sum(),
+        "num_kv_writes": geometry.kv_write_valid.sum(),
+    }
+    if capture_undo:
+        result["undo"] = IndexerCacheUndo(
+            state_pool=state_pool,
+            state_slots=geometry.state_slots_safe,
+            original_state=original_state,
+            kv_pool=kv_pool,
+            kv_slots=geometry.kv_write_slots,
+            original_kv=original_kv,
+        )
+    return result
+
+
 def _write_indexer_cache_vectorized(
     raw_keys: torch.Tensor,
     cu_seqlens: torch.Tensor,
@@ -152,12 +934,22 @@ def _write_indexer_cache_vectorized(
     invalid_block_policy: InvalidBlockPolicy,
     capture_undo: bool,
     rope_is_token_aligned: bool,
+    geometry: Optional[IndexerWriterGeometry] = None,
 ) -> dict:
     """Device-vectorized writer used by the production CUDA path.
 
     Metadata validation has a constant number of host synchronizations. All
     token-to-page resolution, state writes, completed-group pooling and KV
     writes stay on the device; there is no per-token host scalar read or copy.
+
+    ``geometry`` is the step-frozen :class:`IndexerWriterGeometry` (see
+    :func:`build_indexer_writer_geometry`).  When it still describes this
+    invocation and its slots are provably unique, the compression-free
+    full-shape write path replaces the per-call ``nonzero``/``argsort``/
+    ``unique`` chains -- byte-identical pool contents, no device-to-host
+    synchronization.  A stale or inapplicable bundle (and strict validation,
+    which keeps the legacy per-call diagnostics) falls back to the legacy body
+    below.
     """
     device = raw_keys.device
     token_count = int(raw_keys.shape[0])
@@ -210,6 +1002,43 @@ def _write_indexer_cache_vectorized(
         raise ValueError(
             f"rotary_dim must be positive, even, and <= {head_dim}; got "
             f"{rotary_dim}"
+        )
+
+    if qsa_strict_validation_enabled() or not writer_geometry_applies(
+        geometry,
+        cu_seqlens,
+        start_positions,
+        kv_block_table,
+        state_block_table,
+        kv_pool,
+        state_pool,
+        token_count=token_count,
+        ratio=ratio,
+        kv_tokens_per_block=kv_tokens_per_block,
+        state_tokens_per_block=state_tokens_per_block,
+        invalid_block_policy=invalid_block_policy,
+    ):
+        geometry = None
+    if (
+        geometry is not None
+        and geometry.state_slots_unique
+        and int(kv_pool.shape[0]) > 0
+        and int(state_pool.shape[0]) > 0
+    ):
+        # The frozen bundle was validated against these exact tensors (identity
+        # + fingerprint checks above), so the leading cu/rope asserts below
+        # already ran once per step at build time.
+        return _write_indexer_cache_full_shape(
+            raw_keys,
+            geometry,
+            rope_cos,
+            rope_sin,
+            k_norm_gamma,
+            kv_pool,
+            state_pool,
+            norm_eps=norm_eps,
+            capture_undo=capture_undo,
+            rope_is_token_aligned=rope_is_token_aligned,
         )
 
     cu = cu_seqlens.to(torch.long)
@@ -463,6 +1292,7 @@ def write_indexer_cache(
     invalid_block_policy: InvalidBlockPolicy = "raise",
     capture_undo: bool = False,
     rope_is_token_aligned: bool = False,
+    geometry: Optional[IndexerWriterGeometry] = None,
 ) -> dict:
     """Write ragged raw indexer keys to the state ring and completed means to KV.
 
@@ -495,6 +1325,8 @@ def write_indexer_cache(
             "invalid_block_policy must be 'raise' or 'skip', got "
             f"{invalid_block_policy!r}"
         )
+    if geometry is not None and not isinstance(geometry, IndexerWriterGeometry):
+        raise ValueError("geometry must be an IndexerWriterGeometry or None")
     if raw_keys.dim() != 2:
         raise ValueError(f"raw_keys must be [N, head_dim], got {raw_keys.shape}")
     if raw_keys.dtype not in (torch.float16, torch.bfloat16, torch.float32):
@@ -591,6 +1423,7 @@ def write_indexer_cache(
             invalid_block_policy=invalid_block_policy,
             capture_undo=capture_undo,
             rope_is_token_aligned=rope_is_token_aligned,
+            geometry=geometry,
         )
 
     offsets = [int(v) for v in cu_seqlens.tolist()]

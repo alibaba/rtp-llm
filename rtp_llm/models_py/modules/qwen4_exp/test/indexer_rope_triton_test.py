@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -123,8 +124,15 @@ class IndexerRoPETritonTest(unittest.TestCase):
                     torch.testing.assert_close(a, b, rtol=0, atol=0)
             if factor == 3:
                 transported[1] += 1
-                with self.assertRaisesRegex(ValueError, "three axes"):
-                    build_base_rope(transported, config, inv_freq=frequency, **kwargs)
+                # Production mode enqueues the equal-axes verdict as a device
+                # assert; strict mode keeps the legacy fail-fast ValueError.
+                with patch.dict(
+                    os.environ, {"RTP_LLM_QSA_STRICT_VALIDATION": "1"}
+                ):
+                    with self.assertRaisesRegex(ValueError, "three axes"):
+                        build_base_rope(
+                            transported, config, inv_freq=frequency, **kwargs
+                        )
 
     def test_rotation_preserves_bf16_products_and_tail(self):
         for batch, query, heads in ((1, 1, 32), (1, 4, 32), (4, 4, 32), (7, 4, 8)):

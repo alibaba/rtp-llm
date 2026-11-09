@@ -209,6 +209,7 @@ def write_prefill_indexer_cache(
         kv_tokens_per_block=kv_tokens_per_block,
         state_tokens_per_block=int(self.indexer_state_cache.seq_size_per_block),
         norm_eps=float(indexer.norm_eps),
+        geometry=step.writer_geometry,
     )
     return lengths, rope_cos, rope_sin, result
 
@@ -688,6 +689,7 @@ def _incremental_prefill_selection(
                 state_tokens_per_block=int(plan.state_tokens_per_block),
                 norm_eps=float(indexer.norm_eps),
                 rope_is_token_aligned=True,
+                geometry=None if plan.step is None else plan.step.writer_geometry,
             )
 
         rotated_q = apply_partial_rope(

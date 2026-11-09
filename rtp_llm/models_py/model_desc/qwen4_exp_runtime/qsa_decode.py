@@ -13,11 +13,17 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
     _block_table,
+    _required_blocks_verdict,
     _typed_2d_pool,
     _validate_required_blocks,
+    qsa_assert_valid,
+    qsa_strict_validation_enabled,
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
     select_qsa_paged_tokens,
+)
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    host_input_mirror,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     apply_partial_rope,
@@ -80,10 +86,14 @@ def select_decode_tokens(
 
     # The engine keeps decode lengths on pinned CPU memory. Derive the
     # scorer's output width there, before the H2D copy, rather than
-    # synchronizing a GPU max reduction after every sparse layer.
+    # synchronizing a GPU max reduction after every sparse layer. A
+    # device-input engine (RTP_LLM_DEVICE_INPUT) is read back once per model
+    # step through the shared mirror cache, so every layer of the step shares
+    # one host value instead of a per-layer device reduction and sync.
+    lengths_host = host_input_mirror(self.main_inputs, "sequence_lengths")
     host_max_compressed = (
-        (int(sequence_lengths.max().item()) + 1) // ratio
-        if sequence_lengths.device.type == "cpu"
+        (int(lengths_host.max().item()) + 1) // ratio
+        if lengths_host is not None
         else None
     )
     sequence_lengths = sequence_lengths.to(
@@ -92,7 +102,7 @@ def select_decode_tokens(
     invalid_lengths = (
         bool(torch.any(sequence_lengths < 0).item())
         if host_max_compressed is None
-        else bool(torch.any(self.main_inputs.sequence_lengths < 0).item())
+        else bool(torch.any(lengths_host < 0).item())
     )
     if invalid_lengths:
         raise RuntimeError("qwen4_exp QSA sequence_lengths must be non-negative")
@@ -113,10 +123,19 @@ def select_decode_tokens(
     )
     if target_mrope and not graph_decode:
         positions = position_ids.reshape(batch_size, index_factor)
-        if not torch.equal(positions, positions[:, :1].expand_as(positions)):
-            raise RuntimeError(
-                "qwen4_exp QSA decode requires text-only MRoPE continuation "
-                "with three equal axes (which may differ from cache positions)"
+        message = (
+            "qwen4_exp QSA decode requires text-only MRoPE continuation "
+            "with three equal axes (which may differ from cache positions)"
+        )
+        if qsa_strict_validation_enabled():
+            if not torch.equal(positions, positions[:, :1].expand_as(positions)):
+                raise RuntimeError(message)
+        else:
+            # Per eager decode layer: the equal-axes verdict is enqueued as a
+            # device assert instead of a host-synchronizing torch.equal; a
+            # violation traps fail-stop at the next host synchronization.
+            qsa_assert_valid(
+                (positions == positions[:, :1].expand_as(positions)).all(), message
             )
     get_frequency = getattr(indexer, "rope_inv_freq", None)
     frequency = get_frequency(rope_config) if callable(get_frequency) else None
@@ -236,12 +255,26 @@ def select_decode_tokens(
         required_kv_columns = (
             compressed_lengths + kv_entries_per_block - 1
         ) // kv_entries_per_block
-        _validate_required_blocks(
-            kv_table,
-            required_kv_columns,
-            pool_blocks=int(kv_pool.shape[0]),
-            tag=INDEXER_KV_TAG,
-        )
+        if qsa_strict_validation_enabled():
+            _validate_required_blocks(
+                kv_table,
+                required_kv_columns,
+                pool_blocks=int(kv_pool.shape[0]),
+                tag=INDEXER_KV_TAG,
+            )
+        else:
+            # Per eager decode layer: one enqueue-only device verdict replaces
+            # the legacy host-synchronizing per-check validation; strict mode
+            # and CI keep the exact legacy diagnostics.
+            qsa_assert_valid(
+                _required_blocks_verdict(
+                    kv_table,
+                    required_kv_columns,
+                    pool_blocks=int(kv_pool.shape[0]),
+                ),
+                "QSA cache 'indexer_kv' block table does not cover or resolve "
+                "the decode tail",
+            )
 
     # Only rows that close a compression group consume these values. Build
     # one block-start RoPE row per request instead of [0, context_len).
