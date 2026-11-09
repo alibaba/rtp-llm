@@ -385,7 +385,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             query_start_loc=cu_seqlen_without_padding,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            prefix_lengths=attn_inputs.prefix_lengths,
+            prefix_lengths=attn_inputs.prefix_lengths_device,
             metadata=metadata,
             output_groups=self.conv_output_groups,
         )
@@ -411,7 +411,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             else None
         )
         context_batch_size = attn_inputs.input_lengths.shape[0]
-        cu_seqlens_without_padding = attn_inputs.cu_seqlens
+        cu_seqlens_without_padding = attn_inputs.cu_seqlens_device
         initial_states: Optional[torch.Tensor] = None
         if ssm_states is not None:
             initial_states = torch.empty(
@@ -423,7 +423,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
                 dtype=self.ssm_state_dtype,
             )
             load_initial_state_from_block_map(
-                attn_inputs.prefix_lengths,
+                attn_inputs.prefix_lengths_device,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 initial_states,
@@ -599,7 +599,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             store_ssm_state_to_block_map(
                 h_for_store,
                 final_state,
-                attn_inputs.prefix_lengths,
+                attn_inputs.prefix_lengths_device,
                 cu_seqlens_without_padding,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,

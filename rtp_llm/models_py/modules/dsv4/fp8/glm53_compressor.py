@@ -495,9 +495,6 @@ class CompressorFP8(PoolBackedModule):
             "seq_start_per_req and cu_seq_per_req are required for ring write mask; "
             "caller must supply per-request metadata"
         )
-        input_lens = (cu_seq_per_req[1:] - cu_seq_per_req[:-1]).to(torch.long)
-        seq_end_per_req = seq_start_per_req.to(torch.long) + input_lens
-
         if not self._kv_cache_sharded:
             from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
 
@@ -522,9 +519,11 @@ class CompressorFP8(PoolBackedModule):
                 self._kv_block_table,
                 self._kv_eb,
                 self.compress_ratio,
-                seq_end_per_req,
+                seq_start_per_req,
+                cu_seq_per_req,
                 self._state_tokens_per_block,
                 pool_rows=pool_rows,
+                kv_tokens_per_block=self._kv_tokens_per_block,
             )
             return CompressorMeta(
                 positions=positions,
@@ -538,6 +537,8 @@ class CompressorFP8(PoolBackedModule):
                 cu_seq_per_req=cu_seq_per_req,
             )
 
+        input_lens = (cu_seq_per_req[1:] - cu_seq_per_req[:-1]).to(torch.long)
+        seq_end_per_req = seq_start_per_req.to(torch.long) + input_lens
         with record_function_range("dsv4.fp8.compressor.meta.state_slots"):
             state_slots = self._compute_state_slot_mapping(
                 positions, b_idx, seq_end_per_req
