@@ -179,3 +179,17 @@ py_test(
     srcs = ["qwen35_vit_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "memfd_transport_test",
+    srcs = ["memfd_transport_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
+
+py_binary(
+    name = "benchmark_memfd_transport",
+    srcs = ["benchmark_memfd_transport.py", "memfd_transport_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["manual"],
+)
