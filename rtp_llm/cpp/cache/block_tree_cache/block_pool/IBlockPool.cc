@@ -367,6 +367,16 @@ size_t IBlockPool::availableFreeBlocksNoLock() const {
     return available_blocks;
 }
 
+IBlockPool::TreeReferenceStats IBlockPool::treeReferenceStatsNoLock() const {
+    checkInitializedNoLock();
+    const size_t free_blocks = availableFreeBlocksNoLock();
+    return {totalBlocksNumNoLock(),
+            free_blocks,
+            available_blocks_num_ - free_blocks,
+            active_blocks_num_,
+            tree_referenced_block_counts_};
+}
+
 void IBlockPool::refillAscendingFreeBlocksNoLock() {
     BlockIdList merged(free_blocks_.begin() + free_head_, free_blocks_.end());
     merged.insert(merged.end(), released_blocks_.begin(), released_blocks_.end());
