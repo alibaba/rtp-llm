@@ -1671,6 +1671,8 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             external_request_id="",
             *,
             deadline,
+            region=None,
+            input_inspection_enabled=None,
         ):
             computations.append(cache_key)
             started.set()
@@ -1717,6 +1719,8 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             external_request_id="",
             *,
             deadline,
+            region=None,
+            input_inspection_enabled=None,
         ):
             entry.complete((torch.ones(2, 4), None))
 
@@ -1826,6 +1830,8 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             external_request_id="",
             *,
             deadline,
+            region=None,
+            input_inspection_enabled=None,
         ):
             nonlocal active, max_active, completed_count
             with lock:
@@ -1878,6 +1884,8 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             external_request_id="",
             *,
             deadline,
+            region=None,
+            input_inspection_enabled=None,
         ):
             nonlocal completed_count
             started.set()
@@ -1935,6 +1943,8 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             external_request_id="",
             *,
             deadline,
+            region=None,
+            input_inspection_enabled=None,
         ):
             started_urls.append(mm_inputs[0].url)
             first_started.set()
@@ -1985,6 +1995,8 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             external_request_id="",
             *,
             deadline,
+            region=None,
+            input_inspection_enabled=None,
         ):
             started_urls.append(mm_inputs[0].url)
             first_started.set()
@@ -2056,6 +2068,8 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             external_request_id="",
             *,
             deadline,
+            region=None,
+            input_inspection_enabled=None,
         ):
             nonlocal started_count
             with lock:
