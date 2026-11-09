@@ -1,4 +1,7 @@
+#include <array>
+#include <cstring>
 #include <optional>
+#include <openssl/sha.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include "aios/navi_sched/bindings/NaviSchedBindings.h"
@@ -39,6 +42,76 @@ namespace py = pybind11;
 namespace navi_sched {
 AUTIL_DECLARE_AND_SETUP_LOGGER(navi_sched, VLLMAgentBridgeRuntime);
 namespace {
+
+void appendCborValue(std::vector<uint8_t>& bytes, uint8_t majorType, uint64_t value) {
+    const uint8_t prefix = majorType << 5;
+    if (value < 24) {
+        bytes.push_back(prefix | value);
+        return;
+    }
+    unsigned width = 8;
+    uint8_t tag = 27;
+    if (value <= std::numeric_limits<uint8_t>::max()) {
+        width = 1;
+        tag = 24;
+    } else if (value <= std::numeric_limits<uint16_t>::max()) {
+        width = 2;
+        tag = 25;
+    } else if (value <= std::numeric_limits<uint32_t>::max()) {
+        width = 4;
+        tag = 26;
+    }
+    bytes.push_back(prefix | tag);
+    while (width != 0) {
+        --width;
+        bytes.push_back(static_cast<uint8_t>(value >> (8 * width)));
+    }
+}
+
+std::vector<uint64_t> hashVllmPlainTextBlocks(const py::buffer &tokenBuffer, size_t blockSize)
+{
+    const auto tokens = tokenBuffer.request();
+    if (blockSize == 0 || tokens.ndim != 1 || tokens.format != "q"
+        || tokens.itemsize != sizeof(int64_t) || tokens.strides[0] != sizeof(int64_t)) {
+        throw std::invalid_argument("expected contiguous signed 64-bit tokens and a positive block size");
+    }
+    const auto *tokenBytes = static_cast<const uint8_t *>(tokens.ptr);
+    const size_t fullBlocks = tokens.size / blockSize;
+    std::vector<uint64_t> result(fullBlocks);
+
+    // The caller owns its token buffer until this synchronous call returns.
+    py::gil_scoped_release release;
+    // vLLM seeds sha256_cbor with the encoded Python hash seed "0".
+    constexpr std::array<uint8_t, 2> seed{0x61, '0'};
+    std::array<uint8_t, SHA256_DIGEST_LENGTH> parent{};
+    SHA256(seed.data(), seed.size(), parent.data());
+    std::vector<uint8_t> encoded;
+    for (size_t block = 0; block < fullBlocks; ++block) {
+        encoded.clear();
+        // The hashed tuple is (parent hash, current block tokens, extra keys).
+        appendCborValue(encoded, 4, 3);
+        appendCborValue(encoded, 2, parent.size());
+        encoded.insert(encoded.end(), parent.begin(), parent.end());
+        appendCborValue(encoded, 4, blockSize);
+        const size_t first = block * blockSize;
+        for (size_t offset = 0; offset < blockSize; ++offset) {
+            int64_t token;
+            std::memcpy(&token, tokenBytes + (first + offset) * sizeof(token), sizeof(token));
+            if (token < 0) {
+                appendCborValue(encoded, 1, static_cast<uint64_t>(-(token + 1)));
+            } else {
+                appendCborValue(encoded, 0, static_cast<uint64_t>(token));
+            }
+        }
+        encoded.push_back(0xf6);  // No extra cache keys on the plain-text path.
+        SHA256(encoded.data(), encoded.size(), parent.data());
+        for (size_t i = parent.size() - sizeof(uint64_t); i < parent.size(); ++i) {
+            result[block] = (result[block] << 8) | parent[i];
+        }
+    }
+    return result;
+}
+
 
 void shutdownAlogAtExit()
 {
@@ -1688,6 +1761,8 @@ void bindNaviSched(py::module_ &m) { bindNaviSchedData(m); }
 
 void bindNaviSchedModule(py::module_ &module, const char *description)
 {
+    module.def("hash_vllm_plain_text_blocks", &hashVllmPlainTextBlocks,
+               py::arg("token_buffer"), py::arg("block_size"));
     module.doc() = description;
     auto naviModule = module.def_submodule("navi", "Navi runtime configuration");
     registerNaviRuntimeConfigPybind(naviModule);

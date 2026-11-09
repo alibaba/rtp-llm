@@ -5,8 +5,10 @@ import base64
 import functools
 import hashlib
 import logging
+import os
 import threading
 import zlib
+from array import array
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 
@@ -43,6 +45,14 @@ class NaviSchedEndpointRouter:
         self._target_biz_name = str(target_biz_name)
         self._timeout_ms = int(timeout_ms)
         self._block_size = int(block_size)
+        pp_size = os.environ.get("NAVI_SCHED_PP_SIZE", "")
+        self._use_cpp_pp_route_hash = (
+            os.environ.get("VLLM_NAVI_SCHED_PP_ROUTE_HASH_CPP") == "1"
+            and os.environ.get("VLLM_NAVI_SCHED_NATIVE_INGRESS") == "1"
+            and os.environ.get("TPU_RAIDEN_JOB_NAME", "").strip().lower() == "prefill"
+            and pp_size.isdecimal()
+            and int(pp_size) > 1
+        )
         self._route_slots = threading.BoundedSemaphore(route_worker_count)
         self._replay_log_slots = threading.BoundedSemaphore(2)
         self._replay_sample_interval = int(replay_sample_interval)
@@ -94,15 +104,10 @@ class NaviSchedEndpointRouter:
             raise ValueError(
                 "explicit cache checkpoint position must be within the prompt"
             )
-        hashes = (
-            _hash_normalized_token_ids(
-                token_ids,
-                self._block_size,
-                request=block_hash_request,
-            )
-            if block_hashes is None
-            else [int(value) for value in block_hashes]
-        )
+        if block_hashes is None:
+            hashes = self._route_hashes(token_ids, block_hash_request)
+        else:
+            hashes = [int(value) for value in block_hashes]
         collect_replay = False
         if self._replay_sample_interval and logger.isEnabledFor(logging.INFO):
             with self._replay_lock:
@@ -148,6 +153,30 @@ class NaviSchedEndpointRouter:
                         lambda unused: self._replay_log_slots.release()
                     )
         return decision
+
+    def _route_hashes(self, token_ids: tuple[int, ...], request) -> list[int]:
+        if (
+            self._use_cpp_pp_route_hash
+            and request is not None
+            and not getattr(request, "mm_features", None)
+            and getattr(request, "lora_request", None) is None
+            and not getattr(request, "cache_salt", None)
+            and getattr(request, "prompt_embeds", None) is None
+        ):
+            try:
+                packed_tokens = array("q", token_ids)
+            except OverflowError:
+                # Preserve the Python hash domain outside signed 64-bit values.
+                pass
+            else:
+                from navi_sched.util import naviSchedModule
+
+                return naviSchedModule().hash_vllm_plain_text_blocks(
+                    packed_tokens, self._block_size
+                )
+        return _hash_normalized_token_ids(
+            token_ids, self._block_size, request=request
+        )
 
     @staticmethod
     def _log_replay(decision) -> None:

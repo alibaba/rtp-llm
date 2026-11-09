@@ -449,6 +449,7 @@ pybind_extension(
         "bindings/*.h",
     ]),
     deps = [
+        "@boringssl//:crypto",
         "//aios/alog",
         "//aios/navi:navi",
         "//aios/navi:navi_pybind",
@@ -868,6 +869,7 @@ pybind_extension(
         "$(location scripts/navi_sched_pybind.lds)",
     ],
     deps = [
+        "@boringssl//:crypto",
         "//aios/alog",
         "//aios/navi:navi",
         "//aios/navi:navi_pybind",

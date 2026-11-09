@@ -1,9 +1,11 @@
 import hashlib
 import os
 import unittest
+from array import array
 from types import SimpleNamespace
 from unittest import mock
 
+from navi_sched.adapters.vllm.NaviSchedEndpointRouter import NaviSchedEndpointRouter
 from navi_sched.adapters.vllm.VLLMBlockHash import (
     block_hash_to_uint64,
     calculate_vllm_block_hashes,
@@ -11,6 +13,66 @@ from navi_sched.adapters.vllm.VLLMBlockHash import (
 
 
 class VLLMBlockHashTest(unittest.TestCase):
+
+    def test_cpp_plain_route_hash_matches_python_block_chain(self):
+        from navi_sched.util import naviSchedModule
+
+        native = naviSchedModule()
+        token_ids = [
+            -(1 << 63), -65537, -256, -24, 0, 23, 24, 255, 256,
+            65535, 65536, (1 << 32), (1 << 63) - 1,
+        ] * 10
+        for block_size in (1, 4, 16, 64, 4096):
+            with self.subTest(block_size=block_size):
+                self.assertEqual(
+                    calculate_vllm_block_hashes(token_ids, block_size),
+                    native.hash_vllm_plain_text_blocks(array("q", token_ids), block_size),
+                )
+        with self.assertRaises(ValueError):
+            native.hash_vllm_plain_text_blocks(array("i", [1]), 1)
+
+    def test_cpp_route_hash_only_handles_plain_native_pp_requests(self):
+        env = {
+            "VLLM_NAVI_SCHED_PP_ROUTE_HASH_CPP": "1",
+            "VLLM_NAVI_SCHED_NATIVE_INGRESS": "1",
+            "TPU_RAIDEN_JOB_NAME": "prefill",
+            "NAVI_SCHED_PP_SIZE": "4",
+        }
+        token_ids = tuple(range(128))
+        plain_request = SimpleNamespace()
+        fields_requiring_vendor_hash = (
+            {"mm_features": [object()]},
+            {"lora_request": object()},
+            {"cache_salt": "test"},
+            {"prompt_embeds": object()},
+        )
+        client = mock.Mock()
+        with mock.patch.dict(os.environ, env, clear=True):
+            router = NaviSchedEndpointRouter(client, "prefill", block_size=64)
+        self.addCleanup(router.close)
+        with mock.patch(
+            "navi_sched.adapters.vllm.NaviSchedEndpointRouter._hash_normalized_token_ids",
+            return_value=[17],
+        ) as vendor_hash:
+            self.assertIs(
+                router.route(token_ids, request_id=42, block_hash_request=plain_request),
+                client.schedule.return_value,
+            )
+            client.schedule.assert_called_once_with(
+                len(token_ids), block_hashes=[10918909127363516282, 10585920789087210302],
+                block_size=64, forward_payload=b"", target_biz_name="prefill",
+                timeout_ms=1000, request_id=42,
+            )
+            vendor_hash.assert_not_called()
+            for metadata in fields_requiring_vendor_hash:
+                request = SimpleNamespace(**metadata)
+                self.assertEqual([17], router._route_hashes(token_ids, request))
+                vendor_hash.assert_called_with(token_ids, 64, request=request)
+            with mock.patch.dict(os.environ, dict(env, NAVI_SCHED_PP_SIZE="1"), clear=True):
+                single_rank = NaviSchedEndpointRouter(mock.Mock(), "prefill", block_size=64)
+            self.addCleanup(single_rank.close)
+            self.assertEqual([17], single_rank._route_hashes(token_ids, plain_request))
+            vendor_hash.assert_called_with(token_ids, 64, request=plain_request)
 
     def test_plain_runtime_request_uses_native_hashing(self):
         from navi_sched.adapters.vllm import VLLMBlockHash as hashes
