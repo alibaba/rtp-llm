@@ -2,6 +2,7 @@ import datetime
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -39,6 +40,20 @@ def _worker(rank, store):
             device,
             pc,
             Qwen4CollectiveOptions(backend, large),
+        )
+
+    def prepare(max_tokens=32768):
+        qwen4_ar.prepare_collective_workspaces(
+            [SimpleNamespace(hidden_size=2560, compute_dtype=torch.bfloat16)],
+            SimpleNamespace(
+                runtime_config=SimpleNamespace(
+                    fifo_scheduler_config=SimpleNamespace(
+                        max_batch_tokens_size=max_tokens
+                    ),
+                    reserve_runtime_mem_mb=1024,
+                ),
+                kv_cache_config=SimpleNamespace(kv_cache_mem_mb=0),
+            ),
         )
 
     from flashinfer.comm import vllm_ar
@@ -104,6 +119,8 @@ def _worker(rank, store):
     torch.testing.assert_close(actual, torch.full_like(actual, 3), rtol=0, atol=0)
     large_prefill = initialize(large=True)
     assert large_prefill is not None
+    assert not large_prefill.large_prefill
+    prepare()
     for rows in (4093, 4094, 4095, 4096, 8192, 12288, 16384):
         value = torch.full((rows, 2560), rank + 1, dtype=torch.bfloat16, device=device)
         assert large_prefill.should_use(value)
@@ -114,13 +131,22 @@ def _worker(rank, store):
     assert communicator is not None
     small_workspace = communicator._workspace
     value = torch.full((4096, 2560), rank + 1, dtype=torch.bfloat16, device=device)
+    with patch.object(
+        torch.cuda,
+        "mem_get_info",
+        side_effect=AssertionError("request-time allocation"),
+    ):
+        assert not communicator.should_use(value)
+    prepare(8192)
     assert communicator.should_use(value)
+    assert communicator._prefill_workspace.max_bytes == 8192 * 2560 * 2
+    too_large = torch.empty((12288, 2560), dtype=torch.bfloat16, device=device)
+    assert not communicator.should_use(too_large)
     assert communicator._workspace is small_workspace
     assert communicator._prefill_workspace is not small_workspace
     torch.testing.assert_close(
         communicator.all_reduce(value), torch.full_like(value, 3), rtol=0, atol=0
     )
-    qwen4_ar.freeze_workspaces()
     captures = []
     for rows in (4, 7):
         value = torch.full((rows, 2560), rank + 1, dtype=torch.bfloat16, device=device)

@@ -22,6 +22,20 @@ def topology(size=2):
     return pc
 
 
+def engine_config(max_tokens=32768, runtime_mb=1024, kv_mb=0):
+    return SimpleNamespace(
+        runtime_config=SimpleNamespace(
+            fifo_scheduler_config=SimpleNamespace(max_batch_tokens_size=max_tokens),
+            reserve_runtime_mem_mb=runtime_mb,
+        ),
+        kv_cache_config=SimpleNamespace(kv_cache_mem_mb=kv_mb),
+    )
+
+
+def model_config(hidden=2560, dtype=torch.bfloat16):
+    return SimpleNamespace(hidden_size=hidden, compute_dtype=dtype)
+
+
 class Qwen4AllReduceUnitTest(unittest.TestCase):
     def setUp(self):
         self.group = object()
@@ -184,11 +198,12 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
             self.group, self.device, pc, self.options
         )
 
-    def make_ipc(self, large=False):
+    def make_ipc(self, large=False, prepare=False):
         def workspace(group, device, max_bytes):
             result = FlashInferIpcAllReduce.__new__(FlashInferIpcAllReduce)
             result.max_bytes = max_bytes
             result.registered_graph_inputs = True
+            result.ops = SimpleNamespace(meta_size=lambda: 4096)
             return result
 
         with (
@@ -204,6 +219,8 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
             context = qwen4_ar.Qwen4IpcAllReduce(
                 self.group, self.device, Qwen4CollectiveOptions("sm120_ipc", large)
             )
+            if prepare:
+                context.prepare_large_prefill([model_config()], engine_config())
         self.assertEqual(factory.call_args_list[0].kwargs["max_bytes"], 32 * 2560 * 2)
         if large:
             self.assertIsNot(context._workspace, context._prefill_workspace)
@@ -220,7 +237,7 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
             data_ptr=lambda: 16,
         )
         for large in (False, True):
-            context = self.make_ipc(large)
+            context = self.make_ipc(large, prepare=large)
             with patch("torch.cuda.is_current_stream_capturing", return_value=False):
                 for rows in (1, 4, 16, 32):
                     tensor.shape = (rows, 2560)
@@ -252,18 +269,167 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
                 "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.FlashInferIpcAllReduce"
             ) as factory,
         ):
-            context.prepare_large_prefill()
+            context.prepare_large_prefill([model_config()], engine_config())
         factory.assert_not_called()
         self.assertFalse(context.large_prefill)
         self.assertIs(context._workspace, small)
 
-    def test_freeze_prevents_request_time_prefill_allocation(self):
-        context = self.make_ipc()
-        context._prefill_policy = None
-        qwen4_ar.freeze_workspaces()
-        with patch.object(torch.cuda, "mem_get_info") as probe:
-            context.prepare_large_prefill()
-        probe.assert_not_called()
+    def test_constructor_and_dispatch_never_prepare_large_workspace(self):
+        for policy in (None, True):
+            context = self.make_ipc(policy)
+            self.assertFalse(context.large_prefill)
+            tensor = SimpleNamespace(
+                is_cuda=True,
+                device=self.device,
+                dtype=torch.bfloat16,
+                ndim=2,
+                shape=(4096, 2560),
+                is_contiguous=lambda: True,
+            )
+            with (
+                patch.object(
+                    torch.cuda, "is_current_stream_capturing", return_value=False
+                ),
+                patch.object(torch.cuda, "mem_get_info") as probe,
+                patch.object(context, "prepare_large_prefill") as prepare,
+            ):
+                self.assertFalse(context.should_use(tensor))
+            probe.assert_not_called()
+            prepare.assert_not_called()
+
+    def test_startup_capacity_uses_model_and_scheduler_without_warmup(self):
+        for tokens, hidden, dtype, rows in (
+            (32768, 2560, torch.bfloat16, 16384),
+            (8192, 2560, torch.bfloat16, 8192),
+            (4093, 2560, torch.bfloat16, 4093),
+            (2048, 2560, torch.bfloat16, 0),
+            (32768, 5120, torch.bfloat16, 0),
+            (32768, 2560, torch.float16, 0),
+        ):
+            with self.subTest(tokens=tokens, hidden=hidden, dtype=dtype):
+                context = self.make_ipc(None)
+                small = context._workspace
+                with (
+                    patch.object(
+                        torch.cuda,
+                        "mem_get_info",
+                        return_value=(10 * 1024**3, 72 * 1024**3),
+                    ),
+                    patch(
+                        "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.FlashInferIpcAllReduce"
+                    ) as factory,
+                ):
+                    context.prepare_large_prefill(
+                        [model_config(hidden, dtype)], engine_config(tokens)
+                    )
+                self.assertIs(context._workspace, small)
+                self.assertEqual(context.large_prefill, rows > 0)
+                if rows:
+                    self.assertEqual(
+                        factory.call_args.kwargs["max_bytes"], rows * 2560 * 2
+                    )
+                else:
+                    factory.assert_not_called()
+
+    def test_explicit_kv_budget_and_runtime_floor_are_preserved(self):
+        for free_gib, total_gib, runtime_mb, kv_mb, tokens in (
+            (10, 72, 4096, 6144, 32768),
+            (3, 72, 0, 0, 8192),
+            (1, 16, 0, 0, 8192),
+        ):
+            with self.subTest(free=free_gib, total=total_gib, kv=kv_mb):
+                context = self.make_ipc(None)
+                with (
+                    patch.object(
+                        torch.cuda,
+                        "mem_get_info",
+                        return_value=(free_gib * 1024**3, total_gib * 1024**3),
+                    ),
+                    patch(
+                        "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.FlashInferIpcAllReduce"
+                    ) as factory,
+                ):
+                    context.prepare_large_prefill(
+                        [model_config()], engine_config(tokens, runtime_mb, kv_mb)
+                    )
+                factory.assert_not_called()
+                self.assertFalse(context.large_prefill)
+
+    def test_startup_accepts_supported_draft_and_is_idempotent(self):
+        context = self.make_ipc(None)
+        configs = [model_config(5120), model_config()]
+        config = engine_config(kv_mb=5120, runtime_mb=4096)
+        with (
+            patch.object(qwen4_ar, "_communicator", context),
+            patch.object(
+                torch.cuda, "mem_get_info", return_value=(10 * 1024**3, 72 * 1024**3)
+            ) as probe,
+            patch(
+                "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.FlashInferIpcAllReduce"
+            ) as factory,
+        ):
+            qwen4_ar.prepare_collective_workspaces(configs, config)
+            qwen4_ar.prepare_collective_workspaces(configs, config)
+        probe.assert_called_once()
+        factory.assert_called_once()
+        self.assertTrue(context.large_prefill)
+
+    def test_startup_rank_capacity_disagreement_keeps_nccl(self):
+        context = self.make_ipc(None)
+        with (
+            patch.object(
+                torch.cuda, "mem_get_info", return_value=(10 * 1024**3, 72 * 1024**3)
+            ),
+            patch.object(
+                qwen4_ar,
+                "exchange_group_state",
+                return_value=[[8192 * 2560 * 2, True], [16384 * 2560 * 2, True]],
+            ),
+            patch(
+                "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.FlashInferIpcAllReduce"
+            ) as factory,
+        ):
+            context.prepare_large_prefill([model_config()], engine_config())
+        factory.assert_not_called()
+        self.assertFalse(context.large_prefill)
+
+    def test_engine_prepares_target_and_draft_before_cpp_engine(self):
+        from rtp_llm.async_decoder_engine.engine_creator import create_engine
+        from rtp_llm.ops import TaskType
+
+        target_config = model_config()
+        target_config.task_type = TaskType.LANGUAGE_MODEL
+        target = SimpleNamespace(model_config=target_config)
+        draft_config = model_config()
+        draft = SimpleNamespace(model=SimpleNamespace(model_config=draft_config))
+        config = engine_config()
+        events = []
+        constructor = MagicMock(side_effect=lambda **kwargs: events.append("construct"))
+        with (
+            patch("rtp_llm.ops.ensure_engine_ops_loaded"),
+            patch.object(
+                torch.ops.rtp_llm,
+                "init_engine",
+                create=True,
+                side_effect=lambda _: events.append("init"),
+            ),
+            patch.object(
+                qwen4_ar,
+                "prepare_collective_workspaces",
+                side_effect=lambda *args: events.append("prepare"),
+            ) as prepare,
+            patch.dict(
+                "sys.modules",
+                {
+                    "rtp_llm.async_decoder_engine.rpc_engine": SimpleNamespace(
+                        LanguageCppEngine=constructor
+                    )
+                },
+            ),
+        ):
+            create_engine(target, config, "", propose_model=draft)
+        prepare.assert_called_once_with([target_config, draft_config], config)
+        self.assertEqual(events, ["init", "prepare", "construct"])
 
     def test_peer_budget_rejection_does_not_allocate(self):
         context = self.make_ipc()
@@ -273,12 +439,16 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
                 torch.cuda, "mem_get_info", return_value=(10 * 1024**3, 72 * 1024**3)
             ),
             patch.object(torch.cuda, "is_current_stream_capturing", return_value=False),
-            patch.object(qwen4_ar, "exchange_group_state", return_value=[True, False]),
+            patch.object(
+                qwen4_ar,
+                "exchange_group_state",
+                return_value=[[16384 * 2560 * 2, True], [16384 * 2560 * 2, False]],
+            ),
             patch(
                 "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.FlashInferIpcAllReduce"
             ) as factory,
         ):
-            context.prepare_large_prefill()
+            context.prepare_large_prefill([model_config()], engine_config())
         factory.assert_not_called()
 
     def test_capture_registers_and_restores_admission(self):

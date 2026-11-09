@@ -12,7 +12,6 @@ from rtp_llm.config.qwen4_collective_config import Qwen4CollectiveOptions
 from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
 
 _SMALL_BYTES = 32 * 2560 * 2
-_PREFILL_BYTES = 16384 * 2560 * 2
 _PREFILL_ROWS = (4093, 4094, 4095, 4096, 8192, 12288, 16384)
 
 
@@ -31,32 +30,49 @@ class Qwen4IpcAllReduce:
         self._prefill_workspace = None
         self._prefill_attempted = False
         self._workspace = FlashInferIpcAllReduce(group, device, max_bytes=_SMALL_BYTES)
-        # Decode graph pointers always belong to this fixed small workspace.
-        if options.large_prefill is True:
-            self.prepare_large_prefill()
 
     @property
     def large_prefill(self):
         return self._prefill_workspace is not None
 
-    def prepare_large_prefill(self):
-        if (
-            self._prefill_attempted
-            or self._prefill_policy is False
-            or _workspaces_frozen
-            or torch.cuda.is_current_stream_capturing()
-        ):
+    def prepare_large_prefill(self, model_configs, engine_config):
+        if self._prefill_attempted or self._prefill_policy is False:
             return
         self._prefill_attempted = True
-        # Two IPC buffers plus rank metadata. Leave at least 1 GiB for the
-        # engine, and cap this optional workspace at 1% of device capacity.
-        required = 2 * _PREFILL_BYTES + 8 * 1024 * 1024
+        max_bytes = 0
         try:
+            runtime = engine_config.runtime_config
+            max_tokens = runtime.fifo_scheduler_config.max_batch_tokens_size
+            supported = any(
+                config.hidden_size == 2560 and config.compute_dtype == torch.bfloat16
+                for config in model_configs
+            )
+            rows = max(
+                (rows for rows in _PREFILL_ROWS if rows <= max_tokens), default=0
+            )
+            max_bytes = rows * 2560 * 2 if supported else 0
+            required = 2 * max_bytes + 8 * 1024**2 + self._workspace.ops.meta_size()
             free, total = torch.cuda.mem_get_info(self.device)
-            admitted = required <= total // 100 and free >= required + 1024**3
+            # Keep the runtime floor used by MemoryEvaluationHelper, plus any
+            # explicitly sized KV cache. Automatic KV sizing sees this actual
+            # allocation through cudaMemGetInfo; do not deduct it a second time.
+            runtime_bytes = max(
+                runtime.reserve_runtime_mem_mb * 1024**2,
+                2048 * 1024**2,
+                int(total * 0.05),
+            )
+            kv_bytes = max(0, engine_config.kv_cache_config.kv_cache_mem_mb) * 1024**2
+            admitted = (
+                max_bytes > 0
+                and required <= total // 100
+                and free >= required + runtime_bytes + kv_bytes
+            )
         except Exception:
             admitted = False
-        if not all(exchange_group_state(self.group, admitted, "prefill_budget")):
+        peers = exchange_group_state(
+            self.group, [max_bytes, admitted], "prefill_budget"
+        )
+        if not all(peer == [max_bytes, True] for peer in peers):
             return
         from .flashinfer_ipc_all_reduce import (
             FlashInferIpcAllReduce,
@@ -65,7 +81,7 @@ class Qwen4IpcAllReduce:
 
         try:
             workspace = FlashInferIpcAllReduce(
-                self.group, self.device, max_bytes=_PREFILL_BYTES
+                self.group, self.device, max_bytes=max_bytes
             )
         except IpcInitializationError as error:
             logging.warning("Large-prefill IPC unavailable; using NCCL: %s", error)
@@ -87,8 +103,6 @@ class Qwen4IpcAllReduce:
         capturing = torch.cuda.is_current_stream_capturing()
         if capturing and not self.allow_ipc_capture:
             return False
-        if tensor.shape[0] in _PREFILL_ROWS and not capturing:
-            self.prepare_large_prefill()
         workspace = self._workspace_for(tensor)
         return workspace is not None and workspace.is_buffer_size_sufficient(
             self.world_size, tensor.shape[0], tensor.shape[1], tensor.dtype
@@ -139,13 +153,12 @@ _canonical_p2p = None
 _group = None
 _options = None
 _configured_options = Qwen4CollectiveOptions()
-_workspaces_frozen = False
 _capture_active = False
 
 
 def configure_collectives(py_env_configs):
     """Install parsed overrides in each spawned rank, without model-name gates."""
-    global _configured_options, _workspaces_frozen
+    global _configured_options
     options = Qwen4CollectiveOptions(
         backend=py_env_configs.qwen4_all_reduce_backend,
         large_prefill=py_env_configs.qwen4_all_reduce_large_prefill,
@@ -154,13 +167,12 @@ def configure_collectives(py_env_configs):
     if _group is not None and options != _options:
         raise RuntimeError("Destroy the distributed environment before changing policy")
     _configured_options = options
-    _workspaces_frozen = False
 
 
-def freeze_workspaces():
-    """Serving may only use workspaces prepared during startup/warmup."""
-    global _workspaces_frozen
-    _workspaces_frozen = True
+def prepare_collective_workspaces(model_configs, engine_config):
+    """Prepare persistent storage after weights, before warmup and KV sizing."""
+    if _communicator is not None:
+        _communicator.prepare_large_prefill(model_configs, engine_config)
 
 
 def _capability_error(device, options):
@@ -299,7 +311,6 @@ def get_canonical_p2p():
 
 def destroy_qwen4_allreduce():
     global _communicator, _canonical_p2p, _group, _options
-    global _workspaces_frozen
     try:
         if _communicator is not None:
             _communicator.destroy()
@@ -308,4 +319,3 @@ def destroy_qwen4_allreduce():
     finally:
         abort_graph_capture()
         _communicator = _canonical_p2p = _group = _options = None
-        _workspaces_frozen = False
