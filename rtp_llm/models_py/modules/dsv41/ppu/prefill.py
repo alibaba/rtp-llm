@@ -362,6 +362,7 @@ def _producer_tiles(requests, ratio):
 def _tiled_producer_inputs(
     requests, ops, layer, eps, freqs, values, scores, positions, ratio, tag
 ):
+    pack_rotary = getattr(ops, "try_encode_rotary_kv", None)
     for tile in _producer_tiles(requests, ratio):
         if len(tile) == 1:
             # Odd prefixes, unpaired tails, and oversized requests use the
@@ -383,8 +384,14 @@ def _tiled_producer_inputs(
                     eps,
                 )
             entry_positions = positions[begin:end:ratio]
-            rotation = freqs[entry_positions.clamp_max(freqs.shape[0] - 1)]
-            packed_global = ops.encode_kv(_rope_tail(latent, rotation), pool_tag=tag)
+            rotation = None
+            packed_global = (
+                pack_rotary(latent, freqs, entry_positions, global_pool=True)
+                if pack_rotary is not None else None
+            )
+            if packed_global is None:
+                rotation = freqs[entry_positions.clamp_max(freqs.shape[0] - 1)]
+                packed_global = ops.encode_kv(_rope_tail(latent, rotation), pool_tag=tag)
             counts = tuple((request[2] - request[1]) // ratio for request in tile)
             # Keep the GEMM shape of each request. Tile the row-local norm,
             # rotary embedding and codec around that BF16 rounding boundary.
@@ -392,7 +399,14 @@ def _tiled_producer_inputs(
                 [F.linear(rows, layer.index_wk.weight) for rows in latent.split(counts)]
             )
             projected = _rms_norm(projected, layer.index_k_norm, eps)
-            packed_index = ops.encode_kv(_rope_tail(projected, rotation), pool_tag="indexer_kv")
+            packed_index = (
+                pack_rotary(projected, freqs, entry_positions, global_pool=False)
+                if pack_rotary is not None else None
+            )
+            if packed_index is None:
+                if rotation is None:
+                    rotation = freqs[entry_positions.clamp_max(freqs.shape[0] - 1)]
+                packed_index = ops.encode_kv(_rope_tail(projected, rotation), pool_tag="indexer_kv")
             del latent, projected, rotation
         yield from zip(
             tile,

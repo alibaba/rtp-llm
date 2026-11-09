@@ -710,6 +710,74 @@ def _triton_kernels():
     ns.ue8m0_to_fp32 = _ue8m0_to_fp32
 
     @triton.jit
+    def _pack_v41_swa_row(kv, payload, packed):
+        row = tl.program_id(0).to(tl.int64)
+        column = tl.arange(0, 512)
+        values = tl.load(kv + row * 512 + column).to(tl.float32).reshape((16, 32))
+        maximum = tl.max(tl.abs(values), 1)
+        poison = tl.sum((values != values).to(tl.int32), 1) > 0
+        maximum = tl.where(poison, float("nan"), tl.maximum(maximum, 1.0e-4))
+        bits = (maximum * (1.0 / 448.0)).to(tl.int32, bitcast=True)
+        exponent = (((bits >> 23) & 255) + ((bits & 0x7FFFFF) != 0)).to(tl.uint8)
+        normalized = values / _ue8m0_to_fp32(exponent)[:, None]
+        clamped = tl.where(normalized == normalized, tl.clamp(normalized, -448.0, 448.0), normalized)
+        tl.store(payload + row * 528 + column, clamped.reshape((512,)))
+        tl.store(packed + row * 528 + 512 + tl.arange(0, 16), exponent)
+
+    @triton.jit
+    def _pack_v41_rotary_fp4_row(
+        kv, frequencies, positions, packed, fp8, position_stride, max_position,
+        DIM: tl.constexpr, GROUP: tl.constexpr, HALF_ROPE: tl.constexpr,
+        GLOBAL: tl.constexpr,
+    ):
+        row = tl.program_id(0).to(tl.int64)
+        pair = tl.arange(0, DIM // 2)
+        token = tl.minimum(tl.load(positions + row * position_stride), max_position)
+        frequency = pair - (DIM // 2 - HALF_ROPE)
+        rotates = frequency >= 0
+        angle = frequencies + token * (2 * HALF_ROPE) + 2 * frequency
+        cosine = tl.load(angle, rotates, other=1.0)
+        sine = tl.load(angle + 1, rotates, other=0.0)
+        real = tl.load(kv + row * DIM + 2 * pair).to(tl.float32)
+        imag = tl.load(kv + row * DIM + 2 * pair + 1).to(tl.float32)
+        # Preserve the PPU complex multiply and round to BF16 before quantizing.
+        rotated_real = tl.fma(real, cosine, -(imag * sine))
+        rotated_imag = tl.fma(imag, cosine, real * sine)
+        real = tl.where(rotates, rotated_real, real).to(tl.bfloat16).to(tl.float32)
+        imag = tl.where(rotates, rotated_imag, imag).to(tl.bfloat16).to(tl.float32)
+        real = real.reshape((DIM // GROUP, GROUP // 2))
+        imag = imag.reshape((DIM // GROUP, GROUP // 2))
+        maximum = tl.max(tl.maximum(tl.abs(real), tl.abs(imag)), 1)
+        poison = tl.sum(((real != real) | (imag != imag)).to(tl.int32), 1) > 0
+        maximum = tl.where(poison, float("nan"), maximum)
+        base = row * (DIM // 2 + DIM // GROUP)
+        groups = tl.arange(0, DIM // GROUP)
+        if GLOBAL:
+            scale = maximum * (1.0 / 6.0)
+            scale = tl.where(poison, scale, tl.clamp(scale, 2.0**-9, 448.0))
+            encoded = scale.to(fp8.dtype.element_ty, fp_downcast_rounding="rtne")
+            inverse = tl.div_rn(1.0, encoded.to(tl.float32))
+            real *= inverse[:, None]
+            imag *= inverse[:, None]
+            tl.store(fp8 + base + DIM // 2 + groups, encoded)
+        else:
+            scaled = tl.maximum(maximum, 6.0 * (2.0**-126)) * (1.0 / 6.0)
+            bits = scaled.to(tl.int32, bitcast=True)
+            exponent = ((bits >> 23) & 255) + ((bits & 0x7FFFFF) != 0)
+            scale = tl.exp2((exponent - 127).to(tl.float32))
+            real /= scale[:, None]
+            imag /= scale[:, None]
+            tl.store(packed + base + DIM // 2 + groups, exponent.to(tl.uint8))
+        low = _fp4_e2m1_code_rne(real)
+        high = _fp4_e2m1_code_rne(imag)
+        low = tl.where(real == real, low, ((real.to(tl.int32, bitcast=True) >> 28) & 8).to(tl.uint8))
+        high = tl.where(imag == imag, high, ((imag.to(tl.int32, bitcast=True) >> 28) & 8).to(tl.uint8))
+        tl.store(packed + base + pair, (low | (high << 4)).reshape((DIM // 2,)))
+
+    ns.pack_v41_swa_row = _pack_v41_swa_row
+    ns.pack_v41_rotary_fp4_row = _pack_v41_rotary_fp4_row
+
+    @triton.jit
     def _e2m1_code_to_fp32(code):
         m = code & 7
         e = m >> 1
@@ -944,3 +1012,40 @@ def try_dequantize_swa_segments(tail, fresh, start, out):
             SWA_KV_ENTRY_BYTES, KV_DIM, FP8_GROUP,
         )
     return True
+
+
+def try_pack_swa_rows(kv):
+    """Pack BF16 SWA rows without materializing scale and payload tensors."""
+    if not (
+        kv.ndim == 2 and kv.shape[1] == KV_DIM and kv.dtype == torch.bfloat16
+        and kv.is_contiguous() and _ppu_fast_path(kv)
+    ):
+        return None
+    packed = torch.empty((kv.shape[0], SWA_KV_ENTRY_BYTES), dtype=torch.uint8, device=kv.device)
+    if kv.shape[0]:
+        _triton_kernels().pack_v41_swa_row[(kv.shape[0],)](
+            kv, packed.view(torch.float8_e4m3fn), packed, enable_fp_fusion=False,
+        )
+    return packed
+
+
+def try_pack_rotary_fp4_rows(kv, freqs, positions, *, global_pool):
+    """Fuse the producer's indexed RoPE and native interleaved FP4 codec."""
+    dim = KV_DIM if global_pool else INDEXER_HEAD_DIM
+    group = FP4_GROUP if global_pool else MX_GROUP
+    if not (
+        kv.ndim == 2 and kv.shape[1] == dim and kv.dtype == torch.bfloat16 and kv.is_contiguous()
+        and positions.shape == (kv.shape[0],) and positions.dtype == torch.int64
+        and freqs.ndim == 2 and freqs.shape[0] > 0 and 0 < freqs.shape[1] <= dim // 2
+        and freqs.dtype == torch.complex64 and freqs.is_contiguous() and not freqs.is_conj()
+        and kv.device == freqs.device == positions.device and _ppu_fast_path(kv)
+    ):
+        return None
+    packed = torch.empty((kv.shape[0], dim // 2 + dim // group), dtype=torch.uint8, device=kv.device)
+    if kv.shape[0]:
+        _triton_kernels().pack_v41_rotary_fp4_row[(kv.shape[0],)](
+            kv, torch.view_as_real(freqs), positions, packed, packed.view(torch.float8_e4m3fn),
+            positions.stride(0), freqs.shape[0] - 1, dim, group, freqs.shape[1], global_pool,
+            enable_fp_fusion=False,
+        )
+    return packed

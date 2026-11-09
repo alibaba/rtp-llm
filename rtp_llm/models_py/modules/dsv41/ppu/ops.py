@@ -13,6 +13,7 @@ the sibling modules, so this module imports on a CPU host.
 
 from __future__ import annotations
 
+import os
 from typing import Mapping, Optional, Tuple
 
 import torch
@@ -23,6 +24,7 @@ from rtp_llm.models_py.modules.dsv41.backend import (
     V41StepContext,
 )
 
+from . import _quant
 from .attention import sparse_attention as _sparse_attention
 from .engram import (
     DistributedEnpmGroup,
@@ -47,6 +49,7 @@ from .moe import (
 )
 
 _SWIGLU_LIMIT = 10.0
+_FUSED_KV_ROW_PACK_ENV = "RTP_V41_PPU_FUSED_KV_ROW_PACK"
 
 
 class PPUOps(V41BackendOps):
@@ -220,7 +223,20 @@ class PPUOps(V41BackendOps):
     def encode_kv(
         self, kv: torch.Tensor, *, pool_tag: str, descriptor: object = None
     ) -> torch.Tensor:
+        if (
+            pool_tag == "swa_kv"
+            and descriptor is None
+            and os.environ.get(_FUSED_KV_ROW_PACK_ENV, "0") == "1"
+        ):
+            packed = _quant.try_pack_swa_rows(kv)
+            if packed is not None:
+                return packed
         return _encode_kv(kv, pool_tag=pool_tag, descriptor=descriptor)
+
+    def try_encode_rotary_kv(self, kv, freqs, positions, *, global_pool):
+        if os.environ.get(_FUSED_KV_ROW_PACK_ENV, "0") != "1":
+            return None
+        return _quant.try_pack_rotary_fp4_rows(kv, freqs, positions, global_pool=global_pool)
 
     def decode_kv(
         self,
