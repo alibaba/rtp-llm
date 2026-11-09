@@ -43,7 +43,7 @@ phases:
     describe: 两 Client 按总 0.1 倍速回放 DeepSeek，启用请求级缓存复用。
     interface: client/start
     args:
-      requests_file: data/traffic/deepseek.binpb.zst
+      requests_file: data/traffic/deepseek.mckidx
       reuse_cache: true
       replay_speed: 0.1
       concurrency: 4096

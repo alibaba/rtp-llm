@@ -19,8 +19,8 @@ public interface ClientProtocol {
                 request_timeout_ms, drain_timeout_ms, false);
         }
         public Start {
-            if (requests_file == null || requests_file.isBlank() || !java.nio.file.Path.of(requests_file).isAbsolute())
-                throw new IllegalArgumentException("requests_file must be an absolute local path");
+            if (requests_file == null || requests_file.isBlank() || !java.nio.file.Path.of(requests_file).isAbsolute() || !requests_file.endsWith(".mckidx"))
+                throw new IllegalArgumentException("requests_file must be an absolute .mckidx path");
             if (masters != null) {
                 masters = List.copyOf(masters);
                 if (masters.isEmpty() || new HashSet<>(masters).size() != masters.size() || masters.stream().anyMatch(String::isBlank))

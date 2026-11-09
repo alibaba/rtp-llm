@@ -191,9 +191,9 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
         config['FLEXLB_CONFIG'] = json.dumps(native)
     engine = {'engine': 'rtp', 'config': {'mock.scheduler.mode': 'group' if batched else 'fifo', 'seq_size_per_block': 16, 'test_block_num': 256,
         'reserve_block_ratio': 0, 'max_seq_len': 4096, 'mock.compute.forward.expression': '1 + batchSize'}}
-    from mock_framework.execution.test.helpers.input import write_inputs, pb
-    source = tmp_path / 'traffic.binpb.zst'
-    write_inputs(source, (pb.Request(token_ids=[1, 2, 3], max_new_tokens=3) for _ in range(800)))
+    from mock_framework.execution.test.helpers.input import write_inputs
+    source = tmp_path / 'traffic.mckidx'
+    write_inputs(source, (([1, 2, 3], 0, 3, 50, []) for _ in range(800)))
     steps = [step('leader', 'master/get', args={'is_leader': True}, expect={'count': 1}),
         step('traffic', 'client/start', args={'requests_file': source.name,
             'qps': 8, 'concurrency': 32, 'queue_capacity': 64, 'request_timeout': '5s', 'drain_timeout': '5s'}, wait_after='4s'),

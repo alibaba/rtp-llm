@@ -1,11 +1,9 @@
 from mock_framework.execution.test.helpers import FRAMEWORK
 from mock_framework.execution.test.helpers.zookeeper import command as zookeeper_command
-"""Real Master plus independent V/P/D processes, using the standard binary playback path."""
+"""Real Master plus independent V/P/D processes and two indexed readers."""
 import asyncio
 import json
 import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -15,12 +13,11 @@ from mock_framework.config import compile_case
 from mock_framework.execution.step.step_registry import StepRegistry
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
-from mock_framework.execution.test.helpers.input import pb, write_inputs
+from mock_framework.execution.test.helpers.input import write_inputs
 from test_master import configuration
 
 
-@pytest.mark.parametrize('indexed', [False, True])
-def test_vision_playback_through_real_master(tmp_path, indexed):
+def test_vision_playback_through_real_master(tmp_path):
     root = FRAMEWORK
     java = str(Path(os.environ['JAVA_HOME']) / 'bin/java')
     master_classpath = os.pathsep.join([str(root / 'java/master/target/classes'),
@@ -38,10 +35,10 @@ def test_vision_playback_through_real_master(tmp_path, indexed):
     vision = {'config': {'patch_size': 14, 'downsample_ratio': 3, 'min_pixels': 0, 'max_image_tokens': 1024, 'hidden_size': 4, 'mock.vit.skip.download': True, 'mm_cache_gpu_max_bytes': 1024,
         'mm_cache_cpu_max_bytes': 1024, 'mock.compute.forward.expression': '2 + batchSize'}}
     data = {'id': 'vision_playback', 'describe': 'Native V selection, metadata preparation, P/D generation',
-        'environment': {'master': {'config': native}, 'prefill': engine, 'decode': engine, 'vit': vision, 'client': {'config': {'image_token_id': 1000}}},
+        'environment': {'master': {'config': native}, 'prefill': engine, 'decode': engine, 'vit': vision, 'client': {'config': {'image_token_id': 1000}, 'deployment': {'replicas': 2}}},
         'phases': [{'id': 'traffic', 'describe': 'Play media requests', 'timeout': '30s', 'steps': [
             {'id': 'start', 'describe': 'Play image input', 'interface': 'client/start', 'args': {
-                'requests_file': 'requests.binpb.zst', 'qps': 4, 'concurrency': 4, 'queue_capacity': 8,
+                'requests_file': 'requests.mckidx', 'replay_speed': 2, 'concurrency': 4, 'queue_capacity': 8,
                 'request_timeout': '5s', 'drain_timeout': '5s'}, 'wait_after': '6s'},
             {'id': 'stop', 'describe': 'Collect playback result', 'interface': 'client/stop'}]}]}
     (tmp_path / 'configs').mkdir()
@@ -49,23 +46,9 @@ def test_vision_playback_through_real_master(tmp_path, indexed):
         component = data['environment'][role]
         (tmp_path / 'configs' / f'{role}.yaml').write_text(yaml.safe_dump(component['config']))
         data['environment'][role] = {**component, 'config': f'configs/{role}.yaml'}
-    if indexed:
-        data['environment']['client']['deployment'] = {'replicas': 2}
-        args = data['phases'][0]['steps'][0]['args']
-        args.pop('qps')
-        args.update(requests_file='requests.mckidx', replay_speed=2)
-        source = tmp_path / 'anonymous.jsonl'
-        rows = [['media', 1, 56, 28], ['media', 2, 56, 28]]
-        rows += [['tokens', [10, 20 if i < 4 else 21], i * 250, 3, 50, [[i % 2 + 1, 1, 924]]]
-                 for i in range(8)]
-        rows.append(['end', 8])
-        source.write_text(''.join(json.dumps(row) + '\n' for row in rows))
-        subprocess.run([sys.executable, str(root / 'scripts/build-indexed-traffic.py'), str(source),
-                        str(tmp_path / args['requests_file'])], check=True)
-    else:
-        requests = [pb.Request(token_ids=[10, 0, 20], max_new_tokens=3,
-            images=[pb.Image(url='mock://image-' + str(i % 2), width=56, height=28, offset=1)]) for i in range(8)]
-        write_inputs(tmp_path / 'requests.binpb.zst', requests)
+    write_inputs(tmp_path / 'requests.mckidx', (
+        ([10, 20 if i < 4 else 21], i * 250, 3, 50, [[i % 2 + 1, 1, 924]]) for i in range(8)
+    ), media=[(1, 56, 28), (2, 56, 28)])
     path = tmp_path / 'case.yaml'
     path.write_text(yaml.safe_dump(data))
     registry = StepRegistry.standard()
@@ -84,21 +67,20 @@ def test_vision_playback_through_real_master(tmp_path, indexed):
     summary = json.loads((output / 'components/client-0/coordinator/1/result.json').read_text())
     assert not summary['errors'], summary
     clients = list(summary['clients'].values())
-    assert len(clients) == (2 if indexed else 1)
+    assert len(clients) == 2
     for client in clients:
-        assert client['issued'] == client['finished'] == client['outcomes']['success'] == (4 if indexed else 8), client
-    if indexed:
-        assert not (output / 'components/client-0/coordinator/1/shards').exists()
-        for index in range(2):
-            component = output / f'components/client-{index}'
-            plan = json.loads((component / 'playback/1/plan.json').read_text())
-            assert plan['requests_file'] == str(tmp_path / 'requests.mckidx')
-            rows = [json.loads(line) for line in (component / 'playback/1/requests.jsonl').read_text().splitlines()]
-            issued = [int(row['request_id']) for row in rows if row.get('kind') == 'ISSUED']
-            assert issued == list(range(index + 1, 9, 2))
-            assert sum(row.get('kind') == 'SCHEDULE_START' for row in rows) == 8
-            assert any('ViT replay length differs' in path.read_text(errors='replace')
-                       for path in component.glob('*.log'))
+        assert client['issued'] == client['finished'] == client['outcomes']['success'] == 4, client
+    assert not (output / 'components/client-0/coordinator/1/shards').exists()
+    for index in range(2):
+        component = output / f'components/client-{index}'
+        plan = json.loads((component / 'playback/1/plan.json').read_text())
+        assert plan['requests_file'] == str(tmp_path / 'requests.mckidx')
+        rows = [json.loads(line) for line in (component / 'playback/1/requests.jsonl').read_text().splitlines()]
+        issued = [int(row['request_id']) for row in rows if row.get('kind') == 'ISSUED']
+        assert issued == list(range(index + 1, 9, 2))
+        assert sum(row.get('kind') == 'SCHEDULE_START' for row in rows) == 8
+        assert any('ViT replay length differs' in path.read_text(errors='replace')
+                   for path in component.glob('*.log'))
     events = [json.loads(line) for line in (output / 'events.jsonl').read_text().splitlines()]
     engines = [event for event in events if event.get('event') == 'process_started'
                and event.get('node') in {'prefill-0', 'decode-0', 'vit-0'}]

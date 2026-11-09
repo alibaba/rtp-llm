@@ -11,13 +11,6 @@ message Request {
   repeated Image images = 5; // Raw media placeholders; expansion belongs to the engine.
   optional int64 arrival_offset_ms = 4; // Relative to the source start, before replay_speed.
 }
-// Storage chunk only; unrelated to Master or Engine execution batches.
-message InputChunk {
-  uint64 sequence = 1;
-  repeated Request requests = 2;
-  optional uint64 total_requests = 3; // Final chunk only, with no requests.
-}
-
 message Image {
   string url = 1;
   int32 width = 2;

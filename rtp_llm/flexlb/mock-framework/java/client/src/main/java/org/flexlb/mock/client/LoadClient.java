@@ -71,41 +71,28 @@ final class LoadClient implements AutoCloseable {
     }
 
     static void play(Shard plan, long startNanos, int imageToken, Consumer<Item> submit) throws IOException, InterruptedException {
-        Path path = Path.of(plan.requests_file());
-        if (IndexedTraffic.isIndexed(plan.requests_file())) {
-            try (var indexed = new IndexedTraffic(path)) {
-                long expected = indexed.count / plan.stride() + (plan.first_index() < indexed.count % plan.stride() ? 1 : 0);
-                if (!indexed.identity.equals(plan.sha256()) || expected != plan.count())
-                    throw new IOException("Indexed traffic changed after planning");
-                for (long position = 0; position < plan.count(); position++) {
-                    ReplayInput.checkInterrupted();
-                    long index = plan.first_index() + position * plan.stride();
-                    var entry = indexed.entry(index, imageToken);
-                    submit(plan, startNanos, submit, new Item(plan.first_request_id() + index,
-                        index, entry.input(), entry.expectedImageTokens()));
-                }
-            }
-            return;
-        }
-        try (var reader = new ReplayInput.Reader(path)) {
+        try (var indexed = new IndexedTraffic(Path.of(plan.requests_file()))) {
+            long expected = indexed.count / plan.stride() + (plan.first_index() < indexed.count % plan.stride() ? 1 : 0);
+            if (!indexed.identity.equals(plan.sha256()) || expected != plan.count())
+                throw new IOException("Indexed traffic changed after planning");
             for (long position = 0; position < plan.count(); position++) {
-                var input = reader.next();
-                if (input == null) throw new IOException("Truncated request shard: " + plan.requests_file());
+                if (Thread.interrupted()) throw new InterruptedException();
                 long index = plan.first_index() + position * plan.stride();
-                submit(plan, startNanos, submit, new Item(plan.first_request_id() + index, index, input, List.of()));
+                var entry = indexed.entry(index, imageToken);
+                long due = startNanos + delayNanos(index, entry.input().getArrivalOffsetMs(), plan.qps(), plan.replay_speed());
+                long left;
+                while ((left = due - System.nanoTime()) > 0) TimeUnit.NANOSECONDS.sleep(left);
+                if (Thread.interrupted()) throw new InterruptedException();
+                submit.accept(new Item(plan.first_request_id() + index, index, entry.input(), entry.expectedImageTokens()));
             }
-            if (reader.next() != null) throw new IOException("Extra records in request shard: " + plan.requests_file());
-            reader.verify(plan.sha256());
         }
     }
 
-    private static void submit(Shard plan, long startNanos, Consumer<Item> submit, Item item)
-            throws IOException, InterruptedException {
-        long due = startNanos + ReplayInput.delayNanos(item.index(), item.input(), plan.qps(), plan.replay_speed());
-        long left;
-        while ((left = due - System.nanoTime()) > 0) TimeUnit.NANOSECONDS.sleep(left);
-        if (Thread.interrupted()) throw new InterruptedException();
-        submit.accept(item);
+    static long delayNanos(long index, long arrivalMs, Double qps, Double speed) throws IOException {
+        double seconds = speed == null ? index / qps : arrivalMs / (1000.0 * speed);
+        if (!Double.isFinite(seconds) || seconds < 0 || seconds > 86400)
+            throw new IOException("Playback exceeds 24 hours");
+        return (long) (seconds * 1_000_000_000.0);
     }
 
     private synchronized boolean isStopped() { return stopped; }

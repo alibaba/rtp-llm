@@ -106,39 +106,28 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
         }
         try {
             save(directory.resolve("coordinator/" + created.number + "/plan.json"), Map.of("clients", created.peers, "config", args));
-            var parts = new ArrayList<ReplayInput.Part>();
             long total;
-            if (IndexedTraffic.isIndexed(args.requests_file())) {
-                try (var input = new IndexedTraffic(Path.of(args.requests_file()))) {
-                    total = input.count;
-                    int clients = created.peers.size();
-                    if (total < clients) throw new IOException("Need at least one request per Client");
-                    if (args.replay_speed() != null && input.lastArrival / (1000.0 * args.replay_speed()) > 86400)
-                        throw new IOException("Playback exceeds 24 hours");
-                    for (int i = 0; i < clients; i++) {
-                        long count = total / clients + (i < total % clients ? 1 : 0);
-                        parts.add(new ReplayInput.Part(args.requests_file(), count, input.identity));
-                    }
-                }
-            } else {
-                parts.addAll(ReplayInput.split(args, directory.resolve("coordinator/" + created.number + "/shards"),
-                    created.peers.size(), () -> created.stop || closed));
-                total = parts.stream().mapToLong(ReplayInput.Part::count).reduce(0, Math::addExact);
+            String identity;
+            try (var input = new IndexedTraffic(Path.of(args.requests_file()))) {
+                total = input.count;
+                identity = input.identity;
+                if (total < created.peers.size()) throw new IOException("Need at least one request per Client");
+                LoadClient.delayNanos(total - 1, input.lastArrival, args.qps(), args.replay_speed());
             }
             synchronized (this) { nextRequestId = Math.addExact(created.firstId, total); }
-            save(directory.resolve("coordinator/" + created.number + "/input.json"), Map.of("count", total, "shards", parts));
-            for (int i = 0; i < created.peers.size(); i++) {
-                ReplayInput.checkInterrupted();
+            save(directory.resolve("coordinator/" + created.number + "/input.json"),
+                Map.of("count", total, "path", args.requests_file(), "sha256", identity));
+            int clients = created.peers.size();
+            for (int i = 0; i < clients; i++) {
                 if (created.stop || closed) throw new IOException("Client start stopped during preparation");
-                var part = parts.get(i);
-                int slots = args.concurrency() / created.peers.size() + (i < args.concurrency() % created.peers.size() ? 1 : 0);
-                call(created.peers.get(i), "worker/prepare", new Shard(created.number, args.masters(), part.path(),
-                    part.count(), i, created.peers.size(), created.firstId, part.sha256(), args.qps(), args.replay_speed(), slots,
+                long count = total / clients + (i < total % clients ? 1 : 0);
+                int slots = args.concurrency() / clients + (i < args.concurrency() % clients ? 1 : 0);
+                call(created.peers.get(i), "worker/prepare", new Shard(created.number, args.masters(), args.requests_file(),
+                    count, i, clients, created.firstId, identity, args.qps(), args.replay_speed(), slots,
                     args.queue_capacity(), args.request_timeout_ms(), args.drain_timeout_ms(), args.reuse_cache()));
             }
             long startAt = System.currentTimeMillis() + Math.max(1000, created.peers.size() * 100L);
             for (String peer : created.peers) {
-                ReplayInput.checkInterrupted();
                 if (created.stop || closed) throw new IOException("Client start stopped before begin");
                 call(peer, "worker/begin", new Begin(created.number, startAt));
             }

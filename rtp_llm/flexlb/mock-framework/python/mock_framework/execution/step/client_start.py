@@ -26,8 +26,8 @@ class Start:
         rates = [v for v in (self.qps, self.replay_speed) if v is not None]
         if len(rates) != 1 or not math.isfinite(rates[0]) or rates[0] <= 0:
             raise ValueError('Supply exactly one positive finite qps or replay_speed')
-        if not self.requests_file.strip() or '://' in self.requests_file:
-            raise ValueError('requests_file must be a local indexed traffic, JSONL, or Protobuf+Zstd input path')
+        if '://' in self.requests_file or Path(self.requests_file).suffix != '.mckidx':
+            raise ValueError('requests_file must be a local .mckidx input path')
         for value in (self.request_timeout, self.drain_timeout):
             millis = duration(value, positive=True) * 1000
             if millis != int(millis) or not 1 <= millis <= 3600000:
