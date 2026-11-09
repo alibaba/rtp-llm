@@ -685,7 +685,6 @@ class _ExecutionStep:
     resumed_request_count: int = 0
     workload_counts_collected: bool = False
     batch_progress: list[Any] = field(default_factory=list)
-    pp_request_completions: tuple[tuple[str, tuple[int, int]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1191,20 +1190,8 @@ class _NaviSchedScheduler:
     def add_request(self, request):
         started_ns = time.perf_counter_ns()
         timing = {"phase": "admission", "forwarded_requests": 0}
-        pp_completion = getattr(self._observer, "_pp_request_completion", None)
-        pp_ticket = (
-            pp_completion.begin(
-                request.request_id, self._observer._navi_request_id(request)
-            )
-            if pp_completion is not None
-            else None
-        )
         try:
             return self._add_request(request, timing)
-        except BaseException:
-            if pp_completion is not None:
-                pp_completion.fail_admission(request.request_id, pp_ticket)
-            raise
         finally:
             finished_ns = time.perf_counter_ns()
             if finished_ns - started_ns >= _SLOW_ENGINE_STAGE_NS:
@@ -1425,9 +1412,6 @@ class _NaviSchedScheduler:
             self._observer._abort_forward_requests(state, cancelled_ids)
 
         native_results = self._scheduler.finish_requests(request_ids, finished_status)
-        pp_completion = getattr(self._observer, "_pp_request_completion", None)
-        if pp_completion is not None:
-            pp_completion.finish_requests(requested, finished_status)
         native_ids = {request.request_id for request in native_results}
         changed_request_ids = set(native_ids)
         if requested is None:
@@ -1529,9 +1513,6 @@ class _RoutingOutputQueue:
     def put_nowait(self, item):
         if isinstance(item, tuple) and len(item) == 2:
             client_index, outputs = item
-            pp_completion = getattr(self._observer, "_pp_request_completion", None)
-            if pp_completion is not None:
-                pp_completion.observe_outputs(outputs)
             scheduler_stats = getattr(outputs, "scheduler_stats", None)
             if scheduler_stats is not None:
                 outputs.scheduler_stats = None
@@ -1682,7 +1663,6 @@ class VLLMEngineObserver:
         self._request_audit_failures = 0
         self._vllm_config = vllm_config
         self._agent = None
-        self._pp_request_completion = None
         self._bridge = None
         self._agent_options = dict(
             biz_name=config.biz_name,
@@ -1848,24 +1828,8 @@ class VLLMEngineObserver:
         logger.info(
             "NaviSched peer cache capability: enabled=%s", options["peer_cache_enabled"]
         )
-        if self._native_ingress:
-            from .V6DPPCollectorRuntime import make_pp_cache_agent_config
-
-            pp_cache = make_pp_cache_agent_config(
-                scheduler, self._vllm_config, naviSchedModule()
-            )
-            self._pp_cache_agent_config = pp_cache
-            if pp_cache is not None:
-                options["pp_cache_collector"] = pp_cache
         self._agent = NaviSchedAgent(**options)
         self._agent.init()
-        if getattr(self, "_pp_cache_agent_config", None) is not None:
-            from vllm.v1.engine import FinishReason
-            from .V6DPPCollectorRuntime import PPRequestCompletionObserver
-
-            self._pp_request_completion = PPRequestCompletionObserver(
-                self._agent, naviSchedModule(), FinishReason
-            )
         self._bridge = naviSchedModule()._VLLMAgentBridge(
             self._agent, pd_separated=self._native_ingress
         )
@@ -1885,15 +1849,6 @@ class VLLMEngineObserver:
                 "NaviSched native engine step loop: %s",
                 getattr(engine_core.step_fn, "__qualname__", type(engine_core.step_fn).__name__),
             )
-        pp_cache = getattr(self, "_pp_cache_agent_config", None)
-        if pp_cache is not None:
-            from .V6DPPCollectorRuntime import verify_pp_cache_handshake
-
-            try:
-                verify_pp_cache_handshake(pp_cache, engine_core.scheduler)
-            except BaseException:
-                self.shutdown()
-                raise
         self._bind_backend_pipeline_stages(engine_core)
         self._engine_core = engine_core
         _execution_timing_probe.bind_engine_loop_audit(self, engine_core)
@@ -2154,44 +2109,6 @@ class VLLMEngineObserver:
             setattr(owner, name, original)
         self._v6d_publication_restore.clear()
         self._v6d_unpublished_candidates.clear()
-
-    def _log_native_forward_wait(self) -> None:
-        now_ns = time.perf_counter_ns()
-        if now_ns < getattr(self, "_next_forward_wait_log_ns", 0):
-            return
-        self._next_forward_wait_log_ns = now_ns + 5_000_000_000
-        try:
-            state = next(iter(self._scheduled_forward_batches.values()), None)
-            if state is None:
-                state = next(iter(self._pending_forward_batches.values()), None)
-        except RuntimeError:
-            # The engine loop may move a batch while this diagnostic samples it.
-            return
-        if state is None:
-            values = (-1, 0, 0, 0, 0, False, False)
-        else:
-            with state.lock:
-                values = (
-                    state.batch_id,
-                    len(state.requests),
-                    len(state.completed_prefill_request_ids),
-                    len(state.cancelled_request_ids),
-                    state.pending_prefill_steps,
-                    state.prefill_complete,
-                    state.released,
-                )
-        with self._pd_output_lock:
-            ready_finishes = len(self._pd_ready_finishes)
-            completed_outputs = len(self._pd_output_completed_ns)
-        _execution_timing_probe._diagnostic_format_info(
-            logger,
-            "[navi-vllm-forward-slot-wait] batch_id=%d requests=%d "
-            "completed_prefills=%d cancelled=%d pending_steps=%d "
-            "prefill_complete=%s released=%s ready_finishes=%d completed_outputs=%d",
-            *values,
-            ready_finishes,
-            completed_outputs,
-        )
 
     def _forward_batches(self) -> None:
         if _read_bool_env("VLLM_NAVI_SCHED_DEFER_RENDER", False):
@@ -2778,13 +2695,7 @@ class VLLMEngineObserver:
         return dict(zip(request_ids, cache_hits, strict=True))
 
     def _fail_forward_responses(self, request_ids, error_message: str) -> None:
-        pp_completion = getattr(self, "_pp_request_completion", None)
         for request_id in request_ids:
-            if pp_completion is not None:
-                with self._response_lock:
-                    external_id = self._response_request_ids.get(int(request_id))
-                if external_id is not None:
-                    pp_completion.fail_requests((external_id,))
             try:
                 if not self._bridge.fail_forward_response(
                     int(request_id), error_message
@@ -3325,9 +3236,6 @@ class VLLMEngineObserver:
             self._release_forward_batch(state)
             raise
         if cancelled_before_admission:
-            pp_completion = getattr(self, "_pp_request_completion", None)
-            if pp_completion is not None:
-                pp_completion.cancel_requests((external_request_id,))
             self._remove_response_requests((request_id,))
         return admitted_state
 
@@ -4372,11 +4280,6 @@ class VLLMEngineObserver:
             started_ns=time.perf_counter_ns(),
             scheduler_output_key=id(scheduler_output),
         )
-        pp_completion = getattr(self, "_pp_request_completion", None)
-        if pp_completion is not None:
-            execution_step.pp_request_completions = pp_completion.capture_requests(
-                scheduler_output.num_scheduled_tokens
-            )
         _execution_timing_probe.mark_entry(execution_step)
         with self._execution_lock:
             scheduled_work_registered = (
@@ -4431,10 +4334,6 @@ class VLLMEngineObserver:
             execution_step.submitted_ns = time.perf_counter_ns()
             future = execute_model(scheduler_output, non_block=non_block)
         except BaseException:
-            if pp_completion is not None:
-                pp_completion.finish_execution_error(
-                    execution_step.pp_request_completions, cancelled=False
-                )
             self._finish_execution_tracking(execution_step)
             self._end_backend_execution(execution_step)
             self._abort_execution_step(execution_step)
@@ -4624,13 +4523,6 @@ class VLLMEngineObserver:
             and future.result() is None
         ):
             return
-        pp_completion = getattr(self, "_pp_request_completion", None)
-        if pp_completion is not None and future.done():
-            cancelled = future.cancelled()
-            if cancelled or future.exception() is not None:
-                pp_completion.finish_execution_error(
-                    execution_step.pp_request_completions, cancelled=cancelled
-                )
         if execution_step.backend_completion_recorded:
             return
         execution_step.backend_completion_recorded = True
@@ -5961,10 +5853,6 @@ class VLLMEngineObserver:
             self._pd_output_completed_ns.clear()
             self._pd_output_geometry.clear()
             self._pd_ready_finishes.clear()
-        pp_completion = getattr(self, "_pp_request_completion", None)
-        if pp_completion is not None:
-            pp_completion.close()
-            self._pp_request_completion = None
         if self._agent is not None:
             try:
                 self._agent.stop()

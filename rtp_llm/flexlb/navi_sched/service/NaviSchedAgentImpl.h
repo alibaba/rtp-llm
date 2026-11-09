@@ -6,17 +6,10 @@
 #include "aios/navi_sched/service/NaviSchedRole.h"
 #include "aios/navi_sched/common/NaviSchedScheduleData.h"
 #include "navi/engine/AsyncPipe.h"
-#include <mutex>
-#include <unordered_map>
-
-class PPCacheAgentIntegrationTest;
 
 namespace navi_sched {
 
 class AgentGraph;
-class PPCacheMergeR;
-class PPRequestFinishedR;
-class PPCacheCollectGraph;
 class AgentLatencyInputR;
 class AgentReportBridgeR;
 class AgentReportR;
@@ -25,8 +18,6 @@ class AgentResponseR;
 class AgentForwardState;
 
 class NaviSchedAgentImpl final : public NaviSchedRole {
-    friend class ::PPCacheAgentIntegrationTest;
-
 public:
     static NaviSchedAgentImpl *getImpl(NaviSchedAgent &agent);
     NaviSchedAgentImpl(const NaviSchedAgentConfig &agentConfig, int32_t serverPort,
@@ -57,12 +48,8 @@ public:
         const NaviSchedWorkloadSnapshot &snapshot,
         const std::vector<int64_t> &coveredNativeBatchIds = {},
         const std::vector<uint64_t> *waitingRequestIds = nullptr) const;
-    uint64_t beginPPCacheRequest(uint64_t requestId);
-    bool finishPPCacheRequest(uint64_t requestId, uint64_t attemptId,
-                              PPShardRequestStatus status);
     bool setBackendExecutionPipelineStages(size_t stages) const;
-    bool beginObservedBackendExecution(int64_t eventTimeUs = 0,
-                                       int32_t requestCount = 0) const;
+    bool beginObservedBackendExecution(int64_t eventTimeUs = 0, int32_t requestCount = 0) const;
     bool endObservedBackendExecution(int64_t eventTimeUs = 0) const;
     bool reportObservedExecutionStep(double elapsedMs, int64_t prefillTokens,
                                      int64_t decodeTokens) const;
@@ -99,7 +86,6 @@ protected:
     void reportMetrics() const override;
 
 private:
-    void stopPPCacheCollection();
     static std::string getLatencyModelStateFile(const NaviSchedConfig &config);
     bool applyConfig(const std::string &configStr);
     int32_t getInflightRequestCount() const;
@@ -128,13 +114,6 @@ private:
     std::shared_ptr<AgentRequestR> _agentRequestR;
     std::shared_ptr<AgentResponseR> _agentResponseR;
     NaviSchedRuntimeConfig _agentConfig;
-    std::shared_ptr<const PPCacheAgentConfig> _ppCacheConfig;
-    std::shared_ptr<PPCacheMergeR> _ppCacheMerge;
-    std::shared_ptr<PPRequestFinishedR> _ppRequestFinished;
-    std::shared_ptr<PPCacheCollectGraph> _ppCacheGraph;
-    std::mutex _ppRequestMutex;
-    uint64_t _nextPPCacheAttempt = 0;
-    std::unordered_map<uint64_t, uint64_t> _ppActiveRequests;
     std::string _latencyModelFingerprint;
     std::string _latencyHistoryFingerprint;
     std::string _latencyHistoryBinaryFingerprint;

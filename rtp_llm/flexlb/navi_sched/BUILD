@@ -236,7 +236,6 @@ cc_library(
     ]),
     alwayslink = True,
     deps = [
-        "//aios/navi_sched/collector:pp_cache_collect_graph",
         ":tpu_prefill_execution_policy",
         ":navi_sched_agent_header",
         "@com_google_absl//absl/container:flat_hash_map",
@@ -450,7 +449,6 @@ pybind_extension(
         "bindings/*.h",
     ]),
     deps = [
-        "//aios/navi_sched/collector:pp_cache_collector_role",
         "//aios/alog",
         "//aios/navi:navi",
         "//aios/navi:navi_pybind",
@@ -529,8 +527,6 @@ py_library(
         "navi_sched/adapters/vllm/VLLMImageCacheMap.py",
         "navi_sched/adapters/vllm/VLLMNativePreparation.py",
         "navi_sched/adapters/vllm/VLLMWorkerObserver.py",
-        "navi_sched/adapters/vllm/V6DCollectorObserver.py",
-        "navi_sched/adapters/vllm/V6DPPCollectorRuntime.py",
         "navi_sched/adapters/vllm/VLLMAdapterUtils.py",
         "navi_sched/client.py",
         "navi_sched/asyncio.py",
@@ -853,7 +849,6 @@ pybind_extension(
     srcs = [
         "bindings/NaviSchedBindings.h",
         "bindings/Pybindings.cpp",
-        "bindings/PPCacheCollectorBindings.cpp",
         "test/simulator/SimulatedPybindings.cpp",
     ],
     copts = [
@@ -873,7 +868,6 @@ pybind_extension(
         "$(location scripts/navi_sched_pybind.lds)",
     ],
     deps = [
-        "//aios/navi_sched/collector:pp_cache_collector_role",
         "//aios/alog",
         "//aios/navi:navi",
         "//aios/navi:navi_pybind",

@@ -2,7 +2,6 @@
 
 #include "navi_sched/NaviSchedCommon.h"
 #include <cstddef>
-#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -11,7 +10,6 @@
 namespace navi_sched {
 
 class NaviSchedAgentImpl;
-enum class PPShardRequestStatus : uint8_t;
 class NaviSchedLatencyFeatures;
 
 class NAVI_SCHED_API NaviSchedBatchFinishReporter {
@@ -115,10 +113,6 @@ public:
     bool reportObservedWorkload(const NaviSchedWorkloadSnapshot &snapshot,
                                 const std::vector<int64_t> &coveredNativeBatchIds,
                                 const std::vector<uint64_t> &waitingRequestIds) const;
-    // Zero means PP collection is disabled or this request cannot be registered.
-    uint64_t beginPPCacheRequest(uint64_t requestId);
-    bool finishPPCacheRequest(uint64_t requestId, uint64_t attemptId,
-                              PPShardRequestStatus status);
     bool setBackendExecutionPipelineStages(size_t stages) const;
     bool beginObservedBackendExecution(int64_t eventTimeUs = 0, int32_t requestCount = 0) const;
     bool endObservedBackendExecution(int64_t eventTimeUs = 0) const;

@@ -1,4 +1,3 @@
-#include "aios/navi_sched/collector/PPCacheAgentConfig.h"
 #include <optional>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -1513,7 +1512,6 @@ void bindNaviSchedData(py::module_ &m)
 
     py::class_<NaviSchedAgentConfig>(m, "NaviSchedAgentConfig")
         .def(py::init<>())
-        .def_readwrite("pp_cache_collector", &NaviSchedAgentConfig::ppCacheCollector)
         .def_readwrite("service", &NaviSchedAgentConfig::service)
         .def_readwrite("runtime", &NaviSchedAgentConfig::runtime)
         .def_readwrite("pd_separated", &NaviSchedAgentConfig::pdSeparated)
@@ -1681,21 +1679,12 @@ void bindNaviSchedData(py::module_ &m)
             py::arg("mamba_replay_stop_shift") = py::none(),
             py::arg("mamba_retention_interval") = py::none(),
             py::arg("mamba_align") = py::none(), py::call_guard<py::gil_scoped_release>())
-        .def("begin_pp_cache_request", &NaviSchedAgent::beginPPCacheRequest,
-             py::arg("request_id"), py::call_guard<py::gil_scoped_release>())
-        .def("finish_pp_cache_request", &NaviSchedAgent::finishPPCacheRequest,
-             py::arg("request_id"), py::arg("attempt_id"), py::arg("status"),
-             py::call_guard<py::gil_scoped_release>())
         .def("get_grpc_port", &NaviSchedAgent::getGrpcPort);
 }
 
 }
 
-void bindNaviSched(py::module_ &m)
-{
-    bindNaviSchedData(m);
-    bindPPCacheCollector(m);
-}
+void bindNaviSched(py::module_ &m) { bindNaviSchedData(m); }
 
 void bindNaviSchedModule(py::module_ &module, const char *description)
 {

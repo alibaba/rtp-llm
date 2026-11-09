@@ -93,11 +93,6 @@ class NaviSchedClient:
             return None
         return self._client.take_next_forward_response(timeout_ms)
 
-    def notification_fd(self) -> int:
-        if self._client is None:
-            raise RuntimeError("NaviSched client is closed")
-        return self._client.notification_fd()
-
     def abort_forward_request(self, request_id: int) -> bool:
         return bool(
             self._client is not None

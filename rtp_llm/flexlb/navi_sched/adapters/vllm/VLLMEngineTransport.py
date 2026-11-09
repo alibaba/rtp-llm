@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from typing import Any
 
-from navi_sched.asyncio import AsyncNotification
 from navi_sched.util import naviSchedModule
 
 from .NaviSchedAdapterConfig import NaviSchedAdapterConfig
@@ -127,26 +126,10 @@ class VLLMEngineTransport:
         self._remote_cache_stats: dict[str, tuple[int | None, int, int]] = {}
         self._local_output_task: asyncio.Task | None = None
         self._remote_output_task: asyncio.Task | None = None
-        self._pp_response_notification = None
-        self._use_pp_response_notification = (
-            is_vllm_native_pd_prefill()
-            and int(
-                getattr(
-                    getattr(vllm_config, "parallel_config", None),
-                    "pipeline_parallel_size",
-                    1,
-                )
-            )
-            > 1
-        )
         self._response_poll_lock = threading.Lock()
-        self._response_executor = (
-            None
-            if self._use_pp_response_notification
-            else ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix="NaviSchedResponse",
-            )
+        self._response_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="NaviSchedResponse",
         )
         self._closed = False
         self._fallback_metric_warning_logged = False
@@ -342,17 +325,13 @@ class VLLMEngineTransport:
         if self._closed:
             return
         self._closed = True
-        notification = self.__dict__.get("_pp_response_notification")
-        if notification is not None:
-            notification.close()
         for task in (self._local_output_task, self._remote_output_task):
             if task is not None:
                 task.cancel()
         with self._response_poll_lock:
             if self._client is not None:
                 self._client.close()
-        if self._response_executor is not None:
-            self._response_executor.shutdown(wait=True, cancel_futures=True)
+        self._response_executor.shutdown(wait=True, cancel_futures=True)
         self._request_ids.clear()
         self._external_request_ids.clear()
         self._remote_cache_stats.clear()
@@ -443,30 +422,10 @@ class VLLMEngineTransport:
     def _ensure_remote_output_task(self) -> None:
         if self._closed:
             raise RuntimeError("NaviSched VLLM transport is closed")
-        if self.__dict__.get("_use_pp_response_notification", False):
-            if self._pp_response_notification is None:
-                self._pp_response_notification = AsyncNotification(
-                    self._client.notification_fd(),
-                    self._drain_pp_responses,
-                    self._fail_pp_responses,
-                )
-            return
         if self._remote_output_task is None:
             self._remote_output_task = asyncio.create_task(
                 self._pump_remote_outputs(), name="VLLMNaviSchedRemoteOutputs"
             )
-
-    def _drain_pp_responses(self) -> bool:
-        for _ in range(32):
-            response = self._take_next_forward_response(0)
-            if response is None:
-                return False
-            self._deliver_remote_response(response)
-        return True
-
-    def _fail_pp_responses(self, error: Exception) -> None:
-        logger.error("NaviSched PP response notification failed", exc_info=error)
-        self._outputs.put_nowait(error)
 
     async def _pump_local_outputs(self) -> None:
         try:
@@ -488,38 +447,36 @@ class VLLMEngineTransport:
                 )
                 if response is None:
                     continue
-                self._deliver_remote_response(response)
+                request_id = int(response.request_id)
+                external_request_id = self._external_request_ids.get(request_id)
+                if external_request_id is None:
+                    logger.warning(
+                        "dropping NaviSched response for inactive request: "
+                        "request_id=%d",
+                        request_id,
+                    )
+                    continue
+                try:
+                    output = self._decode_remote_response(response, external_request_id)
+                except Exception:
+                    logger.exception(
+                        "invalid NaviSched VLLM response: request_id=%s",
+                        external_request_id,
+                    )
+                    self._client.abort_forward_request(request_id)
+                    self._forget_request(external_request_id, request_id)
+                    output = self._make_error_output(
+                        external_request_id, "invalid NaviSched VLLM response"
+                    )
+                else:
+                    if response.terminal:
+                        self._forget_request(external_request_id, request_id)
+                await self._outputs.put(output)
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 - forward transport failure
             logger.exception("NaviSched VLLM response pump failed")
             await self._outputs.put(error)
-
-    def _deliver_remote_response(self, response) -> None:
-        request_id = int(response.request_id)
-        external_request_id = self._external_request_ids.get(request_id)
-        if external_request_id is None:
-            logger.warning(
-                "dropping NaviSched response for inactive request: " "request_id=%d",
-                request_id,
-            )
-            return
-        try:
-            output = self._decode_remote_response(response, external_request_id)
-        except Exception:
-            logger.exception(
-                "invalid NaviSched VLLM response: request_id=%s",
-                external_request_id,
-            )
-            self._client.abort_forward_request(request_id)
-            self._forget_request(external_request_id, request_id)
-            output = self._make_error_output(
-                external_request_id, "invalid NaviSched VLLM response"
-            )
-        else:
-            if response.terminal:
-                self._forget_request(external_request_id, request_id)
-        self._outputs.put_nowait(output)
 
     def _take_next_forward_response(self, timeout_ms: int):
         with self._response_poll_lock:
