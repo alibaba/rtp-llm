@@ -5799,6 +5799,41 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionCoalescerTimesOutForSingleContext)
     EXPECT_LT(elapsed.count(), 600);
 }
 
+TEST_F(FIFOSchedulerTest, testPrefillAdmissionCoalescerUsesRemainingBudget) {
+    autil::EnvGuard env("PREFILL_ADMISSION_COALESCE_MS", "100");
+    CacheConfig     cache_config = makeMhaCacheConfig(1, 8, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto            cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 8;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    FIFOScheduler scheduler(runtime_config,
+                            model_config,
+                            PDSepConfig{},
+                            ParallelismConfig{},
+                            ModelSpecificConfig{},
+                            cache_manager);
+
+    auto first = makeStream({1}, model_config, runtime_config, resource_context);
+    // Simulate a context that already waited 90 ms behind the previous step.
+    // The enqueue path preserves this first recorded time, so only the remaining
+    // 10 ms of the 100 ms window should be spent at the empty boundary.
+    first->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds() - 90 * 1000);
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    const auto start   = std::chrono::steady_clock::now();
+    auto       result  = scheduler.schedule();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result->size(), 1);
+    EXPECT_LT(elapsed.count(), 80);
+}
+
 TEST_F(FIFOSchedulerTest, testPrefillAdmissionCoalescerStopWakes) {
     autil::EnvGuard env("PREFILL_ADMISSION_COALESCE_MS", "100");
     CacheConfig     cache_config = makeMhaCacheConfig(1, 8, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);

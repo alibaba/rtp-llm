@@ -667,12 +667,22 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
             && waiting_streams_.size() == 1 && waiting_streams_.front()->isContextStream()) {
             // Hold the first context at an empty prefill boundary so an independent
             // context arriving within the bounded window can share one execution
-            // batch. Enqueue/stop notify this wait; the normal admission path below
-            // still owns token, KV and batch limits.
+            // batch. The window is measured from the stream's first scheduler
+            // enqueue, not from this boundary: a context that already waited behind
+            // the previous step must not be charged the full window again. Enqueue/
+            // stop notify this wait; the normal admission path below still owns
+            // token, KV and batch limits.
             schedule_trigger_ = false;
-            cond_.wait_for(lock,
-                           std::chrono::milliseconds(prefill_admission_coalesce_ms_),
-                           [this] { return stop_.load(std::memory_order_relaxed) || waiting_streams_.size() >= 2; });
+            const int64_t now_us       = autil::TimeUtility::currentTimeInMicroSeconds();
+            const int64_t enqueue_us   = waiting_streams_.front()->schedulerEnqueueTimeUs();
+            const int64_t waited_us    = enqueue_us > 0 ? std::max<int64_t>(0, now_us - enqueue_us) : 0;
+            const int64_t budget_us    = static_cast<int64_t>(prefill_admission_coalesce_ms_) * 1000;
+            const int64_t remaining_us = std::max<int64_t>(0, budget_us - waited_us);
+            if (remaining_us > 0) {
+                cond_.wait_for(lock,
+                               std::chrono::microseconds(remaining_us),
+                               [this] { return stop_.load(std::memory_order_relaxed) || waiting_streams_.size() >= 2; });
+            }
         } else {
             // No running work can release capacity. Poll PD-held block releases without turning a
             // large retryable queue into a tight malloc/eviction loop.
