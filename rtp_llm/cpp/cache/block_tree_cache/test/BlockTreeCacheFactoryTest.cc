@@ -707,6 +707,53 @@ TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsUseWideIntermediateProduct
               (std::vector<size_t>{size_t{1} << 30}));
 }
 
+TEST(BlockTreeCacheFactoryUtilityTest, DiskLinearByteRatioOverridesOnlyTheDiskPartition) {
+    const std::vector<CacheGroupType> types{CacheGroupType::FULL, CacheGroupType::LINEAR};
+    EXPECT_EQ(computeDiskBlockCounts(64 * 4096, {40, 10}, {4096, 8192}, types, 0.25), (std::vector<size_t>{48, 8}));
+    EXPECT_EQ(computeDiskBlockCounts(64 * 4096, {1, 100}, {4096, 8192}, types, 0.25), (std::vector<size_t>{48, 8}));
+    EXPECT_EQ(
+        computeDiskBlockCounts(64 * 4096, {10, 40}, {8192, 4096}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, 0.25),
+        (std::vector<size_t>{8, 48}));
+    // Multiple pools of one type share that type's budget in DEVICE proportions.
+    EXPECT_EQ(computeDiskBlockCounts(64 * 4096,
+                                     {3, 8, 1},
+                                     {4096, 8192, 8192},
+                                     {CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                     0.25),
+              (std::vector<size_t>{28, 8, 9}));
+    // Physical counts include each pool's reserved block zero.
+    EXPECT_EQ(computeDiskBlockCounts(size_t{640} * 1024 * 1024 * 1024, {16675, 168}, {1284112, 56171536}, types, 0.4),
+              (std::vector<size_t>{321091, 4893}));
+}
+
+TEST(BlockTreeCacheFactoryUtilityTest, UnsetDiskLinearByteRatioPreservesLegacyTopologiesAndCounts) {
+    EXPECT_EQ(
+        computeDiskBlockCounts(16 * 4096, {40, 10}, {4096, 8192}, {CacheGroupType::FULL, CacheGroupType::LINEAR}, -1.0),
+        (std::vector<size_t>{10, 2}));
+    EXPECT_EQ(
+        computeDiskBlockCounts(16 * 4096, {40, 10}, {4096, 8192}, {CacheGroupType::FULL, CacheGroupType::SWA}, -1.0),
+        (std::vector<size_t>{10, 2}));
+    EXPECT_EQ(computeDiskBlockCounts(4 * 4096, {8}, {4096}, {CacheGroupType::FULL}, -1.0), (std::vector<size_t>{4}));
+}
+
+TEST(BlockTreeCacheFactoryUtilityTest, DiskLinearByteRatioRejectsInvalidOrUnusablePartitions) {
+    CoreDumpGuard                     guard;
+    const std::vector<CacheGroupType> types{CacheGroupType::FULL, CacheGroupType::LINEAR};
+    for (double ratio :
+         {0.0, 1.0, -0.5, -2.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        EXPECT_ANY_THROW(computeDiskBlockCounts(64 * 4096, {40, 10}, {4096, 8192}, types, ratio));
+    }
+    EXPECT_ANY_THROW(computeDiskBlockCounts(64 * 4096, {40}, {4096}, {CacheGroupType::FULL}, 0.25));
+    EXPECT_ANY_THROW(computeDiskBlockCounts(64 * 4096, {10}, {8192}, {CacheGroupType::LINEAR}, 0.25));
+    EXPECT_ANY_THROW(
+        computeDiskBlockCounts(64 * 4096, {40, 10}, {4096, 8192}, {CacheGroupType::FULL, CacheGroupType::SWA}, 0.25));
+    EXPECT_ANY_THROW(computeDiskBlockCounts(64 * 4096, {40, 10}, {4096, 8192}, {}, 0.25));
+    EXPECT_ANY_THROW(computeDiskBlockCounts(64 * 4096, {40, 10}, {4096}, types, 0.25));
+    EXPECT_ANY_THROW(computeDiskBlockCounts(4 * 4096, {40, 10}, {4096, 8192}, types, 0.25));
+    EXPECT_ANY_THROW(computeDiskBlockCounts(64 * 4096, {40, 10}, {4096, 8192}, types, 0.0001));
+    EXPECT_ANY_THROW(computeDiskBlockCounts(std::numeric_limits<size_t>::max(), {1, 1}, {1, 1}, types, 0.25));
+}
+
 TEST(BlockTreeCacheFactoryUtilityTest, HostRatioFitsPhysicalBudgetAndKeepsLegacyAndNonHybridCounts) {
     const std::vector<size_t>         strides{128, 512};
     const std::vector<CacheGroupType> types{CacheGroupType::FULL, CacheGroupType::SWA};
@@ -2659,6 +2706,55 @@ TEST_F(BlockTreeCacheFactoryTest, RejectsTierEnabledWithoutItsOwnCapacity) {
         kv_cache_config.disk_cache_size_mb = 1;
         kv_cache_config.disk_cache_paths   = "";
         expectFactoryRejects(config, allocator, kv_cache_config);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DiskLinearByteRatioPreservesHostAndDevicePools) {
+    const auto          config = makeHybridConfig();
+    std::vector<size_t> baseline_host_counts;
+    std::vector<size_t> baseline_device_counts;
+    for (double ratio : {-1.0, 0.25, 0.4}) {
+        SCOPED_TRACE(ratio);
+        auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_disk_linear_ratio");
+        KVCacheConfig                            kv_cache_config;
+        kv_cache_config.enable_memory_cache          = true;
+        kv_cache_config.memory_cache_size_mb         = 1;
+        kv_cache_config.enable_disk_cache            = true;
+        kv_cache_config.disk_cache_size_mb           = 1;
+        kv_cache_config.disk_cache_paths             = disk_dir.path;
+        kv_cache_config.disk_cache_linear_byte_ratio = ratio;
+        kv_cache_config.disk_cache_buffered_io       = true;
+        auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{});
+        ASSERT_NE(cache, nullptr);
+        ASSERT_EQ(cache->groupSets().size(), 2u);
+        size_t allocated_bytes = 0;
+        for (size_t i = 0; i < cache->groupSets().size(); ++i) {
+            const auto& group = cache->groupSets()[i];
+            ASSERT_NE(group->hostPool(), nullptr);
+            ASSERT_NE(group->diskPool(), nullptr);
+            const auto host_count   = group->hostPool()->totalBlocksNum();
+            const auto device_count = group->devicePools().front()->totalBlocksNum();
+            if (ratio == -1.0) {
+                baseline_host_counts.push_back(host_count);
+                baseline_device_counts.push_back(device_count);
+            } else {
+                EXPECT_EQ(host_count, baseline_host_counts[i]);
+                EXPECT_EQ(device_count, baseline_device_counts[i]);
+            }
+            const auto   disk  = group->diskPool();
+            const size_t bytes = (disk->totalBlocksNum() + 1) * disk->strideBytes();
+            allocated_bytes += bytes;
+            if (ratio != -1.0) {
+                const size_t linear_budget = static_cast<long double>(1024 * 1024) * ratio;
+                const size_t budget =
+                    disk->poolName() == "block_tree_disk_linear" ? linear_budget : 1024 * 1024 - linear_budget;
+                EXPECT_LE(bytes, budget);
+                EXPECT_LT(budget - bytes, disk->strideBytes());
+                EXPECT_GT(disk->totalBlocksNum(), 0u);
+            }
+        }
+        EXPECT_LE(allocated_bytes, 1024u * 1024u);
     }
 }
 

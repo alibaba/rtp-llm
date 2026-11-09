@@ -19,6 +19,15 @@ std::vector<size_t> computeTierBlockCounts(size_t                     capacity_b
                                            const std::vector<size_t>& device_block_counts,
                                            const std::vector<size_t>& pool_strides);
 
+// Physical DISK counts include reserved block zero and aligned/CRC strides.
+// -1 preserves DEVICE proportions; otherwise LINEAR receives this byte fraction
+// and FULL receives the remainder. Within each type, keep DEVICE proportions.
+std::vector<size_t> computeDiskBlockCounts(size_t                             capacity_bytes,
+                                           const std::vector<size_t>&         device_block_counts,
+                                           const std::vector<size_t>&         pool_strides,
+                                           const std::vector<CacheGroupType>& types,
+                                           double                             linear_byte_ratio);
+
 // Ratios apply to usable blocks, while the byte budget also includes each
 // pool's reserved block zero. Without both FULL and SWA, preserve equal counts.
 std::vector<size_t> computeHostUsableBlockCounts(size_t                             capacity_bytes,
