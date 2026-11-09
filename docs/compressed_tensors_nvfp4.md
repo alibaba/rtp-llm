@@ -110,3 +110,39 @@ these inherited hooks. Do not enable the MoE executor merely by widening its
 quant-method allowlist: a real CT MoE checkpoint must establish per-expert
 scale shapes, gate/up global compatibility, expert order, EP/TP slicing,
 router contracts and native numerical agreement first.
+
+## RTX 4060 Ti software validation
+
+On 2026-11-09, the actual RTX 4060 Ti 8GB host completed 12 software checks
+with Torch 2.5.1+cu124. The raw report is
+[ct_nvfp4_4060_result.json](validation/ct_nvfp4_4060_result.json).
+
+The independent reference decodes E2M1/E4M3 fields with scalar arithmetic
+and computes in FP64. The GPU path uses the adapter's reciprocal-scale
+helper and FP32 CUDA GEMM with TF32 disabled. Both use a real checkpoint
+weight tile; activations are synthetic, exactly representable quantized values.
+
+- Weight reconstruction maximum absolute error: `2.980232241545089e-09`.
+- GPU GEMM relative L2 error against FP64: `1.1664547436050209e-07`.
+- All 256 packed byte patterns and 254 finite E4M3 byte patterns checked.
+- Group-aligned partition and zero-padding algebra checked.
+- Wrong reciprocal, nibble ordering and scale grouping negative controls detected.
+- Unequal fused globals rejected.
+
+Reproduce the software checks from the repository with a CUDA-enabled Torch:
+
+```sh
+python scripts/validate_ct_nvfp4_software.py --output /path/to/result.json
+```
+
+The committed runner adjusts fixture/helper paths and report output arguments
+from the standalone host runner, retaining the validation logic. The executed
+standalone runner SHA256 was
+`cfd56216f73ce4b90fc7829a8affa4575d044087cd5bac92a4616d7f8987f1f4`;
+the exact adapter helper supplied to the host had SHA256
+`4f8ffbb2ee2ed20476e63e04861a90aea652833a3c8cafd87d7aff9164880620`.
+
+This is not native NVFP4 kernel, production loader, TP/EP, whole-model,
+quantization-quality or performance validation. Peak Torch allocated memory
+in the report excludes the CUDA context and other processes. The existing
+host environment was not modified; files were placed in an isolated run directory.
