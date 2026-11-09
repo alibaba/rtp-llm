@@ -63,7 +63,7 @@ void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask>
                     task->descriptors().front().source_tier, task->descriptors().front().target_tier, result);
             }
             if (on_done) {
-                on_done(std::move(result));
+                on_done(std::move(result.status));
             }
         },
         "evict");

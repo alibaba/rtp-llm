@@ -55,10 +55,6 @@ public:
     // success, failure, and timeout are carried by response.transfer_status().
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
 
-    bool supportsLocalCompletionQueries() const noexcept override { return local_completion_queries_; }
-    std::vector<TaskCompletion> queryLocalKVCMOperations(const std::vector<std::string>& ids) const override;
-    bool forgetLocalKVCMOperations(const std::vector<std::string>& ids) override;
-
     // Optional EOS publication; true means handled/skipped, not committed.
     bool captureCompletedDecode(const BatchKVCacheResource& resource,
                                 size_t computed_end,
@@ -74,7 +70,6 @@ protected:
                        ReadCompletion                                  done) override;
     void writeImpl(const StorageRequest& request) override;
     bool startWriteImpl(const StorageRequest& request, WriteCompletion done) override;
-    bool supportsCompletionQueries() const noexcept override { return true; }
     void shutdownImpl() noexcept override;
     void onRemoteCacheSkipped(const char* stage) noexcept override;
     bool protectUnknownCompletion() const noexcept override;
@@ -88,7 +83,6 @@ protected:
 
 private:
     class Impl;
-    const bool local_completion_queries_;
     std::unique_ptr<Impl> impl_;
 };
 

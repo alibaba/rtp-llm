@@ -38,7 +38,6 @@ private:
 public:
     int     cache_min_replay_tokens = 1;
     int64_t cache_key_hash_seed     = 0;
-    double  block_tree_device_frozen_abort_ratio = kDefaultDeviceFrozenAbortRatio;
 
     int maxPrefixReuseTokens(int prompt_tokens) const {
         return std::max(0, prompt_tokens - std::max(1, cache_min_replay_tokens));

@@ -1,17 +1,13 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionHeap.h"
 
 #include <functional>
-#include <utility>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
 bool EvictionHeap::EntryLess::operator()(const EvictionEntry& a, const EvictionEntry& b) const {
-    // Frozen entries form a suffix, regardless of the selected eviction policy.
-    if (a.is_frozen != b.is_frozen)
-        return a.is_frozen < b.is_frozen;
-    // Ascending order: the smallest ordinary entry is the best victim (evicted first).
+    // Ascending order: the smallest entry is the best victim (evicted first).
     if (a.primary_key != b.primary_key)
         return a.primary_key < b.primary_key;
     if (a.secondary_key != b.secondary_key)
@@ -23,10 +19,9 @@ bool EvictionHeap::EntryLess::operator()(const EvictionEntry& a, const EvictionE
 
 EvictionHeap::EvictionHeap(EvictionPolicy policy): policy_(policy) {}
 
-EvictionEntry EvictionHeap::makeEntry(TreeNode* node, const CandidateMeta& meta, bool is_frozen) const {
+EvictionEntry EvictionHeap::makeEntry(TreeNode* node, const CandidateMeta& meta) const {
     EvictionEntry entry;
     entry.node      = node;
-    entry.is_frozen = is_frozen;
     entry.cache_key = node ? node->cache_key : 0;
     switch (policy_) {
         case EvictionPolicy::LRU:
@@ -45,12 +40,12 @@ EvictionEntry EvictionHeap::makeEntry(TreeNode* node, const CandidateMeta& meta,
     return entry;
 }
 
-void EvictionHeap::upsert(TreeNode* node, const CandidateMeta& meta, bool is_frozen) {
+void EvictionHeap::upsert(TreeNode* node, const CandidateMeta& meta) {
     if (node == nullptr)
         return;
     // Replace any existing entry so at most one entry per node remains.
     erase(node);
-    auto [ordered_it, inserted] = ordered_.insert(makeEntry(node, meta, is_frozen));
+    auto [ordered_it, inserted] = ordered_.insert(makeEntry(node, meta));
     RTP_LLM_CHECK_WITH_INFO(
         inserted, "EvictionHeap::upsert failed to insert a unique entry for node=%p", static_cast<void*>(node));
     auto index_result = index_.emplace(node, ordered_it);
@@ -65,31 +60,12 @@ bool EvictionHeap::updateIfPresent(TreeNode* node, const CandidateMeta& meta) {
     if (index_it == index_.end()) {
         return false;
     }
-    auto entry    = ordered_.extract(index_it->second);
-    entry.value() = makeEntry(node, meta, entry.value().is_frozen);
-    auto result   = ordered_.insert(std::move(entry));
-    RTP_LLM_CHECK_WITH_INFO(result.inserted,
+    ordered_.erase(index_it->second);
+    auto [ordered_it, inserted] = ordered_.insert(makeEntry(node, meta));
+    RTP_LLM_CHECK_WITH_INFO(inserted,
                             "EvictionHeap::updateIfPresent failed to insert a unique entry for node=%p",
                             static_cast<void*>(node));
-    index_it->second = result.position;
-    return true;
-}
-
-bool EvictionHeap::setFrozenIfPresent(TreeNode* node, bool is_frozen) {
-    auto index_it = index_.find(node);
-    if (index_it == index_.end()) {
-        return false;
-    }
-    if (index_it->second->is_frozen == is_frozen) {
-        return true;
-    }
-    auto entry              = ordered_.extract(index_it->second);
-    entry.value().is_frozen = is_frozen;
-    auto result             = ordered_.insert(std::move(entry));
-    RTP_LLM_CHECK_WITH_INFO(result.inserted,
-                            "EvictionHeap::setFrozenIfPresent failed to insert a unique entry for node=%p",
-                            static_cast<void*>(node));
-    index_it->second = result.position;
+    index_it->second = ordered_it;
     return true;
 }
 
@@ -103,9 +79,6 @@ void EvictionHeap::erase(TreeNode* node) {
 
 std::optional<EvictionEntry> EvictionHeap::best(const std::function<bool(TreeNode*)>& can_evict) const {
     for (const EvictionEntry& entry : ordered_) {
-        if (entry.is_frozen) {
-            return std::nullopt;
-        }
         if (can_evict(entry.node)) {
             return entry;
         }

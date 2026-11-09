@@ -54,10 +54,6 @@ public:
     void incRef(const BlockIdList& blocks, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
     void decRef(BlockIdxType block, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
     void decRef(const BlockIdList& blocks, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
-    // Ordinary remote writes can share a source. A frozen block or a connector
-    // reference that is not a known write source prevents another source pin.
-    bool tryPinForRemoteWriteSource(BlockIdxType block);
-    void unpinRemoteWriteSource(BlockIdxType block);
 
     // EOS publication only. Allocate the release closure and reserve free-list
     // capacity before acquiring the connector reference. The caller must keep
@@ -125,7 +121,6 @@ protected:
     bool hasExternalRefNoLock(BlockIdxType block) const override;
 
 private:
-    void decRefNoLock(BlockIdxType block, size_t type_index);
     void releaseRemotePublicationPin(BlockIdxType block, const std::function<void()>& notify) noexcept;
     bool                         hasRequestRefNoLock(BlockIdxType block) const;
     const DeviceBlockPoolConfig& config() const;
@@ -174,7 +169,6 @@ private:
     std::vector<uint32_t> refcounts_;
     std::array<std::vector<uint32_t>, kRefTypeCount> refcounts_by_type_;
     std::array<size_t, kRefTypeCount>                referenced_block_counts_{};
-    std::vector<uint32_t>                           remote_write_source_refs_;
 
     torch::Tensor cache_aligned_buffer_;
     void*         cache_base_ptr_{nullptr};

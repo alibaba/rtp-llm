@@ -1,4 +1,4 @@
-load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
 
 def _pace_smoke(name, task_info, smoke_args, gpu_type="L20_CU13",
                 kvcm_envs=[], kill_remote=False, metadata_check=True, sleep_time_qr=10,
@@ -82,11 +82,6 @@ REMOTE_CACHE_DEVICE_STORE_ARGS = (
     " --block_tree_device_evict_high_watermark_ratio 0.002"
 )
 
-_REMOTE_CACHE_TP2_ARGS = (
-    "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --tp_size 2 --enable_remote_cache true"
-    + " --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000"
-)
-
 def remote_cache_suites():
     _pace_suites()
 
@@ -129,34 +124,8 @@ def remote_cache_suites():
                 gpu_type = ["L20_CU13"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 20,
-                smoke_args = _REMOTE_CACHE_TP2_ARGS + " --kvcm_task_timeout_ms 20000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
+                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --tp_size 2 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_task_timeout_ms 20000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
                 task_info = "data/model/qwen25/q_r_l20_remote_cache_tpsize_2.json",
-            ),
-            custom_smoke_test(
-                name = "remote_cache_tp2_write_reply_timeout",
-                main = "cache_recovery_smoke_test.py",
-                args = ["CacheRecoverySmokeTest.test_remote_write_timeout_releases_frozen_blocks"],
-                data = [
-                    "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin",
-                    "//rtp_llm:sdk",
-                ],
-                deps = [":pace_smoke_fixture"],
-                gpu_type = ["L20_CU13"],
-                smoke_args = _REMOTE_CACHE_TP2_ARGS + " --kvcm_task_timeout_ms 200 --test_block_num 5000 --max_seq_len 4096" +
-                    " --enable_device_cache 1 --enable_memory_cache 0 --enable_disk_cache 0",
-            ),
-            custom_smoke_test(
-                name = "local_cache_tp2_write_reply_timeout",
-                main = "cache_recovery_smoke_test.py",
-                args = ["CacheRecoverySmokeTest.test_local_transfer_timeout_releases_both_tiers"],
-                data = ["//rtp_llm:sdk"],
-                deps = [":pace_smoke_fixture"],
-                gpu_type = ["L20_CU13"],
-                # Let several prefixes accumulate before the first D2H eviction.
-                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --tp_size 2" +
-                    " --enable_remote_cache 0 --enable_device_cache 1 --enable_memory_cache 1 --enable_disk_cache 0" +
-                    " --memory_cache_size_mb 128 --memory_cache_sync_timeout_ms 2 --test_block_num 5000 --max_seq_len 4096" +
-                    " --block_tree_device_evict_low_watermark_ratio 0.04 --block_tree_device_evict_high_watermark_ratio 0.065",
             ),
             smoke_test(
                 name = "remote_cache_pd",

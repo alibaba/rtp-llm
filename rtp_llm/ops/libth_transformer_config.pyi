@@ -745,7 +745,6 @@ class KVCacheConfig:
     block_tree_transfer_worker_count: int
     block_tree_business_queue_max_size: int
     block_tree_transfer_queue_max_size: int
-    block_tree_device_frozen_abort_ratio: float
     block_tree_device_evict_low_watermark_ratio: float
     block_tree_device_evict_high_watermark_ratio: float
     block_tree_memory_evict_low_watermark_ratio: float

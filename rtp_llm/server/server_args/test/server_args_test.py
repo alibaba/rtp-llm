@@ -469,40 +469,6 @@ class CacheConfigArgumentsTest(TestCase):
                 self.assertEqual(config.kvcm_get_timeout_ms, 12000)
                 self.assertEqual(config.kvcm_put_timeout_ms, 12000)
 
-    def test_device_frozen_abort_ratio_defaults_environment_and_cli(self):
-        env_name = "BLOCK_TREE_DEVICE_FROZEN_ABORT_RATIO"
-        option = "--block_tree_device_frozen_abort_ratio"
-        for args, env, expected in (
-            ([], {}, 0.3),
-            (None, {}, 0.3),
-            ([], {env_name: "0.45"}, 0.45),
-            (None, {env_name: "0.45"}, 0.45),
-            ([option, "0.6"], {env_name: "0.45"}, 0.6),
-            ([option, "0"], {env_name: "0.45"}, 0.0),
-            ([option, "1"], {}, 1.0),
-        ):
-            with self.subTest(args=args, env=env):
-                config = self.parse_cache_config(args, env)
-                self.assertEqual(config.block_tree_device_frozen_abort_ratio, expected)
-                restored = pickle.loads(pickle.dumps(config))
-                self.assertEqual(restored.block_tree_device_frozen_abort_ratio, expected)
-
-    def test_device_frozen_abort_ratio_rejects_invalid_cli_and_environment(self):
-        for value in ("-0.1", "1.1", "nan", "inf", "-inf", "invalid"):
-            with self.subTest(value=value, source="cli"), self.assertRaises(
-                SystemExit
-            ):
-                self.parse_cache_config(
-                    ["--block_tree_device_frozen_abort_ratio", value], {}
-                )
-            for args in (None, []):
-                with self.subTest(value=value, source="env", args=args), self.assertRaises(
-                    SystemExit
-                ):
-                    self.parse_cache_config(
-                        args, {"BLOCK_TREE_DEVICE_FROZEN_ABORT_RATIO": value}
-                    )
-
     def test_pool_capacity_options_survive_startup_serialization(self):
         config = self.parse_cache_config(
             ["--dsv41_decoder_swa_pool_blocks", "512"],

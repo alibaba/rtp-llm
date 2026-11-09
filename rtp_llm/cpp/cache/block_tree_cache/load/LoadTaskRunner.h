@@ -54,8 +54,6 @@ public:
         TransferResult    host_result;
         TransferResult    disk_result;
         std::vector<bool> target_installed;
-        bool              host_source_frozen{false};
-        bool              disk_source_frozen{false};
         // A submitted task owns the committed context until settlement completes.
         std::shared_ptr<LoadAsyncContext> context;
         Phase                             phase{Phase::CREATED};

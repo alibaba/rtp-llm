@@ -403,22 +403,12 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
         }
     }
 
-    bool host_source_frozen = false;
-    bool disk_source_frozen = false;
     for (size_t desc_index = 0; desc_index < load_descs.size(); ++desc_index) {
         const TransferDescriptor& desc = load_descs[desc_index];
         if (desc.source_tier == Tier::DEVICE || joined_loads[desc_index]) {
             ++prepared_desc_count;
             continue;
         }
-        const auto& group_set = tree_->groupSets()[desc.group_set_id];
-        const IBlockPool* source_pool = desc.source_tier == Tier::HOST ?
-                                           static_cast<const IBlockPool*>(group_set->hostPool().get()) :
-                                           static_cast<const IBlockPool*>(group_set->diskPool().get());
-        RTP_LLM_CHECK(source_pool != nullptr);
-        bool& source_frozen = desc.source_tier == Tier::HOST ? host_source_frozen : disk_source_frozen;
-        source_frozen = source_frozen || std::any_of(desc.source_blocks.begin(), desc.source_blocks.end(),
-                                                    [source_pool](BlockIdxType block) { return source_pool->isFrozen(block); });
         if (!changeTransferState(
                 desc.node, desc.group_set_id, GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING)) {
             RTP_LLM_LOG_ERROR("committed load source is not LOAD_PENDING, group_set_id=%zu", desc.group_set_id);
@@ -436,8 +426,6 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
         scheduleContextSettlement(task, ready_context);
     });
     if (task) {
-        task->host_source_frozen = host_source_frozen;
-        task->disk_source_frozen = disk_source_frozen;
         const int64_t queue_begin = currentTimeUs();
         auto          on_timeout  = [this, task, queue_begin]() {
             metrics_reporter_.reportQueueWaitMetric(false,
@@ -557,13 +545,6 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
                                                                    transfer.traceId(),
                                                                    false);
             CompletionStageScope freeze(observation, "freeze_blocks", "workflow_callback");
-            TransferResult result = task->host_result;
-            result.merge(task->disk_result);
-            FrozenTask frozen(result,
-                              FrozenTask::QueryKind::TRANSFER,
-                              "load",
-                              transfer.traceId(),
-                              transfer.requestId().value_or(-1));
             // Ordinary LOAD references still protect both ends until settlement.
             // Preserve those physical slots before publishing the failure.
             for (const TransferDescriptor& desc : task->load_descs) {
@@ -572,19 +553,17 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
                     continue;
                 }
                 const GroupSetPtr& group_set   = tree_->groupSets()[desc.group_set_id];
-                std::shared_ptr<IBlockPool> source_pool = desc.source_tier == Tier::HOST ?
-                    std::static_pointer_cast<IBlockPool>(group_set->hostPool()) :
-                    std::static_pointer_cast<IBlockPool>(group_set->diskPool());
+                IBlockPool*        source_pool = desc.source_tier == Tier::HOST ?
+                                                     static_cast<IBlockPool*>(group_set->hostPool().get()) :
+                                                     static_cast<IBlockPool*>(group_set->diskPool().get());
                 for (BlockIdxType block : desc.source_blocks) {
-                    frozen.freeze(source_pool, block, desc.source_tier, desc.target_tier);
+                    source_pool->freezeBlock(block);
                 }
                 const auto& device_pools = group_set->devicePools();
                 for (size_t member = 0; member < device_pools.size(); ++member) {
-                    frozen.freeze(
-                        device_pools[member], desc.target_blocks[member], desc.source_tier, desc.target_tier);
+                    device_pools[member]->freezeBlock(desc.target_blocks[member]);
                 }
             }
-            transfer_dispatcher_->retainFrozenTask(std::move(frozen));
         }
         for (const Tier tier : {Tier::HOST, Tier::DISK}) {
             const auto&  transfer = tier == Tier::HOST ? task->host_to_device_task : task->disk_to_device_task;

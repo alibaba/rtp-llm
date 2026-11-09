@@ -19,28 +19,25 @@ enum class EvictionPolicy : int8_t {
 
 struct EvictionEntry {
     TreeNode*    node{nullptr};
-    bool         is_frozen{false};
     uint64_t     primary_key{0};
     uint64_t     secondary_key{0};
     CacheKeyType cache_key{0};
 };
 
 // Exact-update eviction heap backed by std::set + node->iterator index.
-// At most one entry per node; physical size equals the current candidate
+// At most one entry per node; physical size equals the current ready-candidate
 // count. upsert/erase/contains are all O(log N) with no stale entries.
 class EvictionHeap {
 public:
     explicit EvictionHeap(EvictionPolicy policy);
 
     // Insert or replace a node's ordered entry from its candidate meta.
-    void upsert(TreeNode* node, const CandidateMeta& meta, bool is_frozen = false);
-    // Replace an existing entry without admitting a missing node or changing its frozen state.
+    void upsert(TreeNode* node, const CandidateMeta& meta);
+    // Replace an existing entry without admitting a missing node.
     bool updateIfPresent(TreeNode* node, const CandidateMeta& meta);
-    // Reorder an existing entry without allocating or admitting a missing node.
-    bool setFrozenIfPresent(TreeNode* node, bool is_frozen);
     // Remove a node's entry if present. Idempotent.
     void erase(TreeNode* node);
-    // Read the best matching victim, stopping before the frozen suffix.
+    // Read the best matching victim without changing heap membership.
     std::optional<EvictionEntry> best(const std::function<bool(TreeNode*)>& can_evict) const;
 
     // Collect all current nodes. Used for read-only capacity queries.
@@ -63,7 +60,7 @@ private:
     using OrderedSet = std::set<EvictionEntry, EntryLess>;
 
     // Build the ordered entry (primary/secondary keys) from meta per policy.
-    EvictionEntry makeEntry(TreeNode* node, const CandidateMeta& meta, bool is_frozen) const;
+    EvictionEntry makeEntry(TreeNode* node, const CandidateMeta& meta) const;
 
     EvictionPolicy                                      policy_;
     OrderedSet                                          ordered_;

@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 
 #include <algorithm>
-#include <chrono>
 #include <exception>
 #include <memory>
 #include <string>
@@ -11,7 +10,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -20,136 +18,15 @@ namespace rtp_llm {
 
 BlockTransferDispatcher::BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
                                                  std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine,
-                                                 size_t max_descriptors_per_batch,
-                                                 std::shared_ptr<StorageBackend> local_kvcm_backend):
+                                                 size_t max_descriptors_per_batch):
     per_rank_engine_(std::move(per_rank_engine)),
     multi_rank_engine_(std::move(multi_rank_engine)),
     max_descriptors_per_batch_(max_descriptors_per_batch) {
     RTP_LLM_CHECK(max_descriptors_per_batch_ > 0);
-    if (local_kvcm_backend && local_kvcm_backend->supportsLocalCompletionQueries()) {
-        local_kvcm_backend_ = std::move(local_kvcm_backend);
-    }
-    if (multi_rank_engine_ || local_kvcm_backend_) {
-        frozen_thread_ = std::thread([this] {
-            std::unique_lock<std::mutex> lock(frozen_stop_mutex_);
-            while (!frozen_stop_cv_.wait_for(lock, std::chrono::seconds(1), [this] { return frozen_stopping_; })) {
-                lock.unlock();
-                try {
-                    pollFrozenTasks();
-                } catch (const std::exception& error) {
-                    RTP_LLM_LOG_WARNING("frozen task polling failed: %s", error.what());
-                } catch (...) {
-                    RTP_LLM_LOG_WARNING("frozen task polling failed with unknown exception");
-                }
-                lock.lock();
-            }
-        });
-    }
 }
 
 BlockTransferDispatcher::~BlockTransferDispatcher() {
-    stopFrozenPolling();
     drainTransfers();
-}
-
-void BlockTransferDispatcher::stopFrozenPolling() {
-    {
-        std::lock_guard<std::mutex> lock(frozen_stop_mutex_);
-        frozen_stopping_ = true;
-    }
-    frozen_stop_cv_.notify_all();
-    if (frozen_thread_.joinable()) frozen_thread_.join();
-}
-
-void BlockTransferDispatcher::pollFrozenTasks() const {
-    if (multi_rank_engine_) {
-        multi_rank_engine_->forgetFinishedTasks();
-        multi_rank_engine_->forgetFinishedKVCMOperations();
-        pollFrozenTasksForKind(FrozenTask::QueryKind::TRANSFER,
-                               [this](const auto& ids) { return multi_rank_engine_->queryTasks(ids); });
-        pollFrozenTasksForKind(FrozenTask::QueryKind::KVCM,
-                               [this](const auto& ids) { return multi_rank_engine_->queryKVCMOperations(ids); });
-    } else if (local_kvcm_backend_) {
-        forgetFinishedLocalKVCMOperations();
-        pollFrozenTasksForKind(FrozenTask::QueryKind::KVCM,
-                               [this](const auto& ids) { return local_kvcm_backend_->queryLocalKVCMOperations(ids); });
-    }
-}
-
-void BlockTransferDispatcher::pollFrozenTasksWithQuery(const QueryFrozenTasks& query) const {
-    pollFrozenTasksForKind(FrozenTask::QueryKind::TRANSFER, query);
-}
-
-void BlockTransferDispatcher::pollFrozenTasksForKind(FrozenTask::QueryKind query_kind,
-                                                     const QueryFrozenTasks& query) const {
-    std::unique_lock<std::mutex> polling(frozen_poll_mutex_, std::try_to_lock);
-    if (!polling.owns_lock()) return;
-    std::unordered_set<std::string> unique_ids;
-    {
-        std::lock_guard<std::mutex> lock(frozen_mutex_);
-        for (const auto& task : frozen_tasks_)
-            if (!task.finalFrozen && task.query_kind == query_kind)
-                unique_ids.insert(task.recovery_task_ids.begin(), task.recovery_task_ids.end());
-    }
-    if (unique_ids.empty()) return;
-    const std::vector<std::string> ids(unique_ids.begin(), unique_ids.end());
-    const auto states = query(ids);  // No frozen-list lock or borrowed task references across RPC.
-    if (states.size() != ids.size()) return;
-    std::unordered_set<std::string> completed_ids;
-    for (size_t i = 0; i < ids.size(); ++i)
-        if (states[i] == TaskCompletion::FINISHED) completed_ids.insert(ids[i]);
-    releaseCompletedFrozenTasks(completed_ids, query_kind);
-}
-
-void BlockTransferDispatcher::releaseCompletedFrozenTasks(
-    const std::unordered_set<std::string>& completed_ids, FrozenTask::QueryKind query_kind) const {
-    std::vector<FrozenTask> completed;
-    {
-        std::lock_guard<std::mutex> lock(frozen_mutex_);
-        for (auto it = frozen_tasks_.begin(); it != frozen_tasks_.end();) {
-            if (it->query_kind == query_kind && it->readyToRelease(completed_ids)) {
-                completed.push_back(std::move(*it));
-                it = frozen_tasks_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-    // Pool capacity callbacks must not run under frozen_mutex_.
-    for (auto& task : completed) {
-        if (!task.unfreeze(completed_ids)) continue;
-        if (query_kind == FrozenTask::QueryKind::TRANSFER) {
-            if (multi_rank_engine_) multi_rank_engine_->enqueueFinishedTasks(task.recovery_task_ids);
-        } else {
-            for (const auto& id : task.recovery_task_ids) enqueueFinishedKVCMOperation(id);
-        }
-    }
-}
-
-void BlockTransferDispatcher::enqueueFinishedKVCMOperation(const std::string& operation_id) const {
-    if (multi_rank_engine_) {
-        multi_rank_engine_->enqueueFinishedKVCMOperations({operation_id});
-    } else if (local_kvcm_backend_) {
-        std::lock_guard<std::mutex> lock(local_kvcm_cleanup_mutex_);
-        local_kvcm_finished_ids_.insert(operation_id);
-    }
-}
-
-void BlockTransferDispatcher::forgetFinishedLocalKVCMOperations() const {
-    std::unique_lock<std::mutex> polling(local_kvcm_cleanup_poll_mutex_, std::try_to_lock);
-    if (!polling.owns_lock()) return;
-    std::vector<std::string> ids;
-    {
-        std::lock_guard<std::mutex> lock(local_kvcm_cleanup_mutex_);
-        constexpr size_t kMaxCleanupBatch = 1024;
-        for (const auto& id : local_kvcm_finished_ids_) {
-            ids.push_back(id);
-            if (ids.size() == kMaxCleanupBatch) break;
-        }
-    }
-    if (ids.empty() || !local_kvcm_backend_->forgetLocalKVCMOperations(ids)) return;
-    std::lock_guard<std::mutex> lock(local_kvcm_cleanup_mutex_);
-    for (const auto& id : ids) local_kvcm_finished_ids_.erase(id);
 }
 
 void BlockTransferDispatcher::drainTransfers() const {
