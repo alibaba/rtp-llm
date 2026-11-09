@@ -183,3 +183,10 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "local_rpc_server_test",
+    srcs = ["LocalRpcServerTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+)

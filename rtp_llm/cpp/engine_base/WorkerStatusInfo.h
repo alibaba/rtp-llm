@@ -14,6 +14,7 @@ namespace rtp_llm {
 
 struct WorkerStatusInfo {
     RoleType           role;
+    int32_t            available_concurrency = 0;
     EngineScheduleInfo engine_schedule_info;
     int64_t            status_version;
     int64_t            latest_finished_version;

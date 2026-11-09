@@ -478,9 +478,9 @@ message UpdateWeightsRequestPB {
 
 message WorkerStatusPB {
     string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
-    // LocalRpcServer::GetWorkerStatus currently does not populate this field, so
-    // protobuf returns the default value 0. Keep it for wire compatibility, but
-    // do not use it for routing, admission control, or batch-size decisions.
+    // max(0, configured concurrency_limit - in-flight generation requests).
+    // Includes KV preparation and waiting for remote decode; this is a request
+    // concurrency snapshot, not a guarantee of available KV or batch capacity.
     int32 available_concurrency = 2;
     repeated TaskInfoPB running_task_info = 3;
     repeated TaskInfoPB finished_task_list = 4;

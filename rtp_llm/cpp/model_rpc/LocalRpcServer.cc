@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -282,6 +283,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     // typed field 20 is rolled out.
     response->set_role("RoleType." + roleTypeToString(status_info.role));
     response->set_role_type(static_cast<RoleTypePB>(status_info.role));
+    response->set_available_concurrency(status_info.available_concurrency);
 
     for (const auto& task : engine_schedule_info.running_task_info_list) {
         TaskInfoPB* task_info = response->add_running_task_info();
@@ -343,6 +345,12 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
 
 WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_version) {
     WorkerStatusInfo status_info;
+    // Count the full RPC lifetime, including KV preparation and remote decode,
+    // which are not necessarily represented in running_task_info.
+    const auto concurrency_limit = static_cast<size_t>(std::max(0, maga_init_params_.concurrency_config.concurrency_limit));
+    const auto onflight_requests  = onflightRequestNum();
+    status_info.available_concurrency =
+        onflight_requests >= concurrency_limit ? 0 : static_cast<int32_t>(concurrency_limit - onflight_requests);
     status_info.engine_schedule_info    = getEngineScheduleInfo(latest_finished_version);
     status_info.role                    = maga_init_params_.pd_sep_config.role_type;
     status_info.dp_size                 = maga_init_params_.parallelism_config.dp_size;
