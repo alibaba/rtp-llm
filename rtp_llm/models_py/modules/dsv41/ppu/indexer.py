@@ -33,6 +33,7 @@ buffer is bounded by ``chunk_rows * n_heads * block_size`` floats, never
 
 from __future__ import annotations
 
+import os
 import types
 
 import torch
@@ -122,7 +123,16 @@ def dense_fp4_index_score(q, k, head_weights, context, ratio):
     )
 
     count = k.values.shape[0]
-    ends = ((context.positions + 1) // ratio).clamp(0, count).to(torch.int32)
+    bounds = None
+    if os.environ.get("RTP_V41_PPU_CP8_DENSE_INDEX_BOUNDS", "0") == "1":
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_metadata import try_score_bounds
+
+        bounds = try_score_bounds(context.positions, count, ratio)
+    if bounds is None:
+        ends = ((context.positions + 1) // ratio).clamp(0, count).to(torch.int32)
+        starts = torch.zeros_like(ends)
+    else:
+        starts, ends = bounds
     logits = score_indexer_chunk(
         q.values,
         q.scales,
@@ -130,11 +140,16 @@ def dense_fp4_index_score(q, k, head_weights, context, ratio):
         k.scales,
         head_weights,
         ends,
-        bounds=(torch.zeros_like(ends), ends),
+        bounds=(starts, ends),
         return_bf16=True,
     )
     # The request-local DeepGEMM ABI can leave the tail unwritten. Both token
     # TopK and candidate block pooling below this boundary need a masked tile.
+    if bounds is not None and logits.stride(1) == 1:
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_grouped_prefill_score import _mask_tail_kernel
+
+        _mask_tail_kernel[(logits.shape[0],)](logits, ends, count, logits.stride(0), 512)
+        return logits
     columns = torch.arange(count, device=logits.device)
     return logits.masked_fill_(columns[None] >= ends[:, None], NEG_INF)
 

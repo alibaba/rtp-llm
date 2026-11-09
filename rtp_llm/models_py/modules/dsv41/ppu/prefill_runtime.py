@@ -4,6 +4,7 @@ import logging
 import os
 from contextlib import nullcontext
 from dataclasses import fields, replace
+from itertools import accumulate
 from types import SimpleNamespace
 
 import torch
@@ -106,6 +107,7 @@ class SharedForwardState:
         self.query_prefixes = tuple(map(int, prefixes))
         self.lengths = tuple(map(int, lengths))
         self._restored_rows = None
+        self._local_cp_rows = None
         self.original_context = self.context = None
         self.plan = None
         self.compacted = False
@@ -149,8 +151,23 @@ class SharedForwardState:
     def rows(self, context=None):
         if context is not None:
             chunks = context.chunk_lengths_per_req
-            cu = torch.tensor([0, *torch.tensor(chunks).cumsum(0).tolist()], dtype=torch.int32, device=self.inputs.input_ids.device)
-            return context.global_positions, context.req_id_per_token.long(), cu, context.local_is_real
+            reuse = (
+                self.prefill
+                and context.cp_size == 8
+                and context.kv_cache_sharded
+                and context.gather_restore_positions is None
+                and os.environ.get("RTP_V41_PPU_CP8_REUSE_LOCAL_ROWS", "0") == "1"
+            )
+            if reuse and self._local_cp_rows is not None and self._local_cp_rows[0] is context:
+                return self._local_cp_rows[1]
+            cu = torch.tensor(
+                (0, *accumulate(chunks)), dtype=torch.int64 if reuse else torch.int32,
+                device=self.inputs.input_ids.device,
+            )
+            rows = context.global_positions, context.req_id_per_token.long(), cu, context.local_is_real
+            if reuse:
+                self._local_cp_rows = context, rows
+            return rows
         device = self.inputs.input_ids.device
         if self.prefill:
             cu = self.attn.cu_seqlens.to(device=device, dtype=torch.int64)

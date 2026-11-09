@@ -911,9 +911,11 @@ def _quantize_mx_rows_ppu(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 def quantize_indexer_q_ppu(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     shape = q.shape
     rows = q.numel() // INDEXER_HEAD_DIM
-    payload, sf = _quantize_mx_rows_ppu(
-        q.reshape(rows, INDEXER_HEAD_DIM).float().contiguous()
-    )
+    flat = q.reshape(rows, INDEXER_HEAD_DIM)
+    # The kernel already loads each element into FP32 registers.
+    if flat.dtype != torch.bfloat16:
+        flat = flat.float()
+    payload, sf = _quantize_mx_rows_ppu(flat)
     return payload.view(*shape[:-1], 64), sf.view(*shape[:-1])
 
 
