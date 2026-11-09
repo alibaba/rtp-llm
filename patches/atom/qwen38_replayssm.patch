@@ -432,23 +432,19 @@ diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/
  import torch
  import triton
  import triton.language as tl
-@@ -29,6 +31,15 @@
+@@ -29,6 +31,11 @@
      _target_verify_state_slots_graph_kernel,
  )
  from atom.utils.forward_context import get_forward_context
 +
 +
 +def _flydsl_mtp_enabled() -> bool:
-+    """Default to FlyDSL on ROCm unless ReplaySSM was selected explicitly."""
-+    replay = os.getenv("ATOM_RTP_ENABLE_REPLAYSSM", "0") == "1"
-+    requested = os.getenv("ATOM_RTP_FLYDSL_GDN_MTP")
-+    if requested == "1" and replay:
-+        raise ValueError("FlyDSL GDN MTP and ReplaySSM are mutually exclusive")
-+    return bool(torch.version.hip) and not replay and requested != "0"
++    from atom.plugin.rtpllm.utils.replay_policy import flydsl_mtp_enabled
++    return flydsl_mtp_enabled()
  
  
  @triton.jit
-@@ -387,13 +398,17 @@
+@@ -387,13 +394,17 @@
                  caches[f"layer_{layer_num}"].v_cache = state
                  caches[f"layer_{layer_num}"].k_cache = conv
  
@@ -470,7 +466,7 @@ diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/
              for layer_num, layer in layer_maps[0].items():
                  state = caches[f"layer_{layer_num}"].v_cache
                  k_dim, v_dim = state.shape[-2:]
-@@ -738,6 +753,24 @@
+@@ -738,6 +749,24 @@
                  gdn_metadata.ssm_conv_state_len = (
                      int(model.config.linear_conv_kernel_dim) - 1
                  )
@@ -495,7 +491,7 @@ diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/
              cls._configure_gdn_backends(
                  metadata.gdn_metadata,
                  resolved_layer_maps[0],
-@@ -929,6 +962,33 @@
+@@ -929,6 +958,33 @@
                      raw_slots.copy_(candidate_slots)
                  else:
                      raw_slots = candidate_slots
@@ -529,7 +525,7 @@ diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/
              metadata.qsa_metadata = Qwen4ExpQSAMetadata(
                  block_tables=full_blocks,
                  slot_mapping=slots,
-@@ -950,6 +1010,8 @@
+@@ -950,6 +1006,8 @@
                  state_page_size=int(runtime.kv_cache.get_seq_size_per_block("indexer_state")),
                  state_read_pages=state_read_pages,
                  state_candidate_pages=state_candidate_pages,
@@ -542,7 +538,7 @@ diff --git a/atom/plugin/rtpllm/utils/replay_hybrid.py b/atom/plugin/rtpllm/util
 new file mode 100644
 --- /dev/null
 +++ b/atom/plugin/rtpllm/utils/replay_hybrid.py
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,91 @@
 +"""Experimental final-state fast path with replay only for partial acceptance."""
 +import os
 +from types import MethodType
@@ -567,7 +563,7 @@ new file mode 100644
 +        tl.store(state+dst.to(tl.int64)*STATE_STRIDE+h*D*D+vv[:,None]*D+kk[None,:],value,(vv[:,None]<D)&(dst>=0))
 +
 +def enabled(runtime):
-+    return os.getenv('ATOM_RTP_REPLAY_HYBRID','0')=='1' and bool(getattr(runtime._rtp_model_config,'atom_qwen4_exp_mtp_target',False))
++    return bool(getattr(runtime, '_hybrid_enabled', False))
 +
 +def prepare_metadata(runtime,metadata,caches,layers):
 +    if not enabled(runtime) or metadata is None or not getattr(metadata,'rtp_flydsl_mtp',False):return
@@ -621,18 +617,43 @@ new file mode 100644
 +def _reduce(self,ok):return self._hybrid_reducer.reduce(ok)
 +
 +def install_runtime(runtime):
-+    if not enabled(runtime):return
-+    if os.getenv('ATOM_RTP_ENABLE_REPLAYSSM','0')=='1':raise RuntimeError('Select hybrid OR legacy ReplaySSM')
++    from atom.plugin.rtpllm.utils.replay_policy import replay_mode
++    runtime._hybrid_enabled = False
++    if (not torch.version.hip or replay_mode() != "1"
++            or not getattr(runtime._rtp_model_config, "atom_qwen4_exp_mtp_target", False)):
++        return
 +    from rtp_llm.models_py.modules.qwen4_exp.cpu_target_status import prepare_cpu_target_status
 +    runtime._hybrid_reducer=prepare_cpu_target_status(runtime._rtp_model_config,runtime.parallelism_config)
-+    if runtime._hybrid_reducer is None:raise RuntimeError('Hybrid requires TP status consensus')
++    if runtime._hybrid_reducer is None:
++        # Keep the supported FlyDSL path when this topology lacks CPU consensus.
++        return
++    runtime._hybrid_enabled = True
 +    runtime._hybrid_stages={};runtime._hybrid_graphs={};runtime._hybrid_active=None;runtime._hybrid_pending=None;runtime._hybrid_modified=False
 +    for name,fn in [('has_speculative_target_status_reducer',_has),('reduce_speculative_target_prepare_status',_reduce),('clear_speculative_target_graph_capture',_clear),('save_speculative_target_graph_capture',_save),('activate_speculative_target_graph_replay',_activate),('prepare_speculative_target_commit',_prepare),('finish_speculative_target_commit',_finish),('finalize_speculative_target_commit',_finalize)]:setattr(runtime,name,MethodType(fn,runtime))
+diff --git a/atom/plugin/rtpllm/utils/replay_policy.py b/atom/plugin/rtpllm/utils/replay_policy.py
+new file mode 100644
+--- /dev/null
++++ b/atom/plugin/rtpllm/utils/replay_policy.py
+@@ -0,0 +1,14 @@
++"""One RTP ReplaySSM switch: 1=hybrid (ROCm default), 0=FlyDSL, legacy=old replay."""
++import os
++import torch
++
++
++def replay_mode():
++    mode = os.getenv("ATOM_RTP_ENABLE_REPLAYSSM", "1" if torch.version.hip else "0")
++    if mode not in ("0", "1", "legacy"):
++        raise ValueError("ATOM_RTP_ENABLE_REPLAYSSM must be 0, 1 or legacy")
++    return mode
++
++
++def flydsl_mtp_enabled():
++    return bool(torch.version.hip) and replay_mode() != "legacy"
 diff --git a/atom/plugin/rtpllm/utils/replayssm_rtp.py b/atom/plugin/rtpllm/utils/replayssm_rtp.py
 new file mode 100644
 --- /dev/null
 +++ b/atom/plugin/rtpllm/utils/replayssm_rtp.py
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,249 @@
 +"""Experimental RTP Qwen3.8 ReplaySSM state bridge.
 +
 +The RTP linear block pool keeps full checkpoints. ReplaySSM records are attached
@@ -664,7 +685,8 @@ new file mode 100644
 +
 +
 +def enabled(runtime) -> bool:
-+    return os.getenv("ATOM_RTP_ENABLE_REPLAYSSM", "0") == "1" and bool(
++    from atom.plugin.rtpllm.utils.replay_policy import replay_mode
++    return replay_mode() == "legacy" and bool(
 +        getattr(getattr(runtime, "_rtp_model_config", None), "atom_qwen4_exp_mtp_target", False)
 +    )
 +
@@ -693,7 +715,6 @@ new file mode 100644
 +    runtime._rtp_replay_state_version = torch.arange(count, device=state.device, dtype=torch.int64)
 +    runtime._rtp_replay_epoch = 0
 +    request_capacity = int(runtime._rtp_mtp_request_capacity)
-+    runtime._rtp_replay_precopy_flags = torch.empty(request_capacity, device=state.device, dtype=torch.int32)
 +    runtime._rtp_replay_commit_dst = torch.empty(request_capacity, device=state.device, dtype=torch.int64)
 +    runtime._rtp_replay_commit_pos = torch.empty(request_capacity, device=state.device, dtype=torch.int32)
 +    runtime._rtp_replay_commit_version = torch.empty(request_capacity, device=state.device, dtype=torch.int64)
@@ -747,7 +768,6 @@ new file mode 100644
 +    copy_replay_slot_with_version(
 +        runtime._rtp_replay_layer_ptrs, runtime._rtp_replay_layer_sizes,
 +        pos, runtime._rtp_replay_state_version, read, src,
-+        runtime._rtp_replay_precopy_flags,
 +    )
 +    if os.getenv("ATOM_RTP_REPLAY_DEBUG") == "1" and runtime._rtp_replay_debug_count < 12 and not torch.cuda.is_current_stream_capturing():
 +        print("REPLAY_PRE", runtime._rtp_replay_debug_count, "slots", src[:3].tolist(), "candidates", candidates[:3].tolist(), "cursor", pos[src[:3].long()].tolist(), flush=True)
@@ -803,16 +823,12 @@ new file mode 100644
 +        raise RuntimeError("ReplaySSM commit was not prepared")
 +    stage = self._rtp_replay_active
 +    self._rtp_replay_modified = True
-+    # Shared-prefix forks must get distinct checkpoint generations on flush.
-+    self._rtp_replay_epoch += 1
-+    epoch_base = self._rtp_replay_epoch * self._rtp_replay_write_pos.numel()
 +    commit_copy_versioned(
 +        self._rtp_replay_layer_ptrs, self._rtp_replay_layer_sizes,
 +        self._rtp_replay_write_pos, self._rtp_replay_state_version,
 +        stage.src, stage.candidates, accept,
 +        self._rtp_replay_commit_dst, self._rtp_replay_commit_pos,
 +        self._rtp_replay_commit_version, self._rtp_replay_commit_copy, 16,
-+        epoch_base=epoch_base,
 +    )
 +
 +
@@ -891,7 +907,7 @@ diff --git a/atom/plugin/rtpllm/utils/replayssm_rtp_fused_copy.py b/atom/plugin/
 new file mode 100644
 --- /dev/null
 +++ b/atom/plugin/rtpllm/utils/replayssm_rtp_fused_copy.py
-@@ -0,0 +1,337 @@
+@@ -0,0 +1,307 @@
 +"""Fused checkpoint, record, and cursor copy for RTP ReplaySSM slots."""
 +import math
 +
@@ -1076,22 +1092,8 @@ new file mode 100644
 +
 +
 +@triton.jit
-+def _snapshot_precopy_versions(version, reads, writes, copy_flags, ROWS: tl.constexpr,
-+                               BLOCK: tl.constexpr):
-+    # Freeze decisions before any destination version is published by copy CTAs.
-+    row = tl.arange(0, BLOCK)
-+    valid = row < ROWS
-+    src = tl.load(reads + row, mask=valid, other=-1).to(tl.int64)
-+    dst = tl.load(writes + row, mask=valid, other=-1).to(tl.int64)
-+    active = valid & (src >= 0) & (dst >= 0) & (src != dst)
-+    src_ver = tl.load(version + src, mask=active, other=0)
-+    dst_ver = tl.load(version + dst, mask=active, other=0)
-+    tl.store(copy_flags + row, active & (src_ver != dst_ver), mask=valid)
-+
-+
-+@triton.jit
 +def _copy_replay_slot_with_version(
-+    state_ptrs,k_ptrs,u_ptrs,g_ptrs,cursor,version,reads,writes,copy_flags,
++    state_ptrs,k_ptrs,u_ptrs,g_ptrs,cursor,version,reads,writes,
 +    STATE_ELEMS:tl.constexpr,STATE_STRIDE:tl.constexpr,
 +    K_ELEMS:tl.constexpr,U_ELEMS:tl.constexpr,G_ELEMS:tl.constexpr,
 +    BLOCK:tl.constexpr,
@@ -1105,9 +1107,8 @@ new file mode 100644
 +        ru=tl.load(u_ptrs+layer).to(tl.pointer_type(tl.bfloat16))
 +        rg=tl.load(g_ptrs+layer).to(tl.pointer_type(tl.float32))
 +        off=tile*BLOCK+tl.arange(0,BLOCK)
-+        if tl.load(copy_flags+row) != 0:
-+            x=tl.load(state+src*STATE_STRIDE+off,mask=off<STATE_ELEMS,other=0)
-+            tl.store(state+dst*STATE_STRIDE+off,x,mask=off<STATE_ELEMS)
++        x=tl.load(state+src*STATE_STRIDE+off,mask=off<STATE_ELEMS,other=0)
++        tl.store(state+dst*STATE_STRIDE+off,x,mask=off<STATE_ELEMS)
 +        if tile*BLOCK<K_ELEMS:
 +            xk=tl.load(rk+src*K_ELEMS+off,mask=off<K_ELEMS,other=0)
 +            tl.store(rk+dst*K_ELEMS+off,xk,mask=off<K_ELEMS)
@@ -1128,7 +1129,6 @@ new file mode 100644
 +    out_dst,out_pos,out_version,out_copy,
 +    ACTIVE:tl.constexpr,ROW_STRIDE:tl.constexpr,COL_STRIDE:tl.constexpr,
 +    WIDTH:tl.constexpr,CAP:tl.constexpr,VERSION_DELTA:tl.constexpr,
-+    EPOCH_BASE, UNIQUE_VERSION:tl.constexpr,
 +):
 +    row=tl.program_id(0)
 +    dst=tl.full((),-1,tl.int64)
@@ -1146,8 +1146,6 @@ new file mode 100644
 +                src_version=tl.load(version+src)
 +                dst_version=tl.load(version+dst)
 +                new_version=src_version+tl.where(flushed,VERSION_DELTA,0)
-+                if UNIQUE_VERSION:
-+                    new_version=tl.where(flushed,EPOCH_BASE+src,src_version)
 +                copy_state=flushed or src_version!=dst_version
 +                tl.store(out_pos+row,new_pos)
 +                tl.store(out_version+row,new_version)
@@ -1194,26 +1192,15 @@ new file mode 100644
 +            tl.store(version+dst,ver)
 +
 +
-+def copy_replay_slot_with_version(tables,sizes,cursor,version,reads,writes,copy_flags=None):
-+    if reads.numel() != writes.numel():
-+        raise RuntimeError("ReplaySSM pre-copy row mismatch")
-+    if reads.numel() == 0:
-+        return
-+    if copy_flags is None:
-+        copy_flags = torch.empty(reads.numel(), device=reads.device, dtype=torch.int32)
-+    if copy_flags.numel() < reads.numel():
-+        raise RuntimeError("ReplaySSM pre-copy scratch capacity exceeded")
-+    _snapshot_precopy_versions[(1,)](
-+        version, reads, writes, copy_flags, reads.numel(),
-+        triton.next_power_of_2(reads.numel()), num_warps=1)
++def copy_replay_slot_with_version(tables,sizes,cursor,version,reads,writes):
 +    block=4096
 +    grid=(reads.numel(),triton.cdiv(max(sizes[0],*sizes[2:]),block),tables[0].numel())
 +    _copy_replay_slot_with_version[grid](
-+        *tables,cursor,version,reads,writes,copy_flags,*sizes,block,num_warps=4)
++        *tables,cursor,version,reads,writes,*sizes,block,num_warps=4)
 +
 +
 +def commit_copy_versioned(tables,sizes,cursor,version,sources,candidates,accepts,
-+                          dst_buffer,pos_buffer,version_buffer,copy_buffer,cap,epoch_base=None):
++                          dst_buffer,pos_buffer,version_buffer,copy_buffer,cap):
 +    if accepts.dtype!=torch.int32 or accepts.ndim!=1 or accepts.numel()>sources.numel():
 +        raise RuntimeError("ReplaySSM versioned commit accept shape/dtype mismatch")
 +    rows=sources.numel()
@@ -1221,8 +1208,7 @@ new file mode 100644
 +        cursor,version,sources,candidates,accepts,
 +        dst_buffer,pos_buffer,version_buffer,copy_buffer,
 +        accepts.numel(),candidates.stride(0),candidates.stride(1),
-+        candidates.shape[1],cap,1<<32,
-+        0 if epoch_base is None else epoch_base, epoch_base is not None,num_warps=1)
++        candidates.shape[1],cap,1<<32,num_warps=1)
 +    block=4096
 +    grid=(rows,triton.cdiv(max(sizes[0],*sizes[2:]),block),tables[0].numel())
 +    _copy_versioned_commit[grid](
