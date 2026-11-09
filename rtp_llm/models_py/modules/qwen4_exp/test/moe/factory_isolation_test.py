@@ -38,6 +38,7 @@ class FactoryIsolationTest(unittest.TestCase):
         module = DenseMLP.__new__(DenseMLP)
         torch.nn.Module.__init__(module)
         module.is_gated = True
+        module.clamp_swiglu = False
         module._fuse_silu_quant = False
         module.parallelism_config = SimpleNamespace(get_ffn_tp_size=lambda: 1)
         module.act_fn = FusedSiluAndMul()

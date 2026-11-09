@@ -240,7 +240,7 @@ class MlaAttention(nn.Module):
         q_c_scale = None
         if self.q_lora_rank > 0:
             if x_fp8 is not None and x_scale is not None:
-                fused_qkv = self.fused_qkv_a_proj(x_fp8, input_scales=x_scale)
+                fused_qkv = self.fused_qkv_a_proj.forward_quantized(x_fp8, x_scale)
             else:
                 fused_qkv = self.fused_qkv_a_proj(hidden_states)
             kv_offset = self.q_lora_rank
@@ -254,7 +254,7 @@ class MlaAttention(nn.Module):
             )
             # F1a/F1b: fused strided RMSNorm (skip .contiguous() copy). When
             # q_b_proj is fp8 we additionally emit fp8+scale (F1b dual output)
-            # so q_b_proj can use input_scales= and skip its internal quant.
+            # so q_b_proj can skip its internal quantization.
             if self._fuse_q_a_norm_mode == "fp8_dual":
                 q_c, q_c_fp8, q_c_scale = (
                     fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
@@ -292,13 +292,13 @@ class MlaAttention(nn.Module):
                 )
                 fmha_impl.prefetch_kv(self.layer_idx, topk_indices)
             q = (
-                self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
+                self.q_b_proj.forward_quantized(q_c_fp8, q_c_scale)
                 if q_c_fp8 is not None
                 else self.q_b_proj(q_c)
             )
         else:
             if x_fp8 is not None and x_scale is not None:
-                fused_qkv = self.fused_qkv_proj(x_fp8, input_scales=x_scale)
+                fused_qkv = self.fused_qkv_proj.forward_quantized(x_fp8, x_scale)
             else:
                 fused_qkv = self.fused_qkv_proj(hidden_states)
             kv_offset = self.num_heads * self.attn_config.size_per_head
