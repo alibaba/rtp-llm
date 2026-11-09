@@ -414,7 +414,23 @@ diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/
  import torch
  import triton
  import triton.language as tl
-@@ -387,13 +389,19 @@
+@@ -29,6 +31,15 @@
+     _target_verify_state_slots_graph_kernel,
+ )
+ from atom.utils.forward_context import get_forward_context
++
++
++def _flydsl_mtp_enabled() -> bool:
++    """Default to FlyDSL on ROCm unless ReplaySSM was selected explicitly."""
++    replay = os.getenv("ATOM_RTP_ENABLE_REPLAYSSM", "0") == "1"
++    requested = os.getenv("ATOM_RTP_FLYDSL_GDN_MTP")
++    if requested == "1" and replay:
++        raise ValueError("FlyDSL GDN MTP and ReplaySSM are mutually exclusive")
++    return bool(torch.version.hip) and not replay and requested != "0"
+ 
+ 
+ @triton.jit
+@@ -387,13 +398,17 @@
                  caches[f"layer_{layer_num}"].v_cache = state
                  caches[f"layer_{layer_num}"].k_cache = conv
  
@@ -424,26 +440,31 @@ diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/
          # AITER decode expects physical VK storage exposed as a logical KV
          # view. Bind that view before the first state write; the prefill path
          # and Triton decode fallback both honor its inner strides. MTP target
-         # verification still uses the original KV state layout.
+-        # verification still uses the original KV state layout.
 -        if not getattr(
 -            model_config, "atom_qwen4_exp_mtp_target", False
 -        ) and not getattr(model_config, "is_mtp", False):
-+        flydsl_mtp = os.getenv("ATOM_RTP_FLYDSL_GDN_MTP", "0") == "1"
-+        if flydsl_mtp and os.getenv("ATOM_RTP_ENABLE_REPLAYSSM", "0") == "1":
-+            raise ValueError("FlyDSL GDN MTP and ReplaySSM are mutually exclusive")
++        # verification uses VK only when the FlyDSL MTP path is selected.
++        flydsl_mtp = _flydsl_mtp_enabled()
 +        if (not getattr(model_config, "atom_qwen4_exp_mtp_target", False)
 +            and not getattr(model_config, "is_mtp", False)) or (
 +                flydsl_mtp and getattr(model_config, "atom_qwen4_exp_mtp_target", False)):
              for layer_num, layer in layer_maps[0].items():
                  state = caches[f"layer_{layer_num}"].v_cache
                  k_dim, v_dim = state.shape[-2:]
-@@ -738,6 +746,16 @@
+@@ -738,6 +753,22 @@
                  gdn_metadata.ssm_conv_state_len = (
                      int(model.config.linear_conv_kernel_dim) - 1
                  )
 +            if gdn_metadata is not None:
 +                gdn_metadata.rtp_flydsl_mtp = (
-+                    os.getenv("ATOM_RTP_FLYDSL_GDN_MTP", "0") == "1"
++                    _flydsl_mtp_enabled()
++                    and bool(resolved_layer_maps[0])
++                    and all(
++                        layer.allow_aiter_flydsl
++                        and forward_context.kv_cache_data[f"layer_{number}"].v_cache.stride(-2) == 1
++                        for number, layer in resolved_layer_maps[0].items()
++                    )
 +                    and gdn_metadata.num_spec_decodes > 0
 +                    and gdn_metadata.num_prefills == 0 and gdn_metadata.num_decodes == 0
 +                )
@@ -454,7 +475,7 @@ diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/
              cls._configure_gdn_backends(
                  metadata.gdn_metadata,
                  resolved_layer_maps[0],
-@@ -929,6 +947,33 @@
+@@ -929,6 +960,33 @@
                      raw_slots.copy_(candidate_slots)
                  else:
                      raw_slots = candidate_slots
@@ -488,7 +509,7 @@ diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/
              metadata.qsa_metadata = Qwen4ExpQSAMetadata(
                  block_tables=full_blocks,
                  slot_mapping=slots,
-@@ -950,6 +995,8 @@
+@@ -950,6 +1008,8 @@
                  state_page_size=int(runtime.kv_cache.get_seq_size_per_block("indexer_state")),
                  state_read_pages=state_read_pages,
                  state_candidate_pages=state_candidate_pages,
