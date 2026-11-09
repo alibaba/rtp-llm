@@ -1,18 +1,17 @@
 from dataclasses import dataclass
 from typing import Literal
-from .registry import register_step
-from .step import Step, StepContext
+
 from ._targets import Targets
+from .step import StepContext
+from .step_registry import register_step
 
 
 @dataclass(frozen=True)
 class Stop(Targets):
-    mode: Literal['terminate', 'kill'] = 'terminate'
+    mode: Literal["terminate", "kill"] = "terminate"
 
 
-@register_step('master/stop', effect='write')
-class MasterStop(Step):
-    @staticmethod
-    async def execute(ctx: StepContext, args: Stop) -> list[str]:
-        """Stop selected Master JVMs, or all active Masters when targets is omitted."""
-        return await ctx.runtime.masters.stop(args.targets, args.mode)
+@register_step("master/stop", effect="write")
+async def master_stop(ctx: StepContext, args: Stop) -> list[str]:
+    """Stop selected Master JVMs, or all active Masters when targets is omitted."""
+    return await ctx.runtime.masters.stop(args.targets, args.mode)

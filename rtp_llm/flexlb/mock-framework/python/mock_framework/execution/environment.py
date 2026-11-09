@@ -4,12 +4,12 @@ import copy
 
 from . import ExecutionError
 from .processes import ProcessSupervisor
-from .roles.client import ClientRole
+from .roles.client import ClientManager
 from .roles.engine import EngineRole
 from .roles.master import MasterRole
 from .roles.prometheus import Prometheus
 from .roles.zookeeper import ZooKeeperRole
-from .run_trace import write_json
+from .step_trace import write_json
 
 
 class EndpointRegistry:
@@ -101,7 +101,7 @@ class RunEnvironment:
             recipes=launch["components"],
             monitoring=self.monitoring,
         )
-        self.clients = ClientRole(
+        self.clients = ClientManager(
             environment=case.environment,
             component=case.environment.get("client"),
             recipe=launch["components"].get("client"),
