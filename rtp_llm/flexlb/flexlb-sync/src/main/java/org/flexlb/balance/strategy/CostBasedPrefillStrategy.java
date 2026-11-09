@@ -9,8 +9,8 @@ import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.RouteTimelineProjector;
-import org.flexlb.balance.scheduler.PrefillQueueShedding;
 import org.flexlb.balance.scheduler.PrefillDeadlineBudget;
+import org.flexlb.balance.scheduler.PrefillQueueShedding;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
@@ -64,6 +64,7 @@ public class CostBasedPrefillStrategy {
     private final double minAcceptingWorkerPercent;
     private final boolean deadlineBudgetEnabled;
     private final Object tokenSelectionLock = new Object();
+    private final PrefillQueuePressure queuePressure = new PrefillQueuePressure();
 
     public CostBasedPrefillStrategy(EndpointRegistry endpointRegistry,
                                     CacheAwareService cacheAwareService,
@@ -640,17 +641,22 @@ public class CostBasedPrefillStrategy {
                 && maxAcceptingHit == maxHit;
     }
 
-    /** A strict majority of the live matching pool must report sustained Engine queue pressure. */
+    /** Global shedding pressure is independent of the per-worker dispatch watermark. */
     public boolean isClusterOverloaded(RoleType role, String group) {
+        return isClusterOverloaded(role, group, System.nanoTime() / 1_000_000L);
+    }
+
+    boolean isClusterOverloaded(RoleType role, String group, long nowMs) {
         int workers = 0;
-        int congested = 0;
+        int waiting = 0;
         for (var entry : endpointRegistry.prefillRoutingSnapshot(role)) {
             var endpoint = entry.endpoint();
             if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) { continue; }
             workers++;
-            if (endpoint.engineQueueCongested()) { congested++; }
+            var status = endpoint.getStatus().committedWorkerStatus();
+            if (status.cursor().statusVersion() >= 0L && status.fields().waitingQueryLen() > 0L) { waiting++; }
         }
-        return workers > 0 && congested > workers / 2;
+        return queuePressure.observe(role, group, workers, waiting, nowMs);
     }
 
     private boolean enoughAcceptingWorkers(int accepting, int workers) {

@@ -1,33 +1,27 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.balance.scheduler.RequestRoute;
-
-import org.flexlb.dao.master.WorkerStatusTestSupport;
-
-import org.flexlb.config.ConfigTestSupport;
-
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
-
-
-import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.config.VictimStage;
-import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -39,14 +33,16 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
+
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
@@ -833,7 +829,10 @@ class CostBasedPrefillSelectionMetricTest {
         updateEngineQueue(workers.get(1), 100, 0);
         assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null), "half the pool is not a majority");
         updateEngineQueue(workers.get(2), 100, 0);
-        assertTrue(strategy.isClusterOverloaded(RoleType.PREFILL, null));
+        for (long ms = 0; ms < 5_000; ms += 100) {
+            assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, ms));
+        }
+        assertTrue(strategy.isClusterOverloaded(RoleType.PREFILL, null, 5_000));
         var request = context.data().getRequest().toBuilder().seqLen(1000L)
                 .blockCacheKeys(List.of(1L,2L,3L,4L,5L,6L,7L,8L,9L)).cacheKeyBlockSize(100L).build();
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(workers.get(3).ipPort(), 9));
@@ -845,6 +844,33 @@ class CostBasedPrefillSelectionMetricTest {
         assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null));
         updateEngineQueue(workers.get(2), -1, 0);
         assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null), "unknown telemetry is not congestion");
+    }
+
+    @Test
+    void globalPressureCountsWaitingBelowTheDispatchWatermarkAndRotatingMajorities() {
+        config.getRouter().getRoles().getPrefill().setTokenBalance(new RoutingConfig.TokenBalanceConfig());
+        registry.close();
+        registry = StrategyTestSupport.endpointRegistry(SchedulingTestConfig.configService(config));
+        var workers = new java.util.ArrayList<PrefillEndpoint>();
+        for (int i = 1; i <= 3; i++) {
+            publish("10.0.0." + i, 8080);
+            workers.add((PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0." + i + ":8080"));
+        }
+        strategy = new CostBasedPrefillStrategy(registry, cache, reporter, cacheReporter,
+                SchedulingTestConfig.configService(config));
+        for (long ms = 0; ms <= 5_000; ms += 100) {
+            int idle = (int) (ms / 100) % 3;
+            for (int i = 0; i < 3; i++) {
+                updateEngineQueue(workers.get(i), i == idle ? 0 : 1, 0);
+                assertTrue(workers.get(i).engineQueueAllowsAdmission());
+                assertTrue(!workers.get(i).engineQueueCongested());
+            }
+            assertEquals(ms >= 5_000, strategy.isClusterOverloaded(RoleType.PREFILL, null, ms));
+        }
+        // Unknown telemetry contributes to the fleet size, but never to the waiting majority.
+        updateEngineQueue(workers.get(0), -1, 0);
+        updateEngineQueue(workers.get(1), -1, 0);
+        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, 5_001));
     }
 
     private CostBasedPrefillStrategy.ColdAdmission coldAdmission(String group) {
