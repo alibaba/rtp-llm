@@ -3,6 +3,8 @@ from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.qwen4_exp_config import IndexerGeometry, ple_eos_token_id
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -82,7 +84,6 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 
 class Qwen4ExpAttention(Qwen3NextAttention):
@@ -812,13 +813,11 @@ class Qwen4ExpModel(Qwen35Model):
         self._cpu_target_status = prepare_cpu_target_status(config, parallelism_config)
         from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
             install_target_graph_all_reduce,
-            prepare_prefill_reduce,
             prepare_target_reduce,
         )
 
         self._target_reduce = prepare_target_reduce(config, parallelism_config)
-        self._prefill_reduce = prepare_prefill_reduce(config, parallelism_config)
-        dispatch = self._target_reduce or self._prefill_reduce
+        dispatch = self._target_reduce
         if dispatch is not None:
             for layer in self.layers:
                 install_target_graph_all_reduce(layer.self_attn, layer.mlp, dispatch)
@@ -907,9 +906,6 @@ class Qwen4ExpModel(Qwen35Model):
         target_reduce = self.__dict__.get("_target_reduce")
         if target_reduce is not None:
             target_reduce.close()
-        prefill_reduce = self.__dict__.get("_prefill_reduce")
-        if prefill_reduce is not None:
-            prefill_reduce.close()
         self._closed = True
 
     def initialize(self, init_resource) -> bool:
@@ -1096,11 +1092,6 @@ class Qwen4ExpModel(Qwen35Model):
         """Retain model-owned tensors for this captured graph instance."""
         if not get_primary_attention_inputs(inputs).is_target_verify:
             return
-        from rtp_llm.models_py.distributed.qwen4_all_reduce import get_qwen4_allreduce
-
-        communicator = get_qwen4_allreduce()
-        if communicator is not None:
-            communicator.finish_graph_capture()
         target_reduce = self.__dict__.get("_target_reduce")
         if target_reduce is not None:
             target_reduce.finish_graph_capture()
@@ -1306,9 +1297,6 @@ class Qwen4ExpModel(Qwen35Model):
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         if self.__dict__.get("_closed", False):
             raise RuntimeError("Qwen4 model is closed")
-        from rtp_llm.models_py.distributed.qwen4_all_reduce import get_qwen4_allreduce
-
-        communicator = get_qwen4_allreduce()
         target_reduce = self.__dict__.get("_target_reduce")
         if target_reduce is not None:
             groups = get_attention_inputs_value(inputs)
@@ -1316,14 +1304,6 @@ class Qwen4ExpModel(Qwen35Model):
             target_reduce.active = any(
                 bool(getattr(a, "is_target_verify", False)) for a in groups
             )
-        prior_capture = None
-        if communicator is not None:
-            groups = get_attention_inputs_value(inputs)
-            groups = groups.values() if isinstance(groups, dict) else (groups,)
-            prior_capture = communicator.allow_ipc_capture
-            communicator.allow_ipc_capture = not bool(
-                getattr(self.config, "is_mtp", False)
-            ) and any(bool(getattr(a, "is_target_verify", False)) for a in groups)
         try:
             from .qwen4_exp_runtime.prefill_preflight import prefill_geometry_scope
 
@@ -1333,8 +1313,6 @@ class Qwen4ExpModel(Qwen35Model):
         finally:
             if target_reduce is not None:
                 target_reduce.active = False
-            if communicator is not None:
-                communicator.allow_ipc_capture = prior_capture
             for ple in self.ple_layers.values():
                 embedding = getattr(ple, "ple_embedding", None)
                 finish = getattr(embedding, "finish_prefetch", None)

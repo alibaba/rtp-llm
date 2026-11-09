@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+
 from rtp_llm.models_py.distributed import qwen4_all_reduce as parent
 from rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce import (
     FlashInferIpcAllReduce,
@@ -96,7 +97,7 @@ class TpRegisteredInputTest(unittest.TestCase):
         base = torch.empty(200)
         source = base[:100]
         separate = torch.empty_like(source)
-        partial = base[50:150]
+        partial = base[48:148]
         for enabled, capturing, output, expected in (
             (False, True, separate, 912),
             (True, False, separate, 912),
@@ -120,7 +121,7 @@ class TpRegisteredInputTest(unittest.TestCase):
 
         buffer = np.empty(200, dtype=np.float32)
         source = torch.from_numpy(buffer[:100])
-        output = torch.from_numpy(buffer[50:150])
+        output = torch.from_numpy(buffer[48:148])
         self.assertNotEqual(
             source.untyped_storage().data_ptr(), output.untyped_storage().data_ptr()
         )

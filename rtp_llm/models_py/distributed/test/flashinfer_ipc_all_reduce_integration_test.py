@@ -11,6 +11,7 @@ import torch.multiprocessing as mp
 
 def _worker(rank, store):
     import flashinfer.comm
+
     from rtp_llm.config.qwen4_collective_config import Qwen4CollectiveOptions
     from rtp_llm.config.server_config_setup import set_parallelism_config
     from rtp_llm.models_py.distributed import qwen4_all_reduce as qwen4_ar
@@ -31,13 +32,13 @@ def _worker(rank, store):
     pc.world_rank = rank
     set_parallelism_config(pc)
 
-    def initialize(large=False):
+    def initialize(large=False, backend="sm120_ipc"):
         qwen4_ar.destroy_qwen4_allreduce()
         return qwen4_ar.init_qwen4_allreduce(
             group,
             device,
             pc,
-            Qwen4CollectiveOptions("sm120_ipc", large, "qwen4_exp"),
+            Qwen4CollectiveOptions(backend, large),
         )
 
     from flashinfer.comm import vllm_ar
@@ -109,17 +110,29 @@ def _worker(rank, store):
         torch.testing.assert_close(
             large_prefill.all_reduce(value), torch.full_like(value, 3), rtol=0, atol=0
         )
-    communicator = initialize()
-    communicator.allow_ipc_capture = True
+    communicator = initialize(large=None, backend="auto")
+    assert communicator is not None
+    small_workspace = communicator._workspace
+    value = torch.full((4096, 2560), rank + 1, dtype=torch.bfloat16, device=device)
+    assert communicator.should_use(value)
+    assert communicator._workspace is small_workspace
+    assert communicator._prefill_workspace is not small_workspace
+    torch.testing.assert_close(
+        communicator.all_reduce(value), torch.full_like(value, 3), rtol=0, atol=0
+    )
+    qwen4_ar.freeze_workspaces()
     captures = []
     for rows in (4, 7):
         value = torch.full((rows, 2560), rank + 1, dtype=torch.bfloat16, device=device)
         communicator.all_reduce(value)
         torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph()
+        qwen4_ar.begin_graph_capture()
         with torch.cuda.graph(graph):
+            assert communicator.should_use(value)
             output = communicator.all_reduce(value)
-        communicator.finish_graph_capture()
+        qwen4_ar.end_graph_capture()
+        assert not communicator.allow_ipc_capture
         captures.append((value, output, graph))
     for value, output, graph in captures:
         value.fill_(rank + 2)
@@ -128,6 +141,24 @@ def _worker(rank, store):
     x.fill_(rank + 3)
     communicator.all_reduce_into(x, x)
     torch.testing.assert_close(x, torch.full_like(x, 7), rtol=0, atol=0)
+    # Only one peer has an unaligned contiguous view. It must keep the same
+    # collective backend and stage locally instead of falling back alone.
+    storage = torch.full(
+        (4 * 2560 + rank,), rank + 1, dtype=torch.bfloat16, device=device
+    )
+    value = storage[rank:].view(4, 2560)
+    assert communicator.should_use(value)
+    original = value.clone()
+    qwen4_ar.begin_graph_capture()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        result = communicator.all_reduce(value)
+    qwen4_ar.end_graph_capture()
+    graph.replay()
+    torch.testing.assert_close(result, torch.full_like(result, 3), rtol=0, atol=0)
+    torch.testing.assert_close(value, original, rtol=0, atol=0)
+    communicator.all_reduce_into(value, value)
+    torch.testing.assert_close(value, torch.full_like(value, 3), rtol=0, atol=0)
     torch.cuda.synchronize()
     qwen4_ar.destroy_qwen4_allreduce()
     dist.destroy_process_group()

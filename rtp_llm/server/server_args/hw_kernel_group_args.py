@@ -169,17 +169,17 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         "--qwen4_all_reduce_backend",
         env_name="RTP_LLM_QWEN4_ALL_REDUCE_BACKEND",
         bind_to="qwen4_all_reduce_backend",
-        choices=("nccl", "sm120_ipc", "sm120_p2p"),
-        default="nccl",
-        help="Qwen4-owned AllReduce backend; ordinary models retain NCCL.",
+        choices=("auto", "nccl", "sm120_ipc", "sm120_p2p"),
+        default="auto",
+        help="Automatically select a supported TP AllReduce backend, or override it.",
     )
     hw_kernel_group.add_argument(
         "--qwen4_all_reduce_large_prefill",
         env_name="RTP_LLM_QWEN4_ALL_REDUCE_LARGE_PREFILL",
         bind_to="qwen4_all_reduce_large_prefill",
         type=str2bool,
-        default=False,
-        help="Enable supported eager large-prefill workspaces with Qwen4 sm120_ipc.",
+        default=None,
+        help="Override automatic, memory-budgeted eager large-prefill IPC preparation.",
     )
 
     hw_kernel_group.add_argument(

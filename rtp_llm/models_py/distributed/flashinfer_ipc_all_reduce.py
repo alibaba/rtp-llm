@@ -133,6 +133,11 @@ class FlashInferIpcAllReduce:
     def all_reduce(self, tensor, output=None):
         if output is None:
             output = torch.empty_like(tensor)
+        # Different ranks can receive views with different storage offsets.
+        # Keep the agreed backend, staging unaligned inputs and copying aligned
+        # kernel output back into an unaligned destination when necessary.
+        source = tensor if tensor.data_ptr() % 16 == 0 else tensor.clone()
+        result = output if output.data_ptr() % 16 == 0 else torch.empty_like(tensor)
         capturing = torch.cuda.is_current_stream_capturing()
         if capturing:
             self.capture_calls += 1
@@ -143,6 +148,7 @@ class FlashInferIpcAllReduce:
             capturing
             and self.registered_graph_inputs
             and tensor.is_contiguous()
+            and tensor.data_ptr() % 16 == 0
             and output.is_contiguous()
             and tensor.untyped_storage().data_ptr()
             != output.untyped_storage().data_ptr()
@@ -155,12 +161,14 @@ class FlashInferIpcAllReduce:
         )
         self.ops.all_reduce(
             self.handle,
-            tensor,
-            output,
+            source,
+            result,
             0 if direct else self.buffer[self.rank],
             self.max_bytes,
             36,
         )
+        if result is not output:
+            output.copy_(result)
         return output
 
     def finish_graph_capture(self):

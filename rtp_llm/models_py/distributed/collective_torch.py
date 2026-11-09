@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Union
 
 import torch
 import torch.distributed
+
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 # ParallelMode enum values matching C++ rtp_llm::ParallelMode in OpData.h
@@ -78,8 +79,6 @@ def _init_qwen4_allreduce(
 ) -> None:
     global _canonical_p2p
     if parallelism_config.tp_size <= 1:
-        if qwen4_collective_options is not None:
-            qwen4_collective_options.validate_topology(parallelism_config)
         return
     module = _get_qwen4_allreduce()
     module.init_qwen4_allreduce(
@@ -160,7 +159,6 @@ def init_distributed_environment(
     nccl_init_port: int,
     backend: str = "nccl",
     timeout: Optional[int] = None,
-    qwen4_collective_options=None,
 ):
     """Initialize distributed environment and create process groups.
 
@@ -173,8 +171,6 @@ def init_distributed_environment(
         nccl_init_port: Port for torch.distributed init_process_group (tcp://ip:port).
         backend: Distributed backend (default: "nccl")
         timeout: Timeout in seconds for process group initialization
-        qwen4_collective_options: Explicit Qwen4 IPC/P2P options. The default
-            keeps NCCL and never initializes an optional communication backend.
 
     Raises:
         RuntimeError: If already initialized and not destroyed
@@ -201,10 +197,7 @@ def init_distributed_environment(
         rocm_rccl = _get_rocm_rccl()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
-        _init_qwen4_allreduce(
-            parallelism_config,
-            qwen4_collective_options,
-        )
+        _init_qwen4_allreduce(parallelism_config)
         return
 
     _normalize_parallelism_ranks(parallelism_config)
@@ -238,10 +231,7 @@ def init_distributed_environment(
         _register_process_groups_to_cpp()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
-        _init_qwen4_allreduce(
-            parallelism_config,
-            qwen4_collective_options,
-        )
+        _init_qwen4_allreduce(parallelism_config)
         return
 
     logging.info(
@@ -281,10 +271,7 @@ def init_distributed_environment(
     if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
-    _init_qwen4_allreduce(
-        parallelism_config,
-        qwen4_collective_options,
-    )
+    _init_qwen4_allreduce(parallelism_config)
 
 
 def _create_process_groups(

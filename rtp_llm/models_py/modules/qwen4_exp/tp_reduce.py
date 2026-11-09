@@ -4,6 +4,7 @@ import os
 
 import torch
 import torch.distributed as dist
+
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.qwen4_all_reduce import get_qwen4_allreduce
 
@@ -97,48 +98,6 @@ def prepare_target_reduce(config, parallelism):
     if any(peer != "ipc256" for peer in peers):
         return None
     return Qwen4TargetReduce(communicator)
-
-
-class Qwen4PrefillReduce(Qwen4TargetReduce):
-    """Dedicated eager staging for the measured TP2 long-Prefill rows."""
-
-    def __init__(self, communicator):
-        super().__init__(communicator, max_bytes=16384 * 2560 * 2)
-        self.active = True
-
-    def __call__(self, tensor, group):
-        if (
-            not self.closed
-            and group == collective_torch.Group.TP
-            and tensor.is_cuda
-            and tensor.dtype == torch.bfloat16
-            and tensor.ndim == 2
-            and tensor.shape[0] in (4093, 4094, 4095, 4096, 8192, 16384)
-            and tensor.shape[1] == 2560
-            and tensor.is_contiguous()
-            and tensor.data_ptr() % 16 == 0
-            and not torch.cuda.is_current_stream_capturing()
-        ):
-            return self.workspace.all_reduce(tensor)
-        return all_reduce_target_graph(tensor, group)
-
-
-def prepare_prefill_reduce(config, parallelism):
-    role = str(getattr(parallelism, "role_type", "")).rsplit(".", 1)[-1]
-    communicator = get_qwen4_allreduce()
-    if not (
-        not getattr(config, "is_mtp", False)
-        and role == "PREFILL"
-        and parallelism.tp_size == 2
-        and parallelism.dp_size == 1
-        and parallelism.local_world_size == 2
-        and communicator is not None
-        and not communicator.disabled
-        and communicator.cpp_small_enabled
-        and communicator.large_prefill
-    ):
-        return None
-    return Qwen4PrefillReduce(communicator)
 
 
 def all_reduce_target_graph(tensor, group):

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+
 from rtp_llm.config.qwen4_collective_config import Qwen4CollectiveOptions
 from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.models_py.distributed import collective_torch as collective
@@ -25,19 +26,20 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
     def setUp(self):
         self.group = object()
         self.device = torch.device("cuda", 0)
-        self.options = Qwen4CollectiveOptions("sm120_ipc", model_type="qwen4_exp")
+        self.options = Qwen4CollectiveOptions("sm120_ipc")
         self.patches = [
+            patch.object(qwen4_ar, "_configured_options", Qwen4CollectiveOptions()),
             patch.object(qwen4_ar.dist, "get_world_size", return_value=2),
             patch.object(qwen4_ar.dist, "get_rank", return_value=0),
-            patch.object(qwen4_ar.dist, "all_gather_object", side_effect=self.agree),
+            patch.object(qwen4_ar, "exchange_group_state", side_effect=self.agree),
         ]
         for item in self.patches:
             item.start()
         self.addCleanup(self.cleanup)
 
     @staticmethod
-    def agree(peers, value, group):
-        peers[:] = [value] * len(peers)
+    def agree(group, value, tag):
+        return [value, value]
 
     def cleanup(self):
         qwen4_ar.destroy_qwen4_allreduce()
@@ -49,35 +51,51 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
             self.group, self.device, topology(), options
         )
 
-    def test_default_never_probes_or_allocates_optional_backends(self):
+    def test_auto_selects_supported_ipc_without_a_model_name(self):
+        with (
+            patch.object(qwen4_ar, "_capability_error", return_value=None),
+            patch.object(qwen4_ar, "Qwen4IpcAllReduce") as factory,
+        ):
+            self.assertIs(self.init(), factory.return_value)
+            self.assertEqual(factory.call_args.args[2].backend, "sm120_ipc")
+
+    def test_explicit_nccl_never_probes_or_allocates(self):
         with (
             patch.object(qwen4_ar, "_capability_error") as probe,
             patch.object(qwen4_ar, "Qwen4IpcAllReduce") as factory,
         ):
-            self.assertIsNone(self.init())
+            self.assertIsNone(self.init(Qwen4CollectiveOptions("nccl")))
         probe.assert_not_called()
         factory.assert_not_called()
-        self.assertIsNone(qwen4_ar.get_canonical_p2p())
+
+    def test_auto_unsupported_topology_falls_back(self):
+        with (
+            patch.object(qwen4_ar, "_capability_error") as probe,
+            patch.object(qwen4_ar, "Qwen4IpcAllReduce") as factory,
+        ):
+            self.assertIsNone(
+                qwen4_ar.init_qwen4_allreduce(self.group, self.device, topology(8))
+            )
+        probe.assert_not_called()
+        factory.assert_not_called()
 
     def test_options_reject_invalid_combinations(self):
-        for backend, large in (("auto", False), ("nccl", True), ("sm120_p2p", True)):
+        for backend, large in (("invalid", False), ("nccl", True), ("sm120_p2p", True)):
             with self.subTest(backend=backend), self.assertRaises(ValueError):
                 Qwen4CollectiveOptions(backend, large)
 
-    def test_nonqwen_owner_and_wrong_topology_fail_before_probe(self):
+    def test_explicit_wrong_topology_fails_before_probe(self):
         with patch.object(qwen4_ar, "_capability_error") as probe:
-            with self.assertRaisesRegex(ValueError, "owned by Qwen4"):
-                self.init(Qwen4CollectiveOptions("sm120_ipc", model_type="qwen_3"))
             with self.assertRaisesRegex(ValueError, "TP8"):
-                self.init(Qwen4CollectiveOptions("sm120_p2p", model_type="qwen4_exp"))
+                self.init(Qwen4CollectiveOptions("sm120_p2p"))
         probe.assert_not_called()
 
     def test_rank_policy_mismatch_fails_before_optional_initialization(self):
-        def disagree(peers, state, group):
-            peers[:] = [state, (Qwen4CollectiveOptions(), None, False)]
+        def disagree(group, state, tag):
+            return [state, ["nccl", None, None, False]]
 
         with (
-            patch.object(qwen4_ar.dist, "all_gather_object", side_effect=disagree),
+            patch.object(qwen4_ar, "exchange_group_state", side_effect=disagree),
             patch.object(qwen4_ar, "_capability_error") as probe,
             self.assertRaisesRegex(ValueError, "differs across TP ranks"),
         ):
@@ -85,18 +103,31 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
         probe.assert_not_called()
 
     def test_one_rank_probe_failure_falls_back_before_allocation(self):
-        def peer_failed(peers, value, group):
-            if isinstance(value, tuple):
-                self.agree(peers, value, group)
-            else:
-                peers[:] = [None, "missing peer API"]
+        def peer_failed(group, value, tag):
+            if tag == "capabilities":
+                return [value, [value[0], value[1], "missing peer API"]]
+            return self.agree(group, value, tag)
 
         with (
-            patch.object(qwen4_ar.dist, "all_gather_object", side_effect=peer_failed),
+            patch.object(qwen4_ar, "exchange_group_state", side_effect=peer_failed),
             patch.object(qwen4_ar, "_capability_error", return_value=None),
             patch.object(qwen4_ar, "Qwen4IpcAllReduce") as factory,
         ):
             self.assertIsNone(self.init(self.options))
+        factory.assert_not_called()
+
+    def test_auto_rank_topology_disagreement_falls_back_together(self):
+        def disagree(group, state, tag):
+            if tag == "capabilities":
+                return [state, ["nccl", state[1], None]]
+            return self.agree(group, state, tag)
+
+        with (
+            patch.object(qwen4_ar, "exchange_group_state", side_effect=disagree),
+            patch.object(qwen4_ar, "_capability_error", return_value=None),
+            patch.object(qwen4_ar, "Qwen4IpcAllReduce") as factory,
+        ):
+            self.assertIsNone(self.init())
         factory.assert_not_called()
 
     def test_agreed_local_setup_failure_can_fall_back(self):
@@ -136,7 +167,7 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
             self.assertEqual(factory.call_count, 2)
 
     def test_policy_change_requires_teardown(self):
-        self.init()
+        self.init(Qwen4CollectiveOptions("nccl"))
         with self.assertRaisesRegex(RuntimeError, "before changing"):
             self.init(self.options)
 
@@ -154,21 +185,28 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
         )
 
     def make_ipc(self, large=False):
-        workspace = FlashInferIpcAllReduce.__new__(FlashInferIpcAllReduce)
-        workspace.max_bytes = 128 * 1024 * 1024 if large else 32 * 2560 * 2
-        workspace.registered_graph_inputs = True
-        with patch(
-            "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.FlashInferIpcAllReduce",
-            return_value=workspace,
-        ) as factory:
+        def workspace(group, device, max_bytes):
+            result = FlashInferIpcAllReduce.__new__(FlashInferIpcAllReduce)
+            result.max_bytes = max_bytes
+            result.registered_graph_inputs = True
+            return result
+
+        with (
+            patch(
+                "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.FlashInferIpcAllReduce",
+                side_effect=workspace,
+            ) as factory,
+            patch.object(
+                torch.cuda, "mem_get_info", return_value=(10 * 1024**3, 72 * 1024**3)
+            ),
+            patch.object(torch.cuda, "is_current_stream_capturing", return_value=False),
+        ):
             context = qwen4_ar.Qwen4IpcAllReduce(
-                self.group,
-                self.device,
-                Qwen4CollectiveOptions("sm120_ipc", large, "qwen4_exp"),
+                self.group, self.device, Qwen4CollectiveOptions("sm120_ipc", large)
             )
-        factory.assert_called_once_with(
-            self.group, self.device, max_bytes=workspace.max_bytes
-        )
+        self.assertEqual(factory.call_args_list[0].kwargs["max_bytes"], 32 * 2560 * 2)
+        if large:
+            self.assertIsNot(context._workspace, context._prefill_workspace)
         return context
 
     def test_shape_capacity_capture_and_large_prefill_domain(self):
@@ -179,6 +217,7 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
             ndim=2,
             shape=(4, 2560),
             is_contiguous=lambda: True,
+            data_ptr=lambda: 16,
         )
         for large in (False, True):
             context = self.make_ipc(large)
@@ -200,29 +239,127 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
                 tensor.shape = (4096, 2560)
                 self.assertFalse(context.should_use(tensor))
 
-    def test_model_prefill_workspace_obeys_same_option(self):
-        from rtp_llm.models_py.modules.qwen4_exp import tp_reduce
-
-        context = SimpleNamespace(
-            disabled=False, cpp_small_enabled=True, large_prefill=False
-        )
-        pc = SimpleNamespace(
-            role_type="PREFILL", tp_size=2, dp_size=1, local_world_size=2
-        )
+    def test_prefill_budget_failure_preserves_decode_workspace(self):
+        context = self.make_ipc()
+        context._prefill_policy = None
+        small = context._workspace
         with (
-            patch.object(tp_reduce, "get_qwen4_allreduce", return_value=context),
-            patch.object(tp_reduce, "Qwen4PrefillReduce") as factory,
+            patch.object(
+                torch.cuda, "mem_get_info", return_value=(1024**2, 72 * 1024**3)
+            ),
+            patch.object(torch.cuda, "is_current_stream_capturing", return_value=False),
+            patch(
+                "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.FlashInferIpcAllReduce"
+            ) as factory,
         ):
-            self.assertIsNone(
-                tp_reduce.prepare_prefill_reduce(SimpleNamespace(is_mtp=False), pc)
-            )
-            factory.assert_not_called()
-            context.large_prefill = True
-            self.assertIs(
-                tp_reduce.prepare_prefill_reduce(SimpleNamespace(is_mtp=False), pc),
-                factory.return_value,
-            )
-            factory.assert_called_once_with(context)
+            context.prepare_large_prefill()
+        factory.assert_not_called()
+        self.assertFalse(context.large_prefill)
+        self.assertIs(context._workspace, small)
+
+    def test_freeze_prevents_request_time_prefill_allocation(self):
+        context = self.make_ipc()
+        context._prefill_policy = None
+        qwen4_ar.freeze_workspaces()
+        with patch.object(torch.cuda, "mem_get_info") as probe:
+            context.prepare_large_prefill()
+        probe.assert_not_called()
+
+    def test_peer_budget_rejection_does_not_allocate(self):
+        context = self.make_ipc()
+        context._prefill_policy = None
+        with (
+            patch.object(
+                torch.cuda, "mem_get_info", return_value=(10 * 1024**3, 72 * 1024**3)
+            ),
+            patch.object(torch.cuda, "is_current_stream_capturing", return_value=False),
+            patch.object(qwen4_ar, "exchange_group_state", return_value=[True, False]),
+            patch(
+                "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.FlashInferIpcAllReduce"
+            ) as factory,
+        ):
+            context.prepare_large_prefill()
+        factory.assert_not_called()
+
+    def test_capture_registers_and_restores_admission(self):
+        communicator = MagicMock()
+        communicator.allow_ipc_capture = False
+        with patch.object(qwen4_ar, "_communicator", communicator):
+            qwen4_ar.begin_graph_capture()
+            self.assertTrue(communicator.allow_ipc_capture)
+            qwen4_ar.end_graph_capture()
+            self.assertFalse(communicator.allow_ipc_capture)
+        communicator.finish_graph_capture.assert_called_once()
+
+    def test_capture_failure_restores_without_registration(self):
+        communicator = MagicMock()
+        with patch.object(qwen4_ar, "_communicator", communicator):
+            qwen4_ar.begin_graph_capture()
+            qwen4_ar.abort_graph_capture()
+            self.assertFalse(communicator.allow_ipc_capture)
+        communicator.finish_graph_capture.assert_not_called()
+
+    def test_registration_failure_propagates_after_restoring_admission(self):
+        communicator = MagicMock()
+        communicator.finish_graph_capture.side_effect = RuntimeError(
+            "registration failed"
+        )
+        with patch.object(qwen4_ar, "_communicator", communicator):
+            qwen4_ar.begin_graph_capture()
+            with self.assertRaisesRegex(RuntimeError, "registration failed"):
+                qwen4_ar.end_graph_capture()
+            self.assertFalse(communicator.allow_ipc_capture)
+            self.assertFalse(qwen4_ar._capture_active)
+
+    def test_configure_installs_cli_override_without_environment_mutation(self):
+        import os
+
+        config = SimpleNamespace(
+            qwen4_all_reduce_backend="nccl",
+            qwen4_all_reduce_large_prefill=False,
+            parallelism_config=topology(),
+        )
+        environment = dict(os.environ)
+        qwen4_ar.configure_collectives(config)
+        self.assertEqual(dict(os.environ), environment)
+        with patch.object(qwen4_ar, "_capability_error") as probe:
+            self.assertIsNone(self.init())
+        probe.assert_not_called()
+
+    def test_unaligned_views_keep_backend_and_output_contract(self):
+        for capturing in (False, True):
+            for inplace in (False, True):
+                with self.subTest(capturing=capturing, inplace=inplace):
+                    source = torch.arange(4 * 2560 + 1, dtype=torch.bfloat16)[1:].view(
+                        4, 2560
+                    )
+                    original = source.clone()
+                    target = source if inplace else torch.empty_like(source)
+                    workspace = FlashInferIpcAllReduce.__new__(FlashInferIpcAllReduce)
+                    workspace.handle = 73
+                    workspace.rank = 0
+                    workspace.buffer = [912]
+                    workspace.max_bytes = 32 * 2560 * 2
+                    workspace.registered_graph_inputs = True
+                    workspace.capture_calls = 0
+                    workspace.ops = MagicMock()
+
+                    def kernel(handle, value, output, staging, capacity, sms):
+                        self.assertEqual(value.data_ptr() % 16, 0)
+                        self.assertEqual(output.data_ptr() % 16, 0)
+                        self.assertEqual(staging, 912)
+                        output.copy_(value * 2)
+
+                    workspace.ops.all_reduce.side_effect = kernel
+                    with patch.object(
+                        torch.cuda,
+                        "is_current_stream_capturing",
+                        return_value=capturing,
+                    ):
+                        self.assertIs(workspace.all_reduce(source, target), target)
+                    torch.testing.assert_close(target, original * 2)
+                    if not inplace:
+                        torch.testing.assert_close(source, original)
 
     def test_collective_inplace_and_out_of_place_contract(self):
         tensor = torch.ones((2, 4))
@@ -240,6 +377,51 @@ class Qwen4AllReduceUnitTest(unittest.TestCase):
             result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
         torch.testing.assert_close(tensor, original)
         torch.testing.assert_close(result, torch.full_like(tensor, 3))
+
+
+class CollectiveAgreementTest(unittest.TestCase):
+    def test_store_rounds_do_not_reuse_stale_decisions(self):
+        from rtp_llm.models_py.distributed import collective_utils
+
+        store = torch.distributed.HashStore()
+        group = SimpleNamespace(group_name="agreement_unit_test")
+        with (
+            patch.object(
+                collective_utils.dist.distributed_c10d,
+                "_get_default_store",
+                return_value=store,
+            ),
+            patch.object(collective_utils.dist, "get_world_size", return_value=1),
+            patch.object(collective_utils.dist, "get_rank", return_value=0),
+        ):
+            self.assertEqual(
+                collective_utils.exchange_group_state(group, False, "probe"), [False]
+            )
+            self.assertEqual(
+                collective_utils.exchange_group_state(group, True, "probe"), [True]
+            )
+
+    def test_missing_rank_timeout_propagates_without_gpu_collective(self):
+        from rtp_llm.models_py.distributed import collective_utils
+
+        store = MagicMock()
+        store.wait.side_effect = RuntimeError("missing rank")
+        with (
+            patch.object(
+                collective_utils.dist.distributed_c10d,
+                "_get_default_store",
+                return_value=store,
+            ),
+            patch.object(collective_utils.dist, "get_world_size", return_value=2),
+            patch.object(collective_utils.dist, "get_rank", return_value=0),
+            patch.object(collective_utils.dist, "all_reduce") as gpu_collective,
+            self.assertRaisesRegex(RuntimeError, "missing rank"),
+        ):
+            collective_utils.exchange_group_state(
+                SimpleNamespace(group_name="missing"), True, "probe"
+            )
+        self.assertLessEqual(store.wait.call_args.args[1].total_seconds(), 120)
+        gpu_collective.assert_not_called()
 
 
 if __name__ == "__main__":

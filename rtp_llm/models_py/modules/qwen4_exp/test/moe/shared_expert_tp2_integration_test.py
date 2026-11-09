@@ -1,5 +1,3 @@
-from rtp_llm.config.qwen4_collective_config import Qwen4CollectiveOptions
-
 """Two real SM120 ranks; isolated BF16 math and real NVFP4 consumer gates.
 
 Manually assemble ONE model-private layer, using real production modules. The
@@ -20,6 +18,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn.functional as F
+
 from rtp_llm.models_py.modules.qwen4_exp.moe import shared_tp2
 from rtp_llm.utils.model_weight import W
 
@@ -623,9 +622,6 @@ def _worker(rank, port):
         pc,
         nccl,
         port,
-        qwen4_collective_options=Qwen4CollectiveOptions(
-            "sm120_ipc", model_type="qwen4_exp"
-        ),
     )
     communicator = get_qwen4_allreduce()
     assert communicator is not None and communicator.cpp_small_enabled

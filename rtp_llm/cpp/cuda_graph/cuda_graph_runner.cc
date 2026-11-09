@@ -959,8 +959,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                     auto*       padding_offset = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
                     auto*       cu_seqlens     = py_model_inputs_.attention_inputs.cu_seqlens.data_ptr<int32_t>();
                     cu_seqlens[0]              = 0;
-                    int         cumulative_padding = 0;
-                    int         token_idx          = 0;
+                    int cumulative_padding     = 0;
+                    int token_idx              = 0;
                     for (int batch_idx = 0; batch_idx < state.current_batch_size; ++batch_idx) {
                         const int input_length = input_lengths[batch_idx];
                         std::fill_n(padding_offset + token_idx, input_length, cumulative_padding);
@@ -2072,7 +2072,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         }
         RTP_LLM_LOG_INFO("Capture for %s %d begin.", key_type, key);
         PyModelOutputs outputs;
-        {
+        auto           collectives = py::module_::import("rtp_llm.models_py.distributed.qwen4_all_reduce");
+        collectives.attr("begin_graph_capture")();
+        try {
             // From this point until finish_capture_session() returns, an
             // exception cannot be treated as a recoverable eager fallback.
             // PyTorch does not provide a reliable allocator/generator rollback
@@ -2098,6 +2100,12 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 mtp_target_hidden_states.copy_(outputs.mtp_target_hidden_states);
             }
             graph.capture_end();
+            collectives.attr("end_graph_capture")();
+        } catch (...) {
+            // Failed capture/registration cannot replay. Restore only local
+            // admission; never introduce another collective during unwinding.
+            collectives.attr("abort_graph_capture")();
+            throw;
         }
         if (!py_after_capture_method_.is_none()) {
             py_after_capture_method_(key, inputs);

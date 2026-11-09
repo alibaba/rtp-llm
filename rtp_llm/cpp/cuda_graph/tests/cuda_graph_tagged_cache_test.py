@@ -4,6 +4,7 @@ import os
 import unittest
 import weakref
 from typing import Optional
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -970,6 +971,42 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                         output, torch.full_like(output, expected)
                     )
 
+    def test_native_runner_owns_collective_capture_lifecycle(self):
+        from rtp_llm.models_py.distributed import qwen4_all_reduce
+
+        communicator = MagicMock()
+        communicator.allow_ipc_capture = False
+        registrations = []
+
+        def register():
+            self.assertFalse(torch.cuda.is_current_stream_capturing())
+            self.assertFalse(communicator.allow_ipc_capture)
+            registrations.append(True)
+
+        communicator.finish_graph_capture.side_effect = register
+        test_case = self
+
+        class Model(TaggedBlockTableModel):
+            def forward(self, inputs, fmha_impl=None):
+                test_case.assertEqual(
+                    communicator.allow_ipc_capture,
+                    torch.cuda.is_current_stream_capturing(),
+                )
+                return super().forward(inputs, fmha_impl)
+
+        with patch.object(qwen4_all_reduce, "_communicator", communicator):
+            runner = CudaGraphRunner()
+            runner.init_decode(
+                Model(),
+                HIDDEN_SIZE,
+                TOKENS_PER_BLOCK,
+                KERNEL_BLOCK_TABLE_WIDTH,
+                [1, 4],
+                GROUP_TAGS,
+            )
+            self.assertEqual(len(registrations), 2)
+            self.assertFalse(communicator.allow_ipc_capture)
+
     def test_native_runner_calls_model_lifecycle_for_each_bucket(self):
         model = GraphLifecycleModel()
         runner = CudaGraphRunner()
@@ -1350,6 +1387,9 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     0,
                 )
             self.assertEqual(model.forward_calls, 4)
+            from rtp_llm.models_py.distributed import qwen4_all_reduce
+
+            self.assertFalse(qwen4_all_reduce._capture_active)
             return model_ref
 
         retained_model = trigger_dirty_capture()

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 import torch.distributed as dist
+
 from rtp_llm.config.qwen4_collective_config import Qwen4CollectiveOptions
 from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.models_py.distributed import collective_torch as collective
@@ -54,17 +55,13 @@ def _worker():
     try:
         collective._init_qwen4_allreduce(
             pc,
-            Qwen4CollectiveOptions(
-                backend="nccl" if rank == 7 else "sm120_p2p", model_type="qwen4_exp"
-            ),
+            Qwen4CollectiveOptions(backend="nccl" if rank == 7 else "sm120_p2p"),
         )
     except ValueError:
         pass
     else:
         raise RuntimeError("rank policy mismatch was accepted")
-    collective._init_qwen4_allreduce(
-        pc, Qwen4CollectiveOptions(backend="sm120_p2p", model_type="qwen4_exp")
-    )
+    collective._init_qwen4_allreduce(pc, Qwen4CollectiveOptions(backend="sm120_p2p"))
     communicator = collective._canonical_p2p
     if communicator is None:
         raise RuntimeError("requested supported communicator unavailable")

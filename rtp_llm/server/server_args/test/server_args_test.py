@@ -17,15 +17,15 @@ from rtp_llm.utils.backend_registry import register_backend_hook
 
 
 class Qwen4AllReduceArgumentsTest(TestCase):
-    def test_default_and_retired_environment_keep_nccl(self):
+    def test_default_auto_and_retired_environment(self):
         from rtp_llm.server.server_args import server_args
 
         for value in (None, "0", "1"):
             env = {} if value is None else {"FT_DISABLE_CUSTOM_AR": value}
             with self.subTest(value=value), patch.dict(os.environ, env, clear=True):
                 configs = server_args.setup_args([])
-                self.assertEqual(configs.qwen4_all_reduce_backend, "nccl")
-                self.assertFalse(configs.qwen4_all_reduce_large_prefill)
+                self.assertEqual(configs.qwen4_all_reduce_backend, "auto")
+                self.assertIsNone(configs.qwen4_all_reduce_large_prefill)
                 self.assertFalse(hasattr(configs, "ft_disable_custom_ar_override"))
 
     def test_retired_cli_is_rejected(self):
@@ -63,7 +63,7 @@ class Qwen4AllReduceArgumentsTest(TestCase):
 
         with patch.dict(os.environ, {}, clear=True), patch("sys.stderr", io.StringIO()):
             with self.assertRaises(SystemExit):
-                server_args.setup_args(["--qwen4_all_reduce_backend", "auto"])
+                server_args.setup_args(["--qwen4_all_reduce_backend", "invalid"])
 
 
 class CacheConfigArgumentsTest(TestCase):

@@ -28,9 +28,7 @@ class Qwen4SmokeArgumentsTest(unittest.TestCase):
             pc = configs.parallelism_config
             set_parallelism_config(pc)
             self.assertEqual((pc.tp_size, pc.ep_size), (2, 2))
-            Qwen4CollectiveOptions(backend, model_type="qwen4_exp").validate_topology(
-                pc
-            )
+            Qwen4CollectiveOptions(backend).validate_topology(pc)
 
 
 if __name__ == "__main__":
