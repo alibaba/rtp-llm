@@ -95,7 +95,12 @@ py_library(
 
 py_library(
     name = "triton_kernels",
-    srcs = ["legacy_fp8_indexer_score.py"],
+    srcs = [
+        "glm53_indexer_gate_quant.py",
+        "glm53_router_split.py",
+        "glm53_router_splitk.py",
+        "legacy_fp8_indexer_score.py",
+    ],
     deps = [
         ":attention",
         ":autotune_cache",
