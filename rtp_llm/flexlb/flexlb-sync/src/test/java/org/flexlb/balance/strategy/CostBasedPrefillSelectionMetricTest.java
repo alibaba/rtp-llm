@@ -829,10 +829,10 @@ class CostBasedPrefillSelectionMetricTest {
         updateEngineQueue(workers.get(1), 100, 0);
         assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null), "half the pool is not a majority");
         updateEngineQueue(workers.get(2), 100, 0);
-        for (long ms = 0; ms < 5_000; ms += 100) {
+        for (long ms = 0; ms < 10_000; ms += 100) {
             assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, ms));
         }
-        assertTrue(strategy.isClusterOverloaded(RoleType.PREFILL, null, 5_000));
+        assertTrue(strategy.isClusterOverloaded(RoleType.PREFILL, null, 10_000));
         var request = context.data().getRequest().toBuilder().seqLen(1000L)
                 .blockCacheKeys(List.of(1L,2L,3L,4L,5L,6L,7L,8L,9L)).cacheKeyBlockSize(100L).build();
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(workers.get(3).ipPort(), 9));
@@ -848,7 +848,9 @@ class CostBasedPrefillSelectionMetricTest {
 
     @Test
     void globalPressureCountsWaitingBelowTheDispatchWatermarkAndRotatingMajorities() {
-        config.getRouter().getRoles().getPrefill().setTokenBalance(new RoutingConfig.TokenBalanceConfig());
+        var balance = new RoutingConfig.TokenBalanceConfig();
+        balance.setEngineQueueAdmissionThreshold(30L);
+        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
         registry.close();
         registry = StrategyTestSupport.endpointRegistry(SchedulingTestConfig.configService(config));
         var workers = new java.util.ArrayList<PrefillEndpoint>();
@@ -858,19 +860,41 @@ class CostBasedPrefillSelectionMetricTest {
         }
         strategy = new CostBasedPrefillStrategy(registry, cache, reporter, cacheReporter,
                 SchedulingTestConfig.configService(config));
-        for (long ms = 0; ms <= 5_000; ms += 100) {
+        for (var worker : workers) { updateEngineQueue(worker, 10, 0); }
+        for (long ms = 0; ms <= 10_000; ms += 100) {
+            assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, ms));
+        }
+        for (long ms = 10_000; ms <= 20_000; ms += 100) {
             int idle = (int) (ms / 100) % 3;
             for (int i = 0; i < 3; i++) {
-                updateEngineQueue(workers.get(i), i == idle ? 0 : 1, 0);
+                updateEngineQueue(workers.get(i), i == idle ? 10 : 11, 0);
                 assertTrue(workers.get(i).engineQueueAllowsAdmission());
                 assertTrue(!workers.get(i).engineQueueCongested());
             }
-            assertEquals(ms >= 5_000, strategy.isClusterOverloaded(RoleType.PREFILL, null, ms));
+            assertEquals(ms >= 20_000, strategy.isClusterOverloaded(RoleType.PREFILL, null, ms));
         }
+        updateEngineQueue(workers.get(0), 10, 0);
+        updateEngineQueue(workers.get(1), 10, 0);
+        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, 20_001));
+        updateEngineQueue(workers.get(0), 11, 0);
+        updateEngineQueue(workers.get(1), 11, 0);
+        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, 20_002));
+        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, 30_001));
+        assertTrue(strategy.isClusterOverloaded(RoleType.PREFILL, null, 30_002));
         // Unknown telemetry contributes to the fleet size, but never to the waiting majority.
         updateEngineQueue(workers.get(0), -1, 0);
         updateEngineQueue(workers.get(1), -1, 0);
-        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, 5_001));
+        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null, 30_003));
+        // Dispatch can oscillate at 30/31 without resetting the global pressure window.
+        for (long ms = 40_000; ms <= 50_000; ms += 100) {
+            long waiting = ms / 100 % 2 == 0 ? 30 : 31;
+            for (var worker : workers) {
+                updateEngineQueue(worker, waiting, 0);
+                assertEquals(waiting > 30, worker.engineQueueDispatchBlocked());
+                assertEquals(waiting <= 30, worker.engineQueueAllowsAdmission());
+            }
+            assertEquals(ms >= 50_000, strategy.isClusterOverloaded(RoleType.PREFILL, null, ms));
+        }
     }
 
     private CostBasedPrefillStrategy.ColdAdmission coldAdmission(String group) {

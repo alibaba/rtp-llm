@@ -7,7 +7,7 @@ import java.util.Map;
 
 /** Pool-wide evidence for global shedding, separate from worker admission limits. */
 final class PrefillQueuePressure {
-    private static final long HOLD_MS = 5_000L;
+    private static final long HOLD_MS = 10_000L;
     private record Pool(RoleType role, String group) { }
     private final Map<Pool, Long> waitingSinceMs = new HashMap<>();
 

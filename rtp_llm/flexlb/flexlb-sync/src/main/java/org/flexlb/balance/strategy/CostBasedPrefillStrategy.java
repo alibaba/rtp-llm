@@ -654,7 +654,7 @@ public class CostBasedPrefillStrategy {
             if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) { continue; }
             workers++;
             var status = endpoint.getStatus().committedWorkerStatus();
-            if (status.cursor().statusVersion() >= 0L && status.fields().waitingQueryLen() > 0L) { waiting++; }
+            if (status.cursor().statusVersion() >= 0L && status.fields().waitingQueryLen() > 10L) { waiting++; }
         }
         return queuePressure.observe(role, group, workers, waiting, nowMs);
     }
