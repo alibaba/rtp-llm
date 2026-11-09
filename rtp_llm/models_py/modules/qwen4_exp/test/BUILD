@@ -186,6 +186,30 @@ py_test(
 )
 
 py_test(
+    name = "qsa_writer_geometry_test",
+    srcs = [
+        "qsa_writer_geometry_test.py",
+        "qsa_draft_tail_vector_test.py",
+        "indexer_prefill_triton_test.py",
+        "indexer_prefix_reuse_triton_test.py",
+        "scalar_cache_reference.py",
+    ],
+    deps = ["//rtp_llm:testlib", ":math_references"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "qsa_draft_tail_vector_test",
+    srcs = ["qsa_draft_tail_vector_test.py"],
+    deps = ["//rtp_llm:testlib", ":math_references"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "qsa_topk_triton_test",
     srcs = ["qsa_topk_triton_test.py", "topk_reference.py"],
     deps = ["//rtp_llm:testlib", ":math_references"],

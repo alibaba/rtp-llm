@@ -198,6 +198,17 @@ class IndexerWriterGeometry:
     tokens, so two tokens of one call can never map to the same state slot
     (positions of one request are consecutive; two positions collide only when
     they differ by a multiple of the ring size).
+
+    ``state_ring_wrap`` covers the production draft tail windows the
+    uniqueness fact excludes: positions of one request are consecutive
+    (``cu_seqlens`` semantics), so the last write per state slot is the
+    maximum position mapping to it -- per (request, logical block) exactly
+    the block's final ``min(ring, coverage)`` rows.  ``state_tail_rows``
+    marks those block-tail rows (and only rows that resolve to an allocated
+    block) and ``state_tail_slots`` is their clamped scatter destination
+    (non-tail rows redirect to the reserved zero block); the ring-wrap batch
+    writer scatters exactly those rows, which reproduces the legacy
+    last-write-per-slot dedup without the ``argsort`` chain.
     """
 
     # Config the bundle was validated against (host checks on reuse).
@@ -222,6 +233,7 @@ class IndexerWriterGeometry:
     # Host facts.
     lengths: tuple[int, ...]
     state_slots_unique: bool
+    state_ring_wrap: bool
     # Device geometry tensors ([B] / [T] / [T, ratio] grade).
     batch_lengths: torch.Tensor
     request_ids: torch.Tensor
@@ -231,6 +243,8 @@ class IndexerWriterGeometry:
     state_slots: torch.Tensor
     state_allocated: torch.Tensor
     state_slots_safe: torch.Tensor
+    state_tail_rows: torch.Tensor
+    state_tail_slots: torch.Tensor
     completed: torch.Tensor
     block_starts: torch.Tensor
     kv_blocks: torch.Tensor
@@ -346,6 +360,12 @@ def build_indexer_writer_geometry(
     ``arange``/``repeat_interleave``/``remainder``/compare chains.  Without
     them the device chain of the legacy path computes the same values.
 
+    The bundle serves two fast write forms: windows whose requests all fit in
+    the state ring (``state_slots_unique``) take the full-shape writer, and
+    longer monotone windows (``state_ring_wrap``) take the ring-wrap batch
+    writer, whose per-(request, block) tail rows ``state_tail_rows`` /
+    ``state_tail_slots`` are computed here once per step.
+
     ``trusted_tables=True`` (the incremental step plan, whose build already
     proved ``cu_seqlens`` equals the expected partition and validated every
     required table column through the required-blocks verdicts) skips the
@@ -384,76 +404,86 @@ def build_indexer_writer_geometry(
                 prefixes_values,
                 token_count,
             )
-        # One host pass builds every integer index tensor; two pinned uploads
-        # replace the device staging chains.
-        req: list[int] = []
-        pos: list[int] = []
-        row_start: list[int] = []
-        row_len: list[int] = []
-        req_off: list[int] = []
-        done: list[bool] = []
-        bstart: list[int] = []
-        state_col: list[int] = []
-        state_good: list[bool] = []
-        state_off: list[int] = []
-        kv_col: list[int] = []
-        kv_good: list[bool] = []
-        kv_ent: list[int] = []
-        src_req: list[int] = []
-        src_col: list[int] = []
-        src_good: list[bool] = []
-        src_cur: list[bool] = []
-        src_off: list[int] = []
-        src_row: list[int] = []
-        cu_running = 0
-        top_row = max(token_count - 1, 0)
-        for request_idx, (prefix, length) in enumerate(
-            zip(prefixes_values, lengths_values)
-        ):
-            for row in range(length):
-                position = prefix + row
-                group_start = position - position % ratio
-                req.append(request_idx)
-                pos.append(position)
-                row_start.append(prefix)
-                row_len.append(length)
-                req_off.append(cu_running)
-                done.append((position + 1) % ratio == 0)
-                bstart.append(group_start)
-                column = position // state_tokens_per_block
-                state_col.append(min(max(column, 0), max(state_width - 1, 0)))
-                state_good.append(0 <= column < state_width)
-                state_off.append(position % state_ring_entries)
-                column = group_start // kv_tokens_per_block
-                kv_col.append(min(max(column, 0), max(kv_width - 1, 0)))
-                kv_good.append(0 <= column < kv_width)
-                kv_ent.append((group_start // ratio) % kv_entries_per_block)
-                for offset in range(ratio):
-                    source_position = group_start + offset
-                    source_local = source_position - prefix
-                    in_current = 0 <= source_local < length
-                    column = source_position // state_tokens_per_block
-                    src_req.append(request_idx)
-                    src_col.append(
-                        min(max(column, 0), max(state_width - 1, 0))
-                    )
-                    src_good.append(0 <= column < state_width)
-                    src_cur.append(in_current)
-                    src_off.append(source_position % state_ring_entries)
-                    src_row.append(
-                        min(max(cu_running + source_local, 0), top_row)
-                    )
-            cu_running += length
-
-        host_int = torch.tensor(
-            req + pos + row_start + row_len + req_off + bstart
-            + state_col + state_off + kv_col + kv_ent
-            + src_req + src_col + src_off + src_row
-            + lengths_values,
-            dtype=torch.long,
+        # Vectorize the host index arithmetic: long draft windows must not
+        # execute a Python iteration for every token and source-group row.
+        # Explicit CPU factories also keep the staging on the host when the
+        # caller has a CUDA default-device context. The packed layout and two
+        # pinned uploads stay identical to the original host construction.
+        host_lengths_tensor = torch.tensor(
+            lengths_values, dtype=torch.long, device="cpu"
         )
-        host_bool = torch.tensor(
-            done + state_good + kv_good + src_good + src_cur, dtype=torch.bool
+        host_prefixes_tensor = torch.tensor(
+            prefixes_values, dtype=torch.long, device="cpu"
+        )
+        host_offsets = host_lengths_tensor.cumsum(0) - host_lengths_tensor
+        req = torch.repeat_interleave(
+            torch.arange(batch_size, dtype=torch.long, device="cpu"),
+            host_lengths_tensor,
+            output_size=token_count,
+        )
+        row_start = host_prefixes_tensor.index_select(0, req)
+        row_len = host_lengths_tensor.index_select(0, req)
+        req_off = host_offsets.index_select(0, req)
+        pos = (
+            row_start
+            + torch.arange(token_count, dtype=torch.long, device="cpu")
+            - req_off
+        )
+        done = (pos + 1).remainder(ratio) == 0
+        bstart = pos - pos.remainder(ratio)
+        state_logical = pos // state_tokens_per_block
+        state_col = state_logical.clamp(0, max(state_width - 1, 0))
+        state_good = (state_logical >= 0) & (state_logical < state_width)
+        state_off = pos.remainder(state_ring_entries)
+        kv_logical = bstart // kv_tokens_per_block
+        kv_col = kv_logical.clamp(0, max(kv_width - 1, 0))
+        kv_good = (kv_logical >= 0) & (kv_logical < kv_width)
+        kv_ent = (bstart // ratio).remainder(kv_entries_per_block)
+        block_end = (state_logical + 1) * state_tokens_per_block - 1
+        tail = pos + state_ring_entries > torch.minimum(
+            block_end, row_start + row_len - 1
+        )
+        source_positions = bstart[:, None] + torch.arange(
+            ratio, dtype=torch.long, device="cpu"
+        )[None, :]
+        source_local = source_positions - row_start[:, None]
+        src_req = req[:, None].expand(-1, ratio)
+        source_logical = source_positions // state_tokens_per_block
+        src_col = source_logical.clamp(0, max(state_width - 1, 0))
+        src_good = (source_logical >= 0) & (source_logical < state_width)
+        src_cur = (source_local >= 0) & (source_local < row_len[:, None])
+        src_off = source_positions.remainder(state_ring_entries)
+        src_row = (req_off[:, None] + source_local).clamp(
+            0, max(token_count - 1, 0)
+        )
+        host_int = torch.cat(
+            (
+                req,
+                pos,
+                row_start,
+                row_len,
+                req_off,
+                bstart,
+                state_col,
+                state_off,
+                kv_col,
+                kv_ent,
+                src_req.reshape(-1),
+                src_col.reshape(-1),
+                src_off.reshape(-1),
+                src_row.reshape(-1),
+                host_lengths_tensor,
+            )
+        )
+        host_bool = torch.cat(
+            (
+                done,
+                state_good,
+                kv_good,
+                src_good.reshape(-1),
+                src_cur.reshape(-1),
+                tail,
+            )
         )
         if device.type == "cuda":
             device_int = host_int.pin_memory().to(device=device, non_blocking=True)
@@ -496,6 +526,9 @@ def build_indexer_writer_geometry(
         source_rows = _int_view(source_count).view(token_count, ratio)
         source_in_bounds = _bool_view(source_count).view(token_count, ratio)
         source_in_current = _bool_view(source_count).view(token_count, ratio)
+        # The tail mask rides the same pinned bool upload, after the
+        # source-grade batches it was appended after.
+        state_tail = _bool_view(token_count)
         # The batch length mirror rides the same pinned upload (a separate
         # pageable host->device staging would violate the step-build
         # contract that every host-built upload is pinned).
@@ -550,6 +583,16 @@ def build_indexer_writer_geometry(
         state_in_bounds = (state_logical >= 0) & (state_logical < state_width)
         state_columns = state_logical.clamp(0, max(state_width - 1, 0))
         state_offsets = positions % state_ring_entries
+        # Block-tail rows: the last ``min(ring, coverage)`` rows of each
+        # (request, logical block) coverage -- the rows whose writes survive
+        # last-write-per-slot dedup.  Pure elementwise arithmetic on full
+        # shapes; the host-mirror build above computes the same mask on the
+        # host and rides the pinned bool upload.
+        state_block_ends = (state_logical + 1) * state_tokens_per_block - 1
+        state_request_ends = row_starts + row_lengths - 1
+        state_tail = positions + state_ring_entries > torch.minimum(
+            state_block_ends, state_request_ends
+        )
         kv_logical = block_starts // kv_tokens_per_block
         kv_in_bounds = (kv_logical >= 0) & (kv_logical < kv_width)
         kv_columns = kv_logical.clamp(0, max(kv_width - 1, 0))
@@ -616,6 +659,12 @@ def build_indexer_writer_geometry(
         state_allocated, state_blocks * state_ring_entries + state_offsets, -1
     )
     state_slots_safe = state_slots.clamp(min=0)
+    # Ring-wrap batch destinations: the tail rows of each (request, logical
+    # block) that resolve to an allocated block, everything else redirected
+    # to the reserved zero block (those rows scatter back the original they
+    # gathered, so the pool is untouched).
+    state_tail_rows = state_tail & state_allocated
+    state_tail_slots = torch.where(state_tail, state_slots_safe, 0)
     source_valid = source_in_current | source_allocated
     group_sources_valid = torch.all(source_valid, dim=1)
     source_slots = (
@@ -641,6 +690,14 @@ def build_indexer_writer_geometry(
     state_slots_unique = bool(
         host_length_values and max(host_length_values) <= state_ring_entries
     )
+    # The monotone ring-wrap batch form needs the last write per slot to be
+    # the maximum position mapping to it.  Positions are structurally
+    # monotone per request (prefix + row index, cu_seqlens semantics) unless
+    # an explicit ``device_positions`` override replaced them -- no production
+    # caller passes one -- so the batch form applies whenever the positions
+    # came from the structural chain; re-deriving monotonicity of an override
+    # would need a host sync.
+    state_ring_wrap = device_positions is None
     if state_slots_unique:
         # The full-shape masked-scatter write is exact only when no two rows
         # resolve to the same destination slot.  Within one request that holds
@@ -657,6 +714,28 @@ def build_indexer_writer_geometry(
             ),
             "indexer writer state destinations must be unique; the state block "
             "table shares a physical block across requests",
+        )
+        sorted_kv = torch.sort(kv_write_slots).values
+        qsa_assert_valid(
+            ~torch.any((sorted_kv[1:] == sorted_kv[:-1]) & (sorted_kv[1:] > 0)),
+            "indexer writer KV destinations must be unique; the KV block table "
+            "shares a physical block across requests",
+        )
+    elif state_ring_wrap:
+        # Same fail-stop contract for the batch form: within one request the
+        # tail rows of a block hit distinct ring offsets and distinct logical
+        # blocks mean distinct physical blocks, so a duplicate tail
+        # destination is a broken block table; across requests it is the
+        # allocator's per-request block disjointness.  The KV side needs no
+        # dedup for the same reason as the unique-slot form (one slot per
+        # completed group).
+        sorted_tail = torch.sort(state_tail_slots).values
+        qsa_assert_valid(
+            ~torch.any(
+                (sorted_tail[1:] == sorted_tail[:-1]) & (sorted_tail[1:] > 0)
+            ),
+            "indexer writer state ring-wrap destinations must be unique; "
+            "the state block table reuses a physical block",
         )
         sorted_kv = torch.sort(kv_write_slots).values
         qsa_assert_valid(
@@ -694,6 +773,7 @@ def build_indexer_writer_geometry(
         },
         lengths=tuple(host_length_values),
         state_slots_unique=state_slots_unique,
+        state_ring_wrap=state_ring_wrap,
         batch_lengths=batch_lengths,
         request_ids=request_ids,
         positions=positions,
@@ -702,6 +782,8 @@ def build_indexer_writer_geometry(
         state_slots=state_slots,
         state_allocated=state_allocated,
         state_slots_safe=state_slots_safe,
+        state_tail_rows=state_tail_rows,
+        state_tail_slots=state_tail_slots,
         completed=completed,
         block_starts=block_starts,
         kv_blocks=kv_blocks,
@@ -804,6 +886,97 @@ def _assert_resolved_blocks(
             )
 
 
+def _full_shape_pooled_entries(
+    raw_keys: torch.Tensor,
+    geometry: IndexerWriterGeometry,
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+    k_norm_gamma: torch.Tensor,
+    state_flat: torch.Tensor,
+    *,
+    norm_eps: float,
+    rope_is_token_aligned: bool,
+) -> torch.Tensor:
+    """The pooled + rms-norm + partial-rope chain over the geometry's rows.
+
+    Shared by both fast writers (full-shape and ring-wrap): the numeric chain
+    is the eager legacy body (gather the ratio source rows, fp32 mean, cast,
+    :func:`exact_head_rms_norm`, :func:`apply_partial_rope`, bf16 cast), on
+    full ``[T]`` shapes -- values for rows the caller does not scatter are
+    computed but discarded, so written rows stay bit-exact.
+    """
+    token_count = geometry.token_count
+    ratio = geometry.ratio
+    head_dim = int(raw_keys.shape[1])
+    gathered_raw = raw_keys.index_select(0, geometry.source_rows.reshape(-1)).view(
+        token_count, ratio, head_dim
+    )
+    gathered_state = state_flat.index_select(
+        0, geometry.source_slots.reshape(-1)
+    ).view(token_count, ratio, head_dim)
+    gathered = torch.where(
+        geometry.source_in_current.unsqueeze(-1),
+        gathered_raw.float(),
+        gathered_state,
+    )
+    pooled = gathered.mean(dim=1).to(raw_keys.dtype)
+    pooled = exact_head_rms_norm(pooled, k_norm_gamma, norm_eps)
+    if rope_is_token_aligned:
+        cos = rope_cos
+        sin = rope_sin
+    elif rope_cos.dim() == 2:
+        cos = rope_cos.index_select(0, geometry.block_starts)
+        sin = rope_sin.index_select(0, geometry.block_starts)
+    else:
+        cos = rope_cos[geometry.request_ids, geometry.block_starts]
+        sin = rope_sin[geometry.request_ids, geometry.block_starts]
+    return apply_partial_rope(pooled, cos, sin).to(torch.bfloat16)
+
+
+def _full_shape_kv_write(
+    kv_flat: torch.Tensor,
+    geometry: IndexerWriterGeometry,
+    pooled: torch.Tensor,
+) -> torch.Tensor:
+    """The masked KV scatter; returns the gathered originals for the undo.
+
+    KV destinations are unique (one slot per completed group within a
+    request, the allocator's disjointness across requests -- both asserted at
+    geometry build time), so the write needs no dedup: invalid rows write
+    back their own gathered original.
+    """
+    head_dim = int(pooled.shape[-1])
+    original_kv = kv_flat.index_select(0, geometry.kv_write_slots)
+    kv_values = torch.where(
+        geometry.kv_write_valid.unsqueeze(-1), pooled, original_kv
+    )
+    kv_flat.scatter_(
+        0, geometry.kv_write_slots.unsqueeze(-1).expand(-1, head_dim), kv_values
+    )
+    return original_kv
+
+
+def _full_shape_rope_coverage_check(
+    geometry: IndexerWriterGeometry,
+    rope_cos: torch.Tensor,
+    *,
+    rope_is_token_aligned: bool,
+) -> None:
+    if not rope_is_token_aligned:
+        # Same coverage contract as the legacy path (rope tables are per-call
+        # arguments, so the check cannot ride the frozen geometry): the [B]-grade
+        # start/length pair sum, exactly as the legacy writer computes it.
+        # Strict validation never reaches the fast paths: the dispatch keeps
+        # the legacy writer with its exact host diagnostics.
+        qsa_assert_valid(
+            torch.all(
+                (geometry.start_positions.to(torch.long) + geometry.batch_lengths)
+                <= int(rope_cos.shape[-2])
+            ),
+            f"RoPE tables cover {rope_cos.shape[-2]} positions, need more",
+        )
+
+
 def _write_indexer_cache_full_shape(
     raw_keys: torch.Tensor,
     geometry: IndexerWriterGeometry,
@@ -833,60 +1006,29 @@ def _write_indexer_cache_full_shape(
     device = raw_keys.device
     token_count = geometry.token_count
     head_dim = int(raw_keys.shape[1])
-    ratio = geometry.ratio
     kv_flat = kv_pool.flatten(0, 1)
     state_flat = state_pool.flatten(0, 1)
 
-    if not rope_is_token_aligned:
-        # Same coverage contract as the legacy path (rope tables are per-call
-        # arguments, so the check cannot ride the frozen geometry): the [B]-grade
-        # start/length pair sum, exactly as the legacy writer computes it.
-        # Strict validation never reaches this path: the dispatch keeps the
-        # legacy writer with its exact host diagnostics.
-        qsa_assert_valid(
-            torch.all(
-                (geometry.start_positions.to(torch.long) + geometry.batch_lengths)
-                <= int(rope_cos.shape[-2])
-            ),
-            f"RoPE tables cover {rope_cos.shape[-2]} positions, need more",
-        )
+    _full_shape_rope_coverage_check(
+        geometry, rope_cos, rope_is_token_aligned=rope_is_token_aligned
+    )
 
     # Capture every destination's original before the first mutation; the
     # gathered rows double as the write-back source for invalid rows and as the
     # undo payload, so undo capture adds no launches.
-    original_kv = kv_flat.index_select(0, geometry.kv_write_slots)
     original_state = state_flat.index_select(0, geometry.state_slots_safe)
+    pooled = _full_shape_pooled_entries(
+        raw_keys,
+        geometry,
+        rope_cos,
+        rope_sin,
+        k_norm_gamma,
+        state_flat,
+        norm_eps=norm_eps,
+        rope_is_token_aligned=rope_is_token_aligned,
+    )
+    original_kv = _full_shape_kv_write(kv_flat, geometry, pooled)
 
-    gathered_raw = raw_keys.index_select(0, geometry.source_rows.reshape(-1)).view(
-        token_count, ratio, head_dim
-    )
-    gathered_state = state_flat.index_select(
-        0, geometry.source_slots.reshape(-1)
-    ).view(token_count, ratio, head_dim)
-    gathered = torch.where(
-        geometry.source_in_current.unsqueeze(-1),
-        gathered_raw.float(),
-        gathered_state,
-    )
-    pooled = gathered.mean(dim=1).to(raw_keys.dtype)
-    pooled = exact_head_rms_norm(pooled, k_norm_gamma, norm_eps)
-    if rope_is_token_aligned:
-        cos = rope_cos
-        sin = rope_sin
-    elif rope_cos.dim() == 2:
-        cos = rope_cos.index_select(0, geometry.block_starts)
-        sin = rope_sin.index_select(0, geometry.block_starts)
-    else:
-        cos = rope_cos[geometry.request_ids, geometry.block_starts]
-        sin = rope_sin[geometry.request_ids, geometry.block_starts]
-    pooled = apply_partial_rope(pooled, cos, sin).to(torch.bfloat16)
-
-    kv_values = torch.where(
-        geometry.kv_write_valid.unsqueeze(-1), pooled, original_kv
-    )
-    kv_flat.scatter_(
-        0, geometry.kv_write_slots.unsqueeze(-1).expand(-1, head_dim), kv_values
-    )
     state_values = torch.where(
         geometry.state_allocated.unsqueeze(-1), raw_keys.float(), original_state
     )
@@ -907,6 +1049,91 @@ def _write_indexer_cache_full_shape(
         result["undo"] = IndexerCacheUndo(
             state_pool=state_pool,
             state_slots=geometry.state_slots_safe,
+            original_state=original_state,
+            kv_pool=kv_pool,
+            kv_slots=geometry.kv_write_slots,
+            original_kv=original_kv,
+        )
+    return result
+
+
+def _write_indexer_cache_ring_wrap(
+    raw_keys: torch.Tensor,
+    geometry: IndexerWriterGeometry,
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+    k_norm_gamma: torch.Tensor,
+    kv_pool: torch.Tensor,
+    state_pool: torch.Tensor,
+    *,
+    norm_eps: float,
+    capture_undo: bool,
+    rope_is_token_aligned: bool,
+) -> dict:
+    """Ring-wrap batch writer for monotone multi-ring windows.
+
+    Production draft tail windows write more tokens per request than the
+    state ring holds (b=1, N=1578 against ring=8 with 128-token pages), so
+    many rows compete for the same in-block slot and the unique-slot
+    full-shape writer cannot serve them.  Positions of one request are
+    consecutive, so the legacy ``_last_write_per_slot`` dedup keeps exactly
+    the maximum position per slot -- per (request, logical block) the
+    block's final ``min(ring, coverage)`` rows, precomputed once per step in
+    the frozen geometry (``state_tail_rows`` / ``state_tail_slots``).  This
+    writer scatters only those tail rows (masked like the full-shape path:
+    non-tail rows write back their own gathered original at the reserved
+    zero block) and runs the same dedup-free KV write, so the pool bytes,
+    result rows and write counts stay bit-exact against the legacy path
+    while the ``nonzero``/``argsort``/``unique`` chains and their implicit
+    device-to-host syncs disappear.
+    """
+    head_dim = int(raw_keys.shape[1])
+    kv_flat = kv_pool.flatten(0, 1)
+    state_flat = state_pool.flatten(0, 1)
+
+    _full_shape_rope_coverage_check(
+        geometry, rope_cos, rope_is_token_aligned=rope_is_token_aligned
+    )
+
+    # Capture every tail destination's original before the first mutation;
+    # non-tail rows redirect to the reserved zero block and write back the
+    # original they gathered there, so the pool is untouched outside the
+    # tail rows.
+    original_state = state_flat.index_select(0, geometry.state_tail_slots)
+    pooled = _full_shape_pooled_entries(
+        raw_keys,
+        geometry,
+        rope_cos,
+        rope_sin,
+        k_norm_gamma,
+        state_flat,
+        norm_eps=norm_eps,
+        rope_is_token_aligned=rope_is_token_aligned,
+    )
+    original_kv = _full_shape_kv_write(kv_flat, geometry, pooled)
+
+    state_values = torch.where(
+        geometry.state_tail_rows.unsqueeze(-1), raw_keys.float(), original_state
+    )
+    state_flat.scatter_(
+        0, geometry.state_tail_slots.unsqueeze(-1).expand(-1, head_dim), state_values
+    )
+
+    result = {
+        "state_slots": geometry.state_slots,
+        "kv_slots": geometry.kv_slots,
+        "completed": geometry.completed,
+        # 0-dim device tensors: no production consumer reads these back,
+        # so they stay lazy instead of two host-synchronizing sums.  The
+        # counts keep the legacy semantics (allocated rows, not the deduped
+        # tail rows).
+        "num_state_writes": geometry.state_allocated.sum(),
+        "num_kv_writes": geometry.kv_write_valid.sum(),
+    }
+    if capture_undo:
+        result["undo"] = IndexerCacheUndo(
+            state_pool=state_pool,
+            state_slots=geometry.state_tail_slots,
             original_state=original_state,
             kv_pool=kv_pool,
             kv_slots=geometry.kv_write_slots,
@@ -947,9 +1174,11 @@ def _write_indexer_cache_vectorized(
     invocation and its slots are provably unique, the compression-free
     full-shape write path replaces the per-call ``nonzero``/``argsort``/
     ``unique`` chains -- byte-identical pool contents, no device-to-host
-    synchronization.  A stale or inapplicable bundle (and strict validation,
-    which keeps the legacy per-call diagnostics) falls back to the legacy body
-    below.
+    synchronization.  Ring-wrapping windows (requests longer than the state
+    ring, the production draft tail shape) take the ring-wrap batch writer
+    over the geometry's per-(request, block) tail rows instead.  A stale or
+    inapplicable bundle (and strict validation, which keeps the legacy
+    per-call diagnostics) falls back to the legacy body below.
     """
     device = raw_keys.device
     token_count = int(raw_keys.shape[0])
@@ -1021,25 +1250,40 @@ def _write_indexer_cache_vectorized(
         geometry = None
     if (
         geometry is not None
-        and geometry.state_slots_unique
         and int(kv_pool.shape[0]) > 0
         and int(state_pool.shape[0]) > 0
     ):
         # The frozen bundle was validated against these exact tensors (identity
         # + fingerprint checks above), so the leading cu/rope asserts below
-        # already ran once per step at build time.
-        return _write_indexer_cache_full_shape(
-            raw_keys,
-            geometry,
-            rope_cos,
-            rope_sin,
-            k_norm_gamma,
-            kv_pool,
-            state_pool,
-            norm_eps=norm_eps,
-            capture_undo=capture_undo,
-            rope_is_token_aligned=rope_is_token_aligned,
-        )
+        # already ran once per step at build time.  Short windows whose slots
+        # are provably unique take the full-shape writer; ring-wrapping
+        # windows take the batch writer over the geometry's tail rows.
+        if geometry.state_slots_unique:
+            return _write_indexer_cache_full_shape(
+                raw_keys,
+                geometry,
+                rope_cos,
+                rope_sin,
+                k_norm_gamma,
+                kv_pool,
+                state_pool,
+                norm_eps=norm_eps,
+                capture_undo=capture_undo,
+                rope_is_token_aligned=rope_is_token_aligned,
+            )
+        if geometry.state_ring_wrap:
+            return _write_indexer_cache_ring_wrap(
+                raw_keys,
+                geometry,
+                rope_cos,
+                rope_sin,
+                k_norm_gamma,
+                kv_pool,
+                state_pool,
+                norm_eps=norm_eps,
+                capture_undo=capture_undo,
+                rope_is_token_aligned=rope_is_token_aligned,
+            )
 
     cu = cu_seqlens.to(torch.long)
     starts = start_positions.to(torch.long)
