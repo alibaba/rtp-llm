@@ -1,9 +1,11 @@
 # RTP FlyDSL GDN MTP adapter
 
-ROCm defaults to FlyDSL MTP when ReplaySSM is disabled.
-Set `ATOM_RTP_FLYDSL_GDN_MTP=0` to opt out. Explicit ReplaySSM selects
-ReplaySSM unless FlyDSL is also explicitly forced, which is an error.
-Non-ROCm and unsupported state layouts retain the original path.
+On supported ROCm RTP targets, `ATOM_RTP_ENABLE_REPLAYSSM` selects the path:
+`1` (default) uses FlyDSL with hybrid replay; `0` uses plain FlyDSL;
+`legacy` selects the old ReplaySSM implementation for comparison.
+The former `ATOM_RTP_REPLAY_HYBRID` and `ATOM_RTP_FLYDSL_GDN_MTP`
+switches are ignored. Unsupported hybrid-consensus topologies retain FlyDSL.
+
 
 The chain kernel is extended with independent initial read slots; each verify
 candidate writes directly to the RTP state pool slot. Physical VK storage is
