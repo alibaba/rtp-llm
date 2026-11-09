@@ -156,7 +156,6 @@ def test_unvalidated_state_or_model_geometry_keeps_fallback(unsupported):
     ) == (32, 4, 2)
 
 
-
 @pytest.mark.parametrize(
     "batch,tokens,override,expected",
     [
