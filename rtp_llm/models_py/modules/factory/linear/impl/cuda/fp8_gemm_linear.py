@@ -142,6 +142,11 @@ class CudaFp8GEMMLinear(LinearBase):
             return self._deepgemm_linear(input)
         return self._flashinfer_linear(input)
 
+    def forward_quantized(
+        self, input_fp8: torch.Tensor, input_scales: torch.Tensor
+    ) -> torch.Tensor:
+        return self._deepgemm_linear.forward_quantized(input_fp8, input_scales)
+
     def forward_silu_and_mul_quantized(
         self, gate_up: torch.Tensor
     ) -> Optional[torch.Tensor]:
