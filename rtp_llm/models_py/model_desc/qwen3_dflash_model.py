@@ -344,7 +344,6 @@ class Qwen3DFlashModel(DSparkProposerMixin, GptModelBase):
         quant_config=None,
         fmha_config=None,
         py_hw_kernel_config=None,
-        device_resource_config=None,
     ) -> None:
         if quant_config is not None:
             raise NotImplementedError("Qwen3 DFlash quantization is not supported")
@@ -355,7 +354,6 @@ class Qwen3DFlashModel(DSparkProposerMixin, GptModelBase):
             max_generate_batch_size=max_generate_batch_size,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
-            device_resource_config=device_resource_config,
         )
         layer_types = config.dflash_layer_types or []
         if len(layer_types) != self.layer_num:
