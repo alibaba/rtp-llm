@@ -1026,7 +1026,6 @@ TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionAllowsLongGenerationWithinPhysic
                                          resources.model_config,
                                          pd_config,
                                          ParallelismConfig{},
-                                         ModelSpecificConfig{},
                                          resources.cache_manager);
         auto                   running =
             makeStream({1, 2}, resources.model_config, resources.runtime_config, resources.resource_context, 41);
@@ -1125,7 +1124,6 @@ TEST_F(FIFOSchedulerTest, PDLinearTailSwitchCombinationsFinishLongRequestsWithin
                                     resources.model_config,
                                     pd_config,
                                     ParallelismConfig{},
-                                    ModelSpecificConfig{},
                                     resources.cache_manager);
             std::vector<GenerateStreamPtr> streams;
             const auto                     commit_token = [](const GenerateStreamPtr& stream) {
@@ -1244,7 +1242,6 @@ TEST_F(FIFOSchedulerTest, WeightedPoolsWaitForExhaustedPoolAndReadmitAfterCancel
                                          resources.model_config,
                                          makePDFusionPDSepConfig(),
                                          ParallelismConfig{},
-                                         ModelSpecificConfig{},
                                          resources.cache_manager);
         auto                   running =
             makeStream({1, 2, 3, 4}, resources.model_config, resources.runtime_config, resources.resource_context, 1);
@@ -1307,7 +1304,6 @@ TEST_F(FIFOSchedulerTest, WeightedPoolLifecycleAdmissionCannotBorrowAnotherPools
                                          resources.model_config,
                                          makePDFusionPDSepConfig(),
                                          ParallelismConfig{},
-                                         ModelSpecificConfig{},
                                          resources.cache_manager);
         auto running = makeStream({1}, resources.model_config, resources.runtime_config, resources.resource_context, 6);
         auto waiting =
@@ -1358,7 +1354,6 @@ TEST_F(FIFOSchedulerTest, WeightedPoolsRemainSubjectToPerPoolReserveOnAdmission)
                                          resources.model_config,
                                          makePDFusionPDSepConfig(),
                                          ParallelismConfig{},
-                                         ModelSpecificConfig{},
                                          resources.cache_manager);
         auto running = makeStream({1}, resources.model_config, resources.runtime_config, resources.resource_context, 1);
         auto waiting = makeStream(
@@ -1395,7 +1390,6 @@ TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionStillChargesEntirePrefill) {
                                      resources.model_config,
                                      makePDFusionPDSepConfig(),
                                      ParallelismConfig{},
-                                     ModelSpecificConfig{},
                                      resources.cache_manager);
     auto running = makeStream({1, 2}, resources.model_config, resources.runtime_config, resources.resource_context, 3);
     std::vector<int> prompt(16);
@@ -1432,7 +1426,6 @@ TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionDrainsCommittedReferencesBeforeC
                                          resources.model_config,
                                          makePDFusionPDSepConfig(),
                                          ParallelismConfig{},
-                                         ModelSpecificConfig{},
                                          resources.cache_manager);
         auto                   running   = makeStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
                                   resources.model_config,
@@ -1489,7 +1482,6 @@ TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionJoinsPendingWorkerWithoutHolding
                                      resources.model_config,
                                      makePDFusionPDSepConfig(),
                                      ParallelismConfig{},
-                                     ModelSpecificConfig{},
                                      resources.cache_manager);
     auto                   running   = makeStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
                               resources.model_config,
