@@ -165,6 +165,11 @@ class Indexer(nn.Module):
                 fallback_proj=self.weights_proj,
                 original_rows=original_rows,
                 tile_decode_output=tile_decode_output,
+                bf16_dot=(
+                    self.dsa_config.indexer_use_fp8
+                    and x.dtype == torch.bfloat16
+                    and not tile_decode_output
+                ),
             )
         x = x.float()
         weights = self.weights_proj(x)

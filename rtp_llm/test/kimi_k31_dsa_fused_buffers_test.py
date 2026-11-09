@@ -93,7 +93,6 @@ class DsaFusedBufferTest(unittest.TestCase):
                 self.assertEqual(suffix_out.storage_offset(), latent_out.storage_offset() + 512)
 
     def test_raw_lse_strides_empty_and_nan(self):
-        from rtp_llm.models_py.kernels.cuda.dsa_kv_chunk import zero_sparse_empty_rows
         from rtp_llm.models_py.triton_kernels.mla.lse_merge import merge_attention_states_in_place
 
         partial = torch.randn(3, 128, 512, device="cuda", dtype=torch.bfloat16)
@@ -110,9 +109,6 @@ class DsaFusedBufferTest(unittest.TestCase):
         self.assertTrue(torch.isneginf(canonical_lse[0]).all())
         torch.testing.assert_close(running[1], partial[1, :96].float(), rtol=0, atol=0)
         self.assertTrue(torch.isnan(running[2, 0]).all())
-        zero_sparse_empty_rows(partial, lse, 96)
-        self.assertTrue((partial[0, :96] == 0).all())
-        self.assertTrue(torch.isnan(partial[2, 0]).all())
 
     def test_flashmla_writes_zero_for_an_empty_query(self):
         from rtp_llm.models_py.utils.flash_mla_legacy import flash_mla_sparse_fwd
@@ -126,6 +122,40 @@ class DsaFusedBufferTest(unittest.TestCase):
         torch.testing.assert_close(output[0], torch.zeros_like(output[0]), rtol=0, atol=0)
         torch.testing.assert_close(output[1], torch.ones_like(output[1]), rtol=0, atol=0)
         self.assertTrue(torch.isposinf(lse[0]).all())
+
+    def test_flashmla_fp8_cache_writes_zero_for_an_empty_query(self):
+        from rtp_llm.models_py.utils.flash_mla_legacy import flash_mla_with_kvcache, get_mla_metadata
+
+        rows, topk = 4, 2048
+        # A packed token has 512 FP8 values, four FP32 scales and 64 BF16 RoPE values.
+        kv = torch.zeros(1, 64, 1, 656, device="cuda", dtype=torch.uint8)
+        kv[..., :512].fill_(0x38)  # E4M3 encoding of 1.0
+        kv[..., 512:528].view(torch.float32).fill_(1.0)
+        kv[0, 0, 0, :512].fill_(0x7F)  # Poison the unreferenced slot.
+        indices = torch.full((rows, topk), -1, device="cuda", dtype=torch.int32)
+        indices[1, 0] = 1
+
+        for heads, query_width in ((64, 1), (64, 2), (128, 1), (128, 2)):
+            with self.subTest(heads=heads, query_width=query_width):
+                query = torch.zeros(
+                    rows // query_width, query_width, heads, 576, device="cuda", dtype=torch.bfloat16,
+                )
+                metadata, splits = get_mla_metadata(
+                    cache_seqlens=None, num_q_tokens_per_head_k=rows * heads,
+                    num_heads_q=heads, num_heads_k=1, is_fp8_kvcache=True, topk=topk,
+                )
+                output, lse = flash_mla_with_kvcache(
+                    q=query, k_cache=kv, block_table=None, cache_seqlens=None, head_dim_v=512,
+                    tile_scheduler_metadata=metadata, num_splits=splits, is_fp8_kvcache=True,
+                    indices=indices.unflatten(0, (-1, query_width)), softmax_scale=192**-0.5,
+                )
+                output = output.flatten(0, 1)
+                lse = lse.transpose(1, 2).flatten(0, 1)
+                empty_rows = [0, 2, 3]
+                torch.testing.assert_close(output[empty_rows], torch.zeros_like(output[empty_rows]), rtol=0, atol=0)
+                torch.testing.assert_close(output[1], torch.ones_like(output[1]), rtol=0, atol=0)
+                self.assertTrue(torch.isinf(lse[empty_rows]).all())
+                self.assertTrue(torch.isfinite(lse[1]).all())
 
     def test_gate_masks_invalid_nan_without_hiding_valid_nan(self):
         from rtp_llm.models_py.triton_kernels.common.activation import gate_sigmoid_mul

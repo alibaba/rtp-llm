@@ -141,11 +141,7 @@ class PageRRSparseMlaOp(SparseMlaOp):
         ).transpose(0, 1)
 
     def _prefill_kv_chunks(self, query, kv, topk_indices, layer_id, workspace):
-        from rtp_llm.models_py.kernels.cuda.dsa_kv_chunk import (
-            check_sparse_lse,
-            map_dsa_chunk_slots,
-            zero_sparse_empty_rows,
-        )
+        from rtp_llm.models_py.kernels.cuda.dsa_kv_chunk import map_dsa_chunk_slots
 
         from rtp_llm.models_py.triton_kernels.mla.lse_merge import merge_attention_states_in_place as merge_mla_states_in_place
 
@@ -203,15 +199,9 @@ class PageRRSparseMlaOp(SparseMlaOp):
                             raw_partial_lse=True,
                         )
                 else:
-                    # BF16 sparse Prefill already writes zero for empty rows.
-                    if fp8:
-                        zero_sparse_empty_rows(partial, lse, heads)
-                        final_lse = lse[:, :heads]
+                    # Both FlashMLA backends write zero for queries with no valid keys.
                     latent = partial[:, :heads]
                 del partial, lse, history
-            if fp8:
-                with profile_scope("RTP::attention.dsa.sfa.lse_check"):
-                    check_sparse_lse(running_lse if chunked else final_lse)
             if chunked:
                 # Reuses the now-dead KV arena; only one cast and V-up per layer.
                 latent = workspace("latent", (rows, heads, latent_dim), torch.bfloat16)
