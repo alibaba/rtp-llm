@@ -585,6 +585,24 @@ class EngramStartup:
     ):
         self._started = time.monotonic()
         self._env = os.environ if environ is None else environ
+        from .config import StorageMode, StoragePolicy
+
+        self._local_startup = None
+        if StoragePolicy.from_environ(self._env).mode == StorageMode.CUDA_LOCAL:
+            from .local import LocalCudaStartup
+
+            self._local_startup = LocalCudaStartup(
+                store,
+                rank=rank,
+                world_size=world_size,
+                device=local_device,
+                checkpoint=checkpoint,
+                gang_hosts=gang_hosts,
+                environ=self._env,
+                install=install,
+            )
+            self._config = None
+            return
         self._config = build_config(
             self._env,
             world_size,
@@ -602,6 +620,8 @@ class EngramStartup:
 
     def run(self):
         """Publish, exchange and install once, before engine construction."""
+        if self._local_startup is not None:
+            return self._local_startup.run()
         if self._config is None:
             return None
         config = self._config

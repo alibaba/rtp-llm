@@ -126,6 +126,28 @@ def derived(env, world_size):
 
 
 class GroupTest(unittest.TestCase):
+    def test_single_host_gpu_fabric_uses_world_store_and_all_local_devices(self):
+        env = {
+            "RTP_ENGRAM_STORAGE": "cuda_fabric",
+            topology.REVISION_ENV: "test",
+            topology.COHORT_ENV: "host-a",
+        }
+        config = topology.build_config(
+            env,
+            4,
+            rank=2,
+            gang_hosts=("host-a",) * 4,
+            checkpoint="/fixture",
+            local_device=2,
+        )
+        self.assertTrue(config["reuse_world_store"])
+        self.assertEqual(config["options"].shards.shard_count, 1)
+        self.assertEqual(config["gpu_devices"], (0, 1, 2, 3))
+        documents = publications(config["group"], "gpu")
+        _, prepared = prepared_package(config["group"], documents)
+        self.assertEqual(prepared["manifest"].manifest.backend, "fabric_gpu")
+        self.assertEqual(len(prepared["manifest"].manifest.tensors[0].shards), 4)
+
     def test_supported_static_shapes(self):
         for n, p, ranks in [(1, 2, 2), (2, 3, 2), (3, 5, 2), (5, 5, 1)]:
             group, docs = fixture(n, p, ranks)
@@ -761,7 +783,9 @@ class TopologySourceTest(unittest.TestCase):
             topology.ShardConfigError, "GANG_TOPOLOGY_REQUIRED"
         ):
             topology.build_group(env, 4)
-        with self.assertRaisesRegex(topology.ShardConfigError, "COHORT_REQUIRED"):
+        with self.assertRaisesRegex(
+            topology.ShardConfigError, "STORAGE_HOST_COUNT_MUST_MATCH_COHORT"
+        ):
             topology.build_group(env, 4, gang_hosts=["a"] * 4)
 
     def _annotation(self, directory, parts):
@@ -890,7 +914,9 @@ class TopologySourceTest(unittest.TestCase):
         with mock.patch.object(
             topology, "DEFAULT_ANNOTATION", "/nonexistent/annotations"
         ):
-            with self.assertRaisesRegex(topology.ShardConfigError, "COHORT_REQUIRED"):
+            with self.assertRaisesRegex(
+                topology.ShardConfigError, "STORAGE_HOST_COUNT_MUST_MATCH_COHORT"
+            ):
                 topology.build_group(env, 4, gang_hosts=["10.0.0.1"] * 4)
         env[topology.ANNOTATION_ENV] = "/nonexistent/annotations"
         with self.assertRaisesRegex(topology.ShardConfigError, "INVALID_GANGINFO"):

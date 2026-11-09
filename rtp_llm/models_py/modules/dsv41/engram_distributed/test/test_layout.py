@@ -108,6 +108,30 @@ def capacity_manifest(count):
     )
 
 
+class LargeGpuLayoutTest(unittest.TestCase):
+    def test_32_gpu_real_table_shapes_remain_single_copy(self):
+        for rows in (384006168, 384016682):
+            plan = plan_shards(rows, 256, 8, granularity=2 << 20)
+            parts = [
+                part
+                for host in range(8)
+                for part in segment_rows(plan, host, (0, 1, 2, 3))
+            ]
+            self.assertEqual(len(parts), 32)
+            self.assertEqual(parts[0][1], 0)
+            self.assertEqual(parts[-1][2], rows)
+            self.assertTrue(
+                all(left[2] == right[1] for left, right in zip(parts, parts[1:]))
+            )
+            self.assertEqual(
+                sum(padded * (256 + 8) for _, _, _, padded in parts),
+                plan.shard_bytes * 8,
+            )
+            self.assertTrue(
+                all(padded * 8 % (2 << 20) == 0 for _, _, _, padded in parts)
+            )
+
+
 class ConfigTest(unittest.TestCase):
     def test_p_is_independent_of_model_parallelism_and_instance_count(self):
         for count in (2, 3, 5, 18, 36, 64):
@@ -129,8 +153,9 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ShardConfigError, "COUNT_MISMATCH"):
             ShardConfig(3).validate_manifest(capacity_manifest(2))
 
-    def test_single_host_and_invalid_p_are_rejected(self):
-        for value in (None, True, 1, 0, -1, 65, 2.0, "2"):
+    def test_single_host_and_invalid_counts(self):
+        self.assertEqual(ShardConfig(1).shard_count, 1)
+        for value in (None, True, 0, -1, 65, 2.0, "2"):
             with self.subTest(value=value), self.assertRaises(ShardConfigError):
                 ShardConfig(value)
         for value in ("", "-1", "2.0", "２", " 2", 2):
@@ -160,6 +185,15 @@ class ConfigTest(unittest.TestCase):
 
 
 class StoragePolicyTest(unittest.TestCase):
+    def test_upstream_gpu_modes_preserve_handle_semantics(self):
+        fabric = StoragePolicy.from_environ({"RTP_ENGRAM_STORAGE": "cuda_fabric"})
+        shared = StoragePolicy.from_environ({"RTP_ENGRAM_STORAGE": "gpu_shared"})
+        local = StoragePolicy.from_environ({"RTP_ENGRAM_STORAGE": "cuda_local"})
+        self.assertEqual(fabric, shared)
+        self.assertEqual(local.memory_kind, "gpu")
+        self.assertEqual(local.backend, "cuda_ipc")
+        self.assertEqual(local.default_graph_mode, "process_lifetime")
+
     def test_modes_are_complete_and_invalid_modes_fail_closed(self):
         for mode, shared, memory in (
             ("host", False, "host"),

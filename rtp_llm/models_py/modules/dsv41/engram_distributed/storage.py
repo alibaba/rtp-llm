@@ -76,6 +76,8 @@ class FabricEngramStorage:
     def __init__(self):
         self._lock = threading.RLock()
         self._mappings = {}
+        self._backings = []
+        self.handle_type = "fabric"
         self._allocation_count = 0
         self._shard_count = 0
         self._views = {}
@@ -93,9 +95,11 @@ class FabricEngramStorage:
         cls,
         validated: ValidatedManifest,
         *,
-        handles: Mapping[str, bytes],
+        handles: Mapping[str, bytes | int],
         device: int,
         native,
+        handle_type="fabric",
+        backings=None,
     ):
         """Map allocations after the layout has been bound to the model."""
         if type(device) is not int or device < 0:
@@ -107,15 +111,26 @@ class FabricEngramStorage:
             part.allocation_id for tensor in tensors for part in tensor.shards
         }:
             raise ValueError("handle allocation set does not match the manifest")
-        if any(
-            not isinstance(h, bytes) or not 0 < len(h) <= 1024 for h in handles.values()
-        ):
-            raise ValueError("Fabric capabilities must be bounded opaque bytes")
+        if handle_type == "fabric":
+            if any(
+                not isinstance(h, bytes) or not 0 < len(h) <= 1024
+                for h in handles.values()
+            ):
+                raise ValueError("Fabric capabilities must be bounded opaque bytes")
+        elif handle_type == "posix_fd" and validated.manifest.backend == "cuda_ipc":
+            if any(type(h) is not int or not 0 <= h < 2**31 for h in handles.values()):
+                raise ValueError(
+                    "POSIX handles must be local nonnegative file descriptors"
+                )
+        else:
+            raise ValueError("unsupported storage handle type")
         result = cls()
         result.validated = validated
+        result.handle_type = handle_type
+        result._backings = backings if backings is not None else []
         result.device = device
         result.memory_kind = (
-            "gpu" if validated.manifest.backend == "fabric_gpu" else "host"
+            "host" if validated.manifest.backend == "fabric_egm" else "gpu"
         )
         result._allocation_count = validated.allocation_count
         result._shard_count = storage_host_count(validated.manifest)
@@ -133,6 +148,11 @@ class FabricEngramStorage:
             for mapping in reversed(list(result._mappings.values())):
                 try:
                     mapping.close()
+                except BaseException as error:
+                    failures.append(type(error).__name__)
+            if not failures:
+                try:
+                    result._close_backings()
                 except BaseException as error:
                     failures.append(type(error).__name__)
             result._state = "FAILED"
@@ -153,7 +173,13 @@ class FabricEngramStorage:
         for tensor in tensors:
             with self._mapping_operation(tensor.name, tensor.shards, "attach"):
                 mapping = native.FabricMapping(
-                    device=self.device, memory_kind=self.memory_kind
+                    device=self.device,
+                    memory_kind=self.memory_kind,
+                    **(
+                        {"handle_type": self.handle_type}
+                        if self.handle_type != "fabric"
+                        else {}
+                    ),
                 )
                 # A failed attach can leave resources for close() to retry.
                 self._mappings[tensor.name] = mapping
@@ -243,7 +269,7 @@ class FabricEngramStorage:
             len(layers) != len(rows)
             or tuple(sorted(zip(layers, rows))) != expected.layers
             or head_dim != expected.head_dim
-            or expected.backend not in ("fabric_egm", "fabric_gpu")
+            or expected.backend not in ("fabric_egm", "fabric_gpu", "cuda_ipc")
         ):
             raise ValueError(
                 "external generation does not match the complete model Engram layout"
@@ -324,10 +350,16 @@ class FabricEngramStorage:
                 allocation_count=self._allocation_count,
                 mapping_count=len(self._mappings),
                 graph_pins=self._graph_pins,
+                backings=[backing.info() for backing in self._backings],
                 allocations={
                     aid: mapping.info() for aid, mapping in self._mappings.items()
                 },
             )
+
+    def _close_backings(self):
+        while self._backings:
+            self._backings[-1].close()
+            self._backings.pop()
 
     def close(self):
         """Stop enqueue, drop owned views, then drain and release imports.
@@ -354,6 +386,7 @@ class FabricEngramStorage:
             try:
                 for mapping in reversed(list(self._mappings.values())):
                     mapping.close()
+                self._close_backings()
             except Exception:
                 self._state = "FAILED"
                 raise

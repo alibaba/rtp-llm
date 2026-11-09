@@ -2,6 +2,8 @@
 #include <torch/extension.h>
 #include <ATen/ops/from_blob.h>
 #include <cuda.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -125,7 +127,7 @@ private:
 void validate_fail_stage(const std::string& value, bool owner) {
     const std::vector<std::string> common = {"", "after_context", "after_reserve", "after_map", "after_access"};
     for (const auto& stage : common) if (stage == value) return;
-    if (owner && value == "after_create") return;
+    if (owner && (value == "after_create" || value == "after_zero")) return;
     if (!owner && (value == "after_import" || value == "after_properties")) return;
     throw std::invalid_argument("unknown fail_stage for this role");
 }
@@ -134,8 +136,15 @@ void inject(const std::string& selected, const char* point) {
     if (selected == point) throw std::runtime_error(std::string("TEST_FAULT_INJECTION: ") + point);
 }
 
+CUmemAllocationHandleType handleType(const std::string& value, bool gpu) {
+    if (value == "fabric") return CU_MEM_HANDLE_TYPE_FABRIC;
+    require(value == "posix_fd" && gpu, "handle_type must be fabric, or posix_fd for GPU memory");
+    return CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+}
+
 struct FabricSegment {
     CUmemFabricHandle fabric{};
+    int fd = -1;
     size_t bytes;
     size_t granularity;
 };
@@ -157,14 +166,15 @@ struct ViewLease {
 
 class Mapping : public std::enable_shared_from_this<Mapping> {
 public:
-    static uint64_t allocation_granularity(int numa, int device, bool gpu = false) {
+    static uint64_t allocation_granularity(int numa, int device, bool gpu = false,
+                                           CUmemAllocationHandleType handle_type = CU_MEM_HANDLE_TYPE_FABRIC) {
         require(gpu || numa >= 0, "numa must be a local nonnegative HOST_NUMA ID");
         auto state = std::shared_ptr<Mapping>(new Mapping(true));
         state->init_context(device);
         CurrentContext current(state->context_);
         CUmemAllocationProp prop{};
         prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-        prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+        prop.requestedHandleTypes = handle_type;
         prop.location.type = gpu ? CU_MEM_LOCATION_TYPE_DEVICE : CU_MEM_LOCATION_TYPE_HOST_NUMA;
         prop.location.id = gpu ? state->cuda_device_ : numa;
         size_t granularity = 0;
@@ -177,7 +187,8 @@ public:
     }
 
     static std::shared_ptr<Mapping> make_owner(uint64_t size, int numa, int device,
-                                               const std::string& fail_stage, bool gpu = false) {
+                                               const std::string& fail_stage, bool gpu = false,
+                                               CUmemAllocationHandleType handle_type = CU_MEM_HANDLE_TYPE_FABRIC) {
         require(size > 0 && size <= kMaxAllocation, "size must be in 1..128GiB");
         require(gpu || numa >= 0, "numa must be a local nonnegative HOST_NUMA ID");
         validate_fail_stage(fail_stage, true);
@@ -185,12 +196,13 @@ public:
         state->logical_bytes_ = size;
         state->numa_ = gpu ? -1 : numa;
         state->gpu_memory_ = gpu;
+        state->handle_type_ = handle_type;
         state->init_context(device);
         inject(fail_stage, "after_context");
         CurrentContext current(state->context_);
         CUmemAllocationProp prop{};
         prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-        prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+        prop.requestedHandleTypes = handle_type;
         prop.location.type = gpu ? CU_MEM_LOCATION_TYPE_DEVICE : CU_MEM_LOCATION_TYPE_HOST_NUMA;
         prop.location.id = gpu ? state->cuda_device_ : numa;
         check(cuMemGetAllocationGranularity(&state->granularity_, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM),
@@ -216,18 +228,23 @@ public:
         check(cuMemSetAccess(state->address_, state->bytes_, &access, 1), gpu ? "owner_gpu_access" : "owner_cpu_access");
         inject(fail_stage, "after_access");
         // Initialize padding and any not-yet-loaded logical bytes; never publish stale pages.
-        if (gpu) check(cuMemsetD8(state->address_, 0, state->bytes_), "owner_gpu_zero");
-        else std::memset(reinterpret_cast<void*>(state->address_), 0, state->bytes_);
+        if (gpu) {
+            // Device memset can outlive the host call, including its failure path.
+            state->may_have_gpu_work_ = true;
+            check(cuMemsetD8(state->address_, 0, state->bytes_), "owner_gpu_zero");
+        } else std::memset(reinterpret_cast<void*>(state->address_), 0, state->bytes_);
+        inject(fail_stage, "after_zero");
         state->ready_ = true;
         current.finish();
         return state;
     }
 
-    static std::shared_ptr<Mapping> make_mapping(int device, bool gpu) {
+    static std::shared_ptr<Mapping> make_mapping(int device, bool gpu, CUmemAllocationHandleType handle_type) {
         validate_device(device);
         auto state = std::shared_ptr<Mapping>(new Mapping(false));
         state->device_ = device;
         state->gpu_memory_ = gpu;
+        state->handle_type_ = handle_type;
         return state;
     }
 
@@ -290,8 +307,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (closed_) return;
         try {
-            // Constructor rollback never exposed a GPU pointer, so no drain is needed.
-            // Once a view was exposed, the last lease must drain before freeing storage.
+            // Drain GPU initialization and any work submitted through exposed views.
+            // Rollback before GPU work needs no synchronization.
             close_locked(may_have_gpu_work_);
         } catch (const std::exception& error) {
             ++counters.deferred_cleanups;
@@ -323,6 +340,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_ready();
         require(owner_, "export is owner-only");
+        require(handle_type_ == CU_MEM_HANDLE_TYPE_FABRIC, "use export_fd for POSIX_FD memory");
         CurrentContext current(context_);
         std::atomic_thread_fence(std::memory_order_seq_cst);
         check(cuCtxSynchronize(), "owner_publish_drain");
@@ -331,6 +349,26 @@ public:
         current.finish();
         sealed_ = true;
         return fabric;
+    }
+
+    int export_fd() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_ready();
+        require(owner_ && handle_type_ == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+                "export_fd requires a GPU POSIX_FD allocation");
+        CurrentContext current(context_);
+        check(cuCtxSynchronize(), "owner_publish_drain");
+        int fd = -1;
+        check(cuMemExportToShareableHandle(&fd, segments_.front().handle, handle_type_, 0), "owner_export_fd");
+        sealed_ = true;
+        try {
+            if (fcntl(fd, F_SETFD, FD_CLOEXEC) == -1) throw std::runtime_error("cannot set exported FD CLOEXEC");
+            current.finish();
+            return fd; // The caller owns the FD; CUDA allocation references are independent.
+        } catch (...) {
+            ::close(fd);
+            throw;
+        }
     }
 
     at::Tensor tensor_view(const std::vector<int64_t>& shape, uint64_t offset, at::ScalarType dtype) {
@@ -397,6 +435,7 @@ public:
         result["device"] = device_;
         result["numa"] = numa_;
         result["memory_kind"] = gpu_memory_ ? "gpu" : "host";
+        result["handle_type"] = handle_type_ == CU_MEM_HANDLE_TYPE_FABRIC ? "FABRIC" : "POSIX_FD";
         result["base_address"] = uint64_t(address_);
         result["sealed"] = sealed_;
         result["active_views"] = active_views_.load();
@@ -454,7 +493,10 @@ private:
 
     void attach_segment(const FabricSegment& part, MappedSegment& segment, const std::string& fail_stage) {
         CUmemFabricHandle fabric = part.fabric;
-        check(cuMemImportFromShareableHandle(&segment.handle, &fabric, CU_MEM_HANDLE_TYPE_FABRIC), "import_handle");
+        void* handle = handle_type_ == CU_MEM_HANDLE_TYPE_FABRIC
+                           ? static_cast<void*>(&fabric)
+                           : reinterpret_cast<void*>(static_cast<intptr_t>(part.fd));
+        check(cuMemImportFromShareableHandle(&segment.handle, handle, handle_type_), "import_handle");
         segment.retained = true;
         ++counters.imports;
         inject(fail_stage, "after_import");
@@ -532,6 +574,7 @@ private:
     bool context_retained_ = false, reserved_ = false;
     bool may_have_gpu_work_ = false;
     bool gpu_memory_ = false;
+    CUmemAllocationHandleType handle_type_ = CU_MEM_HANDLE_TYPE_FABRIC;
     int device_ = -1, numa_ = -1;
     CUdevice cuda_device_{};
     CUcontext context_{};
@@ -547,10 +590,12 @@ ViewLease::~ViewLease() noexcept { mapping->release_view(); }
 
 class FabricAllocation {
 public:
-    FabricAllocation(uint64_t size, int numa, int device, const std::string& fail_stage, const std::string& memory_kind) {
+    FabricAllocation(uint64_t size, int numa, int device, const std::string& fail_stage, const std::string& memory_kind,
+                     const std::string& handle_type) {
         require(memory_kind == "host" || memory_kind == "gpu", "memory_kind must be host or gpu");
+        const auto type = handleType(handle_type, memory_kind == "gpu");
         py::gil_scoped_release release;
-        mapping_ = Mapping::make_owner(size, numa, device, fail_stage, memory_kind == "gpu");
+        mapping_ = Mapping::make_owner(size, numa, device, fail_stage, memory_kind == "gpu", type);
     }
     void load(const py::bytes& data, uint64_t offset) {
         char* address = nullptr; Py_ssize_t length = 0;
@@ -563,6 +608,7 @@ public:
         { py::gil_scoped_release release; fabric = mapping_->export_handle(); }
         return py::bytes(reinterpret_cast<const char*>(&fabric), sizeof(fabric));
     }
+    int export_fd() { return mapping_->export_fd(); }
     void close() { mapping_->close(); }
     py::dict info() const { return mapping_->info(); }
 private:
@@ -571,9 +617,10 @@ private:
 
 class FabricMapping {
 public:
-    FabricMapping(int device, const std::string& memory_kind) {
+    FabricMapping(int device, const std::string& memory_kind, const std::string& handle_type) {
         require(memory_kind == "host" || memory_kind == "gpu", "memory_kind must be host or gpu");
-        mapping_ = Mapping::make_mapping(device, memory_kind == "gpu");
+        handle_type_ = handleType(handle_type, memory_kind == "gpu");
+        mapping_ = Mapping::make_mapping(device, memory_kind == "gpu", handle_type_);
     }
 
     void attach(const py::sequence& segments, const std::string& fail_stage,
@@ -584,16 +631,25 @@ public:
             require(py::isinstance<py::tuple>(item) && py::len(item) == 3,
                     "each segment must be a (handle, allocation_bytes, granularity) tuple");
             auto tuple = py::reinterpret_borrow<py::tuple>(item);
-            require(py::isinstance<py::bytes>(tuple[0]), "Fabric handle must be bytes");
             require(py::isinstance<py::int_>(tuple[1]) && !py::isinstance<py::bool_>(tuple[1]) &&
                     py::isinstance<py::int_>(tuple[2]) && !py::isinstance<py::bool_>(tuple[2]),
                     "allocation_bytes and granularity must be integers");
             FabricSegment part{};
-            char* address = nullptr;
-            Py_ssize_t length = 0;
-            if (PyBytes_AsStringAndSize(tuple[0].ptr(), &address, &length) != 0) throw py::error_already_set();
-            require(length == sizeof(part.fabric), "fabric handle has incorrect byte length");
-            std::memcpy(&part.fabric, address, sizeof(part.fabric));
+            if (handle_type_ == CU_MEM_HANDLE_TYPE_FABRIC) {
+                require(py::isinstance<py::bytes>(tuple[0]), "Fabric handle must be bytes");
+                char* address = nullptr;
+                Py_ssize_t length = 0;
+                if (PyBytes_AsStringAndSize(tuple[0].ptr(), &address, &length) != 0) throw py::error_already_set();
+                require(length == sizeof(part.fabric), "fabric handle has incorrect byte length");
+                std::memcpy(&part.fabric, address, sizeof(part.fabric));
+            } else {
+                require(py::isinstance<py::int_>(tuple[0]) && !py::isinstance<py::bool_>(tuple[0]),
+                        "POSIX_FD handle must be a local integer FD");
+                const auto fd = PyLong_AsLongLong(tuple[0].ptr());
+                if (PyErr_Occurred()) throw py::error_already_set();
+                require(fd >= 0 && fd <= std::numeric_limits<int>::max(), "POSIX_FD handle is out of range");
+                part.fd = static_cast<int>(fd);
+            }
             part.bytes = PyLong_AsUnsignedLongLong(tuple[1].ptr());
             if (PyErr_Occurred()) throw py::error_already_set();
             part.granularity = PyLong_AsUnsignedLongLong(tuple[2].ptr());
@@ -624,6 +680,7 @@ public:
 
 private:
     std::shared_ptr<Mapping> mapping_;
+    CUmemAllocationHandleType handle_type_;
 };
 
 py::dict resource_counters() {
@@ -650,22 +707,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
                "Return each visible CUDA device's host NUMA node in ordinal order.");
     module.def("check_fabric_devices", &checkFabricDevices, py::arg("devices"),
                py::call_guard<py::gil_scoped_release>(), "Check Fabric support on the requested CUDA ordinals.");
-    module.def("device_granularity", [](int device) { return Mapping::allocation_granularity(-1, device, true); }, py::arg("device") = 0, py::call_guard<py::gil_scoped_release>());
+    module.def("device_granularity", [](int device, const std::string& handle_type) {
+        return Mapping::allocation_granularity(-1, device, true, handleType(handle_type, true));
+    }, py::arg("device") = 0, py::arg("handle_type") = "fabric", py::call_guard<py::gil_scoped_release>());
     module.def("resource_counters", &resource_counters);
     module.def("host_numa_granularity", [](int numa, int device) { return Mapping::allocation_granularity(numa, device); },
                py::arg("numa"), py::arg("device"), py::call_guard<py::gil_scoped_release>());
     py::class_<FabricAllocation>(module, "FabricAllocation", "One local Fabric-exportable allocation.")
-        .def(py::init<uint64_t, int, int, const std::string&, const std::string&>(), py::arg("size"), py::arg("numa"),
-             py::arg("device"), py::arg("fail_stage") = "", py::arg("memory_kind") = "host")
+        .def(py::init<uint64_t, int, int, const std::string&, const std::string&, const std::string&>(), py::arg("size"), py::arg("numa"),
+             py::arg("device"), py::arg("fail_stage") = "", py::arg("memory_kind") = "host", py::arg("handle_type") = "fabric")
         .def("load", &FabricAllocation::load, py::arg("data"), py::arg("offset") = 0)
         .def("export_handle", &FabricAllocation::export_handle)
+        .def("export_fd", &FabricAllocation::export_fd, py::call_guard<py::gil_scoped_release>(),
+             "Export a new close-on-exec FD owned by the caller; transfer it only with SCM_RIGHTS.")
         .def("info", &FabricAllocation::info)
         .def("close", &FabricAllocation::close, py::call_guard<py::gil_scoped_release>());
     py::class_<FabricMapping>(module, "FabricMapping", "One read-only CUDA VA span backed by ordered Fabric segments.")
-        .def(py::init<int, const std::string&>(), py::arg("device"), py::arg("memory_kind") = "host")
+        .def(py::init<int, const std::string&, const std::string&>(), py::arg("device"),
+             py::arg("memory_kind") = "host", py::arg("handle_type") = "fabric")
         .def("attach", &FabricMapping::attach, py::arg("segments"), py::kw_only(),
              py::arg("_fail_stage") = "", py::arg("_fail_segment") = 0, py::arg("_fail_rollback") = false,
-             "Map a sequence of (Fabric handle bytes, allocation bytes, granularity) tuples in order.")
+             "Map ordered (handle, bytes, granularity) tuples. Fabric uses bytes; POSIX_FD borrows local integer FDs.")
         .def("tensor_view", &FabricMapping::tensor_view, py::arg("shape"), py::arg("offset") = 0,
              py::kw_only(), py::arg("dtype") = at::kByte,
              "Return a read-only, zero-copy CUDA tensor view at a byte offset. The view retains the mapping.")

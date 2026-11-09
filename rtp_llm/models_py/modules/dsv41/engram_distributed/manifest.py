@@ -60,7 +60,7 @@ class ExpectedLayout:
         _integer(self.head_dim, "expected.head_dim")
         if self.head_dim % DEFAULT_BLOCK or self.layout_abi != LAYOUT_ABI:
             raise ManifestError("UNSUPPORTED_LAYOUT", "expected")
-        if self.backend not in ("fabric_egm", "fabric_gpu"):
+        if self.backend not in ("fabric_egm", "fabric_gpu", "cuda_ipc"):
             raise ManifestError("UNSUPPORTED_BACKEND", "expected.backend")
         _text(self.model_revision, "expected.model_revision")
         _digest(self.hash_abi, "expected.hash_abi")

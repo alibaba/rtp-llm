@@ -105,6 +105,14 @@ assert not torch.cuda.is_initialized()
             native.FabricMapping(0, "host_shared")
         with self.assertRaisesRegex(ValueError, "device ordinal"):
             native.FabricMapping(-1)
+        with self.assertRaisesRegex(ValueError, "handle_type"):
+            native.FabricMapping(0, "host", handle_type="posix_fd")
+        fd_mapping = native.FabricMapping(0, "gpu", handle_type="posix_fd")
+        for value in (True, -1, 2**31, b"1"):
+            with self.subTest(fd=value), self.assertRaises(ValueError):
+                fd_mapping.attach([(value, 4096, 4096)])
+            self.assertEqual(dict(native.resource_counters()), before)
+        fd_mapping.close()
         handle = b"x" * native.fabric_handle_bytes
         mapping = native.FabricMapping(0)
         self.assertEqual(mapping.info()["state"], "NEW")
@@ -163,6 +171,78 @@ class NativeStorageTests(unittest.TestCase):
         gc.collect()
         self.assertEqual(dict(self.native.resource_counters()), self.baseline)
 
+    def test_posix_segments_hold_cuda_references_after_fd_close(self):
+        native, torch = self.native, self.torch
+        owners, descriptors, handles = [], [], []
+        mapping = native.FabricMapping(self.device, "gpu", handle_type="posix_fd")
+        try:
+            for value in (1.25, -2.5):
+                owner = native.FabricAllocation(
+                    4096, -1, self.device, memory_kind="gpu", handle_type="posix_fd"
+                )
+                owners.append(owner)
+                owner.load(
+                    torch.tensor([value], dtype=torch.bfloat16)
+                    .view(torch.uint8)
+                    .numpy()
+                    .tobytes()
+                )
+                fd = owner.export_fd()
+                handles.append(fd)
+                self.assertFalse(os.get_inheritable(fd))
+                info = owner.info()
+                self.assertEqual(info["handle_type"], "POSIX_FD")
+                descriptors.append((fd, info["allocation_bytes"], info["granularity"]))
+                with self.assertRaisesRegex(ValueError, "sealed"):
+                    owner.load(b"x")
+                with self.assertRaisesRegex(ValueError, "export_fd"):
+                    owner.export_handle()
+            mapping.attach(list(reversed(descriptors)))
+            for fd in handles:
+                os.close(fd)
+            handles.clear()
+            view = mapping.tensor_view([1], dtype=torch.bfloat16)
+            tail = mapping.tensor_view([1], descriptors[1][1], dtype=torch.bfloat16)
+            padding = mapping.tensor_view([32], 2)
+            try:
+                self.assertEqual(view.item(), -2.5)
+                self.assertEqual(tail.item(), 1.25)
+                self.assertEqual(padding.cpu().tolist(), [0] * 32)
+                with self.assertRaisesRegex(ValueError, "live tensor"):
+                    mapping.close()
+            finally:
+                del view, tail, padding
+        finally:
+            mapping.close()
+            for fd in handles:
+                os.close(fd)
+            for owner in reversed(owners):
+                owner.close()
+
+    def test_posix_second_segment_failure_releases_cuda_refs_without_closing_fd(self):
+        owner = self.native.FabricAllocation(
+            4096, -1, self.device, memory_kind="gpu", handle_type="posix_fd"
+        )
+        self.addCleanup(owner.close)
+        fd = owner.export_fd()
+        self.addCleanup(os.close, fd)
+        info = owner.info()
+        segments = [(fd, info["allocation_bytes"], info["granularity"])] * 2
+        baseline = dict(self.native.resource_counters())
+        for stage in ("after_import", "after_properties", "after_map", "after_access"):
+            with self.subTest(stage=stage):
+                mapping = self.native.FabricMapping(
+                    self.device, "gpu", handle_type="posix_fd"
+                )
+                self.addCleanup(mapping.close)
+                with self.assertRaisesRegex(RuntimeError, stage):
+                    mapping.attach(segments, _fail_stage=stage, _fail_segment=1)
+                self.assertEqual(mapping.info()["state"], "CLOSED")
+                self.assertEqual(dict(self.native.resource_counters()), baseline)
+                os.fstat(
+                    fd
+                )  # The caller retains ownership on both success and failure.
+
     def test_gpu_backing_readback_graph_and_memory_kind_guard(self):
         owner = self.native.FabricAllocation(4096, -1, self.device, memory_kind="gpu")
         payload = b"fabric-gpu-single-copy"
@@ -214,6 +294,7 @@ class NativeStorageTests(unittest.TestCase):
             "after_reserve",
             "after_map",
             "after_access",
+            "after_zero",
         ):
             with self.subTest(role="owner", stage=stage), self.assertRaisesRegex(
                 RuntimeError, "TEST_FAULT_INJECTION"

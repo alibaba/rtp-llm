@@ -1,16 +1,17 @@
 # 分布式 Engram：启用、拓扑与启动交换
 
-更新时间：2026-11-07。每个存储 host 的 RTP worker 持有一片 Engram，GPU 在线直接读映射后的内存。没有独立 sidecar/holder，没有在线查表 RPC，也不分发 bundle 文件。
+更新时间：2026-11-09。每个存储 host 的 RTP worker 持有一片 Engram，GPU 在线直接读映射后的内存。没有独立 sidecar/holder，没有在线查表 RPC，也不分发 bundle 文件。
 
 ## 最小配置
 
-只用一个入口选择存储方式，三种模式均在冷启动时确定：
+只用一个入口选择存储方式，存储模式在冷启动时确定：
 
 | `RTP_ENGRAM_STORAGE` | 存储方式 | 数据分配 |
 |---|---|---|
 | `host` | 本机 CPU 内存 | 复用本机共享表、NUMA interleave 与 reader lease |
 | `host_shared` | 多 host CPU 内存共享 | 每 host 一份行分片，可在本机 NUMA 节点间继续切分 |
-| `gpu_shared` | 多 host GPU HBM 共享 | 每 host 行分片继续切分到参与的本机 GPU |
+| `gpu_shared` / `cuda_fabric` | GPU HBM Fabric 共享 | 每 host 行分片继续切分到本机 GPU；也支持单 host |
+| `cuda_local` | 单 host GPU HBM 共享 | 每个 rank 在本 GPU 分配一片，通过 POSIX FD 导入，不要求 Fabric / IMEX |
 
 ```bash
 # 同一 RTP world 或平台 gang 已提供完整 host 拓扑时，仅需选择模式。
@@ -22,12 +23,14 @@ RTP_ENGRAM_STORAGE=host_shared
 切到 `host` 时可保留 `ENGRAM_SHARD_COUNT` / cohort
 拓扑，不会执行共享交换。切到共享模式时不必另设 enable 开关；
 P 从拓扑推导，若仍设置 `ENGRAM_SHARD_COUNT`，则作为一致性校验。
-无效模式、缺少共享拓扑或交换失败均报错，不静默回退。当前不提供本机 `gpu` 模式。
+无效模式、缺少共享拓扑或交换失败均报错，不静默回退。单机 GPU 共享使用 `cuda_local`，不接受 `gpu` 这个值。
 
 完全未配置时保持本机 host 路径。旧 `RTP_ENGRAM_MEMORY` 入口已移除；
 只配置 `ENGRAM_SHARD_COUNT` / cohort 而未指定存储模式时明确报错，避免静默加载本机表。
 
-NUMA、容量和 gang 参数不决定新模式。共享模式需要同一 NVLink Fabric / IMEX 域。
+NUMA、容量和 gang 参数不决定新模式。`host_shared` / `gpu_shared` 需要同一 NVLink Fabric / IMEX 域。
+`cuda_fabric` 在配置入口归一为 `gpu_shared`；`cuda_local` 仅接受同 host 的完整 world，
+不设置跨 host cohort。Store 只交换元数据和屏障，FD 通过本机 Unix socket 的 SCM_RIGHTS 传递。
 共享模式默认持有 process-lifetime Graph pin，兼容已启用的 decode CUDA Graph，
 不再要求额外设置 `RTP_ENGRAM_GRAPH_MODE=process_lifetime`。
 DSpARK、prefetch、Graph 开关本身仍使用原业务配置。所有 worker 必须一致，切换需整组冷启动。

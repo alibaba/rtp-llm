@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Model attachment, table sources and process-lifetime storage ownership."""
+
 from __future__ import annotations
 
 import hashlib
@@ -18,6 +19,7 @@ from .config import (
     HARD_MAX_TOTAL_ALLOCATION_BYTES,
     MAX_SHARDS,
     EngramOptions,
+    StorageMode,
     StoragePolicy,
 )
 from .manifest import (
@@ -408,10 +410,12 @@ class EngramRuntime:
 
     def __init__(self):
         self._lock = threading.RLock()
-        self._prepared: tuple[dict, EngramOptions] | None = None
+        self._prepared: tuple[dict | FabricEngramStorage, EngramOptions] | None = None
         self._storages = []
 
-    def install(self, package: dict, options: EngramOptions) -> None:
+    def install(
+        self, package: dict | FabricEngramStorage, options: EngramOptions
+    ) -> None:
         """Commit the verified startup package before this rank acknowledges it."""
         if not options.policy.shared:
             raise BootstrapError("LOCAL_ENGRAM_HAS_SHARED_PACKAGE")
@@ -479,6 +483,26 @@ class EngramRuntime:
         self, package, *, layout, hash_state, device, options: EngramOptions
     ):
         """Attach from an in-memory startup package. Serving never reads bundle files."""
+        if isinstance(package, FabricEngramStorage):
+            # The single-host IPC startup already owns and verifies these mappings.
+            # Bind the model contract here without allocating or copying again.
+            import torch
+
+            target = torch.device(device)
+            if (
+                options.policy.mode != StorageMode.CUDA_LOCAL
+                or package.validated.layout.backend != options.policy.backend
+                or target.type != "cuda"
+                or target.index != package.device
+            ):
+                raise BootstrapError("LOCAL_CUDA_STORAGE_MISMATCH")
+            with package.use():
+                package.require_model_layout(
+                    layout.layer_ids, layout.num_embeddings, layout.head_dim
+                )
+                if package.validated.layout.hash_abi != hash_state_digest(hash_state):
+                    raise BootstrapError("MODEL_CONTRACT_MISMATCH")
+            return package
         if type(package) is not dict or set(package) != _PACKAGE_FIELDS:
             raise BootstrapError("INVALID_PACKAGE")
         parsed = package["manifest"]

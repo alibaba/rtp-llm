@@ -46,8 +46,9 @@ class DependencyFreeTest(unittest.TestCase):
             "model.bin",
             "",
         ):
-            with self.subTest(relative=relative), self.assertRaises(
-                checkpoint.CheckpointError
+            with (
+                self.subTest(relative=relative),
+                self.assertRaises(checkpoint.CheckpointError),
             ):
                 checkpoint._parts(relative)
 
@@ -120,13 +121,13 @@ class RawReaderTest(unittest.TestCase):
             side_effect=AssertionError("default must not query"),
         ):
             self.assertIsNone(checkpoint._cache_page_size(False))
-        with patch.object(
-            checkpoint.os, "posix_fadvise", lambda *args: None, create=True
-        ), patch.object(
-            checkpoint.os, "POSIX_FADV_DONTNEED", 4, create=True
-        ), patch.object(
-            checkpoint.os, "sysconf", return_value=65536
-        ) as query:
+        with (
+            patch.object(
+                checkpoint.os, "posix_fadvise", lambda *args: None, create=True
+            ),
+            patch.object(checkpoint.os, "POSIX_FADV_DONTNEED", 4, create=True),
+            patch.object(checkpoint.os, "sysconf", return_value=65536) as query,
+        ):
             self.assertEqual(checkpoint._cache_page_size(True), 65536)
             query.assert_called_once_with("SC_PAGESIZE")
         for invalid in (1, "yes", None):
@@ -139,9 +140,11 @@ class RawReaderTest(unittest.TestCase):
             self.assertEqual(error.exception.code, "CACHE_ADVICE_UNSUPPORTED")
 
     def test_discard_range_contains_only_fully_consumed_pages(self):
-        with tempfile.TemporaryFile() as source, patch.object(
-            checkpoint.os, "posix_fadvise", create=True
-        ) as advise, patch.object(checkpoint.os, "POSIX_FADV_DONTNEED", 4, create=True):
+        with (
+            tempfile.TemporaryFile() as source,
+            patch.object(checkpoint.os, "posix_fadvise", create=True) as advise,
+            patch.object(checkpoint.os, "POSIX_FADV_DONTNEED", 4, create=True),
+        ):
             self.assertEqual(
                 checkpoint._discard_consumed_pages(source, 1, 131073, 65536), 131072
             )
@@ -154,12 +157,16 @@ class RawReaderTest(unittest.TestCase):
             advise.assert_not_called()
 
     def test_discard_error_has_explicit_code(self):
-        with tempfile.TemporaryFile() as source, patch.object(
-            checkpoint.os,
-            "posix_fadvise",
-            side_effect=OSError("advice failed"),
-            create=True,
-        ), patch.object(checkpoint.os, "POSIX_FADV_DONTNEED", 4, create=True):
+        with (
+            tempfile.TemporaryFile() as source,
+            patch.object(
+                checkpoint.os,
+                "posix_fadvise",
+                side_effect=OSError("advice failed"),
+                create=True,
+            ),
+            patch.object(checkpoint.os, "POSIX_FADV_DONTNEED", 4, create=True),
+        ):
             with self.assertRaises(checkpoint.CheckpointError) as error:
                 checkpoint._discard_consumed_pages(source, 0, 4096, 4096)
             self.assertEqual(error.exception.code, "CACHE_ADVICE_FAILED")
@@ -190,6 +197,17 @@ class CheckpointTest(unittest.TestCase):
         (self.root / "model.safetensors.index.json").write_text(
             json.dumps({"weight_map": self.index})
         )
+
+    def test_checkpoint_metadata_is_independent_of_backing_and_handle_type(self):
+        baseline = checkpoint.inspect_checkpoint(self.root, self.layout)
+        for backend in ("fabric_egm", "fabric_gpu", "cuda_ipc"):
+            with self.subTest(backend=backend):
+                plan = checkpoint.inspect_checkpoint(
+                    self.root, replace(self.layout, backend=backend)
+                )
+                self.assertEqual(plan.layers, baseline.layers)
+                self.assertEqual(plan.files, baseline.files)
+                self.assertEqual(plan.index, baseline.index)
 
     def write_checkpoint(self, *, scale_fp8=False, weight_dtype=None):
         shards = ({}, {})
@@ -417,10 +435,12 @@ class CheckpointTest(unittest.TestCase):
             max_load_chunk_bytes=128,
         )
         generation = str(uuid4())
-        with patch.dict(
-            sys.modules, {"rtp_llm.models_py.modules.dsv41.engram": model}
-        ), patch.object(publisher, "_load_native", lambda: native), patch.object(
-            publisher, "hash_state_digest", lambda _: self.layout.hash_abi
+        with (
+            patch.dict(sys.modules, {"rtp_llm.models_py.modules.dsv41.engram": model}),
+            patch.object(publisher, "_load_native", lambda: native),
+            patch.object(
+                publisher, "hash_state_digest", lambda _: self.layout.hash_abi
+            ),
         ):
             documents = [
                 publisher.shard_publisher.publish(
@@ -662,6 +682,253 @@ class HashSemanticTest(unittest.TestCase):
 
 
 @unittest.skipIf(torch is None, "CPU PyTorch required; native/GPU calls are mocked")
+class PreparedLocalStorageTest(unittest.TestCase):
+    def test_store_disconnect_still_closes_loaded_gpu_backings_and_fds(self):
+        from rtp_llm.models_py.modules.dsv41.engram_distributed import local
+
+        expected = m.ExpectedLayout(
+            ((1, 32761),), 64, "fixture", "sha256:" + "a" * 64, backend="cuda_ipc"
+        )
+        tensors = tuple(
+            types.SimpleNamespace(
+                name=name, relative_path="fixture", shape=(32761, columns)
+            )
+            for name, columns in (("weight", 64), ("scale", 2))
+        )
+        plan = types.SimpleNamespace(
+            layers=(types.SimpleNamespace(layer_id=1, tensors=tensors),),
+            files=(types.SimpleNamespace(relative_path="fixture"),),
+            index=object(),
+        )
+        owners = [mock.Mock(), mock.Mock()]
+        fds = [os.open(os.devnull, os.O_RDONLY) for _ in owners]
+        for owner, fd in zip(owners, fds):
+            owner.export_fd.return_value = fd
+        native = mock.Mock(max_allocation_bytes=1 << 40, max_load_chunk_bytes=64 << 20)
+        native.device_granularity.return_value = 4096
+        native.FabricAllocation.side_effect = owners
+        disconnected = RuntimeError("Store connection lost")
+        store = mock.Mock()
+        store.add.return_value = 1
+        store.set.side_effect = RuntimeError("failure notification also disconnected")
+        directories = []
+
+        def exchange(agreement, phase, payload):
+            if phase == "metadata":
+                return [dict(payload, device=i, pid=i + 100) for i in range(4)]
+            if phase == "directory":
+                directories.append(payload)
+                return [payload, None, None, None]
+            self.assertEqual(phase, "loaded")
+            raise disconnected
+
+        read_text = Path.read_text
+
+        def text(path, *args, **kwargs):
+            return (
+                "fixture-boot"
+                if str(path) == "/proc/sys/kernel/random/boot_id"
+                else read_text(path, *args, **kwargs)
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            startup = local.LocalCudaStartup(
+                store, rank=0, world_size=4, device=0, checkpoint=directory, environ={}
+            )
+            with (
+                patch.object(local, "_load_native", return_value=native),
+                patch.object(local, "inspect_checkpoint", return_value=plan),
+                patch.object(local, "check_gpu_capacity"),
+                patch.object(local, "load_rows"),
+                patch.object(local, "_same_snapshot"),
+                patch.object(local._Agreement, "exchange", exchange),
+                patch.object(Path, "read_text", text),
+            ):
+                try:
+                    with self.assertRaises(RuntimeError) as caught:
+                        startup.prepare(expected)
+                    self.assertIs(caught.exception, disconnected)
+                    for owner in owners:
+                        owner.close.assert_called_once()
+                    for fd in fds:
+                        with self.assertRaises(OSError):
+                            os.fstat(fd)
+                    self.assertTrue(directories)
+                    self.assertTrue(all(not Path(p).exists() for p in directories))
+                finally:
+                    for fd in fds:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+
+    def test_local_startup_installs_once_and_retains_failed_cleanup(self):
+        from rtp_llm.models_py.modules.dsv41.engram_distributed import (
+            EngramStartup,
+            local,
+        )
+        from rtp_llm.models_py.modules.dsv41.engram_distributed.storage import (
+            CleanupPendingError,
+        )
+
+        expected = m.ExpectedLayout(((1, 8),), 32, "fixture", "sha256:" + "a" * 64)
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "config.json").write_text("{}")
+            for fail_install, fail_close in (
+                (False, False),
+                (True, False),
+                (True, True),
+            ):
+                with self.subTest(fail_install=fail_install, fail_close=fail_close):
+                    storage = mock.Mock()
+                    install = mock.Mock()
+                    original = RuntimeError("installation failed")
+                    if fail_install:
+                        install.side_effect = original
+                    if fail_close:
+                        storage.close.side_effect = RuntimeError("drain failed")
+                    publish = mock.Mock(
+                        side_effect=AssertionError(
+                            "Fabric publisher must not run for local IPC"
+                        )
+                    )
+                    startup = EngramStartup(
+                        object(),
+                        rank=0,
+                        world_size=4,
+                        local_device=0,
+                        checkpoint=directory,
+                        environ={"RTP_ENGRAM_STORAGE": "cuda_local"},
+                        gang_hosts=["host-a"] * 4,
+                        install=install,
+                        publish=publish,
+                    )
+                    with (
+                        patch(
+                            "rtp_llm.models_py.modules.dsv41.engram.EngramLayout",
+                            return_value=types.SimpleNamespace(layer_ids=(1,)),
+                        ),
+                        patch("rtp_llm.models_py.modules.dsv41.engram.NgramHashState"),
+                        patch.object(local, "_expected_layout", return_value=expected),
+                        patch.object(
+                            local, "_checkpoint_revision", return_value="fixture"
+                        ),
+                        patch.object(
+                            local, "hash_state_digest", return_value=expected.hash_abi
+                        ),
+                        patch.object(
+                            local.LocalCudaStartup, "prepare", return_value=storage
+                        ) as prepare,
+                        patch.object(b.process_runtime, "retain") as retain,
+                    ):
+                        if fail_close:
+                            with self.assertRaises(CleanupPendingError) as caught:
+                                startup.run()
+                            self.assertIs(caught.exception.resource, storage)
+                            self.assertIs(caught.exception.__cause__, original)
+                            retain.assert_called_once_with(storage)
+                        elif fail_install:
+                            with self.assertRaises(RuntimeError) as caught:
+                                startup.run()
+                            self.assertIs(caught.exception, original)
+                            retain.assert_not_called()
+                        else:
+                            self.assertIs(startup.run(), storage)
+                            retain.assert_not_called()
+                        publish.assert_not_called()
+                        prepare.assert_called_once()
+                        self.assertEqual(prepare.call_args.args[0].backend, "cuda_ipc")
+                        install.assert_called_once()
+                        self.assertIs(install.call_args.args[0], storage)
+                        self.assertEqual(
+                            install.call_args.args[1].policy.backend, "cuda_ipc"
+                        )
+                        self.assertEqual(storage.close.call_count, int(fail_install))
+
+    def test_prepared_gpu_storage_binds_once_without_native_allocation(self):
+        from rtp_llm.models_py.modules.dsv41.engram_distributed.config import (
+            EngramOptions,
+            StoragePolicy,
+        )
+        from rtp_llm.models_py.modules.dsv41.engram_distributed.storage import (
+            FabricEngramStorage,
+        )
+
+        layout = types.SimpleNamespace(
+            layer_ids=(0, 2), num_embeddings=(8, 16), head_dim=32
+        )
+        hash_abi = "sha256:" + "a" * 64
+        expected = m.ExpectedLayout(
+            ((0, 8), (2, 16)), 32, "fixture", hash_abi, backend="cuda_ipc"
+        )
+        manifest = m.Manifest(
+            "fixture", "local-attempt", expected.layout_abi, hash_abi, "cuda_ipc", ()
+        )
+        storage = FabricEngramStorage()
+        storage.validated = m.ValidatedManifest(manifest, 0, 0, expected)
+        storage.device, storage.memory_kind, storage._state = 1, "gpu", "READY"
+        runtime = b.EngramRuntime()
+        options = EngramOptions(
+            StoragePolicy.from_environ({"RTP_ENGRAM_STORAGE": "cuda_local"}),
+            None,
+            "process_lifetime",
+        )
+        runtime.install(storage, options)
+        model = types.SimpleNamespace(
+            _v4_args=types.SimpleNamespace(v41_config={"checkpoint_path": "/fixture"}),
+            v4=types.SimpleNamespace(
+                embed=types.SimpleNamespace(
+                    weight=types.SimpleNamespace(device="cuda:1")
+                ),
+                layers=[types.SimpleNamespace(engram=None) for _ in range(3)],
+            ),
+            py_hw_kernel_config=types.SimpleNamespace(enable_cuda_graph=True),
+        )
+        layers = mock.Mock(
+            side_effect=lambda *args, **kwargs: types.SimpleNamespace(
+                release_external_views=lambda: None
+            )
+        )
+        with (
+            patch.object(b, "hash_state_digest", return_value=hash_abi),
+            patch.object(
+                b, "_load_native", side_effect=AssertionError("already allocated")
+            ),
+        ):
+            attachment = b.EngramModelAttachment.bind(
+                model,
+                runtime,
+                layout_factory=lambda _: layout,
+                hash_factory=lambda *args, **kwargs: object(),
+                layer_factory=layers,
+                environ={"RTP_ENGRAM_STORAGE": "cuda_local"},
+            )
+            self.assertIs(attachment.storage, storage)
+            self.assertIs(b.EngramModelAttachment.bind(model, runtime), attachment)
+            self.assertEqual(storage.info()["graph_pins"], 1)
+            self.assertEqual(layers.call_count, 2)
+            self.assertEqual(runtime._storages, [storage])
+            with self.assertRaisesRegex(b.BootstrapError, "STORAGE_MISMATCH"):
+                runtime.attach_from_package(
+                    storage,
+                    layout=layout,
+                    hash_state=object(),
+                    device="cuda:2",
+                    options=options,
+                )
+        with patch.object(b, "hash_state_digest", return_value="sha256:" + "b" * 64):
+            with self.assertRaisesRegex(b.BootstrapError, "MODEL_CONTRACT_MISMATCH"):
+                runtime.attach_from_package(
+                    storage,
+                    layout=layout,
+                    hash_state=object(),
+                    device="cuda:1",
+                    options=options,
+                )
+        storage._unpin_graph()
+        storage.close()
+
+
 class AttachFailureTest(unittest.TestCase):
     def setUp(self):
         self.hash_state = real_hash_state()

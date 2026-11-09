@@ -214,10 +214,7 @@ def inspect_checkpoint(checkpoint_dir, expected_layout: ExpectedLayout):
     """
     from safetensors import safe_open
 
-    if (
-        not isinstance(expected_layout, ExpectedLayout)
-        or expected_layout.backend != "fabric_egm"
-    ):
+    if not isinstance(expected_layout, ExpectedLayout):
         raise CheckpointError("INVALID_LAYOUT")
     dim = expected_layout.head_dim
     if dim < 32 or dim & (dim - 1):

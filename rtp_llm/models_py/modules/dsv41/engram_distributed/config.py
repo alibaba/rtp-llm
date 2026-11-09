@@ -75,6 +75,7 @@ class StorageMode(str, Enum):
     HOST = "host"
     HOST_SHARED = "host_shared"
     GPU_SHARED = "gpu_shared"
+    CUDA_LOCAL = "cuda_local"
 
 
 @dataclass(frozen=True)
@@ -89,10 +90,16 @@ class StoragePolicy:
 
     @property
     def memory_kind(self):
-        return "gpu" if self.mode == StorageMode.GPU_SHARED else "host"
+        return (
+            "gpu"
+            if self.mode in (StorageMode.GPU_SHARED, StorageMode.CUDA_LOCAL)
+            else "host"
+        )
 
     @property
     def backend(self):
+        if self.mode == StorageMode.CUDA_LOCAL:
+            return "cuda_ipc"
         return "fabric_gpu" if self.memory_kind == "gpu" else "fabric_egm"
 
     @property
@@ -109,14 +116,15 @@ class StoragePolicy:
         ):
             raise ShardConfigError("ENGRAM_STORAGE_REQUIRED")
         try:
-            return cls(StorageMode(env.get("RTP_ENGRAM_STORAGE", "host")))
+            mode = env.get("RTP_ENGRAM_STORAGE", "host")
+            return cls(StorageMode("gpu_shared" if mode == "cuda_fabric" else mode))
         except (ValueError, TypeError):
             raise ShardConfigError("INVALID_ENGRAM_STORAGE_MODE") from None
 
 
 def validate_count(value):
-    if type(value) is not int or not 2 <= value <= MAX_SHARDS:
-        raise ShardConfigError("STORAGE_HOST_COUNT_MUST_BE_2_TO_64")
+    if type(value) is not int or not 1 <= value <= MAX_SHARDS:
+        raise ShardConfigError("STORAGE_HOST_COUNT_MUST_BE_1_TO_64")
     return value
 
 
@@ -171,7 +179,7 @@ class EngramOptions:
     """Resolved worker options passed from startup to model attachment."""
 
     policy: StoragePolicy
-    shards: ShardConfig
+    shards: ShardConfig | None
     graph_mode: str
 
 
@@ -581,8 +589,6 @@ def build_group(
         source = "gang"
         if parts is None:
             raise ShardConfigError("GANG_TOPOLOGY_REQUIRED")
-        if len(parts) < 2:
-            raise ShardConfigError("COHORT_REQUIRED")
         cohort = _parse_members(",".join(parts), env.get(PORT_ENV))
     if parts is not None and not set(parts) <= {host for host, _ in cohort}:
         raise ShardConfigError("GANG_HOST_NOT_IN_COHORT")
