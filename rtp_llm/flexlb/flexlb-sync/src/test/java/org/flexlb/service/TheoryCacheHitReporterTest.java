@@ -33,44 +33,19 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks theoretical cache hits against prior requests and asynchronous trace reporting.
+ */
 @ExtendWith(MockitoExtension.class)
 class TheoryCacheHitReporterTest {
-
     private final List<TheoryCacheHitReporter> reporters = new ArrayList<>();
 
-    private TheoryCacheHitReporter newReporter() {
-        TheoryCacheHitReporter reporter = new TheoryCacheHitReporter();
-        reporters.add(reporter);
-        return reporter;
-    }
+    @Mock private CacheMetricsReporter cacheMetricsReporter;
 
     @AfterEach
     void closeReporters() {
         reporters.forEach(TheoryCacheHitReporter::closeTheoryLog);
     }
-
-    private static void reportWithConfiguration(
-            TheoryCacheHitReporter reporter, BalanceContext context) throws Exception {
-        ConfigService configService = mock(ConfigService.class);
-        FlexlbConfig config = context.getConfig();
-        Mockito.lenient()
-                .when(configService.loadBalanceConfig())
-                .thenReturn(config == null ? new FlexlbConfig() : config);
-        inject(reporter, "configService", configService);
-        reporter.report(context);
-    }
-
-    private static void awaitReports(TheoryCacheHitReporter reporter) throws Exception {
-        executor(reporter).submit(() -> {}).get(5L, TimeUnit.SECONDS);
-    }
-
-    private static ThreadPoolExecutor executor(TheoryCacheHitReporter reporter) throws Exception {
-        Field field = TheoryCacheHitReporter.class.getDeclaredField("theoryHitReportExecutor");
-        field.setAccessible(true);
-        return (ThreadPoolExecutor) field.get(reporter);
-    }
-
-    @Mock private CacheMetricsReporter cacheMetricsReporter;
 
     @Test
     void should_report_request_hits_against_prior_pool() throws Exception {
@@ -256,6 +231,39 @@ class TheoryCacheHitReporterTest {
         verifyNoInteractions(cacheMetricsReporter, historyWindow);
     }
 
+    private TheoryCacheHitReporter newReporter() {
+        TheoryCacheHitReporter reporter = new TheoryCacheHitReporter();
+        reporters.add(reporter);
+        return reporter;
+    }
+
+    private static void reportWithConfiguration(
+            TheoryCacheHitReporter reporter, BalanceContext context) throws Exception {
+        ConfigService configService = mock(ConfigService.class);
+        FlexlbConfig config = context.getConfig();
+        Mockito.lenient()
+                .when(configService.loadBalanceConfig())
+                .thenReturn(config == null ? new FlexlbConfig() : config);
+        inject(reporter, "configService", configService);
+        reporter.report(context);
+    }
+
+    private static void inject(Object target, String fieldName, Object value) throws Exception {
+        Field field = TheoryCacheHitReporter.class.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.set(target, value);
+    }
+
+    private static void awaitReports(TheoryCacheHitReporter reporter) throws Exception {
+        executor(reporter).submit(() -> {}).get(5L, TimeUnit.SECONDS);
+    }
+
+    private static ThreadPoolExecutor executor(TheoryCacheHitReporter reporter) throws Exception {
+        Field field = TheoryCacheHitReporter.class.getDeclaredField("theoryHitReportExecutor");
+        field.setAccessible(true);
+        return (ThreadPoolExecutor) field.get(reporter);
+    }
+
     private static void awaitLatch(CountDownLatch latch) {
         try {
             assertTrue(latch.await(5L, TimeUnit.SECONDS));
@@ -274,12 +282,6 @@ class TheoryCacheHitReporterTest {
             assertEquals(hitAndInputTokens[i * 2], hitCaptor.getAllValues().get(i));
             assertEquals(hitAndInputTokens[i * 2 + 1], inputCaptor.getAllValues().get(i));
         }
-    }
-
-    private static void inject(Object target, String fieldName, Object value) throws Exception {
-        Field field = TheoryCacheHitReporter.class.getDeclaredField(fieldName);
-        field.setAccessible(true);
-        field.set(target, value);
     }
 
     private static TheoryCacheKeyHistory smallWindow() {

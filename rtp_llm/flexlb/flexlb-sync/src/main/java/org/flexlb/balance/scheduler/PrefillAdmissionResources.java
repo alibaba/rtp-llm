@@ -20,7 +20,6 @@ import java.util.Objects;
  * post-commit cleanup state machine.</p>
  */
 final class PrefillAdmissionResources {
-
     private static final RouteProjection.AdmissionBlockSemantics DECODE_BLOCK =
             new RouteProjection.AdmissionBlockSemantics(
                     "DELIVERY_CAPACITY_DECODE_ENGINE",
@@ -29,23 +28,6 @@ final class PrefillAdmissionResources {
                     RoleType.DECODE);
 
     private PrefillAdmissionResources() {}
-
-    enum MemberOwnership {
-        ADMISSION_OWNED,
-        ENDPOINT_OWNED,
-        OWNERSHIP_LOST
-    }
-
-    static final class Member {
-        final ScheduledRequest item;
-        final DecodeEndpoint.EngineDispatchPermit decode;
-        MemberOwnership ownership = MemberOwnership.ADMISSION_OWNED;
-
-        Member(ScheduledRequest item, DecodeEndpoint.EngineDispatchPermit permit) {
-            this.item = Objects.requireNonNull(item, "item");
-            this.decode = permit;
-        }
-    }
 
     static CapacityBoundary.Attempt<Member> prepareMember(ScheduledRequest item) {
         ScheduledRequest.DecodeBinding binding = item.decodeBinding();
@@ -77,28 +59,21 @@ final class PrefillAdmissionResources {
         };
     }
 
-    private static CapacityBoundary.Attempt<Member> decodeCapacityFull(ScheduledRequest item) {
-        return rejected(CapacityBoundary.unavailable(new DecodeAvailability(item), DECODE_BLOCK));
+    static <T> CapacityBoundary.Attempt<T> failed(Throwable cause) {
+        return rejected(CapacityBoundary.failed(cause));
     }
 
-    /**
-     * Capture the acquired Decode permit into its first owning value. Neither
-     * {@link Member} nor the accepted-result wrapper exists before acquisition,
-     * so both allocation windows are guarded by the exact permit rollback.
-     */
-    private static CapacityBoundary.Attempt<Member> captureMember(
-            ScheduledRequest item, DecodeEndpoint.EngineDispatchPermit permit) {
-        Member member = null;
-        try {
-            member = new Member(item, permit);
-            return accepted(member);
-        } catch (Throwable captureFailure) {
-            Throwable failure =
-                    member == null
-                            ? rollbackPermit(permit, captureFailure)
-                            : rollbackMember(member, captureFailure);
-            return failed(failure);
-        }
+    static <T> CapacityBoundary.Attempt<T> rejected(CapacityBoundary boundary) {
+        return CapacityBoundary.Attempt.rejected(boundary);
+    }
+
+    static IllegalStateException missingEndpoint(String role, ScheduledRequest item) {
+        return new IllegalStateException(role + " is unavailable: request_id=" + item.requestId());
+    }
+
+    static IllegalStateException retired(String role, ScheduledRequest item) {
+        return new IllegalStateException(
+                role + " endpoint generation retired: request_id=" + item.requestId());
     }
 
     static <T> CapacityBoundary.Attempt<T> rejectedPrefill(
@@ -122,25 +97,8 @@ final class PrefillAdmissionResources {
         };
     }
 
-    static IllegalStateException missingEndpoint(String role, ScheduledRequest item) {
-        return new IllegalStateException(role + " is unavailable: request_id=" + item.requestId());
-    }
-
-    static IllegalStateException retired(String role, ScheduledRequest item) {
-        return new IllegalStateException(
-                role + " endpoint generation retired: request_id=" + item.requestId());
-    }
-
     static <T> CapacityBoundary.Attempt<T> accepted(T value) {
         return CapacityBoundary.Attempt.accepted(value);
-    }
-
-    static <T> CapacityBoundary.Attempt<T> rejected(CapacityBoundary boundary) {
-        return CapacityBoundary.Attempt.rejected(boundary);
-    }
-
-    static <T> CapacityBoundary.Attempt<T> failed(Throwable cause) {
-        return rejected(CapacityBoundary.failed(cause));
     }
 
     static Throwable rollbackReservation(
@@ -156,6 +114,15 @@ final class PrefillAdmissionResources {
         return priorFailure;
     }
 
+    static Throwable rollbackMember(Member member, Throwable priorFailure) {
+        if (member == null || member.ownership != MemberOwnership.ADMISSION_OWNED) {
+            return priorFailure;
+        }
+        Throwable failure = rollbackPermit(member.decode, priorFailure);
+        member.ownership = MemberOwnership.OWNERSHIP_LOST;
+        return failure;
+    }
+
     static Throwable rollbackPermit(
             DecodeEndpoint.EngineDispatchPermit permit, Throwable priorFailure) {
         if (permit == null) {
@@ -167,15 +134,6 @@ final class PrefillAdmissionResources {
             return combine(priorFailure, failure);
         }
         return priorFailure;
-    }
-
-    static Throwable rollbackMember(Member member, Throwable priorFailure) {
-        if (member == null || member.ownership != MemberOwnership.ADMISSION_OWNED) {
-            return priorFailure;
-        }
-        Throwable failure = rollbackPermit(member.decode, priorFailure);
-        member.ownership = MemberOwnership.OWNERSHIP_LOST;
-        return failure;
     }
 
     static void preserveRejectedCause(Throwable rollbackFailure, CapacityBoundary boundary) {
@@ -211,6 +169,30 @@ final class PrefillAdmissionResources {
         return new CommittedAdmissionOwner(exactMembers);
     }
 
+    private static CapacityBoundary.Attempt<Member> decodeCapacityFull(ScheduledRequest item) {
+        return rejected(CapacityBoundary.unavailable(new DecodeAvailability(item), DECODE_BLOCK));
+    }
+
+    /**
+     * Capture the acquired Decode permit into its first owning value. Neither
+     * {@link Member} nor the accepted-result wrapper exists before acquisition,
+     * so both allocation windows are guarded by the exact permit rollback.
+     */
+    private static CapacityBoundary.Attempt<Member> captureMember(
+            ScheduledRequest item, DecodeEndpoint.EngineDispatchPermit permit) {
+        Member member = null;
+        try {
+            member = new Member(item, permit);
+            return accepted(member);
+        } catch (Throwable captureFailure) {
+            Throwable failure =
+                    member == null
+                            ? rollbackPermit(permit, captureFailure)
+                            : rollbackMember(member, captureFailure);
+            return failed(failure);
+        }
+    }
+
     private static void releaseCommittedHandoff(PrefillState.CommittedHandoff handoff) {
         if (handoff == null) {
             return;
@@ -232,6 +214,26 @@ final class PrefillAdmissionResources {
         return aggregate;
     }
 
+    enum MemberOwnership {
+        ADMISSION_OWNED,
+        ENDPOINT_OWNED,
+        OWNERSHIP_LOST
+    }
+
+    /**
+     * Tracks a batch member's Decode permit and the party responsible for releasing it.
+     */
+    static final class Member {
+        final ScheduledRequest item;
+        final DecodeEndpoint.EngineDispatchPermit decode;
+        MemberOwnership ownership = MemberOwnership.ADMISSION_OWNED;
+
+        Member(ScheduledRequest item, DecodeEndpoint.EngineDispatchPermit permit) {
+            this.item = Objects.requireNonNull(item, "item");
+            this.decode = permit;
+        }
+    }
+
     /**
      * Fully allocated before the ledger crosses its canonical commit point.
      * Binding the returned handoff only assigns its reference.
@@ -239,7 +241,9 @@ final class PrefillAdmissionResources {
     static final class CommittedAdmissionOwner implements AutoCloseable {
         private final IdentityHashMap<ScheduledRequest, Member> membersByIdentity;
         private final Member[] members;
+
         private PrefillState.CommittedHandoff handoff;
+
         private boolean bound;
         private boolean closed;
 
@@ -257,12 +261,6 @@ final class PrefillAdmissionResources {
                 }
                 membersByIdentity.put(member.item, member);
             }
-        }
-
-        /** No-throw bind after one Prefill group has committed. */
-        synchronized void bindPrefillHandoff(PrefillState.CommittedHandoff exactHandoff) {
-            handoff = exactHandoff;
-            bound = true;
         }
 
         public synchronized boolean transferToEndpoint(ScheduledRequest exactItem) {
@@ -318,9 +316,17 @@ final class PrefillAdmissionResources {
             }
             releaseCommittedHandoff(handoff);
         }
+
+        /** No-throw bind after one Prefill group has committed. */
+        synchronized void bindPrefillHandoff(PrefillState.CommittedHandoff exactHandoff) {
+            handoff = exactHandoff;
+            bound = true;
+        }
     }
 
-    /** Decode is the exact event source for its request-scoped permit. */
+    /**
+     * Decode is the exact event source for its request-scoped permit.
+     */
     private static final class DecodeAvailability implements CapacityBoundary.Availability {
         private final ScheduledRequest.DecodeBinding binding;
         private Runnable subscribedListener;

@@ -10,7 +10,9 @@ import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
 
-/** Engine gRPC service for worker and cache status queries. */
+/**
+ * Engine gRPC service for worker and cache status queries.
+ */
 @Component
 public class EngineGrpcService {
 

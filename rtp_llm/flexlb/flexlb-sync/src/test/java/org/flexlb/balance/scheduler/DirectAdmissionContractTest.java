@@ -58,7 +58,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** DIRECT uses real admission ledgers and lifecycle while bypassing waiting queues. */
+/**
+ * DIRECT uses real admission ledgers and lifecycle while bypassing waiting queues.
+ */
 class DirectAdmissionContractTest {
 
     @ParameterizedTest
@@ -252,6 +254,10 @@ class DirectAdmissionContractTest {
         return task;
     }
 
+    /**
+     * Builds direct-admission scenarios and checks that failed admission leaves no queued or owned
+     * requests.
+     */
     private static final class Fixture implements AutoCloseable {
         private final FlexlbConfig config = SchedulingTestConfig.newConfig();
         private final RequestRegistry requests;
@@ -356,6 +362,15 @@ class DirectAdmissionContractTest {
                     new SchedulerRuntime(requests, endpoints, reporter, requestReporter, scheduler);
         }
 
+        @Override
+        public void close() {
+            try {
+                decode.close();
+            } finally {
+                runtime.shutdown();
+            }
+        }
+
         private BalanceContext context(long requestId) {
             var context = RequestLifecycleTestSupport.context(config, requestId);
             context.getRequest().setSeqLen(32L);
@@ -363,16 +378,16 @@ class DirectAdmissionContractTest {
             return context;
         }
 
-        private void assertNoWaitingQueue() {
-            assertEquals(0, scheduler.getQueuedRequestCount());
-            assertEquals(0, prefill.queuedRequestCount());
-            verify(queuedDelivery, never()).prepare(anyList(), any(), any());
-        }
-
         private void assertNoPrefillOwnership() {
             assertNoWaitingQueue();
             assertEquals(0L, prefill.observedRequestCount());
             assertEquals(0, prefill.getInflightBatchCount());
+        }
+
+        private void assertNoWaitingQueue() {
+            assertEquals(0, scheduler.getQueuedRequestCount());
+            assertEquals(0, prefill.queuedRequestCount());
+            verify(queuedDelivery, never()).prepare(anyList(), any(), any());
         }
 
         private void assertItemNotBound(long requestId) {
@@ -402,19 +417,6 @@ class DirectAdmissionContractTest {
             projection.run();
         }
 
-        @Override
-        public void close() {
-            try {
-                decode.close();
-            } finally {
-                runtime.shutdown();
-            }
-        }
-
-        private static WorkerStatus worker(RoleType role, String ip) {
-            return WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test");
-        }
-
         private static WorkerStatusResponse status(
                 WorkerStatus worker,
                 Map<String, TaskInfo> running,
@@ -435,6 +437,10 @@ class DirectAdmissionContractTest {
                 response.setAvailableKvCacheTokens(10_000L - running.size() * 32L);
             }
             return response;
+        }
+
+        private static WorkerStatus worker(RoleType role, String ip) {
+            return WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test");
         }
 
         private static ServerStatus metadata(WorkerEndpoint endpoint, String requestId) {

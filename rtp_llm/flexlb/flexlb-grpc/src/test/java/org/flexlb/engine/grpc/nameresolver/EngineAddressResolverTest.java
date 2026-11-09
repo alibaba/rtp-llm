@@ -30,6 +30,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks engine address discovery, listener updates and resolver shutdown.
+ */
 class EngineAddressResolverTest {
 
     @Test

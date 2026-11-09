@@ -43,8 +43,10 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
+/**
+ * Checks UniConfig configuration subscription and update handling.
+ */
 class UniConfigConfigSourceTest {
-
     private static final String CONFIG_PATH =
             "/v2/configs/modelstudio.spectrum.deployment."
                     + "df4a7748.flexlb-test-wlcb.runtime.meta";
@@ -65,35 +67,11 @@ class UniConfigConfigSourceTest {
     private final AtomicInteger requests = new AtomicInteger();
     private final AtomicReference<String> requestPath = new AtomicReference<>();
     private final AtomicReference<String> requestMethod = new AtomicReference<>();
+
     private HttpServer server;
     private UniConfigConfigSource source;
     private ConfigService configService;
     private Runnable poll;
-
-    @BeforeEach
-    void startAgent() throws IOException {
-        startAgent(new InetSocketAddress("127.0.0.1", 0));
-    }
-
-    private void startAgent(InetSocketAddress address) throws IOException {
-        server = HttpServer.create(address, 0);
-        server.createContext(
-                "/",
-                exchange -> {
-                    requests.incrementAndGet();
-                    requestPath.set(exchange.getRequestURI().getRawPath());
-                    requestMethod.set(exchange.getRequestMethod());
-                    Response current = response.get();
-                    byte[] body = current.body().getBytes(StandardCharsets.UTF_8);
-                    try (exchange) {
-                        exchange.getResponseHeaders()
-                                .set("Content-Type", "application/json; charset=utf-8");
-                        exchange.sendResponseHeaders(current.status(), body.length);
-                        exchange.getResponseBody().write(body);
-                    }
-                });
-        server.start();
-    }
 
     @AfterEach
     void close() {
@@ -280,6 +258,11 @@ class UniConfigConfigSourceTest {
         verify(source).waitForStartupRetry();
     }
 
+    @BeforeEach
+    void startAgent() throws IOException {
+        startAgent(new InetSocketAddress("127.0.0.1", 0));
+    }
+
     @Test
     void keepsRetryingPastPreviousAttemptLimitUntilAgentStarts() throws Exception {
         InetSocketAddress address = server.getAddress();
@@ -380,6 +363,35 @@ class UniConfigConfigSourceTest {
                 .isEqualTo(1048586L);
     }
 
+    private void startAgent(InetSocketAddress address) throws IOException {
+        server = HttpServer.create(address, 0);
+        server.createContext(
+                "/",
+                exchange -> {
+                    requests.incrementAndGet();
+                    requestPath.set(exchange.getRequestURI().getRawPath());
+                    requestMethod.set(exchange.getRequestMethod());
+                    Response current = response.get();
+                    byte[] body = current.body().getBytes(StandardCharsets.UTF_8);
+                    try (exchange) {
+                        exchange.getResponseHeaders()
+                                .set("Content-Type", "application/json; charset=utf-8");
+                        exchange.sendResponseHeaders(current.status(), body.length);
+                        exchange.getResponseBody().write(body);
+                    }
+                });
+        server.start();
+    }
+
+    private void initializeSource() throws Exception {
+        spectrumEnvironment()
+                .execute(
+                        () -> {
+                            prepareSource(new UniConfigConfigSource(new DeploymentIdentity()));
+                            source.initialize();
+                        });
+    }
+
     private EnvironmentVariables spectrumEnvironment() {
         return new EnvironmentVariables(
                         "FLEXLB_UNICONF_ENABLE",
@@ -405,15 +417,6 @@ class UniConfigConfigSourceTest {
                 "configUri",
                 URI.create("http://127.0.0.1:" + server.getAddress().getPort() + CONFIG_PATH));
         ReflectionTestUtils.setField(source, "pollExecutor", executor);
-    }
-
-    private void initializeSource() throws Exception {
-        spectrumEnvironment()
-                .execute(
-                        () -> {
-                            prepareSource(new UniConfigConfigSource(new DeploymentIdentity()));
-                            source.initialize();
-                        });
     }
 
     private void prepareUnavailableAgent() throws Exception {

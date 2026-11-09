@@ -14,13 +14,17 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Selects the configured cache source from manual failover state and KVCM client health.
+ *
+ * <p>KVCM health updates reconcile the active source. A manual fallback overrides health recovery
+ * until explicitly cleared; manual primary recovery first requires a healthy KVCM snapshot. Source
+ * transitions update the reported reason and time.
  */
 @Slf4j
 @Component
 public class CacheMatchFailoverManager {
-
     private final boolean autoSwitchEnabled;
     private final boolean kvcmEnabled;
+
     private final KvcmGrpcClient kvcmGrpcClient;
     private final CacheMetricsReporter cacheMetricsReporter;
     private final AtomicBoolean manualFallbackActive = new AtomicBoolean();
@@ -47,8 +51,41 @@ public class CacheMatchFailoverManager {
         }
     }
 
+    public synchronized void activateFallbackManually() {
+        manualFallbackActive.set(true);
+        if (!updateActiveSource(CacheMatchSource.LOCAL_STANDBY, "manual failover activated")) {
+            lastFailoverReason.set("manual failover activated");
+            lastFailoverTimeMs.set(System.currentTimeMillis());
+        }
+        log.info("Manual cache failover activated; Local Standby is the active cache source");
+    }
+
+    public synchronized void recoverPrimaryManually() {
+        KvcmHealthSnapshot health = kvcmGrpcClient.healthSnapshot();
+        if (!health.isHealthy()) {
+            throw new IllegalStateException("cannot recover KVCM primary while KVCM is unhealthy");
+        }
+        manualFallbackActive.set(false);
+        updateFromKvcmHealth(health);
+        log.info(
+                "Manual cache failover cleared; active cache source follows KVCM health, source={}",
+                activeSource());
+    }
+
     public CacheMatchSource activeSource() {
         return activeSource.get();
+    }
+
+    public long lastFailoverTimeMs() {
+        return lastFailoverTimeMs.get();
+    }
+
+    public String lastFailoverReason() {
+        return lastFailoverReason.get();
+    }
+
+    public KvcmHealthSnapshot healthSnapshot() {
+        return kvcmGrpcClient.healthSnapshot();
     }
 
     /**
@@ -94,39 +131,6 @@ public class CacheMatchFailoverManager {
                     health.consecutiveQueryFailures(),
                     health.consecutiveHeartbeatFailures());
         }
-    }
-
-    public synchronized void activateFallbackManually() {
-        manualFallbackActive.set(true);
-        if (!updateActiveSource(CacheMatchSource.LOCAL_STANDBY, "manual failover activated")) {
-            lastFailoverReason.set("manual failover activated");
-            lastFailoverTimeMs.set(System.currentTimeMillis());
-        }
-        log.info("Manual cache failover activated; Local Standby is the active cache source");
-    }
-
-    public synchronized void recoverPrimaryManually() {
-        KvcmHealthSnapshot health = kvcmGrpcClient.healthSnapshot();
-        if (!health.isHealthy()) {
-            throw new IllegalStateException("cannot recover KVCM primary while KVCM is unhealthy");
-        }
-        manualFallbackActive.set(false);
-        updateFromKvcmHealth(health);
-        log.info(
-                "Manual cache failover cleared; active cache source follows KVCM health, source={}",
-                activeSource());
-    }
-
-    public long lastFailoverTimeMs() {
-        return lastFailoverTimeMs.get();
-    }
-
-    public String lastFailoverReason() {
-        return lastFailoverReason.get();
-    }
-
-    public KvcmHealthSnapshot healthSnapshot() {
-        return kvcmGrpcClient.healthSnapshot();
     }
 
     private boolean updateActiveSource(CacheMatchSource desiredSource, String reason) {

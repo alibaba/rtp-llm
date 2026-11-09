@@ -19,7 +19,6 @@ import java.util.function.Predicate;
  * a separate ordered index and share the scan budget with forward progress.</p>
  */
 final class OrderedRequestQueue {
-
     private static final int PRIORITY_LEVELS = PriorityNormalizer.MAX_PRIORITY + 1;
 
     private static final Comparator<GlobalQueueEntry> SEQUENCE_ORDER =
@@ -30,10 +29,12 @@ final class OrderedRequestQueue {
                     .thenComparing(SEQUENCE_ORDER);
 
     private final boolean priorityOrdering;
+
     private final Bucket fifo = new Bucket();
     private final Bucket[] priorityBuckets = new Bucket[PRIORITY_LEVELS];
     private final BitSet pendingPriorities = new BitSet(PRIORITY_LEVELS);
     private final int[] priorityCounts = new int[PRIORITY_LEVELS];
+
     private int size;
     private long nextSequence;
 
@@ -113,20 +114,6 @@ final class OrderedRequestQueue {
         return priorityOrdering ? !pendingPriorities.isEmpty() : fifo.hasPendingRequests();
     }
 
-    /** Start scanning at this request, or keep an existing earlier scan position. */
-    private void rewindScanTo(GlobalQueueEntry entry) {
-        if (!entry.linked || entry.removed) {
-            return;
-        }
-        Bucket bucket = priorityOrdering ? priorityBuckets[entry.priority] : fifo;
-        if (bucket.nextToScan == null || entry.sequence < bucket.nextToScan.sequence) {
-            bucket.nextToScan = entry;
-        }
-        if (priorityOrdering) {
-            pendingPriorities.set(entry.priority);
-        }
-    }
-
     /** Make an awakened request directly available to the next bounded scan. */
     void markRequestReadyForRetry(GlobalQueueEntry entry) {
         if (!entry.linked || entry.removed) {
@@ -160,6 +147,28 @@ final class OrderedRequestQueue {
         return entries;
     }
 
+    /** Start scanning at this request, or keep an existing earlier scan position. */
+    private void rewindScanTo(GlobalQueueEntry entry) {
+        if (!entry.linked || entry.removed) {
+            return;
+        }
+        Bucket bucket = priorityOrdering ? priorityBuckets[entry.priority] : fifo;
+        if (bucket.nextToScan == null || entry.sequence < bucket.nextToScan.sequence) {
+            bucket.nextToScan = entry;
+        }
+        if (priorityOrdering) {
+            pendingPriorities.set(entry.priority);
+        }
+    }
+
+    private void drainBucket(Bucket bucket, List<GlobalQueueEntry> entries) {
+        while (!bucket.isEmpty()) {
+            GlobalQueueEntry entry = bucket.head;
+            markRemoved(entry);
+            entries.add(entry);
+        }
+    }
+
     private boolean markRemoved(GlobalQueueEntry entry) {
         if (entry.removed) {
             return false;
@@ -188,30 +197,18 @@ final class OrderedRequestQueue {
         }
     }
 
-    private void drainBucket(Bucket bucket, List<GlobalQueueEntry> entries) {
-        while (!bucket.isEmpty()) {
-            GlobalQueueEntry entry = bucket.head;
-            markRemoved(entry);
-            entries.add(entry);
-        }
-    }
-
+    /**
+     * Maintains FIFO membership and ready retries within one ordering bucket.
+     */
     private static final class Bucket {
         private GlobalQueueEntry head;
         private GlobalQueueEntry tail;
         private GlobalQueueEntry nextToScan;
+
         private final NavigableSet<GlobalQueueEntry> readyRetries = new TreeSet<>(SEQUENCE_ORDER);
 
         boolean hasPendingRequests() {
             return nextToScan != null || !readyRetries.isEmpty();
-        }
-
-        GlobalQueueEntry peekNextRequest() {
-            GlobalQueueEntry retry = readyRetries.isEmpty() ? null : readyRetries.first();
-            if (retry == null) {
-                return nextToScan;
-            }
-            return nextToScan == null || retry.sequence < nextToScan.sequence ? retry : nextToScan;
         }
 
         GlobalQueueEntry pollNextRequest() {
@@ -225,18 +222,12 @@ final class OrderedRequestQueue {
             return entry;
         }
 
-        void add(GlobalQueueEntry entry) {
-            if (entry.linked || entry.previous != null || entry.next != null) {
-                throw new IllegalStateException("ordered queue entry is already linked");
+        GlobalQueueEntry peekNextRequest() {
+            GlobalQueueEntry retry = readyRetries.isEmpty() ? null : readyRetries.first();
+            if (retry == null) {
+                return nextToScan;
             }
-            entry.previous = tail;
-            if (tail == null) {
-                head = entry;
-            } else {
-                tail.next = entry;
-            }
-            tail = entry;
-            entry.linked = true;
+            return nextToScan == null || retry.sequence < nextToScan.sequence ? retry : nextToScan;
         }
 
         void remove(GlobalQueueEntry entry) {
@@ -284,6 +275,20 @@ final class OrderedRequestQueue {
                 before.previous.next = entry;
             }
             before.previous = entry;
+            entry.linked = true;
+        }
+
+        void add(GlobalQueueEntry entry) {
+            if (entry.linked || entry.previous != null || entry.next != null) {
+                throw new IllegalStateException("ordered queue entry is already linked");
+            }
+            entry.previous = tail;
+            if (tail == null) {
+                head = entry;
+            } else {
+                tail.next = entry;
+            }
+            tail = entry;
             entry.linked = true;
         }
 

@@ -30,6 +30,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
+/**
+ * Checks cache-match queries against locally synchronized worker indexes.
+ */
 class LocalSyncCacheMatchProviderTest {
 
     @Test

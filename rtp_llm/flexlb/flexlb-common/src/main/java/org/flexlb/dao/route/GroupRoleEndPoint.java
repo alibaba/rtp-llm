@@ -7,6 +7,9 @@ import lombok.Data;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * Associates a discovery endpoint with its routing group and worker role.
+ */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class GroupRoleEndPoint {
@@ -28,31 +31,26 @@ public class GroupRoleEndPoint {
     @JsonProperty("pd_fusion_endpoint")
     private Endpoint pdFusionEndpoint;
 
+    public Endpoint getRoleEndpoint(RoleType roleType) {
+        if (roleType == RoleType.PREFILL) {
+            return prefillEndpoint;
+        } else if (roleType == RoleType.DECODE) {
+            return decodeEndpoint;
+        } else if (roleType == RoleType.VIT) {
+            return vitEndpoint;
+        } else if (roleType == RoleType.ENCODER) {
+            return encoderEndpoint;
+        } else if (roleType == RoleType.PDFUSION) {
+            return pdFusionEndpoint;
+        }
+        return null;
+    }
+
     void applyGroupToEndpoints() {
         String endpointGroup = group == null ? "" : group;
         for (Endpoint endpoint : getAllEndpoints()) {
             endpoint.setGroup(endpointGroup);
         }
-    }
-
-    List<RoleType> getRoleTypes() {
-        List<RoleType> roleTypes = new ArrayList<>();
-        if (prefillEndpoint != null) {
-            roleTypes.add(RoleType.PREFILL);
-        }
-        if (decodeEndpoint != null) {
-            roleTypes.add(RoleType.DECODE);
-        }
-        if (vitEndpoint != null) {
-            roleTypes.add(RoleType.VIT);
-        }
-        if (encoderEndpoint != null) {
-            roleTypes.add(RoleType.ENCODER);
-        }
-        if (pdFusionEndpoint != null) {
-            roleTypes.add(RoleType.PDFUSION);
-        }
-        return roleTypes;
     }
 
     List<Endpoint> getAllEndpoints() {
@@ -75,18 +73,23 @@ public class GroupRoleEndPoint {
         return endpoints;
     }
 
-    public Endpoint getRoleEndpoint(RoleType roleType) {
-        if (roleType == RoleType.PREFILL) {
-            return prefillEndpoint;
-        } else if (roleType == RoleType.DECODE) {
-            return decodeEndpoint;
-        } else if (roleType == RoleType.VIT) {
-            return vitEndpoint;
-        } else if (roleType == RoleType.ENCODER) {
-            return encoderEndpoint;
-        } else if (roleType == RoleType.PDFUSION) {
-            return pdFusionEndpoint;
+    List<RoleType> getRoleTypes() {
+        List<RoleType> roleTypes = new ArrayList<>();
+        if (prefillEndpoint != null) {
+            roleTypes.add(RoleType.PREFILL);
         }
-        return null;
+        if (decodeEndpoint != null) {
+            roleTypes.add(RoleType.DECODE);
+        }
+        if (vitEndpoint != null) {
+            roleTypes.add(RoleType.VIT);
+        }
+        if (encoderEndpoint != null) {
+            roleTypes.add(RoleType.ENCODER);
+        }
+        if (pdFusionEndpoint != null) {
+            roleTypes.add(RoleType.PDFUSION);
+        }
+        return roleTypes;
     }
 }

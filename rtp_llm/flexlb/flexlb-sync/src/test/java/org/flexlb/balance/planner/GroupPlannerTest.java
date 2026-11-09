@@ -27,23 +27,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @DisplayName("GroupPlanner pure domain and algorithm")
 class GroupPlannerTest {
-
     private static final long BIG = 1_000_000L;
 
     /** Each candidate group is predicted at exactly 100ms per member. */
     private static final ToDoubleFunction<List<Item>> HUNDRED_PER_MEMBER =
             items -> 100.0 * items.size();
-
-    private static Item item(long id, long seqLen, long enqueuedAtMs) {
-        return new Item(
-                Long.toString(id), /* priority */
-                0, /* enqueueSeq */
-                id,
-                enqueuedAtMs, /* expiresAtMs */
-                BIG,
-                seqLen, /* hitCache */
-                0L);
-    }
 
     @Test
     void selectionShapePreservesOverflowAndRejectedGrowthBoundaries() {
@@ -75,7 +63,21 @@ class GroupPlannerTest {
         assertEquals(200, budgeted.selectedPredictionMs().orElseThrow());
     }
 
+    private static Item item(long id, long seqLen, long enqueuedAtMs) {
+        return new Item(
+                Long.toString(id), /* priority */
+                0, /* enqueueSeq */
+                id,
+                enqueuedAtMs, /* expiresAtMs */
+                BIG,
+                seqLen, /* hitCache */
+                0L);
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
+    /**
+     * Checks valid batch item sizes and cache-hit boundaries.
+     */
     @Nested
     @DisplayName("Item validation")
     class ItemValidation {
@@ -107,6 +109,9 @@ class GroupPlannerTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    /**
+     * Checks batch shape arithmetic and saturation at numeric limits.
+     */
     @Nested
     @DisplayName("Shape arithmetic")
     class ShapeArithmetic {
@@ -175,6 +180,9 @@ class GroupPlannerTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    /**
+     * Checks batch constraint validation and request-count bounds.
+     */
     @Nested
     @DisplayName("Constraints validation")
     class ConstraintsValidation {
@@ -199,6 +207,9 @@ class GroupPlannerTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    /**
+     * Checks invariants between selected items and batch predictions.
+     */
     @Nested
     @DisplayName("Record invariants: Selection / Plan")
     class RecordInvariants {
@@ -218,6 +229,9 @@ class GroupPlannerTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    /**
+     * Checks prefix selection against request, compute, KV and prediction limits.
+     */
     @Nested
     @DisplayName("select(): largest feasible homogeneous prefix")
     class SelectAlgorithm {
@@ -391,6 +405,10 @@ class GroupPlannerTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    /**
+     * Checks dispatch readiness from batch fullness, predicted duration and elapsed collection
+     * windows.
+     */
     @Nested
     @DisplayName("evaluateReadiness(): dispatch reason")
     class ReadinessAlgorithm {
@@ -478,6 +496,9 @@ class GroupPlannerTest {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    /**
+     * Checks inclusive collection-window boundaries and saturated deadlines.
+     */
     @Nested
     @DisplayName("window helpers")
     class WindowHelpers {
@@ -515,6 +536,10 @@ class GroupPlannerTest {
     // oversized head here would silently lose the request instead of letting the
     // downstream reject-or-dispatch-alone path handle it.
     // ═══════════════════════════════════════════════════════════════════════
+    /**
+     * Checks that an indivisible first request remains selectable when it alone exceeds batch
+     * capacity.
+     */
     @Nested
     @DisplayName("Corner cases: indivisible head and degenerate shapes")
     class IndivisibleHeadCornerCases {
@@ -601,6 +626,9 @@ class GroupPlannerTest {
     // ASSUMPTION: the strict-vs-inclusive split is intentional; confirm with the
     // capacity owner before relying on it in new admission logic.
     // ═══════════════════════════════════════════════════════════════════════
+    /**
+     * Checks the distinct inclusive KV and exclusive compute-capacity boundaries.
+     */
     @Nested
     @DisplayName("Corner case: compute/KV boundary asymmetry")
     class BoundaryAsymmetry {

@@ -12,7 +12,9 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Regression coverage for production endpoint selection in the mock-engine loop. */
+/**
+ * Regression coverage for production endpoint selection in the mock-engine loop.
+ */
 class ProductionRoutingDeadlineE2ETest {
 
     private static final int BASE_PORT = 63300;

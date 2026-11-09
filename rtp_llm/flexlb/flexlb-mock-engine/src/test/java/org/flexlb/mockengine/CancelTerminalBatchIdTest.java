@@ -22,26 +22,15 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Leak-attribution regression tests for the typed CANCELLED terminal frame.
- *
- * <p>The cancel() main path used to publish its terminal without the
- * EnqueueBatch identity, so the master's reconcile could not correlate the
- * cancel with the batch it displaced and dropped the terminal into the
- * batch-mismatch dead branch — leaking the inflight slot (the new-base
- * counterpart of the legacy finishedByBatch[0] leak). The fix mirrors the
- * upstream positiveLifecycleBatchId pattern already used by
- * recordPriorityPreemptionCanceled.</p>
- *
- * <p>Also pins the A1/A2 cancel census counters exported through
- * java_mock_stats: tracked / already-finished / unknown branch distribution.</p>
+ * Checks that cancellation completion retains the batch identity required to reconcile and release
+ * the displaced request.
  */
 class CancelTerminalBatchIdTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private static final int BASE_PORT = 63300;
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
     private JavaMockEngineCluster.ClusterStats stats;
@@ -163,6 +152,24 @@ class CancelTerminalBatchIdTest {
         }
     }
 
+    // ──────────── Terminal-frame access (reflection on completions queue) ────────────
+
+    private EngineRpcService.TaskInfoPB completionOf(long requestId) throws Exception {
+        Field field = JavaMockEngineCluster.FastRpcService.class.getDeclaredField("completions");
+        field.setAccessible(true);
+        ConcurrentLinkedQueue<?> queue = (ConcurrentLinkedQueue<?>) field.get(prefill);
+        Object latest = null;
+        for (Object element : queue) {
+            Field taskField = element.getClass().getDeclaredField("task");
+            taskField.setAccessible(true);
+            EngineRpcService.TaskInfoPB task = (EngineRpcService.TaskInfoPB) taskField.get(element);
+            if (task.getRequestId() == requestId) {
+                latest = task;
+            }
+        }
+        return (EngineRpcService.TaskInfoPB) latest;
+    }
+
     // ──────────── Service / model helpers ────────────
 
     private void newPrefillService(MockPerformanceModel model) {
@@ -207,24 +214,6 @@ class CancelTerminalBatchIdTest {
                                 List.of(List.of(1, 1.0)))));
         MockMasterConfig.writeWithPrefillExpression(master, prefillExpression);
         return MockPerformanceModel.load(performance.toString(), master.toString());
-    }
-
-    // ──────────── Terminal-frame access (reflection on completions queue) ────────────
-
-    private EngineRpcService.TaskInfoPB completionOf(long requestId) throws Exception {
-        Field field = JavaMockEngineCluster.FastRpcService.class.getDeclaredField("completions");
-        field.setAccessible(true);
-        ConcurrentLinkedQueue<?> queue = (ConcurrentLinkedQueue<?>) field.get(prefill);
-        Object latest = null;
-        for (Object element : queue) {
-            Field taskField = element.getClass().getDeclaredField("task");
-            taskField.setAccessible(true);
-            EngineRpcService.TaskInfoPB task = (EngineRpcService.TaskInfoPB) taskField.get(element);
-            if (task.getRequestId() == requestId) {
-                latest = task;
-            }
-        }
-        return (EngineRpcService.TaskInfoPB) latest;
     }
 
     // ──────────── Protobuf / RPC helpers ────────────

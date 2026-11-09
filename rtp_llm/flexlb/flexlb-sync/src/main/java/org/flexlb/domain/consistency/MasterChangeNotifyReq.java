@@ -4,9 +4,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * @author zjw
- * description:
- * date: 2025/3/31
+ * Carries the master-change notification sent between FlexLB instances.
  */
 @Setter
 @Getter

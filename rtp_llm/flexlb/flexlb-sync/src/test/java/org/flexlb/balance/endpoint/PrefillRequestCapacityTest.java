@@ -25,6 +25,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks shared Prefill request limits across waiting, prepared and committed work.
+ */
 class PrefillRequestCapacityTest {
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillState state =

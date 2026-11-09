@@ -25,8 +25,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks endpoint registry separation by worker role.
+ */
 class EndpointRegistryRoleTest {
-
     private EndpointRegistry registry;
 
     @BeforeEach
@@ -315,6 +317,13 @@ class EndpointRegistryRoleTest {
         return EndpointTestSupport.workerStatus(roleType, "127.0.0.1", port, port + 1);
     }
 
+    private void retire(RoleType role, String address, WorkerStatus status) {
+        EndpointRegistry.DetachedGeneration detached =
+                detachUnderGenerationLock(role, address, status);
+        assertNotNull(detached);
+        detached.retireAndAwait();
+    }
+
     private EndpointRegistry.DetachedGeneration detachUnderGenerationLock(
             RoleType role, String address, WorkerStatus expectedStatus) {
         expectedStatus.lock.lock();
@@ -323,12 +332,5 @@ class EndpointRegistryRoleTest {
         } finally {
             expectedStatus.lock.unlock();
         }
-    }
-
-    private void retire(RoleType role, String address, WorkerStatus status) {
-        EndpointRegistry.DetachedGeneration detached =
-                detachUnderGenerationLock(role, address, status);
-        assertNotNull(detached);
-        detached.retireAndAwait();
     }
 }

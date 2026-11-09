@@ -17,6 +17,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+/**
+ * Checks priority/FIFO queue order, exact unlinking and retry progress through blocked entries.
+ */
 class OrderedRequestQueueTest {
 
     @Test

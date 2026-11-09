@@ -4,7 +4,9 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.metric.NoOpFlexMonitor;
 
-/** Test-source bridge to the package-visible dispatcher sizing injection. */
+/**
+ * Test-source bridge to the package-visible dispatcher sizing injection.
+ */
 public final class DefaultBatchDispatcherTestFactory {
 
     private DefaultBatchDispatcherTestFactory() {}

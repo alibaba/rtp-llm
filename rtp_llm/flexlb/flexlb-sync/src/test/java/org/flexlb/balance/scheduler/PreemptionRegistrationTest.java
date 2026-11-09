@@ -6,6 +6,9 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks accepted preemption cancellation, claim release and expiry cleanup.
+ */
 class PreemptionRegistrationTest {
 
     @Test

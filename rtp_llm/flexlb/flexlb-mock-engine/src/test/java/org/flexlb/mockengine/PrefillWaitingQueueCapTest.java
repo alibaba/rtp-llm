@@ -26,17 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * Tests for the prefill waiting-queue cap ({@code prefill.max_waiting_batches}).
- *
- * <p>With the default {@code max_prefill_concurrency} of 1, an engine holds one
- * RUNNING batch plus at most {@code max_waiting_batches} QUEUED batches. The cap
- * counts queued batches only — the running batch never counts toward it — so
- * with cap 4 the 5th enqueued batch is the last accepted (1 running + 4
- * waiting) and the 6th is rejected with an explicit backpressure error.
- *
- * <p>Also verifies that a rejection leaves no counter residue
- * (pendingRequests / waitingPrefillRequests / runningTasks) and that the queue
- * keeps draining normally after a rejection.
+ * Checks that Prefill admission limits waiting batches separately from the running batch.
  */
 class PrefillWaitingQueueCapTest {
 

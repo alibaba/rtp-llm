@@ -12,6 +12,9 @@ import reactor.core.publisher.Mono;
 import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
 
+/**
+ * Exposes application health using the lifecycle's warmup and offline state.
+ */
 @Component
 @Slf4j
 public class HealthCheckServer {

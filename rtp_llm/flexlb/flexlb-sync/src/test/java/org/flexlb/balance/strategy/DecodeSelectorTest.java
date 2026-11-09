@@ -33,9 +33,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Checks Decode cost selection, logical engine identity and capture-conflict retry.
+ */
 @Slf4j
 class DecodeSelectorTest {
-
     private ConfigService configService;
     private Map<String, WorkerStatus> decodeStatuses;
 
@@ -44,40 +46,6 @@ class DecodeSelectorTest {
         configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(StrategyTestSupport.config());
         decodeStatuses = new HashMap<>();
-    }
-
-    WorkerStatus createWorkerStatus(String ip) {
-        return createWorkerStatus(ip, null);
-    }
-
-    WorkerStatus createWorkerStatus(String ip, String group) {
-        return StrategyTestSupport.workerStatus(
-                RoleType.DECODE, group, ip, 8080, 9090, true, 0L, 0L);
-    }
-
-    /** Create an EndpointRegistry with DecodeEndpoints registered for each WorkerStatus entry. */
-    private EndpointRegistry createDecodeRegistry(Map<String, WorkerStatus> workerMap) {
-        EndpointRegistry registry = StrategyTestSupport.endpointRegistry(configService);
-        for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
-            WorkerStatus ws = entry.getValue();
-            StrategyTestSupport.publishEndpoint(registry, RoleType.DECODE, entry.getKey(), ws);
-        }
-        return registry;
-    }
-
-    private WorkerStatus registerWorker(String ip, long totalKv, long availableKv) {
-        WorkerStatus worker = createWorkerStatus(ip);
-        setKv(worker, totalKv, availableKv);
-        decodeStatuses.put(ip + ":8080", worker);
-        return worker;
-    }
-
-    private EndpointRegistry decodeRegistry() {
-        return createDecodeRegistry(decodeStatuses);
-    }
-
-    private DecodeSelector availableStrategy(EndpointRegistry registry) {
-        return new DecodeSelector(new WorkerDirectory(registry));
     }
 
     @Test
@@ -143,15 +111,6 @@ class DecodeSelectorTest {
         } finally {
             registry.close();
         }
-    }
-
-    private BalanceContext context(long sequenceLength, long requestId) {
-        Request request = new Request();
-        request.setSeqLen(sequenceLength);
-        request.setRequestId(Long.toString(requestId));
-        BalanceContext context = new BalanceContext(configService.loadBalanceConfig());
-        context.setRequest(request);
-        return context;
     }
 
     @Test
@@ -286,6 +245,15 @@ class DecodeSelectorTest {
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.1", status.getServerIp());
+    }
+
+    WorkerStatus createWorkerStatus(String ip) {
+        return createWorkerStatus(ip, null);
+    }
+
+    WorkerStatus createWorkerStatus(String ip, String group) {
+        return StrategyTestSupport.workerStatus(
+                RoleType.DECODE, group, ip, 8080, 9090, true, 0L, 0L);
     }
 
     @ParameterizedTest
@@ -736,32 +704,6 @@ class DecodeSelectorTest {
         }
     }
 
-    private enum QueuePolicy {
-        FIFO,
-        PRIORITY,
-        PREEMPTIVE
-    }
-
-    private void configureQueue(QueuePolicy policy) {
-        QueueOrderingConfig ordering =
-                policy == QueuePolicy.FIFO
-                        ? new QueueOrderingConfig()
-                        : QueueOrderingConfig.priority();
-        if (policy == QueuePolicy.PRIORITY) {
-            ordering.setPreemption(null);
-        }
-        if (policy == QueuePolicy.PREEMPTIVE) {
-            ordering.setPreemption(preemption());
-        }
-        configService.loadBalanceConfig().queueScheduler().setOrdering(ordering);
-    }
-
-    private static PreemptionConfig preemption() {
-        PreemptionConfig config = new PreemptionConfig();
-        config.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_RESERVED));
-        return config;
-    }
-
     @Test
     void cacheCostKeepsZeroKvReservationsTiedAcrossWorkers() {
         registerWorker("127.0.0.1", 1_000, 1_000);
@@ -838,17 +780,11 @@ class DecodeSelectorTest {
                 IllegalArgumentException.class, () -> DecodeBinding.capture(context(1L, 992L)));
     }
 
-    private void configureCost(String expression) {
-        var decode = configService.loadBalanceConfig().getRouter().getRoles().getDecode();
-        decode.getCostEstimator().setExpression(expression);
-        decode.getAvailability().setMaxEngineRequests(10L);
-    }
-
-    private static TaskInfo task(long requestId, TaskPhase phase) {
-        TaskInfo task = new TaskInfo();
-        task.setRequestId(Long.toString(requestId));
-        task.setPhase(phase);
-        return task;
+    private WorkerStatus registerWorker(String ip, long totalKv, long availableKv) {
+        WorkerStatus worker = createWorkerStatus(ip);
+        setKv(worker, totalKv, availableKv);
+        decodeStatuses.put(ip + ":8080", worker);
+        return worker;
     }
 
     private static void setKv(WorkerStatus worker, long totalKv, long availableKv) {
@@ -860,6 +796,66 @@ class DecodeSelectorTest {
                         availableKv,
                         totalKv,
                         Math.max(1L, worker.appliedStatusCursor().statusVersion() + 1L)));
+    }
+
+    private EndpointRegistry decodeRegistry() {
+        return createDecodeRegistry(decodeStatuses);
+    }
+
+    /** Create an EndpointRegistry with DecodeEndpoints registered for each WorkerStatus entry. */
+    private EndpointRegistry createDecodeRegistry(Map<String, WorkerStatus> workerMap) {
+        EndpointRegistry registry = StrategyTestSupport.endpointRegistry(configService);
+        for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
+            WorkerStatus ws = entry.getValue();
+            StrategyTestSupport.publishEndpoint(registry, RoleType.DECODE, entry.getKey(), ws);
+        }
+        return registry;
+    }
+
+    private DecodeSelector availableStrategy(EndpointRegistry registry) {
+        return new DecodeSelector(new WorkerDirectory(registry));
+    }
+
+    private BalanceContext context(long sequenceLength, long requestId) {
+        Request request = new Request();
+        request.setSeqLen(sequenceLength);
+        request.setRequestId(Long.toString(requestId));
+        BalanceContext context = new BalanceContext(configService.loadBalanceConfig());
+        context.setRequest(request);
+        return context;
+    }
+
+    private void configureQueue(QueuePolicy policy) {
+        QueueOrderingConfig ordering =
+                policy == QueuePolicy.FIFO
+                        ? new QueueOrderingConfig()
+                        : QueueOrderingConfig.priority();
+        if (policy == QueuePolicy.PRIORITY) {
+            ordering.setPreemption(null);
+        }
+        if (policy == QueuePolicy.PREEMPTIVE) {
+            ordering.setPreemption(preemption());
+        }
+        configService.loadBalanceConfig().queueScheduler().setOrdering(ordering);
+    }
+
+    private static PreemptionConfig preemption() {
+        PreemptionConfig config = new PreemptionConfig();
+        config.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_RESERVED));
+        return config;
+    }
+
+    private void configureCost(String expression) {
+        var decode = configService.loadBalanceConfig().getRouter().getRoles().getDecode();
+        decode.getCostEstimator().setExpression(expression);
+        decode.getAvailability().setMaxEngineRequests(10L);
+    }
+
+    private static TaskInfo task(long requestId, TaskPhase phase) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(Long.toString(requestId));
+        task.setPhase(phase);
+        return task;
     }
 
     private static void reserveQueued(
@@ -900,5 +896,11 @@ class DecodeSelectorTest {
         try (SelectedRole selected = result.value()) {
             return selected.serverStatus();
         }
+    }
+
+    private enum QueuePolicy {
+        FIFO,
+        PRIORITY,
+        PREEMPTIVE
     }
 }

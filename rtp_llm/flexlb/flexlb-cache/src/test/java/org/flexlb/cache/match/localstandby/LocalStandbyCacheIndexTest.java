@@ -17,6 +17,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks standby cache indexing across metadata updates, worker replacement and lookup.
+ */
 class LocalStandbyCacheIndexTest {
 
     @Test

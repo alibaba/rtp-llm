@@ -20,6 +20,9 @@ import org.springframework.context.annotation.Configuration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Checks monitor registry selection and configuration.
+ */
 class MonitorClientConfigTest {
 
     private final ApplicationContextRunner contextRunner =
@@ -125,6 +128,9 @@ class MonitorClientConfigTest {
                         });
     }
 
+    /**
+     * Supplies monitor registries for the isolated configuration test context.
+     */
     @Configuration(proxyBeanMethods = false)
     static class RegistryConfiguration {
         @Bean

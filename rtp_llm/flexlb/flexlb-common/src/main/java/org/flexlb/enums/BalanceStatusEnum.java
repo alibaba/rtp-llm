@@ -2,6 +2,9 @@ package org.flexlb.enums;
 
 import lombok.Getter;
 
+/**
+ * Pairs discovery, cache polling and worker-status failure codes with diagnostic messages.
+ */
 @Getter
 public enum BalanceStatusEnum {
     SUCCESS(0, "Success"),

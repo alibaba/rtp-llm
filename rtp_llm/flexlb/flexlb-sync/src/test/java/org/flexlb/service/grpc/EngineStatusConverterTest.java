@@ -16,6 +16,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks worker status conversion while preserving task identity, phases and cache metadata.
+ */
 class EngineStatusConverterTest {
 
     private final WorkerStatus owner =

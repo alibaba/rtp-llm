@@ -21,25 +21,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
- * Exact-value contracts for {@link EvictionPlanner#planDecode}: the frozen
- * decode admission recompute of {@code current − victims + incoming} for
- * slot and KV capacity.
- *
- * <p>Requirements under test:
- * <ul>
- *   <li>Slot deficit = max(0, engineLoad + 1 − concurrencyLimit). No deficit → no eviction.</li>
- *   <li>Both prompt supply and complete-output usage must fit the same KV budget as admission.</li>
- *   <li>Equal-priority entries are NEVER victims (strict &lt;).</li>
- *   <li>Greedy KV selection takes the largest-bucket release first; covers the
- *       deficit exactly or fails entirely—never a partial set.</li>
- *   <li>Cost = h × f(priority) × g(phase) [× lengthWaste for KV], with exact numeric values.</li>
- * </ul>
+ * Checks exact Decode capacity recomputation after removing selected victims and adding the incoming
+ * request. Slot and KV deficits retain their separate feasibility and cost rules.
  */
 @DisplayName("EvictionPlanner.planDecode recompute contracts")
 class EvictionPlannerDecodeContractTest {
-
     private static final long H_SLOT = 4L;
     private static final long H_KV = 8L;
+
     private static final EngineCancelChannel SUPPORTING_CHANNEL =
             new EngineCancelChannel() {
                 @Override
@@ -53,13 +42,6 @@ class EvictionPlannerDecodeContractTest {
                     return CompletableFuture.completedFuture(CancelAck.ACCEPTED);
                 }
             };
-
-    private static PreemptionConfig engineOwned() {
-        PreemptionConfig p = new PreemptionConfig();
-        p.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_ENGINE_OWNED));
-        p.setEngineCancellation(new org.flexlb.config.EngineCancellationConfig());
-        return p;
-    }
 
     private static DecodeRequestView accepted(long id, int priority, long kvTokens) {
         return new DecodeRequestView(
@@ -110,12 +92,22 @@ class EvictionPlannerDecodeContractTest {
                 failures);
     }
 
+    private static PreemptionConfig engineOwned() {
+        PreemptionConfig p = new PreemptionConfig();
+        p.setAllowedVictimStages(EnumSet.of(VictimStage.DECODE_ENGINE_OWNED));
+        p.setEngineCancellation(new org.flexlb.config.EngineCancellationConfig());
+        return p;
+    }
+
     private static List<String> victimIds(DecodeEvictionProposal p) {
         return p.victims().stream().map(DecodeRequestView::requestId).toList();
     }
 
     // ─── No deficit ─────────────────────────────────────────────────────
 
+    /**
+     * Checks that sufficient Decode capacity produces no eviction deficit.
+     */
     @Nested
     @DisplayName("No deficit")
     class NoDef {
@@ -131,6 +123,9 @@ class EvictionPlannerDecodeContractTest {
 
     // ─── Slot deficit ───────────────────────────────────────────────────
 
+    /**
+     * Checks slot-deficit eviction while preserving equal-priority requests.
+     */
     @Nested
     @DisplayName("Slot deficit recompute")
     class SlotDef {
@@ -166,6 +161,9 @@ class EvictionPlannerDecodeContractTest {
 
     // ─── KV deficit ─────────────────────────────────────────────────────
 
+    /**
+     * Checks KV-deficit victim selection and infeasible release budgets.
+     */
     @Nested
     @DisplayName("KV deficit recompute")
     class KvDef {

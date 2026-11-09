@@ -19,6 +19,9 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 
+/**
+ * Checks Prefill endpoint construction with the direct scheduler.
+ */
 class PrefillEndpointDirectSchedulerTest {
 
     @ParameterizedTest

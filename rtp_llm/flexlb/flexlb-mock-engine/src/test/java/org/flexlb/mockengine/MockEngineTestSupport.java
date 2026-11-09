@@ -25,13 +25,19 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
-/** Shared protocol primitives for in-process mock-engine tests. */
+/**
+ * Shared protocol primitives for in-process mock-engine tests.
+ */
 final class MockEngineTestSupport {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
 
     private MockEngineTestSupport() {}
+
+    static EngineRpcService.GenerateInputPB inputWithDecode(
+            long requestId, int inputTokens, int decodePort) {
+        return input(requestId, inputTokens, 1, decodePort);
+    }
 
     static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
         return input(requestId, inputTokens, 1, null);
@@ -39,11 +45,6 @@ final class MockEngineTestSupport {
 
     static EngineRpcService.GenerateInputPB input(String requestId, int inputTokens) {
         return input(Long.parseLong(requestId), inputTokens);
-    }
-
-    static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        return input(requestId, inputTokens, 1, decodePort);
     }
 
     static EngineRpcService.GenerateInputPB inputWithDecode(
@@ -98,28 +99,6 @@ final class MockEngineTestSupport {
         return inputWithBlockKeys(Long.parseLong(requestId), inputTokens, blockKeys);
     }
 
-    private static EngineRpcService.GenerateInputPB input(
-            long requestId, int inputTokens, int outputTokens, Integer decodePort) {
-        EngineRpcService.GenerateConfigPB.Builder config =
-                EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(outputTokens);
-        if (decodePort != null) {
-            config.addRoleAddrs(
-                    EngineRpcService.RoleAddrPB.newBuilder()
-                            .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
-                            .setRoleStr("DECODE")
-                            .setGrpcPort(decodePort)
-                            .build());
-        }
-        EngineRpcService.GenerateInputPB.Builder input =
-                EngineRpcService.GenerateInputPB.newBuilder()
-                        .setRequestId(requestId)
-                        .setGenerateConfig(config.build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return input.build();
-    }
-
     static EngineRpcService.EnqueueBatchDpSlotPB slot(
             int dpRank, EngineRpcService.GenerateInputPB... inputs) {
         EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
@@ -147,6 +126,45 @@ final class MockEngineTestSupport {
         return unary(observer -> service.enqueueBatch(request, observer));
     }
 
+    static <T> T unary(Consumer<StreamObserver<T>> invocation) {
+        AtomicReference<T> response = new AtomicReference<>();
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        CountDownLatch latch = new CountDownLatch(1);
+        invocation.accept(
+                new StreamObserver<>() {
+                    @Override
+                    public void onNext(T value) {
+                        response.set(value);
+                    }
+
+                    @Override
+                    public void onError(Throwable throwable) {
+                        error.set(throwable);
+                        latch.countDown();
+                    }
+
+                    @Override
+                    public void onCompleted() {
+                        latch.countDown();
+                    }
+                });
+        try {
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                throw new AssertionError("unary response timeout");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("interrupted waiting for unary response", e);
+        }
+        if (error.get() != null) {
+            throw new AssertionError(error.get());
+        }
+        if (response.get() == null) {
+            throw new AssertionError("unary response missing");
+        }
+        return response.get();
+    }
+
     static EngineRpcService.WorkerStatusPB workerStatus(
             JavaMockEngineCluster.FastRpcService service, long sinceVersion) {
         return unary(
@@ -156,6 +174,27 @@ final class MockEngineTestSupport {
                                         .setLatestFinishedVersion(sinceVersion)
                                         .build(),
                                 observer));
+    }
+
+    static MockPerformanceModel decodeModel(
+            Path tempDir, double decodeStepMs, Integer maxPendingRequests) throws IOException {
+        return decodeModel(tempDir, decodeStepMs, maxPendingRequests, false);
+    }
+
+    static MockPerformanceModel decodeModel(
+            Path tempDir,
+            double decodeStepMs,
+            Integer maxPendingRequests,
+            boolean reportQueuedAsKvAllocated)
+            throws IOException {
+        Map<String, Object> decodeConfig = new LinkedHashMap<>();
+        if (maxPendingRequests != null) {
+            decodeConfig.put("max_pending_requests", maxPendingRequests);
+        }
+        if (reportQueuedAsKvAllocated) {
+            decodeConfig.put("report_queued_as_kv_allocated", true);
+        }
+        return performanceModel(tempDir, "10", 0.1, decodeStepMs, Map.of(), decodeConfig);
     }
 
     static MockPerformanceModel performanceModel(Path tempDir, String prefillFormula)
@@ -204,27 +243,6 @@ final class MockEngineTestSupport {
         return MockPerformanceModel.load(performance.toString(), master.toString());
     }
 
-    static MockPerformanceModel decodeModel(
-            Path tempDir, double decodeStepMs, Integer maxPendingRequests) throws IOException {
-        return decodeModel(tempDir, decodeStepMs, maxPendingRequests, false);
-    }
-
-    static MockPerformanceModel decodeModel(
-            Path tempDir,
-            double decodeStepMs,
-            Integer maxPendingRequests,
-            boolean reportQueuedAsKvAllocated)
-            throws IOException {
-        Map<String, Object> decodeConfig = new LinkedHashMap<>();
-        if (maxPendingRequests != null) {
-            decodeConfig.put("max_pending_requests", maxPendingRequests);
-        }
-        if (reportQueuedAsKvAllocated) {
-            decodeConfig.put("report_queued_as_kv_allocated", true);
-        }
-        return performanceModel(tempDir, "10", 0.1, decodeStepMs, Map.of(), decodeConfig);
-    }
-
     static String httpGet(int port, String path) throws IOException, InterruptedException {
         HttpResponse<String> response =
                 HTTP_CLIENT.send(
@@ -253,12 +271,6 @@ final class MockEngineTestSupport {
                         .POST(HttpRequest.BodyPublishers.ofString(body))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
-    }
-
-    private static void requireHttpOk(HttpResponse<?> response, String operation) {
-        if (response.statusCode() != 200) {
-            throw new AssertionError(operation + " failed: HTTP " + response.statusCode());
-        }
     }
 
     static MockPerformanceModel.RequestShape requestShape(
@@ -315,17 +327,17 @@ final class MockEngineTestSupport {
                         + service.getOccupiedKvTokens());
     }
 
+    static int activeDecodeRequests(JavaMockEngineCluster.FastRpcService service)
+            throws ReflectiveOperationException {
+        return activeDecodeRequestsRef(service).get();
+    }
+
     static AtomicInteger activeDecodeRequestsRef(JavaMockEngineCluster.FastRpcService service)
             throws ReflectiveOperationException {
         Field field =
                 JavaMockEngineCluster.FastRpcService.class.getDeclaredField("activeDecodeRequests");
         field.setAccessible(true);
         return (AtomicInteger) field.get(service);
-    }
-
-    static int activeDecodeRequests(JavaMockEngineCluster.FastRpcService service)
-            throws ReflectiveOperationException {
-        return activeDecodeRequestsRef(service).get();
     }
 
     static int decodePendingQueueSize(JavaMockEngineCluster.FastRpcService service)
@@ -352,42 +364,31 @@ final class MockEngineTestSupport {
         return (Boolean) method.invoke(service, shape, batchId, responseQueue);
     }
 
-    static <T> T unary(Consumer<StreamObserver<T>> invocation) {
-        AtomicReference<T> response = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
-        invocation.accept(
-                new StreamObserver<>() {
-                    @Override
-                    public void onNext(T value) {
-                        response.set(value);
-                    }
+    private static EngineRpcService.GenerateInputPB input(
+            long requestId, int inputTokens, int outputTokens, Integer decodePort) {
+        EngineRpcService.GenerateConfigPB.Builder config =
+                EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(outputTokens);
+        if (decodePort != null) {
+            config.addRoleAddrs(
+                    EngineRpcService.RoleAddrPB.newBuilder()
+                            .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
+                            .setRoleStr("DECODE")
+                            .setGrpcPort(decodePort)
+                            .build());
+        }
+        EngineRpcService.GenerateInputPB.Builder input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setGenerateConfig(config.build());
+        for (int token = 0; token < inputTokens; token++) {
+            input.addTokenIds(token);
+        }
+        return input.build();
+    }
 
-                    @Override
-                    public void onError(Throwable throwable) {
-                        error.set(throwable);
-                        latch.countDown();
-                    }
-
-                    @Override
-                    public void onCompleted() {
-                        latch.countDown();
-                    }
-                });
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                throw new AssertionError("unary response timeout");
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new AssertionError("interrupted waiting for unary response", e);
+    private static void requireHttpOk(HttpResponse<?> response, String operation) {
+        if (response.statusCode() != 200) {
+            throw new AssertionError(operation + " failed: HTTP " + response.statusCode());
         }
-        if (error.get() != null) {
-            throw new AssertionError(error.get());
-        }
-        if (response.get() == null) {
-            throw new AssertionError("unary response missing");
-        }
-        return response.get();
     }
 }

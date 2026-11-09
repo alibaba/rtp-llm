@@ -14,7 +14,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Package-local admission APIs exercised through real committed requests. */
+/**
+ * Package-local admission APIs exercised through real committed requests.
+ */
 public final class PrefillCleanupDeadlockFixture {
     private final AtomicLong clock = new AtomicLong(100);
     private final ReentrantLock lock = new ReentrantLock();

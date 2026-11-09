@@ -4,7 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
-/** Explicit workload values for configuration contract tests. */
+/**
+ * Explicit workload values for configuration contract tests.
+ */
 final class ConfigTestFixtures {
     private static final ObjectMapper JSON = new ObjectMapper();
     static final String REQUIRED =
@@ -17,6 +19,8 @@ final class ConfigTestFixtures {
               }
             }
             """;
+
+    private ConfigTestFixtures() {}
 
     static FlexlbConfig parse(String patch) {
         return ConfigService.parse(document(patch));
@@ -45,6 +49,4 @@ final class ConfigTestFixtures {
                             }
                         });
     }
-
-    private ConfigTestFixtures() {}
 }

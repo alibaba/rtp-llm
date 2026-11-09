@@ -28,7 +28,6 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
  */
 @Component
 public class FlexlbControlServer {
-
     private static final String UPDATE_LOG_LEVEL_PATH = "/flexlb/update_log_level";
     private static final String CACHE_MATCH_STATUS_PATH = "/flexlb/cache_match/status";
     private static final String CACHE_MATCH_FAILOVER_PATH = "/flexlb/cache_match/failover";
@@ -116,19 +115,6 @@ public class FlexlbControlServer {
                                         .bodyValue(e.getMessage()));
     }
 
-    private Mono<ServerResponse> applyCacheMatchFailover(CacheMatchFailoverRequest updateRequest) {
-        try {
-            cacheMatchQueryOrchestrator.applyFailoverAction(updateRequest.action());
-            return ServerResponse.ok()
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .bodyValue(cacheMatchQueryOrchestrator.status());
-        } catch (RuntimeException e) {
-            return ServerResponse.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .bodyValue(e.getMessage());
-        }
-    }
-
     private Mono<ServerResponse> forwardCacheMatchFailoverToMaster(
             CacheMatchFailoverRequest updateRequest) {
         String master = lbStatusConsistencyService.getMasterHostIpPort();
@@ -158,5 +144,18 @@ public class FlexlbControlServer {
                                     .bodyValue(
                                             "failed to update cache failover state on real master");
                         });
+    }
+
+    private Mono<ServerResponse> applyCacheMatchFailover(CacheMatchFailoverRequest updateRequest) {
+        try {
+            cacheMatchQueryOrchestrator.applyFailoverAction(updateRequest.action());
+            return ServerResponse.ok()
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(cacheMatchQueryOrchestrator.status());
+        } catch (RuntimeException e) {
+            return ServerResponse.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(e.getMessage());
+        }
     }
 }

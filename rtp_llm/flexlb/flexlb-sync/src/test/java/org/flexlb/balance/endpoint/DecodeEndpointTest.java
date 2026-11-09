@@ -21,6 +21,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Checks Decode admission, reservations and worker completion accounting.
+ */
 class DecodeEndpointTest {
 
     private WorkerStatus status;

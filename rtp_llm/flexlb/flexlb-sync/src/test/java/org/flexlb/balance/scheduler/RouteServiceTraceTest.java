@@ -28,6 +28,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks route service trace labels while retaining the scheduler's original future.
+ */
 class RouteServiceTraceTest {
     @BeforeEach
     void setUp() {

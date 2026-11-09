@@ -11,6 +11,9 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * Combines normalized configuration inputs while preserving field-level override precedence.
+ */
 public final class FlexlbConfigMerger {
 
     private static final String FLEXLB_CONFIG = "FLEXLB_CONFIG";

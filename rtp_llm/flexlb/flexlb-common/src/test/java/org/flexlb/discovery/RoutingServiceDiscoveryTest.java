@@ -14,6 +14,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertIterableEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Checks routing discovery across provider results and configured groups.
+ */
 class RoutingServiceDiscoveryTest {
 
     @Test
@@ -170,6 +173,9 @@ class RoutingServiceDiscoveryTest {
         return config;
     }
 
+    /**
+     * Records discovery lookups and returns test-controlled worker lists.
+     */
     private static class RecordingProvider implements ServiceDiscoveryProvider {
 
         private final AtomicInteger validationCount = new AtomicInteger();

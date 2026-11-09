@@ -32,11 +32,8 @@ import java.util.concurrent.ConcurrentHashMap;
 @Slf4j
 @Component
 public class KvCacheManager implements EngineCacheInvalidator {
-
     @Autowired private GlobalCacheIndex globalCacheIndex;
-
     @Autowired private EngineLocalView engineLocalView;
-
     @Autowired private WorkerStatusProvider workerStatusProvider;
 
     /**
@@ -55,6 +52,22 @@ public class KvCacheManager implements EngineCacheInvalidator {
     public void destroy() {
         log.info("KvCacheManager shutting down...");
         clear();
+    }
+
+    /**
+     * Clear all data
+     */
+    public void clear() {
+
+        globalCacheIndex.clear();
+        engineLocalView.clear();
+        physicalIpPortByLogicalIpPort.clear();
+
+        // Report
+        cacheMetricsReporter.reportGlobalCacheMetrics(
+                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
+
+        log.info("Cleared all cache data");
     }
 
     /**
@@ -111,6 +124,45 @@ public class KvCacheManager implements EngineCacheInvalidator {
                 newCacheBlocks);
     }
 
+    /** Remove both local and global cache-index state for one engine. */
+    public void removeEngineCache(String engineIpPort) {
+        if (engineIpPort == null) {
+            return;
+        }
+        engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
+        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort);
+        physicalIpPortByLogicalIpPort.remove(engineIpPort);
+        cacheMetricsReporter.reportGlobalCacheMetrics(
+                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
+    }
+
+    /**
+     * Remove cache metadata for engines that are no longer present in service discovery.
+     */
+    @Override
+    public void removeStaleEngineCaches(Collection<String> activeEngineIpPorts) {
+        if (activeEngineIpPorts == null) {
+            return;
+        }
+        Set<String> activePhysicalIpPorts = new HashSet<>(activeEngineIpPorts);
+        Set<String> staleEngineIpPorts = new HashSet<>(engineLocalView.getAllEngineIpPorts());
+        staleEngineIpPorts.removeIf(
+                engineIpPort ->
+                        activePhysicalIpPorts.contains(
+                                physicalIpPortByLogicalIpPort.getOrDefault(
+                                        engineIpPort, engineIpPort)));
+        for (String staleEngineIpPort : staleEngineIpPorts) {
+            long startTime = System.nanoTime() / 1000;
+            engineLocalView.removeAllCacheBlockOfEngine(staleEngineIpPort);
+            globalCacheIndex.removeAllCacheBlockOfEngine(staleEngineIpPort);
+            physicalIpPortByLogicalIpPort.remove(staleEngineIpPort);
+            log.info(
+                    "Removed stale engine cache: {}, cost={}us",
+                    staleEngineIpPort,
+                    System.nanoTime() / 1000 - startTime);
+        }
+    }
+
     private void updateEngineCache(
             WorkerIdentity identity, String metricIpPort, String role, Set<Long> newCacheBlocks) {
         String engineIPort = identity == null ? null : identity.getLogicalIpPort();
@@ -155,60 +207,5 @@ public class KvCacheManager implements EngineCacheInvalidator {
         cacheMetricsReporter.reportGlobalCacheMetrics(
                 globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
-    }
-
-    /** Remove both local and global cache-index state for one engine. */
-    public void removeEngineCache(String engineIpPort) {
-        if (engineIpPort == null) {
-            return;
-        }
-        engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
-        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort);
-        physicalIpPortByLogicalIpPort.remove(engineIpPort);
-        cacheMetricsReporter.reportGlobalCacheMetrics(
-                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
-    }
-
-    /**
-     * Remove cache metadata for engines that are no longer present in service discovery.
-     */
-    @Override
-    public void removeStaleEngineCaches(Collection<String> activeEngineIpPorts) {
-        if (activeEngineIpPorts == null) {
-            return;
-        }
-        Set<String> activePhysicalIpPorts = new HashSet<>(activeEngineIpPorts);
-        Set<String> staleEngineIpPorts = new HashSet<>(engineLocalView.getAllEngineIpPorts());
-        staleEngineIpPorts.removeIf(
-                engineIpPort ->
-                        activePhysicalIpPorts.contains(
-                                physicalIpPortByLogicalIpPort.getOrDefault(
-                                        engineIpPort, engineIpPort)));
-        for (String staleEngineIpPort : staleEngineIpPorts) {
-            long startTime = System.nanoTime() / 1000;
-            engineLocalView.removeAllCacheBlockOfEngine(staleEngineIpPort);
-            globalCacheIndex.removeAllCacheBlockOfEngine(staleEngineIpPort);
-            physicalIpPortByLogicalIpPort.remove(staleEngineIpPort);
-            log.info(
-                    "Removed stale engine cache: {}, cost={}us",
-                    staleEngineIpPort,
-                    System.nanoTime() / 1000 - startTime);
-        }
-    }
-
-    /**
-     * Clear all data
-     */
-    public void clear() {
-
-        globalCacheIndex.clear();
-        engineLocalView.clear();
-        physicalIpPortByLogicalIpPort.clear();
-
-        // Report
-        cacheMetricsReporter.reportGlobalCacheMetrics(
-                globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
-
-        log.info("Cleared all cache data");
     }
 }

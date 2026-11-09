@@ -3,16 +3,12 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 
-/** Scheduler mode and QUEUE-owned settings. */
+/**
+ * Scheduler mode and QUEUE-owned settings.
+ */
 @Getter
 @Setter
 public final class SchedulerConfig {
-
-    public enum Type {
-        DIRECT,
-        QUEUE
-    }
-
     private Type type = Type.QUEUE;
 
     /** Maximum time a request may remain owned by the QUEUE scheduler. */
@@ -36,5 +32,10 @@ public final class SchedulerConfig {
         return admissionTimeMs > Long.MAX_VALUE - queueTimeoutMs
                 ? Long.MAX_VALUE
                 : admissionTimeMs + queueTimeoutMs;
+    }
+
+    public enum Type {
+        DIRECT,
+        QUEUE
     }
 }

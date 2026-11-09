@@ -17,6 +17,9 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
+/**
+ * Checks logger-group changes from control requests and configuration updates.
+ */
 class FlexlbLogManagerTest {
 
     @Test

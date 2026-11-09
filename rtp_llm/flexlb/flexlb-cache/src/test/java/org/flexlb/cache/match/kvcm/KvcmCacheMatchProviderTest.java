@@ -16,6 +16,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks KVCM request conversion and cache-match result handling.
+ */
 class KvcmCacheMatchProviderTest {
 
     @Test

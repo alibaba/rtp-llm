@@ -6,6 +6,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+/**
+ * Checks token-ID views and their index boundaries.
+ */
 class TokenIdsTest {
 
     @Test

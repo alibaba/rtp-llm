@@ -4,6 +4,10 @@ import org.flexlb.constant.CommonConstants;
 
 import java.util.concurrent.ThreadLocalRandom;
 
+/**
+ * Generates 32-character random hexadecimal identifiers and extracts model names from physical
+ * service identifiers.
+ */
 public class IdUtils {
 
     private static final char[] HEX_ARRAY = "0123456789abcdef".toCharArray();

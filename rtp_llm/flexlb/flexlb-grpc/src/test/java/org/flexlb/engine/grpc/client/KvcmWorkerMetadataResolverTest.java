@@ -22,8 +22,10 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+/**
+ * Checks resolution of worker metadata required by KVCM queries.
+ */
 class KvcmWorkerMetadataResolverTest {
-
     @Test
     void resolvesNamespaceAndQueryTypeFromOneWorkerStatusRefresh() {
         WorkerStatus workerStatus = workerStatus("prefill-deployment", KvCacheGroupMode.WITH_MAMBA);
@@ -121,6 +123,12 @@ class KvcmWorkerMetadataResolverTest {
         };
     }
 
+    private CacheMatchConfiguration configuration(String namespace) {
+        FlexlbConfig flexlbConfig = new FlexlbConfig();
+        flexlbConfig.setCacheMatching(new KvcmCacheMatchingConfig());
+        return new CacheMatchConfiguration(modelMetaConfig(namespace), flexlbConfig);
+    }
+
     private ModelMetaConfig modelMetaConfig(String namespace) {
         Endpoint endpoint = new Endpoint();
         endpoint.setAddress("v-prefill");
@@ -140,11 +148,5 @@ class KvcmWorkerMetadataResolverTest {
         ModelMetaConfig modelMetaConfig = new ModelMetaConfig();
         modelMetaConfig.putServiceRoute(route.getServiceId(), route);
         return modelMetaConfig;
-    }
-
-    private CacheMatchConfiguration configuration(String namespace) {
-        FlexlbConfig flexlbConfig = new FlexlbConfig();
-        flexlbConfig.setCacheMatching(new KvcmCacheMatchingConfig());
-        return new CacheMatchConfiguration(modelMetaConfig(namespace), flexlbConfig);
     }
 }

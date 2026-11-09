@@ -24,7 +24,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * convention grpcPort-1 with a unique host per engine).
  */
 class UniqueEngineIpsTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @TempDir Path tempDir;
@@ -174,18 +173,18 @@ class UniqueEngineIpsTest {
         return MAPPER.readTree(endpointFile.toFile());
     }
 
+    private static String[] with(String[] base, String... extra) {
+        String[] args = new String[base.length + extra.length];
+        System.arraycopy(base, 0, args, 0, base.length);
+        System.arraycopy(extra, 0, args, base.length, extra.length);
+        return args;
+    }
+
     private String[] baseArgs() {
         return new String[] {
             "--endpoint-file", tempDir.resolve("endpoint.json").toString(),
             "--performance", tempDir.resolve("performance.json").toString(),
             "--master-config", tempDir.resolve("master.json").toString(),
         };
-    }
-
-    private static String[] with(String[] base, String... extra) {
-        String[] args = new String[base.length + extra.length];
-        System.arraycopy(base, 0, args, 0, base.length);
-        System.arraycopy(extra, 0, args, base.length, extra.length);
-        return args;
     }
 }

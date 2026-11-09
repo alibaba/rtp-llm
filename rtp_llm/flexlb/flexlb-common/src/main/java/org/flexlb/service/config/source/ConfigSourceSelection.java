@@ -4,6 +4,9 @@ import org.apache.commons.lang3.StringUtils;
 
 import static org.flexlb.constant.NacosConfigConstants.NACOS_SERVER_ADDR;
 
+/**
+ * Orders candidate configuration sources and retains the selected source and document.
+ */
 enum ConfigSourceSelection {
     UNICONFIG,
     NACOS,

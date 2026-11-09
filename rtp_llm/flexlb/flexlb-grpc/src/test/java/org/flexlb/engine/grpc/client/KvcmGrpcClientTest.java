@@ -50,8 +50,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Checks KVCM RPC request construction and responses.
+ */
 class KvcmGrpcClientTest {
-
     private KvcmGrpcClient client;
 
     @Test
@@ -183,46 +185,6 @@ class KvcmGrpcClientTest {
         succeedQuery();
         assertEquals(1, updates.size());
         assertTrue(updates.getFirst().isHealthy());
-    }
-
-    private KvcmLeaderResolver createHealthTestClient() throws InterruptedException {
-        CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
-        KvcmCacheMatchingConfig runtimeConfig = new KvcmCacheMatchingConfig();
-        runtimeConfig.setLeaderRefreshIntervalMs(60_000);
-        runtimeConfig.setRecoverySuccessThreshold(3);
-        runtimeConfig.setQueryFailureThreshold(1);
-        runtimeConfig.setHeartbeatFailureThreshold(1);
-        when(configuration.isKvcmEnabled()).thenReturn(true);
-        when(configuration.getKvcmConfig()).thenReturn(new KvcmConfig());
-        when(configuration.getKvcmRuntimeConfig()).thenReturn(runtimeConfig);
-        KvcmLeaderResolver leader = mock(KvcmLeaderResolver.class);
-        when(leader.refresh()).thenReturn(true);
-        KvcmWorkerMetadataResolver metadata = mock(KvcmWorkerMetadataResolver.class);
-        CountDownLatch initialRefresh = new CountDownLatch(1);
-        doAnswer(
-                        ignored -> {
-                            initialRefresh.countDown();
-                            return null;
-                        })
-                .when(metadata)
-                .refreshNamespacesAndQueryTypes();
-        client =
-                createClient(
-                        configuration,
-                        mock(KvcmMetaServiceClient.class),
-                        leader,
-                        metadata,
-                        mock(GrpcReporter.class));
-        assertTrue(initialRefresh.await(2, TimeUnit.SECONDS));
-        return leader;
-    }
-
-    private void failQuery() {
-        ReflectionTestUtils.invokeMethod(client, "recordQueryFailure");
-    }
-
-    private void succeedQuery() {
-        ReflectionTestUtils.invokeMethod(client, "recordQuerySuccess");
     }
 
     @AfterEach
@@ -751,6 +713,38 @@ class KvcmGrpcClientTest {
         verify(metaServiceClient, org.mockito.Mockito.never()).shutdown();
     }
 
+    private KvcmLeaderResolver createHealthTestClient() throws InterruptedException {
+        CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
+        KvcmCacheMatchingConfig runtimeConfig = new KvcmCacheMatchingConfig();
+        runtimeConfig.setLeaderRefreshIntervalMs(60_000);
+        runtimeConfig.setRecoverySuccessThreshold(3);
+        runtimeConfig.setQueryFailureThreshold(1);
+        runtimeConfig.setHeartbeatFailureThreshold(1);
+        when(configuration.isKvcmEnabled()).thenReturn(true);
+        when(configuration.getKvcmConfig()).thenReturn(new KvcmConfig());
+        when(configuration.getKvcmRuntimeConfig()).thenReturn(runtimeConfig);
+        KvcmLeaderResolver leader = mock(KvcmLeaderResolver.class);
+        when(leader.refresh()).thenReturn(true);
+        KvcmWorkerMetadataResolver metadata = mock(KvcmWorkerMetadataResolver.class);
+        CountDownLatch initialRefresh = new CountDownLatch(1);
+        doAnswer(
+                        ignored -> {
+                            initialRefresh.countDown();
+                            return null;
+                        })
+                .when(metadata)
+                .refreshNamespacesAndQueryTypes();
+        client =
+                createClient(
+                        configuration,
+                        mock(KvcmMetaServiceClient.class),
+                        leader,
+                        metadata,
+                        mock(GrpcReporter.class));
+        assertTrue(initialRefresh.await(2, TimeUnit.SECONDS));
+        return leader;
+    }
+
     private static KvcmGrpcClient createClient(
             CacheMatchConfiguration configuration,
             KvcmMetaServiceClient metaServiceClient,
@@ -767,6 +761,14 @@ class KvcmGrpcClientTest {
                 warmupState,
                 grpcReporter,
                 new KvcmMetricsReporter(NoOpFlexMonitor.getInstance()));
+    }
+
+    private void failQuery() {
+        ReflectionTestUtils.invokeMethod(client, "recordQueryFailure");
+    }
+
+    private void succeedQuery() {
+        ReflectionTestUtils.invokeMethod(client, "recordQuerySuccess");
     }
 
     private static KvcmGrpcClient createQueryTestClient(

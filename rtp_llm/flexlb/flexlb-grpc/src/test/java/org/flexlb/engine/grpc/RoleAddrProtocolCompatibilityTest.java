@@ -15,6 +15,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Checks role and address fields against the existing wire protocol.
+ */
 class RoleAddrProtocolCompatibilityTest {
     private static final List<RoleType> LEGACY_ROLE_ADDR_ROLES =
             List.of(
@@ -230,6 +233,35 @@ class RoleAddrProtocolCompatibilityTest {
                 .findMessageTypeByName("RoleAddrPB");
     }
 
+    private static DescriptorProtos.EnumDescriptorProto roleEnum(String name, String prefix) {
+        DescriptorProtos.EnumDescriptorProto.Builder builder =
+                DescriptorProtos.EnumDescriptorProto.newBuilder().setName(name);
+        for (RoleType role : LEGACY_ROLE_ADDR_ROLES) {
+            builder.addValue(
+                    DescriptorProtos.EnumValueDescriptorProto.newBuilder()
+                            .setName(prefix + role.name())
+                            .setNumber(RoleTypeProtoConverter.toRoleAddrProto(role).getNumber()));
+        }
+        return builder.build();
+    }
+
+    private static DescriptorProtos.FieldDescriptorProto field(
+            String name,
+            int number,
+            DescriptorProtos.FieldDescriptorProto.Type type,
+            String typeName) {
+        DescriptorProtos.FieldDescriptorProto.Builder builder =
+                DescriptorProtos.FieldDescriptorProto.newBuilder()
+                        .setName(name)
+                        .setNumber(number)
+                        .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL)
+                        .setType(type);
+        if (typeName != null) {
+            builder.setTypeName(typeName);
+        }
+        return builder.build();
+    }
+
     private static Descriptors.Descriptor legacyWorkerStatusDescriptor() throws Exception {
         DescriptorProtos.DescriptorProto task =
                 DescriptorProtos.DescriptorProto.newBuilder()
@@ -275,6 +307,16 @@ class RoleAddrProtocolCompatibilityTest {
                 .findMessageTypeByName("WorkerStatusPB");
     }
 
+    private static DescriptorProtos.FieldDescriptorProto repeatedField(
+            String name,
+            int number,
+            DescriptorProtos.FieldDescriptorProto.Type type,
+            String typeName) {
+        return field(name, number, type, typeName).toBuilder()
+                .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_REPEATED)
+                .build();
+    }
+
     private static Descriptors.Descriptor legacyGenerateConfigDescriptor() throws Exception {
         DescriptorProtos.DescriptorProto message =
                 DescriptorProtos.DescriptorProto.newBuilder()
@@ -303,44 +345,5 @@ class RoleAddrProtocolCompatibilityTest {
         return Descriptors.FileDescriptor.buildFrom(
                         file, new Descriptors.FileDescriptor[] {WrappersProto.getDescriptor()})
                 .findMessageTypeByName("GenerateConfigPB");
-    }
-
-    private static DescriptorProtos.EnumDescriptorProto roleEnum(String name, String prefix) {
-        DescriptorProtos.EnumDescriptorProto.Builder builder =
-                DescriptorProtos.EnumDescriptorProto.newBuilder().setName(name);
-        for (RoleType role : LEGACY_ROLE_ADDR_ROLES) {
-            builder.addValue(
-                    DescriptorProtos.EnumValueDescriptorProto.newBuilder()
-                            .setName(prefix + role.name())
-                            .setNumber(RoleTypeProtoConverter.toRoleAddrProto(role).getNumber()));
-        }
-        return builder.build();
-    }
-
-    private static DescriptorProtos.FieldDescriptorProto field(
-            String name,
-            int number,
-            DescriptorProtos.FieldDescriptorProto.Type type,
-            String typeName) {
-        DescriptorProtos.FieldDescriptorProto.Builder builder =
-                DescriptorProtos.FieldDescriptorProto.newBuilder()
-                        .setName(name)
-                        .setNumber(number)
-                        .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL)
-                        .setType(type);
-        if (typeName != null) {
-            builder.setTypeName(typeName);
-        }
-        return builder.build();
-    }
-
-    private static DescriptorProtos.FieldDescriptorProto repeatedField(
-            String name,
-            int number,
-            DescriptorProtos.FieldDescriptorProto.Type type,
-            String typeName) {
-        return field(name, number, type, typeName).toBuilder()
-                .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_REPEATED)
-                .build();
     }
 }
