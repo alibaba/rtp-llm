@@ -25,41 +25,15 @@ Caller is responsible for FP8 quantizing Q via
 
 from __future__ import annotations
 
-import os
-from typing import Optional
-
 import torch
+from rtp_llm.models_py.kernels.cuda import fp8_mqa
+from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
 )
 
-try:
-    from rtp_llm.models_py.kernels.cuda import fp8_mqa as _deep_gemm
-
-    _HAS_DEEP_GEMM = _deep_gemm.available()
-    _HAS_DEEP_GEMM_MQA = _HAS_DEEP_GEMM
-except ImportError:
-    _deep_gemm = None
-    _HAS_DEEP_GEMM = False
-    _HAS_DEEP_GEMM_MQA = False
-
-
-def has_fp8_paged_mqa_logits() -> bool:
-    return _HAS_DEEP_GEMM
-
-
-def has_fp8_mqa_logits() -> bool:
-    return _HAS_DEEP_GEMM_MQA
-
-
-_sched_cache: Optional[torch.Tensor] = None
-
-
-def _get_num_sms(device: torch.device) -> int:
-    # The scheduler metadata and launch must use the same configured SM budget.
-    # Physical SM count can differ when DeepGEMM is deliberately limited.
-    return int(_deep_gemm.get_num_sms())
+_HAS_NATIVE_MQA = fp8_mqa.available()
 
 
 def fp8_paged_indexer_score(
@@ -94,7 +68,10 @@ def fp8_paged_indexer_score(
             max_ctx_len,
         )
 
-    assert _HAS_DEEP_GEMM, "deep_gemm.fp8_paged_mqa_logits not available"
+    if not _HAS_NATIVE_MQA:
+        return _indexer_score.fp8_paged_indexer_score(
+            q_fp8, w_fold, kv_pool_uint8, block_table, context_lens, block_size, max_ctx_len
+        )
     assert q_fp8.dtype == torch.float8_e4m3fn, f"q_fp8 dtype={q_fp8.dtype}"
     assert q_fp8.dim() == 4 and q_fp8.shape[-1] == INDEXER_HEAD_DIM
     assert w_fold.dtype == torch.float32 and w_fold.dim() == 2
@@ -112,11 +89,11 @@ def fp8_paged_indexer_score(
     num_blocks = total_slots // block_size
     kv_4d = kv_pool_uint8.view(num_blocks, block_size, 1, INDEXER_ENTRY_BYTES)
 
-    num_sms = _get_num_sms(q_fp8.device)
-    schedule = _deep_gemm.get_paged_mqa_logits_metadata(
+    num_sms = fp8_mqa.get_num_sms()
+    schedule = fp8_mqa.get_paged_mqa_logits_metadata(
         context_lens, block_size, num_sms
     )
-    return _deep_gemm.fp8_paged_mqa_logits(
+    return fp8_mqa.fp8_paged_mqa_logits(
         q_fp8.contiguous(),
         kv_4d,
         w_fold.contiguous(),
@@ -165,7 +142,17 @@ def fp8_mqa_indexer_score(
     ``cu_seqlen_ke[m]`` are left untouched; the topk-with-causal-mask path
     in :class:`Indexer.forward` re-applies its own ``q_pos`` causal cap.
     """
-    assert _HAS_DEEP_GEMM_MQA, "deep_gemm.fp8_mqa_logits not available"
+    if not _HAS_NATIVE_MQA:
+        return _indexer_score.fp8_mqa_indexer_score(
+            q_fp8,
+            w_fold,
+            k_quant,
+            k_scale,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            clean_logits=clean_logits,
+            max_seqlen_k=max_seqlen_k,
+        )
     assert q_fp8.dtype == torch.float8_e4m3fn and q_fp8.dim() == 3
     assert q_fp8.shape[-1] == INDEXER_HEAD_DIM
     assert w_fold.dtype == torch.float32 and w_fold.dim() == 2
@@ -179,7 +166,7 @@ def fp8_mqa_indexer_score(
     assert cu_seqlen_ks.shape[0] == q_fp8.shape[0]
     assert cu_seqlen_ke.shape[0] == q_fp8.shape[0]
 
-    return _deep_gemm.fp8_mqa_logits(
+    return fp8_mqa.fp8_mqa_logits(
         q_fp8.contiguous(),
         (k_quant.contiguous(), k_scale.contiguous()),
         w_fold.contiguous(),

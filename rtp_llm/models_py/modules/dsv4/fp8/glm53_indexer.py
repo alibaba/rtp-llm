@@ -1,8 +1,7 @@
 """DeepSeek-V4 lightning Indexer — FP8 KV pool path.
 
-Companion to ``indexer.py`` (BF16 path). Always uses DeepGEMM for the
-FP8 indexer score (paged for decode, non-paged for prefill); the bf16
-``v4_indexer_score`` fallback path lives in the BF16 class.
+Uses the packaged native MQA backend when present and the shared FP8
+group-128 score implementation in builds without the native extension.
 
 Nested compressor is ``CompressorFP8(head_dim=128)`` which writes the
 132B grouped UE8M0 layout that DeepGEMM consumes directly.
@@ -12,9 +11,6 @@ What this class does NOT do — by design:
   * NO ``_bind_kv_cache_for_indexer`` materialization. DeepGEMM reads
     the FP8 pool directly via ``fp8_paged_mqa_logits`` /
     ``fp8_mqa_logits``. No bf16 dequant intermediate.
-  * NO env gate (``_fp8_deepgemm_score_enabled`` / equivalent). FP8
-    class always uses DeepGEMM. If DeepGEMM is unavailable at runtime,
-    the layer construction itself should fail loudly.
   * NO bf16 / FP8 runtime branching. Pick the right indexer class at
     attention construction time.
 """
@@ -58,8 +54,6 @@ from rtp_llm.models_py.modules.dsv4.fp8.glm53_compressor import (
 from rtp_llm.models_py.modules.dsv4.fp8.glm53_indexer_score import (
     fp8_mqa_indexer_score,
     fp8_paged_indexer_score,
-    has_fp8_mqa_logits,
-    has_fp8_paged_mqa_logits,
 )
 from rtp_llm.models_py.modules.dsv4.glm53_prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.indexer_grouping import completed_group_lengths_i32
@@ -472,10 +466,6 @@ class IndexerFP8(PoolBackedModule):
         assert index_head_dim == INDEXER_HEAD_DIM, (
             f"IndexerFP8 locked to index_head_dim={INDEXER_HEAD_DIM} "
             f"(matches CompressorFP8 132B layout); got {index_head_dim}"
-        )
-        assert has_fp8_paged_mqa_logits(), (
-            "deep_gemm.fp8_paged_mqa_logits not available — IndexerFP8 cannot "
-            "operate without DeepGEMM. Use IndexerBF16 (or install deep_gemm)."
         )
         assert layer_weights is not None or (
             q_projection is not None
@@ -1470,9 +1460,6 @@ class IndexerFP8(PoolBackedModule):
             with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
                 weights = self._compute_weights(x)
 
-            assert (
-                has_fp8_mqa_logits()
-            ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
             assert self._kv_pool_view.dim() == 3, (
                 "IndexerFP8 expects 3D ``_kv_pool_view`` "
                 "[num_blocks, eb, 132]; got dim="
@@ -1645,9 +1632,6 @@ class IndexerFP8(PoolBackedModule):
             with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
                 weights = self._compute_weights(x)
 
-            assert (
-                has_fp8_mqa_logits()
-            ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
             assert self._kv_pool_view.dim() == 3, (
                 "IndexerFP8 expects 3D ``_kv_pool_view`` "
                 "[num_blocks, eb, 132]; got dim="
