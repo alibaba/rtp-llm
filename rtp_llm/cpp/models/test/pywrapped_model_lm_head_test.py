@@ -116,33 +116,95 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
         torch.testing.assert_close(result["all_hidden_states"], selected)
         self.assertEqual(self.model.projected_rows, [2])
 
-    def test_tp_joins_bf16_vocabulary_shards_before_fp32(self):
+    def test_tp_joins_vocabulary_shards_before_fp32(self):
+        for tp_size in (2, 4):
+            for packed in (False, True):
+                for already_selected, has_context, need_all in (
+                    (False, True, False),
+                    (False, False, False),
+                    (False, True, True),
+                    (True, True, False),
+                ):
+                    with self.subTest(
+                        tp_size=tp_size,
+                        packed=packed,
+                        already_selected=already_selected,
+                        has_context=has_context,
+                        need_all=need_all,
+                    ):
+                        self.check_tp_logits(
+                            tp_size, packed, already_selected, has_context, need_all
+                        )
+
+    def test_tp_gather_accepts_noncontiguous_projection(self):
+        project = self.model.compute_quantized_logits
+
+        def strided_projection(hidden):
+            local = project(hidden)
+            result = torch.stack((local, local), dim=-1)[..., 0]
+            self.assertFalse(result.is_contiguous())
+            return result
+
+        self.model.compute_quantized_logits = strided_projection
+        self.check_tp_logits(2, True, False, True, False)
+
+    def check_tp_logits(self, tp_size, packed, already_selected, has_context, need_all):
         communicated = []
+        selected = already_selected or (has_context and not need_all)
+        projected_hidden = self.hidden[[5, 1]] if selected else self.hidden
+        rows = projected_hidden.shape[0]
 
         def gather(receivers, mode, senders, inplace):
-            # Emulate the peer shard while exercising the actual C++ gather
-            # adapter, rank-major layout conversion, crop and FP32 conversion.
+            # The production adapter sends the local shard separately. The
+            # receive buffer has no initialized rank slice before the gather.
+            self.assertEqual(mode, 0)  # ParallelMode::TP
+            self.assertFalse(inplace)
+            self.assertEqual(len(receivers), 1)
+            self.assertEqual(len(senders), 1)
+            local = senders[0]
             buffer = receivers[0]
-            local = buffer.reshape(2, 2, 16)[0].clone()
-            communicated.append(local)
-            buffer.reshape(2, 2, 16).copy_(torch.stack((local, local + 16)))
+            self.assertEqual(tuple(local.shape), (rows, 16))
+            self.assertEqual(tuple(buffer.shape), (tp_size * rows, 16))
+            self.assertTrue(local.is_contiguous())
+            self.assertTrue(buffer.is_contiguous())
+            self.assertEqual(local.dtype, buffer.dtype)
+            communicated.append(local.clone())
+            buffer.reshape(tp_size, rows, 16).copy_(
+                torch.stack([local + 16 * rank for rank in range(tp_size)])
+            )
 
         register_comm_ops(lambda *args: None, lambda *args: None, gather)
         try:
             with torch.no_grad():
                 result = run_lm_head(
                     self.model,
-                    self.packed,
-                    self.hidden,
+                    self.packed if packed else self.model.nvfp4_lm_head.weight,
+                    self.hidden[[5, 1]] if already_selected else self.hidden,
                     self.indexes,
-                    tp_size=2,
-                    output_vocab_size=29,
+                    has_context_request=has_context,
+                    need_all_logits=need_all,
+                    already_selected=already_selected,
+                    tp_size=tp_size,
+                    output_vocab_size=16 * tp_size - 3,
                 )
-                local = self.model.nvfp4_lm_head(self.hidden[[5, 1]])
+                local = (
+                    self.model.nvfp4_lm_head(projected_hidden)
+                    if packed
+                    else projected_hidden.float()
+                    @ self.model.nvfp4_lm_head.weight.float().t()
+                )
             self.assertEqual(len(communicated), 1)
-            self.assertEqual(communicated[0].dtype, torch.bfloat16)
-            expected = torch.cat((local, local + 16), dim=1)[:, :29].float()
+            self.assertEqual(
+                communicated[0].dtype, torch.bfloat16 if packed else torch.float32
+            )
+            torch.testing.assert_close(communicated[0], local)
+            all_logits = torch.cat(
+                [local + 16 * rank for rank in range(tp_size)], dim=1
+            )[:, : 16 * tp_size - 3].float()
+            expected = all_logits[[5, 1]] if need_all else all_logits
             torch.testing.assert_close(result["logits"], expected)
+            if need_all:
+                torch.testing.assert_close(result["all_logits"], all_logits)
         finally:
             clear_comm_ops()
 
