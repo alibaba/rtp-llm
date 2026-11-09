@@ -318,7 +318,7 @@ Trace 的两个 JSONL 流共用 `run_id` 和 `seq`。Step 事件、关联动作�
 
 新增 Case 操作在 `execution/step/` 定义带类型注解的异步函数并注册；新增角色生命周期行为进入对应服务；只有新的跨服务启动/收尾顺序才修改 `RunEnvironment`。不为接口名、角色名或 Case 名向 Runner 主循环增加分支，也不引入通用插件框架或事件总线。配置入口和业务 Case 的下一批接线以这些边界为基础，本批保持现有 YAML 参数、返回值与产物格式。
 
-这里的 EngineLoop 是 P/D 文本生成执行内核，不是 JVM 宿主循环，也不是 ViT 调度循环。runtime 仅提供访问和实例管理设施；EngineLoop 驱动 EngineScheduler 选批及 Forward 执行，EngineScheduler 提交生成进度、队列和资源变化。ViT 保留自己的图片合批循环。RequestState 负责进度、终态及资源使用计数；EngineScheduler.QueueSnapshot 只是队列计数值，不统一各调度器的队列容器。
+EngineLoop 是 P/D 文本生成执行内核。runtime 仅提供访问和实例管理设施；EngineLoop 驱动 EngineScheduler 选批及 Forward 执行，EngineScheduler 提交生成进度、队列和资源变化。ViT 保留自己的图片合批循环。RequestState 负责进度、终态及资源使用计数；EngineScheduler.QueueSnapshot 只是队列计数值，不统一各调度器的队列容器。
 
 protocol 供 Client、P 接入层和 ViT 共用媒体输入与 RPC；图片几何、模拟输出 hash 生成和缓存大小计算归 ViT 的 VitGeometry。它们不反向依赖 ViT 服务实现。java/metrics 提供公共指标标签、窗口统计与导出；RTP 指标名称、单位及 TPS/容量统计放在后端 RtpMetrics，ViT 仍使用 VitMetrics。指标记录不参与模拟计算；窗口统计在 scrape 时推进，因此同一目标应由一个采集者抓取，额外 scrape 会改变窗口划分。
 
