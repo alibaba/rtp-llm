@@ -8,9 +8,6 @@
 # Adapted for rtp-llm: forward-only, no CP, no backward.
 
 import torch
-from rtp_llm.models_py.triton_kernels.fla.chunk_delta_h import (
-    chunk_gated_delta_rule_fwd_h,
-)
 from rtp_llm.models_py.triton_kernels.fla.cumsum import chunk_local_cumsum
 from rtp_llm.models_py.triton_kernels.fla.utils import RCP_LN2
 from rtp_llm.models_py.triton_kernels.glm53_kda.chunk_delta_h import (
@@ -19,6 +16,9 @@ from rtp_llm.models_py.triton_kernels.glm53_kda.chunk_delta_h import (
 from rtp_llm.models_py.triton_kernels.glm53_kda.chunk_intra import chunk_kda_fwd_intra
 from rtp_llm.models_py.triton_kernels.glm53_kda.chunk_o import chunk_gla_fwd_o_gk
 from rtp_llm.models_py.triton_kernels.glm53_kda.gate import kda_gate_chunk_cumsum
+from rtp_llm.models_py.triton_kernels.glm53_kda.prefill_delta_h import (
+    chunk_gated_delta_rule_fwd_h,
+)
 from rtp_llm.models_py.triton_kernels.glm53_kda.reuse_state_graph import (
     chunk_gated_delta_rule_fwd_h_reuse_graph,
 )
