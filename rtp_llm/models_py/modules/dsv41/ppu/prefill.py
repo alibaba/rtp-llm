@@ -8,6 +8,7 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.backend import V41QuantizedTensor, V41StepContext
 from rtp_llm.models_py.modules.dsv41.ppu import _quant
 from rtp_llm.models_py.modules.dsv41.ppu.attention import COMBINED_WIDTH
@@ -331,6 +332,69 @@ def _global_write_ranges(positions, request_ids, append_starts, prefill_layout):
         yield rid, start, end, append, list(indices), state_rows
 
 
+_PRODUCER_TILE_ENTRIES = 8192
+
+
+def _producer_tiles(requests, ratio):
+    """Group adjacent whole requests without crossing a compression pair."""
+    tile, count = [], 0
+    for request in requests:
+        _, start, end, _, _, _ = request
+        entries = (end - start) // ratio
+        aligned = start % ratio == 0 and end % ratio == 0
+        if tile and (not aligned or count + entries > _PRODUCER_TILE_ENTRIES):
+            yield tile
+            tile, count = [], 0
+        if not aligned or entries > _PRODUCER_TILE_ENTRIES:
+            yield [request]
+        else:
+            tile.append(request)
+            count += entries
+    if tile:
+        yield tile
+
+
+def _tiled_producer_inputs(
+    requests, ops, layer, eps, freqs, values, scores, positions, ratio, tag
+):
+    for tile in _producer_tiles(requests, ratio):
+        if len(tile) == 1:
+            # Odd prefixes, unpaired tails, and oversized requests use the
+            # original producer, including its CSA carry and error checks.
+            yield tile[0], None
+            continue
+
+        with record_function_range("dsv41.ppu.prefill.compressor.tile"):
+            begin, end = tile[0][4].start, tile[-1][4].stop
+            tile_values = values[begin:end]
+            if ratio == 1:
+                latent = _rms_norm(tile_values, layer.compressor_norm, eps).to(torch.bfloat16)
+            else:
+                tile_scores = scores[begin:end]
+                latent = _compress_pairs(
+                    tile_values.reshape(-1, 2, tile_values.shape[-1]),
+                    tile_scores.reshape(-1, 2, tile_scores.shape[-1]),
+                    layer.compressor_norm,
+                    eps,
+                )
+            entry_positions = positions[begin:end:ratio]
+            rotation = freqs[entry_positions.clamp_max(freqs.shape[0] - 1)]
+            packed_global = ops.encode_kv(_rope_tail(latent, rotation), pool_tag=tag)
+            counts = tuple((request[2] - request[1]) // ratio for request in tile)
+            # Keep the GEMM shape of each request. Tile the row-local norm,
+            # rotary embedding and codec around that BF16 rounding boundary.
+            projected = torch.cat(
+                [F.linear(rows, layer.index_wk.weight) for rows in latent.split(counts)]
+            )
+            projected = _rms_norm(projected, layer.index_k_norm, eps)
+            packed_index = ops.encode_kv(_rope_tail(projected, rotation), pool_tag="indexer_kv")
+            del latent, projected, rotation
+        yield from zip(
+            tile,
+            zip(entry_positions.split(counts), packed_global.split(counts), packed_index.split(counts)),
+        )
+
+
 def _produce_global(
     *,
     ops,
@@ -367,10 +431,19 @@ def _produce_global(
         and cache.cp8_row_prep_enabled()
     )
     ranges = _global_write_ranges(positions, request_ids, append_starts or {}, prefill_layout)
-    for rid, start, end, append, rows, state_rows in ranges:
+    prepared = (
+        _tiled_producer_inputs(
+            ranges, ops, layer, geometry.norm_eps, freqs, values, scores, positions, ratio, tag,
+        )
+        if request_local and os.environ.get("RTP_V41_PPU_CP8_TILED_COMPRESSOR", "0") == "1"
+        else ((request, None) for request in ranges)
+    )
+    for (rid, start, end, append, rows, state_rows), packed in prepared:
         handle = None if request_local else slots[rid]
         begin, stop = start // ratio, end // ratio
-        if ratio == 1:
+        if packed is not None:
+            entry_positions, packed_global, packed_index = packed
+        elif ratio == 1:
             latent = _rms_norm(
                 values[rows], layer.compressor_norm, geometry.norm_eps
             ).to(torch.bfloat16)
@@ -407,15 +480,16 @@ def _produce_global(
             entry_positions = torch.arange(
                 begin * ratio, stop * ratio, ratio, device=positions.device
             )
-        entry_count = stop - begin
-        if latent.shape[0] != entry_count:
-            raise RuntimeError(
-                f"layer {layer_id} produced {latent.shape[0]} entries for "
-                f"request {rid}, expected {entry_count} (start={start}, end={end})"
-            )
-        safe_positions = entry_positions.clamp_max(freqs.shape[0] - 1)
-        global_keys = _rope_tail(latent, freqs[safe_positions])
-        packed_global = ops.encode_kv(global_keys, pool_tag=tag)
+        if packed is None:
+            entry_count = stop - begin
+            if latent.shape[0] != entry_count:
+                raise RuntimeError(
+                    f"layer {layer_id} produced {latent.shape[0]} entries for "
+                    f"request {rid}, expected {entry_count} (start={start}, end={end})"
+                )
+            safe_positions = entry_positions.clamp_max(freqs.shape[0] - 1)
+            global_keys = _rope_tail(latent, freqs[safe_positions])
+            packed_global = ops.encode_kv(global_keys, pool_tag=tag)
         first_write = max(begin, append // ratio)
         write_offset = first_write - begin
         write_positions = entry_positions[write_offset:]
@@ -431,11 +505,12 @@ def _produce_global(
                 handle.global_slots[layer_id][first_write:stop],
                 packed_global[write_offset:],
             )
-        # Indexer K comes from the same latents.
-        projected = F.linear(latent, layer.index_wk.weight)
-        projected = _rms_norm(projected, layer.index_k_norm, geometry.norm_eps)
-        index_keys = _rope_tail(projected, freqs[safe_positions])
-        packed_index = ops.encode_kv(index_keys, pool_tag="indexer_kv")
+        if packed is None:
+            # Indexer K comes from the same latents.
+            projected = F.linear(latent, layer.index_wk.weight)
+            projected = _rms_norm(projected, layer.index_k_norm, geometry.norm_eps)
+            index_keys = _rope_tail(projected, freqs[safe_positions])
+            packed_index = ops.encode_kv(index_keys, pool_tag="indexer_kv")
         if handle is None:
             cache.insert_request_rows(
                 layer_id, "indexer_kv", rid, write_positions, packed_index[write_offset:],
