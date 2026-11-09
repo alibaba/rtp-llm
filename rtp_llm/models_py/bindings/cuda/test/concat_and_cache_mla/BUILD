@@ -29,6 +29,14 @@ py_test(
 )
 
 py_test(
+    name = "test_glm53_fp8",
+    srcs = ["test_glm53_fp8.py"],
+    deps = py_test_deps,
+    exec_properties = {"gpu": "SM103_CU13"},
+    tags = ["SM103_CU13"],
+)
+
+py_test(
     name = "test_model1_fp8",
     srcs = [
         "test_model1_fp8.py",

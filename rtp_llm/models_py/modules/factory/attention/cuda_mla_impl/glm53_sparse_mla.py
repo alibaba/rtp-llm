@@ -872,6 +872,7 @@ class SparseMlaImpl(MlaImplBase):
         )
         self.kv_cache_write_op = MlaKVCacheWriteOp(
             kv_cache_dtype=attn_configs.kv_cache_dtype,
+            fp8_nope=self.rope_head_dim == 0,
         )
 
         self._fuse_qk_rope_cat_cache_mla = _fused_qk_rope_cat_cache_mla_enabled(
@@ -983,26 +984,9 @@ class SparseMlaImpl(MlaImplBase):
         self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False
     ) -> None:
         """Refresh per-forward params + plan. forbid_realloc=True under cuda graph replay."""
-        block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
-        if (
-            type(self.fmha_impl) is SparseMlaOp
-            and _is_multi_token_decode(attn_inputs)
-            and not forbid_realloc
-            and attn_inputs.total_tokens > 0
-            and isinstance(block_table, torch.Tensor)
-            and block_table.is_cuda
-        ):
-            self.fmha_params.fill_multi_token_decode_params(
-                attn_inputs.input_lengths,
-                attn_inputs.prefix_lengths,
-                block_table,
-                self.seq_size_per_block,
-                attn_inputs.total_tokens,
-            )
-        else:
-            self.fmha_params.fill_params(
-                attn_inputs, self.seq_size_per_block, forbid_realloc
-            )
+        self.fmha_params.fill_params(
+            attn_inputs, self.seq_size_per_block, forbid_realloc
+        )
         self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc)
         block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
         if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
@@ -1014,28 +998,9 @@ class SparseMlaImpl(MlaImplBase):
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+        # Reuse main's device-only fill for ordinary decode. Target verification
+        # and other prefill-shaped requests use main's SparseMlaParams plan.
         if (
-            _is_multi_token_decode(attn_inputs)
-            and isinstance(self.fmha_impl, SparseMlaOp)
-            and attn_inputs.kv_cache_kernel_block_id_device is not None
-            and self.fmha_params.multi_token_decode_total_tokens > 0
-        ):
-            block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
-            if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
-                block_table = attn_inputs.kv_cache_block_id_device
-            self.fmha_params.fill_multi_token_decode_cuda_graph_params(
-                attn_inputs.input_lengths,
-                attn_inputs.prefix_lengths,
-                block_table,
-                self.seq_size_per_block,
-            )
-            self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
-            self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
-        # Decode fast path (draft model): SparseMlaImpl handles decode for sparse
-        # configs because MlaFlashInferDecodeImpl rejects when is_sparse=True.
-        # fillParams' 3 toHostContiguousI32 D2H syncs go away by delegating to
-        # the device-only fillDecodeCudaGraphParams kernel.
-        elif (
             not getattr(attn_inputs, "is_prefill", True)
             and isinstance(self.fmha_impl, SparseMlaOp)
             and attn_inputs.sequence_lengths_plus_1_device is not None
@@ -1046,24 +1011,6 @@ class SparseMlaImpl(MlaImplBase):
                 block_table = attn_inputs.kv_cache_block_id_device
             self.fmha_params.fill_sparse_mla_decode_cuda_graph_params(
                 attn_inputs.sequence_lengths_plus_1_device,
-                block_table,
-                self.seq_size_per_block,
-            )
-            self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
-            self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
-        elif (
-            getattr(attn_inputs, "is_prefill", False)
-            and not _is_multi_token_decode(attn_inputs)
-            and isinstance(self.fmha_impl, SparseMlaFp8Op)
-            and attn_inputs.kv_cache_kernel_block_id_device is not None
-            and self.fmha_params.prefill_tokens_per_batch > 0
-        ):
-            block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
-            if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
-                block_table = attn_inputs.kv_cache_block_id_device
-            self.fmha_params.fill_target_verify_cuda_graph_params(
-                attn_inputs.input_lengths,
-                attn_inputs.prefix_lengths,
                 block_table,
                 self.seq_size_per_block,
             )
