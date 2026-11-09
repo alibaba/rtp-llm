@@ -20,7 +20,13 @@ def _valid_page_size(page_size) -> bool:
 def _page_amax(
     X,
     Partial,
-    ROWS: tl.constexpr,
+    # ``ROWS`` is a runtime argument on purpose: it is the residual chunk's
+    # row count, which varies per request. As a constexpr it compiled a fresh
+    # variant for every new chunk length — serving timelines show ~60-130ms
+    # Triton JIT stalls per new length (the ~190ms qwen4.ple.apply giant
+    # window and the ~60ms step-tail gap). The structural constants (K, PAGE,
+    # TILES, BLOCK) stay constexpr; they are fixed by the layer geometry.
+    ROWS,
     K: tl.constexpr,
     PAGE: tl.constexpr,
     TILES: tl.constexpr,
@@ -48,8 +54,13 @@ def _page_quant(
     RowValueScale,
     WK,
     WV,
-    ROWS: tl.constexpr,
-    PADDED: tl.constexpr,
+    # ``ROWS``/``PADDED`` are runtime arguments on purpose: both track the
+    # residual chunk's row count (PADDED is the page-rounded size), which
+    # varies per request. As constexprs they compiled a fresh variant pair per
+    # new chunk length; as runtime ints Triton's value classes (1, %16, other)
+    # keep the variant count bounded. See _page_amax for the stall history.
+    ROWS,
+    PADDED,
     K: tl.constexpr,
     PAGE: tl.constexpr,
     TILES: tl.constexpr,
@@ -120,7 +131,7 @@ def quantize_pages(x, key_scale, value_scale, page_size=128, *, row_scales=False
         else (None, None)
     )
     _page_amax[(pages, tiles)](
-        x, partial, ROWS=rows, K=width, PAGE=page_size, TILES=tiles, BLOCK=4096
+        x, partial, rows, K=width, PAGE=page_size, TILES=tiles, BLOCK=4096
     )
     _page_quant[(pages, tiles)](
         x,
@@ -130,8 +141,8 @@ def quantize_pages(x, key_scale, value_scale, page_size=128, *, row_scales=False
         *row_sf,
         key_scale,
         value_scale,
-        ROWS=rows,
-        PADDED=padded,
+        rows,
+        padded,
         K=width,
         PAGE=page_size,
         TILES=tiles,
