@@ -11,8 +11,10 @@ import torch.multiprocessing as mp
 
 def _worker(rank, store):
     import flashinfer.comm
-
-    from rtp_llm.models_py.distributed.flashinfer_all_reduce import FlashInferAllReduce
+    from rtp_llm.config.qwen4_collective_config import Qwen4CollectiveOptions
+    from rtp_llm.config.server_config_setup import set_parallelism_config
+    from rtp_llm.models_py.distributed import qwen4_all_reduce as qwen4_ar
+    from rtp_llm.ops import ParallelismConfig
 
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
@@ -24,61 +26,48 @@ def _worker(rank, store):
         timeout=datetime.timedelta(seconds=90),
     )
     group = dist.group.WORLD
-    # A missing optional API must also participate in the same consensus.
-    original = flashinfer.comm.allreduce_fusion
-    if rank == 1:
-        del flashinfer.comm.allreduce_fusion
-    try:
-        communicator = FlashInferAllReduce(
+    pc = ParallelismConfig()
+    pc.tp_size = pc.ep_size = pc.world_size = pc.local_world_size = 2
+    pc.world_rank = rank
+    set_parallelism_config(pc)
+
+    def initialize(large=False):
+        qwen4_ar.destroy_qwen4_allreduce()
+        return qwen4_ar.init_qwen4_allreduce(
             group,
             device,
-            single_node=True,
-            enable_sm120_collectives=True,
-            disable_custom_all_reduce=False,
+            pc,
+            Qwen4CollectiveOptions("sm120_ipc", large, "qwen4_exp"),
         )
-        assert communicator.disabled and not communicator.cpp_small_enabled
+
+    from flashinfer.comm import vllm_ar
+
+    original = vllm_ar.init_custom_ar
+    if rank == 1:
+        del vllm_ar.init_custom_ar
+    try:
+        assert initialize() is None
     finally:
-        flashinfer.comm.allreduce_fusion = original
-    # Neither a heterogeneous capability nor rank-local tuning may select
-    # different collectives. Both ranks must disable IPC before allocation.
+        vllm_ar.init_custom_ar = original
     with patch.object(
         torch.cuda,
         "get_device_capability",
         return_value=(12, 0) if rank == 0 else (8, 9),
     ):
-        communicator = FlashInferAllReduce(
-            group,
-            device,
-            single_node=True,
-            enable_sm120_collectives=True,
-            disable_custom_all_reduce=False,
-        )
-        assert communicator.disabled and not communicator.cpp_small_enabled
-    communicator = FlashInferAllReduce(
-        group,
-        device,
-        single_node=True,
-        enable_sm120_collectives=True,
-        disable_custom_all_reduce=False,
-        large_prefill=bool(rank),
-    )
-    assert communicator.disabled and not communicator.cpp_small_enabled
+        assert initialize() is None
+    try:
+        initialize(large=bool(rank))
+    except ValueError as error:
+        assert "differs across TP ranks" in str(error)
+    else:
+        raise AssertionError("rank-local tuning did not fail consistently")
     with patch.object(
         torch.cuda,
         "get_device_capability",
-        side_effect=(
-            RuntimeError("injected local capability failure") if rank == 1 else None
-        ),
+        side_effect=RuntimeError("injected probe failure") if rank == 1 else None,
         return_value=(12, 0),
     ):
-        communicator = FlashInferAllReduce(
-            group,
-            device,
-            single_node=True,
-            enable_sm120_collectives=True,
-            disable_custom_all_reduce=False,
-        )
-        assert communicator.disabled
+        assert initialize() is None
     original_empty = torch.empty
 
     def allocate(*args, **kwargs):
@@ -86,28 +75,13 @@ def _worker(rank, store):
             raise torch.OutOfMemoryError("injected local IPC allocation failure")
         return original_empty(*args, **kwargs)
 
-    communicator = FlashInferAllReduce(
-        group,
-        device,
-        single_node=True,
-        enable_sm120_collectives=True,
-        disable_custom_all_reduce=False,
-    )
-    x = torch.full((4, 2560), rank + 1, dtype=torch.bfloat16, device=device)
     with patch.object(torch, "empty", side_effect=allocate):
-        assert not communicator.should_use(x)
-    assert communicator.disabled
+        assert initialize() is None
+    x = torch.full((4, 2560), rank + 1, dtype=torch.bfloat16, device=device)
     dist.all_reduce(x)
     torch.testing.assert_close(x, torch.full_like(x, 3), rtol=0, atol=0)
     from flashinfer.comm import vllm_ar
 
-    communicator = FlashInferAllReduce(
-        group,
-        device,
-        single_node=True,
-        enable_sm120_collectives=True,
-        disable_custom_all_reduce=False,
-    )
     original_register = vllm_ar.register_buffer
 
     def register(*args):
@@ -116,39 +90,26 @@ def _worker(rank, store):
         return original_register(*args)
 
     with patch.object(vllm_ar, "register_buffer", side_effect=register):
-        assert not communicator.should_use(x)
-    assert communicator.disabled
+        assert initialize() is None
     x.fill_(rank + 1)
     dist.all_reduce(x)
     torch.testing.assert_close(x, torch.full_like(x, 3), rtol=0, atol=0)
 
-    communicator = FlashInferAllReduce(
-        group,
-        device,
-        single_node=True,
-        enable_sm120_collectives=True,
-        disable_custom_all_reduce=False,
-    )
-    assert not communicator.disabled and communicator.cpp_small_enabled
+    communicator = initialize()
+    assert communicator is not None and communicator.cpp_small_enabled
     x = torch.full((4, 2560), rank + 1, dtype=torch.bfloat16, device=device)
     assert communicator.should_use(x)
     actual = communicator.all_reduce(x)
     torch.testing.assert_close(actual, torch.full_like(actual, 3), rtol=0, atol=0)
-    large_prefill = FlashInferAllReduce(
-        group,
-        device,
-        single_node=True,
-        enable_sm120_collectives=True,
-        disable_custom_all_reduce=False,
-        large_prefill=True,
-    )
+    large_prefill = initialize(large=True)
+    assert large_prefill is not None
     for rows in (4093, 4094, 4095, 4096, 8192, 12288, 16384):
         value = torch.full((rows, 2560), rank + 1, dtype=torch.bfloat16, device=device)
         assert large_prefill.should_use(value)
         torch.testing.assert_close(
             large_prefill.all_reduce(value), torch.full_like(value, 3), rtol=0, atol=0
         )
-    large_prefill.destroy()
+    communicator = initialize()
     communicator.allow_ipc_capture = True
     captures = []
     for rows in (4, 7):
@@ -168,7 +129,7 @@ def _worker(rank, store):
     communicator.all_reduce_into(x, x)
     torch.testing.assert_close(x, torch.full_like(x, 7), rtol=0, atol=0)
     torch.cuda.synchronize()
-    communicator.destroy()
+    qwen4_ar.destroy_qwen4_allreduce()
     dist.destroy_process_group()
 
 

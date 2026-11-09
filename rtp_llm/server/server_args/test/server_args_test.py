@@ -16,43 +16,54 @@ from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
 
-class CustomAllReduceArgumentsTest(TestCase):
-    def test_explicit_cli_value_is_preserved_for_python_collectives(self):
+class Qwen4AllReduceArgumentsTest(TestCase):
+    def test_default_and_retired_environment_keep_nccl(self):
         from rtp_llm.server.server_args import server_args
 
-        with patch.dict(os.environ, {}, clear=True):
-            disabled = server_args.setup_args(["--ft_disable_custom_ar", "1"])
-            enabled = server_args.setup_args(["--ft_disable_custom_ar", "0"])
-            unspecified = server_args.setup_args([])
+        for value in (None, "0", "1"):
+            env = {} if value is None else {"FT_DISABLE_CUSTOM_AR": value}
+            with self.subTest(value=value), patch.dict(os.environ, env, clear=True):
+                configs = server_args.setup_args([])
+                self.assertEqual(configs.qwen4_all_reduce_backend, "nccl")
+                self.assertFalse(configs.qwen4_all_reduce_large_prefill)
+                self.assertFalse(hasattr(configs, "ft_disable_custom_ar_override"))
 
-        self.assertIs(disabled.ft_disable_custom_ar_override, True)
-        self.assertIs(enabled.ft_disable_custom_ar_override, False)
-        self.assertIsNone(unspecified.ft_disable_custom_ar_override)
-
-    def test_environment_value_is_preserved_for_python_collectives(self):
+    def test_retired_cli_is_rejected(self):
         from rtp_llm.server.server_args import server_args
 
-        with patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": "1"}, clear=True):
+        for option in ("--ft_disable_custom_ar", "--ffn_sp_size"):
+            with self.subTest(option=option), patch.dict(os.environ, {}, clear=True):
+                with patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+                    server_args.setup_args([option, "1"])
+
+    def test_backend_and_large_prefill_cli_override_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        env = {
+            "RTP_LLM_QWEN4_ALL_REDUCE_BACKEND": "sm120_ipc",
+            "RTP_LLM_QWEN4_ALL_REDUCE_LARGE_PREFILL": "1",
+        }
+        with patch.dict(os.environ, env, clear=True):
             configs = server_args.setup_args([])
+            self.assertEqual(configs.qwen4_all_reduce_backend, "sm120_ipc")
+            self.assertTrue(configs.qwen4_all_reduce_large_prefill)
+            configs = server_args.setup_args(
+                [
+                    "--qwen4_all_reduce_backend",
+                    "nccl",
+                    "--qwen4_all_reduce_large_prefill",
+                    "0",
+                ]
+            )
+            self.assertEqual(configs.qwen4_all_reduce_backend, "nccl")
+            self.assertFalse(configs.qwen4_all_reduce_large_prefill)
 
-        self.assertIs(configs.ft_disable_custom_ar_override, True)
-
-    def test_large_prefill_policy_is_parsed_and_default_off(self):
+    def test_invalid_backend_is_rejected(self):
         from rtp_llm.server.server_args import server_args
 
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(server_args.setup_args([]).ipc_all_reduce_large_prefill)
-        with patch.dict(
-            os.environ, {"RTP_LLM_IPC_ALL_REDUCE_LARGE_PREFILL": "1"}, clear=True
-        ):
-            self.assertTrue(server_args.setup_args([]).ipc_all_reduce_large_prefill)
-            self.assertFalse(
-                server_args.setup_args(
-                    ["--ipc_all_reduce_large_prefill", "0"]
-                ).ipc_all_reduce_large_prefill
-            )
-        with patch.dict(os.environ, {}, clear=True), self.assertRaises(SystemExit):
-            server_args.setup_args(["--ipc_all_reduce_large_prefill", "invalid"])
+        with patch.dict(os.environ, {}, clear=True), patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                server_args.setup_args(["--qwen4_all_reduce_backend", "auto"])
 
 
 class CacheConfigArgumentsTest(TestCase):
@@ -168,9 +179,10 @@ class CacheConfigArgumentsTest(TestCase):
             ([], {"ENABLE_CRC": "invalid"}),
             (["--enable_crc", "invalid"], {}),
         ):
-            with self.subTest(args=args, env=env), patch(
-                "sys.stderr", new_callable=io.StringIO
-            ) as stderr:
+            with (
+                self.subTest(args=args, env=env),
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
                 with self.assertRaises(SystemExit) as raised:
                     self.parse_cache_config(args, env)
                 self.assertEqual(raised.exception.code, 2)
@@ -223,9 +235,10 @@ class CacheConfigArgumentsTest(TestCase):
     def test_removed_cli_names_are_rejected(self):
         samples = self.startup_samples()
         for name, old_name in self.removed_names().items():
-            with self.subTest(old_name=old_name), patch(
-                "sys.stderr", new_callable=io.StringIO
-            ) as stderr:
+            with (
+                self.subTest(old_name=old_name),
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
                 with self.assertRaises(SystemExit) as raised:
                     self.parse_cache_config([f"--{old_name}", str(samples[name])], {})
                 self.assertEqual(raised.exception.code, 2)
@@ -407,9 +420,11 @@ class ServerArgsPyEnvConfigsTest(TestCase):
         from rtp_llm.server.server_args import server_args
 
         for strategy in ("grouped_fp4", "local_loop"):
-            with self.subTest(strategy=strategy), patch.dict(
-                os.environ, {"MOE_STRATEGY": strategy}, clear=True
-            ), patch.object(sys, "argv", ["rtp_llm_server"]):
+            with (
+                self.subTest(strategy=strategy),
+                patch.dict(os.environ, {"MOE_STRATEGY": strategy}, clear=True),
+                patch.object(sys, "argv", ["rtp_llm_server"]),
+            ):
                 configs = server_args.setup_args()
                 self.assertEqual(configs.moe_config.moe_strategy, strategy)
 
@@ -425,9 +440,11 @@ class ServerArgsPyEnvConfigsTest(TestCase):
         self.assertEqual(rocm_configs.moe_config.moe_strategy, "rocm_ep_low_latency")
 
         for unsupported in ("no_auant_cpp",):
-            with self.subTest(unsupported=unsupported), patch.dict(
-                os.environ, {}, clear=True
-            ), patch("sys.stderr", new_callable=io.StringIO):
+            with (
+                self.subTest(unsupported=unsupported),
+                patch.dict(os.environ, {}, clear=True),
+                patch("sys.stderr", new_callable=io.StringIO),
+            ):
                 with self.assertRaises(SystemExit):
                     server_args.setup_args(["--moe_strategy", unsupported])
 
@@ -438,10 +455,11 @@ class ServerArgsPyEnvConfigsTest(TestCase):
             ["rtp_llm_server"],
             ["rtp_llm_server", "--tp_size", "1"],
         ):
-            with self.subTest(argv=argv), patch.dict(
-                os.environ, {"MOE_STRATEGY": "not_a_strategy"}, clear=True
-            ), patch.object(sys, "argv", argv), patch(
-                "sys.stderr", new_callable=io.StringIO
+            with (
+                self.subTest(argv=argv),
+                patch.dict(os.environ, {"MOE_STRATEGY": "not_a_strategy"}, clear=True),
+                patch.object(sys, "argv", argv),
+                patch("sys.stderr", new_callable=io.StringIO),
             ):
                 with self.assertRaises(SystemExit):
                     server_args.setup_args()
@@ -450,8 +468,9 @@ class ServerArgsPyEnvConfigsTest(TestCase):
         from rtp_llm.server.server_args import server_args
 
         for env_value in ("mega_moe", "not_a_strategy"):
-            with self.subTest(env_value=env_value), patch.dict(
-                os.environ, {"MOE_STRATEGY": env_value}, clear=True
+            with (
+                self.subTest(env_value=env_value),
+                patch.dict(os.environ, {"MOE_STRATEGY": env_value}, clear=True),
             ):
                 configs = server_args.setup_args(["--moe_strategy=local_loop"])
                 self.assertEqual(configs.moe_config.moe_strategy, "local_loop")
@@ -537,8 +556,9 @@ class ServerArgsSetTest(TestCase):
         config.torch_allocator_dump_auth_token = "secret"
         for cooldown in (-1.0, float("nan"), float("inf"), float("-inf")):
             config.torch_allocator_dump_cooldown_seconds = cooldown
-            with self.subTest(cooldown=cooldown), self.assertRaisesRegex(
-                ValueError, "finite and non-negative"
+            with (
+                self.subTest(cooldown=cooldown),
+                self.assertRaisesRegex(ValueError, "finite and non-negative"),
             ):
                 config.validate_allocator_dump_config()
 
@@ -562,19 +582,22 @@ class ServerArgsSetTest(TestCase):
             }
         )
         for dtype_name in ("bf16", "fp8_e4m3"):
-            with self.subTest(dtype=dtype_name), patch.dict(
-                os.environ,
-                {
-                    CONFIG_ENV: trace_json,
-                    "JSON_MODEL_OVERRIDE_ARGS": json.dumps(
-                        {
-                            "hidden_state_capture_layer_ids": [1],
-                            "hidden_state_capture_dtype": (
-                                "fp8_e4m3" if dtype_name == "bf16" else "bf16"
-                            ),
-                        }
-                    ),
-                },
+            with (
+                self.subTest(dtype=dtype_name),
+                patch.dict(
+                    os.environ,
+                    {
+                        CONFIG_ENV: trace_json,
+                        "JSON_MODEL_OVERRIDE_ARGS": json.dumps(
+                            {
+                                "hidden_state_capture_layer_ids": [1],
+                                "hidden_state_capture_dtype": (
+                                    "fp8_e4m3" if dtype_name == "bf16" else "bf16"
+                                ),
+                            }
+                        ),
+                    },
+                ),
             ):
                 configs = server_args.setup_args(
                     [
@@ -1384,8 +1407,9 @@ class ServerArgsSetTest(TestCase):
                     )
                     if source == "env_only":
                         args = None
-                    with patch.dict(os.environ, env, clear=True), patch.object(
-                        sys, "argv", ["prog"]
+                    with (
+                        patch.dict(os.environ, env, clear=True),
+                        patch.object(sys, "argv", ["prog"]),
                     ):
                         if value in ("0", "2"):
                             configs = server_args.setup_args(args)

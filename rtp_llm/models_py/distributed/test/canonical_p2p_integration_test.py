@@ -8,9 +8,11 @@ from unittest.mock import MagicMock, patch
 
 import torch
 import torch.distributed as dist
-
+from rtp_llm.config.qwen4_collective_config import Qwen4CollectiveOptions
+from rtp_llm.config.server_config_setup import set_parallelism_config
 from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.distributed.canonical_p2p import init_canonical_p2p
+from rtp_llm.ops import ParallelismConfig
 
 
 def _worker():
@@ -19,47 +21,53 @@ def _worker():
     dist.init_process_group("nccl", timeout=datetime.timedelta(seconds=90))
     group = dist.group.WORLD
     device = torch.device("cuda", rank)
-    for label, enabled, disabled in (
-        ("default", False, None),
-        ("rank_mismatch", rank != 7, None),
-        ("explicit_disabled", True, True),
+    for label, enabled in (
+        ("default", False),
+        ("rank_mismatch", rank != 7),
     ):
-        with patch.dict(
-            os.environ, {"RTP_LLM_CANONICAL_P2P_ALL_REDUCE": "1" if enabled else "0"}
-        ):
-            result = init_canonical_p2p(
-                group, device, disable_custom_all_reduce=disabled
-            )
-            if result is not None:
-                raise RuntimeError("init fallback failed " + label)
-    # One rank without peer access must vote the whole group back to NCCL.
-    with patch.dict(os.environ, {"RTP_LLM_CANONICAL_P2P_ALL_REDUCE": "1"}):
-        if rank == 7:
-            with patch("torch.cuda.can_device_access_peer", return_value=False):
-                result = init_canonical_p2p(group, device)
-        else:
-            result = init_canonical_p2p(group, device)
+        result = init_canonical_p2p(group, device, requested=enabled)
         if result is not None:
-            raise RuntimeError("peer availability vote split the group")
-        communicator = init_canonical_p2p(group, device)
-    if communicator is None:
-        raise RuntimeError("requested supported communicator unavailable")
+            raise RuntimeError("init fallback failed " + label)
+    # One rank without peer access must vote the whole group back to NCCL.
+    if rank == 7:
+        with patch("torch.cuda.can_device_access_peer", return_value=False):
+            result = init_canonical_p2p(group, device, requested=True)
+    else:
+        result = init_canonical_p2p(group, device, requested=True)
+    if result is not None:
+        raise RuntimeError("peer availability vote split the group")
     from types import SimpleNamespace
 
-    collective._canonical_p2p = communicator
     collective._group_map[collective.Group.TP] = group
     collective._group_map[collective.Group.DP_AND_TP] = group
     collective._initialized = True
-    collective._parallelism_config = SimpleNamespace(
-        tp_size=8,
-        dp_size=1,
-        world_size=8,
-        local_world_size=8,
-        tp_rank=rank,
-        local_rank=rank,
-        world_rank=rank,
-        dp_rank=0,
+    pc = ParallelismConfig()
+    pc.tp_size = pc.ep_size = pc.world_size = pc.local_world_size = 8
+    pc.world_rank = rank
+    set_parallelism_config(pc)
+    collective._parallelism_config = pc
+    module = collective._get_qwen4_allreduce()
+    collective._init_qwen4_allreduce(pc, Qwen4CollectiveOptions())
+    if collective._canonical_p2p is not None:
+        raise RuntimeError("default NCCL policy initialized the P2P backend")
+    module.destroy_qwen4_allreduce()
+    try:
+        collective._init_qwen4_allreduce(
+            pc,
+            Qwen4CollectiveOptions(
+                backend="nccl" if rank == 7 else "sm120_p2p", model_type="qwen4_exp"
+            ),
+        )
+    except ValueError:
+        pass
+    else:
+        raise RuntimeError("rank policy mismatch was accepted")
+    collective._init_qwen4_allreduce(
+        pc, Qwen4CollectiveOptions(backend="sm120_p2p", model_type="qwen4_exp")
     )
+    communicator = collective._canonical_p2p
+    if communicator is None:
+        raise RuntimeError("requested supported communicator unavailable")
     import sys
 
     compute_ops = SimpleNamespace(register_comm_ops=MagicMock())
@@ -260,7 +268,7 @@ def _worker():
                     full_tile_vector_load_bits=32,
                     rows=all_rows,
                     changing_graph_replays=64 * len(counts),
-                    initialization_fallback_cases=4,
+                    initialization_fallback_cases=6,
                     pingpong=True,
                     changing_shape_skew_replays=96,
                     max_elements=communicator.max_elements,
@@ -273,7 +281,7 @@ def _worker():
             )
         )
         print("integration GPU gates passed", flush=True)
-    communicator.close()
+    module.destroy_qwen4_allreduce()
     collective._canonical_p2p = None
     del communicator
     dist.destroy_process_group()

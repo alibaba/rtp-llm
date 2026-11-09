@@ -166,21 +166,20 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     )
 
     hw_kernel_group.add_argument(
-        "--ipc_all_reduce_large_prefill",
-        env_name="RTP_LLM_IPC_ALL_REDUCE_LARGE_PREFILL",
-        bind_to="ipc_all_reduce_large_prefill",
+        "--qwen4_all_reduce_backend",
+        env_name="RTP_LLM_QWEN4_ALL_REDUCE_BACKEND",
+        bind_to="qwen4_all_reduce_backend",
+        choices=("nccl", "sm120_ipc", "sm120_p2p"),
+        default="nccl",
+        help="Qwen4-owned AllReduce backend; ordinary models retain NCCL.",
+    )
+    hw_kernel_group.add_argument(
+        "--qwen4_all_reduce_large_prefill",
+        env_name="RTP_LLM_QWEN4_ALL_REDUCE_LARGE_PREFILL",
+        bind_to="qwen4_all_reduce_large_prefill",
         type=str2bool,
         default=False,
-        help="Enable supported eager large-prefill IPC all-reduce shapes; reserves about 256 MiB per TP rank.",
-    )
-
-    hw_kernel_group.add_argument(
-        "--ft_disable_custom_ar",
-        env_name="FT_DISABLE_CUSTOM_AR",
-        bind_to="ft_disable_custom_ar_override",
-        type=str2bool,
-        default=None,
-        help="设置为 `True` 时，禁用自定义的 AllReduce (AR) 实现，可能回退到标准库（如 NCCL）的 AllReduce。",
+        help="Enable supported eager large-prefill workspaces with Qwen4 sm120_ipc.",
     )
 
     hw_kernel_group.add_argument(

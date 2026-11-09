@@ -388,6 +388,12 @@ py_library(
 )
 
 py_library(
+    name = "qwen4_collective_config",
+    srcs = ["config/qwen4_collective_config.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "config",
     srcs = glob([
         "config/*.py",

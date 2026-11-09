@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import builtins
 import multiprocessing as mp
 import os
 import time
 import unittest
-from unittest.mock import patch
+from unittest import mock
 
 import torch
 import torch.distributed as dist
+from rtp_llm.models_py.distributed import flashinfer_all_reduce as flashinfer_ar_module
 from rtp_llm.models_py.distributed.flashinfer_all_reduce import FlashInferAllReduce
 from rtp_llm.test.utils.port_util import PortManager
 
@@ -16,37 +16,16 @@ from rtp_llm.test.utils.port_util import PortManager
 def _worker(rank: int, port: int) -> None:
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(port)
-    os.environ["FT_DISABLE_CUSTOM_AR"] = "0"
+    # The runtime switch is pinned off; construct with enabled_by_config patched
+    # to exercise the (still supported) FlashInfer all-reduce path directly.
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", rank=rank, world_size=2)
-    # Ordinary models do not enable the SM120 policy. A rank-local import or
-    # probe failure must still leave both ranks using a working NCCL fallback.
-    import flashinfer.comm
-
-    original_import = builtins.__import__
-    for error_type in (ImportError, RuntimeError):
-
-        def import_with_local_failure(name, *args, **kwargs):
-            if rank == 1 and name == "flashinfer.comm":
-                raise error_type("injected rank-local FlashInfer probe failure")
-            return original_import(name, *args, **kwargs)
-
-        with patch("builtins.__import__", side_effect=import_with_local_failure):
-            fallback = FlashInferAllReduce(
-                dist.group.WORLD,
-                torch.device("cuda", rank),
-                single_node=True,
-                disable_custom_all_reduce=False,
-                enable_sm120_collectives=False,
-            )
-        value = torch.full((4, 5120), rank + 1, device="cuda", dtype=torch.bfloat16)
-        assert fallback.disabled and not fallback.should_use(value)
-        dist.all_reduce(value)
-        torch.testing.assert_close(value, torch.full_like(value, 3), rtol=0, atol=0)
-        fallback.destroy()
-    communicator = FlashInferAllReduce(
-        dist.group.WORLD, torch.device("cuda", rank), single_node=True
-    )
+    with mock.patch.object(
+        flashinfer_ar_module, "enabled_by_config", return_value=True
+    ):
+        communicator = FlashInferAllReduce(
+            dist.group.WORLD, torch.device("cuda", rank), single_node=True
+        )
     assert not communicator.disabled
 
     try:

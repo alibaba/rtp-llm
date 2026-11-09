@@ -1,3 +1,5 @@
+from rtp_llm.config.qwen4_collective_config import Qwen4CollectiveOptions
+
 """Two real SM120 ranks; isolated BF16 math and real NVFP4 consumer gates.
 
 Manually assemble ONE model-private layer, using real production modules. The
@@ -18,7 +20,6 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn.functional as F
-
 from rtp_llm.models_py.modules.qwen4_exp.moe import shared_tp2
 from rtp_llm.utils.model_weight import W
 
@@ -111,9 +112,19 @@ def _pc(rank):
     pc.world_rank = rank
     pc.role_type = RoleType.DECODE
     set_parallelism_config(pc)
-    # This manually assembled EP2 layer keeps a full shared FFN on each rank.
-    # The general rank setup now defaults FFN TP to attention TP.
-    pc.ffn_tp_size, pc.ffn_tp_rank = 1, 0
+    from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE, ModelOptFp4Config
+    from rtp_llm.config.qwen4_exp_config import resolve_qwen4_parallelism
+
+    quant = ModelOptFp4Config(
+        bits=4,
+        group_size=16,
+        is_quanted=False,
+        source_fp8_block_size=128,
+        require_contiguous_experts=True,
+        model_recipe=QWEN4_FP8_NVFP4_RECIPE,
+    )
+
+    pc = resolve_qwen4_parallelism(SimpleNamespace(quant_config=quant), pc)
     assert pc.tp_rank == pc.ep_rank == rank
     assert pc.get_ffn_tp_size() == 1 and pc.get_ffn_tp_rank() == 0
     return pc
@@ -595,9 +606,7 @@ def _qualify_local_shared_buckets(layer, source, rank, tiny_calls):
 
 def _worker(rank, port):
     from rtp_llm.models_py.distributed import collective_torch as ct
-    from rtp_llm.models_py.distributed.flashinfer_all_reduce import (
-        get_flashinfer_allreduce,
-    )
+    from rtp_llm.models_py.distributed.qwen4_all_reduce import get_qwen4_allreduce
     from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import Qwen4TargetReduce
     from rtp_llm.ops import NcclCommConfig
 
@@ -611,9 +620,14 @@ def _worker(rank, port):
     nccl = NcclCommConfig()
     nccl.nccl_ip = "127.0.0.1"
     ct.init_distributed_environment(
-        pc, nccl, port, disable_custom_all_reduce=False, enable_sm120_collectives=True
+        pc,
+        nccl,
+        port,
+        qwen4_collective_options=Qwen4CollectiveOptions(
+            "sm120_ipc", model_type="qwen4_exp"
+        ),
     )
-    communicator = get_flashinfer_allreduce()
+    communicator = get_qwen4_allreduce()
     assert communicator is not None and communicator.cpp_small_enabled
     communicator.allow_ipc_capture = True
     reducer = Qwen4TargetReduce(communicator)

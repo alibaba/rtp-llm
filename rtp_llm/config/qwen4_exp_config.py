@@ -5,6 +5,7 @@ known. Target and draft build independent snapshots; pickle preserves them.
 """
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 
 from rtp_llm.config.model_config import ModelConfig
@@ -143,7 +144,6 @@ class Qwen4RuntimeSnapshot:
     is_mtp_draft: bool
     ffn_tp: int
     ep_size: int
-    ffn_sp_size: int
     role: str
     target_verify_width: int
     kv_precision: str
@@ -166,7 +166,6 @@ def freeze_runtime_config(config, parallelism):
             else 1
         ),
         int(getattr(parallelism, "ep_size", 1)),
-        int(getattr(parallelism, "ffn_sp_size", 1)),
         str(getattr(parallelism, "role_type", "PDFUSION")),
         int(getattr(config, "gen_num_per_cycle", 0)) + 1,
         str(
@@ -205,6 +204,35 @@ def is_qwen4_precision_recipe(quant):
         and not quant.mixed_attention
         and quant.require_contiguous_experts
     )
+
+
+def resolve_qwen4_parallelism(config, parallelism):
+    """Give loading and execution the same model-owned NVFP4 layout."""
+    resolved = deepcopy(parallelism)
+    # ParallelismConfig's pickle state omits local_rank. Preserve the selected
+    # device when making a model-owned copy instead of restoring rank zero.
+    resolved.local_rank = parallelism.local_rank
+    if not is_qwen4_precision_recipe(getattr(config, "quant_config", None)):
+        return resolved
+    cp = resolved.prefill_cp_config
+    if (
+        resolved.dp_size != 1
+        or resolved.pp_size != 1
+        or resolved.world_size != resolved.tp_size
+        or cp.is_enabled()
+        or cp.is_prefill_enabled()
+    ):
+        raise ValueError("Qwen4 NVFP4 requires pure TP or pure EP without DP/PP/CP")
+    if resolved.ep_size == 1 and resolved.tp_size in (1, 2):
+        resolved.ffn_tp_size = resolved.tp_size
+        resolved.ffn_tp_rank = resolved.tp_rank
+    elif resolved.ep_size == resolved.tp_size and resolved.tp_size in (2, 8):
+        # Each rank owns complete local experts and a replicated shared expert.
+        resolved.ffn_tp_size = 1
+        resolved.ffn_tp_rank = 0
+    else:
+        raise ValueError("Qwen4 NVFP4 supports TP1, TP2/EP1, and pure EP2/EP8")
+    return resolved
 
 
 def build_qwen4_quant_config(quantization, source_fp8):
@@ -256,8 +284,6 @@ def validate_qwen4_runtime(config, parallelism):
         or (not config.is_mtp and not config.enable_qwen4_ple)
     ):
         raise RuntimeError("qwen4_exp requires complete checkpoint PLE/QSA geometry")
-    if bool(getattr(parallelism, "enable_ffn_disaggregate", False)):
-        raise RuntimeError("qwen4_exp PLE/QSA does not support FFN disaggregation")
     full_fp8 = bool(getattr(config, "_qwen4_full_fp8_nvfp4", False))
     quant = getattr(config, "quant_config", None)
     if full_fp8 and getattr(config, "tie_word_embeddings", False):

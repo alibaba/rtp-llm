@@ -3,7 +3,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-
+from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE
+from rtp_llm.config.qwen4_exp_config import resolve_qwen4_parallelism
 from rtp_llm.device.device_impl import CudaImpl
 from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
     quantize_expert_to_nvfp4,
@@ -432,6 +433,8 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         pc.world_size = 2
         pc.local_world_size = 2
         set_parallelism_config(pc)
+        model.quant_config.model_recipe = QWEN4_FP8_NVFP4_RECIPE
+        pc = resolve_qwen4_parallelism(model, pc)
         moe = MoeConfig()
         moe.moe_strategy = "nvfp4_cutlass"
         moe.fp4_moe_op = "cutlass"

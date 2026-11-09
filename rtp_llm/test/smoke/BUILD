@@ -1,6 +1,14 @@
 load(":defs.bzl", "SMOKE_FRAMEWORK_DEPS", "custom_smoke_test", "smoke_test")
 package(default_visibility = ["//visibility:public"])
 
+py_test(
+    name = "qwen4_smoke_arguments_test",
+    srcs = ["qwen4_smoke_arguments_test.py"],
+    data = ["suites_sm120.bzl"],
+    env = {"GPU_COUNT": "0"},
+    deps = ["//rtp_llm:testlib"],
+)
+
 # Framework source files for cross-package smoke tests.
 # Used as data dep (not srcs/deps) so internal smoke targets can merge their
 # own smoke/ children through smoke.__path__ without duplicating runner srcs.

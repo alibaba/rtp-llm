@@ -1096,11 +1096,9 @@ class Qwen4ExpModel(Qwen35Model):
         """Retain model-owned tensors for this captured graph instance."""
         if not get_primary_attention_inputs(inputs).is_target_verify:
             return
-        from rtp_llm.models_py.distributed.flashinfer_all_reduce import (
-            get_flashinfer_allreduce,
-        )
+        from rtp_llm.models_py.distributed.qwen4_all_reduce import get_qwen4_allreduce
 
-        communicator = get_flashinfer_allreduce()
+        communicator = get_qwen4_allreduce()
         if communicator is not None:
             communicator.finish_graph_capture()
         target_reduce = self.__dict__.get("_target_reduce")
@@ -1308,11 +1306,9 @@ class Qwen4ExpModel(Qwen35Model):
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         if self.__dict__.get("_closed", False):
             raise RuntimeError("Qwen4 model is closed")
-        from rtp_llm.models_py.distributed.flashinfer_all_reduce import (
-            get_flashinfer_allreduce,
-        )
+        from rtp_llm.models_py.distributed.qwen4_all_reduce import get_qwen4_allreduce
 
-        communicator = get_flashinfer_allreduce()
+        communicator = get_qwen4_allreduce()
         target_reduce = self.__dict__.get("_target_reduce")
         if target_reduce is not None:
             groups = get_attention_inputs_value(inputs)

@@ -729,10 +729,8 @@ class PyEnvConfigs:
         self.master_config: MasterConfig = MasterConfig()
         self.jit_config = JITConfig()
         self.py_hw_kernel_config: HWKernelConfig = HWKernelConfig()
-        # None preserves each Python collective implementation's default;
-        # explicit CLI/env values override it before process creation.
-        self.ft_disable_custom_ar_override: Optional[bool] = None
-        self.ipc_all_reduce_large_prefill: bool = False
+        self.qwen4_all_reduce_backend: str = "nccl"
+        self.qwen4_all_reduce_large_prefill: bool = False
         self.sp_config = SpeculativeExecutionConfig()
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()

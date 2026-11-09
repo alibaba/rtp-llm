@@ -8,6 +8,7 @@ from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.qwen4_collective_config import Qwen4CollectiveOptions
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
@@ -51,6 +52,13 @@ class BackendManager(object):
             nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
         )
 
+        collective_options = Qwen4CollectiveOptions(
+            backend=self.py_env_configs.qwen4_all_reduce_backend,
+            large_prefill=self.py_env_configs.qwen4_all_reduce_large_prefill,
+            model_type=self.py_env_configs.model_args.model_type,
+        )
+        if engine_config.parallelism_config.world_size <= 1:
+            collective_options.validate_topology(engine_config.parallelism_config)
         if engine_config.parallelism_config.world_size > 1:
             init_distributed_environment(
                 engine_config.parallelism_config,
@@ -58,10 +66,7 @@ class BackendManager(object):
                 nccl_init_port=self._distributed_server.get_nccl_init_port(),
                 backend="nccl",
                 timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
-                disable_custom_all_reduce=self.py_env_configs.ft_disable_custom_ar_override,
-                ipc_all_reduce_large_prefill=self.py_env_configs.ipc_all_reduce_large_prefill,
-                enable_sm120_collectives=self.py_env_configs.model_args.model_type
-                in ("qwen4_exp", "qwen4_exp_mtp"),
+                qwen4_collective_options=collective_options,
             )
         world_info = get_world_info(
             self.py_env_configs.server_config,

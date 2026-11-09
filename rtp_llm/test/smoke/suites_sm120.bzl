@@ -82,14 +82,15 @@ def sm120_suites():
             _qwen4_scenarios("qwen4_exp_mixed_tp2_eager_sm120", 0, False),
             _qwen4_scenarios("qwen4_exp_mixed_tp2_mtp_eager_sm120", 0, True),
             _qwen4_scenarios("qwen4_exp_mixed_tp2_mtp_graph_sm120", 1, True),
+            _qwen4_scenarios("qwen4_exp_mixed_tp2_mtp_ipc_graph_sm120", 1, True, "sm120_ipc"),
         ],
     )
 
-def _qwen4_scenarios(name, graph, mtp):
+def _qwen4_scenarios(name, graph, mtp, backend = "nccl"):
     return custom_smoke_test(
         name = name,
         main = "qwen4_exp_smoke_test.py",
-        smoke_args = _QWEN4_SMOKE_ARGS + (" --sp_type mtp --sp_model_type qwen4_exp_mtp --sp_act_type BF16 --gen_num_per_cycle 3" if mtp else "") + " --enable_cuda_graph " + str(graph),
+        smoke_args = _QWEN4_SMOKE_ARGS + (" --sp_type mtp --sp_model_type qwen4_exp_mtp --sp_act_type BF16 --gen_num_per_cycle 3" if mtp else "") + " --enable_cuda_graph " + str(graph) + " --qwen4_all_reduce_backend " + backend,
         gpu_type = ["RTX_5000_PRO_CU13"],
         data = ["//rtp_llm:sdk", ":smoke_framework_srcs", "data/model/qwen4_exp/q_r_qwen4_exp_fp8_full.json"],
         deps = ["//rtp_llm:transformers"],

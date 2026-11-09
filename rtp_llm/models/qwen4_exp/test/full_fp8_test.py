@@ -110,19 +110,6 @@ class FullFp8StorageTest(unittest.TestCase):
                 config, SimpleNamespace(ep_size=2, get_attn_tp_size=lambda: 1)
             )
 
-    def test_ffn_disaggregation_rejected_before_empty_alignment_batches(self):
-        from rtp_llm.config.qwen4_exp_config import validate_qwen4_runtime
-
-        config = SimpleNamespace(
-            enable_qwen4_qsa=True,
-            enable_qwen4_ple=True,
-            is_mtp=False,
-        )
-        with self.assertRaisesRegex(RuntimeError, "FFN disaggregation"):
-            validate_qwen4_runtime(
-                config, SimpleNamespace(enable_ffn_disaggregate=True)
-            )
-
     def test_original_descriptor_split_runs_before_quantization(self):
         source = AtomicWeight(W.embedding, [CkptWeightInfo("weight")])
         source.split_func = lambda t, **kwargs: t[:, :4]

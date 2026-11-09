@@ -8,12 +8,10 @@ collectives in the same serial order on every rank, as required by NCCL.
 """
 
 import logging
-import os
 from typing import Optional
 
 import torch
 import torch.distributed as dist
-
 from rtp_llm.models_py.distributed.symm_mem import _agree_across_group
 
 _MAX_ELEMENTS = 40960  # 80 KiB; larger PCIe messages use the existing backend.
@@ -92,7 +90,7 @@ class CanonicalPeerAllReduce:
 
 
 def init_canonical_p2p(
-    group, device: torch.device, *, disable_custom_all_reduce: Optional[bool] = None
+    group, device: torch.device, *, requested: bool = False
 ) -> Optional[CanonicalPeerAllReduce]:
     if (
         not torch.cuda.is_available()
@@ -100,10 +98,6 @@ def init_canonical_p2p(
         or dist.get_world_size(group) != 8
     ):
         return None
-    requested = (
-        os.getenv("RTP_LLM_CANONICAL_P2P_ALL_REDUCE", "0") == "1"
-        and disable_custom_all_reduce is not True
-    )
     # Called by every member of the eligible single-node TP8 group, even when
     # disabled locally. A missing flag on one rank must not split the backend.
     if not _agree_across_group(group, requested, "canonical_p2p_enabled"):
@@ -209,13 +203,9 @@ def init_canonical_p2p(
             torch.zeros(max_elements, dtype=buffer.dtype, device=device)
         )
         communicator.all_reduce(torch.zeros(257, dtype=buffer.dtype, device=device))
-        communicator.all_reduce(
-            torch.zeros(2560, dtype=buffer.dtype, device=device)
-        )
+        communicator.all_reduce(torch.zeros(2560, dtype=buffer.dtype, device=device))
         # Also compile the masked large-message path before any capture.
-        communicator.all_reduce(
-            torch.zeros(2561, dtype=buffer.dtype, device=device)
-        )
+        communicator.all_reduce(torch.zeros(2561, dtype=buffer.dtype, device=device))
         torch.cuda.synchronize(device)
     except Exception as error:
         logging.warning("Canonical P2P initialization unavailable: %s", error)

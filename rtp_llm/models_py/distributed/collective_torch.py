@@ -35,7 +35,7 @@ _initialized: bool = False  # Track if we've initialized (to prevent double init
 _cpu_tp_broadcaster_base_path: Optional[str] = None
 _rocm_rccl = None
 _symm_mem = None
-_flashinfer_allreduce = None
+_qwen4_allreduce = None
 _canonical_p2p = None
 
 
@@ -63,46 +63,32 @@ def _get_symm_mem():
     return _symm_mem
 
 
-def _get_flashinfer_allreduce():
-    global _flashinfer_allreduce
-    if _flashinfer_allreduce is None:
-        from rtp_llm.models_py.distributed import flashinfer_all_reduce
+def _get_qwen4_allreduce():
+    global _qwen4_allreduce
+    if _qwen4_allreduce is None:
+        from rtp_llm.models_py.distributed import qwen4_all_reduce
 
-        _flashinfer_allreduce = flashinfer_all_reduce
-    return _flashinfer_allreduce
+        _qwen4_allreduce = qwen4_all_reduce
+    return _qwen4_allreduce
 
 
-def _init_flashinfer_allreduce(
+def _init_qwen4_allreduce(
     parallelism_config: ParallelismConfig,
-    disable_custom_all_reduce: Optional[bool] = None,
-    ipc_all_reduce_large_prefill: bool = False,
-    enable_sm120_collectives: bool = False,
+    qwen4_collective_options=None,
 ) -> None:
     global _canonical_p2p
     if parallelism_config.tp_size <= 1:
+        if qwen4_collective_options is not None:
+            qwen4_collective_options.validate_topology(parallelism_config)
         return
-    _get_flashinfer_allreduce().init_flashinfer_allreduce(
+    module = _get_qwen4_allreduce()
+    module.init_qwen4_allreduce(
         _get_group(Group.TP),
         torch.device("cuda", parallelism_config.local_rank),
-        single_node=parallelism_config.tp_size <= parallelism_config.local_world_size,
-        disable_custom_all_reduce=disable_custom_all_reduce,
-        large_prefill=ipc_all_reduce_large_prefill,
-        enable_sm120_collectives=enable_sm120_collectives,
+        parallelism_config,
+        qwen4_collective_options,
     )
-
-    if (
-        enable_sm120_collectives
-        and parallelism_config.tp_size == 8
-        and parallelism_config.world_size == 8
-        and parallelism_config.local_world_size == 8
-    ):
-        from rtp_llm.models_py.distributed.canonical_p2p import init_canonical_p2p
-
-        _canonical_p2p = init_canonical_p2p(
-            _get_group(Group.TP),
-            torch.device("cuda", parallelism_config.local_rank),
-            disable_custom_all_reduce=disable_custom_all_reduce,
-        )
+    _canonical_p2p = module.get_canonical_p2p()
 
 
 def _make_cpu_tp_broadcaster_base_path(
@@ -174,9 +160,7 @@ def init_distributed_environment(
     nccl_init_port: int,
     backend: str = "nccl",
     timeout: Optional[int] = None,
-    disable_custom_all_reduce: Optional[bool] = None,
-    ipc_all_reduce_large_prefill: bool = False,
-    enable_sm120_collectives: bool = False,
+    qwen4_collective_options=None,
 ):
     """Initialize distributed environment and create process groups.
 
@@ -189,13 +173,8 @@ def init_distributed_environment(
         nccl_init_port: Port for torch.distributed init_process_group (tcp://ip:port).
         backend: Distributed backend (default: "nccl")
         timeout: Timeout in seconds for process group initialization
-        disable_custom_all_reduce: Explicit server-wide custom AllReduce
-            override. ``None`` preserves the implementation-specific default.
-        ipc_all_reduce_large_prefill: Opt in to supported eager large-prefill IPC
-            reductions, including their larger per-rank workspace.
-        enable_sm120_collectives: The selected model owns the SM120 IPC/capture
-            lifecycle. False preserves the existing communication backend and
-            skips the additional initialization agreements.
+        qwen4_collective_options: Explicit Qwen4 IPC/P2P options. The default
+            keeps NCCL and never initializes an optional communication backend.
 
     Raises:
         RuntimeError: If already initialized and not destroyed
@@ -222,11 +201,9 @@ def init_distributed_environment(
         rocm_rccl = _get_rocm_rccl()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
-        _init_flashinfer_allreduce(
+        _init_qwen4_allreduce(
             parallelism_config,
-            disable_custom_all_reduce,
-            ipc_all_reduce_large_prefill,
-            enable_sm120_collectives,
+            qwen4_collective_options,
         )
         return
 
@@ -261,11 +238,9 @@ def init_distributed_environment(
         _register_process_groups_to_cpp()
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
-        _init_flashinfer_allreduce(
+        _init_qwen4_allreduce(
             parallelism_config,
-            disable_custom_all_reduce,
-            ipc_all_reduce_large_prefill,
-            enable_sm120_collectives,
+            qwen4_collective_options,
         )
         return
 
@@ -306,11 +281,9 @@ def init_distributed_environment(
     if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
-    _init_flashinfer_allreduce(
+    _init_qwen4_allreduce(
         parallelism_config,
-        disable_custom_all_reduce,
-        ipc_all_reduce_large_prefill,
-        enable_sm120_collectives,
+        qwen4_collective_options,
     )
 
 
@@ -523,7 +496,7 @@ def _register_process_groups_to_cpp():
             dest.copy_(tensor)
             return dest
         target = dest if dest is not None else tensor
-        flashinfer_ar = _get_flashinfer_allreduce().get_flashinfer_allreduce()
+        qwen4_ar = _get_qwen4_allreduce().get_qwen4_allreduce()
         if (
             op == 0
             and mode == _CPP_PARALLEL_MODE_TP
@@ -533,21 +506,21 @@ def _register_process_groups_to_cpp():
             and tensor.dtype == target.dtype
             and tensor.device == target.device
             and target.is_contiguous()
-            and flashinfer_ar is not None
-            and pg is flashinfer_ar.group
+            and qwen4_ar is not None
+            and pg is qwen4_ar.group
             and not (
                 _canonical_p2p is not None
                 and pg is _canonical_p2p.group
                 and _canonical_p2p.should_use(tensor)
             )
-            and flashinfer_ar.should_use_cpp_small(tensor)
+            and qwen4_ar.should_use_cpp_small(tensor)
         ):
-            return flashinfer_ar.all_reduce_into(tensor, target)
+            return qwen4_ar.all_reduce_into(tensor, target)
         if dest is not None:
             target.copy_(tensor)
         device_id = torch.cuda.current_device()
         gpu_t, was_cpu = _ensure_cuda(target, device_id)
-        flashinfer_ar = _get_flashinfer_allreduce().get_flashinfer_allreduce()
+        qwen4_ar = _get_qwen4_allreduce().get_qwen4_allreduce()
         if (
             op == 0
             and mode == _CPP_PARALLEL_MODE_TP
@@ -561,11 +534,11 @@ def _register_process_groups_to_cpp():
             op == 0
             and mode == _CPP_PARALLEL_MODE_TP
             and not was_cpu
-            and flashinfer_ar is not None
-            and pg is flashinfer_ar.group
-            and flashinfer_ar.should_use_cpp_small(gpu_t)
+            and qwen4_ar is not None
+            and pg is qwen4_ar.group
+            and qwen4_ar.should_use_cpp_small(gpu_t)
         ):
-            result = flashinfer_ar.all_reduce(gpu_t)
+            result = qwen4_ar.all_reduce(gpu_t)
             # The C++ callback returns the original destination storage.
             gpu_t.copy_(result)
         else:
@@ -721,7 +694,7 @@ def destroy_distributed_environment():
         )
 
         destroy_user_buffers_communicator()
-        _get_flashinfer_allreduce().destroy_flashinfer_allreduce()
+    _get_qwen4_allreduce().destroy_qwen4_allreduce()
 
     try:
         import librtp_compute_ops
@@ -740,8 +713,6 @@ def destroy_distributed_environment():
     if rocm_rccl is not None:
         rocm_rccl.destroy_capture_comm()
 
-    if _canonical_p2p is not None:
-        _canonical_p2p.close()
     _canonical_p2p = None
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
@@ -876,14 +847,14 @@ def all_reduce(
         if _canonical_p2p is not None and _canonical_p2p.should_use(tensor):
             return _canonical_p2p.all_reduce(tensor, inplace=inplace)
 
-        flashinfer_ar = _get_flashinfer_allreduce().get_flashinfer_allreduce()
-        if flashinfer_ar is not None and flashinfer_ar.should_use(tensor):
+        qwen4_ar = _get_qwen4_allreduce().get_qwen4_allreduce()
+        if qwen4_ar is not None and qwen4_ar.should_use(tensor):
             if inplace:
                 # IPC first stages the input, so the registered reduction may
                 # write directly back into its original destination. Avoid a
                 # second device copy at every model-layer collective.
-                return flashinfer_ar.all_reduce_into(tensor, tensor)
-            return flashinfer_ar.all_reduce(tensor)
+                return qwen4_ar.all_reduce_into(tensor, tensor)
+            return qwen4_ar.all_reduce(tensor)
 
         symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(

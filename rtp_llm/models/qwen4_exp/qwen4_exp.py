@@ -7,6 +7,7 @@ from rtp_llm.config.qwen4_exp_config import (
     Qwen4ModelConfig,
     build_qwen4_quant_config,
     freeze_runtime_config,
+    resolve_qwen4_parallelism,
     validate_qwen4_runtime,
 )
 from rtp_llm.model_factory_register import register_model
@@ -44,6 +45,9 @@ class Qwen4Exp(Qwen35Moe):
 
     def load(self, skip_python_model: bool = False):
         config = getattr(self, "model_config", None)
+        self.parallelism_config = resolve_qwen4_parallelism(
+            config, self.parallelism_config
+        )
         validate_qwen4_runtime(config, self.parallelism_config)
         freeze_runtime_config(config, self.parallelism_config)
         self._validate_checkpoint(config)

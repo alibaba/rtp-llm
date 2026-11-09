@@ -15,6 +15,10 @@ import torch
 import torch.distributed as dist
 
 
+class IpcInitializationError(RuntimeError):
+    """All ranks agreed that local IPC setup failed; NCCL is still usable."""
+
+
 class FlashInferIpcAllReduce:
     def __init__(self, group, device, max_bytes=32 * 2560 * 2):
         self.group = group
@@ -58,7 +62,9 @@ class FlashInferIpcAllReduce:
         dist.all_gather_object(peers, (error is None, handles), group=group)
         if not all(peer[0] for peer in peers):
             self._release_local()
-            raise RuntimeError("IPC allocation failed on a TP rank") from error
+            raise IpcInitializationError(
+                "IPC allocation failed on a TP rank"
+            ) from error
         try:
             pointers = []
             for index in range(2):
@@ -84,7 +90,9 @@ class FlashInferIpcAllReduce:
         dist.all_gather_object(peers, error is None, group=group)
         if not all(peers):
             self._release_local()
-            raise RuntimeError("IPC registration failed on a TP rank") from error
+            raise IpcInitializationError(
+                "IPC registration failed on a TP rank"
+            ) from error
 
     def _release_local(self):
         # Cleanup never contains a collective: partial construction is allowed.

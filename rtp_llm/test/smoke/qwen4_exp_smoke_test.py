@@ -94,9 +94,8 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import requests
-        from transformers import AutoTokenizer
-
         from rtp_llm.test.utils.maga_server_manager import MagaServerManager
+        from transformers import AutoTokenizer
 
         fixture = (
             Path(__file__).parent / "data/model/qwen4_exp/q_r_qwen4_exp_fp8_full.json"
@@ -125,7 +124,7 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         cls.server = MagaServerManager(
             env_args={
                 "RTP_LLM_STREAM_ASYNC": "1",
-                "LOG_LEVEL": "DEBUG",
+                "LOG_LEVEL": "INFO",
                 "FT_SERVER_TEST": "1",
             },
             role_name="qwen4_sm120_scenarios",

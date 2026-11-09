@@ -5,11 +5,13 @@ py_library(
         "canonical_p2p.py",
         "flashinfer_all_reduce.py",
         "flashinfer_ipc_all_reduce.py",
+        "qwen4_all_reduce.py",
         "rocm_rccl.py",
         "symm_mem.py",
     ],
     deps = [
         "//rtp_llm:torch",
+        "//rtp_llm:qwen4_collective_config",
         "//rtp_llm/models_py/triton_kernels:peer_all_reduce",
     ],
     visibility = ["//visibility:public"],

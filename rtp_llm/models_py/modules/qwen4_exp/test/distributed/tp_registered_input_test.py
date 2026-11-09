@@ -3,8 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-
-from rtp_llm.models_py.distributed import flashinfer_all_reduce as parent
+from rtp_llm.models_py.distributed import qwen4_all_reduce as parent
 from rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce import (
     FlashInferIpcAllReduce,
 )
@@ -133,7 +132,7 @@ class TpRegisteredInputTest(unittest.TestCase):
         )
 
     def test_draft_capture_disabled_and_eager_never_request_direct_input(self):
-        communicator = parent.FlashInferAllReduce.__new__(parent.FlashInferAllReduce)
+        communicator = parent.Qwen4IpcAllReduce.__new__(parent.Qwen4IpcAllReduce)
         communicator._workspace = self.workspace(True)
         communicator.should_use = MagicMock(return_value=True)
         tensor = torch.empty(4, 2560)
@@ -159,24 +158,20 @@ class TpRegisteredInputTest(unittest.TestCase):
             should_use_registered_graph_input=MagicMock(return_value=True)
         )
         with (
-            patch.object(
-                tp_reduce, "get_flashinfer_allreduce", return_value=communicator
-            ),
+            patch.object(tp_reduce, "get_qwen4_allreduce", return_value=communicator),
             patch.object(tp_reduce.collective_torch, "all_reduce") as reduce,
         ):
             tp_reduce.all_reduce_target_graph(tensor, group)
             reduce.assert_called_once_with(tensor, group, inplace=False)
         communicator.should_use_registered_graph_input.return_value = False
         with (
-            patch.object(
-                tp_reduce, "get_flashinfer_allreduce", return_value=communicator
-            ),
+            patch.object(tp_reduce, "get_qwen4_allreduce", return_value=communicator),
             patch.object(tp_reduce.collective_torch, "all_reduce") as reduce,
         ):
             tp_reduce.all_reduce_target_graph(tensor, group)
             reduce.assert_called_once_with(tensor, group)
         with (
-            patch.object(tp_reduce, "get_flashinfer_allreduce", return_value=None),
+            patch.object(tp_reduce, "get_qwen4_allreduce", return_value=None),
             patch.object(tp_reduce.collective_torch, "all_reduce") as reduce,
         ):
             tp_reduce.all_reduce_target_graph(tensor, group)

@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-
 from rtp_llm.models_py.kernels.cuda.marlin_nvfp4.marlin_nvfp4 import (
     Nvfp4MarlinMoE,
     align,
@@ -341,11 +340,19 @@ with patch("torch.utils.cpp_extension.load", side_effect=AssertionError("runtime
         model.expert_num = 8
         model.hidden_size, model.moe_inter_size, model.moe_k = self.k, self.n, 3
         model.quant_config = ModelOptFp4Config(
-            bits=4, group_size=16, is_quanted=False, model_recipe=QWEN4_FP8_NVFP4_RECIPE
+            bits=4,
+            group_size=16,
+            is_quanted=False,
+            model_recipe=QWEN4_FP8_NVFP4_RECIPE,
+            source_fp8_block_size=128,
+            require_contiguous_experts=True,
         )
         pc = ParallelismConfig()
         pc.tp_size = pc.ep_size = pc.world_size = pc.local_world_size = 2
         set_parallelism_config(pc)
+        from rtp_llm.config.qwen4_exp_config import resolve_qwen4_parallelism
+
+        pc = resolve_qwen4_parallelism(model, pc)
         moe = MoeConfig()
         moe.moe_strategy, moe.fp4_moe_op = "nvfp4_marlin", "marlin"
         moe.use_all_gather, moe.use_deepep_moe = True, False

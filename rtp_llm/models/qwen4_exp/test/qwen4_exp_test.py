@@ -136,7 +136,6 @@ class Qwen4ExpTest(unittest.TestCase):
             ple_eos_token_id(self.config), self.config.special_tokens.eos_token_id
         )
         import torch
-
         from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpNGramEmbedding
 
         embedding = SimpleNamespace(eos_token_id=ple_eos_token_id(config))
@@ -179,6 +178,7 @@ class Qwen4ExpTest(unittest.TestCase):
         config.update(changes)
         model.model_config = SimpleNamespace(**config)
         model.parallelism_config = SimpleNamespace(
+            local_rank=0,
             role_type=RoleType.PDFUSION,
             get_attn_tp_size=lambda: 1,
             prefill_cp_config=SimpleNamespace(

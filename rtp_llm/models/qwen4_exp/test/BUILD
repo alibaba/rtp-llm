@@ -1,5 +1,12 @@
 package(default_visibility = ["//visibility:public"])
 
+py_test(
+    name = "parallelism_test",
+    srcs = ["parallelism_test.py"],
+    env = {"GPU_COUNT": "0"},
+    deps = ["//rtp_llm:testlib"],
+)
+
 py_library(
     name = "config_fixture",
     srcs = ["config_fixture.py"],
