@@ -26,14 +26,14 @@ class Qwen4MoeLayer(GenericMoeLayer):
     _shared_stream = None
     _reused_shared_stream = None
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, config, parallelism_config, weights, *args, **kwargs):
+        super().__init__(config, parallelism_config, weights, *args, **kwargs)
         if os.getenv("RTP_QWEN4_BF16_SHARED_TP2", "0") == "1":
             from rtp_llm.models_py.modules.qwen4_exp.moe.shared_tp2 import (
                 maybe_prepare_bf16_shared_tp2,
             )
 
-            maybe_prepare_bf16_shared_tp2(self)
+            maybe_prepare_bf16_shared_tp2(self, weights)
 
     def prepare_shared_expert_overlap(self) -> None:
         """Allocate streams only for the explicitly qualified Qwen4 layout."""
@@ -58,7 +58,6 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and pc.tp_size == 2
             and pc.ep_size == 2
             and pc.dp_size == 1
-            and pc.ffn_sp_size == 2
             and self.ffn_tp_size == 1
             and not self.use_ep_shared_allreduce
             and not self.use_unified_tp_allreduce

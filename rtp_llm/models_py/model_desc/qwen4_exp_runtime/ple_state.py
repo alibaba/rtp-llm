@@ -19,6 +19,7 @@ class _PLETargetLayerStage:
     candidate_state_inputs: torch.Tensor
     initial_context: torch.Tensor
     candidate_ids: torch.Tensor
+    live_rows: Optional[torch.Tensor] = None
 
 
 @dataclass

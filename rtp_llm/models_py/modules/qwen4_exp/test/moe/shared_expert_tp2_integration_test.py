@@ -20,6 +20,7 @@ import torch.multiprocessing as mp
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.qwen4_exp.moe import shared_tp2
+from rtp_llm.utils.model_weight import W
 
 _ENV = {
     "RTP_QWEN4_BF16_SHARED_TP2": "1",
@@ -107,10 +108,12 @@ def _pc(rank):
     pc = ParallelismConfig()
     pc.tp_size = pc.ep_size = pc.world_size = pc.local_world_size = 2
     pc.dp_size = 1
-    pc.ffn_sp_size = 2
     pc.world_rank = rank
     pc.role_type = RoleType.DECODE
     set_parallelism_config(pc)
+    # This manually assembled EP2 layer keeps a full shared FFN on each rank.
+    # The general rank setup now defaults FFN TP to attention TP.
+    pc.ffn_tp_size, pc.ffn_tp_rank = 1, 0
     assert pc.tp_rank == pc.ep_rank == rank
     assert pc.get_ffn_tp_size() == 1 and pc.get_ffn_tp_rank() == 0
     return pc
@@ -214,13 +217,18 @@ def _layer(pc, source, executor):
     shared.activation_type = ActivationType.Swiglu
     shared.is_gated = True
     shared.act_fn = FusedSiluAndMul()
-    shared.up_proj = CudaF16Linear(source["up_kn"].to(device).clone())
-    shared.down_proj = CudaF16Linear(source["down_kn"].to(device).clone())
+    owners = {
+        W.ffn_w13: source["up_kn"].to(device).clone(),
+        W.ffn_w2: source["down_kn"].to(device).clone(),
+    }
+    shared.up_proj = CudaF16Linear(owners[W.ffn_w13])
+    shared.down_proj = CudaF16Linear(owners[W.ffn_w2])
     layer = Qwen4MoeLayer.__new__(Qwen4MoeLayer)
     torch.nn.Module.__init__(layer)
     layer.config, layer.parallelism_config = config, pc
     layer.ffn_tp_size, layer.ep_size = 1, 2
     layer.shared_expert = shared
+    layer._test_shared_weight_owners = owners
     gate_nk = torch.empty((1, 2560), dtype=torch.bfloat16, device=device)
     gate_nk.copy_(source["gate_kn"].t())
     layer.shared_expert_gate = CudaF16Linear(gate_nk.t())
@@ -257,9 +265,40 @@ def _equal_bits(actual, expected):
 
 
 def _pack_check(layer, source, rank):
+    from rtp_llm.model_loader.model_weight_info import ModelWeights
+    from rtp_llm.model_loader.weight_manager import WeightManager
+
     up_before = layer.shared_expert.up_proj.weight
     down_before = layer.shared_expert.down_proj.weight
-    assert shared_tp2.maybe_prepare_bf16_shared_tp2(layer), "helper silently fell back"
+    owners = layer._test_shared_weight_owners
+    assert shared_tp2.maybe_prepare_bf16_shared_tp2(
+        layer, owners
+    ), "helper silently fell back"
+    model_weights = ModelWeights(1, "cuda", torch.bfloat16)
+    model_weights.weights[0] = owners
+    manager = WeightManager.__new__(WeightManager)
+    manager._weights = model_weights
+    for name, owner in owners.items():
+        before = owner.clone()
+        for update in (
+            lambda: model_weights.update_layer_weight(0, name, torch.zeros_like(owner)),
+            lambda: manager.update(
+                dict(
+                    name="model.layers.0." + name,
+                    method="shm",
+                    desc="invalid-ipc-description",
+                )
+            ),
+        ):
+            try:
+                update()
+            except PermissionError as error:
+                assert "restart" in str(error)
+            else:
+                raise AssertionError(
+                    "packed shared expert accepted a stale-weight update"
+                )
+        _equal_bits(owner, before)
     up = layer.shared_expert.up_proj.weight
     down = layer.shared_expert.down_proj.weight
     assert type(layer.shared_expert.up_proj) is shared_tp2._Qwen4SharedTp2Up
@@ -394,7 +433,9 @@ def _fallback_checks(pc, source, executor):
             dist, "all_gather_object", side_effect=AssertionError("default collective")
         ),
     ):
-        assert not shared_tp2.maybe_prepare_bf16_shared_tp2(layer)
+        assert not shared_tp2.maybe_prepare_bf16_shared_tp2(
+            layer, layer._test_shared_weight_owners
+        )
     assert layer.shared_expert.up_proj.weight is up
     assert layer.shared_expert.down_proj.weight is down
     changes = (
@@ -410,7 +451,9 @@ def _fallback_checks(pc, source, executor):
         old = getattr(obj, key)
         setattr(obj, key, replacement)
         try:
-            assert not shared_tp2.maybe_prepare_bf16_shared_tp2(layer)
+            assert not shared_tp2.maybe_prepare_bf16_shared_tp2(
+                layer, layer._test_shared_weight_owners
+            )
             assert not layer.use_unified_tp_allreduce
         finally:
             setattr(obj, key, old)

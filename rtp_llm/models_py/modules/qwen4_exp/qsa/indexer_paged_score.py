@@ -29,7 +29,7 @@ import triton.language as tl
 _BLOCK_N = 64
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["max_ctx_len", "max_blocks", "pool_blocks", "next_n"])
 def _qsa_paged_score_kernel(
     q_ptr,
     w_ptr,
@@ -41,7 +41,7 @@ def _qsa_paged_score_kernel(
     max_ctx_len,
     max_blocks,
     pool_blocks,
-    next_n: tl.constexpr,
+    next_n,
     H: tl.constexpr,
     D: tl.constexpr,
     block_size: tl.constexpr,

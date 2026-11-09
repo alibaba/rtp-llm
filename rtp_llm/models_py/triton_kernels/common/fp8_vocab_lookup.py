@@ -38,7 +38,7 @@ def _vocab_rows(
     # A masked text row is zero even when the vocabulary scale is nonfinite.
     if HAS_MASK:
         value = tl.where(keep, value, 0)
-    tl.store(Output + offsets, value, offsets < N * D)
+    tl.store(Output + offsets, value, row < N)
 
 
 def vocab_rows(tokens, weight, scale, text_mask=None):

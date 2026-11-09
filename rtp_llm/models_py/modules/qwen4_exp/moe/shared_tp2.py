@@ -10,6 +10,7 @@ import os
 import torch
 
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
+from rtp_llm.utils.model_weight import W
 
 _ENV = "RTP_QWEN4_BF16_SHARED_TP2"
 
@@ -119,7 +120,6 @@ def _eligible(layer):
         and config.inter_size == 640
         and pc.tp_size == pc.ep_size == pc.world_size == pc.local_world_size == 2
         and pc.dp_size == pc.pp_size == 1
-        and pc.ffn_sp_size == 2
         and pc.get_attn_tp_size() == 2
         and pc.get_ffn_tp_size() == layer.ffn_tp_size == 1
         and pc.get_ffn_tp_rank() == 0
@@ -189,7 +189,7 @@ def _eligible(layer):
     )
 
 
-def maybe_prepare_bf16_shared_tp2(layer):
+def maybe_prepare_bf16_shared_tp2(layer, weights):
     """Return False without mutation for default/off-domain construction.
 
     Unsupported local metadata is a local fallback, NOT a cross-rank agreement.
@@ -201,6 +201,15 @@ def maybe_prepare_bf16_shared_tp2(layer):
         return False
     if not _eligible(layer):
         return False
+
+    # The update API owns these dictionary entries, not the projection's .T
+    # views or the local cat allocation. Preserve that exact owner identity.
+    owner = getattr(weights, "_storage_owner", weights)
+    sources = [
+        tensor
+        for name in (W.ffn_w13, W.ffn_w2)
+        for tensor in (weights[name], owner[name])
+    ]
 
     shared = layer.shared_expert
     begin = layer.parallelism_config.tp_rank * 320
@@ -221,6 +230,8 @@ def maybe_prepare_bf16_shared_tp2(layer):
     up_projection = _Qwen4SharedTp2Up(local_up)
     local_up._rtp_requires_restart_for_update = True
     local_down._rtp_requires_restart_for_update = True
+    for source in sources:
+        source._rtp_requires_restart_for_update = True
     shared.up_proj = up_projection
     shared.down_proj.weight = local_down
     layer.use_unified_tp_allreduce = True

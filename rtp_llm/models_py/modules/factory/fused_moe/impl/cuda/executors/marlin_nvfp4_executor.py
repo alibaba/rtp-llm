@@ -176,7 +176,9 @@ class Qwen4MarlinExecutor(Qwen4DecodeMarlinExecutor):
         )
         checker.check(Nvfp4MarlinMoE.is_supported())
         checker.check(config.tp_size == config.ep_size)
-        checker.check(config.parallelism_config.get_ffn_tp_size() == 1)
+        checker.check(
+            config.ep_size > 1 or config.parallelism_config.get_ffn_tp_size() == 1
+        )
         checker.check(config.moe_config.fp4_moe_op in ("auto", "marlin"))
         checker.check(not config.has_redundant_experts)
         checker.check(not config.model_config.eplb_config.enable_eplb())

@@ -2,6 +2,7 @@ import math
 import unittest
 
 import torch
+import triton
 
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
     qsa_paged_indexer_score,
@@ -40,6 +41,32 @@ def _ref(q, w, pool, bt, ctx, bs):
 
 
 class PagedScoreTest(unittest.TestCase):
+    def test_new_request_geometry_reuses_compiled_kernel(self):
+        def score(batch, queries, context, width, blocks):
+            q = torch.ones(batch, queries, 1, _D, device=_DEV, dtype=torch.bfloat16)
+            weights = torch.ones(batch * queries, 1, device=_DEV)
+            pool = torch.ones(blocks * 32, _D, device=_DEV, dtype=torch.bfloat16)
+            table = torch.ones(batch, width, device=_DEV, dtype=torch.int32)
+            lengths = torch.full(
+                (batch, queries), context, device=_DEV, dtype=torch.int32
+            )
+            return qsa_paged_indexer_score(
+                q, weights, pool, table, lengths, block_size=32, max_ctx_len=context
+            )
+
+        score(1, 3, 97, 4, 5)
+        compiles = []
+        with triton.knobs.compilation.scope():
+            triton.knobs.compilation.listener = (
+                lambda *, cache_hit, **_: compiles.append(cache_hit)
+            )
+            for geometry in ((2, 5, 99, 5, 6), (3, 7, 103, 6, 7)):
+                actual = score(*geometry)
+                torch.testing.assert_close(
+                    actual, torch.full_like(actual, float(_D)), rtol=0, atol=0
+                )
+        self.assertNotIn(False, compiles)
+
     def test_physical_block_beyond_signed_int32_element_offset(self):
         block = 2**19
         pool = torch.empty(((block + 1) * 32, _D), dtype=torch.bfloat16, device=_DEV)

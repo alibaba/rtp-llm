@@ -344,9 +344,7 @@ with patch("torch.utils.cpp_extension.load", side_effect=AssertionError("runtime
             bits=4, group_size=16, is_quanted=False, model_recipe=QWEN4_FP8_NVFP4_RECIPE
         )
         pc = ParallelismConfig()
-        pc.tp_size = pc.ep_size = pc.ffn_sp_size = pc.world_size = (
-            pc.local_world_size
-        ) = 2
+        pc.tp_size = pc.ep_size = pc.world_size = pc.local_world_size = 2
         set_parallelism_config(pc)
         moe = MoeConfig()
         moe.moe_strategy, moe.fp4_moe_op = "nvfp4_marlin", "marlin"

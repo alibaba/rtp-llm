@@ -12,6 +12,24 @@ from rtp_llm.models_py.modules.base.common.fp8_embedding import Fp8VocabEmbeddin
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class Fp8VocabEmbeddingTest(unittest.TestCase):
+    def test_output_element_count_crossing_signed_int32_boundary(self):
+        reference, module = self.make_embedding()
+        # N itself still fits int32, while N * D crosses 2**31. Inspect every
+        # output element in bounded chunks without allocating a second 4 GiB tensor.
+        for rows in (2**31 // module.hidden_size, 2**31 // module.hidden_size + 1):
+            with self.subTest(rows=rows):
+                ids = torch.arange(rows, device="cuda", dtype=torch.int32) % 257
+                mask = ids % 2 == 0
+                output = module(ids, text_tokens_mask=mask)
+                for begin in range(0, rows, 4096):
+                    end = min(begin + 4096, rows)
+                    expected = F.embedding(ids[begin:end].long(), reference)
+                    expected[~mask[begin:end]] = 0
+                    torch.testing.assert_close(
+                        output[begin:end], expected, rtol=0, atol=0
+                    )
+                del output
+
     def make_embedding(self, width=2560, tp=1):
         torch.manual_seed(671)
         weight = torch.randn(257, width, device="cuda").to(torch.float8_e4m3fn)

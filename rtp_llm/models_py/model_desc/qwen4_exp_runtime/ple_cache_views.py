@@ -2,6 +2,7 @@
 
 import torch
 
+from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import PLE_NGRAM_CTX_TAG, PLE_STATE_TAG
 from rtp_llm.models_py.utils.cache_payload_view import (
     CachePayloadGeometry,
     payload_view,
@@ -11,6 +12,17 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
 
 class PLECacheViews:
+    @classmethod
+    def eager_live_rows(cls, state_inputs, ctx_inputs):
+        if bool(state_inputs.is_cuda_graph) or not bool(state_inputs.is_s_padded):
+            return None
+        state = cls._resolve_block_table(state_inputs, PLE_STATE_TAG)
+        context = cls._resolve_block_table(ctx_inputs, PLE_NGRAM_CTX_TAG)
+        active = state.ne(0).any(dim=1)
+        if not torch.equal(active, context.ne(0).any(dim=1).to(active.device)):
+            raise RuntimeError("qwen4_exp PLE regions disagree about padded rows")
+        return active
+
     @staticmethod
     def _fixed_state_pool(
         cache: LayerKVCache, dtype: torch.dtype, entries: int, width: int
@@ -92,6 +104,22 @@ class PLECacheViews:
         # the device checks below. Never copy device metadata back for decode.
         lookup_table = host_table if use_host_table else table
         pages = logical_pages.to(device=lookup_table.device, dtype=torch.long)
+        if not graph_capture and bool(getattr(attention_inputs, "is_s_padded", False)):
+            # The framework aliases whole dummy rows to block zero. A missing
+            # page in a live row must still fail before any persistent write.
+            active = lookup_table.ne(0).any(dim=1)
+            if not lookup_table.shape[1] or pool_rows <= 0:
+                raise RuntimeError(f"PLE cache {tag!r} padded table or pool is empty")
+            valid_page = (pages >= 0) & (pages < lookup_table.shape[1])
+            if bool((active & ~valid_page).any().item()):
+                raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
+            blocks = lookup_table.gather(
+                1, pages.clamp(0, lookup_table.shape[1] - 1).unsqueeze(1)
+            ).squeeze(1)
+            cls._check_physical_blocks(tag, blocks[active], pool_rows)
+            return torch.where(active, blocks, 0).to(
+                device=device, dtype=torch.long, non_blocking=True
+            )
         if graph_capture:
             # The graph runner owns the fixed-size device table and refreshes
             # it each step. Clamp invalid indices to

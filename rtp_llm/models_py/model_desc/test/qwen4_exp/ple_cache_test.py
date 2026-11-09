@@ -16,6 +16,102 @@ from rtp_llm.models_py.model_desc.test.qwen4_exp.ple_page_reference import (
 
 
 class Qwen4ExpPLECacheTest(PLERuntimeFixture, TestCase):
+    def test_eager_dp_fake_target_rows_preserve_pools_through_commit_and_abort(self):
+        self.state_base.normal_()
+        self.ctx_base.random_(1, 7)
+        before_state, before_ctx = self.state_base.clone(), self.ctx_base.clone()
+        self.state_blocks.zero_()
+        self.ctx_blocks.zero_()
+        for finalize in (True, False):
+            inputs = self._target_inputs((0, 0), 3)
+            for item in inputs.values():
+                item.is_s_padded = True
+            hyper = torch.randn(6, _HC * _HIDDEN, dtype=torch.bfloat16)
+            output = self.model._apply_ple(
+                1, hyper, torch.ones(6, dtype=torch.long), inputs
+            )
+            torch.testing.assert_close(output, hyper, rtol=0, atol=0)
+            self.model.prepare_speculative_target_commit(
+                torch.zeros(2, dtype=torch.int32)
+            )
+            self.assertEqual(self.model._ple_target_transaction.prepared_writes, [])
+            self.model.finish_speculative_target_commit(True)
+            if finalize:
+                self.model.finalize_speculative_target_commit()
+            else:
+                self.model.finish_speculative_target_commit(False)
+            self.assertIsNone(self.model._ple_target_transaction)
+            torch.testing.assert_close(self.state_base, before_state, rtol=0, atol=0)
+            torch.testing.assert_close(self.ctx_base, before_ctx, rtol=0, atol=0)
+
+    def test_eager_dp_target_commit_selects_nonleading_live_rows_and_preserves_undo(
+        self,
+    ):
+        prefixes = (self._PAGE, self._PAGE - 1)
+        initial_state, initial_context = self._seed_target_history(prefixes)
+        ids = torch.tensor([[4, 5, 6], [8, 9, 10]], dtype=torch.long)
+        hyper = torch.randn(2, 3, _HC * _HIDDEN, dtype=torch.bfloat16)
+        expected, states, contexts = self._target_baseline(
+            hyper, ids, initial_state, initial_context
+        )
+        before_state, before_ctx = self.state_base.clone(), self.ctx_base.clone()
+        self.state_blocks[0].zero_()
+        self.ctx_blocks[0].zero_()
+        inputs = self._target_inputs((0, prefixes[1]), 3)
+        for item in inputs.values():
+            item.is_s_padded = True
+        output = self.model._apply_ple(
+            1, hyper.flatten(0, 1), ids.flatten(), inputs
+        ).view_as(hyper)
+        torch.testing.assert_close(output[0], hyper[0], rtol=0, atol=0)
+        torch.testing.assert_close(output[1], hyper[1] + expected[1])
+        self.model.prepare_speculative_target_commit(
+            torch.tensor([0, 2], dtype=torch.int32)
+        )
+        self.model.finish_speculative_target_commit(True)
+        # The live row crosses a page boundary; only its pages may change.
+        state_row, ctx_row = int(self.state_blocks[1, 1]), int(self.ctx_blocks[1, 1])
+        torch.testing.assert_close(
+            self.state_base[state_row].view_as(states[1][1]), states[1][1]
+        )
+        torch.testing.assert_close(self.ctx_base[ctx_row], contexts[1][1])
+        torch.testing.assert_close(self.state_base[0], before_state[0], rtol=0, atol=0)
+        torch.testing.assert_close(self.ctx_base[0], before_ctx[0], rtol=0, atol=0)
+        self.model.finish_speculative_target_commit(False)
+        torch.testing.assert_close(self.state_base, before_state, rtol=0, atol=0)
+        torch.testing.assert_close(self.ctx_base, before_ctx, rtol=0, atol=0)
+
+    def test_eager_dp_target_still_rejects_missing_live_pages(self):
+        self.state_blocks[1].zero_()
+        self.ctx_blocks[1].zero_()
+        self.state_blocks[0, 0] = 0  # Other pages keep row zero live.
+        inputs = self._target_inputs((1, 0), 3)
+        for item in inputs.values():
+            item.is_s_padded = True
+        before_state, before_ctx = self.state_base.clone(), self.ctx_base.clone()
+        with self.assertRaisesRegex(RuntimeError, "unallocated logical page"):
+            self.model._apply_ple(
+                1,
+                torch.randn(6, _HC * _HIDDEN, dtype=torch.bfloat16),
+                torch.ones(6, dtype=torch.long),
+                inputs,
+            )
+        torch.testing.assert_close(self.state_base, before_state, rtol=0, atol=0)
+        torch.testing.assert_close(self.ctx_base, before_ctx, rtol=0, atol=0)
+
+    def test_eager_dp_target_rejects_disagreeing_region_masks(self):
+        self.state_blocks[0].zero_()
+        inputs = self._target_inputs((1, 1), 3)
+        for item in inputs.values():
+            item.is_s_padded = True
+        with self.assertRaisesRegex(RuntimeError, "disagree about padded rows"):
+            self.model._apply_ple(
+                1,
+                torch.randn(6, _HC * _HIDDEN, dtype=torch.bfloat16),
+                torch.ones(6, dtype=torch.long),
+                inputs,
+            )
+
     def test_bulk_prefill_preserves_ragged_page_writes_and_reused_prefixes(self):
         for prefixes, lengths in (((0, 0), (17, 16)), ((8, 8), (16, 16))):
             with self.subTest(prefixes=prefixes, lengths=lengths):

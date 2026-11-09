@@ -78,7 +78,8 @@ def _small_qk_rmsnorm_kernel(
     QKV,
     QG,
     KG,
-    ROWS: tl.constexpr,
+    Q_WIDE: tl.constexpr,
+    K_WIDE: tl.constexpr,
     STRIDE: tl.constexpr,
     Q_HEADS: tl.constexpr,
     KV_HEADS: tl.constexpr,
@@ -100,9 +101,7 @@ def _small_qk_rmsnorm_kernel(
     t0, t1, t2, t3 = b0 * b0, b1 * b1, b2 * b2, b3 * b3
     # CUDA mean uses 64 reduction lanes for fewer than 16 outputs, otherwise
     # 32. Q and K use their own output counts, including replicated KV heads.
-    wide = ((head < Q_HEADS) & (ROWS * Q_HEADS < 16)) | (
-        (head >= Q_HEADS) & (ROWS * KV_HEADS < 16)
-    )
+    wide = ((head < Q_HEADS) & Q_WIDE) | ((head >= Q_HEADS) & K_WIDE)
     sum_wide = (((s0 + s1) + s2) + s3) + (((t0 + t1) + t2) + t3)
     sum_narrow = (((s0 + t0) + (s1 + t1)) + (s2 + t2)) + (s3 + t3)
     variance = tl.sum(tl.where(wide, sum_wide, sum_narrow), 0) / 256
@@ -144,7 +143,8 @@ def small_qk_rmsnorm_(qkv, q_gamma, k_gamma, q_heads, kv_heads, head_dim, eps):
         qkv,
         q_gamma,
         k_gamma,
-        ROWS=qkv.shape[0],
+        Q_WIDE=qkv.shape[0] * q_heads < 16,
+        K_WIDE=qkv.shape[0] * kv_heads < 16,
         STRIDE=qkv.stride(0),
         Q_HEADS=q_heads,
         KV_HEADS=kv_heads,
@@ -184,7 +184,8 @@ def try_prefill_qk_rmsnorm_(qkv, q_gamma, k_gamma, q_heads, kv_heads, head_dim, 
         qkv,
         q_gamma,
         k_gamma,
-        ROWS=qkv.shape[0],
+        Q_WIDE=False,
+        K_WIDE=False,
         STRIDE=qkv.stride(0),
         Q_HEADS=q_heads,
         KV_HEADS=kv_heads,

@@ -42,7 +42,9 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
         )
         tensor_parallel = use_nvfp4_tensor_parallel(config)
         checker.check(
-            config.parallelism_config.get_ffn_tp_size() == 1 or tensor_parallel
+            config.ep_size > 1
+            or config.parallelism_config.get_ffn_tp_size() == 1
+            or tensor_parallel
         )
         checker.check(
             config.moe_config.fp4_moe_op == "cutlass"

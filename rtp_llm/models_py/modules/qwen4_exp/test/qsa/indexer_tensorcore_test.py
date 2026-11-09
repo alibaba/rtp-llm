@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 import torch
+import triton
 
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
     qsa_paged_indexer_score,
@@ -9,6 +10,32 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_paged_score import (
 
 
 class IndexerTensorCoreTest(unittest.TestCase):
+    def test_new_request_geometry_reuses_compiled_kernel(self):
+        def score(batch, queries, context, width, blocks):
+            q = torch.ones(batch, queries, 4, 128, device="cuda", dtype=torch.bfloat16)
+            weights = torch.ones(batch * queries, 4, device="cuda")
+            pool = torch.ones(blocks * 32, 128, device="cuda", dtype=torch.bfloat16)
+            table = torch.ones(batch, width, device="cuda", dtype=torch.int32)
+            lengths = torch.full(
+                (batch, queries), context, device="cuda", dtype=torch.int32
+            )
+            return qsa_paged_indexer_score(
+                q, weights, pool, table, lengths, block_size=32, max_ctx_len=context
+            )
+
+        score(1, 17, 97, 4, 5)
+        compiles = []
+        with triton.knobs.compilation.scope():
+            triton.knobs.compilation.listener = (
+                lambda *, cache_hit, **_: compiles.append(cache_hit)
+            )
+            for geometry in ((2, 19, 99, 5, 6), (3, 23, 103, 6, 7)):
+                actual = score(*geometry)
+                torch.testing.assert_close(
+                    actual, torch.full_like(actual, 512.0), rtol=0, atol=0
+                )
+        self.assertNotIn(False, compiles)
+
     @classmethod
     def setUpClass(cls):
         if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (

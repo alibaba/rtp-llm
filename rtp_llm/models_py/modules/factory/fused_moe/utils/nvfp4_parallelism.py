@@ -18,6 +18,4 @@ def use_nvfp4_tensor_parallel(config) -> bool:
         and config.ep_size == 1
         and pc.world_size == 2
         and pc.get_ffn_tp_size() == 2
-        and pc.ffn_sp_size == 1
-        and not pc.ffn_disaggregate_config.enable_ffn_disaggregate
     )

@@ -12,7 +12,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["QUERIES", "MAX_CTX", "TABLE_WIDTH", "POOL_BLOCKS"])
 def _paged_mqa_mma(
     Q,
     W,
@@ -20,12 +20,12 @@ def _paged_mqa_mma(
     TABLE,
     LENGTHS,
     OUT,
-    QUERIES: tl.constexpr,
+    QUERIES,
     H: tl.constexpr,
     D: tl.constexpr,
-    MAX_CTX: tl.constexpr,
-    TABLE_WIDTH: tl.constexpr,
-    POOL_BLOCKS: tl.constexpr,
+    MAX_CTX,
+    TABLE_WIDTH,
+    POOL_BLOCKS,
     PAGE: tl.constexpr,
     BM: tl.constexpr,
     BN: tl.constexpr,

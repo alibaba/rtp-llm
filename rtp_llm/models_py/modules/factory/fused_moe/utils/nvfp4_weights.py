@@ -20,8 +20,10 @@ class Nvfp4WeightViews:
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         pc = getattr(config, "parallelism_config", None)
-        self.tp_size = pc.get_ffn_tp_size() if pc is not None else 1
-        self.tp_rank = pc.get_ffn_tp_rank() if pc is not None else 0
+        # EP already partitions routed experts; FFN TP also covers shared weights.
+        pure_tp = pc is not None and self.ep_size == 1
+        self.tp_size = pc.get_ffn_tp_size() if pure_tp else 1
+        self.tp_rank = pc.get_ffn_tp_rank() if pure_tp else 0
 
     def cutlass_quant_scales(self):
         weights = self.weights

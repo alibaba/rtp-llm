@@ -35,6 +35,20 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         views = Nvfp4WeightViews(SimpleNamespace(ep_size=1, ep_rank=0), None, weights)
         self.assertEqual(views.w1.dtype, torch.int64)
         self.assertEqual(views.block_scales[0].dtype, torch.int32)
+        for ep_size in (1, 2):
+            for rank in (0, 1):
+                pc = SimpleNamespace(
+                    get_ffn_tp_size=lambda: 2, get_ffn_tp_rank=lambda: rank
+                )
+                views = Nvfp4WeightViews(
+                    SimpleNamespace(
+                        ep_size=ep_size, ep_rank=rank, parallelism_config=pc
+                    ),
+                    None,
+                    weights,
+                )
+                self.assertEqual(views.tp_size, 2 if ep_size == 1 else 1)
+                self.assertEqual(views.tp_rank, rank if ep_size == 1 else 0)
         weights[W.moe_w1_i_s] = torch.tensor([1.0, 2.0])
         weights[W.moe_w2_i_s] = torch.ones(2)
         with self.assertRaisesRegex(ValueError, "uniform finite positive"):
@@ -164,7 +178,6 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
             pc = ParallelismConfig()
             pc.tp_size = tp_size
             pc.ep_size = tp_size
-            pc.ffn_sp_size = tp_size
             pc.world_size = tp_size
             pc.local_world_size = tp_size
             set_parallelism_config(pc)
@@ -267,7 +280,6 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
             pc.tp_size = 2
             pc.tp_rank = rank
             pc.ep_size = 1
-            pc.ffn_sp_size = 1
             pc.world_size = 2
             pc.local_world_size = 2
             pc.world_rank = rank
@@ -324,7 +336,7 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
             torch.testing.assert_close(got, combined(), atol=0, rtol=0)
             torch.testing.assert_close(got, run(full).float(), atol=0.0005, rtol=0.02)
 
-    def test_tensor_parallel_selection_uses_format_and_rejects_sp_and_world_mismatch(
+    def test_tensor_parallel_selection_uses_format_and_rejects_ffn_tp_and_world_mismatch(
         self,
     ):
         from rtp_llm.config.model_config import ModelConfig
@@ -359,7 +371,6 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         pc = ParallelismConfig()
         pc.tp_size = 2
         pc.ep_size = 1
-        pc.ffn_sp_size = 1
         pc.world_size = 2
         pc.local_world_size = 2
         set_parallelism_config(pc)
@@ -378,8 +389,8 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         pc.world_size = 4
         self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
         pc.world_size = 2
-        pc.ffn_sp_size = 2
         set_parallelism_config(pc)
+        pc.ffn_tp_size = 1
         self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
 
     def test_selection_requires_matching_attention_tp_ep_and_online_weights(self):
@@ -418,7 +429,6 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         pc = ParallelismConfig()
         pc.tp_size = 2
         pc.ep_size = 2
-        pc.ffn_sp_size = 2
         pc.world_size = 2
         pc.local_world_size = 2
         set_parallelism_config(pc)
@@ -431,6 +441,8 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         self.assertTrue(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
         pc.ep_size = 1
         set_parallelism_config(pc)
+        self.assertTrue(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
+        model.quant_config.require_contiguous_experts = False
         self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
         pc.ep_size = 2
         set_parallelism_config(pc)

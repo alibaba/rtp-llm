@@ -39,6 +39,7 @@ class PLECommitPrepareTest(unittest.TestCase):
         initial_context = history[:, : 2 * context : 2]
         ids = history[:, 2 * context :: 2]
         stage = SimpleNamespace(
+            live_rows=None,
             initial_state=state(batch, length),
             candidate_state_inputs=state(batch, query),
             initial_context=initial_context,

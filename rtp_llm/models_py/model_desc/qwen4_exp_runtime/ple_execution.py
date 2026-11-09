@@ -179,7 +179,6 @@ class PLEExecution:
                     pages,
                     int(pool.shape[0]),
                     pool.device,
-                    graph_capture=padded,
                 )
                 history = torch.cat(
                     (pool.index_select(0, blocks), ids.view(-1, 1)), dim=1
@@ -209,6 +208,7 @@ class PLEExecution:
         if (
             is_target_verify != bool(ctx_inputs.is_target_verify)
             or bool(state_inputs.is_prefill) != bool(ctx_inputs.is_prefill)
+            or bool(state_inputs.is_s_padded) != bool(ctx_inputs.is_s_padded)
             or any(
                 not self._same_metadata(
                     state_inputs, ctx_inputs, name, cache=metadata_cache
@@ -309,6 +309,7 @@ class PLEExecution:
                     ctx_pool=ctx_pool,
                     page_size=page_size,
                     embeddings=prefetched,
+                    live_rows=PLECacheViews.eager_live_rows(state_inputs, ctx_inputs),
                 )
 
             if state_inputs.is_prefill:
@@ -633,7 +634,7 @@ class PLEExecution:
                 read_pages,
                 int(state_pool.shape[0]),
                 state_pool.device,
-                graph_capture=graph_capture or padded,
+                graph_capture=graph_capture,
             )
             ctx_read_blocks = self._physical_blocks(
                 ctx_inputs,
@@ -641,7 +642,7 @@ class PLEExecution:
                 read_pages,
                 int(ctx_pool.shape[0]),
                 ctx_pool.device,
-                graph_capture=graph_capture or padded,
+                graph_capture=graph_capture,
             )
             state_write_blocks = self._physical_blocks(
                 state_inputs,
@@ -649,7 +650,7 @@ class PLEExecution:
                 write_pages,
                 int(state_pool.shape[0]),
                 state_pool.device,
-                graph_capture=graph_capture or padded,
+                graph_capture=graph_capture,
             )
             ctx_write_blocks = self._physical_blocks(
                 ctx_inputs,
@@ -657,11 +658,14 @@ class PLEExecution:
                 write_pages,
                 int(ctx_pool.shape[0]),
                 ctx_pool.device,
-                graph_capture=graph_capture or padded,
+                graph_capture=graph_capture,
             )
             conv_buffer = state_pool.index_select(0, state_read_blocks)
             context = ctx_pool.index_select(0, ctx_read_blocks)
             live = sequence_lengths.to(device=state_pool.device) > 0
+            eager_live = PLECacheViews.eager_live_rows(state_inputs, ctx_inputs)
+            if eager_live is not None:
+                live = live & eager_live.to(live.device)
             conv_buffer = torch.where(live[:, None, None], conv_buffer, 0)
             context = torch.where(live[:, None], context, eos)
             state_write_blocks = torch.where(live, state_write_blocks, 0)

@@ -17,6 +17,50 @@ from rtp_llm.models_py.model_desc.test.qwen4_exp.fixtures import (
 
 
 class Qwen4ExpPLEGraphTest(PLERuntimeFixture, TestCase):
+    def test_eager_dp_target_cuda_skips_fake_rows_and_preserves_live_undo(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required")
+        device = torch.device("cuda")
+        self._move_ple_to_cuda(device)
+        for all_fake in (False, True):
+            self.state_blocks[0].zero_()
+            self.ctx_blocks[0].zero_()
+            if all_fake:
+                self.state_blocks[1].zero_()
+                self.ctx_blocks[1].zero_()
+            self.state_base.normal_()
+            self.ctx_base.random_(1, 7)
+            before_state, before_ctx = self.state_base.clone(), self.ctx_base.clone()
+            inputs = self._target_inputs((0, 0 if all_fake else self._PAGE - 1), 3)
+            for item in inputs.values():
+                item.is_s_padded = True
+            hyper = torch.randn(6, _HC * _HIDDEN, device=device, dtype=torch.bfloat16)
+            ids = torch.tensor([4, 5, 6, 8, 9, 10], device=device)
+            output = self.model._apply_ple(1, hyper, ids, inputs)
+            torch.testing.assert_close(output[:3], hyper[:3], rtol=0, atol=0)
+            accepted = torch.tensor(
+                [0, 0 if all_fake else 2], device=device, dtype=torch.int32
+            )
+            self.model.prepare_speculative_target_commit(accepted)
+            self.model.finish_speculative_target_commit(True)
+            if all_fake:
+                torch.testing.assert_close(output, hyper, rtol=0, atol=0)
+                torch.testing.assert_close(
+                    self.state_base, before_state, rtol=0, atol=0
+                )
+                torch.testing.assert_close(self.ctx_base, before_ctx, rtol=0, atol=0)
+            else:
+                self.assertFalse(torch.equal(self.state_base, before_state))
+                torch.testing.assert_close(
+                    self.state_base[0], before_state[0], rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    self.ctx_base[0], before_ctx[0], rtol=0, atol=0
+                )
+            self.model.finish_speculative_target_commit(False)
+            torch.testing.assert_close(self.state_base, before_state, rtol=0, atol=0)
+            torch.testing.assert_close(self.ctx_base, before_ctx, rtol=0, atol=0)
+
     def test_target_graph_batch64_fallback_uses_live_device_prefixes(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required for Graph replay")
