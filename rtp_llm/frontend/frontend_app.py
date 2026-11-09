@@ -936,14 +936,18 @@ class FrontendApp(object):
         @app.post("/tokenizer/encode")
         async def tokenizer_encode(req: Union[str, Dict[Any, Any]], request: Request):
             check_not_draining(request)
-            return self.frontend_server.tokenizer_encode(req)
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, self.frontend_server.tokenizer_encode, req
+            )
 
         # example {"prompt": "abcde"}
         # example openai_request
         @app.post("/tokenize")
         async def encode(req: Union[str, Dict[Any, Any]], request: Request):
             check_not_draining(request)
-            return self.frontend_server.tokenize(req)
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, self.frontend_server.tokenize, req)
 
         if self.frontend_server.is_embedding:
             # embedding
