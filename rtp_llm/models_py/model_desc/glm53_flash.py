@@ -1322,7 +1322,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 enable_cuda_graph=enable_cuda_graph,
             )
 
-        self.hc_enabled = config.hc_mult > 1
+        self.hc_enabled = config.glm53_hc_mult > 1
         if self.hc_enabled:
             self.input_layernorm = RMSNorm(
                 weights[W.pre_ln_gamma], eps=config.layernorm_eps
@@ -1332,7 +1332,7 @@ class KimiLinearDecoderLayer(nn.Module):
             )
             hc_args = dict(
                 dim=config.hidden_size,
-                hc_mult=config.hc_mult,
+                hc_mult=config.glm53_hc_mult,
                 hc_sinkhorn_iters=config.hc_sinkhorn_iters,
                 norm_eps=config.layernorm_eps,
                 hc_eps=config.hc_eps,
@@ -1703,7 +1703,7 @@ class Glm53FlashModel(GptModelBase):
         self.prefill_mla_cp = mla_cp_enabled(
             model_config.model_type, parallelism_config.role_type
         )
-        if self.prefill_sequence_parallel and model_config.hc_mult <= 1:
+        if self.prefill_sequence_parallel and model_config.glm53_hc_mult <= 1:
             raise ValueError("GLM53 Prefill sequence parallel requires mHC")
         self.mla_parallelism = (
             MlaCPParallelismView(parallelism_config)
@@ -1739,7 +1739,7 @@ class Glm53FlashModel(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
-        self.hc_enabled = model_config.hc_mult > 1
+        self.hc_enabled = model_config.glm53_hc_mult > 1
         self.enable_kda_reuse_fusion = False
         self.kda_chunk_size = get_kda_chunk_size()
         logging.info("KDA chunk size: %d", self.kda_chunk_size)
@@ -1871,7 +1871,7 @@ class Glm53FlashModel(GptModelBase):
         if self.hc_enabled:
             hidden_states = (
                 hidden_states.unsqueeze(1)
-                .expand(-1, self.config.hc_mult, -1)
+                .expand(-1, self.config.glm53_hc_mult, -1)
                 .contiguous()
             )
             residual = hidden_states

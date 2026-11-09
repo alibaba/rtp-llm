@@ -95,12 +95,16 @@ def _configure_glm53_indexer_compression(
 
 
 def _configure_glm53_hyper_connections(
-    config: ModelConfig, text_config: Dict[str, Any]
+    config: "Glm53FlashModelConfig", text_config: Dict[str, Any]
 ) -> None:
     """Configure the target model's Hyper-Connection residual geometry."""
-    config.hc_mult = int(text_config.get("hc_mult", 1))
-    if config.hc_mult <= 0:
-        raise ValueError(f"GLM-5.3-Flash requires hc_mult > 0, got {config.hc_mult}")
+    config.glm53_hc_mult = int(text_config.get("hc_mult", 1))
+    if config.glm53_hc_mult <= 0:
+        raise ValueError(
+            f"GLM-5.3-Flash requires hc_mult > 0, got {config.glm53_hc_mult}"
+        )
+    # GLM contracts the HC streams before returning hidden states to MTP.
+    config.hc_mult = 1
     config.hc_sinkhorn_iters = int(text_config.get("hc_sinkhorn_iters", 0))
     config.hc_eps = float(text_config.get("hc_eps", 1e-6))
 
@@ -159,6 +163,7 @@ class Glm53FlashModelConfig(ModelConfig):
     """Model config with checkpoint-mandated KDA cache precision."""
 
     _python_fields = ModelConfig._python_fields | {
+        "glm53_hc_mult",
         "indexer_types",
         "is_glm53_mtp",
         "kda_gate_lower_bound",
