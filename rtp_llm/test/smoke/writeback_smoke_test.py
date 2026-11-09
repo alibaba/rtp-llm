@@ -87,6 +87,22 @@ class CacheWaitTest(unittest.TestCase):
         self.assertEqual(self.post.call_count, 2)
         self.assertEqual(set(self.comparer.tracer.actual_result.cached_keys), set(keys))
 
+    def test_waits_for_full_key_list(self):
+        keys = [6858790234522785586, -6858790234522785586]
+        # Newer services expose the full list; this branch's protobuf uses a map.
+        responses = [
+            {"block_size": 8, "version": 1, "cache_key_list": keys[:1]},
+            {"block_size": 8, "version": 2, "cache_key_list": keys, "cache_keys": {"999": True}},
+        ]
+        self.post.side_effect = [Mock(json=Mock(return_value=response)) for response in responses]
+        self.comparer.run()
+        self.assertEqual(self.post.call_count, 2)
+        self.assertEqual(set(self.comparer.tracer.actual_result.cached_keys), set(keys))
+
+    def test_empty_full_key_list_is_an_empty_cache(self):
+        actual = self.comparer.format_result({"block_size": 8, "cache_key_list": []})
+        self.assertEqual(actual.cached_keys, [])
+
     def test_empty_or_removed_rpc_keys_do_not_satisfy_wait(self):
         for keys, count in [({}, 0), ({100: True, 200: False}, 1)]:
             with self.subTest(keys=keys):

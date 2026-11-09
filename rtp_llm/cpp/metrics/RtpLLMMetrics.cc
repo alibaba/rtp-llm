@@ -886,6 +886,7 @@ void RtpLLMRemoteCacheSDKMetrics::report(const kmonitor::MetricsTags*          t
 }
 
 bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(writeback_reuse_len_metric, "rtp_llm_writeback_reuse_len");
     REGISTER_GAUGE_MUTABLE_METRIC(block_aligned_input_length_metric, "rtp_llm_kv_cache_block_aligned_input_length");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_reuse_length_metric, "rtp_llm_kv_cache_reuse_length");
     REGISTER_GAUGE_MUTABLE_METRIC(device_reuse_length_metric, "rtp_llm_kv_cache_device_reuse_length");
@@ -913,6 +914,11 @@ bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector) {
+    if (collector->report_reuse_lengths && collector->writeback_reuse_len >= 0) {
+        kmonitor::MetricsTags reuse_tags = tags ? *tags : kmonitor::MetricsTags{};
+        reuse_tags.AddTag("side", "prefill");
+        writeback_reuse_len_metric->Report(&reuse_tags, collector->writeback_reuse_len);
+    }
     if (collector->report_reuse_metrics) {
         REPORT_MUTABLE_METRIC(block_aligned_input_length_metric, collector->block_aligned_input_length);
         REPORT_MUTABLE_METRIC(kv_cache_reuse_length_metric, collector->kv_cache_reuse_length);

@@ -1365,6 +1365,28 @@ class ModelRpcClientTest(TestCase):
             generate_config_pb = trans_input(input).generate_config
             self.assertEqual(generate_config_pb.enable_disk_cache, enabled)
 
+    def test_enable_p2p_writeback_serialization_preserves_presence(self):
+        self.assertIsNone(GenerateConfig(using_hf_sampling=False).enable_p2p_writeback)
+
+        for enabled in (None, False, True):
+            kwargs = {}
+            if enabled is not None:
+                kwargs["enable_p2p_writeback"] = enabled
+            input = GenerateInput(
+                token_ids=torch.tensor([1]),
+                generate_config=GenerateConfig(using_hf_sampling=False, **kwargs),
+                request_id=0,
+                mm_inputs=[],
+            )
+
+            generate_config_pb = trans_input(input).generate_config
+            self.assertEqual(
+                generate_config_pb.HasField("enable_p2p_writeback"),
+                enabled is not None,
+            )
+            if enabled is not None:
+                self.assertEqual(generate_config_pb.enable_p2p_writeback.value, enabled)
+
     def test_generate_stream_with_logits_index(self):
         client = FakeModelRpcClient()
         generate_config: GenerateConfig = GenerateConfig(

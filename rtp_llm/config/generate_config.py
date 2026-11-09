@@ -277,6 +277,9 @@ class GenerateConfig(BaseModel):
 
     # Protocol compatibility: BlockTreeCache DEVICE uploads follow deployment backend configuration.
     enable_remote_cache: bool = True
+    # Optional per-request opt-out. Missing preserves the service-level behavior.
+    enable_p2p_writeback: Optional[bool] = None
+
     group_timeout: Optional[int] = None  # ms
 
     unique_key: str = ""

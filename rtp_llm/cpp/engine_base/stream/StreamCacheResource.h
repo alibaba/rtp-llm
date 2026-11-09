@@ -114,6 +114,9 @@ public:
     bool reuseCache() const;
     bool enableMemoryCache() const;
     bool enableDeviceCache() const;
+    bool writebackEnabled() const;
+    // A missing request value preserves legacy service-level behavior.
+    static bool resolveWritebackEnabled(bool deployment_enabled, const std::optional<bool>& request_enabled) noexcept;
     bool enableDiskCache() const;
     bool enableCacheLookup() const;
     Tier storeTarget() const;
@@ -131,6 +134,8 @@ public:
     }
 
 private:
+    // P peer metadata is set after stream construction; refresh before estimation or first allocation.
+    void         configureWritebackRetention() const;
     void         clearCacheReuseState();
     void         finalizeReuseAccounting();
     void         recordCacheReuseMallocResult(const MallocResult& result);

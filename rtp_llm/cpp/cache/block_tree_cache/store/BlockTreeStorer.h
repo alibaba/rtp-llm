@@ -40,8 +40,7 @@ public:
                                  Tier                                              target_tier,
                                  bool                                              is_resident,
                                  size_t&                                           resident_prefix_length,
-                                 bool                                              is_writeback = false,
-                                 bool                                              account_for_prefill = false);
+                                 bool                                              is_writeback = false);
     void             stopAdmissionLocked();
 
 private:
@@ -52,14 +51,12 @@ private:
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          bool                                              is_resident,
                                          size_t&                                           resident_prefix_length,
-                                         bool                                              is_writeback,
-                                         bool                                              account_for_prefill);
+                                         bool                                              is_writeback);
     StorageRequest   makeStorageRequest(const CacheKeysType&                              cache_keys,
                                         const std::vector<std::vector<GroupSetResource>>& resources) const;
     void             submitLowerTierLocked(const CacheKeysType&                              cache_keys,
                                            const std::vector<std::vector<GroupSetResource>>& resources,
-                                           Tier                                              target_tier,
-                                           bool                                              account_for_prefill);
+                                           Tier                                              target_tier);
     void             runStoreTask(const StoreTaskPtr& task);
     void             scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error);
     void             settleTask(const StoreTask& task, bool copy_success);

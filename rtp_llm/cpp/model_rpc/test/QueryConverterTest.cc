@@ -281,6 +281,24 @@ TEST_F(QueryConverterTest, EnableDiskCacheIsPreservedWhenExplicitlyEnabled) {
     ASSERT_TRUE(generate_input->generate_config->enable_disk_cache);
 }
 
+TEST_F(QueryConverterTest, RequestLevelP2PWritebackPreservesPresenceAndLegacyDefault) {
+    EXPECT_FALSE(GenerateConfig().enable_p2p_writeback.has_value());
+
+    for (const int wire_value : {-1, 0, 1}) {
+        SCOPED_TRACE(wire_value);
+        GenerateConfigPB config;
+        if (wire_value >= 0) {
+            config.mutable_enable_p2p_writeback()->set_value(wire_value == 1);
+        }
+
+        const auto converted = QueryConverter::transGenerateConfig(&config);
+        EXPECT_EQ(converted->enable_p2p_writeback.has_value(), wire_value >= 0);
+        if (wire_value >= 0) {
+            EXPECT_EQ(converted->enable_p2p_writeback.value(), wire_value == 1);
+        }
+    }
+}
+
 TEST_F(QueryConverterTest, EnableMemoryCacheIsPreservedFromProto) {
     EXPECT_EQ(GenerateConfigPB::kEnableMemoryCacheFieldNumber, 51);
     EXPECT_TRUE(GenerateConfig().enable_memory_cache);

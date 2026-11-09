@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -104,7 +105,9 @@ public:
                                            size_t                             required_prefix_blocks,
                                            KVCacheResourcePtr&                resource,
                                            size_t&                            start_block,
-                                           std::shared_ptr<LoadAsyncContext>& load_context);
+                                           std::shared_ptr<LoadAsyncContext>& load_context,
+                                           bool require_device_prefix = true,
+                                           std::optional<double> max_kv_ratio = std::nullopt);
     ErrorInfo    commitWriteBackDecodeCache(const KVCacheResource& resource, size_t start_block, int64_t deadline_ms);
     virtual void blockCopy(int src_block_index, int dest_block_index);
     virtual void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
@@ -172,7 +175,9 @@ protected:
     void      releaseMatchedBlockReferences(const BlockTreeMatchResult& match_result) const;
     ErrorInfo mallocAndBindLoadTargets(KVCacheResource&  resource,
                                        bool              enable_reuse_cache,
-                                       LoadAsyncContext* load_context) const;
+                                       LoadAsyncContext* load_context,
+                                       std::optional<double> max_kv_ratio,
+                                       const std::map<DeviceBlockPool*, size_t>& available) const;
     // Which capacity snapshots evaluateInitCapacity() is allowed to consult.
     // TOTAL_ONLY answers "can this request ever fit"; TOTAL_AND_AVAILABLE also
     // answers "can it fit right now".
@@ -211,13 +216,15 @@ protected:
                                          int                    seq_len,
                                          int                    remaining_tokens,
                                          int                    reserve_step,
-                                         bool                   enable_reuse_cache) const;
+                                         bool                   enable_reuse_cache,
+                                         int                    writeback_alignment_tokens = 0) const;
     virtual int   estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                      int  common_seq_len,
                                                      int  remaining_tokens,
                                                      int  reserve_step,
                                                      bool enable_reuse_cache,
-                                                     int  target_batch_size) const;
+                                                     int  target_batch_size,
+                                                     int  writeback_alignment_tokens = 0) const;
     virtual void  checkCPShardedMallocResult(const MallocInfo&) const;
     virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
     size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;

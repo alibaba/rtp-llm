@@ -24,6 +24,12 @@ def token_row(response, name):
 
 
 def cached_keys(status):
+    if "cache_key_list" in status:
+        keys = status["cache_key_list"]
+        require(isinstance(keys, list), "Invalid cache_key_list")
+        # The RPC prefers a nonempty list and otherwise falls back to the map.
+        if keys or "cache_keys" not in status:
+            return {int(key) for key in keys}
     if "cache_keys" in status:
         return {int(key) for key, present in status["cache_keys"].items() if present}
     require(isinstance(status.get("cached_keys"), list), "Cache status omitted keys")
@@ -153,12 +159,12 @@ def validate_generation(response, input_ids, count, pd_sep):
     require(aux.get("pd_sep") is pd_sep, "PD separation did not match requested path")
 
 
-def validate_reuse(response, expected, pd_sep):
+def validate_reuse(response, expected, pd_sep, *, expected_first_use=None):
     aux = response.get("aux_info", {})
     fields = (
         ("prefill_total_reuse_len", "prefill_local_reuse_len")
         if pd_sep
-        else ("reuse_len", "local_reuse_len")
+        else ("actual_reuse_len", "local_reuse_len")
     )
     for field in fields:
         require(
@@ -168,6 +174,25 @@ def validate_reuse(response, expected, pd_sep):
     if expected == 0 and pd_sep:
         for field in ("decode_total_reuse_len", "decode_local_reuse_len"):
             require(aux.get(field) == 0, f"Cold control reused D cache: {field}")
+
+    require(
+        aux.get("actual_reuse_len") == expected,
+        f"actual_reuse_len: expected {expected}, got {aux.get('actual_reuse_len')}",
+    )
+    first_use = aux.get("writeback_first_use_len")
+    require(
+        type(first_use) is int and 0 <= first_use <= expected,
+        f"Invalid writeback_first_use_len: {first_use!r}",
+    )
+    require(
+        aux.get("reuse_len") == expected - first_use,
+        f"reuse_len: expected billed reuse {expected - first_use}, got {aux.get('reuse_len')}",
+    )
+    if expected_first_use is not None:
+        require(
+            first_use == expected_first_use,
+            f"writeback_first_use_len: expected {expected_first_use}, got {first_use}",
+        )
 
 
 def compare_outputs(warm, control):
@@ -278,11 +303,11 @@ class AcceptanceRun:
         warm_p = self.generate(
             "warm-prefill", "prefill", continuation, complete_ids, 1, True, False
         )
-        validate_reuse(warm_p, cp_unit, False)
+        validate_reuse(warm_p, cp_unit, False, expected_first_use=cp_unit)
         warm_pd = self.generate(
             "warm-pd", "decode", continuation, complete_ids, 8, True, True
         )
-        validate_reuse(warm_pd, cp_unit, True)
+        validate_reuse(warm_pd, cp_unit, True, expected_first_use=0)
         cold_p = self.generate(
             "cold-prefill", "prefill", continuation, complete_ids, 1, False, False
         )

@@ -5,6 +5,7 @@
 #include "aios/network/arpc/arpc/ANetRPCController.h"
 #include <algorithm>
 #include <limits>
+#include <memory>
 
 namespace {
 inline size_t alignUp(size_t value, size_t alignment) {
@@ -61,6 +62,7 @@ public:
     }
 
     void Run() override {
+        std::unique_ptr<TcpTransferClosure> self_guard(this);
         TransferErrorCode error_code = TransferErrorCode::OK;
         std::string       error_msg;
 

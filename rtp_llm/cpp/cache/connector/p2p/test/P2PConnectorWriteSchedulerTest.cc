@@ -26,12 +26,15 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillWrite.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWriteRpcUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWritebackResourceUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 #include "rtp_llm/cpp/cache/test/BlockTreeCacheAllocatorTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
+#include "kmonitor/client/common/MinMaxCalculator.h"
+#include "kmonitor/client/core/MetricsCollector.h"
 
 namespace rtp_llm {
 namespace {
@@ -334,6 +337,41 @@ private:
 class P2PConnectorWriteSchedulerTest: public ::testing::Test {
 protected:
     using Allocator = test::BlockTreeCacheTestAllocator<CoordinatorCacheManager>;
+
+    kmonitor::KMonitorPtr attachPrefillMetrics() {
+        auto monitor = std::make_shared<kmonitor::KMonitor>("write_scheduler_metrics_test");
+        monitor->SetServiceName("");
+        auto reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+        prefill_.reset();
+        prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator_, reporter, prefill_client_);
+        EXPECT_TRUE(prefill_->init());
+        return monitor;
+    }
+
+    void expectPrefillMetrics(const kmonitor::KMonitorPtr&                      monitor,
+                              const std::map<std::string, std::vector<double>>& expected_samples,
+                              const std::vector<std::string>&                   absent = {}) {
+        kmonitor::MetricsCollector snapshot;
+        monitor->GetMetrics(&snapshot, {kmonitor::NORMAL}, 10000);
+        std::map<std::string, std::vector<std::string>> values;
+        for (const auto* record : snapshot.GetRecords().getRecords()) {
+            for (const auto* value : record->Values()) {
+                values[value->Name()].push_back(value->Value());
+            }
+        }
+        for (const auto& [name, samples] : expected_samples) {
+            SCOPED_TRACE(name);
+            ASSERT_EQ(values[name].size(), 1);
+            kmonitor::MinMaxCalculator expected;
+            for (const auto value : samples) {
+                expected.Add(value);
+            }
+            EXPECT_EQ(values[name].front(), expected.ToString());
+        }
+        for (const auto& name : absent) {
+            EXPECT_EQ(values.count(name), 0) << name;
+        }
+    }
 
     void SetUp() override {
         config_    = test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16, 1, 2);
@@ -697,6 +735,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, MirroredRoutesAndAllRanksRequiredBeforePu
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, ReceiverSelectsSuffixWithoutReturningRangeToSource) {
+    const auto monitor = attachPrefillMetrics();
     ASSERT_TRUE(test::seedCompleteBlockTreePath(allocator_, {keys_[0], keys_[1]}).success);
     auto context = asyncWrite(source());
     ASSERT_TRUE(await([&] { return decode_workers_[0].starts == 1 && decode_workers_[1].starts == 1; }));
@@ -717,10 +756,17 @@ TEST_F(P2PConnectorWriteSchedulerTest, ReceiverSelectsSuffixWithoutReturningRang
     ASSERT_TRUE(await([&] { return !context->resourceHoldPending(); }));
     EXPECT_TRUE(context->success()) << context->errorInfo().ToString();
     EXPECT_EQ(allocator_->devicePrefixBlocksForTest(keys_), 3u);
+    const auto bytes = static_cast<double>(2 * config_.topology().blockSizeBytesForGroup("default"));
+    EXPECT_GT(context->metrics_.planned_bytes, bytes);
+    expectPrefillMetrics(monitor,
+                         {{"rtp_llm_p2p_writeback_planned_bytes", {bytes}},
+                          {"rtp_llm_p2p_writeback_transferred_bytes", {bytes}},
+                          {"rtp_llm_p2p_writeback_committed_token_count", {4}}});
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, ConcurrentBusySuffixFailsPublicationAndReleasesSource) {
-    auto owner = source();
+    const auto                     monitor = attachPrefillMetrics();
+    auto                           owner   = source();
     std::weak_ptr<KVCacheResource> weak = owner;
     auto context = asyncWrite(std::move(owner));
     ASSERT_TRUE(await([&] { return decode_workers_[0].starts == 1 && decode_workers_[1].starts == 1; }));
@@ -736,6 +782,11 @@ TEST_F(P2PConnectorWriteSchedulerTest, ConcurrentBusySuffixFailsPublicationAndRe
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::CACHE_STORE_STORE_FAILED);
     EXPECT_NE(context->errorInfo().ToString().find("publication incomplete"), std::string::npos);
+    const auto bytes = static_cast<double>(4 * config_.topology().blockSizeBytesForGroup("default"));
+    expectPrefillMetrics(
+        monitor,
+        {{"rtp_llm_p2p_writeback_transferred_bytes", {bytes}}},
+        {"rtp_llm_p2p_writeback_committed_token_count"});
     EXPECT_TRUE(await([&] { return weak.expired(); }));
     {
         std::lock_guard<std::mutex> lock(cache->mutex_);
@@ -890,9 +941,9 @@ TEST_F(P2PConnectorWriteSchedulerTest, ReceiverBuildsLocalDeadlineFromRemainingB
     ASSERT_TRUE(await([&]() { return prefill_->inflightContextCount() == 0; }));
 }
 
-TEST_F(P2PConnectorWriteSchedulerTest, ReceiverRejectsWritebackThatWouldEatKvReserve) {
+TEST_F(P2PConnectorWriteSchedulerTest, ReceiverRejectsWritebackExceedingAvailableKvBudget) {
     prefill_.reset();
-    prefill_config_.p2p_writeback_kv_reserve_ratio = 1.0;
+    prefill_config_.p2p_writeback_max_kv_ratio = 0.1;
     prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator_, nullptr, prefill_client_);
     ASSERT_TRUE(prefill_->init());
     const auto                       prefix_blocks = allocator_->devicePrefixBlocksForTest(keys_);
@@ -982,7 +1033,7 @@ TEST_F(P2PConnectorWriteSchedulerTest, ReceiverChecksEachIndependentPoolAndRelea
     ASSERT_TRUE(allocator->init());
     ASSERT_TRUE(test::seedCompleteBlockTreePath(allocator, {keys_.front()}).success);
     prefill_config_.topology                       = config_.topologyPtr();
-    prefill_config_.p2p_writeback_kv_reserve_ratio = 0.75;
+    prefill_config_.p2p_writeback_max_kv_ratio = 0.3;
     prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator, nullptr, prefill_client_);
     ASSERT_TRUE(prefill_->init());
     decode_config_.topology = config_.topologyPtr();
@@ -1013,14 +1064,20 @@ TEST_F(P2PConnectorWriteSchedulerTest, ReceiverChecksEachIndependentPoolAndRelea
     EXPECT_EQ(allocator->devicePrefixBlocksForTest(keys_), 1u);
 }
 
-TEST_F(P2PConnectorWriteSchedulerTest, OutOfRangeKvReserveRatioFailsInit) {
-    for (const double ratio : {-0.1, 1.5}) {
+TEST_F(P2PConnectorWriteSchedulerTest, PrefillRejectsOutOfRangeWritebackMaxKvRatio) {
+    for (const double ratio : {-0.1, 1.5, std::numeric_limits<double>::quiet_NaN()}) {
         auto prefill_config                           = prefill_config_;
-        prefill_config.p2p_writeback_kv_reserve_ratio = ratio;
+        prefill_config.p2p_writeback_max_kv_ratio = ratio;
         EXPECT_FALSE(P2PSchedulerPrefillWrite(prefill_config, allocator_, nullptr, prefill_client_).init());
-        auto decode_config                           = decode_config_;
-        decode_config.p2p_writeback_kv_reserve_ratio = ratio;
-        EXPECT_FALSE(P2PSchedulerDecodeWrite(decode_config, decode_client_, *decode_source_worker_).init());
+    }
+}
+
+TEST_F(P2PConnectorWriteSchedulerTest, DecodeIgnoresWritebackMaxKvRatio) {
+    for (const double ratio : {0.0, -0.1, 1.5, std::numeric_limits<double>::quiet_NaN()}) {
+        auto config                       = decode_config_;
+        config.p2p_writeback_max_kv_ratio = ratio;
+        P2PSchedulerDecodeWrite scheduler(config, decode_client_, *decode_source_worker_);
+        EXPECT_TRUE(scheduler.init());
     }
 }
 
@@ -1057,9 +1114,9 @@ TEST_F(P2PConnectorWriteSchedulerTest, FullyCachedHandshakeSkipsWorkersAndReleas
     EXPECT_EQ(allocator_->freeBlocksNum(), free);
 }
 
-TEST_F(P2PConnectorWriteSchedulerTest, FullyCachedHandshakeNeedsNoKvReserve) {
+TEST_F(P2PConnectorWriteSchedulerTest, FullyCachedHandshakeNeedsNoKvBudget) {
     prefill_.reset();
-    prefill_config_.p2p_writeback_kv_reserve_ratio = 1.0;
+    prefill_config_.p2p_writeback_max_kv_ratio = 0.0;
     prefill_ = std::make_unique<P2PSchedulerPrefillWrite>(prefill_config_, allocator_, nullptr, prefill_client_);
     ASSERT_TRUE(prefill_->init());
     ASSERT_TRUE(test::seedCompleteBlockTreePath(allocator_, keys_).success);
@@ -1158,7 +1215,22 @@ TEST_F(P2PConnectorWriteSchedulerTest, CancelBeforeReceiveSubmissionWaitsForLoca
     EXPECT_EQ(allocator_->devicePrefixBlocksForTest(keys_), 2u);
 }
 
+TEST_F(P2PConnectorWriteSchedulerTest, StrictPolicyRejectsHostPromptBeforeStartingLoadOrTransfer) {
+    input_length_ = 8;
+    prepareLocalLoad(block_tree_cache_test::TransferCopyAction::Succeed);
+    auto context = asyncWrite(source());
+    ASSERT_TRUE(await([&]() { return context->done() && !context->resourceHoldPending(); }));
+    EXPECT_FALSE(context->success());
+    EXPECT_NE(context->errorInfo().ToString().find("prefix_evicted_or_demoted"), std::string::npos);
+    EXPECT_EQ(load_engine_->submittedBatchCount(), 0u);
+    EXPECT_EQ(prefill_workers_[0].starts, 0);
+    EXPECT_EQ(decode_workers_[0].starts, 0);
+    EXPECT_EQ(allocator_->devicePrefixBlocksForTest(keys_), 1u);
+}
+
 TEST_F(P2PConnectorWriteSchedulerTest, LocalLoadRunsAlongsideReceiveAndPublicationWaitsForBoth) {
+    prefill_config_.p2p_writeback_require_device_prefix = false;
+    input_length_ = 8;
     prepareLocalLoad(block_tree_cache_test::TransferCopyAction::Succeed);
     auto context = asyncWrite(source());
     ASSERT_TRUE(await([&]() {
@@ -1214,6 +1286,8 @@ TEST_F(P2PConnectorWriteSchedulerTest, LocalLoadFinishesFirstButReceiveStillHold
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, LocalLoadFailureCancelsReceiveAndDoesNotPublishTail) {
+    prefill_config_.p2p_writeback_require_device_prefix = false;
+    input_length_ = 8;
     prepareLocalLoad(block_tree_cache_test::TransferCopyAction::Fail);
     auto context = asyncWrite(source());
     ASSERT_TRUE(await([&]() {
@@ -1240,6 +1314,8 @@ TEST_F(P2PConnectorWriteSchedulerTest, LocalLoadFailureCancelsReceiveAndDoesNotP
 }
 
 TEST_F(P2PConnectorWriteSchedulerTest, CancellationKeepsResourceUntilLocalLoadAlsoStops) {
+    prefill_config_.p2p_writeback_require_device_prefix = false;
+    input_length_ = 8;
     prepareLocalLoad(block_tree_cache_test::TransferCopyAction::Succeed);
     auto context = asyncWrite(source());
     ASSERT_TRUE(await([&]() {
@@ -3118,12 +3194,52 @@ TEST(P2PConnectorAsyncWriteContextTest, StartWriteBackCompletionWakesCheckerAndR
     checker.stop();
 }
 
-TEST(P2PWritebackKvReserveTest, RatioMustBeWithinZeroAndOne) {
-    EXPECT_TRUE(validWritebackKvReserveRatio(0.0));
-    EXPECT_TRUE(validWritebackKvReserveRatio(1.0));
-    EXPECT_FALSE(validWritebackKvReserveRatio(-0.1));
-    EXPECT_FALSE(validWritebackKvReserveRatio(1.5));
-    EXPECT_FALSE(validWritebackKvReserveRatio(std::numeric_limits<double>::quiet_NaN()));
+TEST_F(P2PConnectorWriteSchedulerTest, KvBudgetRejectsBeforeEvictionAndCountsCacheOnlyBlocks) {
+    // Isolate admission from the background watermark eviction policy.
+    auto allocator = std::make_shared<Allocator>(config_);
+    KVCacheConfig cache_config;
+    cache_config.block_tree_device_evict_low_watermark_ratio = 0.0;
+    cache_config.block_tree_device_evict_high_watermark_ratio = 0.0;
+    allocator->setBlockTreeCacheConfigForTest(cache_config);
+    ASSERT_TRUE(allocator->init());
+    CacheKeysType cached = {keys_.front()};
+    for (int64_t key = 100; cached.size() < 14; ++key) {
+        cached.push_back(key);
+    }
+    ASSERT_TRUE(test::seedCompleteBlockTreePath(allocator, cached).success);
+    const auto pool = allocator->cacheGroups().front()->blockPool();
+    ASSERT_EQ(pool->freeBlocksNum(), 1u);
+    ASSERT_EQ(pool->availableBlocksNum(), 15u);
+    KVCacheResourcePtr resource;
+    size_t start = 0;
+    std::shared_ptr<LoadAsyncContext> load;
+    const auto reject_without_eviction = [&](const CacheKeysType& keys, double ratio) {
+        const auto error = allocator->admitWriteBackDecodeCache(keys, 1, resource, start, load, true, ratio);
+        EXPECT_EQ(error.code(), ErrorCode::MALLOC_FAILED) << error.ToString();
+        EXPECT_EQ(resource, nullptr);
+        EXPECT_EQ(load, nullptr);
+        EXPECT_EQ(pool->freeBlocksNum(), 1u);
+        EXPECT_EQ(pool->availableBlocksNum(), 15u);
+        EXPECT_EQ(allocator->devicePrefixBlocksForTest(cached), cached.size());
+        EXPECT_EQ(allocator->devicePrefixBlocksForTest(keys_), 1u);
+    };
+    auto oversized = keys_;
+    oversized.insert(oversized.end(), {200, 201});
+    reject_without_eviction(oversized, 0.3);
+    reject_without_eviction(keys_, 0.2);
+    reject_without_eviction(keys_, 0.0);
+
+    ASSERT_TRUE(allocator->admitWriteBackDecodeCache(keys_, 1, resource, start, load, true, 0.2001).ok());
+    ASSERT_EQ(start, 1u);
+    EXPECT_EQ(resource->blocks("default").size(), 3u);
+}
+
+TEST(P2PWritebackKvBudgetTest, RatioMustBeWithinZeroAndOne) {
+    EXPECT_TRUE(validWritebackMaxKvRatio(0.0));
+    EXPECT_TRUE(validWritebackMaxKvRatio(1.0));
+    EXPECT_FALSE(validWritebackMaxKvRatio(-0.1));
+    EXPECT_FALSE(validWritebackMaxKvRatio(1.5));
+    EXPECT_FALSE(validWritebackMaxKvRatio(std::numeric_limits<double>::quiet_NaN()));
 }
 
 TEST(P2PWriteRpcUtilTest, CallForResultKeepsFailureCause) {

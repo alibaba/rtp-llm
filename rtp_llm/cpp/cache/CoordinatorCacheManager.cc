@@ -27,6 +27,18 @@
 namespace rtp_llm {
 namespace {
 
+// Rounding a writeback endpoint down can require an older SWA window.
+// Keep this margin separate from policy.active_tail_blocks, which is also
+// used to plan the receiver's required keys.
+int writebackExtraTailBlocks(int alignment_tokens, const SingleTypeCacheManager& group) {
+    if (alignment_tokens <= 1 || group.policy().group_type != CacheGroupType::SWA || !group.prefixReuseEnabled()) {
+        return 0;
+    }
+    const int group_tokens = group.seqSizePerBlock();
+    RTP_LLM_CHECK(group_tokens > 0);
+    return 1 + (alignment_tokens - 2) / group_tokens;
+}
+
 // CP shard helpers: when mapper is null/passthrough, all helpers no-op.
 inline CacheKeysType cpCanonicalCacheKeys(const std::shared_ptr<CPSlotMapper>& mapper, const CacheKeysType& full) {
     return (mapper && mapper->isSharded()) ? mapper->canonicalCacheKeys(full) : full;
@@ -193,7 +205,9 @@ void CoordinatorCacheManager::releaseMatchedBlockReferences(const BlockTreeMatch
 
 ErrorInfo CoordinatorCacheManager::mallocAndBindLoadTargets(KVCacheResource&  resource,
                                                             bool              enable_reuse_cache,
-                                                            LoadAsyncContext* load_context) const {
+                                                            LoadAsyncContext* load_context,
+                                                            std::optional<double> max_kv_ratio,
+                                                            const std::map<DeviceBlockPool*, size_t>& available) const {
     const auto groups = cacheGroups();
     const int cp_size = cp_slot_mapper_ ? cp_slot_mapper_->cpSize() : 1;
     std::unordered_map<std::string, RequiredPositions> required_positions;
@@ -212,6 +226,35 @@ ErrorInfo CoordinatorCacheManager::mallocAndBindLoadTargets(KVCacheResource&  re
         for (const auto& desc : load_context->loadDescs()) {
             for (const auto& tag : block_tree_cache_->groupSets()[desc.group_set_id]->groupTags()) {
                 required_positions[tag].insert(loadTargetPosition(desc.path_index, tag, cp_slot_mapper_, cp_size));
+            }
+        }
+    }
+    if (max_kv_ratio) {
+        // Slot vectors already cover the final extent: FULL fills every hole,
+        // while sparse groups fill only the required tail and local-load positions.
+        std::map<DeviceBlockPool*, std::unordered_set<BlockIdxType>> matched;
+        std::map<DeviceBlockPool*, size_t> missing;
+        for (const auto& group : groups) {
+            if (!group->prefixReuseEnabled()) {
+                continue;
+            }
+            const auto pool = group->blockPool().get();
+            auto& held = matched[pool];
+            const auto& blocks = resource.blocks(group->tag());
+            for (size_t i = 0; i < blocks.size(); ++i) {
+                if (!isNullBlockIdx(blocks[i])) {
+                    held.insert(blocks[i]);
+                } else if (group->policy().group_type == CacheGroupType::FULL
+                           || required_positions[group->tag()].count(i)) {
+                    ++missing[pool];
+                }
+            }
+        }
+        for (const auto& [pool, held] : matched) {
+            const size_t demand = held.size() + missing[pool];
+            const size_t capacity = available.at(pool);
+            if (demand > 0 && (capacity == 0 || static_cast<double>(demand) / capacity >= *max_kv_ratio)) {
+                return ErrorInfo(ErrorCode::MALLOC_FAILED, "writeback exceeds available KV budget");
             }
         }
     }
@@ -256,10 +299,15 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
                                                              size_t                             required_prefix_blocks,
                                                              KVCacheResourcePtr&                resource,
                                                              size_t&                            start_block,
-                                                             std::shared_ptr<LoadAsyncContext>& load_context) {
+                                                             std::shared_ptr<LoadAsyncContext>& load_context,
+                                                             bool require_device_prefix,
+                                                             std::optional<double> max_kv_ratio) {
     resource.reset();
     load_context.reset();
     start_block = 0;
+    if (max_kv_ratio && !(*max_kv_ratio >= 0.0 && *max_kv_ratio <= 1.0)) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid writeback KV budget ratio");
+    }
     if (!block_tree_cache_ || !block_tree_cache_->isDeviceCacheEnabled() || allocation_type_ != AllocationType::DEVICE) {
         return ErrorInfo(ErrorCode::INVALID_PARAMS, "external insert requires reusable DEVICE groups");
     }
@@ -292,6 +340,16 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
     }
     const auto groups = cacheGroups();
 
+    std::map<DeviceBlockPool*, size_t> available;
+    if (max_kv_ratio) {
+        for (const auto& group : groups) {
+            const auto pool = group->blockPool().get();
+            if (!available.count(pool)) {
+                available.emplace(pool, pool->availableBlocksNum());
+            }
+        }
+    }
+
     KVCacheResourcePtr owner(new KVCacheResource, [groups](KVCacheResource* resource) {
         for (const auto& group : groups) {
             group->unreference(resource->blocks(group->tag()));
@@ -305,12 +363,17 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
     const auto tree_keys = cp_size > 1 ? cp_slot_mapper_->canonicalCacheKeys(cache_keys) : cache_keys;
 
     // step 1. match the existing blocks in the cache, admission control and hold the resource with the matched blocks
-    const auto error = block_tree_cache_->matchForExternalInsert(tree_keys, required_prefix_blocks / cp_size, match_result);
+    const auto error = block_tree_cache_->matchForExternalInsert(
+        tree_keys, required_prefix_blocks / cp_size, match_result, require_device_prefix);
     if (error.hasError()) {
         return error;
     }
     auto         local_load     = match_result.async_context;
     const size_t matched_blocks = local_load ? local_load->localMatchedBlocks() : match_result.matched_device_blocks;
+    if (matched_blocks < required_prefix_blocks / cp_size) {
+        releaseMatchedBlockReferences(match_result);
+        return ErrorInfo(ErrorCode::CACHE_STORE_STORE_FAILED, "prefix_evicted_or_demoted");
+    }
 
     // match() already owns these request references; transfer them into the resource without incrementing again.
     for (const auto& group : groups) {
@@ -326,8 +389,12 @@ ErrorInfo CoordinatorCacheManager::admitWriteBackDecodeCache(const CacheKeysType
         return populate_error;
     }
 
-    // step 3. malloc the remaining blocks and bind them to the resource and load context
-    const auto malloc_error = mallocAndBindLoadTargets(*owner, false, local_load.get());
+    // A fully DEVICE-cached handshake needs neither transfer nor a new KV budget.
+    if (matched_blocks == tree_keys.size() && !local_load) {
+        max_kv_ratio.reset();
+    }
+    // Check the complete physical demand before allocation can evict cached blocks.
+    const auto malloc_error = mallocAndBindLoadTargets(*owner, false, local_load.get(), max_kv_ratio, available);
     if (malloc_error.hasError()) {
         return malloc_error;
     }
@@ -507,13 +574,22 @@ int CoordinatorCacheManager::estimateBatchPeakNeedBlocks(const BatchKVCacheResou
     // A fresh resource follows initMalloc's two phases. Each group estimates that exact sequence so Linear groups can
     // distinguish the shared common tail from every sequence's private suffix tail.
     if (batch_kv_cache_resource->curBlocksNum() == 0) {
-        return estimateInitialBatchPeakNeedBlocks(
-            seq_len, clamped_common_len, remaining_tokens, reserve_step, enable_reuse_cache, target_width);
+        return estimateInitialBatchPeakNeedBlocks(seq_len,
+                                                  clamped_common_len,
+                                                  remaining_tokens,
+                                                  reserve_step,
+                                                  enable_reuse_cache,
+                                                  target_width,
+                                                  batch_kv_cache_resource->writebackAlignmentTokens());
     }
 
     // Initialized sequences have the same layout, and all subsequent growth is private per sequence.
-    const int per_sequence_growth = estimatePeakNeedBlocks(
-        batch_kv_cache_resource->cacheResource(0), seq_len, remaining_tokens, reserve_step, enable_reuse_cache);
+    const int per_sequence_growth = estimatePeakNeedBlocks(batch_kv_cache_resource->cacheResource(0),
+                                                           seq_len,
+                                                           remaining_tokens,
+                                                           reserve_step,
+                                                           enable_reuse_cache,
+                                                           batch_kv_cache_resource->writebackAlignmentTokens());
 
     // Full blocks remain shared when the batch expands, but every additional sequence needs a physical copy of the
     // current partial tail before it can diverge.
@@ -980,10 +1056,12 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             return {true, 0};
         }
         for (int b = 0; b < batch_size; ++b) {
-            for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
-                const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
-                kv_cache_groups_[static_cast<size_t>(group_id)]->removeSkippedBlocks(
-                    kv_resource->mutableBlockIds(b, tag), malloc_info.reuse_cache, reserve_step);
+            for (const auto& group : kv_cache_groups_) {
+                group->removeSkippedBlocks(
+                    kv_resource->mutableBlockIds(b, group->tag()),
+                    malloc_info.reuse_cache,
+                    reserve_step,
+                    writebackExtraTailBlocks(kv_resource->writebackAlignmentTokens(), *group));
             }
         }
         return {true, 0};
@@ -1187,13 +1265,8 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         }
         insert_keys.resize(publish_prefix);
         resources.resize(publish_prefix);
-        if (insert_info.is_resident) {
-            const size_t batch_resident_prefix_length =
-                block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, true, insert_info.account_for_prefill);
-            resident_prefix_length += batch_resident_prefix_length;
-        } else {
-            block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, false, insert_info.account_for_prefill);
-        }
+        resident_prefix_length += block_tree_cache_->insert(
+            insert_keys, resources, insert_info.target_tier, insert_info.is_resident);
     }
 }
 
@@ -1670,12 +1743,16 @@ int CoordinatorCacheManager::estimatePeakNeedBlocks(const KVCacheResource& kv_ca
                                                     int                    seq_len,
                                                     int                    remaining_tokens,
                                                     int                    reserve_step,
-                                                    bool                   enable_reuse_cache) const {
+                                                    bool                   enable_reuse_cache,
+                                                    int                    writeback_alignment_tokens) const {
     int need_blocks = 0;
-    for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
-        const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
-        need_blocks += kv_cache_groups_[static_cast<size_t>(group_id)]->estimatePeakNeedBlocks(
-            seq_len, kv_cache_resource.blocks(tag), remaining_tokens, reserve_step, enable_reuse_cache);
+    for (const auto& group : kv_cache_groups_) {
+        need_blocks += group->estimatePeakNeedBlocks(seq_len,
+                                                     kv_cache_resource.blocks(group->tag()),
+                                                     remaining_tokens,
+                                                     reserve_step,
+                                                     enable_reuse_cache,
+                                                     writebackExtraTailBlocks(writeback_alignment_tokens, *group));
     }
     return need_blocks;
 }
@@ -1685,11 +1762,18 @@ int CoordinatorCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                                 int  remaining_tokens,
                                                                 int  reserve_step,
                                                                 bool enable_reuse_cache,
-                                                                int  target_batch_size) const {
+                                                                int  target_batch_size,
+                                                                int  writeback_alignment_tokens) const {
     int peak_blocks = 0;
     for (const auto& group : kv_cache_groups_) {
-        peak_blocks += group->estimateInitialBatchPeakNeedBlocks(
-            seq_len, common_seq_len, remaining_tokens, reserve_step, enable_reuse_cache, target_batch_size);
+        peak_blocks +=
+            group->estimateInitialBatchPeakNeedBlocks(seq_len,
+                                                      common_seq_len,
+                                                      remaining_tokens,
+                                                      reserve_step,
+                                                      enable_reuse_cache,
+                                                      target_batch_size,
+                                                      writebackExtraTailBlocks(writeback_alignment_tokens, *group));
     }
     return peak_blocks;
 }

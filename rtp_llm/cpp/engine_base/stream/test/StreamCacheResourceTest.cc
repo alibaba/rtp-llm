@@ -664,6 +664,19 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
     ASSERT_FALSE(resource.reuseCache());
 }
 
+TEST_F(StreamCacheResourceTest, RequestWritebackIsIntersectedWithDeploymentCapability) {
+    for (const bool deployment_enabled : {false, true}) {
+        for (const int request_mode : {-1, 0, 1}) {
+            SCOPED_TRACE("deployment=" + std::to_string(deployment_enabled)
+                         + " request_mode=" + std::to_string(request_mode));
+            const std::optional<bool> request_enabled =
+                request_mode < 0 ? std::nullopt : std::optional<bool>(request_mode == 1);
+            EXPECT_EQ(StreamCacheResource::resolveWritebackEnabled(deployment_enabled, request_enabled),
+                      deployment_enabled && request_mode != 0);
+        }
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testPrefillOnlyDisablesPrefixAndDeviceCacheReuseForAllocation) {
     for (const bool ignore_request_switches : {false, true}) {
         SCOPED_TRACE(ignore_request_switches);
@@ -947,7 +960,7 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_WithoutAllocatorContext_Retur
 }
 
 TEST_F(StreamCacheResourceTest, NonPDRequestSkipsRegistrationWithEmptyOrBusinessKey) {
-    for (const std::string key : {std::string{}, std::string{"business-key"}}) {
+    for (const std::string& key : {std::string{}, std::string{"business-key"}}) {
         SCOPED_TRACE(key);
         ASSERT_NO_FATAL_FAILURE(prepareP2PRegistrationResource(/*query_pd=*/false, key));
         auto& resource = stream_->streamCacheResource();
@@ -1057,7 +1070,12 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_NoContext_ReturnsTrue) {
 }
 
 TEST_F(StreamCacheResourceTest, CacheReuseMetricsAllowMissingWarmupCacheManager) {
-    prepareResource(/*reuse_cache=*/true);
+    prepareResourceWithInputTokens(std::vector<int>(32, 1), /*reuse_cache=*/true);
+    stream_->setInitialReuseLength(20);
+    stream_->setHostReuseLength(4);
+    stream_->setDiskReuseLength(6);
+    stream_->setLocalReuseLength(12);
+    stream_->setRemoteReuseLength(8);
     auto&                 resource = stream_->streamCacheResource();
     kmonitor::MetricsTags tags;
     stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
@@ -1065,6 +1083,52 @@ TEST_F(StreamCacheResourceTest, CacheReuseMetricsAllowMissingWarmupCacheManager)
 
     resource.reportCacheReuseMetrics();
 
+    const auto& metrics = resource.cache_reuse_metrics_;
+    EXPECT_FALSE(metrics.report_reuse_metrics);
+    EXPECT_EQ(metrics.kv_cache_reuse_length, 20);
+    EXPECT_EQ(metrics.writeback_reuse_len, -1);
+    EXPECT_EQ(metrics.device_reuse_length, 2);
+    EXPECT_EQ(metrics.host_reuse_length, 4);
+    EXPECT_EQ(metrics.disk_reuse_length, 6);
+    EXPECT_EQ(metrics.remote_reuse_length, 8);
+}
+
+TEST_F(StreamCacheResourceTest, CacheReuseMetricsReportWritebackBenefitBeforePrefillAccounting) {
+    prepareResourceWithInputTokens(std::vector<int>(32, 1), true, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags()));
+    stream_->setInitialReuseLength(20);
+    stream_->setWritebackFirstUseLength(8);
+    resource.reportCacheReuseMetrics();
+    EXPECT_EQ(resource.cache_reuse_metrics_.kv_cache_reuse_length, 20);
+    EXPECT_EQ(resource.cache_reuse_metrics_.writeback_reuse_len, 8);
+    stream_->setWritebackFirstUseLength(0);
+    resource.reportCacheReuseMetrics();
+    EXPECT_EQ(resource.cache_reuse_metrics_.writeback_reuse_len, 0);
+    stream_->setWritebackFirstUseLength(40);
+    resource.reportCacheReuseMetrics();
+    EXPECT_EQ(resource.cache_reuse_metrics_.writeback_reuse_len, 20);
+
+}
+
+TEST_F(StreamCacheResourceTest, CacheReuseMetricsDecodeDoesNotDuplicateWritebackBenefit) {
+    prepareResourceWithInputTokens(std::vector<int>(32, 1), true, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+    stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags()));
+    stream_->setInitialReuseLength(28);
+    stream_->setWritebackFirstUseLength(16);
+    stream_->setPrefillReuseLength(20, 20, 0, 0, 0, false, 8);
+    resource.reportCacheReuseMetrics();
+    EXPECT_EQ(resource.cache_reuse_metrics_.writeback_reuse_len, -1);
+    EXPECT_EQ(resource.cache_reuse_metrics_.kv_cache_reuse_length, 28);
+}
+
+TEST_F(StreamCacheResourceTest, CacheReuseMetricsReportZeroLengthsWhenCacheReuseIsDisabled) {
+    prepareResourceWithInputTokens(std::vector<int>(32, 1), false, RoleType::PREFILL);
+    auto& resource = stream_->streamCacheResource();
+    stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags()));
+    resource.reportCacheReuseMetrics();
+    EXPECT_EQ(resource.cache_reuse_metrics_.writeback_reuse_len, 0);
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_reuse_metrics);
 }
 
@@ -1381,7 +1445,7 @@ TEST_F(StreamCacheResourceTest, WritebackAccountingUsesCanonicalCpBlocks) {
     EXPECT_EQ(stream_->initialReuseLength(), 4);
 }
 
-TEST_F(StreamCacheResourceTest, OnlySuccessfulPrefillReleaseRequestsAccountingCommit) {
+TEST_F(StreamCacheResourceTest, SuccessfulReleaseCommitsCacheForPrefillAndDecode) {
     for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
         prepareResource(true, role);
         auto& resource = stream_->streamCacheResource();
@@ -1390,7 +1454,6 @@ TEST_F(StreamCacheResourceTest, OnlySuccessfulPrefillReleaseRequestsAccountingCo
         auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
         EXPECT_CALL(*allocator, insertIntoCache(testing::_, testing::_))
             .WillOnce(testing::Invoke([&](const InsertInfo& info, size_t& resident_prefix_length) {
-                EXPECT_EQ(info.account_for_prefill, role == RoleType::PREFILL);
                 actual_allocator->insertIntoCache(info, resident_prefix_length);
             }));
         EXPECT_CALL(*allocator, free(testing::_)).WillOnce(testing::Invoke([&](const FreeInfo& info) {

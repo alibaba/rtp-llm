@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import time
 from pathlib import Path
 
 from v4_cp_writeback_acceptance import (
@@ -83,12 +84,51 @@ def compare_handoff(warm, cold):
 def generate_probe(run, name, role, prompt, input_ids, reuse):
     pd_sep = role == "decode"
     query = generation_query(prompt, 2, reuse)
-    query["generate_config"].update(can_use_pd_separation=pd_sep, return_logits=True)
+    query["generate_config"].update(
+        can_use_pd_separation=pd_sep,
+        return_logits=True,
+        enable_p2p_writeback=False,
+    )
     run.save(name + "-request", query)
     response = run.post(role, "/", query)
     run.save(name, response)
     validate_generation(response, input_ids, 2, pd_sep)
     return response
+
+
+def generate_source(run, name, prompt, input_ids, count, enable_p2p_writeback):
+    query = generation_query(prompt, count, True)
+    query["generate_config"]["enable_p2p_writeback"] = enable_p2p_writeback
+    run.save(name + "-request", query)
+    response = run.post("decode", "/", query)
+    run.save(name, response)
+    validate_generation(response, input_ids, count, True)
+    return response
+
+
+def assert_no_publication(
+    post, block_size, timeout, clock=time.monotonic, sleep=time.sleep
+):
+    require(math.isfinite(timeout) and timeout > 0, "Invalid cache wait timeout")
+    deadline = clock() + timeout
+    last_status = None
+    while clock() < deadline:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
+        last_status = post(min(2.0, remaining))
+        require(
+            cache_block_size(last_status) == block_size,
+            "P cache block size changed during opt-out check",
+        )
+        require(
+            not cached_keys(last_status),
+            "Request-level writeback opt-out still published a P cache block",
+        )
+        remaining = deadline - clock()
+        if remaining > 0:
+            sleep(min(0.1, remaining))
+    return last_status
 
 
 def validate_writeback(run, tokenizer, block_size=16):
@@ -97,14 +137,36 @@ def validate_writeback(run, tokenizer, block_size=16):
     run.save("initial-cache", initial)
     require(cache_block_size(initial) == block_size, "Unexpected cache block size")
     require(not cached_keys(initial), "Acceptance requires an empty P cache")
+    opt_out_prompt = "Explain how databases isolate concurrent transactions."
+    opt_out_ids = tokenizer.encode(opt_out_prompt)
+    require(
+        0 < len(opt_out_ids) < block_size,
+        "Opt-out source prompt must not publish a P block",
+    )
+    opt_out_source = generate_source(
+        run,
+        "writeback-opt-out-source",
+        opt_out_prompt,
+        opt_out_ids,
+        block_size * 3,
+        False,
+    )
+    validate_reuse(opt_out_source, 0, True)
+    opt_out_status = assert_no_publication(
+        lambda timeout: run.post(
+            "prefill", "/rtp_llm/cache_status", status_query, timeout
+        ),
+        block_size,
+        35,
+    )
+    run.save("writeback-opt-out-cache", opt_out_status)
+
     prompt = "Write a detailed explanation of database transactions."
     input_ids = tokenizer.encode(prompt)
     require(
         0 < len(input_ids) < block_size, "Source prompt must not publish a P block"
     )
-    source = run.generate(
-        "source", "decode", prompt, input_ids, block_size * 3, True, True
-    )
+    source = generate_source(run, "source", prompt, input_ids, block_size * 3, True)
     validate_reuse(source, 0, True)
     publication = wait_for_publication(
         lambda timeout: run.post(
@@ -140,7 +202,14 @@ def validate_writeback(run, tokenizer, block_size=16):
                 warm = generate_probe(
                     run, label + f"-warm-{repeat}", role, continuation, prefix, True
                 )
-                validate_reuse(warm, prefix_blocks * block_size, role == "decode")
+                validate_reuse(
+                    warm,
+                    prefix_blocks * block_size,
+                    role == "decode",
+                    expected_first_use=(
+                        block_size if role == "prefill" and repeat == 0 else 0
+                    ),
+                )
                 metrics = compare_handoff(warm, cold)
                 if previous is not None:
                     compare_outputs(warm, previous)
@@ -149,6 +218,11 @@ def validate_writeback(run, tokenizer, block_size=16):
     return {
         "passed": True,
         "published_keys": len(cached_keys(publication)),
+        "checks": [
+            "request-level writeback opt-out suppresses P publication",
+            "request-level writeback opt-in publishes P cache",
+            "warm/cold whole-vocabulary logits remain equivalent",
+        ],
         "comparisons": comparisons,
     }
 

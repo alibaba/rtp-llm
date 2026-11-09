@@ -365,7 +365,9 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_CHECK(nums == total_blocks);
 
     if (total_blocks > 0) {
-        if (reuseCache() && !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
+        const bool finished_successfully =
+            !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED;
+        if (reuseCache() && finished_successfully) {
             const Tier target_tier = storeTarget();
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d, target_tier=%s",
                               stream_->streamId(),
@@ -373,19 +375,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               tierName(target_tier));
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
-                insert_info.account_for_prefill = resource_context_.role_type == RoleType::PREFILL;
                 size_t     resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
-                if (target_tier == Tier::DEVICE && resource_context_.cache_manager->writebackEnabled()
-                    && !stream_->isFakeStream() && !stream_->hasNumBeams()) {
-                    MetaImpl meta(false, false, "");
-                    meta.fillRoutingContext(stream_);
-                    resource_context_.cache_manager->asyncWriteBack(batch_kv_cache_resource_,
-                                                                     stream_->completeTokenIdsPtr(),
-                                                                     stream_->inputLength(),
-                                                                     stream_->writebackKVReadyTokenCount(),
-                                                                     meta);
-                }
             }
         } else {
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
@@ -393,6 +384,16 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               reuseCache(),
                               stream_->hasErrorWithoutLock(),
                               StreamStateToString(stream_->getStatus()).c_str());
+        }
+
+        if (finished_successfully && writebackEnabled() && !stream_->isFakeStream() && !stream_->hasNumBeams()) {
+            MetaImpl meta(false, false, "");
+            meta.fillRoutingContext(stream_);
+            resource_context_.cache_manager->asyncWriteBack(batch_kv_cache_resource_,
+                                                            stream_->completeTokenIdsPtr(),
+                                                            stream_->inputLength(),
+                                                            stream_->writebackKVReadyTokenCount(),
+                                                            meta);
         }
 
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
@@ -411,6 +412,7 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len, int reserve_step) co
 
 int StreamCacheResource::estimatePeakNeedBlocks(
     int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, int target_batch_size) const {
+    configureWritebackRetention();
     return resource_context_.cache_manager->estimatePeakNeedBlocks(batch_kv_cache_resource_,
                                                                    seq_len,
                                                                    common_seq_len,
@@ -432,6 +434,7 @@ void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
 absl::Status StreamCacheResource::initKVBlock() {
+    configureWritebackRetention();
     RTP_LLM_PROFILE_FUNCTION();
     // Decode side: first malloc should NOT use device cache, regardless of runtime config.
     // Follow-up allocations (incrKVBlock) use enableCacheLookup().
@@ -614,21 +617,26 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
 }
 
 void StreamCacheResource::reportCacheReuseMetrics() {
-    if (resource_context_.cache_manager == nullptr || stream_->metrics_reporter_ == nullptr || !reuseCache()) {
+    if (stream_->metrics_reporter_ == nullptr) {
         return;
     }
-    const int64_t input_length                 = stream_->inputLength();
-    const int64_t total_reuse_length           = stream_->initialReuseLength();
-    cache_reuse_metrics_.kv_cache_reuse_length = total_reuse_length;
-    cache_reuse_metrics_.device_reuse_length   = stream_->deviceReuseLength();
-    cache_reuse_metrics_.host_reuse_length     = stream_->hostReuseLength();
-    cache_reuse_metrics_.disk_reuse_length     = stream_->diskReuseLength();
-    cache_reuse_metrics_.remote_reuse_length   = stream_->remoteReuseLength();
-    resource_context_.cache_manager->recordCacheHitTokens(input_length, cache_reuse_metrics_);
-    cache_reuse_metrics_.report_reuse_metrics = true;
+    cache_reuse_metrics_.writeback_reuse_len =
+        resource_context_.role_type == RoleType::PREFILL ?
+            std::clamp<int64_t>(stream_->writebackFirstUseLength(), 0, std::max(0, stream_->initialReuseLength())) :
+            -1;
+    cache_reuse_metrics_.kv_cache_reuse_length            = stream_->initialReuseLength();
+    cache_reuse_metrics_.device_reuse_length = stream_->deviceReuseLength();
+    cache_reuse_metrics_.host_reuse_length = stream_->hostReuseLength();
+    cache_reuse_metrics_.disk_reuse_length   = stream_->diskReuseLength();
+    cache_reuse_metrics_.remote_reuse_length = stream_->remoteReuseLength();
+    cache_reuse_metrics_.report_reuse_metrics = resource_context_.cache_manager && reuseCache();
+    if (cache_reuse_metrics_.report_reuse_metrics) {
+        resource_context_.cache_manager->recordCacheHitTokens(stream_->inputLength(), cache_reuse_metrics_);
+    }
     kmonitor::MetricsTags tags;
-    stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(
-        &tags, &cache_reuse_metrics_);
+    auto                  metrics = cache_reuse_metrics_;
+    metrics.report_reuse_lengths = true;
+    stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &metrics);
 }
 
 std::optional<absl::Status> StreamCacheResource::pollAllocatorLoad() {
@@ -867,6 +875,29 @@ bool StreamCacheResource::reuseCache() const {
     // Per-request field flows frontend → FlexLB → engine via protobuf.
     return !stream_->generateConfig()->isPrefillOnly() && resource_context_.reuse_cache
            && (resource_context_.ignore_request_cache_switches || stream_->reuseCache());
+}
+
+bool StreamCacheResource::resolveWritebackEnabled(bool                       deployment_enabled,
+                                                  const std::optional<bool>& request_enabled) noexcept {
+    return deployment_enabled && request_enabled.value_or(true);
+}
+
+bool StreamCacheResource::writebackEnabled() const {
+    const auto& generate_config = stream_->generateConfig();
+    return generate_config && resource_context_.cache_manager
+           && resolveWritebackEnabled(resource_context_.cache_manager->writebackEnabled(),
+                                      generate_config->enable_p2p_writeback);
+}
+
+void StreamCacheResource::configureWritebackRetention() const {
+    int alignment_tokens = 0;
+    if (stream_ && writebackEnabled() && !stream_->hasNumBeams() && !stream_->isFakeStream()) {
+        const int block_tokens = resource_context_.cache_manager->cacheConfig().seq_size_per_block;
+        const int cp_size      = std::max(1, stream_->getPrefillCpSize());
+        RTP_LLM_CHECK(block_tokens > 0 && cp_size <= std::numeric_limits<int>::max() / block_tokens);
+        alignment_tokens = block_tokens * cp_size;
+    }
+    batch_kv_cache_resource_->setWritebackAlignmentTokens(alignment_tokens);
 }
 
 bool StreamCacheResource::enableMemoryCache() const {

@@ -125,7 +125,8 @@ public:
     BlockTreeMatchResult match(const CacheKeysType& cache_keys, const std::function<bool(size_t)>& valid_prefix = {});
     ErrorInfo            matchForExternalInsert(const CacheKeysType&  cache_keys,
                                                 size_t                required_prefix_blocks,
-                                                BlockTreeMatchResult& match_result);
+                                                BlockTreeMatchResult& match_result,
+                                                bool require_device_prefix = true);
     ErrorInfo            insertExternalBlocks(const CacheKeysType&                              cache_keys,
                                               size_t                                            start_block,
                                               const std::vector<std::vector<GroupSetResource>>& resources,
@@ -137,8 +138,7 @@ public:
     size_t insert(const CacheKeysType&                              cache_keys,
                   const std::vector<std::vector<GroupSetResource>>& resources,
                   Tier                                              target_tier,
-                  bool                                              is_resident,
-                  bool                                              account_for_prefill = false);
+                  bool                                              is_resident);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
@@ -189,7 +189,9 @@ public:
     }
 
 private:
-    ErrorInfo validateDevicePrefixLocked(const CacheKeysType& cache_keys, size_t required_prefix_blocks) const;
+    ErrorInfo validateWritebackPrefixLocked(const CacheKeysType& cache_keys,
+                                            size_t required_prefix_blocks,
+                                            bool require_device_prefix = true) const;
     void      checkWatermark();
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool check_watermark);
