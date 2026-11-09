@@ -678,9 +678,16 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
             const int64_t waited_us    = enqueue_us > 0 ? std::max<int64_t>(0, now_us - enqueue_us) : 0;
             const int64_t budget_us    = static_cast<int64_t>(prefill_admission_coalesce_ms_) * 1000;
             const int64_t remaining_us = std::max<int64_t>(0, budget_us - waited_us);
-            if (remaining_us > 0) {
+            // Even when the enqueue-age budget is exhausted, leave a short
+            // post-boundary grace: the previous step's newest KV chunk must be
+            // published before the next context can reuse it. A measured
+            // match-to-ready latency is 0.9-13 ms, so 20 ms covers it without
+            // restoring the full singleton hold.
+            constexpr int64_t kMinPostBoundaryWaitUs = 20 * 1000;
+            const int64_t     wait_us = std::max(remaining_us, kMinPostBoundaryWaitUs);
+            if (wait_us > 0) {
                 cond_.wait_for(lock,
-                               std::chrono::microseconds(remaining_us),
+                               std::chrono::microseconds(wait_us),
                                [this] { return stop_.load(std::memory_order_relaxed) || waiting_streams_.size() >= 2; });
             }
         } else {

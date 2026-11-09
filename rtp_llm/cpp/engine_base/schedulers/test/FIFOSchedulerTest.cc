@@ -5821,8 +5821,8 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionCoalescerUsesRemainingBudget) {
 
     auto first = makeStream({1}, model_config, runtime_config, resource_context);
     // Simulate a context that already waited 90 ms behind the previous step.
-    // The enqueue path preserves this first recorded time, so only the remaining
-    // 10 ms of the 100 ms window should be spent at the empty boundary.
+    // Only 10 ms of the enqueue-age budget remains, but the 20 ms post-boundary
+    // grace still applies so the prior step's newest KV chunk can become ready.
     first->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds() - 90 * 1000);
     ASSERT_TRUE(scheduler.enqueue(first).ok());
     const auto start   = std::chrono::steady_clock::now();
@@ -5831,6 +5831,7 @@ TEST_F(FIFOSchedulerTest, testPrefillAdmissionCoalescerUsesRemainingBudget) {
         std::chrono::steady_clock::now() - start);
     ASSERT_TRUE(result.ok());
     EXPECT_EQ(result->size(), 1);
+    EXPECT_GE(elapsed.count(), 15);
     EXPECT_LT(elapsed.count(), 80);
 }
 
