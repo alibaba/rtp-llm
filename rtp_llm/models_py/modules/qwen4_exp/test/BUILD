@@ -22,10 +22,18 @@ models_py_test(
     gpu = "H20_CU13",
 )
 
-models_py_test(
+py_test(
     name = "qsa_writer_geometry_test",
-    src = "qsa_writer_geometry_test.py",
-    gpu = "H20_CU13",
+    srcs = [
+        "qsa_writer_geometry_test.py",
+        "qsa_draft_tail_vector_test.py",
+        "qsa/indexer_prefill_triton_test.py",
+        "indexer_prefix_reuse_triton_test.py",
+    ],
+    deps = ["//rtp_llm:testlib", ":math_references"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
 
 models_py_test(

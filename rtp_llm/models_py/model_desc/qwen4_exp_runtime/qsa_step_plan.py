@@ -919,6 +919,12 @@ def _build_step_writer_geometry(
     ``trusted_tables`` (incremental plans, whose build proved the cu partition
     and ran the required-blocks verdicts over every column this geometry can
     read) drops the redundant resolve asserts.
+
+    The geometry build itself decides which fast write form the bundle can
+    serve: short windows prove the destination slots unique (full-shape
+    write) and longer monotone windows take the ring-wrap batch write; a
+    window neither form can serve keeps the legacy per-call writer (the
+    bundle is not paid for nothing).
     """
     if qsa_strict_validation_enabled():
         return None
@@ -940,7 +946,7 @@ def _build_step_writer_geometry(
         batch_size=len(host_lengths),
         device=cu_seqlens.device,
     )
-    return build_indexer_writer_geometry(
+    geometry = build_indexer_writer_geometry(
         cu_seqlens,
         start_positions,
         kv_table,
@@ -957,6 +963,11 @@ def _build_step_writer_geometry(
         host_prefixes=host_prefixes,
         trusted_tables=trusted_tables,
     )
+    if not (geometry.state_slots_unique or geometry.state_ring_wrap):
+        # Neither fast write form applies to this window: keep the legacy
+        # per-call writer instead of freezing an unused bundle.
+        return None
+    return geometry
 
 
 def build_incremental_step_plan(
@@ -1341,14 +1352,44 @@ def build_incremental_step_plan(
     selection_valid_rows = prep.selection_valid_rows
     selection_valid = prep.selection_valid
 
-    # Freeze the writer geometry when the full-shape write path can engage
-    # (no request spans more than the state ring).  Longer incremental windows
-    # keep the legacy per-call writer, so the bundle is not paid for nothing.
+    # Main-model fused prefix reuse consumes the plan's tables directly.
+    # Skip the unused bundle for its candidates; draft paths still need it.
+    # A consumer-side decline retains the legacy transactional fallback.
+    prefix_reuse_fused_supported = prefix_reuse_fused_geometry_supported(
+        batch_size=batch_size,
+        head_dim=head_dim,
+        head_num=head_num,
+        ratio=ratio,
+        lengths=lengths,
+        prefixes=prefix_values,
+        kv_tokens_per_block=kv_tokens_per_block,
+        state_tokens_per_block=state_tokens_per_block,
+    )
+    prefix_reuse_fused_candidate = (
+        not draft
+        and not draft_prefix_reuse
+        and not bool(context.is_mtp_draft)
+        and device.type == "cuda"
+        and torch.version.hip is None
+        and prefix_reuse_fused_supported
+        and selection_valid_rows is not None
+        and padded_score_weights is not None
+        and current_cos is not None
+        and current_cos.shape[-1] == 64
+        and rope_cos is not None
+        and rope_cos.shape[-1] == 64
+    )
+    # Freeze the writer geometry for both fast write forms: short windows
+    # (every request within the state ring) prove the destination slots
+    # unique and take the full-shape write, while longer monotone windows --
+    # including the production draft tail (b=1, N=1578) -- take the
+    # ring-wrap batch write over each (request, block)'s tail rows.  The
+    # builder itself declines windows neither form can serve.
     # The incremental build validated the cu partition (torch.equal against
     # the pinned mirrors) and both tables (required-blocks verdicts cover every
     # column the geometry reads), so the redundant resolve asserts are dropped.
     writer_geometry = None
-    if max(lengths, default=0) <= 2 * ratio:
+    if not prefix_reuse_fused_candidate:
         writer_geometry = _build_step_writer_geometry(
             context,
             cu_seqlens=expected_cu,
@@ -1418,16 +1459,7 @@ def build_incremental_step_plan(
         padded_score_weights=padded_score_weights,
         kv_lens_rows=kv_lens_rows,
         padded_kv_lens=padded_kv_lens,
-        prefix_reuse_fused_supported=prefix_reuse_fused_geometry_supported(
-            batch_size=batch_size,
-            head_dim=head_dim,
-            head_num=head_num,
-            ratio=ratio,
-            lengths=lengths,
-            prefixes=prefix_values,
-            kv_tokens_per_block=kv_tokens_per_block,
-            state_tokens_per_block=state_tokens_per_block,
-        ),
+        prefix_reuse_fused_supported=prefix_reuse_fused_supported,
         writer_geometry=writer_geometry,
     )
 
@@ -1580,10 +1612,22 @@ def build_cold_step_plan(
         rope_sin[request_idx, :seq_len].copy_(sin)
         offset = end
 
-    # Freeze the writer geometry only when the full-shape write path can engage
-    # (short zero-prefix prefills); long cold prefills keep the per-call writer.
+    # The zero-prefix fused writer does not consume writer_geometry. Skip
+    # that work only for shapes it may serve, using the plan's known facts.
+    # A later per-layer layout or alias rejection retains the ordinary
+    # legacy fallback, which needs no bundle.
+    fused_writer_candidate = (
+        defer_cu
+        and torch.version.hip is None
+        and kv_tokens_per_block in (64, 128)
+        and head_dim == 128
+        and rotary_dim == 64
+        and rope_dtype == torch.bfloat16
+        and batch_size > 0
+        and all(n > 0 for n in lengths)
+    )
     writer_geometry = None
-    if max(lengths, default=0) <= 2 * ratio:
+    if not fused_writer_candidate:
         writer_geometry = _build_step_writer_geometry(
             context,
             cu_seqlens=cu_seqlens,
