@@ -235,7 +235,9 @@ SM100/SM103 上，外部存储支持 decode 的 attention-bounded prefetch；
 Engram 分片：scale 仍按物理节点分组，在线查询不增加跨节点 collective。
 Graph 和 prefetch 持有对应的表、scale generation 与完成事件，释放映射前必须排空读取。
 外部表在普通 prefill 中默认使用 GPU 侧流预取，支持 `host_shared`、`gpu_shared`
-及外部映射的 `cuda_local`。prefill warmup 会为可预取的层建好侧流。设
+及外部映射的 `cuda_local`。prefill warmup 会为可预取的层建好侧流。超过每 rank
+32K 行时，外部表按原有的 32K 行边界分块。侧流提前读取第一块，并在主流投影
+当前块时读取下一块，最多保留两个块的 lookup 结果。设
 `DSV41_ASYNC_ENGRAM_LOOKUP=0` 可改用同步 GPU lookup。外部表使用 CUDA 地址，
 `DSV41_CPU_ENGRAM_LOOKUP` 只适用于本机 CPU 表。
 未更改 GPU lookup kernel，也没有宣称完成 <100µs decode 增量验收。
