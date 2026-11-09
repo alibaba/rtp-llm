@@ -106,8 +106,6 @@ cc_test(
         "//rtp_llm/cpp/testing:device_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
     ] + _spec_gpu_deps + torch_deps() + cuda13_torch_link_deps,
     env = select({
         "@//:using_ppu": {
