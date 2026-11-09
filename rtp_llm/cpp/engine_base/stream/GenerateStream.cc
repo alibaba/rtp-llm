@@ -122,8 +122,9 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     // TorchSpec target hidden-state capture publishes one result per request and cannot be split across chunks.
     const auto chunk_size = runtime_config.fifo_scheduler_config.prefill_chunk_size;
-    if (!input->fake_query && chunk_size > 0 && input->generate_config->isPrefillOnly()
-        && !model_config.hidden_state_capture_layer_ids.empty()
+    if (!input->fake_query && chunk_size > 0
+        && (input->generate_config->capture_hidden_states
+            || (input->generate_config->isPrefillOnly() && !model_config.hidden_state_capture_layer_ids.empty()))
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
         reportEvent(StreamEvents::Error,
                     ErrorCode::INVALID_PARAMS,
@@ -255,6 +256,7 @@ void GenerateStream::releaseResource() {
     // Return KV blocks only after all workers that captured this stream finish.
     // Earlier release could let a worker write into blocks owned by another stream.
     waitPendingAsyncBookkeeping();
+    cancelHiddenStateCapture();
     std::lock_guard<std::mutex> lock(*mutex_);
     if (!stream_cache_resource_->isResourceReleased()) {
         stream_cache_resource_->releaseResource();
@@ -641,6 +643,16 @@ int64_t GenerateStream::prefillMemoryReuseLen() const {
 
 void GenerateStream::incLastOutputPos() {
     last_output_pos_++;
+}
+
+bool GenerateStream::shouldCaptureHiddenStates() const {
+    const auto role = stream_cache_resource_->resourceContext().role_type;
+    // iterCount is advanced by gather, before forward. A later fallback to context must not
+    // republish this request, and speculative verification must never publish prompt rows.
+    return requiresFullContextForCapture() && (role == RoleType::PREFILL || role == RoleType::PDFUSION)
+           && !generate_input_->fake_query && !isFakeStream() && !hasError() && isContextStream() && iterCount() == 0
+           && !chunkedPrefillEnabled() && prefixLength() == 0 && seqLength() == inputLength()
+           && generateConfig()->num_validate_token == 0 && score_len_ == 0 && !contain_propose_token_;
 }
 
 bool GenerateStream::isContextStream() const {

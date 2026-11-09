@@ -1171,6 +1171,170 @@ void FIFOSchedulerTest::verifySchedulersPartitionMixedExecutionModes(int first_m
     }
 }
 
+TEST_F(FIFOSchedulerTest, testZeroAndGenerationModesStillPartitionAndDrainTail) {
+    // 0: ordinary generation; 1: explicit generation capture; 2: prefill-only capture.
+    // 0: FIFO; 1: BatchDecode; 2: PDFusion base admission.
+    for (const int scheduler_type : {0, 1, 2}) {
+        for (const auto& modes : {std::vector<int>{1, 2, 1}, std::vector<int>{2, 1, 2}}) {
+            SCOPED_TRACE(testing::Message()
+                         << "scheduler_type=" << scheduler_type << " first=" << modes[0] << " second=" << modes[1]);
+            auto [cache_manager, resource_context, model_config, runtime_config] =
+                makeReadinessResources(32, 1, RoleType::PDFUSION, 2);
+            runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 2;
+            ASSERT_TRUE(cache_manager->init());
+            std::unique_ptr<SchedulerBase> scheduler;
+            if (scheduler_type == 1) {
+                scheduler = std::make_unique<BatchDecodeScheduler>(runtime_config, cache_manager, nullptr);
+            } else if (scheduler_type == 2) {
+                scheduler = std::make_unique<PDFusionRatioScheduler>(runtime_config,
+                                                                     model_config,
+                                                                     makePDFusionPDSepConfig(),
+                                                                     ParallelismConfig{},
+                                                                     ModelSpecificConfig{},
+                                                                     cache_manager);
+            } else {
+                scheduler = std::make_unique<FIFOScheduler>(runtime_config,
+                                                            model_config,
+                                                            makePDFusionPDSepConfig(),
+                                                            ParallelismConfig{},
+                                                            ModelSpecificConfig{},
+                                                            cache_manager);
+            }
+            std::vector<GenerateStreamPtr> streams;
+            for (size_t i = 0; i < modes.size(); ++i) {
+                auto query             = std::make_shared<GenerateInput>();
+                query->input_ids       = torch::tensor({1 + static_cast<int>(i), 4}, torch::kInt32);
+                query->generate_config = makeTestGenerateConfig(modes[i] == 2 ? 0 : 4);
+                query->generate_config->capture_hidden_states = modes[i] == 1;
+                query->generate_config->reuse_cache           = false;
+                auto stream                                   = std::make_shared<NormalGenerateStream>(
+                    query, model_config, runtime_config, resource_context, nullptr);
+                ASSERT_FALSE(stream->hasError());
+                streams.push_back(stream);
+            }
+            ASSERT_TRUE(enqueueIndividually(*scheduler, streams));
+            auto first = scheduler->schedule();
+            ASSERT_TRUE(first.ok());
+            ASSERT_EQ(first->size(), 2u);
+            EXPECT_EQ(first->front(), streams[0]);
+            EXPECT_EQ(first->back(), streams[2]);
+            EXPECT_FALSE(streams[1]->hasEvent(StreamEvents::CanRun));
+            EXPECT_EQ(streams[1]->curBlocksNum(), 0);
+            for (const auto& stream : *first) {
+                EXPECT_FALSE(stream->hasError());
+                EXPECT_EQ(stream->shouldCaptureHiddenStates(), modes[0] != 0);
+                if (modes[0] != 0) {
+                    EXPECT_TRUE(stream->isContextStream());
+                }
+                stream->step();
+                stream->setIsContextStream(false);
+                EXPECT_FALSE(stream->shouldCaptureHiddenStates());
+                stream->reportEvent(StreamEvents::GenerateDone);
+            }
+            auto tail = scheduler->schedule();
+            ASSERT_TRUE(tail.ok());
+            ASSERT_EQ(tail->size(), 1u);
+            EXPECT_EQ(tail->front(), streams[1]);
+            EXPECT_FALSE(streams[1]->hasError());
+            EXPECT_EQ(streams[1]->shouldCaptureHiddenStates(), modes[1] != 0);
+            if (modes[1] != 0) {
+                EXPECT_TRUE(streams[1]->isContextStream());
+            }
+            streams[1]->reportEvent(StreamEvents::GenerateDone);
+        }
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testPDFusionExportPreferenceDoesNotRejectNormalServingAdmission) {
+    for (const bool prepared_context : {false, true}) {
+        for (const bool include_running_mode : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "prepared_context=" << prepared_context
+                                            << " include_running_mode=" << include_running_mode);
+            auto [cache_manager, resource_context, model_config, runtime_config] =
+                makeReadinessResources(32, 1, RoleType::PDFUSION, 4);
+            ASSERT_TRUE(cache_manager->init());
+            PDFusionRatioScheduler scheduler(runtime_config,
+                                             model_config,
+                                             makePDFusionPDSepConfig(),
+                                             ParallelismConfig{},
+                                             ModelSpecificConfig{},
+                                             cache_manager);
+            const auto             make_mode = [&](int token, bool capture) {
+                auto stream = makeStream({token, token + 1}, model_config, runtime_config, resource_context, 4);
+                stream->generateConfig()->capture_hidden_states = capture;
+                stream->generateConfig()->reuse_cache           = false;
+                return stream;
+            };
+            auto seed = make_mode(1, prepared_context);
+            seed->reportEvent(StreamEvents::CanRun);
+            ASSERT_EQ(seed->moveToNext(), StreamState::RUNNING);
+            if (prepared_context) {
+                scheduler.new_streams_.push_back(seed);
+            } else {
+                seed->step();
+                seed->setIsContextStream(false);
+                scheduler.running_streams_.push_back(seed);
+            }
+            auto capture = make_mode(3, true);
+            auto normal  = make_mode(5, false);
+            ASSERT_TRUE(enqueueIndividually(scheduler, {capture, normal}));
+
+            const auto admitted = scheduler.evaluateWaitingStreams(scheduler.waiting_streams_, include_running_mode);
+            ASSERT_EQ(admitted.size(), 2u);
+            EXPECT_TRUE(scheduler.waiting_streams_.empty());
+            for (const auto& selected : {capture, normal}) {
+                EXPECT_EQ(admitted.count(selected.get()), 1u);
+                EXPECT_EQ(selected->getStatus(), StreamState::RUNNING);
+                EXPECT_TRUE(selected->hasEvent(StreamEvents::CanRun));
+                EXPECT_GT(selected->curBlocksNum(), 0);
+                EXPECT_FALSE(selected->hasError());
+            }
+            ASSERT_EQ(scheduler.new_streams_.size(), prepared_context ? 3u : 2u);
+            if (prepared_context) {
+                EXPECT_EQ(scheduler.new_streams_.front(), seed);
+                EXPECT_TRUE(seed->shouldCaptureHiddenStates());
+                EXPECT_TRUE(scheduler.running_streams_.empty());
+            } else {
+                ASSERT_EQ(scheduler.running_streams_.size(), 1u);
+                EXPECT_EQ(scheduler.running_streams_.front(), seed);
+                EXPECT_FALSE(seed->isContextStream());
+                EXPECT_FALSE(seed->shouldCaptureHiddenStates());
+            }
+        }
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testForceBatchGroupAllowsOptionalCaptureAlongsideOrdinaryGeneration) {
+    for (const bool batch_decode : {false, true}) {
+        auto [cache_manager, resource_context, model_config, runtime_config] =
+            makeReadinessResources(16, 1, RoleType::PDFUSION, 2);
+        ASSERT_TRUE(cache_manager->init());
+        const auto                     free_blocks = cache_manager->freeBlocksNum();
+        std::unique_ptr<SchedulerBase> scheduler;
+        if (batch_decode) {
+            scheduler = std::make_unique<BatchDecodeScheduler>(runtime_config, cache_manager, nullptr);
+        } else {
+            scheduler = std::make_unique<FIFOScheduler>(runtime_config,
+                                                        model_config,
+                                                        makePDFusionPDSepConfig(),
+                                                        ParallelismConfig{},
+                                                        ModelSpecificConfig{},
+                                                        cache_manager);
+        }
+        auto capture = makeStream({1, 2}, model_config, runtime_config, resource_context, 4);
+        capture->generateConfig()->capture_hidden_states = true;
+        capture->generateConfig()->reuse_cache           = false;
+        auto normal = makeStream({3, 4}, model_config, runtime_config, resource_context, 4);
+        auto result = scheduler->enqueueGroup({capture, normal});
+        EXPECT_EQ(result.first, (std::vector<bool>{true, true}));
+        for (const auto& stream : result.second) {
+            EXPECT_FALSE(stream->hasError());
+            EXPECT_EQ(stream->curBlocksNum(), 0);
+        }
+        EXPECT_EQ(cache_manager->freeBlocksNum(), free_blocks);
+    }
+}
+
 TEST_F(FIFOSchedulerTest, testSchedulersPartitionZeroPositiveInQueueOrder) {
     verifySchedulersPartitionMixedExecutionModes(/*first_max_new_tokens=*/0, /*second_max_new_tokens=*/1);
 }

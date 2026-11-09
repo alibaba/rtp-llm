@@ -668,6 +668,9 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_all_hidden_states = (
         input_py.generate_config.return_all_hidden_states
     )
+    generate_config_pb.capture_hidden_states = (
+        input_py.generate_config.capture_hidden_states
+    )
     generate_config_pb.hidden_states_cut_dim = (
         input_py.generate_config.hidden_states_cut_dim
     )

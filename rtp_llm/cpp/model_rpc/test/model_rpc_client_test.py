@@ -604,6 +604,78 @@ class ModelRpcClientTest(TestCase):
         round_tripped_input_pb.ParseFromString(input_pb.SerializeToString())
         return round_tripped_input_pb.generate_config
 
+    def test_capture_hidden_states_proto_contract(self):
+        field = GenerateConfigPB.DESCRIPTOR.fields_by_name["capture_hidden_states"]
+        self.assertEqual(field.number, 77)
+        self.assertEqual(field.type, field.TYPE_BOOL)
+        self.assertFalse(GenerateConfigPB.FromString(b"").capture_hidden_states)
+        self.assertEqual(
+            GenerateConfigPB.DESCRIPTOR.fields_by_name["prefill_only"].number, 76
+        )
+
+    def test_trans_input_round_trips_capture_independently_of_hidden_state_flags(self):
+        for capture in (False, True):
+            for return_hidden in (False, True):
+                for return_all in (False, True):
+                    with self.subTest(
+                        capture=capture, hidden=return_hidden, all=return_all
+                    ):
+                        config = GenerateConfig(
+                            max_new_tokens=7,
+                            capture_hidden_states=capture,
+                            reuse_cache=not capture,
+                            return_hidden_states=return_hidden,
+                            return_all_hidden_states=return_all,
+                            is_streaming=True,
+                        )
+                        before = config.model_dump()
+                        config_pb = self._round_trip_generate_config(config)
+                        self.assertEqual(config.model_dump(), before)
+                        self.assertEqual(config_pb.capture_hidden_states, capture)
+                        self.assertEqual(config_pb.return_hidden_states, return_hidden)
+                        self.assertEqual(config_pb.return_all_hidden_states, return_all)
+                        self.assertEqual(config_pb.reuse_cache, not capture)
+                        self.assertEqual(config_pb.max_new_tokens, 7)
+                        self.assertTrue(config_pb.is_streaming)
+                        self.assertFalse(config_pb.prefill_only)
+
+    def test_trans_input_round_trips_zero_token_capture_and_legacy_requests(self):
+        for capture in (False, True):
+            with self.subTest(capture=capture):
+                config = GenerateConfig(
+                    max_new_tokens=0,
+                    capture_hidden_states=capture,
+                    reuse_cache=not capture,
+                )
+                config_pb = self._round_trip_generate_config(config)
+                self.assertEqual(config_pb.capture_hidden_states, capture)
+                self.assertEqual(config_pb.reuse_cache, not capture)
+                self.assertEqual(config_pb.max_new_tokens, 0)
+                self.assertTrue(config_pb.prefill_only)
+                fields = {field.name for field, _ in config_pb.ListFields()}
+                self.assertEqual("capture_hidden_states" in fields, capture)
+
+    def test_trans_input_validates_mutated_capture_without_rewriting_parameters(self):
+        for invalid, message in (
+            ({"num_beams": 2}, "num_beams"),
+            ({"variable_num_beams": [1]}, "variable_num_beams"),
+            ({"num_return_sequences": 2}, "num_return_sequences"),
+            ({"reuse_cache": True}, "reuse_cache=false"),
+        ):
+            with self.subTest(invalid=invalid):
+                config = GenerateConfig(
+                    max_new_tokens=7, capture_hidden_states=True, reuse_cache=False
+                )
+                for field, value in invalid.items():
+                    setattr(config, field, value)
+                before = config.model_dump()
+                with self.assertRaisesRegex(FtRuntimeException, message) as ctx:
+                    trans_input(self._make_generate_input(config))
+                self.assertEqual(
+                    ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+                )
+                self.assertEqual(config.model_dump(), before)
+
     def test_trans_input_serializes_resolved_positive_default_max_new_tokens(self):
         config = GenerateConfig()
 

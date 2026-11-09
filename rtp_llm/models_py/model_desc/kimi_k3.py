@@ -337,6 +337,57 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
                 model_config.layernorm_eps,
             )
 
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(self, hidden, residual):
+        # SP all_gather already owns a snapshot. CP keeps local rows for C++
+        # restoration; its layer/attention workspaces may be reused later.
+        if self.tp_size > 1 and self._query_layout is None:
+            return hidden
+        return hidden.clone()
+
+    def _capture_layer(self, capture, index, hidden):
+        if capture is None or not capture.wants_layer(index):
+            return
+        # Communication is not recoverable snapshot work. Keep this sequence
+        # identical on all ranks even if one rank has discarded its capture.
+        snapshot = hidden
+        if self._outer_layout is not None:
+            # Packed blocks must share the final output's Zigzag shard order.
+            # Keep transport outside recoverable snapshot handling on every rank.
+            with profile_scope("hidden_state_capture.natural_to_zigzag"):
+                snapshot = self._row_exchange.exchange(
+                    hidden, self._routing_plan, "to_zigzag"
+                )
+        elif self.tp_size > 1 and self._query_layout is None:
+            snapshot = all_gather(hidden, Group.TP)
+        capture.capture_layer(index, snapshot)
+
+    def _capture_canonical_final(self, hidden, residual):
+        return self.norm(hidden)
+
+    def _capture_hidden_states_requested(self, inputs):
+        if (
+            not inputs.capture_hidden_states
+            or type(self) is not KimiK3Model
+            or self.parallelism_config.role_type == RoleType.DECODE
+        ):
+            return False
+        primary = get_primary_attention_inputs(inputs, self.kv_cache)
+        return (
+            primary.is_prefill
+            and not primary.is_warmup
+            and not primary.is_target_verify
+            and not primary.is_mtp_draft_update
+            and not primary.is_cuda_graph
+            and not (
+                inputs.input_ids.is_cuda and torch.cuda.is_current_stream_capturing()
+            )
+        )
+
     def initialize(self, init_resource) -> bool:
         ready = super().initialize(init_resource)
         self._initialize_mtp_hidden_handoff(init_resource)
@@ -537,6 +588,7 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         fmha_impl,
         sequence_parallel_input=False,
         gather_output=True,
+        capture=None,
     ):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
@@ -600,6 +652,8 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
                 fmha = {tag: select_fmha_impl_for_group(fmha_impl, tag) for tag in tags}
                 cache = get_layer_caches_for_groups(self.kv_cache, index, tags) if self.kv_cache else None
                 hidden = layer(hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask)
+                if capture is not None:
+                    self._capture_layer(capture, index, hidden)
                 continue
             attention_inputs = select_attention_inputs_for_layer(
                 inputs, self.kv_cache, index
@@ -613,6 +667,8 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
             hidden = layer(
                 hidden, anchors, fmha, cache, attention_inputs, metadata, valid_mask
             )
+            if capture is not None:
+                self._capture_layer(capture, index, hidden)
         if self.num_blocks:
             hidden = self.final_residual(hidden, anchors)
         if outer_layout is not None:
@@ -631,5 +687,12 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
         return self._forward_single(inputs, fmha_impl)
 
     def _forward_single(self, inputs, fmha_impl=None):
-        hidden = self._forward_layers(None, inputs, fmha_impl)
+        capture = self.capture_context(self._capture_hidden_states_requested(inputs))
+        hidden = self._forward_layers(
+            None, inputs, fmha_impl, capture=capture if capture.enabled else None
+        )
+        if capture.enabled:
+            outputs = capture.finalize(hidden)
+            outputs.mtp_target_hidden_states = hidden
+            return outputs
         return PyModelOutputs(self.norm(hidden), hidden)

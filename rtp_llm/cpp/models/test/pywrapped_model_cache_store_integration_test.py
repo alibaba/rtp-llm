@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 import weakref
@@ -168,6 +169,7 @@ class _FakeMooncakeConfig:
 
 
 class _FakeEagleMooncakeStore:
+    capture_protocol_version = 1
     instances: ClassVar[list["_FakeEagleMooncakeStore"]] = []
     events = None
     fail_put = False
@@ -175,6 +177,9 @@ class _FakeEagleMooncakeStore:
     fail_flush = False
     fail_warmup = False
     async_error_after_accept_count = 0
+    flush_entered = None
+    release_flush = None
+    auto_consume = True
 
     def __init__(self, config) -> None:
         self.config = config
@@ -184,6 +189,10 @@ class _FakeEagleMooncakeStore:
         self.put_batch_calls = []
         self.put_attempts = 0
         self.keys: set[str] = set()
+        self.source_keys: set[str] = set()
+        self.ready_keys: set[str] = set()
+        self.query_calls: list[list[str]] = []
+        self.call_threads: list[tuple[str, int]] = []
         self.pending_async_errors: list[BaseException] = []
         self.setup_device = None
         self.warmed_up = False
@@ -200,14 +209,17 @@ class _FakeEagleMooncakeStore:
         type(self)._record("store.setup")
         self.config_at_setup = _snapshot_mooncake_layout(self.config)
         self.setup_device = device
+        self.call_threads.append(("setup", threading.get_ident()))
 
     def warmup_rdma(self) -> None:
+        self.call_threads.append(("warmup", threading.get_ident()))
         type(self)._record("store.warmup")
         self.warmed_up = True
         if type(self).fail_warmup:
             raise RuntimeError("injected Mooncake warmup failure")
 
     def take_async_errors(self) -> list[BaseException]:
+        self.call_threads.append(("take_async_errors", threading.get_ident()))
         type(self)._record("store.take_async_errors")
         errors = self.pending_async_errors
         self.pending_async_errors = []
@@ -278,7 +290,7 @@ class _FakeEagleMooncakeStore:
             }
         )
         self.keys.add(key)
-        return {
+        metadata = {
             "shapes": {
                 "hidden_states": tuple(hidden_states.shape),
                 "input_ids": tuple(input_ids.shape),
@@ -290,6 +302,10 @@ class _FakeEagleMooncakeStore:
                 "last_hidden_states": last_hidden_states.dtype,
             },
         }
+        if hidden_states_scale is not None:
+            metadata["shapes"]["hidden_states_scale"] = tuple(hidden_states_scale.shape)
+            metadata["dtypes"]["hidden_states_scale"] = hidden_states_scale.dtype
+        return metadata
 
     def put_batch(
         self,
@@ -300,8 +316,17 @@ class _FakeEagleMooncakeStore:
         last_hidden_states=None,
         target=None,
         hidden_states_scale=None,
+        *,
+        capture_metadata,
     ) -> list[dict[str, Any]]:
         del target
+        self.call_threads.append(("put_batch", threading.get_ident()))
+        assert set(capture_metadata) == {"capture_layer_ids"}
+        layer_ids = capture_metadata["capture_layer_ids"]
+        assert type(layer_ids) is list
+        assert all(type(layer_id) is int for layer_id in layer_ids)
+        assert len(layer_ids) == self.config.num_aux_layers
+        assert len(set(layer_ids)) == len(layer_ids)
         request_ids = list(request_ids)
         hidden_states = list(hidden_states)
         input_ids = list(input_ids)
@@ -326,6 +351,7 @@ class _FakeEagleMooncakeStore:
                 "batch_id": batch_id,
                 "request_ids": request_ids,
                 "lengths": [tensor.shape[0] for tensor in hidden_states],
+                "capture_metadata": {"capture_layer_ids": list(layer_ids)},
             }
         )
         duplicate_key = next((key for key in request_ids if key in self.keys), None)
@@ -337,6 +363,22 @@ class _FakeEagleMooncakeStore:
         if type(self).fail_put:
             raise RuntimeError("injected Mooncake put_batch admission failure")
 
+        for auxiliary, ids, final, scale in zip(
+            hidden_states,
+            input_ids,
+            last_hidden_states,
+            hidden_states_scale,
+            strict=True,
+        ):
+            tokens = ids.numel()
+            assert tuple(auxiliary.shape) == (
+                tokens,
+                self.config.hidden_dim * len(layer_ids),
+            )
+            assert tuple(final.shape) == (tokens, self.config.hidden_dim)
+            if scale is not None:
+                assert tuple(scale.shape) == (tokens, len(layer_ids))
+                assert scale.dtype == torch.float32
         metadata = [
             self._record_put(key, aux, ids, last, scale)
             for key, aux, ids, last, scale in zip(
@@ -348,6 +390,14 @@ class _FakeEagleMooncakeStore:
                 strict=True,
             )
         ]
+        for key, scale in zip(request_ids, hidden_states_scale, strict=True):
+            self.source_keys.update(key + suffix for suffix in ("_hs", "_ids", "_lhs"))
+            if scale is not None:
+                self.source_keys.add(key + "_hss")
+        for item, payload in zip(metadata, self.puts[-len(metadata) :], strict=True):
+            item["capture_protocol_version"] = 1
+            item["capture_layer_ids"] = list(layer_ids)
+            payload["capture_metadata"] = item
         if type(self).async_error_after_accept_count > 0:
             type(self).async_error_after_accept_count -= 1
             self.pending_async_errors.append(
@@ -359,13 +409,32 @@ class _FakeEagleMooncakeStore:
             )
         return metadata
 
+    def query_keys(self, keys) -> dict[str, bool]:
+        keys = list(keys)
+        self.call_threads.append(("query_keys", threading.get_ident()))
+        self.query_calls.append(keys)
+        # Simulate a consumer only after ready publication, never during preflight.
+        if type(self).auto_consume and self.ready_keys:
+            self.source_keys.clear()
+        return {key: key in self.source_keys for key in keys}
+
     def flush(self) -> None:
         type(self)._record("store.flush")
+        self.call_threads.append(("flush", threading.get_ident()))
         self.flushed = True
+        if type(self).flush_entered is not None:
+            type(self).flush_entered.set()
+        if type(self).release_flush is not None:
+            if not type(self).release_flush.wait(timeout=10):
+                raise TimeoutError("test did not release the asynchronous store flush")
         if type(self).fail_flush:
             raise RuntimeError("injected Mooncake flush failure")
+        for key in self.keys:
+            self.ready_keys.add(key)
+            self.source_keys.add(key + "_ready")
 
     def close(self) -> None:
+        self.call_threads.append(("close", threading.get_ident()))
         type(self)._record("store.close")
         self.closed = True
 
@@ -445,9 +514,22 @@ def _register_no_collectives(allreduce=None) -> None:
 def _register_identity_allreduce() -> None:
     def identity_allreduce(tensor, op, mode, dest):
         del op, mode, dest
-        return tensor
+        return tensor * 2 if tensor.numel() == 3 else tensor
 
     _register_no_collectives(identity_allreduce)
+
+
+def _capture_tp_vote(tensor, op, mode, dest, statuses=None, *, remote_valid=True):
+    assert (op, mode, dest) == (3 if tensor.numel() == 2 else 0, 0, None)
+    assert tensor.numel() in (2, 3)
+    if tensor.numel() == 2:
+        return tensor
+    if statuses is not None:
+        statuses.append(int(tensor[1].item()))
+    result = tensor * 2
+    if not remote_valid:
+        result[1] = 0  # Remote export failure must not invalidate canonical/MTP.
+    return result
 
 
 def _run_tp_sync_cache_rows_pending_rank(tp_rank: int, base_path: str, ready) -> None:
@@ -728,12 +810,12 @@ class CacheStoreForwardModel:
             dtype=torch.float16,
             device=inputs.input_ids.device,
         )
+        output = PyModelOutputs(hidden_states)
         if inputs.capture_hidden_states:
-            hidden_states = torch.cat(
-                (hidden_states + 10, hidden_states + 20, hidden_states + 30),
-                dim=-1,
+            output.captured_hidden_states = torch.cat(
+                (hidden_states + 10, hidden_states + 20, hidden_states), dim=-1
             )
-        return PyModelOutputs(hidden_states)
+        return output
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         self.forward_calls += 1
@@ -944,11 +1026,12 @@ class CaptureAwareGenerationPrefillModel(SuccessfulGenerationPrefillCaptureModel
         self.forward_calls += 1
         hidden_states = super().forward(inputs, fmha_impl).hidden_states
         mtp_hidden_states = torch.cat((hidden_states + 40, hidden_states + 50), dim=-1)
+        output = PyModelOutputs(hidden_states, mtp_hidden_states)
         if inputs.capture_hidden_states:
-            hidden_states = torch.cat(
-                (hidden_states + 10, hidden_states + 20, hidden_states + 30), dim=-1
+            output.captured_hidden_states = torch.cat(
+                (hidden_states + 10, hidden_states + 20, hidden_states), dim=-1
             )
-        return PyModelOutputs(hidden_states, mtp_hidden_states)
+        return output
 
 
 class LateInitializeFailureGenerationPrefillCaptureModel(
@@ -1013,8 +1096,27 @@ class PositionAwareCaptureModel(CacheStoreForwardModel):
         output = super()._forward_one(inputs)
         if inputs.capture_hidden_states:
             positions = inputs.input_ids.to(torch.float16).reshape(-1, 1)
-            return PyModelOutputs(
-                torch.cat((positions + 10, positions + 20, positions + 30), dim=-1)
+            output.hidden_states = positions + 30
+            output.captured_hidden_states = torch.cat(
+                (positions + 10, positions + 20, output.hidden_states), dim=-1
+            )
+        return output
+
+
+class SequenceParallelCaptureModel(PositionAwareCaptureModel):
+    requires_sequence_parallel_padding = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen_input_ids: list[list[int]] = []
+
+    def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
+        self.seen_input_ids.append(inputs.input_ids.cpu().tolist())
+        output = super()._forward_one(inputs)
+        if not inputs.capture_hidden_states:
+            # Both modes return the same final feature; only capture packs auxiliaries.
+            output = PyModelOutputs(
+                inputs.input_ids.to(torch.float16).reshape(-1, 1) + 30
             )
         return output
 
@@ -1032,25 +1134,42 @@ class FinalNormParityModel(CacheStoreForwardModel):
             hidden_states * torch.rsqrt(variance + self._FINAL_NORM_EPS)
         ) * hidden_states.new_tensor(self._FINAL_NORM_GAMMA)
         final_hidden_states = final_hidden_states.to(hidden_states.dtype)
+        output = PyModelOutputs(final_hidden_states, hidden_states)
         if inputs.capture_hidden_states:
-            return PyModelOutputs(
-                torch.cat(
-                    (
-                        hidden_states + 10,
-                        hidden_states + 20,
-                        final_hidden_states,
-                    ),
-                    dim=-1,
-                )
+            output.captured_hidden_states = torch.cat(
+                (hidden_states + 10, hidden_states + 20, final_hidden_states), dim=-1
             )
-        return PyModelOutputs(final_hidden_states)
+        return output
 
 
-class MalformedCaptureLayoutModel(CacheStoreForwardModel):
+class ExplicitCaptureChannelsModel(PositionAwareCaptureModel):
+    def __init__(self, capture_error="", *, bad_canonical=False, bad_mtp=False):
+        super().__init__()
+        self.capture_error = capture_error
+        self.bad_canonical = bad_canonical
+        self.bad_mtp = bad_mtp
+
+    def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
+        output = super()._forward_one(inputs)
+        positions = inputs.input_ids.to(torch.float16).reshape(-1, 1)
+        output.hidden_states = positions + 30
+        output.mtp_target_hidden_states = torch.cat(
+            (positions + 70, positions + 80), -1
+        )
+        if inputs.capture_hidden_states:
+            output.capture_error = self.capture_error
+            if self.bad_canonical:
+                output.hidden_states = output.hidden_states[:-1]
+            if self.bad_mtp:
+                output.mtp_target_hidden_states = output.mtp_target_hidden_states[:-1]
+        return output
+
+
+class MalformedCaptureLayoutModel(PositionAwareCaptureModel):
     def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
         output = super()._forward_one(inputs)
         if inputs.capture_hidden_states:
-            return PyModelOutputs(output.hidden_states[:, :2])
+            output.captured_hidden_states = output.captured_hidden_states[:, :2]
         return output
 
 
@@ -1060,46 +1179,40 @@ class MalformedCaptureOutputCountModel(CacheStoreForwardModel):
         return outputs[:-1]
 
 
-class MalformedCaptureRankModel(CacheStoreForwardModel):
+class MalformedCaptureRankModel(PositionAwareCaptureModel):
     def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
         output = super()._forward_one(inputs)
         if inputs.capture_hidden_states:
-            return PyModelOutputs(output.hidden_states.flatten())
+            output.captured_hidden_states = output.captured_hidden_states.flatten()
         return output
 
 
-class MalformedCaptureRowCountModel(CacheStoreForwardModel):
+class MalformedCaptureRowCountModel(PositionAwareCaptureModel):
     def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
         output = super()._forward_one(inputs)
         if inputs.capture_hidden_states:
-            return PyModelOutputs(output.hidden_states[:-1])
+            output.captured_hidden_states = output.captured_hidden_states[:-1]
         return output
 
 
-class MalformedCaptureDtypeModel(CacheStoreForwardModel):
+class MalformedCaptureDtypeModel(PositionAwareCaptureModel):
     def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
         output = super()._forward_one(inputs)
         if inputs.capture_hidden_states:
-            return PyModelOutputs(output.hidden_states.float())
+            output.captured_hidden_states = output.captured_hidden_states.float()
         return output
 
 
-class MalformedCaptureDeviceModel(CacheStoreForwardModel):
+class MalformedCaptureDeviceModel(PositionAwareCaptureModel):
     def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
         output = super()._forward_one(inputs)
         if inputs.capture_hidden_states:
-            return PyModelOutputs(output.hidden_states.cpu())
+            output.captured_hidden_states = output.captured_hidden_states.cpu()
         return output
 
 
-class UnsupportedCaptureModel:
+class UnsupportedCaptureModel(CacheStoreForwardModel):
     supports_hidden_state_capture = False
-
-    def initialize(self, resources) -> bool:
-        return True
-
-    def forward(self, inputs, fmha_impl=None) -> PyModelOutputs:
-        raise AssertionError("unsupported capture model must fail during construction")
 
 
 def _blocks_by_key(result: dict) -> dict[str, dict]:
@@ -1358,7 +1471,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 self.assertEqual(forward["logits"] is None, skip_lm_head)
                 tokens = torch.arange(1 + i, 4 + i, dtype=torch.bfloat16)
                 hidden = tokens.unsqueeze(1).expand(-1, 4)
-                expected_hidden = hidden + 30 if capture else hidden
+                expected_hidden = hidden
                 torch.testing.assert_close(
                     forward["hidden_states"].cpu(), expected_hidden
                 )
@@ -1559,6 +1672,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         _FakeEagleMooncakeStore.fail_flush = False
         _FakeEagleMooncakeStore.fail_warmup = False
         _FakeEagleMooncakeStore.async_error_after_accept_count = 0
+        _FakeEagleMooncakeStore.flush_entered = None
+        _FakeEagleMooncakeStore.release_flush = None
+        _FakeEagleMooncakeStore.auto_consume = True
 
     def assertCaptureQps(
         self,
@@ -1661,9 +1777,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             ["301", "301", "302"],
         )
         middle = _record_for_request(result, 302)
-        self.assertTrue(
-            all("_tag_full" in block["key"] for block in middle["blocks"])
-        )
+        self.assertTrue(all("_tag_full" in block["key"] for block in middle["blocks"]))
         blocks = _blocks_by_key(result)
         for tag, stride, expected in (
             ("swa", 24, {3103: 3, 3104: 4}),
@@ -1963,48 +2077,38 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         )
 
     def assertCaptureProfileStoreCalls(self, events, store_events) -> None:
-        prefix = "hidden_state_capture."
-        for scope, call, parent in (
-            ("put_batch_python", "store.put_batch", "put_batch_admit"),
-            ("flush_python", "store.flush", "flush"),
-            ("take_async_errors", "store.take_async_errors", "observe_async_errors"),
-        ):
-            scopes = [e for e in events if e.name == prefix + scope]
-            self.assertEqual(
-                len(scopes), sum(e.split(":", 1)[0] == call for e in store_events)
-            )
-            for event in scopes:
-                self.assertIsNotNone(event.cpu_parent)
-                self.assertEqual(event.cpu_parent.name, prefix + parent)
+        self.assertEqual(
+            sum(event.startswith("store.put_batch:") for event in store_events),
+            (
+                sum(
+                    name == "put_batch"
+                    for name, _ in _FakeEagleMooncakeStore.instances[-1].call_threads
+                )
+                if store_events
+                else 0
+            ),
+        )
+        main_thread = threading.get_ident()
         for event in events:
-            if not event.name.startswith(prefix):
+            if event.name not in (
+                "hidden_state_capture.put_batch_python",
+                "hidden_state_capture.flush_python",
+            ):
                 continue
-            self.assertLessEqual(event.time_range.start, event.time_range.end)
-            if event.cpu_parent is not None:
-                self.assertLessEqual(
-                    event.cpu_parent.time_range.start, event.time_range.start
-                )
-                self.assertLessEqual(
-                    event.time_range.end, event.cpu_parent.time_range.end
-                )
-            if event.name == prefix + "observe_async_errors":
-                self.assertEqual(
-                    [e.name for e in events if e.cpu_parent is event],
-                    [prefix + "take_async_errors"],
-                )
-            elif event.name == prefix + "flush":
-                children = [e for e in events if e.cpu_parent is event]
-                self.assertIn(
-                    [e.name for e in children],
-                    (
-                        [prefix + "flush_python"],
-                        [prefix + "flush_python", prefix + "observe_async_errors"],
-                    ),
-                )
-                if len(children) == 2:
-                    self.assertLessEqual(
-                        children[0].time_range.end, children[1].time_range.start
-                    )
+            self.assertNotEqual(
+                event.thread,
+                next(e.thread for e in events if e.name == "py_model.forward"),
+            )
+            parent = event.cpu_parent
+            while parent is not None:
+                self.assertNotEqual(parent.name, "py_model.forward")
+                parent = parent.cpu_parent
+        for store in _FakeEagleMooncakeStore.instances:
+            self.assertTrue(store.call_threads)
+            self.assertTrue(
+                all(thread != main_thread for _, thread in store.call_threads)
+            )
+            self.assertEqual(len({thread for _, thread in store.call_threads}), 1)
 
     def test_capture_profile_scopes_preserve_forward_contract(self) -> None:
         _register_identity_allreduce()
@@ -2019,7 +2123,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             scenarios += ["capture_fp8", "capture_cp"]
         for scenario in scenarios:
             namespace = (
-                "ProfileActor" + "A" * 256 if scenario == "capture_bf16" else "TestActor"
+                "ProfileActor" + "A" * 256
+                if scenario == "capture_bf16"
+                else "TestActor"
             )
             with self.subTest(scenario=scenario), patch.dict(
                 os.environ, {_MOONCAKE_STORE_KEY_NAMESPACE_ENV: namespace}
@@ -2029,163 +2135,64 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     if scenario == "capture_cp"
                     else CacheStoreForwardModel
                 )
-                baseline_calls = []
-                _FakeEagleMooncakeStore.events = baseline_calls
                 baseline = run_scenario(model_type(), scenario)
-                store_calls = []
-                _FakeEagleMooncakeStore.events = store_calls
+                calls = []
+                _FakeEagleMooncakeStore.events = calls
                 with torch.profiler.profile(
                     activities=[torch.profiler.ProfilerActivity.CPU]
                 ) as prof:
                     result = run_scenario(model_type(), scenario)
-                self.assertEqual(
-                    result["deferred_capture_errors"],
-                    baseline["deferred_capture_errors"],
-                )
+                self.assertEqual(result["completed_forwards"], 1)
                 self.assertEqual(result["hidden_width"], baseline["hidden_width"])
+                self.assertFalse(result["capture_fatal_failure"])
                 for name in _CAPTURE_QPS_METRICS | _CAPTURE_STATUS_METRICS:
                     self.assertEqual(
-                        result["capture_metrics"][name], baseline["capture_metrics"][name]
+                        result["capture_metrics"][name],
+                        baseline["capture_metrics"][name],
                     )
-                self.assertEqual(
-                    len(result["forward_hidden_states"]),
-                    len(baseline["forward_hidden_states"]),
+                torch.testing.assert_close(
+                    result["forward_hidden_states"][0],
+                    baseline["forward_hidden_states"][0],
+                    rtol=0,
+                    atol=0,
                 )
-                for actual, expected in zip(
-                    result["forward_hidden_states"], baseline["forward_hidden_states"]
-                ):
-                    torch.testing.assert_close(actual, expected)
                 events = prof.events()
-                self.assertEqual(store_calls, baseline_calls)
-                self.assertCaptureProfileStoreCalls(events, store_calls)
-                batch_ids = [
-                    call.split(":", 1)[1]
-                    for call in store_calls
-                    if call.startswith("store.put_batch:")
-                ]
-                expected_calls = []
+                self.assertIn("py_model.forward", {e.name for e in events})
+                self.assertCaptureProfileStoreCalls(events, calls)
+                puts = [call for call in calls if call.startswith("store.put_batch:")]
+                active = scenario not in ("capture_non_owner", "capture_explicit_off")
+                self.assertEqual(len(puts), int(active))
+                self.assertEqual(calls.count("store.flush"), int(active))
                 if scenario != "capture_non_owner":
-                    expected_calls = ["store.setup", "store.warmup"]
-                    if scenario != "capture_explicit_off":
-                        self.assertEqual(len(batch_ids), 1)
-                        expected_calls += [
-                            "store.take_async_errors",
-                            f"store.put_batch:{batch_ids[0]}",
-                            "store.flush",
-                            "store.take_async_errors",
-                        ]
-                    expected_calls += [
-                        "store.flush",
-                        "store.take_async_errors",
-                        "store.close",
-                    ]
-                self.assertEqual(store_calls, expected_calls)
-                markers = [e for e in events if e.name.startswith("rtp-forward-")]
-                self.assertEqual([e.name for e in markers], batch_ids)
-                publish = [
-                    e for e in events if e.name == "hidden_state_capture.publish"
-                ]
-                if scenario == "capture_explicit_off":
-                    self.assertFalse(publish)
-                    # A configured but inactive publisher still drains at shutdown.
-                    capture_events = [
-                        e for e in events if e.name.startswith("hidden_state_capture.")
-                    ]
-                    self.assertEqual(
-                        [e.name for e in capture_events],
-                        [
-                            "hidden_state_capture.flush",
-                            "hidden_state_capture.flush_python",
-                            "hidden_state_capture.observe_async_errors",
-                            "hidden_state_capture.take_async_errors",
-                        ],
-                    )
-                    self.assertIsNone(capture_events[0].cpu_parent)
-                    continue
-                self.assertEqual(len(publish), 1)
-                children = {e.name: e for e in events if e.cpu_parent is publish[0]}
-                if scenario == "capture_non_owner":
-                    self.assertNotIn("hidden_state_capture.gil_acquire", children)
-                    self.assertNotIn("hidden_state_capture.observe_async_errors", children)
-                    self.assertNotIn("hidden_state_capture.prepare_payload", children)
-                    self.assertNotIn("hidden_state_capture.put_batch_admit", children)
-                    self.assertNotIn("hidden_state_capture.flush", children)
+                    self.assertEqual(calls[:2], ["store.setup", "store.warmup"])
+                    self.assertEqual(calls[-1], "store.close")
                 else:
-                    gil = children["hidden_state_capture.gil_acquire"]
-                    poll = children["hidden_state_capture.observe_async_errors"]
-                    prepare = children["hidden_state_capture.prepare_payload"]
-                    admit = children["hidden_state_capture.put_batch_admit"]
-                    flush = children["hidden_state_capture.flush"]
-                    self.assertLessEqual(gil.time_range.end, poll.time_range.start)
-                    self.assertLessEqual(poll.time_range.end, prepare.time_range.start)
-                    marker = markers[0]
-                    if scenario == "capture_bf16":
-                        self.assertGreater(len(marker.name), 256)
-                    self.assertIs(marker.cpu_parent, publish[0])
-                    self.assertLessEqual(prepare.time_range.end, marker.time_range.start)
-                    self.assertLessEqual(marker.time_range.start, marker.time_range.end)
-                    self.assertLessEqual(marker.time_range.end, admit.time_range.start)
-                    self.assertLessEqual(prepare.time_range.end, admit.time_range.start)
-                    self.assertLessEqual(admit.time_range.end, flush.time_range.start)
-                    quantize = [
-                        e for e in events if e.name == "hidden_state_capture.quantize"
-                    ]
-                    self.assertEqual(len(quantize), int(scenario == "capture_fp8"))
-                    if quantize:
-                        self.assertIs(quantize[0].cpu_parent, prepare)
-                    for name in (
-                        "publish_request_count",
-                        "publish_token_count",
-                        "publish_payload_bytes",
-                    ):
-                        key = f"{_CAPTURE_METRIC_PREFIX}{name}"
-                        self.assertEqual(
-                            result["capture_metrics"][key],
-                            baseline["capture_metrics"][key],
-                        )
-                names = {e.name for e in events}
-                if scenario == "capture_micro_batch":
-                    self.assertIn("py_model.forwardMicroBatched(python_forward)", names)
-                    self.assertIn("py_model.capture_microbatch_layout", names)
-                    self.assertIn("py_model.forwardMicroBatched(merge)", names)
-                else:
-                    layout = next(
-                        e for e in events if e.name == "py_model.capture_layout_status"
-                    )
-                    self.assertLessEqual(
-                        layout.time_range.end, publish[0].time_range.start
-                    )
-                if scenario == "capture_cp":
-                    restore = next(
-                        e for e in events if e.name == "py_model.capture_cp_restore"
-                    )
-                    self.assertLessEqual(
-                        layout.time_range.end, restore.time_range.start
-                    )
-                    self.assertLessEqual(
-                        restore.time_range.end, publish[0].time_range.start
-                    )
+                    self.assertEqual(calls, [])
+                if scenario == "capture_bf16":
+                    self.assertGreater(len(puts[0]), 256)
 
     def test_capture_profile_scopes_close_on_admission_and_flush_failure(self) -> None:
         original_poll = _FakeEagleMooncakeStore.take_async_errors
-        for failure, stage, poll_failure_at in (
-            ("fail_put", "put_batch_admit", 0),
-            ("fail_flush", "flush", 0),
-            ("poll_raises", "observe_async_errors", 1),
-            ("poll_invalid", "observe_async_errors", 1),
-            ("poll_raises", "flush", 2),
-            ("poll_invalid", "flush", 2),
+        for failure, poll_failure_at in (
+            ("fail_put", 0),
+            ("fail_flush", 0),
+            ("poll_raises", 1),
+            ("poll_invalid", 1),
+            ("poll_raises", 2),
+            ("poll_invalid", 2),
         ):
+            model = CacheStoreForwardModel()
             poll_count = 0
 
             def poll(store):
                 nonlocal poll_count
-                poll_count += 1
                 errors = original_poll(store)
-                if poll_count == poll_failure_at:
-                    if failure == "poll_raises":
-                        raise RuntimeError("injected async-error polling failure")
-                    return None
+                if model.forward_calls:
+                    poll_count += 1
+                    if poll_count == poll_failure_at:
+                        if failure == "poll_raises":
+                            raise RuntimeError("injected async-error polling failure")
+                        return None
                 return errors
 
             with self.subTest(failure=failure, poll=poll_failure_at), patch.multiple(
@@ -2193,66 +2200,33 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 fail_put=failure == "fail_put",
                 fail_flush=failure == "fail_flush",
             ), patch.object(_FakeEagleMooncakeStore, "take_async_errors", poll):
-                store_calls = []
-                _FakeEagleMooncakeStore.events = store_calls
+                calls = []
+                _FakeEagleMooncakeStore.events = calls
                 with torch.profiler.profile(
                     activities=[torch.profiler.ProfilerActivity.CPU]
                 ) as prof:
-                    result = run_scenario(
-                        CacheStoreForwardModel(),
-                        "capture_bf16",
-                        ignore_deferred_errors=True,
-                    )
-                self.assertEqual(len(result["deferred_capture_errors"]), 1)
+                    result = run_scenario(model, "capture_bf16")
+                self.assertEqual(result["completed_forwards"], 1)
+                self.assertFalse(result["capture_fatal_failure"])
+                torch.testing.assert_close(
+                    result["forward_hidden_states"][0],
+                    torch.zeros(5, 1, dtype=torch.float16),
+                    rtol=0,
+                    atol=0,
+                )
                 metrics = result["capture_metrics"]
+                self.assertGreaterEqual(
+                    metrics[f"{_CAPTURE_METRIC_PREFIX}store_failure_qps"], 1
+                )
                 self.assertEqual(
                     metrics[f"{_CAPTURE_METRIC_PREFIX}publish_success_qps"], 0
                 )
-                self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}store_failure_qps"], 1)
-                self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}prepare_failure_qps"], 0)
-                self.assertCaptureStatus(metrics, enabled=1, broken=0)
-                events = prof.events()
-                self.assertCaptureProfileStoreCalls(events, store_calls)
-                publish = next(
-                    e for e in events if e.name == "hidden_state_capture.publish"
+                self.assertEqual(
+                    metrics[f"{_CAPTURE_METRIC_PREFIX}prepare_failure_qps"], 0
                 )
-                children = {e.name: e for e in events if e.cpu_parent is publish}
-                expected_stage = "hidden_state_capture." + stage
-                self.assertIn(expected_stage, children)
-                self.assertLessEqual(
-                    children[expected_stage].time_range.end, publish.time_range.end
-                )
-                expected_calls = [
-                    "store.setup",
-                    "store.warmup",
-                    "store.take_async_errors",
-                ]
-                store = _FakeEagleMooncakeStore.instances[-1]
-                if poll_failure_at != 1:
-                    self.assertEqual(len(store.put_batch_calls), 1)
-                    batch_id = store.put_batch_calls[0]["batch_id"]
-                    expected_calls.append(f"store.put_batch:{batch_id}")
-                    self.assertIn(batch_id, children)
-                    self.assertIn("hidden_state_capture.put_batch_admit", children)
-                    if failure != "fail_put":
-                        expected_calls.append("store.flush")
-                        if failure != "fail_flush":
-                            expected_calls.append("store.take_async_errors")
-                else:
-                    self.assertEqual(store.put_batch_calls, [])
-                    self.assertNotIn("hidden_state_capture.prepare_payload", children)
-                    self.assertNotIn("hidden_state_capture.put_batch_admit", children)
-                    self.assertFalse(
-                        any(e.name.startswith("rtp-forward-") for e in events)
-                    )
-                if failure == "fail_put" or poll_failure_at == 1:
-                    self.assertNotIn("hidden_state_capture.flush", children)
-                expected_calls.append("store.flush")
-                if failure != "fail_flush":
-                    expected_calls.append("store.take_async_errors")
-                expected_calls.append("store.close")
-                self.assertEqual(store_calls, expected_calls)
-                self.assertTrue(store.closed)
+                self.assertCaptureProfileStoreCalls(prof.events(), calls)
+                for event in prof.events():
+                    self.assertLessEqual(event.time_range.start, event.time_range.end)
 
     def test_capture_bf16_store_contract_slices_each_request_and_flushes_on_shutdown(
         self,
@@ -2314,7 +2288,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             store.put_batch_calls[0]["request_ids"],
             ["rtp_TestActor_501", "rtp_TestActor_502"],
         )
-        self.assertEqual(_FakeMooncakeConfig.make_store_key_calls, [0, 501, 502])
+        self.assertEqual(
+            _FakeMooncakeConfig.make_store_key_calls, [0, 501, 502, 501, 502]
+        )
         self.assertEqual(store.put_batch_calls[0]["lengths"], [2, 3])
         self.assertIn("requests-501-502", store.put_batch_calls[0]["batch_id"])
         self.assertEqual(
@@ -2346,8 +2322,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             [[10.0, 20.0], [10.0, 20.0], [10.0, 20.0]],
         ]
         expected_last = [
-            [[30.0], [30.0]],
-            [[30.0], [30.0], [30.0]],
+            [[0.0], [0.0]],
+            [[0.0], [0.0], [0.0]],
         ]
         self.assertEqual(
             [put["hidden_states"].tolist() for put in store.puts],
@@ -2356,6 +2332,184 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(
             [put["last_hidden_states"].tolist() for put in store.puts],
             expected_last,
+        )
+
+    def test_sp_capture_excludes_dummy_rows_and_matches_capture_off(self) -> None:
+        layout_statuses = []
+
+        def allreduce(tensor, op, mode, dest):
+            return _capture_tp_vote(tensor, op, mode, dest, layout_statuses)
+
+        _register_no_collectives(allreduce)
+        self.addCleanup(clear_comm_ops)
+        model = SequenceParallelCaptureModel()
+        # The native TP=2 fixture has two logical prompts [2, 3] (T=5).
+        # SP executes six rows and appends a length-1 dummy request, without an ID.
+        result = run_scenario(
+            model, "capture_bf16_tp", 2, capture_only_first_forward=True
+        )
+
+        self.assertEqual(model.capture_flags, [True, False])
+        self.assertEqual(model.seen_input_ids, [[1, 2, 3, 4, 5, 0]] * 2)
+        self.assertEqual(model.seen_input_lengths, [[2, 3, 1]] * 2)
+        self.assertEqual(layout_statuses, [1])
+        self.assertFalse(result["logits_defined"])
+        self.assertEqual(result["capture_failure_count"], 0)
+        self.assertEqual(result["capture_broken_rejection_count"], 0)
+        self.assertFalse(result["capture_fatal_failure"])
+        self.assertEqual(result["cp_handle_outputs_calls"], 0)
+        capture_on_hidden, capture_off_hidden = result["forward_hidden_states"]
+        self.assertEqual(tuple(capture_on_hidden.shape), (5, 1))
+        self.assertEqual(tuple(capture_off_hidden.shape), (5, 1))
+        torch.testing.assert_close(
+            capture_on_hidden, capture_off_hidden, rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            capture_on_hidden,
+            torch.arange(31, 36, dtype=torch.float16).reshape(-1, 1),
+            rtol=0,
+            atol=0,
+        )
+
+        self.assertEqual(len(_FakeEagleMooncakeStore.instances), 1)
+        store = _FakeEagleMooncakeStore.instances[0]
+        self.assertEqual(len(store.put_batch_calls), 1)
+        self.assertEqual(
+            store.put_batch_calls[0]["request_ids"],
+            ["rtp_TestActor_501", "rtp_TestActor_502"],
+        )
+        self.assertEqual(store.put_batch_calls[0]["lengths"], [2, 3])
+        self.assertEqual(len(store.puts), 2)
+        self.assertEqual(
+            [put["input_ids"].tolist() for put in store.puts], [[1, 2], [3, 4, 5]]
+        )
+        for put, start, end in zip(store.puts, (0, 2), (2, 5), strict=True):
+            ids = put["input_ids"].to(torch.bfloat16).reshape(-1, 1)
+            self.assertEqual(tuple(put["hidden_states"].shape), (end - start, 2))
+            torch.testing.assert_close(
+                put["hidden_states"], torch.cat((ids + 10, ids + 20), dim=-1)
+            )
+            torch.testing.assert_close(
+                put["last_hidden_states"],
+                capture_on_hidden[start:end].to(torch.bfloat16),
+                rtol=0,
+                atol=0,
+            )
+        metrics = result["capture_metrics"]
+        self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}publish_request_count"], 2)
+        self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}publish_token_count"], 5)
+        self.assertCaptureStatus(metrics, enabled=1, broken=0)
+        self.assertTrue(store.flushed)
+        self.assertTrue(store.closed)
+
+    def test_sp_capture_tp2_three_tokens_preserves_logical_metadata(self) -> None:
+        layout_statuses = []
+
+        def allreduce(tensor, op, mode, dest):
+            return _capture_tp_vote(tensor, op, mode, dest, layout_statuses)
+
+        _register_no_collectives(allreduce)
+        self.addCleanup(clear_comm_ops)
+        model = SequenceParallelCaptureModel()
+        # This native scenario runs PyWrappedModel::forward twice and checks that
+        # its logical input tensors remain [1, 2, 3], [3], and request ID [503].
+        result = run_scenario(
+            model, "capture_bf16_tp_single_request", 2, capture_only_first_forward=True
+        )
+
+        self.assertEqual(model.capture_flags, [True, False])
+        self.assertEqual(model.forward_calls, 2)
+        self.assertEqual(model.micro_batch_calls, 0)
+        self.assertEqual(model.seen_input_ids, [[1, 2, 3, 0]] * 2)
+        self.assertEqual(model.seen_input_lengths, [[3, 1]] * 2)
+        self.assertEqual(layout_statuses, [1])
+        self.assertFalse(result["logits_defined"])
+        self.assertEqual(result["capture_failure_count"], 0)
+        self.assertEqual(result["capture_broken_rejection_count"], 0)
+        self.assertFalse(result["capture_fatal_failure"])
+        self.assertEqual(result["cp_handle_outputs_calls"], 0)
+        capture_on_hidden, capture_off_hidden = result["forward_hidden_states"]
+        self.assertEqual(tuple(capture_on_hidden.shape), (3, 1))
+        self.assertEqual(tuple(capture_off_hidden.shape), (3, 1))
+        torch.testing.assert_close(
+            capture_on_hidden, capture_off_hidden, rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            capture_on_hidden,
+            torch.tensor([[31], [32], [33]], dtype=torch.float16),
+            rtol=0,
+            atol=0,
+        )
+
+        self.assertEqual(len(_FakeEagleMooncakeStore.instances), 1)
+        store = _FakeEagleMooncakeStore.instances[0]
+        self.assertEqual(len(store.put_batch_calls), 1)
+        self.assertEqual(store.put_batch_calls[0]["request_ids"], ["rtp_TestActor_503"])
+        self.assertEqual(store.put_batch_calls[0]["lengths"], [3])
+        self.assertEqual(len(store.puts), 1)
+        put = store.puts[0]
+        self.assertEqual(put["input_ids"].tolist(), [1, 2, 3])
+        self.assertEqual(tuple(put["hidden_states"].shape), (3, 2))
+        torch.testing.assert_close(
+            put["hidden_states"],
+            torch.tensor([[11, 21], [12, 22], [13, 23]], dtype=torch.bfloat16),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            put["last_hidden_states"],
+            capture_on_hidden.to(torch.bfloat16),
+            rtol=0,
+            atol=0,
+        )
+        metrics = result["capture_metrics"]
+        self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}publish_request_count"], 1)
+        self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}publish_token_count"], 3)
+        self.assertCaptureStatus(metrics, enabled=1, broken=0)
+        self.assertTrue(store.flushed)
+        self.assertTrue(store.closed)
+
+    def test_sp_capture_checks_physical_rows_before_logical_crop(self) -> None:
+        statuses = []
+        _register_no_collectives(
+            lambda t, op, mode, dest: _capture_tp_vote(t, op, mode, dest, statuses)
+        )
+        self.addCleanup(clear_comm_ops)
+        model = MalformedCaptureRowCountModel()
+        model.requires_sequence_parallel_padding = True
+        result = run_scenario(model, "capture_bf16_tp")
+        self.assertEqual(statuses, [0])
+        self.assertEqual(model.seen_input_lengths, [[2, 3, 1]])
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
+        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
+        # The five real canonical rows survive; a missing sixth capture row drops export only.
+        torch.testing.assert_close(
+            result["forward_hidden_states"][0],
+            torch.arange(31, 36, dtype=torch.float16).reshape(-1, 1),
+            rtol=0,
+            atol=0,
+        )
+
+    def test_sp_capture_remote_layout_failure_preserves_logical_canonical(self) -> None:
+        statuses = []
+        _register_no_collectives(
+            lambda t, op, mode, dest: _capture_tp_vote(
+                t, op, mode, dest, statuses, remote_valid=False
+            )
+        )
+        self.addCleanup(clear_comm_ops)
+        result = run_scenario(SequenceParallelCaptureModel(), "capture_bf16_tp")
+        self.assertEqual(statuses, [1])
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
+        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
+        torch.testing.assert_close(
+            result["forward_hidden_states"][0],
+            torch.arange(31, 36, dtype=torch.float16).reshape(-1, 1),
+            rtol=0,
+            atol=0,
         )
 
     def test_capture_publisher_consumes_non_4096_hidden_env(self) -> None:
@@ -2401,12 +2555,13 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(store.config_at_setup, expected_layout)
 
     def test_capture_missing_namespace_fails_before_store_construction(self) -> None:
-        os.environ.pop(_MOONCAKE_STORE_KEY_NAMESPACE_ENV)
-
-        with self.assertRaisesRegex(RuntimeError, "store_key_namespace"):
-            run_scenario(CacheStoreForwardModel(), "capture_bf16")
-
+        os.environ.pop("MOONCAKE_STORE_KEY_NAMESPACE")
+        result = run_scenario(CacheStoreForwardModel(), "capture_bf16")
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(_FakeEagleMooncakeStore.instances, [])
+        self.assertCaptureStatus(result["capture_metrics"], enabled=0, broken=1)
 
     def test_capture_namespace_matches_rtp_engine_key_contract(self) -> None:
         os.environ[_MOONCAKE_STORE_KEY_NAMESPACE_ENV] = "ActorA1"
@@ -2440,118 +2595,72 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertNotEqual(first_key, second_key)
 
     def test_capture_invalid_namespace_fails_before_store_construction(self) -> None:
-        os.environ[_MOONCAKE_STORE_KEY_NAMESPACE_ENV] = "invalid_namespace"
-
-        with self.assertRaisesRegex(RuntimeError, "store_key_namespace"):
-            run_scenario(CacheStoreForwardModel(), "capture_bf16")
-
+        os.environ["MOONCAKE_STORE_KEY_NAMESPACE"] = "invalid_namespace"
+        result = run_scenario(CacheStoreForwardModel(), "capture_bf16")
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(_FakeEagleMooncakeStore.instances, [])
+        self.assertCaptureStatus(result["capture_metrics"], enabled=0, broken=1)
 
     @_skip_rocm_context_parallel
     def test_capture_cp_validates_before_existing_restore_and_store(self) -> None:
-        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(
-                PositionAwareCaptureModel(), "capture_cp"
-            )
-            return
-        events = []
-        _FakeEagleMooncakeStore.events = events
+        calls = []
+        _FakeEagleMooncakeStore.events = calls
 
         def allreduce(tensor, op, mode, dest):
-            self.assertEqual((op, mode, dest), (3, 0, None))
-            events.append(f"allreduce:{int(tensor.item())}")
-            return tensor
+            result = _capture_tp_vote(tensor, op, mode, dest)
+            if tensor.numel() == 3:
+                calls.append(f"allreduce:{int(tensor[1].item())}")
+            return result
 
         _register_no_collectives(allreduce)
         self.addCleanup(clear_comm_ops)
-
         result = run_scenario(PositionAwareCaptureModel(), "capture_cp")
-
-        self.assertEqual(result["cp_handle_outputs_calls"], 1)
+        self.assertEqual(result["cp_handle_outputs_calls"], 2)
+        # Idle diagnostic polls may interleave, but the real forward/worker boundary is ordered.
         self.assertEqual(
-            events,
+            [c for c in calls if c != "store.take_async_errors"],
             [
                 "store.setup",
                 "store.warmup",
                 "allreduce:1",
-                "store.take_async_errors",
                 "store.put_batch:rtp-forward-TestActor-1-requests-601-601",
                 "store.flush",
-                "store.take_async_errors",
-                "store.flush",
-                "store.take_async_errors",
                 "store.close",
             ],
         )
 
-    def test_publish_flush_failure_is_deferred_and_close_still_runs(self) -> None:
-        events = []
-        _FakeEagleMooncakeStore.events = events
+    def test_publish_flush_failure_preserves_serving_and_unresolved_ownership(
+        self,
+    ) -> None:
         _FakeEagleMooncakeStore.fail_flush = True
-
-        result = run_scenario(
-            CacheStoreForwardModel(), "capture_bf16", ignore_deferred_errors=True
-        )
-
+        result = run_scenario(ExplicitCaptureChannelsModel(), "capture_bf16")
         store = _FakeEagleMooncakeStore.instances[0]
+        self.assertEqual(result["completed_forwards"], 1)
         self.assertTrue(store.flushed)
-        self.assertTrue(store.closed)
-        self.assertEqual(
-            events,
-            [
-                "store.setup",
-                "store.warmup",
-                "store.take_async_errors",
-                "store.put_batch:rtp-forward-TestActor-1-requests-501-502",
-                "store.flush",
-                "store.flush",
-                "store.close",
-            ],
-        )
-        self.assertCaptureQps(
-            result["capture_metrics"],
-            batch=1,
-            publish_success=0,
-            failure=2,
-            store_failure=1,
-            shutdown_failure=1,
-            operational_failure=2,
-            bf16_publish=0,
-        )
-        self.assertEqual(len(result["deferred_capture_errors"]), 1)
-        self.assertIn(
-            "injected Mooncake flush failure", result["deferred_capture_errors"][0]
+        self.assertFalse(store.ready_keys)
+        # An unresolved store operation retains its source owners instead of closing early.
+        self.assertFalse(store.closed)
+        self.assertEqual(result["capture_quota"]["retained_tasks"], 1)
+        self.assertGreaterEqual(result["capture_failure_count"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
+        torch.testing.assert_close(
+            result["forward_hidden_states"][0],
+            torch.arange(31, 36, dtype=torch.float16).reshape(-1, 1),
+            rtol=0,
+            atol=0,
         )
 
     def assertRocmFp8CaptureRejected(
-        self,
-        scenario: str,
-        forward_count: int = 1,
-        ignore_deferred_errors: bool = False,
+        self, scenario: str, forward_count: int = 1
     ) -> None:
-        fp8_module = cast(Any, sys.modules["torchspec.utils.fp8"])
-        with patch.object(
-            fp8_module,
-            "quantize_aux_hidden_states",
-            wraps=fp8_module.quantize_aux_hidden_states,
-        ) as quantizer:
-            model = CacheStoreForwardModel()
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "TorchSpec hidden-state capture does not support FP8 on ROCm"
-                ".*float8_e4m3fn.*float8_e4m3fnuz",
-            ):
-                run_scenario(
-                    model,
-                    scenario,
-                    forward_count,
-                    ignore_deferred_errors,
-                )
-            self.assertEqual(_FakeEagleMooncakeStore.instances, [])
-            self.assertEqual(model.forward_calls, 0)
-            self.assertEqual(model.micro_batch_calls, 0)
-            self.assertEqual(model.capture_flags, [])
-            quantizer.assert_not_called()
+        model = CacheStoreForwardModel()
+        result = run_scenario(model, scenario, forward_count)
+        self.assertEqual(model.capture_flags, [False] * forward_count)
+        self.assertEqual(result["completed_forwards"], forward_count)
+        self.assertFalse(result["capture_fatal_failure"])
+        self.assertEqual(_FakeEagleMooncakeStore.instances, [])
 
     def assertRocmContextParallelRejected(self, model, scenario: str) -> None:
         # Context-parallel input processing is a CUDA-only feature: the production
@@ -2605,6 +2714,14 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertTrue(
             all(put["hidden_states_scale"].dtype == torch.float32 for put in store.puts)
         )
+        for put, tokens in zip(store.puts, (2, 3), strict=True):
+            self.assertEqual(put["capture_metadata"]["capture_layer_ids"], [0, 1])
+            self.assertEqual(
+                put["capture_metadata"]["shapes"]["hidden_states_scale"], (tokens, 2)
+            )
+            self.assertEqual(
+                put["capture_metadata"]["dtypes"]["hidden_states_scale"], torch.float32
+            )
         expected_auxiliary = [
             [[10.0, 20.0], [10.0, 20.0]],
             [[10.0, 20.0], [10.0, 20.0], [10.0, 20.0]],
@@ -2619,8 +2736,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(
             [put["last_hidden_states"].tolist() for put in store.puts],
             [
-                [[30.0], [30.0]],
-                [[30.0], [30.0], [30.0]],
+                [[0.0], [0.0]],
+                [[0.0], [0.0], [0.0]],
             ],
         )
 
@@ -2706,47 +2823,51 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             atol=0,
         )
 
-    def test_capture_micro_batch_output_count_failure_is_deferred_without_collective(
-        self,
-    ) -> None:
+        capture_on_mtp = capture_on_result["forward_mtp_hidden_states"][0]
+        capture_off_mtp = capture_off_result["forward_mtp_hidden_states"][0]
+        self.assertEqual(tuple(capture_on_mtp.shape), (5, 2))
+        self.assertEqual(capture_on_mtp.dtype, torch.float16)
+        torch.testing.assert_close(capture_on_mtp, capture_off_mtp, rtol=0, atol=0)
+        tokens = torch.arange(1, 6, dtype=torch.float16).reshape(-1, 1)
+        torch.testing.assert_close(
+            capture_on_mtp, torch.cat((tokens, tokens + 1), -1), rtol=0, atol=0
+        )
+
+    def test_capture_micro_batch_missing_canonical_output_remains_fatal(self) -> None:
         _register_identity_allreduce()
         self.addCleanup(clear_comm_ops)
+        # Losing a whole output loses canonical rows too; this is a model failure, not export-only.
         with self.assertRaisesRegex(
-            Exception,
-            "capture output count 1 must match micro-batch input count 2",
+            Exception, "canonical/MTP micro-batch output contract violation"
         ):
-            run_scenario(
-                MalformedCaptureOutputCountModel(),
-                "capture_micro_batch_tp",
+            run_scenario(MalformedCaptureOutputCountModel(), "capture_micro_batch_tp")
+        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
+
+    def test_capture_micro_batch_layout_failure_drops_only_export(self) -> None:
+        _register_identity_allreduce()
+        self.addCleanup(clear_comm_ops)
+        result = run_scenario(MalformedCaptureLayoutModel(), "capture_micro_batch_tp")
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
+        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
+        torch.testing.assert_close(
+            result["forward_hidden_states"][0],
+            torch.arange(31, 36, dtype=torch.float16).reshape(-1, 1),
+            rtol=0,
+            atol=0,
+        )
+
+    def test_capture_context_parallel_micro_batch_disables_only_export(self) -> None:
+        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
+            self.assertRocmContextParallelRejected(
+                CacheStoreForwardModel(), "capture_cp_micro_batch"
             )
-
-        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
-
-    def test_capture_micro_batch_layout_failure_is_deferred_without_collective(
-        self,
-    ) -> None:
-        _register_identity_allreduce()
-        self.addCleanup(clear_comm_ops)
-        with self.assertRaisesRegex(
-            Exception,
-            "capture micro-batch output 0 width 2 must match expected packed width 3",
-        ):
-            run_scenario(MalformedCaptureLayoutModel(), "capture_micro_batch_tp")
-
-        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
-
-    def test_capture_context_parallel_and_micro_batch_is_explicitly_unsupported(
-        self,
-    ) -> None:
+            return
         model = CacheStoreForwardModel()
-        with self.assertRaisesRegex(
-            Exception,
-            "hidden-state capture does not support context parallel combined with layer micro-batching",
-        ):
-            run_scenario(model, "capture_cp_micro_batch")
-
-        self.assertEqual(model.forward_calls, 0)
-        self.assertEqual(model.micro_batch_calls, 0)
+        result = run_scenario(model, "capture_cp_micro_batch")
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertTrue(model.capture_flags)
+        self.assertTrue(all(flag is False for flag in model.capture_flags))
         self.assertEqual(_FakeEagleMooncakeStore.instances, [])
 
     @unittest.skipUnless(
@@ -2763,188 +2884,158 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_rejects_invalid_num_valid_tokens(self) -> None:
-        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(
-                CacheStoreForwardModel(), "capture_cp_invalid_num_valid_tokens"
-            )
-            return
-        layout_statuses = []
-
-        def allreduce(tensor, op, mode, dest):
-            layout_statuses.append(int(tensor.item()))
-            return tensor
-
-        _register_no_collectives(allreduce)
+        _register_identity_allreduce()
         self.addCleanup(clear_comm_ops)
-        with self.assertRaisesRegex(
-            Exception,
-            "context parallel restored captured hidden-state row count 6 must match expected row count 5",
-        ):
-            run_scenario(
-                CacheStoreForwardModel(), "capture_cp_invalid_num_valid_tokens"
-            )
-
-        self.assertEqual(layout_statuses, [1])
+        result = run_scenario(
+            PositionAwareCaptureModel(), "capture_cp_invalid_num_valid_tokens"
+        )
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertEqual(result["cp_handle_outputs_calls"], 2)
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
+        torch.testing.assert_close(
+            result["forward_hidden_states"][0],
+            torch.arange(31, 37, dtype=torch.float16).reshape(-1, 1),
+            rtol=0,
+            atol=0,
+        )
 
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_rejects_local_layout_before_restore(self) -> None:
-        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(
-                MalformedCaptureLayoutModel(), "capture_cp_malformed_layout"
+        statuses = []
+        _register_no_collectives(
+            lambda t, op, mode, dest: _capture_tp_vote(
+                t, op, mode, dest, statuses, remote_valid=True
             )
-            return
-        layout_statuses = []
-
-        def allreduce(tensor, op, mode, dest):
-            layout_statuses.append(int(tensor.item()))
-            return tensor
-
-        _register_no_collectives(allreduce)
+        )
         self.addCleanup(clear_comm_ops)
         result = run_scenario(
-            MalformedCaptureLayoutModel(),
-            "capture_cp_malformed_layout",
-            ignore_deferred_errors=True,
+            MalformedCaptureLayoutModel(), "capture_cp_malformed_layout"
         )
-
-        self.assertEqual(layout_statuses, [0])
-        self.assertEqual(result["cp_handle_outputs_calls"], 0)
-        self.assertEqual(len(result["deferred_capture_errors"]), 1)
-        self.assertIn(
-            "captured hidden-state width 2 must match expected packed width 3",
-            result["deferred_capture_errors"][0],
-        )
+        self.assertEqual(statuses, [0])
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertEqual(result["cp_handle_outputs_calls"], 1)
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
-        hidden_states = result["forward_hidden_states"][0]
-        torch.testing.assert_close(hidden_states, torch.zeros_like(hidden_states))
+        torch.testing.assert_close(
+            result["forward_hidden_states"][0],
+            torch.arange(31, 37, dtype=torch.float16).reshape(-1, 1),
+            rtol=0,
+            atol=0,
+        )
 
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_remote_invalid_rank_skips_restore(self) -> None:
-        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(
-                CacheStoreForwardModel(), "capture_cp"
+        statuses = []
+        _register_no_collectives(
+            lambda t, op, mode, dest: _capture_tp_vote(
+                t, op, mode, dest, statuses, remote_valid=False
             )
-            return
-        layout_reduce_calls = []
-
-        def allreduce(tensor, op, mode, dest):
-            layout_reduce_calls.append((int(tensor.item()), op, mode, dest))
-            return torch.zeros_like(tensor)
-
-        _register_no_collectives(allreduce)
+        )
         self.addCleanup(clear_comm_ops)
-        result = run_scenario(
-            CacheStoreForwardModel(),
-            "capture_cp",
-            ignore_deferred_errors=True,
-        )
-
-        self.assertEqual(layout_reduce_calls, [(1, 3, 0, None)])
-        self.assertEqual(result["cp_handle_outputs_calls"], 0)
-        self.assertEqual(len(result["deferred_capture_errors"]), 1)
-        self.assertIn(
-            "layout contract violation on another TP rank",
-            result["deferred_capture_errors"][0],
-        )
+        result = run_scenario(PositionAwareCaptureModel(), "capture_cp")
+        self.assertEqual(statuses, [1])
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertEqual(result["cp_handle_outputs_calls"], 1)
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
-        hidden_states = result["forward_hidden_states"][0]
-        torch.testing.assert_close(hidden_states, torch.zeros_like(hidden_states))
+        torch.testing.assert_close(
+            result["forward_hidden_states"][0],
+            torch.arange(31, 37, dtype=torch.float16).reshape(-1, 1),
+            rtol=0,
+            atol=0,
+        )
 
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_rechecks_width_after_restore(self) -> None:
-        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmContextParallelRejected(
-                CacheStoreForwardModel(), "capture_cp_malformed_restored_width"
+        statuses = []
+        _register_no_collectives(
+            lambda t, op, mode, dest: _capture_tp_vote(
+                t, op, mode, dest, statuses, remote_valid=True
             )
-            return
-        layout_statuses = []
-
-        def allreduce(tensor, op, mode, dest):
-            layout_statuses.append(int(tensor.item()))
-            return tensor
-
-        _register_no_collectives(allreduce)
+        )
         self.addCleanup(clear_comm_ops)
         result = run_scenario(
-            CacheStoreForwardModel(),
-            "capture_cp_malformed_restored_width",
-            ignore_deferred_errors=True,
+            PositionAwareCaptureModel(), "capture_cp_malformed_restored_width"
         )
-
-        self.assertEqual(layout_statuses, [1])
-        self.assertEqual(result["cp_handle_outputs_calls"], 1)
-        self.assertEqual(len(result["deferred_capture_errors"]), 1)
-        self.assertIn(
-            "context parallel restored captured hidden-state width 2 must match expected packed width 3",
-            result["deferred_capture_errors"][0],
-        )
+        self.assertEqual(statuses, [1])
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertEqual(result["cp_handle_outputs_calls"], 2)
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
-        hidden_states = result["forward_hidden_states"][0]
-        torch.testing.assert_close(hidden_states, torch.zeros_like(hidden_states))
+        torch.testing.assert_close(
+            result["forward_hidden_states"][0],
+            torch.arange(31, 37, dtype=torch.float16).reshape(-1, 1),
+            rtol=0,
+            atol=0,
+        )
 
     def test_capture_packed_layout_reports_rows_dtype_and_device_errors(self) -> None:
-        cases = [
-            (
-                MalformedCaptureRowCountModel(),
-                "captured hidden-state row count 4 must match expected row count 5",
-            ),
-            (
-                MalformedCaptureDtypeModel(),
-                "captured hidden-state dtype must match the model dtype",
-            ),
-            (
-                MalformedCaptureDeviceModel(),
-                "captured hidden-state must be on the model input device",
-            ),
-        ]
-        for model, expected_error in cases:
-            with self.subTest(expected_error=expected_error):
-                with self.assertRaisesRegex(Exception, expected_error):
-                    run_scenario(model, "capture_bf16")
+        for model_type in (
+            MalformedCaptureRowCountModel,
+            MalformedCaptureDtypeModel,
+            MalformedCaptureDeviceModel,
+        ):
+            with self.subTest(model=model_type.__name__):
+                result = run_scenario(model_type(), "capture_bf16")
+                self.assertEqual(result["completed_forwards"], 1)
+                self.assertEqual(result["capture_failure_count"], 1)
+                self.assertFalse(result["capture_fatal_failure"])
                 self.assertEqual(_FakeEagleMooncakeStore.instances[-1].puts, [])
+                self.assertEqual(
+                    result["capture_metrics"][
+                        f"{_CAPTURE_METRIC_PREFIX}layout_failure_qps"
+                    ],
+                    1,
+                )
+                torch.testing.assert_close(
+                    result["forward_hidden_states"][0],
+                    torch.arange(31, 36, dtype=torch.float16).reshape(-1, 1),
+                    rtol=0,
+                    atol=0,
+                )
 
-    def test_capture_malformed_rank_uses_fallback_before_any_narrow(self) -> None:
-        layout_statuses = []
-
-        def allreduce(tensor, op, mode, dest):
-            layout_statuses.append(int(tensor.item()))
-            return tensor
-
-        _register_no_collectives(allreduce)
-        self.addCleanup(clear_comm_ops)
-        result = run_scenario(
-            MalformedCaptureRankModel(),
-            "capture_bf16_tp",
-            ignore_deferred_errors=True,
+    def test_capture_malformed_rank_preserves_canonical_before_any_capture_narrow(
+        self,
+    ) -> None:
+        statuses = []
+        _register_no_collectives(
+            lambda t, op, mode, dest: _capture_tp_vote(t, op, mode, dest, statuses)
         )
-
-        self.assertEqual(layout_statuses, [0])
-        self.assertEqual(len(result["deferred_capture_errors"]), 1)
-        self.assertIn("must be a rank-2 tensor", result["deferred_capture_errors"][0])
+        self.addCleanup(clear_comm_ops)
+        result = run_scenario(MalformedCaptureRankModel(), "capture_bf16_tp")
+        self.assertEqual(statuses, [0])
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
-        hidden_states = result["forward_hidden_states"][0]
-        torch.testing.assert_close(hidden_states, torch.zeros_like(hidden_states))
+        torch.testing.assert_close(
+            result["forward_hidden_states"][0],
+            torch.arange(31, 36, dtype=torch.float16).reshape(-1, 1),
+            rtol=0,
+            atol=0,
+        )
 
     def test_capture_non_owner_layout_status_rejects_owner_publish(self) -> None:
-        def allreduce(tensor, op, mode, dest):
-            # Simulate a non-owner TP rank reporting a malformed capture.
-            return torch.zeros_like(tensor)
-
-        _register_no_collectives(allreduce)
-        self.addCleanup(clear_comm_ops)
-        result = run_scenario(
-            CacheStoreForwardModel(),
-            "capture_bf16_tp",
-            ignore_deferred_errors=True,
+        _register_no_collectives(
+            lambda t, op, mode, dest: _capture_tp_vote(
+                t, op, mode, dest, remote_valid=False
+            )
         )
-
-        self.assertEqual(len(result["deferred_capture_errors"]), 1)
-        self.assertIn("another TP rank", result["deferred_capture_errors"][0])
+        self.addCleanup(clear_comm_ops)
+        result = run_scenario(PositionAwareCaptureModel(), "capture_bf16_tp")
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
-        # The fallback preserves the last-hidden lane when the packed layout is
-        # otherwise usable; the important regression check is that owner store
-        # publication was rejected and the remote-rank error was surfaced.
-        self.assertTrue(torch.any(result["forward_hidden_states"][0] != 0).item())
+        torch.testing.assert_close(
+            result["forward_hidden_states"][0],
+            torch.arange(31, 36, dtype=torch.float16).reshape(-1, 1),
+            rtol=0,
+            atol=0,
+        )
 
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_uses_original_ids_and_lengths(self) -> None:
@@ -2956,8 +3047,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         layout_statuses = []
 
         def allreduce(tensor, op, mode, dest):
-            layout_statuses.append(int(tensor.item()))
-            return tensor
+            return _capture_tp_vote(tensor, op, mode, dest, layout_statuses)
 
         _register_no_collectives(allreduce)
         self.addCleanup(clear_comm_ops)
@@ -2965,7 +3055,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         result = run_scenario(model, "capture_cp")
 
         self.assertEqual(layout_statuses, [1])
-        self.assertEqual(result["cp_handle_outputs_calls"], 1)
+        self.assertEqual(result["cp_handle_outputs_calls"], 2)
         self.assertEqual(model.seen_input_lengths, [[4]])
         self.assertEqual(result["hidden_width"], 1)
         puts = _FakeEagleMooncakeStore.instances[0].puts
@@ -2995,78 +3085,40 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         )
 
     def test_capture_rejects_negative_request_id_before_put(self) -> None:
-        with self.assertRaisesRegex(Exception, "request id must be non-negative"):
-            run_scenario(CacheStoreForwardModel(), "capture_negative_request_id")
-
-        self.assertEqual(len(_FakeEagleMooncakeStore.instances), 1)
+        result = run_scenario(CacheStoreForwardModel(), "capture_negative_request_id")
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
 
-    def test_capture_duplicate_request_id_only_rejects_each_current_batch(
-        self,
-    ) -> None:
+    def test_capture_duplicate_request_id_only_rejects_each_current_batch(self) -> None:
         model = CacheStoreForwardModel()
-
-        result = run_scenario(
-            model,
-            "capture_duplicate_request_id",
-            3,
-            True,
-        )
-
-        store = _FakeEagleMooncakeStore.instances[0]
+        result = run_scenario(model, "capture_duplicate_request_id", 3)
         self.assertEqual(model.capture_flags, [True, True, True])
-        self.assertEqual(store.put_attempts, 0)
-        self.assertEqual(store.puts, [])
+        self.assertEqual(result["completed_forwards"], 3)
+        self.assertEqual(result["capture_failure_count"], 0)
+        self.assertFalse(result["capture_fatal_failure"])
+        self.assertEqual(_FakeEagleMooncakeStore.instances[0].put_attempts, 0)
+        self.assertEqual(result["capture_quota"]["samples"], 0)
+        for hidden in result["forward_hidden_states"]:
+            torch.testing.assert_close(hidden, torch.zeros_like(hidden), rtol=0, atol=0)
+
+    def test_capture_cpu_prepare_failure_only_rejects_each_current_batch(self) -> None:
+        _register_identity_allreduce()
+        self.addCleanup(clear_comm_ops)
+        result = run_scenario(CacheStoreForwardModel(), "capture_prepare_failure_tp", 3)
+        self.assertEqual(result["completed_forwards"], 3)
         self.assertEqual(result["capture_failure_count"], 3)
-        self.assertEqual(result["capture_broken_rejection_count"], 0)
-        self.assertEqual(len(result["deferred_capture_errors"]), 3)
-        self.assertTrue(
-            all(
-                "duplicate capture request id 501" in error
-                for error in result["deferred_capture_errors"]
-            )
-        )
-        metrics = result["capture_metrics"]
+        self.assertFalse(result["capture_fatal_failure"])
+        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
         self.assertCaptureQps(
-            metrics,
+            result["capture_metrics"],
             batch=3,
             publish_success=0,
             failure=3,
             prepare_failure=3,
             request_error_failure=3,
-            duplicate_request_id=3,
         )
-        self.assertCaptureStatus(metrics, enabled=1, broken=0)
-
-    def test_capture_cpu_prepare_failure_only_rejects_each_current_batch(self) -> None:
-        _register_identity_allreduce()
-        self.addCleanup(clear_comm_ops)
-        model = CacheStoreForwardModel()
-
-        result = run_scenario(model, "capture_prepare_failure_tp", 3, True)
-
-        self.assertEqual(model.capture_flags, [True, True, True])
-        self.assertEqual(result["capture_failure_count"], 3)
-        self.assertEqual(result["capture_broken_rejection_count"], 0)
-        self.assertEqual(len(result["deferred_capture_errors"]), 3)
-        self.assertTrue(
-            all(
-                "capture request metadata" in error
-                for error in result["deferred_capture_errors"]
-            )
-        )
-        metrics = result["capture_metrics"]
-        self.assertCaptureQps(
-            metrics,
-            batch=3,
-            publish_success=0,
-            failure=3,
-            prepare_failure=3,
-            operational_failure=3,
-        )
-        self.assertCaptureStatus(metrics, enabled=1, broken=0)
-        self.assertIn(f"{_CAPTURE_METRIC_PREFIX}publish_latency_us", metrics)
-        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
+        self.assertCaptureStatus(result["capture_metrics"], enabled=1, broken=0)
 
     def test_capture_non_owner_does_not_materialize_request_metadata(self) -> None:
         _register_identity_allreduce()
@@ -3078,25 +3130,19 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(model.capture_flags, [True])
         self.assertEqual(result["capture_failure_count"], 0)
         self.assertEqual(result["capture_broken_rejection_count"], 0)
-        self.assertEqual(result["deferred_capture_errors"], [])
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(_FakeEagleMooncakeStore.instances, [])
 
-    def test_capture_async_completion_failure_is_deferred(self) -> None:
+    def test_capture_async_completion_failure_is_training_only(self) -> None:
         _FakeEagleMooncakeStore.async_error_after_accept_count = 1
-        result = run_scenario(
-            CacheStoreForwardModel(),
-            "capture_bf16",
-            ignore_deferred_errors=True,
-        )
+        result = run_scenario(CacheStoreForwardModel(), "capture_bf16")
         store = _FakeEagleMooncakeStore.instances[0]
+        self.assertEqual(result["completed_forwards"], 1)
         self.assertEqual(store.put_attempts, 1)
         self.assertEqual(len(store.puts), 2)
         self.assertTrue(store.flushed)
         self.assertEqual(store.pending_async_errors, [])
-        errors = result["deferred_capture_errors"]
-        self.assertEqual(len(errors), 1)
-        self.assertIn("asynchronous publish failure", errors[0])
-        # One observation of the async error and one runtime failure.
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(result["capture_failure_count"], 2)
         self.assertCaptureQps(
             result["capture_metrics"],
@@ -3106,51 +3152,43 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             store_failure=2,
             operational_failure=2,
         )
-        self.assertCaptureStatus(result["capture_metrics"], enabled=1, broken=0)
 
     def test_capture_historical_async_error_is_not_attributed_to_current_batch(
         self,
     ) -> None:
         model = CacheStoreForwardModel()
         original_poll = _FakeEagleMooncakeStore.take_async_errors
-        poll_count = 0
+        injected = False
 
         def poll_with_history(store):
-            nonlocal poll_count
-            poll_count += 1
-            # First publish: start poll, completion poll. Inject an old error
-            # only at the second publish's start, not its completion check.
-            if poll_count == 3:
-                batch_id = store.put_batch_calls[0]["batch_id"]
+            nonlocal injected
+            # Arm by real model execution, not an unstable worker maintenance poll number.
+            if model.forward_calls == 2 and not injected:
+                injected = True
                 store.pending_async_errors.append(
-                    RuntimeError(f"historical async failure for {batch_id}")
+                    RuntimeError(
+                        f"historical async failure for {store.put_batch_calls[0]['batch_id']}"
+                    )
                 )
             return original_poll(store)
 
         with patch.object(
             _FakeEagleMooncakeStore, "take_async_errors", poll_with_history
         ):
-            result = run_scenario(
-                model,
-                "capture_async_history",
-                2,
-            )
-
+            result = run_scenario(model, "capture_async_history", 2)
         store = _FakeEagleMooncakeStore.instances[0]
+        self.assertTrue(injected)
+        self.assertEqual(result["completed_forwards"], 2)
         self.assertEqual(model.capture_flags, [True, True])
-        self.assertEqual(store.put_attempts, 2)
-        self.assertEqual(len(store.put_batch_calls), 2)
         self.assertEqual(
-            [call["request_ids"] for call in store.put_batch_calls],
+            [c["request_ids"] for c in store.put_batch_calls],
             [
                 ["rtp_TestActor_501", "rtp_TestActor_502"],
                 ["rtp_TestActor_1501", "rtp_TestActor_1502"],
             ],
         )
         self.assertEqual(store.pending_async_errors, [])
-        self.assertEqual(result["deferred_capture_errors"], [])
-        self.assertEqual(result["capture_failure_count"], 1)
-        self.assertEqual(result["capture_broken_rejection_count"], 0)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertCaptureQps(
             result["capture_metrics"],
             batch=2,
@@ -3160,160 +3198,95 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             operational_failure=1,
             bf16_publish=2,
         )
-        self.assertCaptureStatus(result["capture_metrics"], enabled=1, broken=0)
 
-    def test_capture_fp8_rejects_malformed_quantizer_result(
-        self,
-    ) -> None:
-        fp8_module = cast(Any, sys.modules["torchspec.utils.fp8"])
-        original_quantizer = fp8_module.quantize_aux_hidden_states
-        fp8_module.quantize_aux_hidden_states = lambda hidden_states, num_layers: (
-            hidden_states,
-        )
-        self.addCleanup(
-            setattr,
-            fp8_module,
-            "quantize_aux_hidden_states",
-            original_quantizer,
-        )
-
+    def test_capture_fp8_rejects_malformed_quantizer_result(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
             self.assertRocmFp8CaptureRejected("capture_fp8")
             return
-
-        with self.assertRaisesRegex(Exception, "must return tensor and scale"):
-            run_scenario(
-                CacheStoreForwardModel(),
-                "capture_fp8",
-            )
-
-        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
-
-    def test_capture_quantizer_execution_failure_recovers_on_next_batch(self) -> None:
         fp8_module = cast(Any, sys.modules["torchspec.utils.fp8"])
-        original_quantizer = fp8_module.quantize_aux_hidden_states
-        call_count = 0
-
-        def fail_once(hidden_states, num_layers):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise RuntimeError("injected TorchSpec quantizer execution failure")
-            return original_quantizer(hidden_states, num_layers)
-
-        fp8_module.quantize_aux_hidden_states = fail_once
-        self.addCleanup(
-            setattr,
+        with patch.object(
             fp8_module,
             "quantize_aux_hidden_states",
-            original_quantizer,
-        )
+            lambda hidden, num_layers: (hidden,),
+        ):
+            result = run_scenario(CacheStoreForwardModel(), "capture_fp8")
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
+        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
+        self.assertCaptureStatus(result["capture_metrics"], enabled=0, broken=1)
 
+    def test_capture_gpu_quantizer_execution_failure_stays_fatal_on_next_batch(
+        self,
+    ) -> None:
+        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
+            self.assertRocmFp8CaptureRejected("capture_fp8_tp", 2)
+            return
         _register_identity_allreduce()
         self.addCleanup(clear_comm_ops)
-        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmFp8CaptureRejected("capture_fp8_tp", 2, True)
-            self.assertEqual(call_count, 0)
-            return
+        fp8_module = cast(Any, sys.modules["torchspec.utils.fp8"])
 
-        result = run_scenario(CacheStoreForwardModel(), "capture_fp8_tp", 2, True)
+        def fail_execution(hidden, num_layers):
+            raise RuntimeError("injected GPU quantizer execution failure")
 
-        store = _FakeEagleMooncakeStore.instances[0]
-        self.assertEqual(store.put_attempts, 1)
-        self.assertEqual(
-            [put["key"] for put in store.puts],
-            ["rtp_TestActor_501", "rtp_TestActor_502"],
-        )
-        self.assertEqual(len(result["deferred_capture_errors"]), 1)
-        self.assertIn(
-            "injected TorchSpec quantizer execution failure",
-            result["deferred_capture_errors"][0],
-        )
-        self.assertEqual(result["capture_failure_count"], 1)
-        self.assertEqual(result["capture_broken_rejection_count"], 0)
-        self.assertCaptureQps(
-            result["capture_metrics"],
-            batch=2,
-            publish_success=1,
-            failure=1,
-            quantize_failure=1,
-            operational_failure=1,
-            fp8_publish=1,
-        )
-        self.assertCaptureStatus(result["capture_metrics"], enabled=1, broken=0)
+        with patch.object(fp8_module, "quantize_aux_hidden_states", fail_execution):
+            first = run_scenario(CacheStoreForwardModel(), "capture_fp8_tp")
+            self.assertEqual(first["completed_forwards"], 1)
+            self.assertTrue(first["capture_fatal_failure"])
+            model = CacheStoreForwardModel()
+            # Existing owner health rides the next ordinary batch's TP input control.
+            with self.assertRaisesRegex(
+                Exception, "fatal hidden-state worker execution failure"
+            ):
+                run_scenario(
+                    model, "capture_fp8_tp", 2, capture_only_first_forward=True
+                )
+            self.assertEqual(model.capture_flags, [True])
 
-    def assertNonOwnerCapture(
-        self, forward_count: int = 1, *, ignore_deferred_errors: bool = False
-    ) -> None:
+    def assertNonOwnerCapture(self, forward_count: int = 1) -> None:
         _register_identity_allreduce()
         self.addCleanup(clear_comm_ops)
         model = CacheStoreForwardModel()
-        result = run_scenario(
-            model, "capture_non_owner", forward_count, ignore_deferred_errors
+        result = run_scenario(model, "capture_non_owner", forward_count)
+        self.assertEqual(model.capture_flags, [True] * forward_count)
+        self.assertEqual(result["completed_forwards"], forward_count)
+        self.assertEqual(_FakeEagleMooncakeStore.instances, [])
+        self.assertEqual(result["capture_failure_count"], 0)
+        self.assertFalse(result["capture_fatal_failure"])
+        for hidden in result["forward_hidden_states"]:
+            self.assertEqual(tuple(hidden.shape), (5, 1))
+            torch.testing.assert_close(hidden, torch.zeros_like(hidden), rtol=0, atol=0)
+        self.assertCaptureQps(
+            result["capture_metrics"], batch=0, publish_success=0, failure=0
         )
 
-        self.assertEqual(model.capture_flags, [True] * forward_count)
-        self.assertEqual(_FakeEagleMooncakeStore.instances, [])
-        self.assertEqual(result["deferred_capture_errors"], [])
-        self.assertEqual(result["capture_failure_count"], 0)
-        self.assertEqual(result["capture_broken_rejection_count"], 0)
-        self.assertEqual(len(result["forward_hidden_states"]), forward_count)
-        for index, hidden_states in enumerate(result["forward_hidden_states"]):
-            with self.subTest(forward=index):
-                self.assertEqual(tuple(hidden_states.shape), (5, 1))
-                torch.testing.assert_close(
-                    hidden_states, torch.full_like(hidden_states, 30)
-                )
-        metrics = result["capture_metrics"]
-        self.assertEqual(set(metrics), _CAPTURE_QPS_METRICS | _CAPTURE_STATUS_METRICS)
-        self.assertCaptureMetricTypes(result)
-        self.assertCaptureQps(metrics, batch=0, publish_success=0, failure=0)
-        self.assertCaptureStatus(metrics, enabled=0, broken=0)
-
     def test_capture_non_owner_does_not_duplicate_success_metrics(self) -> None:
-        for forward_count, ignore_deferred_errors in (
-            (1, False),
-            (3, False),
-            (3, True),
-        ):
-            with self.subTest(
-                forward_count=forward_count,
-                ignore_deferred_errors=ignore_deferred_errors,
-            ):
-                self.assertNonOwnerCapture(
-                    forward_count, ignore_deferred_errors=ignore_deferred_errors
-                )
+        for forward_count in (1, 3):
+            with self.subTest(forward_count=forward_count):
+                self.assertNonOwnerCapture(forward_count)
 
     def test_capture_fp8_hard_failure_disables_owner_store_before_next_forward(
         self,
     ) -> None:
+        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
+            self.assertRocmFp8CaptureRejected("capture_fp8_tp", 3)
+            return
         _register_identity_allreduce()
         self.addCleanup(clear_comm_ops)
         fp8_module = cast(Any, sys.modules["torchspec.utils.fp8"])
-        original_quantizer = fp8_module.quantize_aux_hidden_states
-        fp8_module.quantize_aux_hidden_states = lambda hidden_states, num_layers: (
-            hidden_states,
-        )
-        self.addCleanup(
-            setattr,
+        model = CacheStoreForwardModel()
+        with patch.object(
             fp8_module,
             "quantize_aux_hidden_states",
-            original_quantizer,
-        )
-        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-            self.assertRocmFp8CaptureRejected("capture_fp8_tp", 3, True)
-            return
-
-        model = CacheStoreForwardModel()
-        result = run_scenario(model, "capture_fp8_tp", 3, True)
-
-        self.assertEqual(model.capture_flags, [True, True, True])
-        self.assertEqual(len(result["deferred_capture_errors"]), 3)
-        self.assertEqual(result["capture_failure_count"], 1)
-        self.assertEqual(result["capture_broken_rejection_count"], 2)
-        metrics = result["capture_metrics"]
+            lambda hidden, num_layers: (hidden,),
+        ):
+            result = run_scenario(model, "capture_fp8_tp", 3)
+        self.assertEqual(model.capture_flags, [True, False, False])
+        self.assertEqual(result["completed_forwards"], 3)
+        self.assertFalse(result["capture_fatal_failure"])
+        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
         self.assertCaptureQps(
-            metrics,
+            result["capture_metrics"],
             batch=3,
             publish_success=0,
             failure=1,
@@ -3321,70 +3294,57 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             hard_contract_failure=1,
             broken_rejection=2,
         )
-        self.assertCaptureStatus(metrics, enabled=0, broken=1)
-        self.assertIn(f"{_CAPTURE_METRIC_PREFIX}publish_latency_us", metrics)
-        self.assertIn(f"{_CAPTURE_METRIC_PREFIX}quantize_latency_us", metrics)
-        self.assertTrue(
-            all(
-                "must return tensor and scale" in error
-                for error in result["deferred_capture_errors"]
-            )
-        )
+        self.assertCaptureStatus(result["capture_metrics"], enabled=0, broken=1)
 
     def test_capture_rejects_duplicate_layer_ids_at_startup(self) -> None:
-        with self.assertRaisesRegex(
-            Exception, "layer ids must be unique; duplicate id 0"
-        ):
-            run_scenario(CacheStoreForwardModel(), "capture_duplicate_layer_id")
-
+        model = CacheStoreForwardModel()
+        result = run_scenario(model, "capture_duplicate_layer_id")
+        self.assertEqual(model.capture_flags, [False])
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(_FakeEagleMooncakeStore.instances, [])
 
     def test_capture_rejects_invalid_dtype_at_startup(self) -> None:
-        with self.assertRaisesRegex(
-            Exception, "unsupported hidden-state capture dtype: 99"
-        ):
-            run_scenario(CacheStoreForwardModel(), "capture_invalid_dtype")
-
+        model = CacheStoreForwardModel()
+        result = run_scenario(model, "capture_invalid_dtype")
+        self.assertEqual(model.capture_flags, [False])
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(_FakeEagleMooncakeStore.instances, [])
 
     def test_capture_rejects_unsupported_python_model_at_startup(self) -> None:
-        with self.assertRaisesRegex(Exception, "does not support hidden-state capture"):
-            run_scenario(UnsupportedCaptureModel(), "capture_bf16")
-
+        model = UnsupportedCaptureModel()
+        result = run_scenario(model, "capture_bf16")
+        self.assertEqual(model.capture_flags, [False])
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(_FakeEagleMooncakeStore.instances, [])
 
     def test_capture_publisher_flush_does_not_close_store(self) -> None:
         result = flush_capture_publisher_without_close()
-        self.assertTrue(result["flushed"])
-        self.assertEqual(len(_FakeEagleMooncakeStore.instances), 1)
+        self.assertTrue(result["drained"])
+        self.assertFalse(result["closed_before_shutdown"])
+        # An empty drain need not flush the store; the fixture destructor closes afterward.
+        self.assertFalse(result["flushed_before_shutdown"])
         store = _FakeEagleMooncakeStore.instances.pop()
-        self.assertTrue(store.flushed)
-        self.assertFalse(store.closed)
-        self.assertEqual(
-            _FakeEagleMooncakeStore.events,
-            None,
-        )
-        del store
+        self.assertTrue(store.closed)
+        self.assertFalse(store.flushed)
 
     def test_capture_publisher_close_acquires_gil_when_called_without_one(self) -> None:
         _FakeEagleMooncakeStore.events = []
         result = close_capture_publisher_without_gil()
         self.assertTrue(result["closed_without_gil"])
-        self.assertEqual(len(_FakeEagleMooncakeStore.instances), 1)
         store = _FakeEagleMooncakeStore.instances.pop()
-        self.assertTrue(store.flushed)
         self.assertTrue(store.closed)
+        self.assertFalse(store.flushed)
         self.assertEqual(
-            _FakeEagleMooncakeStore.events,
             [
-                "store.setup",
-                "store.warmup",
-                "store.flush",
-                "store.take_async_errors",
-                "store.close",
+                c
+                for c in _FakeEagleMooncakeStore.events
+                if c != "store.take_async_errors"
             ],
+            ["store.setup", "store.warmup", "store.close"],
         )
-        del store
 
     def test_capture_publisher_layout_with_core_dump(self) -> None:
         child_case_env = "RTP_TEST_CAPTURE_LAYOUT_CHILD"
@@ -3487,14 +3447,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             enabled=1 - failed,
             broken=failed,
         )
+        self.assertEqual(result["error"], "")
+        self.assertEqual(result["initialization_failure_count"], failed)
         if expected_error is not None:
-            if missing_method is not None:
-                self.assertIn("batch publisher contract", result["error"])
-            else:
-                self.assertIn(
-                    "invalid Mooncake capture layout contract", result["error"]
-                )
-            self.assertIn(expected_error, result["error"])
             if missing_method is None:
                 self.assertEqual(_FakeEagleMooncakeStore.instances, [])
                 self.assertEqual(_FakeEagleMooncakeStore.events, [])
@@ -3510,87 +3465,72 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             self.assertEqual(result["error"], "")
             self.assertEqual(len(_FakeEagleMooncakeStore.instances), 1)
             store = _FakeEagleMooncakeStore.instances.pop()
-            self.assertEqual(store.setup_device, torch.device("cuda:0"))
+            self.assertEqual(store.setup_device, torch.device("cpu"))
             self.assertTrue(store.warmed_up)
-            self.assertTrue(store.flushed)
+            self.assertFalse(store.flushed)
             self.assertTrue(store.closed)
             self.assertEqual(store.put_attempts, 0)
             self.assertEqual(
-                _FakeEagleMooncakeStore.events,
                 [
-                    "store.setup",
-                    "store.warmup",
-                    "store.flush",
-                    "store.take_async_errors",
-                    "store.close",
+                    event
+                    for event in _FakeEagleMooncakeStore.events
+                    if event != "store.take_async_errors"
                 ],
+                ["store.setup", "store.warmup", "store.close"],
             )
             del store
         gc.collect()
         self.assertEqual(len(config_refs), 1)
         self.assertIsNone(config_refs.pop()())
 
-    def test_capture_publisher_rejects_layer_count_mismatch(
-        self,
-    ) -> None:
+    def test_capture_publisher_rejects_layer_count_mismatch(self) -> None:
         os.environ["MOONCAKE_NUM_AUX_LAYERS"] = "3"
-
-        with self.assertRaisesRegex(
-            Exception, "does not match RTP capture layer count"
-        ):
-            run_scenario(
-                CacheStoreForwardModel(),
-                "capture_bf16",
-            )
-
+        result = run_scenario(CacheStoreForwardModel(), "capture_bf16")
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(_FakeEagleMooncakeStore.instances, [])
+        self.assertCaptureStatus(result["capture_metrics"], enabled=0, broken=1)
 
-    def test_capture_publisher_rejects_hidden_dim_mismatch(
-        self,
-    ) -> None:
+    def test_capture_publisher_rejects_hidden_dim_mismatch(self) -> None:
         os.environ["MOONCAKE_HIDDEN_DIM"] = "2"
-
-        with self.assertRaisesRegex(Exception, "does not match RTP hidden size"):
-            run_scenario(
-                CacheStoreForwardModel(),
-                "capture_bf16",
-            )
-
+        result = run_scenario(CacheStoreForwardModel(), "capture_bf16")
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(_FakeEagleMooncakeStore.instances, [])
+        self.assertCaptureStatus(result["capture_metrics"], enabled=0, broken=1)
 
     def test_capture_publisher_requires_batch_and_async_error_contract_methods(
         self,
     ) -> None:
-        for method_name in ("put_batch", "take_async_errors"):
-            with self.subTest(method_name=method_name):
-                original = getattr(_FakeEagleMooncakeStore, method_name)
-                setattr(_FakeEagleMooncakeStore, method_name, None)
-                try:
-                    with self.assertRaisesRegex(
-                        Exception,
-                        rf"EagleMooncakeStore\.{method_name} must be callable",
-                    ):
-                        run_scenario(
-                            CacheStoreForwardModel(),
-                            "capture_bf16",
-                        )
-                finally:
-                    setattr(_FakeEagleMooncakeStore, method_name, original)
+        for method_name in (
+            "put_batch",
+            "take_async_errors",
+            "query_keys",
+            "flush",
+            "close",
+        ):
+            with self.subTest(method=method_name), patch.object(
+                _FakeEagleMooncakeStore, method_name, None
+            ):
+                result = run_scenario(CacheStoreForwardModel(), "capture_bf16")
+                self.assertEqual(result["completed_forwards"], 1)
+                self.assertEqual(result["capture_failure_count"], 1)
+                self.assertFalse(result["capture_fatal_failure"])
+                self.assertEqual(_FakeEagleMooncakeStore.instances[-1].put_attempts, 0)
+                self.assertCaptureStatus(result["capture_metrics"], enabled=0, broken=1)
 
-    def test_capture_publisher_init_failure_raises_and_closes_partial_store(
+    def test_capture_publisher_init_failure_disables_capture_and_closes_partial_store(
         self,
     ) -> None:
         _FakeEagleMooncakeStore.fail_warmup = True
         _FakeEagleMooncakeStore.events = []
         model = CacheStoreForwardModel()
-
-        with self.assertRaisesRegex(Exception, "injected Mooncake warmup failure"):
-            run_scenario(model, "capture_bf16")
-
-        self.assertEqual(model.capture_flags, [])
-        self.assertEqual(model.forward_calls, 0)
-        self.assertEqual(model.micro_batch_calls, 0)
-        self.assertEqual(len(_FakeEagleMooncakeStore.instances), 1)
+        result = run_scenario(model, "capture_bf16")
+        self.assertEqual(model.capture_flags, [False])
+        self.assertEqual(result["completed_forwards"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
         store = _FakeEagleMooncakeStore.instances[0]
         self.assertEqual(store.put_attempts, 0)
         self.assertTrue(store.closed)
@@ -3609,39 +3549,22 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         hidden_states = result["forward_hidden_states"][0]
         torch.testing.assert_close(hidden_states, torch.zeros_like(hidden_states))
 
-    def test_capture_duplicate_store_key_only_rejects_each_current_batch(
-        self,
-    ) -> None:
+    def test_capture_duplicate_store_key_only_rejects_each_current_batch(self) -> None:
         _register_identity_allreduce()
         self.addCleanup(clear_comm_ops)
         model = CacheStoreForwardModel()
-
-        result = run_scenario(
-            model,
-            "capture_bf16_tp",
-            3,
-            True,
-        )
-
+        result = run_scenario(model, "capture_bf16_tp", 3)
         store = _FakeEagleMooncakeStore.instances[0]
         self.assertEqual(model.capture_flags, [True, True, True])
-        self.assertEqual(
-            [put["key"] for put in store.puts],
-            ["rtp_TestActor_501", "rtp_TestActor_502"],
-        )
+        self.assertEqual(result["completed_forwards"], 3)
         self.assertEqual(store.put_attempts, 3)
-        self.assertEqual(result["capture_failure_count"], 2)
-        self.assertEqual(result["capture_broken_rejection_count"], 0)
-        self.assertEqual(len(result["deferred_capture_errors"]), 2)
-        self.assertTrue(
-            all(
-                "Mooncake key already exists: rtp_TestActor_501" in error
-                for error in result["deferred_capture_errors"]
-            )
+        self.assertEqual(
+            [p["key"] for p in store.puts], ["rtp_TestActor_501", "rtp_TestActor_502"]
         )
-        metrics = result["capture_metrics"]
+        self.assertEqual(result["capture_failure_count"], 2)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertCaptureQps(
-            metrics,
+            result["capture_metrics"],
             batch=3,
             publish_success=1,
             failure=2,
@@ -3650,60 +3573,40 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             duplicate_request_id=2,
             bf16_publish=1,
         )
-        self.assertCaptureStatus(metrics, enabled=1, broken=0)
 
     def test_capture_rejects_packed_layout(self) -> None:
         model = MalformedCaptureLayoutModel()
-        result = run_scenario(
-            model,
-            "capture_bf16",
-            3,
-            True,
-        )
-
-        self.assertEqual(model.capture_flags, [True, True, True])
-        self.assertEqual(len(result["deferred_capture_errors"]), 3)
-        self.assertTrue(
-            all(
-                "captured hidden-state width 2 must match expected packed width 3"
-                in error
-                for error in result["deferred_capture_errors"]
-            )
-        )
-        self.assertEqual(result["capture_failure_count"], 3)
-        self.assertEqual(result["capture_broken_rejection_count"], 2)
-        metrics = result["capture_metrics"]
+        result = run_scenario(model, "capture_bf16", 3)
+        self.assertEqual(model.capture_flags, [True, False, False])
+        self.assertEqual(result["completed_forwards"], 3)
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertFalse(result["capture_fatal_failure"])
+        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
         self.assertCaptureQps(
-            metrics,
+            result["capture_metrics"],
             batch=3,
             publish_success=0,
-            failure=3,
-            layout_failure=3,
-            hard_contract_failure=3,
+            failure=1,
+            layout_failure=1,
+            hard_contract_failure=1,
             broken_rejection=2,
         )
-        self.assertCaptureStatus(metrics, enabled=0, broken=1)
-        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
-
-    def test_new_forward_discards_unconsumed_operational_capture_error(self) -> None:
-        _FakeEagleMooncakeStore.fail_put_count = 1
-        model = CacheStoreForwardModel()
-
-        result = run_scenario(
-            model,
-            "capture_bf16",
-            2,
-            capture_only_first_forward=True,
-            skip_first_deferred_error_take=True,
+        self.assertCaptureStatus(result["capture_metrics"], enabled=0, broken=1)
+        torch.testing.assert_close(
+            result["forward_hidden_states"][0],
+            torch.arange(31, 36, dtype=torch.float16).reshape(-1, 1),
+            rtol=0,
+            atol=0,
         )
 
-        store = _FakeEagleMooncakeStore.instances[0]
+    def test_store_failure_does_not_poison_next_capture_off_forward(self) -> None:
+        _FakeEagleMooncakeStore.fail_put_count = 1
+        model = ExplicitCaptureChannelsModel()
+        result = run_scenario(model, "capture_bf16", 2, capture_only_first_forward=True)
         self.assertEqual(model.capture_flags, [True, False])
-        self.assertEqual(store.put_attempts, 1)
-        self.assertEqual(store.puts, [])
-        self.assertEqual(result["deferred_capture_errors"], [])
-        self.assertEqual(result["capture_failure_count"], 1)
-        self.assertEqual(result["capture_broken_rejection_count"], 0)
+        self.assertEqual(result["completed_forwards"], 2)
+        self.assertFalse(result["capture_fatal_failure"])
+        self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
         self.assertCaptureQps(
             result["capture_metrics"],
             batch=1,
@@ -3712,38 +3615,39 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             store_failure=1,
             operational_failure=1,
         )
-        self.assertCaptureStatus(result["capture_metrics"], enabled=1, broken=0)
+        for hidden in result["forward_hidden_states"]:
+            torch.testing.assert_close(
+                hidden,
+                torch.arange(31, 36, dtype=torch.float16).reshape(-1, 1),
+                rtol=0,
+                atol=0,
+            )
 
-    def test_capture_fail_closed_synchronous_admission_error_fails_current_batch(
+    def test_capture_worker_admission_error_is_fail_open_and_next_batch_recovers(
         self,
     ) -> None:
         _register_identity_allreduce()
         self.addCleanup(clear_comm_ops)
         _FakeEagleMooncakeStore.fail_put_count = 1
-        model = CacheStoreForwardModel()
-        result = run_scenario(model, "capture_bf16_tp", 2, True)
-
+        model = ExplicitCaptureChannelsModel()
+        result = run_scenario(model, "capture_bf16_tp", 2)
         store = _FakeEagleMooncakeStore.instances[0]
         self.assertEqual(model.capture_flags, [True, True])
-        for hidden_states in result["forward_hidden_states"]:
-            torch.testing.assert_close(
-                hidden_states, torch.full_like(hidden_states, 30)
-            )
+        self.assertEqual(result["completed_forwards"], 2)
+        self.assertFalse(result["capture_fatal_failure"])
         self.assertEqual(store.put_attempts, 2)
         self.assertEqual(
-            [put["key"] for put in store.puts],
-            ["rtp_TestActor_501", "rtp_TestActor_502"],
+            [p["key"] for p in store.puts], ["rtp_TestActor_501", "rtp_TestActor_502"]
         )
-        self.assertEqual(len(result["deferred_capture_errors"]), 1)
-        self.assertIn(
-            "injected Mooncake put_batch admission failure",
-            result["deferred_capture_errors"][0],
-        )
-        self.assertEqual(result["capture_failure_count"], 1)
-        self.assertEqual(result["capture_broken_rejection_count"], 0)
-        metrics = result["capture_metrics"]
+        for hidden in result["forward_hidden_states"]:
+            torch.testing.assert_close(
+                hidden,
+                torch.arange(31, 36, dtype=torch.float16).reshape(-1, 1),
+                rtol=0,
+                atol=0,
+            )
         self.assertCaptureQps(
-            metrics,
+            result["capture_metrics"],
             batch=2,
             publish_success=1,
             failure=1,
@@ -3751,9 +3655,373 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             operational_failure=1,
             bf16_publish=1,
         )
-        self.assertCaptureStatus(metrics, enabled=1, broken=0)
-        self.assertIn(f"{_CAPTURE_METRIC_PREFIX}publish_latency_us", metrics)
-        self.assertIn(f"{_CAPTURE_METRIC_PREFIX}store_put_latency_us", metrics)
+        self.assertCaptureStatus(result["capture_metrics"], enabled=1, broken=0)
+
+    def test_normal_and_zero_serving_finish_before_capture_ready(self) -> None:
+        for scenario, model_type in (
+            ("capture_with_lm_head", ExplicitCaptureChannelsModel),
+            ("capture_zero_canonical", CacheStoreForwardModel),
+        ):
+            entered = threading.Event()
+            release = threading.Event()
+            observed = []
+
+            def on_forward(index, frame):
+                try:
+                    self.assertEqual(index, 0)
+                    self.assertTrue(
+                        entered.wait(timeout=10), "worker never entered store flush"
+                    )
+                    store = _FakeEagleMooncakeStore.instances[-1]
+                    self.assertFalse(release.is_set())
+                    self.assertFalse(store.ready_keys)
+                    self.assertEqual(frame["quota"]["samples"], 2)
+                    self.assertEqual(frame["quota"]["retained_tasks"], 1)
+                    self.assertTrue(
+                        all(
+                            thread != threading.get_ident()
+                            for _, thread in store.call_threads
+                        )
+                    )
+                    hidden = frame["hidden_states"]
+                    self.assertEqual(tuple(hidden.shape), (5, 1))
+                    self.assertEqual(hidden.dtype, torch.float16)
+                    if scenario == "capture_with_lm_head":
+                        torch.testing.assert_close(
+                            hidden,
+                            torch.arange(31, 36, dtype=torch.float16).reshape(-1, 1),
+                            rtol=0,
+                            atol=0,
+                        )
+                        torch.testing.assert_close(
+                            frame["logits"],
+                            torch.tensor([[32, 32], [35, 35]], dtype=torch.float32),
+                            rtol=0,
+                            atol=0,
+                        )
+                        self.assertEqual(
+                            tuple(frame["mtp_target_hidden_states"].shape), (5, 2)
+                        )
+                    else:
+                        torch.testing.assert_close(
+                            hidden, torch.zeros_like(hidden), rtol=0, atol=0
+                        )
+                        self.assertIsNone(frame["logits"])
+                    observed.append(index)
+                finally:
+                    release.set()
+
+            with self.subTest(scenario=scenario), patch.multiple(
+                _FakeEagleMooncakeStore, flush_entered=entered, release_flush=release
+            ):
+                result = run_scenario(model_type(), scenario, on_forward=on_forward)
+            self.assertEqual(observed, [0])
+            self.assertEqual(result["completed_forwards"], 1)
+            self.assertEqual(result["capture_failure_count"], 0)
+            self.assertEqual(result["capture_quota"]["samples"], 0)
+            store = _FakeEagleMooncakeStore.instances[-1]
+            self.assertEqual(
+                store.ready_keys, {"rtp_TestActor_501", "rtp_TestActor_502"}
+            )
+            self.assertTrue(store.closed)
+            torch.testing.assert_close(
+                torch.cat([put["last_hidden_states"] for put in store.puts]),
+                result["forward_hidden_states"][0].to(torch.bfloat16),
+                rtol=0,
+                atol=0,
+            )
+
+    def test_worker_failure_after_two_serving_batches_does_not_rewrite_either(
+        self,
+    ) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        observed = []
+
+        def on_forward(index, frame):
+            try:
+                self.assertTrue(entered.wait(timeout=10))
+                self.assertFalse(_FakeEagleMooncakeStore.instances[-1].ready_keys)
+                self.assertFalse(release.is_set())
+                torch.testing.assert_close(
+                    frame["hidden_states"],
+                    torch.arange(31, 36, dtype=torch.float16).reshape(-1, 1),
+                    rtol=0,
+                    atol=0,
+                )
+                observed.append(index)
+            finally:
+                if index == 1 or len(observed) != index + 1:
+                    release.set()
+
+        with patch.multiple(
+            _FakeEagleMooncakeStore,
+            flush_entered=entered,
+            release_flush=release,
+            async_error_after_accept_count=1,
+        ):
+            result = run_scenario(
+                ExplicitCaptureChannelsModel(),
+                "capture_async_history",
+                2,
+                on_forward=on_forward,
+                drain_between_forwards=False,
+            )
+        self.assertEqual(observed, [0, 1])
+        self.assertEqual(result["completed_forwards"], 2)
+        self.assertFalse(result["capture_fatal_failure"])
+        self.assertEqual(result["capture_failure_count"], 2)
+        self.assertEqual(len(_FakeEagleMooncakeStore.instances[-1].puts), 4)
+        torch.testing.assert_close(
+            result["forward_hidden_states"][0],
+            result["forward_hidden_states"][1],
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            result["forward_mtp_hidden_states"][0],
+            result["forward_mtp_hidden_states"][1],
+            rtol=0,
+            atol=0,
+        )
+
+    def test_store_fault_preserves_canonical_mtp_and_serving_logits(self) -> None:
+        for fault in ("fail_put", "fail_flush", "async_error_after_accept_count"):
+            with self.subTest(fault=fault), patch.object(
+                _FakeEagleMooncakeStore, fault, 1
+            ):
+                result = run_scenario(
+                    ExplicitCaptureChannelsModel(), "capture_with_lm_head"
+                )
+            self.assertEqual(result["completed_forwards"], 1)
+            self.assertFalse(result["capture_fatal_failure"])
+            self.assertGreaterEqual(result["capture_failure_count"], 1)
+            positions = torch.arange(1, 6, dtype=torch.float16).reshape(-1, 1)
+            torch.testing.assert_close(
+                result["forward_hidden_states"][0], positions + 30, rtol=0, atol=0
+            )
+            torch.testing.assert_close(
+                result["forward_mtp_hidden_states"][0],
+                torch.cat((positions + 70, positions + 80), -1),
+                rtol=0,
+                atol=0,
+            )
+            torch.testing.assert_close(
+                result["forward_logits"][0],
+                torch.tensor([[32, 32], [35, 35]], dtype=torch.float32),
+                rtol=0,
+                atol=0,
+            )
+
+    def test_capture_error_drops_export_without_changing_canonical_mtp_or_logits(
+        self,
+    ) -> None:
+        model = ExplicitCaptureChannelsModel(
+            capture_error="injected optional capture packing failure"
+        )
+        result = run_scenario(
+            model, "capture_with_lm_head", 2, capture_only_first_forward=True
+        )
+        self.assertEqual(result["completed_forwards"], 2)
+        self.assertFalse(result["capture_fatal_failure"])
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertEqual(_FakeEagleMooncakeStore.instances[-1].puts, [])
+        torch.testing.assert_close(
+            result["forward_hidden_states"][0],
+            result["forward_hidden_states"][1],
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            result["forward_mtp_hidden_states"][0],
+            result["forward_mtp_hidden_states"][1],
+            rtol=0,
+            atol=0,
+        )
+        self.assertTrue(result["logits_defined"])
+
+        torch.testing.assert_close(
+            result["forward_logits"][0], result["forward_logits"][1], rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            result["forward_logits"][0],
+            torch.tensor([[32, 32], [35, 35]], dtype=torch.float32),
+            rtol=0,
+            atol=0,
+        )
+
+    def test_canonical_and_mtp_contract_errors_are_not_fail_open(self) -> None:
+        for micro_batch in (False, True):
+            for bad_field in ("bad_canonical", "bad_mtp"):
+                with self.subTest(micro_batch=micro_batch, field=bad_field):
+                    model = ExplicitCaptureChannelsModel(**{bad_field: True})
+                    scenario = "capture_micro_batch" if micro_batch else "capture_bf16"
+                    with self.assertRaisesRegex(
+                        Exception, "canonical/MTP.*contract violation"
+                    ):
+                        run_scenario(model, scenario)
+                    self.assertEqual(_FakeEagleMooncakeStore.instances[-1].puts, [])
+
+    def test_model_and_collective_execution_exceptions_remain_fatal(self) -> None:
+        class BrokenModel(CacheStoreForwardModel):
+            def _forward_one(self, inputs):
+                # Exercise a real tensor execution error, not a capture_error string.
+                return PyModelOutputs(
+                    torch.ones(1, device=inputs.input_ids.device).reshape(2)
+                )
+
+        with self.assertRaisesRegex(Exception, "shape.*invalid"):
+            run_scenario(BrokenModel(), "capture_bf16")
+
+        def broken_collective(*_args):
+            raise RuntimeError("injected collective execution failure")
+
+        _register_no_collectives(broken_collective)
+        self.addCleanup(clear_comm_ops)
+        with self.assertRaisesRegex(Exception, "injected collective execution failure"):
+            run_scenario(CacheStoreForwardModel(), "capture_bf16_tp")
+
+    def test_typed_worker_allocation_and_cuda_failures_remain_fatal(self) -> None:
+        original_put = _FakeEagleMooncakeStore.put_batch
+        for error_type in (MemoryError, torch.OutOfMemoryError):
+
+            def fatal_put(store, *args, **kwargs):
+                raise error_type("injected typed worker execution failure")
+
+            with self.subTest(error=error_type.__name__), patch.object(
+                _FakeEagleMooncakeStore, "put_batch", fatal_put
+            ):
+                first = run_scenario(ExplicitCaptureChannelsModel(), "capture_bf16")
+                self.assertEqual(first["completed_forwards"], 1)
+                self.assertTrue(first["capture_fatal_failure"])
+                model = ExplicitCaptureChannelsModel()
+                with self.assertRaisesRegex(
+                    Exception, "fatal hidden-state worker execution failure"
+                ):
+                    run_scenario(
+                        model, "capture_bf16", 2, capture_only_first_forward=True
+                    )
+                self.assertEqual(model.capture_flags, [True])
+        self.assertIs(_FakeEagleMooncakeStore.put_batch, original_put)
+
+    def test_capture_protocol_version_must_be_exact_v1(self) -> None:
+        for version in (None, True, "1", 0, 2):
+            with self.subTest(version=version), patch.object(
+                _FakeEagleMooncakeStore, "capture_protocol_version", version
+            ):
+                if version is None:
+                    del _FakeEagleMooncakeStore.capture_protocol_version
+                model = CacheStoreForwardModel()
+                before = len(_FakeEagleMooncakeStore.instances)
+                result = run_scenario(model, "capture_bf16")
+                self.assertEqual(model.capture_flags, [False])
+                self.assertEqual(result["completed_forwards"], 1)
+                self.assertFalse(result["capture_fatal_failure"])
+                self.assertEqual(result["capture_failure_count"], 1)
+                self.assertEqual(len(_FakeEagleMooncakeStore.instances), before)
+
+    def test_capture_metadata_preserves_configured_layer_order_and_actual_layout(
+        self,
+    ) -> None:
+        result = run_scenario(
+            ExplicitCaptureChannelsModel(), "capture_reordered_layers"
+        )
+        store = _FakeEagleMooncakeStore.instances[-1]
+        self.assertEqual(
+            store.put_batch_calls[0]["capture_metadata"], {"capture_layer_ids": [1, 0]}
+        )
+        for payload, tokens in zip(store.puts, (2, 3), strict=True):
+            metadata = payload["capture_metadata"]
+            self.assertEqual(metadata["capture_protocol_version"], 1)
+            self.assertEqual(metadata["capture_layer_ids"], [1, 0])
+            self.assertEqual(
+                metadata["shapes"],
+                {
+                    "hidden_states": (tokens, 2),
+                    "input_ids": (tokens,),
+                    "last_hidden_states": (tokens, 1),
+                },
+            )
+            self.assertEqual(
+                metadata["dtypes"],
+                {
+                    "hidden_states": torch.bfloat16,
+                    "input_ids": torch.int64,
+                    "last_hidden_states": torch.bfloat16,
+                },
+            )
+        self.assertEqual(result["completed_forwards"], 1)
+        # No new metadata source key is introduced; preflight/cleanup use the same v1 manifest.
+        expected = {
+            f"rtp_TestActor_{request}{suffix}"
+            for request in (501, 502)
+            for suffix in ("_hs", "_ids", "_lhs", "_ready")
+        }
+        self.assertEqual(set(store.query_calls[0]), expected)
+        self.assertTrue(all(set(query) == expected for query in store.query_calls))
+
+    def test_strict_query_preflight_never_publishes_unknown_or_existing_sources(
+        self,
+    ) -> None:
+        original_query = _FakeEagleMooncakeStore.query_keys
+        for answer in ("missing", "extra", "integer", "sequence", "error", "existing"):
+
+            def query(store, keys):
+                states = original_query(store, keys)
+                if answer == "missing":
+                    states.pop(next(iter(states)))
+                elif answer == "extra":
+                    states["unrequested"] = False
+                elif answer == "integer":
+                    states = dict.fromkeys(states, 0)
+                elif answer == "sequence":
+                    return list(states)
+                elif answer == "error":
+                    raise OSError("injected source query failure")
+                else:
+                    states[next(iter(states))] = True
+                return states
+
+            with self.subTest(answer=answer), patch.object(
+                _FakeEagleMooncakeStore, "query_keys", query
+            ):
+                result = run_scenario(ExplicitCaptureChannelsModel(), "capture_bf16")
+                self.assertEqual(result["completed_forwards"], 1)
+                self.assertFalse(result["capture_fatal_failure"])
+                self.assertEqual(result["capture_failure_count"], 1)
+                self.assertEqual(_FakeEagleMooncakeStore.instances[-1].put_attempts, 0)
+                torch.testing.assert_close(
+                    result["forward_hidden_states"][0],
+                    torch.arange(31, 36, dtype=torch.float16).reshape(-1, 1),
+                    rtol=0,
+                    atol=0,
+                )
+
+    def test_strict_query_cleanup_unknown_is_not_absence(self) -> None:
+        original_query = _FakeEagleMooncakeStore.query_keys
+        for answer in ("missing", "integer", "error"):
+
+            def query(store, keys):
+                states = original_query(store, keys)
+                if store.put_attempts:
+                    if answer == "missing":
+                        states.pop(next(iter(states)))
+                    elif answer == "integer":
+                        states = dict.fromkeys(states, 0)
+                    else:
+                        raise OSError("injected cleanup query failure")
+                return states
+
+            with self.subTest(answer=answer), patch.object(
+                _FakeEagleMooncakeStore, "query_keys", query
+            ):
+                result = run_scenario(ExplicitCaptureChannelsModel(), "capture_bf16")
+            self.assertEqual(result["completed_forwards"], 1)
+            self.assertFalse(result["capture_fatal_failure"])
+            self.assertEqual(result["capture_quota"]["samples"], 2)
+            self.assertEqual(result["capture_quota"]["retained_tasks"], 0)
+            self.assertEqual(result["capture_quota"]["retained_bytes"], 0)
+            self.assertFalse(_FakeEagleMooncakeStore.instances[-1].closed)
 
 
 class TorchSpecContractGuardTest(unittest.TestCase):
@@ -3820,7 +4088,15 @@ class TorchSpecContractGuardTest(unittest.TestCase):
         self.assertIsNotNone(mooncake_store)
         self.assertTrue(callable(quantize_aux_hidden_states))
 
-        for method_name in ("put_batch", "take_async_errors", "flush", "close"):
+        self.assertIs(type(mooncake_store.capture_protocol_version), int)
+        self.assertEqual(mooncake_store.capture_protocol_version, 1)
+        for method_name in (
+            "put_batch",
+            "take_async_errors",
+            "query_keys",
+            "flush",
+            "close",
+        ):
             self.assertTrue(
                 callable(getattr(mooncake_store, method_name, None)), method_name
             )
@@ -3868,6 +4144,10 @@ class TorchSpecContractGuardTest(unittest.TestCase):
             input_ids=[object()],
             last_hidden_states=[object()],
             hidden_states_scale=None,
+            capture_metadata={"capture_layer_ids": [1, 0]},
+        )
+        self.assertSignatureBinds(
+            mooncake_store.query_keys, object(), ["contract-key_ready"]
         )
         self.assertSignatureBinds(quantize_aux_hidden_states, object(), 2)
 

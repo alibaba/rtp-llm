@@ -93,6 +93,12 @@ filegroup(
     visibility = ["//rtp_llm/models_py/modules/kimi_k3/test:__pkg__"],
 )
 
+filegroup(
+    name = "kimi_k3_capture_control_flow_test_sources",
+    srcs = ["model_desc/kimi_k3.py"],
+    visibility = ["//rtp_llm/models_py/model_desc/test:__pkg__"],
+)
+
 
 filegroup(
     name = "cutlass_moe_config",

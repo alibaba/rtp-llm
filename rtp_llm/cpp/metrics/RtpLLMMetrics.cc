@@ -387,6 +387,19 @@ void RtpLLMGrammarMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMGramm
 }
 
 bool RtpLLMHiddenStateCaptureMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(retained_tasks_metric, "rtp_llm_hidden_state_capture_retained_tasks");
+    REGISTER_GAUGE_MUTABLE_METRIC(retained_bytes_metric, "rtp_llm_hidden_state_capture_retained_budget_bytes");
+    REGISTER_QPS_MUTABLE_METRIC(reservation_qps_metric, "rtp_llm_hidden_state_capture_reservation_qps");
+    REGISTER_QPS_MUTABLE_METRIC(quota_rejection_qps_metric, "rtp_llm_hidden_state_capture_quota_rejection_qps");
+    REGISTER_QPS_MUTABLE_METRIC(queue_rejection_qps_metric, "rtp_llm_hidden_state_capture_queue_rejection_qps");
+    REGISTER_QPS_MUTABLE_METRIC(cleanup_query_failure_qps_metric,
+                                "rtp_llm_hidden_state_capture_cleanup_query_failure_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(inflight_samples_metric, "rtp_llm_hidden_state_capture_inflight_samples");
+    REGISTER_GAUGE_MUTABLE_METRIC(inflight_bytes_metric, "rtp_llm_hidden_state_capture_inflight_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(inflight_tokens_metric, "rtp_llm_hidden_state_capture_inflight_tokens");
+    REGISTER_GAUGE_MUTABLE_METRIC(pending_batches_metric, "rtp_llm_hidden_state_capture_pending_batches");
+    REGISTER_GAUGE_MUTABLE_METRIC(cleanup_pending_samples_metric,
+                                  "rtp_llm_hidden_state_capture_cleanup_pending_samples");
     REGISTER_QPS_MUTABLE_METRIC(batch_qps_metric, "rtp_llm_hidden_state_capture_batch_qps");
     REGISTER_QPS_MUTABLE_METRIC(publish_success_qps_metric, "rtp_llm_hidden_state_capture_publish_success_qps");
     REGISTER_QPS_MUTABLE_METRIC(failure_qps_metric, "rtp_llm_hidden_state_capture_failure_qps");
@@ -428,6 +441,19 @@ bool RtpLLMHiddenStateCaptureMetrics::init(kmonitor::MetricsGroupManager* manage
 
 void RtpLLMHiddenStateCaptureMetrics::report(const kmonitor::MetricsTags*              tags,
                                              RtpLLMHiddenStateCaptureMetricsCollector* collector) {
+    REPORT_QPS(reservation_qps);
+    REPORT_QPS(quota_rejection_qps);
+    REPORT_QPS(queue_rejection_qps);
+    REPORT_QPS(cleanup_query_failure_qps);
+    if (collector->has_quota) {
+        REPORT_MUTABLE_METRIC(retained_tasks_metric, collector->retained_tasks);
+        REPORT_MUTABLE_METRIC(retained_bytes_metric, collector->retained_bytes);
+        REPORT_MUTABLE_METRIC(inflight_samples_metric, collector->inflight_samples);
+        REPORT_MUTABLE_METRIC(inflight_bytes_metric, collector->inflight_bytes);
+        REPORT_MUTABLE_METRIC(inflight_tokens_metric, collector->inflight_tokens);
+        REPORT_MUTABLE_METRIC(pending_batches_metric, collector->pending_batches);
+        REPORT_MUTABLE_METRIC(cleanup_pending_samples_metric, collector->cleanup_pending_samples);
+    }
     REPORT_QPS(batch_qps);
     REPORT_QPS(publish_success_qps);
     REPORT_QPS(failure_qps);

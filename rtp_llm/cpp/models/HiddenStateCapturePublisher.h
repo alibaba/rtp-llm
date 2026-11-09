@@ -1,10 +1,16 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 #include <pybind11/pybind11.h>
 #include <torch/extension.h>
@@ -14,13 +20,64 @@
 
 namespace rtp_llm {
 
-struct HiddenStateCaptureStats {
-    uint64_t failure_count{0};
-    uint64_t broken_rejection_count{0};
+namespace test {
+struct HiddenStateCapturePublisherTestPeer;
+}
+
+enum class HiddenStateCaptureFatalKind {
+    NONE,
+    TENSOR,
+    OUT_OF_MEMORY,
+    ACCELERATOR,
+    ALLOCATION,
+    RUNTIME
+};
+enum class HiddenStateCaptureFailureStage {
+    INITIALIZATION,
+    LAYOUT,
+    PREPARE,
+    QUANTIZE,
+    STORE,
+    SHUTDOWN
 };
 
-// TODO: Once the current contract is published as an immutable wheel, pin its
-// URL and SHA using RTP's Bazel requirements/lock workflow.
+struct HiddenStateCaptureFatalState {
+    HiddenStateCaptureFatalKind    kind{HiddenStateCaptureFatalKind::NONE};
+    HiddenStateCaptureFailureStage stage{HiddenStateCaptureFailureStage::INITIALIZATION};
+    std::string                    message;
+};
+
+struct HiddenStateCaptureStats {
+    uint64_t                    failure_count{0};
+    uint64_t                    broken_rejection_count{0};
+    HiddenStateCaptureFatalKind fatal_kind{HiddenStateCaptureFatalKind::NONE};
+};
+
+// Per publishing owner, not per TP rank. Payload limits exclude temporary
+// capture/quantization/staging allocations; deployments need additional headroom.
+struct HiddenStateCaptureLimits {
+    int64_t max_inflight_samples{64};
+    int64_t max_inflight_bytes{1073741824};
+    int64_t max_inflight_tokens{131072};
+    int64_t max_pending_batches{8};  // Total queued/active/unresolved tasks, not just deque length.
+    int64_t poll_interval_ms{1000};
+    // Producer snapshots + conservative per-task tensor scratch allowance.
+    // Excludes caller/model/CP/packing, quantizer internals and store staging headroom.
+    int64_t max_retained_bytes{2147483648};
+};
+
+struct HiddenStateCaptureQuotaSnapshot {
+    int64_t samples{0};
+    int64_t bytes{0};
+    int64_t tokens{0};
+    int64_t reserved_samples{0};
+    int64_t pending_batches{0};
+    int64_t published_samples{0};
+    int64_t cleanup_pending_samples{0};
+    int64_t retained_tasks{0};
+    int64_t retained_bytes{0};
+};
+
 class HiddenStateCapturePublisher final {
 public:
     HiddenStateCapturePublisher(int64_t                      layer_count,
@@ -29,65 +86,90 @@ public:
                                 c10::ScalarType              model_dtype,
                                 bool                         owner,
                                 int                          local_rank,
-                                kmonitor::MetricsReporterPtr metrics_reporter);
+                                kmonitor::MetricsReporterPtr metrics_reporter,
+                                HiddenStateCaptureLimits     limits        = {},
+                                std::vector<int64_t>         layer_ids     = {},
+                                std::optional<c10::Device>   worker_device = std::nullopt);
     ~HiddenStateCapturePublisher();
 
     HiddenStateCapturePublisher(const HiddenStateCapturePublisher&)            = delete;
     HiddenStateCapturePublisher& operator=(const HiddenStateCapturePublisher&) = delete;
 
-    void                       beginForward();
-    bool                       shouldPublish();
-    int64_t                    packedWidth() const;
-    std::string                validatePackedLayout(const torch::Tensor& tensor,
-                                                    int64_t              expected_rows,
-                                                    const c10::Device&   expected_device,
-                                                    const std::string&   context) const;
-    HiddenStateCaptureStats    stats() const;
-    std::optional<std::string> takeDeferredError();
+    // Admission must happen before capture allocation. IDs are unique for the
+    // run namespace. Non-owners consume the synchronized decision, never reserve.
+    bool tryReserve(int64_t request_id, int64_t valid_tokens);
+    // Serving cancellation only releases RESERVED entries whose local capture
+    // work has finished/been discarded. Once submitted this is a no-op: publication and source cleanup belong
+    // exclusively to the publisher, independent of the serving stream lifetime.
+    void                            cancelReserved(int64_t request_id);
+    HiddenStateCaptureQuotaSnapshot quotaSnapshot() const;
 
+    bool                    shouldPublish();
+    int64_t                 packedWidth() const;
+    std::string             validatePackedLayout(const torch::Tensor& tensor,
+                                                 int64_t              expected_rows,
+                                                 const c10::Device&   expected_device,
+                                                 const std::string&   context) const;
+    HiddenStateCaptureStats stats() const;
+    // Sticky owner-level worker failure, never attributed to a later stream.
+    HiddenStateCaptureFatalState fatalState() const;
+    static bool                  isFatalPythonError(pybind11::handle error) {
+        return pythonFatalKind(error) != HiddenStateCaptureFatalKind::NONE;
+    }
     bool rejectLayout(std::string layout_error);
 
-    torch::Tensor
-    makeFallback(const torch::Tensor& hidden_states, int64_t token_count, const c10::Device& fallback_device) const;
-    torch::Tensor publish(torch::Tensor        packed_hidden_states,
-                          const torch::Tensor& input_ids,
-                          const torch::Tensor& input_lengths,
-                          const torch::Tensor& request_ids,
-                          int64_t              expected_rows,
-                          const std::string&   layout_context,
-                          const c10::Device&   fallback_device);
+    // Snapshots CPU metadata and device payloads on the producer stream. No
+    // Python, network, device wait or flush; c10/OOM/allocation errors propagate.
+    bool trySubmit(torch::Tensor        packed_hidden_states,
+                   const torch::Tensor& input_ids,
+                   const torch::Tensor& input_lengths,
+                   const torch::Tensor& request_ids,
+                   int64_t              expected_rows,
+                   const std::string&   layout_context);
 
-    // The caller must keep the Python interpreter alive and stop publication
-    // before shutdown. The publisher destructor intentionally performs no Python calls.
-    // Requires the GIL; waits for the current store work without closing the store.
+    // Explicit maintenance barrier, never called by forward. Releases a held
+    // GIL while waiting for the worker. Published source quota is not released.
     bool flushPending();
-    // Acquires the GIL for store calls and Python reference cleanup.
+    // Interpreter must remain alive. Stops admission and joins without holding
+    // the GIL; the worker alone owns Python store calls and reference cleanup.
     void flushAndClose() noexcept;
 
 private:
-    enum class FailureStage {
-        INITIALIZATION,
-        LAYOUT,
-        PREPARE,
-        QUANTIZE,
-        STORE,
-        SHUTDOWN,
-    };
-
+    friend struct test::HiddenStateCapturePublisherTestPeer;
+    using FailureStage = HiddenStateCaptureFailureStage;
     enum class FailureDisposition {
         HARD_CONTRACT,
         REQUEST_ERROR,
         OPERATIONAL,
+        FATAL
+    };
+    enum class ReservationState {
+        RESERVED,
+        SUBMITTED,
+        PUBLISHED,
+        CLEANUP_PENDING
+    };
+    class CaptureFailure;
+    struct WorkerStream;
+    struct PublishTask;
+    struct Reservation {
+        int64_t                      tokens{0};
+        int64_t                      bytes{0};
+        ReservationState             state{ReservationState::RESERVED};
+        std::shared_ptr<PublishTask> task;
+        // Completed exports retain only a lightweight source manifest, not a task.
+        bool local_complete{false};  // Producer/worker GPU completion only.
+        bool store_attempted{false};
+        // Only original successful PUT + terminal flush proves no future native writes.
+        bool                     native_quiescent{false};
+        std::vector<std::string> keys;
     };
 
-    class CaptureFailure;
-
     template<typename Operation>
-    static decltype(auto) perform(FailureStage       failure_stage,
-                                  FailureDisposition failure_disposition,
-                                  const char*        context,
-                                  Operation&&        operation);
-
+    decltype(auto) perform(FailureStage       failure_stage,
+                           FailureDisposition failure_disposition,
+                           const char*        context,
+                           Operation&&        operation);
     struct PublishMetrics {
         int64_t publish_latency_us{0};
         int64_t quantize_latency_us{0};
@@ -103,15 +185,31 @@ private:
         bool    has_store_put_latency{false};
     };
 
+    static HiddenStateCaptureFatalKind nativeFatalKind(const std::exception& error) noexcept;
+    static HiddenStateCaptureFatalKind pythonFatalKind(pybind11::handle error, int depth = 0);
+    FailureDisposition
+         classifyWorkerFailure(const std::exception& error, FailureStage stage, FailureDisposition fallback) noexcept;
+    void latchFatal(FailureStage stage, HiddenStateCaptureFatalKind kind, const char* message) noexcept;
+    template<typename Fence>
+    bool          acceleratorFence(FailureStage stage, const char* phase, Fence&& operation) noexcept;
+    void          quarantineWorkerStream() noexcept;
+    bool          payloadBytes(int64_t tokens, int64_t& bytes) const;
+    void          workerLoop() noexcept;
+    void          processTask(const std::shared_ptr<PublishTask>& task);
+    torch::Tensor publishOnWorker(PublishTask& task);
+    bool          flushStore();
+    void          pollSourceKeys();
+    void          closeStore() noexcept;
+    void          releaseReservation(std::unordered_map<int64_t, Reservation>::iterator entry);
+    void          recordQuota();
     bool rejectFailure(std::string error_message, FailureStage failure_stage, FailureDisposition failure_disposition);
-    void initialize(int local_rank);
+    bool initialize(int local_rank);
     std::string makeRequestKey(int64_t request_id) const;
     std::string makeBatchId(uint64_t batch_sequence, int64_t first_request_id, int64_t last_request_id) const;
     bool        completeFailure(const std::string& error_message,
                                 FailureStage       failure_stage,
                                 FailureDisposition failure_disposition,
-                                const char*        phase,
-                                bool               defer_error);
+                                const char*        phase);
     void        deferError(std::string error_message, bool disable_capture);
     void        reportMetrics(RtpLLMHiddenStateCaptureMetricsCollector& collector);
     void        recordBatch();
@@ -122,23 +220,50 @@ private:
     void        recordPublish(bool success, const PublishMetrics& metrics);
     bool        observeAsyncErrors(FailureStage failure_stage, const char* phase);
 
-private:
-    const int64_t                 layer_count_;
-    const int64_t                 hidden_size_;
-    const HiddenStateCaptureDtype capture_dtype_;
-    const c10::ScalarType         model_dtype_;
-    const bool                    owner_;
-    std::string                   store_key_namespace_;
-    kmonitor::MetricsReporterPtr  metrics_reporter_;
+    const int64_t layer_count_;
+    // Real configured order, never inferred from the layer count. Missing IDs
+    // are tolerated for source compatibility but prevent worker publication.
+    const std::vector<int64_t>               layer_ids_;
+    const int64_t                            hidden_size_;
+    const HiddenStateCaptureDtype            capture_dtype_;
+    const c10::ScalarType                    model_dtype_;
+    const bool                               owner_;
+    const int                                local_rank_;
+    const HiddenStateCaptureLimits           limits_;
+    const c10::Device                        worker_device_;
+    std::string                              store_key_namespace_;
+    kmonitor::MetricsReporterPtr             metrics_reporter_;
+    std::atomic<bool>                        capture_enabled_{false};
+    std::atomic<uint64_t>                    failure_count_{0};
+    std::atomic<uint64_t>                    broken_rejection_count_{0};
+    std::atomic<uint64_t>                    batch_sequence_{0};
+    mutable std::mutex                       error_mutex_;
+    std::optional<std::string>               broken_reason_;
+    std::atomic<HiddenStateCaptureFatalKind> fatal_kind_{HiddenStateCaptureFatalKind::NONE};
+    FailureStage                             fatal_stage_{FailureStage::INITIALIZATION};
+    std::string                              fatal_message_;
 
-    std::atomic<bool>     capture_enabled_{true};
-    std::atomic<uint64_t> failure_count_{0};
-    std::atomic<uint64_t> broken_rejection_count_{0};
-    std::atomic<uint64_t> batch_sequence_{0};
-
-    std::mutex                 error_mutex_;
-    std::optional<std::string> deferred_error_;
-    std::optional<std::string> broken_reason_;
+    mutable std::mutex                       state_mutex_;
+    std::mutex                               close_mutex_;
+    std::condition_variable                  state_changed_;
+    std::unordered_map<int64_t, Reservation> reservations_;
+    std::deque<std::shared_ptr<PublishTask>> pending_;
+    int64_t                                  reserved_bytes_{0};
+    int64_t                                  reserved_tokens_{0};
+    int64_t                                  retained_tasks_{0};
+    int64_t                                  retained_bytes_{0};
+    bool                                     stopping_{false};
+    bool                                     cleanup_requested_{false};
+    bool                                     worker_active_{false};
+    bool                                     worker_finished_{false};
+    // Worker-owned sticky quarantine: native work may outlive a failed PUT/flush.
+    bool        native_write_unknown_{false};
+    std::thread worker_;
+    // An owned native nonblocking stream, never borrowed from Torch's finite pool.
+    std::shared_ptr<WorkerStream> worker_stream_owner_;
+    std::optional<c10::Stream>    worker_stream_;
+    // Test peer may inject a native-wrapper failure before submit, never in flight.
+    void (*protective_fence_override_)(){nullptr};
 
     pybind11::object mooncake_config_;
     pybind11::object store_;

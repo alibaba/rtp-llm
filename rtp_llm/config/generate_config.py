@@ -215,6 +215,8 @@ class GenerateConfig(BaseModel):
     return_incremental: bool = False
     return_hidden_states: bool = False
     return_all_hidden_states: bool = False
+    # Capture selected layers independently of the hidden-state response flags.
+    capture_hidden_states: bool = False
     hidden_states_cut_dim: int = 0
     normalized_hidden_states: bool = False
     select_tokens_str: List[str] = []
@@ -476,10 +478,26 @@ class GenerateConfig(BaseModel):
             self.response_format = ResponseFormat(type="json_object")
         self.json_format = False
 
+    def _validate_capture_hidden_states(self) -> None:
+        if not self.capture_hidden_states:
+            return
+        unsupported = {
+            "num_beams > 1": self.num_beams > 1,
+            "non-empty variable_num_beams": bool(self.variable_num_beams),
+            "num_return_sequences > 1": self.num_return_sequences > 1,
+            "reuse_cache=true; set reuse_cache=false to capture the full prompt": self.reuse_cache,
+        }
+        for combination, enabled in unsupported.items():
+            if enabled:
+                raise ValueError(
+                    f"capture_hidden_states does not support {combination}"
+                )
+
     def _validate_prefill_only(self) -> None:
         # Match C++ validatePrefillOnly(): reject negative limits before prompt
         # scoring can normalize them, even outside prefill-only mode.
         self._validate_max_new_tokens(self.max_new_tokens)
+        self._validate_capture_hidden_states()
         if self.return_prompt_logits:
             self.enforce_prompt_scoring_constraints()
         if not self.is_prefill_only():

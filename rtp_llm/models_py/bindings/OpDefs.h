@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 #include "rtp_llm/cpp/cache/BufferTypes.h"
@@ -401,6 +402,9 @@ struct PyModelOutputs {
     // a first-class forward output because CUDA graph replay does not execute
     // Python and therefore cannot safely recover it from mutable model state.
     torch::Tensor mtp_target_hidden_states;
+    // Optional capture transport; never replaces canonical hidden_states or MTP features.
+    torch::Tensor captured_hidden_states;
+    std::string   capture_error;
 
     PyModelOutputs() = default;
 

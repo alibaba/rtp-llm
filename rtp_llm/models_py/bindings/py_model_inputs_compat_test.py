@@ -180,10 +180,27 @@ class PyModelInputsCompatTest(unittest.TestCase):
 
         self.assertEqual(hidden_states.data_ptr(), outputs.hidden_states.data_ptr())
         self.assertIsNone(outputs.mtp_target_hidden_states)
+        self.assertIsNone(outputs.captured_hidden_states)
+        self.assertEqual(outputs.capture_error, "")
         self.assertFalse(hasattr(outputs, "params_ptr"))
 
         target_features = torch.ones(2, 3)
         outputs = PyModelOutputs(hidden_states, target_features)
+        self.assertEqual(
+            target_features.data_ptr(), outputs.mtp_target_hidden_states.data_ptr()
+        )
+        captured = torch.arange(18, dtype=torch.float16).reshape(2, 9)
+        outputs.captured_hidden_states = captured
+        outputs.capture_error = "optional capture failed"
+        self.assertEqual(hidden_states.data_ptr(), outputs.hidden_states.data_ptr())
+        self.assertEqual(
+            target_features.data_ptr(), outputs.mtp_target_hidden_states.data_ptr()
+        )
+        self.assertEqual(captured.data_ptr(), outputs.captured_hidden_states.data_ptr())
+        self.assertEqual(outputs.capture_error, "optional capture failed")
+        outputs.captured_hidden_states = None
+        outputs.capture_error = ""
+        self.assertIsNone(outputs.captured_hidden_states)
         self.assertEqual(
             target_features.data_ptr(), outputs.mtp_target_hidden_states.data_ptr()
         )

@@ -15,6 +15,9 @@ namespace rtp_llm {
 class Executor {
 public:
     Executor() {};
+    virtual HiddenStateCaptureReservationPtr tryReserveHiddenStateCapture(int64_t, int64_t) {
+        return {};
+    }
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,

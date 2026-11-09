@@ -10,6 +10,8 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <array>
+#include <atomic>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -77,6 +79,12 @@ struct GptModelInitParams {
 
     std::vector<int64_t>    hidden_state_capture_layer_ids;
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
+    int64_t                 hidden_state_capture_max_inflight_samples = 64;
+    int64_t                 hidden_state_capture_max_inflight_bytes   = 1073741824;
+    int64_t                 hidden_state_capture_max_inflight_tokens  = 131072;
+    int64_t                 hidden_state_capture_max_pending_batches  = 8;
+    int64_t                 hidden_state_capture_poll_interval_ms     = 1000;
+    int64_t                 hidden_state_capture_max_retained_bytes   = 2147483648;
 };
 
 enum GptModelInputIndex : size_t {
@@ -123,7 +131,7 @@ enum GptModelInputIndex : size_t {
     kernelSeqSizePerBlock,
     // Exact per-tensor placement bitmap from root.  Every tensor collected by
     // tpSyncModelInputs has a bit so non-root ranks choose the same CPU/UDS or
-    // CUDA/NCCL lane as rank 0.
+    // CUDA/NCCL lane as rank 0. The optional capture planning mirror is fixed CPU.
     tensorDeviceMap,
     // Preserve the root-side KV block-table layout across TP sync. Legacy
     // models use [batch, blocks], while grouped-cache models use
@@ -137,6 +145,8 @@ enum GptModelInputIndex : size_t {
     mmFeaturesSpans,
     engramTokenWindowRows,
     engramTokenWindowWidth,
+    hiddenStateCaptureWorkerFailed,
+    capturePlanningLengthRows,
     gptModelInputLength,
 };
 
@@ -203,14 +213,44 @@ struct TokenSliceInfo {
     size_t count  = 0;
 };
 
+// Shared by stream copies, with cancellation that never owns an executor/model.
+class HiddenStateCaptureReservation final {
+public:
+    explicit HiddenStateCaptureReservation(std::function<void()> cancel): cancel_(std::move(cancel)) {}
+    ~HiddenStateCaptureReservation() {
+        cancel();
+    }
+    HiddenStateCaptureReservation(const HiddenStateCaptureReservation&)            = delete;
+    HiddenStateCaptureReservation& operator=(const HiddenStateCaptureReservation&) = delete;
+    bool                           active() const {
+        return active_.load(std::memory_order_acquire);
+    }
+    void cancel() noexcept {
+        if (active_.exchange(false, std::memory_order_acq_rel)) {
+            try {
+                cancel_();
+            } catch (...) { /* Cancellation must be destructor-safe. */
+            }
+        }
+    }
+
+private:
+    std::atomic<bool>     active_{true};
+    std::function<void()> cancel_;
+};
+using HiddenStateCaptureReservationPtr = std::shared_ptr<HiddenStateCaptureReservation>;
+
 class ModelBase {
 public:
     virtual ~ModelBase()                                                     = default;
     virtual GptModelOutputs            forward(const GptModelInputs& inputs) = 0;
     virtual void                       releaseBuffers() {}
     virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
-    virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
-        return std::nullopt;
+    virtual bool                       hiddenStateCaptureHasFatalFailure() const {
+        return false;
+    }
+    virtual HiddenStateCaptureReservationPtr tryReserveHiddenStateCapture(int64_t, int64_t) {
+        return {};
     }
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-

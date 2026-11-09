@@ -340,7 +340,11 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("lm_output_already_selected", &PyModelOutputs::lm_output_already_selected)
         .def_readwrite("mtp_target_hidden_states",
                        &PyModelOutputs::mtp_target_hidden_states,
-                       "Optional target features consumed by speculative decoding");
+                       "Optional target features consumed by speculative decoding")
+        .def_readwrite("captured_hidden_states",
+                       &PyModelOutputs::captured_hidden_states,
+                       "Optional packed auxiliary and canonical final hidden states")
+        .def_readwrite("capture_error", &PyModelOutputs::capture_error, "Forward-local hidden-state capture failure");
 }
 
 }  // namespace torch_ext

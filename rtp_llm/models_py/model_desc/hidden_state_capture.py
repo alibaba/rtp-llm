@@ -30,6 +30,7 @@ class CaptureContext:
         "_captured_hidden_states",
         "_supported",
         "_enabled",
+        "_capture_error",
         "_profile_enabled",
         "_profile_noop",
         "_record_function_fast",
@@ -53,6 +54,7 @@ class CaptureContext:
         self._captured_hidden_states = captured_hidden_states
         self._supported = supported
         self._enabled = enabled
+        self._capture_error = ""
         self._profile_enabled = False
         self._profile_noop = _NOOP_RECORD_FUNCTION_RANGE
         self._record_function_fast = None
@@ -125,7 +127,17 @@ class CaptureContext:
             enabled=True,
         )
 
+    @property
+    def failed(self) -> bool:
+        return bool(self._capture_error)
+
+    @property
+    def capture_error(self) -> str:
+        return self._capture_error
+
     def wants_layer(self, layer_id: int) -> bool:
+        # This is the frozen forward plan, not snapshot health. Kimi SP must
+        # still execute every selected-layer collective after a local failure.
         return self._enabled and layer_id in self._layer_slots
 
     def capture_layer(
@@ -134,21 +146,52 @@ class CaptureContext:
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> None:
-        if not self._enabled:
+        if not self._enabled or self.failed:
             return
         slot = self._layer_slots.get(layer_id)
         if slot is None:
             return
-        canonical_layer = self._canonical_layer
-        captured_hidden_states = self._captured_hidden_states
-        if canonical_layer is None or captured_hidden_states is None:
-            raise RuntimeError("active capture context is missing canonical hooks")
-        with (
-            self._record_function_fast(f"hidden_state_capture.layer(layer={layer_id})")
-            if self._record_function_fast is not None
-            else self._profile_noop
+        try:
+            canonical_layer = self._canonical_layer
+            captured_hidden_states = self._captured_hidden_states
+            if canonical_layer is None or captured_hidden_states is None:
+                raise ValueError("active capture context is missing canonical hooks")
+            with (
+                self._record_function_fast(
+                    f"hidden_state_capture.layer(layer={layer_id})"
+                )
+                if self._record_function_fast is not None
+                else self._profile_noop
+            ):
+                captured_hidden_states[slot] = canonical_layer(hidden_states, residual)
+        except (
+            AttributeError,
+            LookupError,
+            TypeError,
+            ValueError,
+            RuntimeError,
+        ) as error:
+            self._fail(error, hidden_states, residual)
+
+    def _fail(self, error: Exception, *tensors: torch.Tensor | None) -> None:
+        # Device RuntimeErrors can report asynchronous kernel/collective faults.
+        # Without a typed recoverable device error, fail closed; never infer GPU
+        # health from message text or introduce a synchronization to probe it.
+        fatal_types = tuple(
+            error_type
+            for name in ("OutOfMemoryError", "AcceleratorError")
+            if isinstance(error_type := getattr(torch, name, None), type)
+        )
+        if isinstance(error, fatal_types) or (
+            isinstance(error, RuntimeError)
+            and any(
+                tensor is not None and tensor.device.type != "cpu" for tensor in tensors
+            )
         ):
-            captured_hidden_states[slot] = canonical_layer(hidden_states, residual)
+            raise error
+        if not self._capture_error:
+            self._capture_error = f"{type(error).__name__}: {error}"
+        self._captured_hidden_states = None
 
     def finalize(
         self,
@@ -166,36 +209,56 @@ class CaptureContext:
         if not self._enabled:
             return PyModelOutputs(final_hidden_states)
 
-        captured_hidden_states = self._captured_hidden_states
-        if captured_hidden_states is None:
-            raise RuntimeError("active capture context has no forward-local storage")
-        missing_layer_ids = [
-            layer_id
-            for layer_id, captured in zip(
-                self._ordered_layer_ids, captured_hidden_states
-            )
-            if captured is None
-        ]
-        if missing_layer_ids:
-            raise RuntimeError(
-                "hidden-state capture did not visit configured layers "
-                f"{missing_layer_ids}"
-            )
-        with (
-            self._record_function_fast("hidden_state_capture.pack")
-            if self._record_function_fast is not None
-            else self._profile_noop
-        ):
-            packed_hidden_states = torch.cat(
-                [
-                    captured
-                    for captured in captured_hidden_states
-                    if captured is not None
+        outputs = PyModelOutputs(final_hidden_states)
+        if not self.failed:
+            try:
+                captured_hidden_states = self._captured_hidden_states
+                if captured_hidden_states is None or len(captured_hidden_states) != len(
+                    self._ordered_layer_ids
+                ):
+                    raise ValueError(
+                        "active capture context has invalid forward-local storage"
+                    )
+                missing_layer_ids = [
+                    layer_id
+                    for layer_id, captured in zip(
+                        self._ordered_layer_ids, captured_hidden_states
+                    )
+                    if captured is None
                 ]
-                + [final_hidden_states],
-                dim=-1,
-            )
-        return PyModelOutputs(packed_hidden_states)
+                if missing_layer_ids:
+                    raise ValueError(
+                        "hidden-state capture did not visit configured layers "
+                        f"{missing_layer_ids}"
+                    )
+                for captured in captured_hidden_states:
+                    if (
+                        not isinstance(captured, torch.Tensor)
+                        or captured.shape != final_hidden_states.shape
+                        or captured.dtype != final_hidden_states.dtype
+                        or captured.device != final_hidden_states.device
+                    ):
+                        raise ValueError(
+                            "captured hidden state does not match canonical final tensor"
+                        )
+                with (
+                    self._record_function_fast("hidden_state_capture.pack")
+                    if self._record_function_fast is not None
+                    else self._profile_noop
+                ):
+                    outputs.captured_hidden_states = torch.cat(
+                        captured_hidden_states + [final_hidden_states], dim=-1
+                    )
+            except (
+                AttributeError,
+                LookupError,
+                TypeError,
+                ValueError,
+                RuntimeError,
+            ) as error:
+                self._fail(error, final_hidden_states)
+        outputs.capture_error = self._capture_error
+        return outputs
 
 
 _UNSUPPORTED_CAPTURE_CONTEXT = CaptureContext()

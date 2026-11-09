@@ -19,6 +19,7 @@
 策略：Python 侧硬编码期望值 + C++ 侧 static_assert，无需解析源码。
 """
 
+import copy
 import logging
 import unittest
 from types import SimpleNamespace
@@ -311,6 +312,176 @@ class TestPrefillOnlyGenerateConfig(unittest.TestCase):
                 max_new_tokens=1, return_prompt_logits=True
             ).return_prompt_logits
         )
+
+
+class TestCaptureHiddenStatesGenerateConfig(unittest.TestCase):
+    INVALID_COMBINATIONS = (
+        ({"num_beams": 2}, "num_beams"),
+        ({"variable_num_beams": [1]}, "variable_num_beams"),
+        ({"variable_num_beams": [1, 2]}, "variable_num_beams"),
+        ({"num_return_sequences": 2}, "num_return_sequences"),
+        ({"reuse_cache": True}, "reuse_cache=false"),
+    )
+
+    def test_capture_is_a_declared_boolean_defaulting_to_false(self):
+        field = GenerateConfig.model_fields["capture_hidden_states"]
+        self.assertIs(field.annotation, bool)
+        self.assertIs(field.default, False)
+        self.assertIs(GenerateConfig().capture_hidden_states, False)
+        self.assertIs(
+            GenerateConfig(max_new_tokens=0, reuse_cache=True).capture_hidden_states,
+            False,
+        )
+
+    def test_capture_survives_json_and_copies(self):
+        for enabled in (False, True):
+            with self.subTest(capture_hidden_states=enabled):
+                config = GenerateConfig(
+                    max_new_tokens=7,
+                    capture_hidden_states=enabled,
+                    reuse_cache=False,
+                    return_hidden_states=True,
+                    return_all_hidden_states=True,
+                )
+                self.assertIs(config.model_dump()["capture_hidden_states"], enabled)
+                restored = GenerateConfig.model_validate_json(config.model_dump_json())
+                self.assertEqual(restored, config)
+                self.assertIn("capture_hidden_states", restored.model_fields_set)
+                for copied in (
+                    copy.copy(config),
+                    copy.deepcopy(config),
+                    config.model_copy(),
+                    config.model_copy(deep=True),
+                ):
+                    self.assertEqual(copied, config)
+                    copied.capture_hidden_states = not enabled
+                    self.assertIs(config.capture_hidden_states, enabled)
+
+    def test_capture_updates_coerce_and_preserve_request_parameters(self):
+        for method in ("update", "update_and_pop"):
+            with self.subTest(method=method):
+                config = GenerateConfig(max_new_tokens=7, is_streaming=True)
+                update = {
+                    "capture_hidden_states": "true",
+                    "reuse_cache": "false",
+                    "unknown": "keep",
+                }
+                result = getattr(config, method)(update)
+                if method == "update_and_pop":
+                    self.assertEqual(result, {"unknown": "keep"})
+                self.assertEqual(update["capture_hidden_states"], "true")
+                self.assertIs(config.capture_hidden_states, True)
+                self.assertIs(config.reuse_cache, False)
+                config.validate()
+                self.assertEqual(config.max_new_tokens, 7)
+                self.assertTrue(config.is_streaming)
+                self.assertFalse(config.return_hidden_states)
+                self.assertFalse(config.return_all_hidden_states)
+                self.assertFalse(config.is_prefill_only())
+                getattr(config, method)(
+                    {"capture_hidden_states": "false", "reuse_cache": "true"}
+                )
+                self.assertIs(config.capture_hidden_states, False)
+                self.assertIs(config.reuse_cache, True)
+
+    def test_capture_rejects_unsupported_combinations_at_construction(self):
+        for max_new_tokens in (0, 7):
+            for invalid, message in self.INVALID_COMBINATIONS:
+                with self.subTest(max_new_tokens=max_new_tokens, invalid=invalid):
+                    values = dict(
+                        max_new_tokens=max_new_tokens,
+                        capture_hidden_states=True,
+                        reuse_cache=False,
+                    )
+                    values.update(invalid)
+                    with self.assertRaisesRegex(ValidationError, message):
+                        GenerateConfig(**values)
+
+    def test_mutated_capture_is_validated_without_changing_parameters(self):
+        for invalid, message in self.INVALID_COMBINATIONS:
+            with self.subTest(invalid=invalid):
+                config = GenerateConfig(
+                    max_new_tokens=7, capture_hidden_states=True, reuse_cache=False
+                )
+                for field, value in invalid.items():
+                    setattr(config, field, value)
+                before = config.model_dump()
+                with self.assertRaisesRegex(FtRuntimeException, message) as ctx:
+                    config.validate()
+                self.assertEqual(
+                    ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+                )
+                self.assertEqual(config.model_dump(), before)
+
+    def test_invalid_capture_updates_are_atomic(self):
+        for method in ("update", "update_and_pop"):
+            for invalid, message in self.INVALID_COMBINATIONS:
+                with self.subTest(method=method, invalid=invalid):
+                    config = GenerateConfig(
+                        max_new_tokens=7, capture_hidden_states=True, reuse_cache=False
+                    )
+                    config._diverge_depth_warned = True
+                    before = config.model_copy(deep=True)
+                    update = {**invalid, "unknown": "keep"}
+                    with self.assertRaisesRegex(FtRuntimeException, message):
+                        getattr(config, method)(update)
+                    self.assertEqual(config, before)
+                    self.assertEqual(config.model_fields_set, before.model_fields_set)
+                    self.assertEqual(update, {**invalid, "unknown": "keep"})
+
+    def test_enabling_capture_requires_explicit_cache_opt_out_atomically(self):
+        for method in ("update", "update_and_pop"):
+            with self.subTest(method=method):
+                config = GenerateConfig(max_new_tokens=7)
+                with self.assertRaisesRegex(FtRuntimeException, "reuse_cache=false"):
+                    getattr(config, method)({"capture_hidden_states": True})
+                self.assertFalse(config.capture_hidden_states)
+                self.assertTrue(config.reuse_cache)
+
+    def test_invalid_capture_boolean_is_rejected(self):
+        with self.assertRaisesRegex(ValidationError, "capture_hidden_states") as ctx:
+            GenerateConfig(capture_hidden_states=object(), reuse_cache=False)
+        self.assertEqual(ctx.exception.errors()[0]["loc"], ("capture_hidden_states",))
+        for method in ("update", "update_and_pop"):
+            with self.subTest(method=method):
+                config = GenerateConfig()
+                before = config.model_copy(deep=True)
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "capture_hidden_states"
+                ):
+                    getattr(config, method)(
+                        {"capture_hidden_states": object(), "reuse_cache": False}
+                    )
+                self.assertEqual(config, before)
+
+    def test_positive_capture_preserves_legacy_hidden_state_flags(self):
+        for capture in (False, True):
+            for return_hidden in (False, True):
+                for return_all in (False, True):
+                    with self.subTest(
+                        capture=capture, hidden=return_hidden, all=return_all
+                    ):
+                        config = GenerateConfig(
+                            max_new_tokens=7,
+                            capture_hidden_states=capture,
+                            reuse_cache=not capture,
+                            return_hidden_states=return_hidden,
+                            return_all_hidden_states=return_all,
+                            is_streaming=True,
+                        )
+                        before = config.model_dump()
+                        config.validate()
+                        self.assertEqual(config.model_dump(), before)
+                        self.assertFalse(config.is_prefill_only())
+
+    def test_explicit_zero_token_capture_does_not_require_legacy_response_flags(self):
+        config = GenerateConfig(
+            max_new_tokens=0, capture_hidden_states=True, reuse_cache=False
+        )
+        config.validate()
+        self.assertTrue(config.is_prefill_only())
+        self.assertFalse(config.return_hidden_states)
+        self.assertFalse(config.return_all_hidden_states)
 
 
 class TestGenerateConfigUpdates(unittest.TestCase):

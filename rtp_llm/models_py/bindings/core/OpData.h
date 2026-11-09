@@ -82,6 +82,10 @@ struct GptModelInputs {
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index
 
+    // Ingress snapshots saved before H2D/CP/SP. Lengths also travel in the TP
+    // CPU payload for micro-batch planning; request IDs remain owner-only.
+    torch::Tensor capture_input_lengths_cpu;
+    torch::Tensor capture_request_ids_cpu;
     torch::Tensor request_id;             // int64, [context_batch_size]
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
@@ -102,6 +106,7 @@ struct GptModelInputs {
     bool need_all_hidden_states = false;
     bool skip_lm_head           = false;
     bool capture_hidden_states  = false;
+    bool capture_worker_failed  = false;  // Root-owned engine health, synchronized with ordinary TP controls.
     bool need_moe_gating        = false;
     bool warmup                 = false;
     bool skip_run               = false;

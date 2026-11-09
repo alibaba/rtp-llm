@@ -87,6 +87,7 @@ public:
     bool                          return_incremental       = false;
     bool                          return_hidden_states     = false;
     bool                          return_all_hidden_states = false;
+    bool                          capture_hidden_states    = false;
     bool                          normalized_hidden_states = false;
     bool                          return_output_ids        = false;
     bool                          return_input_ids         = false;
@@ -152,11 +153,31 @@ public:
         can_use_pd_separation = false;
     }
 
+    void validateCaptureHiddenStates() const {
+        if (!capture_hidden_states) {
+            return;
+        }
+        if (num_beams > 1) {
+            throw std::invalid_argument("capture_hidden_states does not support num_beams > 1");
+        }
+        if (!variable_num_beams.empty()) {
+            throw std::invalid_argument("capture_hidden_states does not support non-empty variable_num_beams");
+        }
+        if (num_return_sequences > 1) {
+            throw std::invalid_argument("capture_hidden_states does not support num_return_sequences > 1");
+        }
+        if (reuse_cache) {
+            throw std::invalid_argument("capture_hidden_states does not support reuse_cache=true; "
+                                        "set reuse_cache=false to capture the full prompt");
+        }
+    }
+
     void validatePrefillOnly() {
         if (max_new_tokens < 0) {
             throw std::invalid_argument("max_new_tokens must be greater than or equal to 0, got "
                                         + std::to_string(max_new_tokens));
         }
+        validateCaptureHiddenStates();
         if (return_prompt_logits) {
             enforcePromptScoringConstraints();
         }
@@ -250,6 +271,7 @@ public:
                      << ", return_logits:" << return_logits << ", return_incremental: " << return_incremental
                      << ", return_hidden_states:" << return_hidden_states
                      << ", return_all_hidden_states:" << return_all_hidden_states
+                     << ", capture_hidden_states:" << capture_hidden_states
                      << ", hidden_states_cut_dim:" << hidden_states_cut_dim
                      << ", normalized_hidden_states:" << normalized_hidden_states
                      << ", return_output_ids:" << return_output_ids << ", return_input_ids:" << return_input_ids
@@ -339,6 +361,7 @@ public:
         JSONIZE(return_incremental);
         JSONIZE(return_hidden_states);
         JSONIZE(return_all_hidden_states);
+        JSONIZE(capture_hidden_states);
         JSONIZE(hidden_states_cut_dim);
         JSONIZE(normalized_hidden_states);
         JSONIZE(return_output_ids);

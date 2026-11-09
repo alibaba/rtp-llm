@@ -586,6 +586,152 @@ TEST_F(NormalEngineTest, testDirectEngineEntriesConvertPrefillValidationErrorsTo
     EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
 }
 
+TEST_F(NormalEngineTest, testDirectEngineEntriesConvertCaptureValidationErrorsToStreamErrors) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+    ASSERT_TRUE(engine->stop().ok());
+
+    struct TestCase {
+        const char*      name;
+        int              num_beams;
+        std::vector<int> variable_num_beams;
+        int              num_return_sequences;
+        bool             disable_reuse_cache;
+        const char*      error;
+    };
+    const std::vector<TestCase> cases = {
+        {"default_reuse_cache", 1, {}, 1, false, "capture_hidden_states does not support reuse_cache=true"},
+        {"beam_search", 2, {}, 1, true, "capture_hidden_states does not support num_beams > 1"},
+        {"variable_beams", 1, {1, 2}, 1, true, "capture_hidden_states does not support non-empty variable_num_beams"},
+        {"multiple_sequences", 1, {}, 2, true, "capture_hidden_states does not support num_return_sequences > 1"},
+        {"beam_and_reuse_cache", 2, {}, 1, false, "capture_hidden_states does not support num_beams > 1"},
+    };
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        for (const int max_new_tokens : {0, 1}) {
+            SCOPED_TRACE(max_new_tokens);
+            auto query                                    = make_shared<GenerateInput>();
+            query->input_ids                              = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+            query->generate_config                        = make_shared<GenerateConfig>();
+            query->generate_config->max_new_tokens        = max_new_tokens;
+            query->generate_config->capture_hidden_states = true;
+            query->generate_config->num_beams             = test_case.num_beams;
+            query->generate_config->variable_num_beams    = test_case.variable_num_beams;
+            query->generate_config->num_return_sequences  = test_case.num_return_sequences;
+            if (test_case.disable_reuse_cache) {
+                query->generate_config->reuse_cache = false;
+            }
+            const auto original_config = query->generate_config;
+            const auto original_fields = original_config->debugString();
+            const auto original_ids    = query->input_ids.clone();
+            const auto original_data   = query->input_ids.data_ptr();
+            auto       expect_error    = [&](const GenerateStreamPtr& stream) {
+                ASSERT_NE(stream, nullptr);
+                EXPECT_TRUE(stream->hasError());
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_NE(stream->stopReason().find(test_case.error), std::string::npos);
+                EXPECT_FALSE(stream->hasEvent(StreamEvents::CanRun));
+                EXPECT_EQ(stream->curBlocksNum(), 0);
+                EXPECT_NE(stream->generateInput(), query);
+                EXPECT_NE(stream->generateConfig(), original_config);
+                EXPECT_EQ(stream->generateConfig()->max_new_tokens, 1);
+                EXPECT_FALSE(stream->generateConfig()->capture_hidden_states);
+                EXPECT_EQ(stream->generateConfig()->maxNumBeams(), 1);
+                EXPECT_EQ(stream->generateConfig()->num_return_sequences, 1);
+                EXPECT_EQ(query->generate_config, original_config);
+                EXPECT_EQ(query->generate_config->debugString(), original_fields);
+                EXPECT_EQ(query->input_ids.data_ptr(), original_data);
+                EXPECT_TRUE(torch::equal(query->input_ids, original_ids));
+            };
+
+            std::shared_ptr<GenerateStream> stream;
+            EXPECT_NO_THROW(stream = engine->makeStream(query));
+            expect_error(stream);
+            stream.reset();
+            EXPECT_NO_THROW(stream = engine->enqueue(query));
+            expect_error(stream);
+
+            std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>> result;
+            EXPECT_NO_THROW(result = engine->enqueueMultiple({query, query}));
+            EXPECT_EQ(result.first, std::vector<bool>({false, false}));
+            ASSERT_EQ(result.second.size(), 2);
+            for (const auto& invalid_stream : result.second) {
+                expect_error(invalid_stream);
+            }
+            EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+        }
+    }
+}
+
+TEST_F(NormalEngineTest, testEngineEntriesPreserveValidConfigsWithInvalidCaptureInBatch) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+    // Inspect scheduling without executing capture on the logits-only mock model.
+    ASSERT_TRUE(engine->stop().ok());
+
+    auto make_query = [](int max_new_tokens) {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = max_new_tokens;
+        return query;
+    };
+    size_t scheduled = 0;
+    for (const bool capture : {false, true}) {
+        SCOPED_TRACE(capture);
+        for (const int max_new_tokens : {0, 1}) {
+            SCOPED_TRACE(max_new_tokens);
+            for (const bool invalid_first : {false, true}) {
+                SCOPED_TRACE(invalid_first);
+                auto valid                                      = make_query(max_new_tokens);
+                valid->generate_config->capture_hidden_states   = capture;
+                valid->generate_config->reuse_cache             = !capture;
+                const auto valid_config                         = valid->generate_config;
+                const auto valid_fields                         = valid_config->debugString();
+                auto       invalid                              = make_query(0);
+                invalid->generate_config->capture_hidden_states = true;
+                const auto invalid_config                       = invalid->generate_config;
+                const auto invalid_fields                       = invalid_config->debugString();
+
+                auto expect_valid = [&](const GenerateStreamPtr& stream) {
+                    ASSERT_NE(stream, nullptr);
+                    EXPECT_FALSE(stream->hasError());
+                    EXPECT_EQ(stream->generateInput(), valid);
+                    EXPECT_EQ(stream->generateConfig(), valid_config);
+                    EXPECT_EQ(valid->generate_config, valid_config);
+                    EXPECT_EQ(valid_config->debugString(), valid_fields);
+                };
+                std::shared_ptr<GenerateStream> stream;
+                EXPECT_NO_THROW(stream = engine->makeStream(valid));
+                expect_valid(stream);
+                stream.reset();
+                EXPECT_NO_THROW(stream = engine->enqueue(valid));
+                expect_valid(stream);
+                ++scheduled;
+                EXPECT_EQ(engine->getScheduler().onflightStreams(), scheduled);
+
+                auto inputs = invalid_first ? std::vector<std::shared_ptr<GenerateInput>>{invalid, valid} :
+                                              std::vector<std::shared_ptr<GenerateInput>>{valid, invalid};
+                std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>> result;
+                EXPECT_NO_THROW(result = engine->enqueueMultiple(inputs));
+                EXPECT_EQ(result.first, std::vector<bool>({!invalid_first, invalid_first}));
+                ASSERT_EQ(result.second.size(), 2);
+                expect_valid(result.second[invalid_first ? 1 : 0]);
+                const auto& rejected = result.second[invalid_first ? 0 : 1];
+                ASSERT_NE(rejected, nullptr);
+                EXPECT_TRUE(rejected->hasError());
+                EXPECT_EQ(rejected->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_FALSE(rejected->hasEvent(StreamEvents::CanRun));
+                EXPECT_EQ(rejected->curBlocksNum(), 0);
+                EXPECT_EQ(invalid->generate_config, invalid_config);
+                EXPECT_EQ(invalid_config->debugString(), invalid_fields);
+                ++scheduled;
+                EXPECT_EQ(engine->getScheduler().onflightStreams(), scheduled);
+            }
+        }
+    }
+}
+
 TEST_F(NormalEngineTest, testEnqueueMultipleRejectsMixedModesBeforeRoleFiltering) {
     CustomConfig config;
     config.role_type = RoleType::DECODE;
