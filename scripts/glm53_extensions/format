@@ -1,0 +1,9 @@
+#pragma once
+#define FMT_HEADER_ONLY 1
+#include <fmt/format.h>
+#include <string_view>
+namespace std {
+template<class... A> string format(string_view f, A&&... a) {
+  return fmt::vformat(fmt::string_view(f.data(), f.size()), fmt::make_format_args(a...));
+}
+}
