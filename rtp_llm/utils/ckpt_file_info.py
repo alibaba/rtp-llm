@@ -3,8 +3,9 @@ import json
 import logging
 import os
 import struct
+import threading
 from pathlib import PosixPath
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from safetensors import safe_open
@@ -57,6 +58,113 @@ def configure_loader_page_cache(enabled: bool, threshold_mb: int) -> None:
     _DROP_PAGE_CACHE_THRESHOLD = max(0, int(threshold_mb)) * 1024 * 1024
     os.environ["LOADER_DROP_PAGE_CACHE"] = "1" if bool(enabled) else "0"
     os.environ["LOADER_DROP_PAGE_CACHE_THRESHOLD_MB"] = str(max(0, int(threshold_mb)))
+
+
+class CkptMetaCache:
+    """Process-wide checkpoint metadata cache keyed by file path.
+
+    Caches the parsed header metadata (and other small path-scoped parses
+    such as index.json) so repeated ``CkptDatabase(path)`` constructions on
+    the same directory skip re-opening every shard: target + eplb + draft
+    loaders each used to cold-scan all shards of a shared checkpoint dir
+    (4 full scans measured on the dspark smoke, ~91s per role).
+
+    Interface contract:
+      * ``get``/``put``/``get_or_load`` take the internal lock; callers
+        never lock manually.
+      * entries are validated against ``(st_mtime_ns, st_size)`` on every
+        ``get``; a rewritten file re-parses on the next miss.
+      * values are treated as immutable shared objects (read-only by
+        convention). ``CkptDatabase.cleanup_database`` rebinds
+        ``CkptFileInfo.metadata = None`` per instance, which never touches
+        the cached dict, so a cleaned target database does not poison a
+        draft database built afterwards.
+      * ``get_or_load`` does NOT hold the lock while calling ``loader``
+        (NAS header parses take seconds). Concurrent misses may duplicate
+        the parse and both store the same result; benign.
+
+    Values must not be ``None``; ``put`` silently skips ``None`` so a
+    miss stays a miss instead of caching a poisoned entry.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: Dict[str, Tuple[int, int, Any]] = {}
+        self._hits = 0
+        self._misses = 0
+
+    def get(self, path: str) -> Optional[Any]:
+        """Return the cached value when the entry exists and (mtime, size)
+        still matches; ``None`` on miss, path failure, or stat change."""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        key = os.path.abspath(path)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None and entry[0] == st.st_mtime_ns and entry[1] == st.st_size:
+                self._hits += 1
+                return entry[2]
+        return None
+
+    def put(self, path: str, value: Any) -> None:
+        """Cache ``value`` under the current (mtime, size) of ``path``.
+        Unstatable paths and ``None`` values are skipped silently."""
+        if value is None:
+            return
+        try:
+            st = os.stat(path)
+        except OSError:
+            return
+        key = os.path.abspath(path)
+        with self._lock:
+            self._entries[key] = (st.st_mtime_ns, st.st_size, value)
+            self._misses += 1
+
+    def get_or_load(self, path: str, loader: Callable[[str], Any]) -> Any:
+        """Cache-first load: return the hit, else parse via ``loader(path)``,
+        store, and return. The lock is released while ``loader`` runs."""
+        value = self.get(path)
+        if value is not None:
+            return value
+        value = loader(path)
+        self.put(path, value)
+        return value
+
+    def stats(self) -> Tuple[int, int]:
+        """Return ``(hits, misses)`` for observability logs."""
+        with self._lock:
+            return (self._hits, self._misses)
+
+    def clear(self) -> None:
+        """Drop all entries and reset counters (test isolation)."""
+        with self._lock:
+            self._entries.clear()
+            self._hits = 0
+            self._misses = 0
+
+
+# Per-file header metadata cache shared by every CkptFileInfo construction.
+_FILE_META_CACHE = CkptMetaCache()
+
+
+def _parse_file_meta(file: str) -> Dict[str, Any]:
+    """Uncached header parse for one checkpoint file.
+
+    https://huggingface.co/docs/safetensors/metadata_parsing
+    """
+    if file.endswith(".safetensors"):
+        meta = {}
+        with safe_open(file, framework="pt") as f_:
+            with open(file, "rb") as f:
+                length_of_header = struct.unpack("<Q", f.read(8))[0]
+                header = f.read(length_of_header)
+                metadata = json.loads(header)
+            for key in f_.keys():
+                meta[key] = metadata[key]["data_offsets"][0]
+        return meta
+    return torch.load(file, pickle_module=meta_pickler)
 
 
 class CkptType(enum.Enum):
@@ -157,20 +265,12 @@ class CkptFileInfo:
 
         return [name for name, _ in sorted_tensors]
 
-    def _load_meta(self, file: str) -> Dict[str, Any]:
-        # https://huggingface.co/docs/safetensors/metadata_parsing
-        if self.is_safetensor():
-            meta = {}
-            with safe_open(file, framework="pt") as f_:
-                with open(file, "rb") as f:
-                    length_of_header = struct.unpack("<Q", f.read(8))[0]
-                    header = f.read(length_of_header)
-                    metadata = json.loads(header)
-                for key in f_.keys():
-                    meta[key] = metadata[key]["data_offsets"][0]
-            self.metadata = meta
-        else:
-            self.metadata = torch.load(file, pickle_module=meta_pickler)
+    def _load_meta(self, file: str) -> None:
+        # Header parse goes through the process-wide cache: repeated
+        # CkptDatabase constructions on the same directory (target + eplb +
+        # draft loaders) reuse the parsed metadata instead of cold-reading
+        # every shard header again.
+        self.metadata = _FILE_META_CACHE.get_or_load(file, _parse_file_meta)
 
     def get_tensor_type(self, tensor_name: str) -> torch.dtype:
         file: str = self.file_name
