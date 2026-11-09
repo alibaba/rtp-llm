@@ -1,4 +1,4 @@
-"""MTP4 dispatch coverage, including shapes that must keep the original kernel."""
+"""Verify dispatch and rollback coverage for the FP32 paged KDA kernel."""
 
 import importlib
 from unittest.mock import patch
@@ -30,6 +30,7 @@ def test_verify_geometry_and_fallback(tokens, batch, capability, fast):
     with (
         patch.object(kda, "fused_recurrent_kda_fwd_kernel", recorder),
         patch.object(kda, "_FAST_VERIFY_ENABLED", fast),
+        patch.object(kda, "_WIDE_VERIFY_ENABLED", False),
         patch.object(kda, "_HOIST_GATE_ENABLED", True),
         patch.object(kda, "_VERIFY_LAUNCH_CONFIG", (16, 1, 3)),
         patch("torch.cuda.get_device_capability", return_value=capability),
@@ -82,7 +83,11 @@ def test_precision_and_hoist_switches_at_import(monkeypatch, flag):
     import importlib.util
     import sys
 
-    for env in ("GLM53_KDA_FAST_VERIFY", "GLM53_KDA_HOIST_GATE"):
+    for env in (
+        "GLM53_KDA_FAST_VERIFY",
+        "GLM53_KDA_WIDE_VERIFY",
+        "GLM53_KDA_HOIST_GATE",
+    ):
         monkeypatch.delenv(env, raising=False)
         if flag is not None:
             monkeypatch.setenv(env, flag)
@@ -91,6 +96,7 @@ def test_precision_and_hoist_switches_at_import(monkeypatch, flag):
     monkeypatch.setitem(sys.modules, spec.name, isolated)
     spec.loader.exec_module(isolated)
     assert isolated._FAST_VERIFY_ENABLED == (flag != "0")
+    assert isolated._WIDE_VERIFY_ENABLED == (flag != "0")
     assert isolated._HOIST_GATE_ENABLED == (flag != "0")
 
 
@@ -148,3 +154,68 @@ def test_unvalidated_state_or_model_geometry_keeps_fallback(unsupported):
         recorder.kwargs["num_warps"],
         recorder.kwargs["num_stages"],
     ) == (32, 4, 2)
+
+
+
+@pytest.mark.parametrize(
+    "batch,tokens,override,expected",
+    [
+        (8, 2, {}, (16, 1, 3)),
+        (32, 6, {}, (16, 1, 3)),
+        (48, 8, {}, (16, 1, 3)),
+        (64, 8, {}, (16, 1, 3)),
+        (7, 2, {}, (32, 4, 2)),
+        (65, 8, {}, (32, 4, 2)),
+        (32, 7, {}, (32, 4, 2)),
+        (32, 6, {"wide": False}, (32, 4, 2)),
+        (48, 6, {"wide": False}, (16, 1, 3)),
+        (32, 5, {"wide": False}, (16, 1, 3)),
+        (32, 6, {"fast": False}, (32, 4, 2)),
+        (32, 6, {"capability": (10, 3)}, (32, 4, 2)),
+        (32, 6, {"page": 64}, (32, 4, 2)),
+        (32, 6, {"store": False}, (32, 4, 2)),
+        (32, 6, {"inplace": False}, (32, 4, 2)),
+        (32, 6, {"v_first": True}, (32, 4, 2)),
+        (32, 6, {"dtype": torch.bfloat16}, (32, 4, 2)),
+    ],
+)
+def test_wide_verify_respects_rollback_and_paged_state_contract(
+    batch, tokens, override, expected
+):
+    q = torch.empty(batch, tokens, 64, 128, device="meta", dtype=torch.bfloat16)
+    state = torch.empty(
+        2, 64, 128, 128, device="meta", dtype=override.get("dtype", torch.float32)
+    )
+    recorder = _LaunchRecorder()
+    with (
+        patch.object(kda, "fused_recurrent_kda_fwd_kernel", recorder),
+        patch.object(kda, "_FAST_VERIFY_ENABLED", override.get("fast", True)),
+        patch.object(kda, "_WIDE_VERIFY_ENABLED", override.get("wide", True)),
+        patch.object(kda, "_VERIFY_LAUNCH_CONFIG", (16, 1, 3)),
+        patch(
+            "torch.cuda.get_device_capability",
+            return_value=override.get("capability", (10, 0)),
+        ),
+    ):
+        _, updated = kda.fused_recurrent_kda_fwd(
+            q,
+            q,
+            q,
+            q,
+            torch.empty(batch, tokens, 64, device="meta"),
+            128**-0.5,
+            state,
+            block_map=torch.empty(batch, 1050, device="meta", dtype=torch.int32),
+            sequence_lengths=torch.empty(batch, device="meta", dtype=torch.int32),
+            seq_size_per_block=override.get("page", 128),
+            decode_low_warps=True,
+            inplace_final_state=override.get("inplace", True),
+            store_states=override.get("store", True),
+            state_v_first=override.get("v_first", False),
+        )
+    actual = recorder.kwargs
+    assert (actual["BV"], actual["num_warps"], actual["num_stages"]) == expected
+    assert actual["h0"] is state
+    assert actual["ht"] is updated
+    assert (updated is state) == override.get("inplace", True)
+    assert actual["STORE_STATES"] == override.get("store", True)

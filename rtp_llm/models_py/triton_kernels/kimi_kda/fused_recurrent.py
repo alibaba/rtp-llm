@@ -38,6 +38,8 @@ _HOIST_GATE_ENABLED = os.environ.get("GLM53_KDA_HOIST_GATE", "1") == "1"
 # T includes the target token: MTP4 requires T=5, not the old T=4 path.
 # The changed BV/warp reduction can change rounding; =0 restores that path.
 _FAST_VERIFY_ENABLED = os.environ.get("GLM53_KDA_FAST_VERIFY", "1") == "1"
+# Roll back the additional T=2/6/8 shapes without losing the existing MTP4 path.
+_WIDE_VERIFY_ENABLED = os.environ.get("GLM53_KDA_WIDE_VERIFY", "1") == "1"
 
 
 @triton.jit
@@ -346,10 +348,22 @@ def fused_recurrent_kda_fwd(
             and _VERIFY_LAUNCH_CONFIG is not None
         ):
             BV, num_warps, num_stages = _VERIFY_LAUNCH_CONFIG
+    legacy_verify_shape = (N == 48 and 2 <= T <= 6) or (T == 5 and 16 <= N <= 64)
+    # The wider schedule is measured on SM100 with the native 128-token,
+    # FP32 K-first paged state. Keep the state tape and replay contracts intact.
+    wide_verify_shape = (
+        _WIDE_VERIFY_ENABLED
+        and 8 <= N <= 64
+        and T in (2, 6, 8)
+        and seq_size_per_block == 128
+        and sequence_lengths is not None
+        and inplace_final_state
+        and store_states
+    )
     if (
         _FAST_VERIFY_ENABLED
         and decode_low_warps
-        and ((N == 48 and 2 <= T <= 6) or (T == 5 and 16 <= N <= 64))
+        and (legacy_verify_shape or wide_verify_shape)
         and cu_seqlens is None
         and block_map is not None
         and H == HV == 64
