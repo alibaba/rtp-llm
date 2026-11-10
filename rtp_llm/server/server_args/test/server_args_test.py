@@ -4,6 +4,7 @@ import io
 import json
 import os
 import pickle
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -44,6 +45,46 @@ class MMRdmaProviderArgumentsTest(TestCase):
                     self.parse_config(["--mm_rdma_read_provider_count", value], {})
                 with self.assertRaises(SystemExit):
                     self.parse_config([], {"MM_RDMA_READ_PROVIDER_COUNT": value})
+
+
+class ResidentOwnerArgumentsTest(TestCase):
+    def test_worker_and_owner_resolve_the_same_abbreviated_options(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+        from rtp_llm.utils.prefill_supervisor import _resolve_worker_args
+
+        args = ["--checkpoint=dfs://new", "--world_s", "4"]
+        env = {"CHECKPOINT_PATH": "/old", "WORLD_SIZE": "1"}
+        with patch.dict(os.environ, env, clear=True):
+            direct = setup_args(args)
+            resident_env, worker_args = _resolve_worker_args(env, args)
+        with patch.dict(os.environ, resident_env, clear=True):
+            worker = setup_args(worker_args)
+
+        self.assertEqual(resident_env["CHECKPOINT_PATH"], "dfs://new")
+        self.assertEqual(resident_env["WORLD_SIZE"], "4")
+        self.assertEqual(worker.model_args.ckpt_path, direct.model_args.ckpt_path)
+        self.assertEqual(
+            worker.parallelism_config.world_size, direct.parallelism_config.world_size
+        )
+
+    def test_supervisor_canonicalization_keeps_torch_out_of_parent(self):
+        code = """
+import sys
+from rtp_llm.utils.prefill_supervisor import _resolve_worker_args
+
+env, remaining = _resolve_worker_args({}, ["--checkpoint=/tmp/x", "--world_s", "4"])
+assert "torch" not in sys.modules, "supervisor imported torch"
+assert env["CHECKPOINT_PATH"] == "/tmp/x"
+assert env["WORLD_SIZE"] == "4"
+assert remaining == []
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parents[4]),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class CustomAllReduceArgumentsTest(TestCase):

@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Authenticated, read-only Owner discovery without a shared filesystem.
 
-Each Owner serves its own immutable descriptor. Requests and responses use
-Fernet authenticated encryption with a per-generation key provisioned into a
-private LOCAL file on each member. No descriptor or key is logged. A random
-request challenge prevents an old response from passing a fresh liveness probe.
-There is no central coordinator or mutation RPC.
+Each Owner serves its immutable descriptor to TCP peers in the C2 gang.
+This read-only exchange relies on the platform's gang network isolation.
+A random request challenge binds the reply to a fresh liveness probe.
 """
 
 from __future__ import annotations
 
 import fcntl
 import hashlib
+import ipaddress
+import json
 import logging
 import os
 import secrets
@@ -23,28 +23,19 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from uuid import NAMESPACE_OID, uuid5
 
 from . import config
 from .exchange import MAX_MESSAGE, ExchangeError, decode, encode
 
 TRANSPORT_ENV = "RTP_ENGRAM_RESIDENT_TRANSPORT"
 STATE_ENV = "RTP_ENGRAM_RESIDENT_STATE_DIR"
-KEY_ENV = "RTP_ENGRAM_RESIDENT_KEY_FILE"
-ENDPOINTS_ENV = "RTP_ENGRAM_RESIDENT_ENDPOINTS"
 PORT_ENV = "RTP_ENGRAM_RESIDENT_PORT"
 DEFAULT_PORT = 29484
-_MAX_FRAME = 2 * MAX_MESSAGE
+_PROTOCOL = 2
 _REQUEST_LIMIT = 4096
 _RPC_TIMEOUT = 2.0
-_TTL = 30
 _LOGGER = logging.getLogger(__name__)
-
-
-def network_requested(env):
-    transport = env.get(TRANSPORT_ENV, "file")
-    if transport not in ("file", "tcp"):
-        raise config.ShardConfigError("INVALID_RESIDENT_TRANSPORT")
-    return transport == "tcp"
 
 
 def _private(info, kind):
@@ -52,64 +43,57 @@ def _private(info, kind):
         raise ExchangeError("UNSAFE_RESIDENT_LOCAL_STATE")
 
 
-def read_key_file(path):
-    """Read one bounded private key snapshot; never return unvalidated bytes."""
-    from cryptography.fernet import Fernet
-
-    path = Path(path)
-    if not path.is_absolute():
-        raise config.ShardConfigError("RESIDENT_KEY_FILE_REQUIRED")
-    with os.fdopen(
-        os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb"
-    ) as f:
-        _private(os.fstat(f.fileno()), stat.S_ISREG)
-        raw = f.read(129)
-    if len(raw) > 128:
-        raise config.ShardConfigError("INVALID_RESIDENT_KEY")
-    key = raw.strip()
-    if len(key) != 44:
-        raise config.ShardConfigError("INVALID_RESIDENT_KEY")
-    try:
-        Fernet(key)
-    except (ValueError, TypeError):
-        raise config.ShardConfigError("INVALID_RESIDENT_KEY") from None
-    return key
-
-
-def _cipher(env):
-    from cryptography.fernet import Fernet
-
-    return Fernet(read_key_file(env.get(KEY_ENV, "")))
-
-
-def endpoints(env, count):
+def _owner_port(env):
     port = env.get(PORT_ENV, str(DEFAULT_PORT))
     if not port.isascii() or not port.isdecimal() or not 1 <= int(port) <= 65535:
         raise config.ShardConfigError("INVALID_RESIDENT_PORT")
-    if ENDPOINTS_ENV in env:
-        peers = config._parse_members(env[ENDPOINTS_ENV], port)
-    else:
-        peers = config._cohort(env) or config._ganginfo_cohort(env)
-        if peers is None:
-            candidates = []
-            for host in sorted(config._local_addresses()):
-                try:
-                    found = config._annotation_cohort(env, [host])
-                except config.ShardConfigError as error:
-                    if str(error) != "LOCAL_HOST_NOT_IN_GANGINFO":
-                        raise
-                    continue
-                if found and found not in candidates:
-                    candidates.append(found)
-            if len(candidates) != 1:
-                raise config.ShardConfigError("RESIDENT_ENDPOINTS_REQUIRED")
-            peers = candidates[0]
-        # Worker rendezvous ports belong to the workers. Owner ports must live
-        # independently and are identical on all hosts unless explicitly given.
-        peers = [(host, int(port)) for host, _ in peers]
-    if len(peers) != count:
+    return int(port)
+
+
+def c2_topology(env):
+    """Use the C2 gang projection as the only authority for keyless peers."""
+    annotations = Path(env.get(config.ANNOTATION_ENV, config.DEFAULT_ANNOTATION))
+    try:
+        parts = config.read_parts(annotations)
+        labels = dict(
+            line.split("=", 1)
+            for line in annotations.with_name("labels").read_text().splitlines()
+            if "=" in line
+        )
+        version = json.loads(labels["gang-version-hash"])
+        local_part = json.loads(labels["app.c2.io/gang-part-name"])
+        if (
+            not isinstance(version, str)
+            or not version
+            or not isinstance(local_part, str)
+        ):
+            raise ValueError()
+        if [config.part_number(name) for name, _, _ in parts] != list(
+            range(len(parts))
+        ):
+            raise ValueError()
+        if len({config.family(name) for name, _, _ in parts}) != 1:
+            raise ValueError()
+        members = []
+        for name, ip, _ in parts:
+            address = ipaddress.IPv4Address(ip)
+            if address.is_unspecified or address.is_multicast:
+                raise ValueError()
+            members.append((name, str(address)))
+        [local_ip] = [
+            ip
+            for name, ip in members
+            if name.replace("_", "-") == local_part.replace("_", "-")
+        ]
+    except (KeyError, OSError, ValueError):
+        raise config.ShardConfigError("RESIDENT_C2_GANG_METADATA_INVALID") from None
+    count = config.ShardConfig.from_environ(env).shard_count
+    if len(members) != count:
         raise config.ShardConfigError("RESIDENT_ENDPOINT_COUNT_MISMATCH")
-    return tuple(peers)
+    port = _owner_port(env)
+    peers = tuple((ip, port) for _, ip in members)
+    identity = encode(["rtp-engram-c2-v1", version, members]).decode()
+    return str(uuid5(NAMESPACE_OID, identity)), peers, local_ip
 
 
 def _recv(sock, length, deadline):
@@ -134,7 +118,7 @@ def _read_frame(sock, limit, deadline):
 
 
 def _send_frame(sock, payload):
-    if len(payload) > _MAX_FRAME:
+    if len(payload) > MAX_MESSAGE:
         raise ExchangeError("MESSAGE_TOO_LARGE")
     sock.sendall(struct.pack("!I", len(payload)) + payload)
 
@@ -148,6 +132,12 @@ class _Server(socketserver.ThreadingTCPServer):
         self.owner = owner
         self.slots = threading.BoundedSemaphore(16)
         super().__init__(address, _Handler)
+
+    def verify_request(self, request, client_address):
+        if client_address[0] in self.owner.allowed_ips:
+            return True
+        self.owner.rejected("outside_c2_gang")
+        return False
 
     def process_request(self, request, client_address):
         if not self.slots.acquire(blocking=False):
@@ -166,30 +156,24 @@ class _Server(socketserver.ThreadingTCPServer):
             self.slots.release()
 
     def handle_error(self, *_):
-        # Never let an untrusted request print a decrypted descriptor or key.
+        # Do not log descriptor contents or handles on request failures.
         self.owner.rejected("internal")
 
 
 class _Handler(socketserver.BaseRequestHandler):
     def handle(self):
-        from cryptography.fernet import InvalidToken
-
         owner = self.server.owner
         self.request.settimeout(_RPC_TIMEOUT)
         try:
-            message = decode(
-                owner.cipher.decrypt(
-                    _read_frame(
-                        self.request, _REQUEST_LIMIT, time.monotonic() + _RPC_TIMEOUT
-                    ),
-                    ttl=_TTL,
-                )
+            payload = _read_frame(
+                self.request, _REQUEST_LIMIT, time.monotonic() + _RPC_TIMEOUT
             )
+            message = decode(payload)
             expected = {"protocol", "kind", "generation", "revision", "shard", "nonce"}
             if (
                 set(message) != expected
                 or type(message["protocol"]) is not int
-                or message["protocol"] != 1
+                or message["protocol"] != _PROTOCOL
                 or message["kind"] != "get"
                 or message["generation"] != owner.generation
                 or message["revision"] != owner.revision
@@ -203,7 +187,7 @@ class _Handler(socketserver.BaseRequestHandler):
             with owner.lock:
                 document = owner.document
             reply = dict(
-                protocol=1,
+                protocol=_PROTOCOL,
                 kind="reply",
                 nonce=message["nonce"],
                 generation=owner.generation,
@@ -212,9 +196,7 @@ class _Handler(socketserver.BaseRequestHandler):
                 status="ready" if document is not None else "loading",
                 document=document,
             )
-            _send_frame(self.request, owner.cipher.encrypt(encode(reply)))
-        except InvalidToken:
-            owner.rejected("authentication")
+            _send_frame(self.request, encode(reply))
         except (ValueError, ExchangeError):
             owner.rejected("framing")
         except OSError:
@@ -226,7 +208,10 @@ class OwnerEndpoint:
         self.generation = generation.generation
         self.revision = generation.revision
         self.shard = shard
-        self.cipher = generation.network.cipher
+        network = generation.network
+        self.allowed_ips = frozenset(ip for ip, _ in network.peers)
+        if network.peers[shard][0] != network.source_ip:
+            raise config.ShardConfigError("RESIDENT_C2_OWNER_HOST_MISMATCH")
         self.document = None
         self.published = False
         self.lock = threading.Lock()
@@ -240,7 +225,7 @@ class OwnerEndpoint:
     def __enter__(self):
         self.thread.start()
         _LOGGER.info(
-            "engram event=resident_endpoint_started generation=%s shard=%d pid=%d endpoint=%s:%d",
+            "engram event=resident_endpoint_started generation=%s shard=%d pid=%d endpoint=%s:%d access=c2_gang",
             self.generation,
             self.shard,
             os.getpid(),
@@ -308,39 +293,34 @@ class OwnerEndpoint:
 
 
 class OwnerClients:
-    def __init__(self, env, generation, revision, count, directory):
-        self.peers = endpoints(env, count)
-        self.cipher = _cipher(env)
+    def __init__(self, env, generation, revision, directory):
+        c2_generation, self.peers, self.source_ip = c2_topology(env)
+        if c2_generation != generation:
+            raise config.ShardConfigError("RESIDENT_C2_GANG_IDENTITY_MISMATCH")
         self.generation, self.revision = generation, revision
         self.directory = directory
 
     def request(self, shard, timeout):
-        from cryptography.fernet import InvalidToken
-
         nonce = secrets.token_hex(32)
         deadline = time.monotonic() + timeout
         message = dict(
-            protocol=1,
+            protocol=_PROTOCOL,
             kind="get",
             generation=self.generation,
             revision=self.revision,
             shard=shard,
             nonce=nonce,
         )
-        with socket.create_connection(self.peers[shard], timeout=timeout) as sock:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.bind((self.source_ip, 0))
+            sock.connect(self.peers[shard])
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError()
             sock.settimeout(remaining)
-            _send_frame(sock, self.cipher.encrypt(encode(message)))
-            try:
-                reply = decode(
-                    self.cipher.decrypt(
-                        _read_frame(sock, _MAX_FRAME, deadline), ttl=_TTL
-                    )
-                )
-            except InvalidToken:
-                raise ExchangeError("RESIDENT_OWNER_AUTH_FAILED") from None
+            _send_frame(sock, encode(message))
+            reply = decode(_read_frame(sock, MAX_MESSAGE, deadline))
         if (
             set(reply)
             != {
