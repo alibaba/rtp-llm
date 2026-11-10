@@ -2,7 +2,9 @@ import asyncio
 import os
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -530,6 +532,64 @@ class StartupRealWarmupRpcTest(unittest.IsolatedAsyncioTestCase):
                 await start_server._run_startup_real_warmup_grpc(service_configs())
         client.close.assert_awaited_once()
         client.batch_generate.assert_not_called()
+
+
+class PrefillRuntimeProbeTest(unittest.TestCase):
+    def test_real_loopback_rpc_uses_local_prefill_and_requires_a_terminal_result(self):
+        import grpc
+
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GenerateOutputsPB
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+            RpcServiceServicer,
+            add_RpcServiceServicer_to_server,
+        )
+
+        received = []
+        release = threading.Event()
+
+        class Backend(RpcServiceServicer):
+            mode = "ready"
+
+            def GenerateStreamCall(self, request, context):
+                received.append(request.generate_config)
+                if self.mode == "busy":
+                    context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "busy")
+                if self.mode == "hung":
+                    release.wait(3)
+                    return
+                response = GenerateOutputsPB(request_id=request.request_id)
+                response.flatten_output.finished.append(self.mode == "ready")
+                yield response
+
+        backend = Backend()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            server = grpc.server(executor)
+            add_RpcServiceServicer_to_server(backend, server)
+            port = server.add_insecure_port("127.0.0.1:0")
+            server.start()
+            try:
+                self.assertTrue(start_server._prefill_runtime_probe(port, 1))
+                config = received[0]
+                self.assertTrue(config.prefill_only)
+                self.assertEqual(config.max_new_tokens, 0)
+                self.assertFalse(config.can_use_pd_separation)
+                self.assertFalse(config.enable_remote_cache)
+                backend.mode = "incomplete"
+                self.assertFalse(start_server._prefill_runtime_probe(port, 1))
+                backend.mode = "busy"
+                self.assertIsNone(start_server._prefill_runtime_probe(port, 1))
+                backend.mode = "hung"
+                self.assertFalse(start_server._prefill_runtime_probe(port, 0.1))
+            finally:
+                release.set()
+                server.stop(0).wait(2)
+
+    def test_opt_in_rejects_compute_spread_over_multiple_instances(self):
+        with patch.dict(
+            os.environ, {"RTP_LLM_PREFILL_WATCHDOG": "1", "LOCAL_WORLD_SIZE": "2"}
+        ):
+            with self.assertRaisesRegex(ValueError, "compute world"):
+                start_server._create_prefill_watchdog(service_configs())
 
 
 if __name__ == "__main__":

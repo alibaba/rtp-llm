@@ -1758,7 +1758,9 @@ sys.stdin.readline()
             self.generation.claim(0)
 
     def test_incomplete_and_incompatible_generations_fail_closed(self):
-        with self.assertRaisesRegex(topology.ShardConfigError, "REQUIRES_HOST_SHARED"):
+        with self.assertRaisesRegex(
+            topology.ShardConfigError, "REQUIRES_FABRIC_SHARED"
+        ):
             resident.ResidentGeneration({**self.env, "RTP_ENGRAM_STORAGE": "host"})
         missing = resident.ResidentGeneration(
             {**self.env, "RTP_ENGRAM_COHORT_TIMEOUT": "0.01"}
@@ -1774,6 +1776,86 @@ sys.stdin.readline()
         path.chmod(0o644)
         with self.assertRaisesRegex(exchange.ExchangeError, "UNSAFE_RESIDENT"):
             self.generation.load()
+
+    def test_expired_publication_blocks_only_new_consumers_of_its_generation(self):
+        missing = resident.ResidentGeneration(
+            {**self.env, "RTP_ENGRAM_COHORT_TIMEOUT": "0.01"}
+        )
+        path = missing.claim(0)
+        resident._publish_descriptor(path, self.documents[0])
+        with patch.object(resident, "checkpoint_samples", samples):
+            original = missing.load()
+            stale = time.time() - resident.HEARTBEAT_MAX_AGE_SECONDS - 1
+            os.utime(path, (stale, stale))
+            with self.assertRaisesRegex(exchange.ExchangeError, "STARTUP_TIMEOUT"):
+                missing.load()
+            self.assertEqual(original["generation"], missing.generation)
+
+            other = resident.ResidentGeneration(
+                {**self.env, "RTP_ENGRAM_RESIDENT_GENERATION": str(UUID(int=456))}
+            )
+            other_path = other.claim(0)
+            resident._publish_descriptor(
+                other_path, dict(self.documents[0], generation=other.generation)
+            )
+            self.assertEqual(other.load()["generation"], other.generation)
+
+    def test_gpu_owner_passes_placement_and_consumer_checks_backing_kind(self):
+        env = {
+            **self.env,
+            "RTP_ENGRAM_STORAGE": "gpu_shared",
+            "RTP_ENGRAM_GPU_RESERVE_BYTES": "4096",
+        }
+        generation = resident.ResidentGeneration(env)
+        (document,) = publications(self.group, memory_kind="gpu")
+        with patch.object(resident, "ShardPublisher") as factory:
+            publisher = factory.return_value
+            publisher.publish.return_value = document
+            publisher.release.return_value = []
+            resident.serve_shard(generation, env, 0, "host-0", 0, lambda: True, (0, 1))
+            self.assertEqual(publisher.publish.call_args.kwargs["memory_kind"], "gpu")
+            self.assertEqual(publisher.publish.call_args.kwargs["gpu_devices"], (0, 1))
+            self.assertEqual(
+                publisher.publish.call_args.kwargs["gpu_reserve_bytes"], 4096
+            )
+            publisher.release.assert_called_once_with(generation.generation)
+        path = generation.directory / "shard-0" / "ready.json"
+        resident._publish_descriptor(path, document)
+        with patch.object(resident, "checkpoint_samples", samples):
+            self.assertEqual(
+                generation.load()["manifest"].manifest.backend, "fabric_gpu"
+            )
+        with self.assertRaisesRegex(exchange.ExchangeError, "DESCRIPTOR_MISMATCH"):
+            self.generation.load()
+
+    def test_metadata_heartbeat_failure_does_not_retire_live_backing(self):
+        attempts = []
+        with patch.object(resident, "ShardPublisher") as factory, patch.object(
+            resident, "HEARTBEAT_INTERVAL_SECONDS", 0
+        ), patch.object(resident.time, "sleep"):
+            publisher = factory.return_value
+            publisher.publish.return_value = self.documents[0]
+            publisher.release.return_value = []
+
+            def heartbeat(path, *_args, **_kwargs):
+                attempts.append(path)
+                publisher.release.assert_not_called()
+                self.assertTrue(path.is_file())
+                if len(attempts) == 1:
+                    raise PermissionError("simulated shared mount outage")
+
+            with patch.object(resident.os, "utime", side_effect=heartbeat):
+                resident.serve_shard(
+                    self.generation,
+                    self.env,
+                    0,
+                    "host-0",
+                    0,
+                    lambda: len(attempts) == 2,
+                )
+            self.assertEqual(len(attempts), 2)
+            self.assertFalse(attempts[-1].exists())
+            publisher.release.assert_called_once_with(self.generation.generation)
 
 
 if __name__ == "__main__":
