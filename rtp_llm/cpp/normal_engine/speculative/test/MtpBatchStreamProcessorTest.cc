@@ -555,7 +555,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpec
               toVec<float>(sampler_inputs.temperature));
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetUsesFixedCandidateWidth) {
+TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetWithoutExplicitTopKUsesFixedCandidateWidth) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -583,19 +583,14 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetUsesFixedCandidateWidth) {
     auto draft    = torch::zeros({2, 1}, torch::kInt32);
     auto mixed    = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(mixed.ok());
-    EXPECT_EQ(mixed->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(mixed->all_probs_indices.defined());
-
-    auto mapped = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft, nullptr, true);
-    ASSERT_TRUE(mapped.ok());
-    EXPECT_EQ(mapped->all_probs.size(1), 8192);
-    EXPECT_FALSE(mapped->all_probs_indices.defined());
+    EXPECT_EQ(mixed->all_probs.size(1), 8192);
+    EXPECT_FALSE(mixed->all_probs_indices.defined());
 
     second->generateConfig()->top_k = 8192;
     auto pure = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(pure.ok());
-    EXPECT_EQ(pure->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(pure->all_probs_indices.defined());
+    EXPECT_EQ(pure->all_probs.size(1), 8192);
+    EXPECT_FALSE(pure->all_probs_indices.defined());
 
     first->generateConfig()->top_k  = 0;
     second->generateConfig()->top_k = 0;
@@ -603,6 +598,11 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetUsesFixedCandidateWidth) {
     ASSERT_TRUE(pure_no_k_p1.ok());
     EXPECT_EQ(pure_no_k_p1->all_probs.size(1), speculative::dsparkForceTopK());
     EXPECT_TRUE(pure_no_k_p1->all_probs_indices.defined());
+
+    auto mapped = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft, nullptr, true);
+    ASSERT_TRUE(mapped.ok());
+    EXPECT_EQ(mapped->all_probs.size(1), 8192);
+    EXPECT_FALSE(mapped->all_probs_indices.defined());
 
     first->generateConfig()->top_p  = 0.95f;
     second->generateConfig()->top_p = 0.95f;
@@ -617,21 +617,21 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetUsesFixedCandidateWidth) {
     second->generateConfig()->top_k = 40;
     auto small_vocab_pure = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(small_vocab_pure.ok());
-    EXPECT_EQ(small_vocab_pure->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(small_vocab_pure->all_probs_indices.defined());
+    EXPECT_EQ(small_vocab_pure->all_probs.size(1), 8192);
+    EXPECT_FALSE(small_vocab_pure->all_probs_indices.defined());
 
     second->generateConfig()->top_p = 1.0f - 5e-8f;
     auto equivalent_p = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(equivalent_p.ok());
-    EXPECT_EQ(equivalent_p->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(equivalent_p->all_probs_indices.defined());
+    EXPECT_EQ(equivalent_p->all_probs.size(1), 8192);
+    EXPECT_FALSE(equivalent_p->all_probs_indices.defined());
 
     second->generateConfig()->top_p     = 1.0f;
     second->generateConfig()->do_sample = false;
     auto mixed_greedy = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
     ASSERT_TRUE(mixed_greedy.ok());
-    EXPECT_EQ(mixed_greedy->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(mixed_greedy->all_probs_indices.defined());
+    EXPECT_EQ(mixed_greedy->all_probs.size(1), 8192);
+    EXPECT_FALSE(mixed_greedy->all_probs_indices.defined());
 
     model_config.vocab_size = 129280;
     auto large_first        = createContextStream(model_config, runtime_config, resource_context, {1}, 3);
@@ -652,22 +652,22 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetUsesFixedCandidateWidth) {
     auto large_mixed =
         large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
     ASSERT_TRUE(large_mixed.ok());
-    EXPECT_EQ(large_mixed->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(large_mixed->all_probs_indices.defined());
+    EXPECT_EQ(large_mixed->all_probs.size(1), 129280);
+    EXPECT_FALSE(large_mixed->all_probs_indices.defined());
 
     large_second->generateConfig()->top_p = 0.95f;
     auto large_mixed_topp =
         large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
     ASSERT_TRUE(large_mixed_topp.ok());
-    EXPECT_EQ(large_mixed_topp->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(large_mixed_topp->all_probs_indices.defined());
+    EXPECT_EQ(large_mixed_topp->all_probs.size(1), 129280);
+    EXPECT_FALSE(large_mixed_topp->all_probs_indices.defined());
 
     large_first->generateConfig()->top_k = 41;
     auto bounded_mixed_topp =
         large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
     ASSERT_TRUE(bounded_mixed_topp.ok());
-    EXPECT_EQ(bounded_mixed_topp->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(bounded_mixed_topp->all_probs_indices.defined());
+    EXPECT_EQ(bounded_mixed_topp->all_probs.size(1), 129280);
+    EXPECT_FALSE(bounded_mixed_topp->all_probs_indices.defined());
 
     for (const auto& stream : {large_first, large_second}) {
         stream->generateConfig()->top_k = 0;
@@ -686,8 +686,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetUsesFixedCandidateWidth) {
     auto one_draft    = torch::zeros({1, 1}, torch::kInt32);
     auto large_single = large_processor.gatherSpecSamplerInput(StreamGroups({large_first}), one_output, {}, one_draft);
     ASSERT_TRUE(large_single.ok());
-    EXPECT_EQ(large_single->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(large_single->all_probs_indices.defined());
+    EXPECT_EQ(large_single->all_probs.size(1), 129280);
+    EXPECT_FALSE(large_single->all_probs_indices.defined());
 
     std::list<GenerateStreamPtr> pure_k_streams{large_first};
     for (int i = 0; i < 7; ++i) {
@@ -705,16 +705,16 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetUsesFixedCandidateWidth) {
     auto large_eight =
         large_processor.gatherSpecSamplerInput(StreamGroups(pure_k_streams), eight_output, {}, eight_draft);
     ASSERT_TRUE(large_eight.ok());
-    EXPECT_EQ(large_eight->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(large_eight->all_probs_indices.defined());
+    EXPECT_EQ(large_eight->all_probs.size(1), 129280);
+    EXPECT_FALSE(large_eight->all_probs_indices.defined());
     for (const auto& stream : pure_k_streams) {
         stream->generateConfig()->top_p = 0.95f;
     }
     auto large_eight_joint =
         large_processor.gatherSpecSamplerInput(StreamGroups(pure_k_streams), eight_output, {}, eight_draft);
     ASSERT_TRUE(large_eight_joint.ok());
-    EXPECT_EQ(large_eight_joint->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(large_eight_joint->all_probs_indices.defined());
+    EXPECT_EQ(large_eight_joint->all_probs.size(1), 129280);
+    EXPECT_FALSE(large_eight_joint->all_probs_indices.defined());
 }
 
 // Per-round logits are consumable; gathering does not clone them.

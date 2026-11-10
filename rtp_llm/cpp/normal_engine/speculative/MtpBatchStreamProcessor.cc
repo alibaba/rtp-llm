@@ -1547,7 +1547,9 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     const int force_topk = is_dspark_ ? speculative::dsparkForceTopK() : 0;
     if (!target_point_mass && !sampler_inputs.cum_log_probs.defined() && !has_draft_to_target_mapping && force_topk > 0
         && force_topk <= 4096 && force_topk < static_cast<int>(vocab_size_)) {
-        compact_target = true;
+        const auto* ks                = sampler_inputs.top_k.data_ptr<int32_t>();
+        const bool  no_explicit_top_k = std::all_of(ks, ks + total_batch_size, [](int32_t k) { return k <= 0; });
+        compact_target                = no_explicit_top_k;
     }
 #endif
     if (target_point_mass) {
