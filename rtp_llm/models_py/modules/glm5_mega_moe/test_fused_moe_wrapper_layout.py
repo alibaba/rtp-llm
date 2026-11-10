@@ -1,3 +1,5 @@
+import sys
+import types
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -11,6 +13,7 @@ from rtp_llm.models_py.modules.glm5_mega_moe import (
     mega_moe_fp8,
     mega_moe_fp8_se_wrapper,
     mega_moe_fp8_wrapper,
+    mega_moe_fused,
     mega_moe_fused_wrapper,
     mega_moe_wrapper,
     quant_layouts,
@@ -77,6 +80,23 @@ def _parallelism(role_type=None):
 
 
 class MegaMoeWrapperLayoutTest(unittest.TestCase):
+    def test_fused_prepacked_dispatch_accepts_activation_clamp(self):
+        module = object.__new__(mega_moe_fused.GLM5MegaMoEFused)
+        torch.nn.Module.__init__(module)
+        hidden = torch.empty((1, 8), dtype=torch.bfloat16)
+        deep_gemm = types.ModuleType("deep_gemm")
+
+        with (
+            patch.dict(sys.modules, {"deep_gemm": deep_gemm}),
+            patch.object(
+                mega_moe_fused.GLM5MegaMoEFused,
+                "_check_shared_expert_ready",
+                side_effect=RuntimeError("shared expert readiness sentinel"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "shared expert readiness sentinel"),
+        ):
+            module.forward_prepacked(hidden, activation_clamp=10.0)
+
     def test_hy4_fp32_router_preserves_stable_path_with_fast_routes_enabled(self):
         hidden = torch.tensor([[0.5, -1.0], [1.0, 0.25]], dtype=torch.bfloat16)
         gate_weight = torch.tensor([[0.1, 0.2, -0.3], [0.4, -0.5, 0.6]])

@@ -305,9 +305,11 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
         indices: torch.Tensor | None,
         *,
         inputs_prepacked: bool,
+        activation_clamp: Optional[float] = None,
     ) -> torch.Tensor:
         import deep_gemm
 
+        del activation_clamp
         self._check_shared_expert_ready()
 
         T = x.size(0)
