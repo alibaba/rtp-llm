@@ -41,12 +41,15 @@ def _sparse_fwd_reference(q, kv, indices, sm_scale, attn_sink, topk_length):
     import os
 
     T, H, D = q.shape
+    # Callers may pass a leading batch axis or a stray head axis ([1,T,K],
+    # [T,1,K]); normalize to row-major [T, K] (q's row count is authoritative).
+    indices = indices.reshape(T, -1)
     K = indices.shape[-1]
     kv2 = kv.reshape(-1, kv.shape[-1])
     valid = indices >= 0
     if topk_length is not None:
         cols = torch.arange(K, device=indices.device).view(1, -1)
-        valid = valid & (cols < topk_length.view(T, 1).to(torch.int64))
+        valid = valid & (cols < topk_length.reshape(T, 1).to(torch.int64))
     chunk = max(int(os.environ.get("DSV41_SM80_SPARSE_Q_CHUNK", "1024")), 1)
     outs, maxes, lses = [], [], []
     for start in range(0, T, chunk):
