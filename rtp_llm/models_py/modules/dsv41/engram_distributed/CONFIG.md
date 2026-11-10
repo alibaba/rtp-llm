@@ -1,6 +1,6 @@
 # 分布式 Engram：启用、拓扑与启动交换
 
-更新时间：2026-11-09。每个存储 host 的 RTP worker 持有一片 Engram，GPU 在线直接读映射后的内存。没有独立 sidecar/holder，没有在线查表 RPC，也不分发 bundle 文件。
+更新时间 2026-11-10。默认由每个存储 host 的 RTP worker 持有一片 Engram。Prefill 的 `host_shared` 和 `gpu_shared` 也可接入独立常驻 Owner。GPU 在线直接读取映射后的内存。
 
 ## 最小配置
 
@@ -86,7 +86,7 @@ Engram 按本机地址自动匹配成员。正常部署读取 `/etc/podinfo/anno
 | `RTP_ENGRAM_COHORT_PORT` | 跨实例交换的监听端口，平台指定或默认 29483；同一个 RTP world 不使用此端口 |
 | `RTP_ENGRAM_COHORT_TIMEOUT` | 启动交换超时，默认 1800 秒 |
 
-**不需要配置 UUID、generation、本机分片下标或 ranks-per-part。**
+**由业务 worker 持片时，无需配置 UUID、generation、本机分片下标或 ranks-per-part。**
 `RTP_ENGRAM_GENERATION` 不再读取；原有 manifest 内部标识仍保留，不是部署配置。
 旧 `RTP_ENGRAM_LOCAL_DESCRIPTORS` 文件启动模式已移除，显式报错防止误用。
 
@@ -222,6 +222,55 @@ TCPStore 使用可信计算网络，不提供 TLS；显式设置已移除的 `RT
 
 部分 rank 重启会等待其他 rank 而有界失败，不是自动恢复。恢复时重建整个 gang/共享组及其 Store；先排空并停止旧消费者，再释放持片进程。
 cohort Store 关闭不释放分片；映射和 backing 保持到 worker 退出。该机制不代替运行时故障检测或高可用。
+
+### Prefill 使用独立常驻 Owner
+
+在每个存储 host 启动一个独立 Owner 进程，放在 `python-worker` 容器及其回收范围之外。
+Owner 通过自己的 checkpoint 挂载加载一片 host NUMA 或 GPU HBM backing，持有 CUDA VMM 分配并导出 Fabric handle。
+各 Prefill 实例启动时独立导入同一代分片。RTP 校验模型布局、hash ABI 和 GPU 读回样本后完成 warmup，
+在线请求继续直接读 Fabric 映射。重启后的消费者复用已加载的分片，只重建自身模型和映射。
+
+Owner 和消费者使用相同的配置。 `RTP_ENGRAM_RESIDENT_DIR` 需要是平台预建的专用 POSIX 共享卷目录，
+在各节点可见，由同一服务 UID 持有且权限为 `0700`。Owner 需要写权限，消费者挂载为只读。
+目录含 Fabric capability，仅授予该 Engram 共享组。Owner 与消费者仍需同一受控 IMEX 域和相应设备权限。
+
+```bash
+export RTP_ENGRAM_STORAGE=host_shared
+export ENGRAM_SHARD_COUNT=4
+export RTP_ENGRAM_RESIDENT_DIR=/run/engram-shared
+export RTP_ENGRAM_RESIDENT_GENERATION=5fdfe813-a0a0-4db4-b324-cc8d7a597c77
+export RTP_ENGRAM_MODEL_REVISION='immutable-model-revision'
+export RTP_ENGRAM_CHECKPOINT=/models/deepseek-v41
+
+# 每台存储 host 运行一个前台 Owner，传入该台对应的下标 0–3。
+exec python -m rtp_llm.models_py.modules.dsv41.engram_distributed.resident \
+  --shard 0 --host-id storage-node-0 --device 0
+```
+
+使用 GPU HBM 时，Owner 与消费者设置 `RTP_ENGRAM_STORAGE=gpu_shared`。Owner 可通过
+`--gpu-devices 0 1 2 3` 在指定的本机可见 GPU 上分配同一片，默认使用 `--device` 指定的卡。
+每张卡仍应用 `RTP_ENGRAM_GPU_RESERVE_BYTES`，平台需为权重、KV cache 和运行峰值预留显存。
+
+部署时生成新的 UUID，给同代 Owner 和消费者注入相同值。每片启动时独占其发布目录，
+写完后原子发布 `ready.json`。该片一旦认领便不允许在同一代重建，避免同代名称混用新旧分配。
+每个消费者在 `RTP_ENGRAM_COHORT_TIMEOUT`（默认 1800 秒）内等待全部分片。
+设置任一 resident 环境变量即进入显式校验，缺失、超时、版本或数据不匹配使启动失败。
+未配置 resident 参数的部署继续使用原有路径。
+
+Owner 每两秒更新描述符的 mtime，消费者把超过 30 秒的描述符视为未就绪并有界等待。
+共享卷需要跨节点可见的 mtime、原子 mkdir/rename 和同步的节点时钟。发布卷写入故障时，
+Owner 保留已有 backing，存量消费者在线读取 GPU 映射。恢复后以同一文件的下一次心跳开放新导入。
+
+单实例收到 SIGKILL、SIGTERM 或触发业务容器级 OOM 时，平台仅摘流和恢复该实例。
+运行时回收该实例的进程和 CUDA 映射。新请求由路由发到其他就绪的完整 Prefill 实例。
+如单个实例由多个计算 rank 组成，计算通信组按整个实例恢复。滚动替换单个消费者时保留 Owner。
+显式作用于共享组的操作（如整组升级、停止或下线）可统一退出。先冻结旧代消费者的创建、
+自动重启与流量入口，排空并确认全部消费者进程退出，再向旧 Owner 发送 SIGTERM。
+Owner 收到信号后撤下描述文件并释放分片，平台在该代退休后可清理发布目录。
+
+Owner 进程崩溃可能留下描述文件，导入和 GPU 样本校验仍是消费者的启动门槛。
+Owner 丢失时按故障代处理，平台停止向受影响组接流并用新 UUID 重建该代。
+当前实现覆盖消费者生命周期隔离，Owner、宿主机、IMEX 或整个 Fabric 域故障需要另外的副本和路由切换。
 
 ## 校验边界
 

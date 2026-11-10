@@ -515,6 +515,7 @@ class ShardPublisher:
         budget_bytes=None,
         release_input_page_cache=False,
         deadline=None,
+        reclaim_legacy=True,
     ):
         """Allocate one shard here, fill it from ``checkpoint`` and describe it.
 
@@ -569,7 +570,8 @@ class ShardPublisher:
         )
         backing.validate_capacity(physical, gpu_reserve_bytes)
         _check_deadline(deadline)
-        _reclaim_legacy_tables(deadline)
+        if reclaim_legacy:
+            _reclaim_legacy_tables(deadline)
         page_size = _cache_page_size(release_input_page_cache)
         if page_size is not None:
             for snapshot in plan.files:
@@ -669,7 +671,7 @@ class ShardPublisher:
         return document
 
     def release(self, generation):
-        """Test-only retirement AFTER all local/remote consumers drain and exit.
+        """Retire backing AFTER all local/remote consumers drain and exit.
 
         Never use as an in-process serving restart: remote graphs may hold pointers.
         Failed native closes retain their references so cleanup can be retried.
