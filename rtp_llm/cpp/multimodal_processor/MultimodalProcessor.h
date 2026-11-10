@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <memory>
 #include <grpcpp/server_context.h>
 
@@ -27,6 +28,7 @@ struct ExpandedOutput {
     torch::Tensor token_type_ids;
     torch::Tensor text_tokens_mask;
     torch::Tensor locs;
+    std::map<int, int> multimodal_lengths;
     ExpandedOutput(torch::Tensor expanded_ids     = {},
                    torch::Tensor token_type_ids   = {},
                    torch::Tensor text_tokens_mask = {},
@@ -90,6 +92,7 @@ private:
     expandInterleavedTokenIds(const std::vector<torch::Tensor>&                features,
                               const torch::Tensor&                             token_ids,
                               const torch::Tensor&                             token_type_ids,
+                              const std::vector<MultimodalInput>&              mm_inputs,
                               const std::vector<std::pair<int32_t, int32_t>>&  spans,
                               const std::optional<std::vector<torch::Tensor>>& feature_hashes,
                               const std::vector<torch::Tensor>&                layouts);

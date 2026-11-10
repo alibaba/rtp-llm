@@ -1,6 +1,7 @@
 #pragma once
 #include "rtp_llm/cpp/multimodal_processor/V41Input.h"
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -44,6 +45,9 @@ public:
     }
 
     std::map<int, int> multimodalLengths() const {
+        if (!interleaved_multimodal_lengths.empty()) {
+            return interleaved_multimodal_lengths;
+        }
         std::map<int, int> lengths;
         if (v41_inputs && multimodal_features) {
             for (const auto& feature : *multimodal_features) {
@@ -104,6 +108,7 @@ public:
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
     std::optional<MultimodalTokenLayout>        multimodal_token_layout;
+    std::map<int, int>                          interleaved_multimodal_lengths;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;
