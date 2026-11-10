@@ -277,6 +277,11 @@ class DsaKVExecution:
                 add("slots", (capacity_rows, owner.topk), torch.int32)
                 if not self.prefill:
                     add("lengths", (capacity_rows,), torch.int32)
+                    if owner.sfa_metadata_free:
+                        # topk_length of the metadata-free FP8 decode kernel: how
+                        # many of the packed slots this owner holds. The operator
+                        # reads the same owner flag, so the two cannot disagree.
+                        add("owned_slots", (capacity_rows,), torch.int32)
                     add("partial_lse", (capacity_rows, owner.heads), torch.float32)
                 if not staged_sfa:
                     if block.tokens < total_history:

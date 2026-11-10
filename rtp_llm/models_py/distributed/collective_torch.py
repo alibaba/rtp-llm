@@ -333,8 +333,9 @@ def _create_process_groups(
                 # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
 
-    if tp_size > 1 and world_size != tp_size:
-        # Create all TP groups - all ranks must participate in creating all TP groups
+    if world_size != tp_size:
+        # Singleton TP groups must stay local too: None/WORLD would join independent DP owners.
+        # All ranks participate in creating every group, including the singleton groups.
         # TP group: ranks with the same dp_rank (i.e., world_rank // tp_size)
         # There are dp_size TP groups (one for each dp_rank value)
         for dp_rank_val in range(dp_size):
@@ -356,10 +357,11 @@ def _create_process_groups(
                         f"[rank: {world_rank}] Stored TP group with key: {group_key} {tp_group} with ranks: {tp_ranks}"
                     )
 
-                _get_symm_mem().init_symm_mem_communicator(
-                    tp_group,
-                    disable_custom_all_reduce=disable_custom_all_reduce,
-                )
+                if tp_size > 1:
+                    _get_symm_mem().init_symm_mem_communicator(
+                        tp_group,
+                        disable_custom_all_reduce=disable_custom_all_reduce,
+                    )
 
                 # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
@@ -756,7 +758,7 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     if group == Group.DP and dp_size > 1 and world_size != dp_size:
         tp_rank = torch.distributed.get_rank() % tp_size
         group_key = Group.DP.name + str(tp_rank)
-    elif group == Group.TP and tp_size > 1 and world_size != tp_size:
+    elif group == Group.TP and world_size != tp_size:
         dp_rank = torch.distributed.get_rank() // tp_size
         group_key = Group.TP.name + str(dp_rank)
     else:

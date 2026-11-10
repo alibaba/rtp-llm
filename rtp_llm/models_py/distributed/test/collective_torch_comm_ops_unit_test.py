@@ -162,6 +162,47 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
 
         get_global_rank.assert_called_once_with(process_group, 0)
 
+    def test_pure_dp_creates_singleton_tp_groups(self):
+        config = SimpleNamespace(world_rank=2, world_size=4, tp_size=1, dp_size=4)
+        groups = [object() for _ in range(4)]
+        with (
+            patch.object(collective, "_group_map", {}) as group_map,
+            patch.object(
+                torch.distributed, "new_group", side_effect=groups
+            ) as new_group,
+            patch.object(torch.distributed, "barrier"),
+            patch.object(collective, "_get_symm_mem") as symm_mem,
+        ):
+            collective._create_process_groups(
+                config, "nccl", None, disable_custom_all_reduce=True
+            )
+            self.assertEqual(
+                [call.kwargs["ranks"] for call in new_group.call_args_list],
+                [[0], [1], [2], [3]],
+            )
+            self.assertIs(group_map["TP2"], groups[2])
+            symm_mem.assert_not_called()
+
+    def test_pure_dp_tp_group_does_not_resolve_to_world(self):
+        singleton, world = object(), object()
+        config = SimpleNamespace(tp_size=1, dp_size=4, world_size=4)
+        with (
+            patch.object(collective, "_initialized", True),
+            patch.object(collective, "_parallelism_config", config),
+            patch.object(
+                collective,
+                "_group_map",
+                {"TP2": singleton, collective.Group.DP_AND_TP: world},
+            ),
+            patch.object(torch.distributed, "is_initialized", return_value=True),
+            patch.object(torch.distributed, "get_rank", return_value=2),
+        ):
+            self.assertIs(collective.get_process_group(collective.Group.TP), singleton)
+            self.assertIs(collective.get_process_group(collective.Group.DP), world)
+            self.assertIs(
+                collective.get_process_group(collective.Group.DP_AND_TP), world
+            )
+
     def test_regular_allreduce_supports_explicit_out_of_place(self):
         tensor = torch.tensor([1.0, 2.0])
 

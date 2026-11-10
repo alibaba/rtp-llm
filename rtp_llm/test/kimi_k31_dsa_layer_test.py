@@ -41,13 +41,21 @@ except ImportError:  # run as a plain script next to the fixture (no Bazel runfi
 
 TOPK, INDEX_HEADS, LATENT, ROPE, NOPE, V_HEAD = 2048, 32, 512, 64, 128, 128
 # Switch environment per arm (dsa_dcp_options); switches are read when the layer and its
-# workspace owner are built, so arms coexist in one process.
+# workspace owner are built, so arms coexist in one process. Every arm pins every switch,
+# so an arm keeps its meaning when the module defaults change.
 ARMS = {
-    "dev": {},
-    "mega_topk": {"DSA_DCP_TOPK": "mega_topk"},
-    "mega_a2a": {"DSA_DCP_TOPK": "mega_topk", "DSA_DCP_COMBINE": "mega_a2a"},
-    "serial": {"DSA_DCP_TOPK": "mega_topk", "DSA_DCP_COMBINE": "mega_a2a", "DSA_DCP_PROLOGUE": "serial"},
-    "final": {"DSA_DCP_TOPK": "mega_topk", "DSA_DCP_COMBINE": "mega_a2a", "DSA_DCP_PROLOGUE": "multi_stream"},
+    "dev": {"DSA_DCP_TOPK": "a2a", "DSA_DCP_COMBINE": "a2a", "DSA_DCP_PROLOGUE": "dev",
+            "DSA_SFA_DECODE": "sched"},
+    "mega_topk": {"DSA_DCP_TOPK": "mega_topk", "DSA_DCP_COMBINE": "a2a",
+                  "DSA_DCP_PROLOGUE": "dev", "DSA_SFA_DECODE": "sched"},
+    "mega_a2a": {"DSA_DCP_TOPK": "mega_topk", "DSA_DCP_COMBINE": "mega_a2a",
+                 "DSA_DCP_PROLOGUE": "dev", "DSA_SFA_DECODE": "sched"},
+    "serial": {"DSA_DCP_TOPK": "mega_topk", "DSA_DCP_COMBINE": "mega_a2a",
+               "DSA_DCP_PROLOGUE": "serial", "DSA_SFA_DECODE": "sched"},
+    "sched": {"DSA_DCP_TOPK": "mega_topk", "DSA_DCP_COMBINE": "mega_a2a",
+              "DSA_DCP_PROLOGUE": "multi_stream", "DSA_SFA_DECODE": "sched"},
+    "final": {"DSA_DCP_TOPK": "mega_topk", "DSA_DCP_COMBINE": "mega_a2a",
+              "DSA_DCP_PROLOGUE": "multi_stream", "DSA_SFA_DECODE": "metadata_free"},
 }
 
 
@@ -463,7 +471,6 @@ def main():
     parser.add_argument("--queries", default="[1, 3, 4, 6, 8, 16]", help="speculative widths Q to simulate")
     parser.add_argument("--buckets", default=None, help="graph buckets (default: buckets_for)")
     parser.add_argument("--steps", type=int, default=5, help="steps per Q and bucket")
-    parser.add_argument("--eager-fraction", type=float, default=0.1)
     parser.add_argument("--arms", default='["dev"]')
     parser.add_argument("--max-seq-len", type=int, default=1 << 20)
     parser.add_argument("--pool-pages", type=int, default=96 * 1024, help="kernel pages per cache group per rank")
@@ -493,14 +500,18 @@ def main():
         pool_handle = torch.cuda.graph_pool_handle()
         decisions = random.Random(args.seed * 7 + queries)
         hidden_gen = torch.Generator(device="cuda").manual_seed(args.seed * 13 + rank)
-        schedule = [b for b in buckets for _ in range(args.steps)]
-        decisions.shuffle(schedule)
-        for number, bucket in enumerate(schedule):
+        # Online, eager decode runs only in the datatype-probe and warmup forwards before a bucket is
+        # captured, when no Graph arena is resident yet. One eager step per bucket therefore goes first;
+        # the shuffled schedule that follows replays under graph.
+        schedule = [(b, False) for b in buckets]
+        replays = [b for b in buckets for _ in range(args.steps)]
+        decisions.shuffle(replays)
+        schedule += [(b, True) for b in replays]
+        for number, (bucket, graph) in enumerate(schedule):
             faulthandler.dump_traceback_later(args.step_timeout, exit=True)
             index = buckets.index(bucket)
             low = buckets[index - 1] + 1 if index else 1
             batch = decisions.randint(low, bucket)
-            graph = decisions.random() >= args.eager_fraction
             requests = server.step(batch)
             for request in requests:
                 if request.fresh:

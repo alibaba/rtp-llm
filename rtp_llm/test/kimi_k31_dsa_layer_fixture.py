@@ -32,6 +32,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.dsa_kv_workspace 
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_page_rr_impl import (
     SparseMlaPageRRImpl,
 )
+from rtp_llm.models_py.modules.factory.attention.kda_impl import KdaMetadata
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
@@ -41,6 +42,8 @@ SFA_FP8_ENTRY = 512 + 16 + 128  # 512B E4M3 latent + 4xFP32 scales (16B) + 64xBF
 INDEX_ENTRY = 128 + 4  # E4M3 key bytes, then one FP32 scale per token
 TAGS = ("full", "indexer_kv")
 MAX_TOKENS = 512  # largest decode batch in tokens (requests x queries)
+# The decode role's _projection_staging_tokens (global_capacity in the TP8 smoke log).
+DECODE_STAGING_TOKENS = 65536
 
 
 def dequant_fp8_ds_mla(entries):
@@ -216,6 +219,69 @@ def build_layer(config, parallel, weights, layer_index):
     return layer
 
 
+def attach_decode_collectives(layer, config, parallel, *, max_m=DECODE_STAGING_TOKENS):
+    """Attach the decode-role TP collectives that KimiK3Model.initialize builds for one attention.
+
+    Mirrors KimiK3Model._initialize_fp8_collective and _initialize_bf16_collective (kimi_k3.py):
+    the same guards, constructor arguments and decode_staging=True. The model-level wiring outside
+    this layer (AttnRes configuration, MLP output_transition) is not reproduced. A failed guard
+    leaves the NCCL fallback in place. Returns the names of the attached collectives.
+    """
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.bf16_comm_fusion import (
+        Bf16CollectiveProjection,
+    )
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_comm_fusion import (
+        Fp8CollectiveProjection,
+    )
+
+    attached = []
+    if parallel.tp_size == 1:
+        return attached
+    group = collective._get_group(collective.Group.TP)
+    device = layer.input.weight.device
+    quant = getattr(config, "attention_projection_quant_config", None)
+    nvfp4_modules = getattr(config, "k31_nvfp4_modules", ())
+    if (
+        quant is not None
+        and quant.get_method() == "FP8_PER_BLOCK"
+        and not any(name.startswith(("kda.", "dsa.")) for name in nvfp4_modules)
+    ):
+        if not (
+            getattr(layer.input, "scale_ue8m0", False)
+            and getattr(layer.output, "scale_ue8m0", False)
+        ):
+            raise ValueError("FP8 collective fusion requires grouped E4M3 projections")
+        layer._fp8_collective = Fp8CollectiveProjection(
+            group,
+            device,
+            max_m=max_m,
+            hidden_size=config.hidden_size,
+            enable_ag=True,
+            enable_rs=True,
+            decode_staging=True,
+        )
+        attached.append("fp8")
+    projections = (layer.input, layer.output)
+    if all(
+        isinstance(p, CudaF16Linear)
+        and p.weight.dtype == torch.bfloat16
+        and p.weight.is_cuda
+        and p.bias is None
+        for p in projections
+    ) and torch.cuda.get_device_capability(device) in ((10, 0), (10, 3)):
+        layer._bf16_collective = Bf16CollectiveProjection(
+            group,
+            device,
+            max_m=max_m,
+            hidden_size=config.hidden_size,
+            output_projections=[layer.output],
+            decode_staging=True,
+        )
+        attached.append("bf16")
+    return attached
+
+
 def build_owner(config, parallel, layers, *, max_requests, queries):
     """The model adapter's workspace owner (KimiK31ModelAdapter._setup_dsa)."""
     from rtp_llm.models_py.utils.flash_mla_policy import configure_flash_mla_l2_persist
@@ -330,14 +396,35 @@ class Request:
             pools[tag].release(pages)
         self.pages = {}
 
-    def write_history(self, pools, tp, rank, start=0, chunk=1 << 18):
-        """Random history at positions [start, prefix) through the production writers."""
-        begin, end = local_tokens(start, tp, rank), local_tokens(self.prefix, tp, rank)
-        gen = torch.Generator(device="cuda").manual_seed(self.seed * 8191 + rank)
+    def write_history(
+        self, pools, tp, rank, start=0, chunk=1 << 18, *, global_history=False
+    ):
+        """Write random history; global_history keeps the logical data identical across TP sizes."""
+        begin, end = (
+            (start, self.prefix)
+            if global_history
+            else (local_tokens(start, tp, rank), local_tokens(self.prefix, tp, rank))
+        )
+        gen = torch.Generator(device="cuda").manual_seed(
+            self.seed * 8191 + (0 if global_history else rank)
+        )
         scale = torch.ones((), dtype=torch.float32, device="cuda")
         for first in range(begin, end, chunk):
-            local = torch.arange(first, min(first + chunk, end), device="cuda")
-            latent = torch.randn(local.numel(), 576, generator=gen, device="cuda").bfloat16()
+            positions = torch.arange(first, min(first + chunk, end), device="cuda")
+            latent = torch.randn(
+                positions.numel(), 576, generator=gen, device="cuda"
+            ).bfloat16()
+            keys = torch.randn(
+                positions.numel(), 128, generator=gen, device="cuda"
+            ).bfloat16()
+            if global_history:
+                owner, local = global_owner(positions, tp)
+                keep = owner == rank
+                local, latent, keys = local[keep], latent[keep], keys[keep]
+            else:
+                local = positions
+            if not local.numel():
+                continue
             full_slots = pools["full"].slots(self.pages["full"], local)
             if pools["full"].cache.dtype == torch.uint8:
                 rtp_llm_ops.concat_and_cache_mla(
@@ -346,7 +433,6 @@ class Request:
                 )
             else:
                 pools["full"].cache.view(-1, 576)[full_slots] = latent
-            keys = torch.randn(local.numel(), 128, generator=gen, device="cuda").bfloat16()
             rtp_llm_ops.indexer_k_quant_and_cache(
                 keys, pools["indexer_kv"].cache, pools["indexer_kv"].slots(self.pages["indexer_kv"], local),
                 128, "ue8m0",
@@ -487,6 +573,8 @@ class GraphSlot:
         }
         rows = self.padded * queries // tp
         self.hidden = torch.zeros(rows, config.hidden_size, dtype=torch.bfloat16, device="cuda")
+        # The model's layer metadata (KimiK3Model.forward); collective eligibility reads is_target_verify.
+        self.metadata = KdaMetadata(is_target_verify=queries > 1)
         self.forward()  # eager warm-up
         torch.cuda.synchronize()
         self.graph = torch.cuda.CUDAGraph()
@@ -497,7 +585,10 @@ class GraphSlot:
 
     def forward(self):
         primary = self.inputs["full"]
-        return [layer(self.hidden, self.fmha, self.caches[layer.layer_idx], primary, None) for layer in self.layers]
+        return [
+            layer(self.hidden, self.fmha, self.caches[layer.layer_idx], primary, self.metadata)
+            for layer in self.layers
+        ]
 
     def load(self, requests, hidden):
         """Copy one step's live inputs into the captured buffers (CudaGraphRunner.prepareInputs)."""

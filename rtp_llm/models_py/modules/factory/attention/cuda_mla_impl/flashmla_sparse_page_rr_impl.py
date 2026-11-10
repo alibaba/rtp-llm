@@ -49,13 +49,40 @@ class PageRRSparseMlaOp(SparseMlaOp):
             raise ValueError(
                 "BF16 sparse FlashMLA currently supports at most 128 heads"
             )
+        # The metadata-free FP8 decode kernel also accepts 96 heads natively, so
+        # that path keeps its own, smaller head target. The switch itself is read
+        # once, by the workspace owner, so the operator and the reserved buffers
+        # can never disagree.
+        self.sfa_decode_backend = (
+            "metadata_free"
+            if workspace_owner is not None and workspace_owner.sfa_metadata_free
+            else "sched"
+        )
+        self.decode_kernel_heads = (
+            next(heads for heads in (64, 96, 128) if heads >= self.communicator.heads)
+            if self.sfa_decode_backend == "metadata_free"
+            else self.kernel_heads
+        )
         # Retain every capture bucket's scheduler tensors across preparations.
         self._fp8_schedules = {}
+
+    def _decode_fp8_backend(self):
+        """Which FP8 sparse decode operator this phase runs, if any."""
+        if self.params.is_prefill or not self.workspace_owner.sfa_use_fp8:
+            return None
+        return self.sfa_decode_backend
+
+    @property
+    def _pad_heads(self):
+        """Query heads the operator selected for this phase requires."""
+        if self._decode_fp8_backend() == "metadata_free":
+            return self.decode_kernel_heads
+        return self.kernel_heads
 
     def plan(self, params, block_table, attn_inputs=None):
         self.params = params
         self.execute = self._prefill if params.is_prefill else self._decode
-        if self.workspace_owner.sfa_use_fp8 and not params.is_prefill:
+        if self._decode_fp8_backend() == "sched":
             from rtp_llm.models_py.utils.flash_mla_legacy import get_mla_metadata
 
             rows = params.positions_d.numel()
@@ -86,13 +113,31 @@ class PageRRSparseMlaOp(SparseMlaOp):
 
     projects_values = True
 
-    def _attention(self, query, kv, slots):
+    def _attention(self, query, kv, slots, counts=None):
         # Query CP/head gather and padding happen once, outside the KV loop.
         if not query.shape[0]:
             return query.new_empty(
-                (0, self.kernel_heads, self.kv_lora_rank)
-            ), query.new_empty((0, self.kernel_heads), dtype=torch.float32)
-        if self.workspace_owner.sfa_use_fp8 and not self.params.is_prefill:
+                (0, self._pad_heads, self.kv_lora_rank)
+            ), query.new_empty((0, self._pad_heads), dtype=torch.float32)
+        backend = self._decode_fp8_backend()
+        if backend == "metadata_free":
+            from rtp_llm.models_py.utils.flash_mla_legacy import (
+                flash_mla_sparse_decode_fp8_kv,
+            )
+
+            # `counts` packs this owner's slots at the front of every row, so the
+            # kernel walks only them; empty rows come back as 0 / -inf, which the
+            # existing partial normalization already treats as an empty sentinel.
+            output, lse = flash_mla_sparse_decode_fp8_kv(
+                query.unsqueeze(1),
+                kv.view(torch.uint8).view(-1, self.params.kernel_page_size, 1, 656),
+                slots.unsqueeze(1),
+                counts,
+                head_dim_v=self.kv_lora_rank,
+                softmax_scale=self.scale,
+            )
+            return output.squeeze(1), lse.squeeze(-1)
+        if backend == "sched":
             from rtp_llm.models_py.utils.flash_mla_legacy import flash_mla_with_kvcache
 
             output, lse = flash_mla_with_kvcache(
@@ -220,7 +265,7 @@ class PageRRSparseMlaOp(SparseMlaOp):
             query = q
         else:
             query = self.execute(q)
-            query = F.pad(query, (0, 0, 0, self.kernel_heads - heads)).contiguous()
+            query = F.pad(query, (0, 0, 0, self._pad_heads - heads)).contiguous()
         rows, value_dim = query.shape[0], self.workspace_owner.value_dim
         if not execution.blocks:
             output = query.new_zeros((rows, heads, value_dim))
@@ -240,6 +285,12 @@ class PageRRSparseMlaOp(SparseMlaOp):
         chunked = len(execution.blocks) > 1
         lengths = workspace("lengths", (rows,), torch.int32)
         slots = workspace("slots", (rows, self.top_k), torch.int32)
+        # The metadata-free kernel reads its per-row topk_length from the slot map.
+        counts = (
+            workspace("owned_slots", (rows,), torch.int32)
+            if self._decode_fp8_backend() == "metadata_free"
+            else None
+        )
         weights = self.workspace_owner.value_weights[layer_id]
         if chunked:
             running = workspace("running", (rows, heads, value_dim), torch.float32)
@@ -269,9 +320,12 @@ class PageRRSparseMlaOp(SparseMlaOp):
                     slots,
                     block_table=execution.block_ids,
                     lengths=lengths if number == 0 else None,
+                    counts=counts,
                 )
             with profile_scope("RTP::attention.dsa.sfa.chunk_qk_pv"):
-                partial, lse = self._attention(query, history.unsqueeze(1), slots)
+                partial, lse = self._attention(
+                    query, history.unsqueeze(1), slots, counts
+                )
                 normalize_sparse_partial(
                     partial, lse, heads, partial_lse, lengths, lse_scale=lse_scale
                 )
@@ -370,7 +424,7 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
         if key_up.shape[0] != heads:
             raise ValueError("an all-head decode query needs the all-head kc weight")
         return absorbed_query(
-            query, key_up, self.kv_lora_rank, self.fmha_impl.kernel_heads
+            query, key_up, self.kv_lora_rank, self.fmha_impl.decode_kernel_heads
         )
 
     def write_decode_cache(self, latent, suffix, kv_cache):

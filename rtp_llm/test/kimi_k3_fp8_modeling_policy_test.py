@@ -299,6 +299,7 @@ class CacheDispatchTest(unittest.TestCase):
             "models_py/modules/factory/attention/cuda_mla_impl/flashmla_sparse_page_rr_impl.py"
         ))
         op = NS(workspace_owner=NS(sfa_use_fp8=True), kernel_heads=128, top_k=2048,
+                sfa_decode_backend="sched", _decode_fp8_backend=lambda: "sched",
                 _prefill=object(), _decode=object(), _fp8_schedules={})
 
         def prepare(rows, replay=False):
@@ -375,6 +376,8 @@ class CacheDispatchTest(unittest.TestCase):
         op = NS(workspace_owner=NS(sfa_use_fp8=True),
                 params=NS(is_prefill=False, kernel_page_size=128, block_table=object()),
                 kernel_heads=128, kv_lora_rank=512, scale=192 ** -.5,
+                sfa_decode_backend="sched", _decode_fp8_backend=lambda: "sched",
+                _pad_heads=128,
                 _fp8_metadata=object(), _fp8_num_splits=None)
         with patch.dict(sys.modules, {module_name: module}):
             output, lse = attend(op, Tensor((4, 128, 576), "bf16"),

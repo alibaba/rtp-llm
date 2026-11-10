@@ -97,6 +97,8 @@ class MetadataModel:
                 op = object.__new__(PageRRSparseMlaOp)
                 op.workspace_owner = self.owner
                 op.kernel_heads = 64
+                op.decode_kernel_heads = 64
+                op.sfa_decode_backend = "sched"
                 op.top_k = self.owner.topk
                 op._fp8_schedules = {}
                 impl.fmha_impl = op

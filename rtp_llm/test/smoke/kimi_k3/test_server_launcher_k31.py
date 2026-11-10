@@ -225,11 +225,13 @@ class K31LaunchContract(unittest.TestCase):
                             self.assertNotIn('DSA_DCP_TOPK',env)
                             self.assertNotIn('DSA_DCP_COMBINE',env)
                             self.assertNotIn('DSA_DCP_PROLOGUE',env)
+                            self.assertNotIn('DSA_SFA_DECODE',env)
                         else:
                             self.assertEqual(env['ENABLE_LINEAR_REPLAY'],'1')
                             self.assertEqual(env['DSA_DCP_TOPK'],'mega_topk')
                             self.assertEqual(env['DSA_DCP_COMBINE'],'mega_a2a')
                             self.assertEqual(env['DSA_DCP_PROLOGUE'],'multi_stream')
+                            self.assertEqual(env['DSA_SFA_DECODE'],'metadata_free')
                             self.assertEqual(options['--decode_capture_config'],
                                              '1,2,4,8,16,32' if dp==2 else '1,2,4,8,16,32,64')
                         self.assertNotIn('force_sp_accept',options)

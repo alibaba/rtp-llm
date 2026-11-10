@@ -13,7 +13,7 @@ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-
 # against torch 2.11+cu130; SHAs encoded in filename).
 http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2+98a672e.cu132-cp310-cp310-linux_aarch64.whl
 # Current and legacy model KV formats share one versioned FlashMLA wheel.
-http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_mla/flash_mla-1.0.0%2B3ca6856.cu132-cp310-cp310-linux_aarch64.whl#sha256=d960b9b2ae558f7c088af277657dc8814a8802dee1df5b1eca24573490a2f94d
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_mla/flash_mla-1.0.0%2Bbdd41db.cu132-cp310-cp310-linux_aarch64.whl#sha256=dc9876a2df6ed59f34d08a01488da5e43c7bc593be7c317505d5040b29b617c1
 https://artlab.alibaba-inc.com/1/pypi/rtp_llm/tokenspeed-mla/tokenspeed_mla-0.2.11+8b513a59.cu132-py3-none-any.whl#sha256=d66de94e5072c4e509d9b83b115616ddbc91bc1f50a6fb438deb5dfeecf089c3
 nvidia-cutlass-dsl==4.5.3
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.

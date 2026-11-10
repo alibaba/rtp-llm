@@ -187,11 +187,18 @@ class DsaWorkspaceOwner:
         self.sfa_use_fp8 = sfa_use_fp8
         if sfa_use_fp8 and (latent_dim, suffix_dim) != (512, 64):
             raise ValueError("fp8_ds_mla requires 512 latent and 64 physical suffix dimensions")
-        from .dsa_dcp_options import dcp_combine_backend, dcp_topk_mode
+        from .dsa_dcp_options import dcp_combine_backend, dcp_topk_mode, sfa_decode_backend
 
         # Decode DCP paths of the FP8 target (dsa_dcp_options): MegaTopk selection, MegaA2A combine.
         self.mega_topk = indexer_use_fp8 and tp_size > 1 and dcp_topk_mode() == "mega_topk"
         self.mega_a2a = indexer_use_fp8 and tp_size > 1 and dcp_combine_backend() == "mega_a2a"
+        # Only the metadata-free FP8 decode operator consumes a per-row topk_length,
+        # and it only pays off when this owner holds a fraction of the row's top-k:
+        # with one rank per domain every row still walks all `topk` slots, where the
+        # kernel's asymmetric 256/320 query split measures as a small net loss.
+        self.sfa_metadata_free = (
+            sfa_use_fp8 and tp_size > 1 and sfa_decode_backend() == "metadata_free"
+        )
         self.indexer_score = None
         self.heads, self.latent_dim = heads, latent_dim
         self.suffix_dim, self.value_dim = suffix_dim, value_dim

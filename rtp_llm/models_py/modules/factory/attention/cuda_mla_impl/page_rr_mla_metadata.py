@@ -23,8 +23,9 @@ class PageRRMlaMetadata:
     ):
         if page_size <= 0 or kernel_page_size <= 0 or page_size % kernel_page_size:
             raise ValueError("Page-RR ownership page must be a multiple of kernel page size")
-        if cp_size <= 1 or not 0 <= cp_rank < cp_size:
-            raise ValueError("Page-RR requires a valid rank in a multi-rank TP group")
+        # One owner is the identity layout: its DP replica keeps the complete request.
+        if cp_size < 1 or not 0 <= cp_rank < cp_size:
+            raise ValueError("Page-RR requires a valid rank in a nonempty TP group")
         self.page_size = page_size
         self.kernel_page_size = kernel_page_size
         self.cp_size = cp_size

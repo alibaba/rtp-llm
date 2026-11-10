@@ -269,6 +269,7 @@ def launch_config(args):
             environment["DSA_DCP_TOPK"] = os.environ.get("DSA_DCP_TOPK", "mega_topk")
             environment["DSA_DCP_COMBINE"] = os.environ.get("DSA_DCP_COMBINE", "mega_a2a")
             environment["DSA_DCP_PROLOGUE"] = os.environ.get("DSA_DCP_PROLOGUE", "multi_stream")
+            environment["DSA_SFA_DECODE"] = os.environ.get("DSA_SFA_DECODE", "metadata_free")
     if getattr(args, "execution_evidence", False):
         environment["KIMI_K3_SMOKE_EVIDENCE"] = "1"
     decode_capture_batches = (

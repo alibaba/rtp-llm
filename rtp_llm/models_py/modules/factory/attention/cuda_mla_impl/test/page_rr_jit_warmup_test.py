@@ -60,6 +60,17 @@ def compile_attempts(kernel):
         knobs.runtime.jit_cache_hook = previous
 
 
+class PageRRGeometryTest(unittest.TestCase):
+    def test_single_owner_is_valid(self):
+        metadata = PageRRMlaMetadata(PAGE, KERNEL, 1, 0)
+        self.assertEqual((metadata.cp_size, metadata.cp_rank), (1, 0))
+
+    def test_invalid_owner_rejected(self):
+        for size, rank in ((0, 0), (-1, 0), (1, 1), (2, -1)):
+            with self.subTest(size=size, rank=rank), self.assertRaises(ValueError):
+                PageRRMlaMetadata(PAGE, KERNEL, size, rank)
+
+
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA/Triton")
 class PageRRJitWarmupTest(unittest.TestCase):
     def test_prefill_request_shapes_reuse_jit(self):

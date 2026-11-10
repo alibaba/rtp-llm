@@ -13,6 +13,7 @@ def _map_slots(
     Table,
     Slots,
     Lengths,
+    Counts,
     TOPK: tl.constexpr,
     PREFILL: tl.constexpr,
     PAGE: tl.constexpr,
@@ -27,6 +28,7 @@ def _map_slots(
     TABLE_COL_STRIDE: tl.constexpr,
     BLOCK: tl.constexpr,
     HAS_LENGTHS: tl.constexpr,
+    COMPACT: tl.constexpr,
 ):
     row = tl.program_id(0)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
@@ -57,17 +59,37 @@ def _map_slots(
             slot = block * KERNEL_PAGE + local % KERNEL_PAGE
         else:
             slot = request * WIDTH + local - START
-    tl.store(Slots + row * TOPK + col, tl.where(valid, slot, -1), col < TOPK)
+    if COMPACT:
+        # One program covers the whole row, so a block-wide prefix sum packs this
+        # owner's slots into [0, count) and `Counts` becomes the kernel's
+        # topk_length. The two stores cover disjoint columns.
+        owned = (valid & (col < TOPK)).to(tl.int32)
+        count = tl.sum(owned, axis=0)
+        rank = tl.cumsum(owned, axis=0) - 1
+        tl.store(Slots + row * TOPK + rank, slot, owned == 1)
+        tl.store(Slots + row * TOPK + col, -1, (col >= count) & (col < TOPK))
+        tl.store(Counts + row, count)
+    else:
+        tl.store(Slots + row * TOPK + col, tl.where(valid, slot, -1), col < TOPK)
 
 
-def map_dsa_chunk_slots(indices, params, block, out, *, block_table=None, lengths=None):
+def map_dsa_chunk_slots(
+    indices, params, block, out, *, block_table=None, lengths=None, counts=None
+):
+    """Translate global TopK positions to this owner's slots.
+
+    ``lengths`` keeps its existing meaning: how many globally valid TopK entries
+    a row has, regardless of ownership. ``counts`` instead asks for this owner's
+    valid slots to be packed at the front of each row and counted, which is the
+    ``topk_length`` contract of the metadata-free FP8 decode kernel.
+    """
     if indices.shape != out.shape or not indices.is_contiguous():
         raise ValueError("DSA final TopK must be contiguous [query,K]")
     requests = params.query_requests if params.is_prefill else params.batch_indice_d
     if indices.numel():
         block_size = (
             max(256, triton.next_power_of_2(indices.shape[1]))
-            if lengths is not None
+            if lengths is not None or counts is not None
             else 256
         )
         num_warps = 8 if block_size >= 2048 else 4
@@ -78,6 +100,7 @@ def map_dsa_chunk_slots(indices, params, block, out, *, block_table=None, length
             block_table if block_table is not None else requests,
             out,
             lengths if lengths is not None else requests,
+            counts if counts is not None else requests,
             indices.shape[1],
             params.is_prefill,
             params.page_size,
@@ -93,10 +116,14 @@ def map_dsa_chunk_slots(indices, params, block, out, *, block_table=None, length
             block_table.stride(1) if block_table is not None else 0,
             block_size,
             lengths is not None,
+            counts is not None,
             num_warps=num_warps,
         )
-    elif lengths is not None and lengths.numel():
-        lengths.zero_()
+    else:
+        if lengths is not None and lengths.numel():
+            lengths.zero_()
+        if counts is not None and counts.numel():
+            counts.zero_()
 
 
 @triton.jit
