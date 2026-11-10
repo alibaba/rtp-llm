@@ -31,8 +31,16 @@ enum class ParallelMode {
 // context batch is request for initial word, decoder batch is request for incremental word.
 // ids and lengths are int32_t
 struct GptModelInputs {
-    torch::Tensor engram_token_windows;
-    torch::Tensor mm_features_spans;
+    // Input-owner-only snapshot captured while assembling this exact batch.
+    // Not broadcast to TP peers and never read back from CUDA for recording.
+    struct RecordedLengths {
+        std::vector<int32_t> q_tokens;
+        std::vector<int32_t> kv_tokens_before;
+    };
+    std::optional<RecordedLengths> record_lengths;
+    int64_t                        record_execution_id = 0;
+    torch::Tensor                  engram_token_windows;
+    torch::Tensor                  mm_features_spans;
     // input_lengths holds original input length for requests,
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
@@ -45,11 +53,11 @@ struct GptModelInputs {
     torch::Tensor custom_output_indexes;
     // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
     // scheduling redesign no longer populates it (stays undefined).
-    torch::Tensor lm_output_lengths;        // [total_batch_size]
-    torch::Tensor prefix_lengths;           // [context_batch_size]
+    torch::Tensor lm_output_lengths;  // [total_batch_size]
+    torch::Tensor prefix_lengths;     // [context_batch_size]
     // First token of this request's FULL cache-store write; zero on its first chunk.
     torch::Tensor cache_store_publish_start_tokens;  // [context_batch_size], optional
-    torch::Tensor sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
+    torch::Tensor sequence_lengths_plus_1;           // optional CUDA mirror for target-verify linear attention
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]

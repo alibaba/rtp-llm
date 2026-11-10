@@ -56,8 +56,8 @@ struct GptModelInitParams {
     RuntimeConfig                                runtime_config;
     ConcurrencyConfig                            concurrency_config;
     SpeculativeExecutionConfig                   sp_config;
-    int64_t                                      max_seq_len  = 0;
-    int64_t                                      hidden_size  = 0;
+    int64_t                                      max_seq_len = 0;
+    int64_t                                      hidden_size = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
@@ -133,6 +133,7 @@ enum GptModelInputIndex : size_t {
     engramTokenWindowRows,
     engramTokenWindowWidth,
     kvCacheCopyTokenLengths,
+    recordExecutionId,
     gptModelInputLength,
 };
 

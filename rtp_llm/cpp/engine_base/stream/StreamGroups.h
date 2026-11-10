@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -100,14 +101,13 @@ public:
                 }
             }
             const int    snapshot_seq_len = mtp_state.next_seq_len_upper_bound;
-            const size_t seq_len          = use_mtp_snapshot && snapshot_seq_len > 0 ?
-                                                static_cast<size_t>(snapshot_seq_len) :
-                                                static_cast<size_t>(stream->seqLength());
-            max_seq_len_                  = std::max(max_seq_len_, seq_len);
+            const size_t seq_len = use_mtp_snapshot && snapshot_seq_len > 0 ? static_cast<size_t>(snapshot_seq_len) :
+                                                                              static_cast<size_t>(stream->seqLength());
+            max_seq_len_         = std::max(max_seq_len_, seq_len);
             total_score_batch_size_ += stream->scoreLen();
             adapter_names.push_back(stream->adapterName());
-            gen_timeline_ |= use_mtp_snapshot ? stream->genTimelineAtSeqLength(static_cast<int>(seq_len)) :
-                                                stream->genTimeline();
+            gen_timeline_ |=
+                use_mtp_snapshot ? stream->genTimelineAtSeqLength(static_cast<int>(seq_len)) : stream->genTimeline();
         }
     }
 
@@ -331,14 +331,26 @@ public:
         return debug_string.str();
     }
 
-    void updateStreams(const std::vector<StreamSpecUpdateInfo>& spec_update_infos) const {
-        int stream_idx = 0;
+    void updateStreams(const std::vector<StreamSpecUpdateInfo>& spec_update_infos,
+                       const std::shared_ptr<RecordedBatch>&    recorded_batch = nullptr) const {
+        int    stream_idx = 0;
+        size_t timing_idx = 0;
+        auto   slice      = [&](const GenerateStreamPtr& stream) {
+            RecordedTokenTiming* timings = nullptr;
+            if (recorded_batch) {
+                timings = recorded_batch->sliceTimings(timing_idx, stream->currentBatchSize());
+            }
+            timing_idx += stream->currentBatchSize();
+            return timings;
+        };
         for (auto& stream : decode_streams_) {
-            stream->specUpdate(spec_update_infos[stream_idx]);
+            auto* timings = slice(stream);
+            stream->specUpdate(spec_update_infos[stream_idx], timings, timings ? stream->currentBatchSize() : 0);
             stream_idx++;
         }
         for (auto& stream : context_streams_) {
-            stream->specUpdate(spec_update_infos[stream_idx]);
+            auto* timings = slice(stream);
+            stream->specUpdate(spec_update_infos[stream_idx], timings, timings ? stream->currentBatchSize() : 0);
             stream_idx++;
         }
     }

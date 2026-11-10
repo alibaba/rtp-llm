@@ -718,7 +718,7 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  strea
     updateProposeTokens(stream_groups, propose_output, spec_update_infos);
 
     // update streams
-    stream_groups.updateStreams(spec_update_infos);
+    stream_groups.updateStreams(spec_update_infos, prefill_output.recorded_batch);
 
     RTP_LLM_LOG_DEBUG("dispatch prefill done");
     return absl::OkStatus();
@@ -736,7 +736,10 @@ absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&        
     // to avoid cuda sync, we need to set propose token in extra loop
     updateProposeTokens(stream_groups, draft_prefill_output, spec_update_infos);
 
-    stream_groups.updateStreams(spec_update_infos);
+    // sp_verify rows: specUpdate backfills kv_len/accept_len under the stream
+    // lock (guarded by speculative_propose_step > 0), then the RecordedBatch
+    // destructor submits.
+    stream_groups.updateStreams(spec_update_infos, draft_prefill_output.recorded_batch);
 
     RTP_LLM_LOG_DEBUG("dispatch decode done");
     return absl::OkStatus();
@@ -1268,17 +1271,18 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     int* combo_tokens  = combo_tokens_cpu.data_ptr<int>();
 
     const int* sampled_tokens = new_all_token_ids_cpu.data_ptr<int>();
-    int* combo_position_ids =
+    int*       combo_position_ids =
         model_input.combo_position_ids.defined() ? model_input.combo_position_ids.data_ptr<int>() : nullptr;
     const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
     auto         all_streams            = stream_groups.allStreams();
-    const size_t stream_row_count = std::accumulate(
+    const size_t stream_row_count       = std::accumulate(
         all_streams.begin(), all_streams.end(), size_t{0}, [](size_t count, const GenerateStreamPtr& stream) {
             return count + static_cast<size_t>(stream->nextBatchSize());
         });
     RTP_LLM_CHECK_WITH_INFO(stream_row_count == batch_size,
                             "prefill draft input stream rows %zu != sampler rows %zu",
-                            stream_row_count, batch_size);
+                            stream_row_count,
+                            batch_size);
 
     size_t row_idx = 0;
     int    offset  = 0;
@@ -1291,8 +1295,8 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
 
             // Middle chunk tail is the next prompt token; other prefill tails use sampled token.
             // Using sampled token at a chunk boundary would build draft KV from the wrong input.
-            const int tail_token = middle_chunk ? stream->nextChunkBoundaryToken() :
-                                                  sampled_tokens[row_idx * token_stride + token_stride - 1];
+            const int tail_token                    = middle_chunk ? stream->nextChunkBoundaryToken() :
+                                                                     sampled_tokens[row_idx * token_stride + token_stride - 1];
             combo_tokens[offset + input_length - 1] = tail_token;
 
             if (combo_position_ids != nullptr) {
