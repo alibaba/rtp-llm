@@ -2061,13 +2061,17 @@ class AttentionFP8(nn.Module):
         T = bsz * q_len
         swa_global = attn_metadata.swa_global_slots[:T]
         swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
-        sched_meta = get_or_build_sched_meta(
-            attn_metadata,
-            batch_size=bsz,
-            q_len=q_len,
-            num_heads=self.n_heads,
-            topk=self.window_size,
-            extra_attn_type=None,
+        sched_meta = (
+            None
+            if torch.version.hip is not None
+            else get_or_build_sched_meta(
+                attn_metadata,
+                batch_size=bsz,
+                q_len=q_len,
+                num_heads=self.n_heads,
+                topk=self.window_size,
+                extra_attn_type=None,
+            )
         )
         swa_topk_length = (
             attn_metadata.swa_topk_length[:bsz]
@@ -2218,13 +2222,17 @@ class AttentionFP8(nn.Module):
             )
         swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
         cmp_topk_3d = cmp_global.view(bsz, q_len, K_cmp).contiguous()
-        sched_meta = get_or_build_sched_meta(
-            attn_metadata,
-            batch_size=bsz,
-            q_len=q_len,
-            num_heads=self.n_heads,
-            topk=win,
-            extra_attn_type=cmp_attn_type,
+        sched_meta = (
+            None
+            if torch.version.hip is not None
+            else get_or_build_sched_meta(
+                attn_metadata,
+                batch_size=bsz,
+                q_len=q_len,
+                num_heads=self.n_heads,
+                topk=win,
+                extra_attn_type=cmp_attn_type,
+            )
         )
         swa_topk_length = (
             attn_metadata.swa_topk_length[:bsz]
