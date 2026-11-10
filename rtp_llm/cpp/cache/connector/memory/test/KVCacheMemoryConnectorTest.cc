@@ -1177,6 +1177,41 @@ TEST_F(KVCacheMemoryConnectorTest, LinearRequestWriteKeepsOnlyTailInHost) {
     }
 }
 
+TEST_F(KVCacheMemoryConnectorTest, LinearRequestReadRequiresTheMatchedCheckpointDestination) {
+    auto cfg                    = createCompactRequestConnectorConfig();
+    auto kv                     = kv_cache_config_;
+    kv.memory_cache_size_mb     = 1;
+    kv.enable_memory_cache_disk = false;
+    auto conn =
+        std::make_shared<KVCacheMemoryConnector>(cfg, kv, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+
+    auto       source        = makeCacheResource({10, 11}, {{1, 2}, {3, 4}});
+    const auto slots         = conn->layerRegionSlots();
+    const auto source_blocks = conn->resourceLayerRegionBlocks(*source, slots);
+    bool       no_need_write = true;
+    auto       write_plan =
+        conn->buildPrefixCopyPlanForWrite(source->cacheKeys(), {}, source_blocks, slots, 0, 2, no_need_write);
+    ASSERT_NE(write_plan, nullptr);
+    for (auto& copy : write_plan->copy_infos) {
+        const auto dependency = copy.cache_key == 10 ? BlockDependency{false, 0, 0} : BlockDependency{true, 10, 1};
+        conn->putPrefixToCache(copy, dependency, slots);
+    }
+    write_plan.reset();
+
+    // The destination was prepared for key 10 before key 11's Linear
+    // checkpoint became visible. Its paged KV slots alone cannot resume key 11.
+    auto dest = makeCacheResource({10, 11, 12}, {{1, 2, 3}, {7, NULL_BLOCK_IDX, NULL_BLOCK_IDX}});
+    auto meta = std::make_shared<TestReadMeta>(true);
+    ASSERT_EQ(conn->matchWholeRequest(*dest), 2u);
+    EXPECT_EQ(conn->asyncMatch(dest, meta), nullptr);
+
+    dest->mutableBlockIds(1, KVCacheRegionName::DEFAULT).setAt(1, 8);
+    auto match = std::dynamic_pointer_cast<AsyncMatchContext>(conn->asyncMatch(dest, meta));
+    ASSERT_NE(match, nullptr);
+    EXPECT_EQ(match->matchedBlockCount(), 2u);
+}
+
 TEST_F(KVCacheMemoryConnectorTest, LinearRequestEvictionStaysInTargetTier) {
     DiskTempDir disk0;
     auto        cfg                           = createCompactRequestConnectorConfig();

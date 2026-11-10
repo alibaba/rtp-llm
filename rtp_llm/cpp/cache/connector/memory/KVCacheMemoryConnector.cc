@@ -1384,13 +1384,24 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForRead(const CacheKeysType&         
                                                    int                                 start_index,
                                                    int                                 read_num) {
     (void)dependencies;
+    const bool whole_state = wholeStateRequestCache();
+    if (whole_state && read_num > 0) {
+        // A checkpoint can become visible after the coordinator allocates the
+        // destination for its first match. Do not report reuse if this read
+        // would copy only paged KV and leave the final Linear state unwritten.
+        const auto tail = static_cast<size_t>(start_index + read_num - 1);
+        if (prefixSlotValidMask(layer_attn_block_ids, slots, tail, CacheBlockKind::STATE_SWA_KV)
+            != wholeStateSlotMask(slots)) {
+            return nullptr;
+        }
+    }
     std::vector<CopyInfoPerKey> copy_infos;
     bool                        success = true;
     for (int i = start_index; i < start_index + read_num; ++i) {
         const auto cache_key                  = cache_keys.at(i);
         const auto copy_info_count_before_key = copy_infos.size();
         for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
-            if (wholeStateRequestCache() && kind == CacheBlockKind::STATE_SWA_KV && i != start_index + read_num - 1) {
+            if (whole_state && kind == CacheBlockKind::STATE_SWA_KV && i != start_index + read_num - 1) {
                 continue;
             }
             const auto required_mask = prefixSlotValidMask(layer_attn_block_ids, slots, static_cast<size_t>(i), kind);
