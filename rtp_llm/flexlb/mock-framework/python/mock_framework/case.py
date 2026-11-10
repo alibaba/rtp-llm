@@ -8,7 +8,6 @@ import sys
 import yaml
 
 from .config import ConfigError, compile_case, load_yaml
-from .execution.step.step_registry import StepRegistry
 from .execution import ExecutionError
 from .execution.launch import prepare_launch
 from .execution.runner import run_case
@@ -28,7 +27,7 @@ def _launch(args, case, parser):
         sys.stdout.write(encoded)
 
 
-def _run(args, case, registry, parser):
+def _run(args, case, parser):
     if args.output is None or args.launch is None:
         parser.error('run requires --output <new directory> and --launch <recipes.yaml>')
     launch = prepare_launch(load_yaml(args.launch), case, args.launch.resolve().parent)
@@ -38,7 +37,7 @@ def _run(args, case, registry, parser):
         task = asyncio.current_task()
         loop.add_signal_handler(signal.SIGTERM, task.cancel)
         try:
-            return await run_case(case, registry, launch, args.output)
+            return await run_case(case, launch, args.output)
         finally:
             loop.remove_signal_handler(signal.SIGTERM)
 
@@ -64,13 +63,12 @@ def main():
     if args.command != 'launch' and any(value is not None for value in (args.java, args.prometheus)):
         parser.error('--java and --prometheus are only valid with launch')
     try:
-        registry = StepRegistry.standard()
-        case = compile_case(args.case, registry, shared_root=args.shared_root)
+        case = compile_case(args.case, shared_root=args.shared_root)
         if args.command == 'launch':
             _launch(args, case, parser)
             return
         if args.command == 'run':
-            _run(args, case, registry, parser)
+            _run(args, case, parser)
             return
         if args.launch is not None:
             parser.error('--launch is only valid with run')

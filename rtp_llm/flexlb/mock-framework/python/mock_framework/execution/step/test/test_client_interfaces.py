@@ -366,7 +366,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
         case = compile_case(path, registry)
     launch = prepare_launch(recipe, case, tmp_path)
     output = tmp_path / "result"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
     if "prometheus" in recipe:
         gates = [

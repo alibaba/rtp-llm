@@ -49,9 +49,9 @@ def test_discovery_failure_after_launch_still_reaps_process(tmp_path, monkeypatc
         if nodes:
             raise OSError('discovery unavailable')
     monkeypatch.setattr(MasterRole, 'publish_discovery', publish)
-    case, registry, launch = generic(tmp_path, [step('never', 'master/stop')])
+    case, launch = generic(tmp_path, [step('never', 'master/stop')])
     output = tmp_path / 'run'
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result['status'] == 'ERROR' and 'discovery unavailable' in result['error']
     events = logs(output)
     assert len([e for e in events if e['event'] == 'process_started']) == 1

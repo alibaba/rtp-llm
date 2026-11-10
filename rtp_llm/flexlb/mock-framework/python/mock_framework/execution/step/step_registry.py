@@ -111,10 +111,6 @@ class StepDefinition:
     args: dict
     returns: dict
 
-    def describe(self):
-        return {'effect': self.effect, 'unit': self.unit, 'args': self.args, 'returns': self.returns,
-                'description': self.handler.__doc__ or ''}
-
     def arguments(self, value):
         where = self.name + '.args'
         validate(value, self.args, where)
@@ -169,10 +165,6 @@ class StepRegistry:
     def standard(cls):
         from . import standard_actions
         return cls(standard_actions())
-
-    @property
-    def interfaces(self):
-        return {name: item.describe() for name, item in self._definitions.items()}
 
     def get(self, name):
         try:

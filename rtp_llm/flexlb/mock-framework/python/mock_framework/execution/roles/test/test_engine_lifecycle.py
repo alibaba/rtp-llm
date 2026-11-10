@@ -62,7 +62,7 @@ def setup_case(tmp_path, operation, monitor=False, invalid=False, master=False):
         raw['zookeeper'] = {'command': zookeeper_command(ROOT, java)}
     if monitor:
         raw['prometheus'] = {'binary': os.environ['PROMETHEUS_BIN'], 'scrape_interval': '100ms'}
-    return case, registry, prepare_launch(raw, case, tmp_path)
+    return case, prepare_launch(raw, case, tmp_path)
 
 
 def no_children(output):
@@ -198,9 +198,9 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
         assert len(await engine_scale(ctx, Scale(direction='out'))) == 1
         return removed + created
     monitor = bool(os.environ.get('PROMETHEUS_BIN'))
-    case, registry, launch = setup_case(tmp_path, exercise, monitor)
+    case, launch = setup_case(tmp_path, exercise, monitor)
     output = tmp_path / 'result'
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result['status'] == 'PASS', result
     events = no_children(output)
     assert len([event for event in events if event['event'] == 'instance_stopped']) == 4
@@ -222,9 +222,9 @@ def test_process_failure_or_partial_startup_fails_the_run_and_cleans_every_proce
         ctx.runtime.supervisor.child('prefill-0').kill()
         await asyncio.sleep(20)
         return True
-    case, registry, launch = setup_case(tmp_path, crash, invalid=invalid)
+    case, launch = setup_case(tmp_path, crash, invalid=invalid)
     output = tmp_path / 'result'
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result['status'] == 'ERROR'
     events = no_children(output)
     assert len([event for event in events if event['event'] == 'process_started']) == 3
@@ -266,9 +266,9 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(tmp_path, 
         if operation == 'create': await engine_scale(ctx, Scale(direction='out', count=2))
         else: await engine_scale(ctx, Scale(direction='in', count=2))
         raise AssertionError('Partial failure was swallowed')
-    case, registry, launch = setup_case(tmp_path, exercise)
+    case, launch = setup_case(tmp_path, exercise)
     output = tmp_path / 'result'
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result['status'] == 'ERROR', result
     events = no_children(output)
     injected = [e for e in events if e['event'] == 'injected_failure']
@@ -345,9 +345,9 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
                 except TimeoutError:
                     child.kill(); await child.wait()
                 assert child.returncode == 0, (directory / 'stderr.log').read_text()
-    case, registry, launch = setup_case(tmp_path, exercise, monitor=True, master=True)
+    case, launch = setup_case(tmp_path, exercise, monitor=True, master=True)
     output = tmp_path / 'result'
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result['status'] == 'PASS', result
     no_children(output)
     assert json.loads((output / 'prometheus/collection.json').read_text())['complete']

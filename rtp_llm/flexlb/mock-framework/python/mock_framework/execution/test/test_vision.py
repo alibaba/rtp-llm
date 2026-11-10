@@ -189,7 +189,7 @@ def test_vision_playback_through_real_master(tmp_path):
         tmp_path,
     )
     output = tmp_path / "result"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
     summary = json.loads(
         (output / "components/client-0/coordinator/1/result.json").read_text()

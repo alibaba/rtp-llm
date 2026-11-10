@@ -48,7 +48,7 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
     output = tmp_path / 'result'
 
     async def run():
-        task = asyncio.create_task(run_case(case, registry, launch, output))
+        task = asyncio.create_task(run_case(case, launch, output))
         try:
             for _ in range(2000):
                 if all((output / f'components/{role}-0/ready.json').exists() for role in ('prefill', 'decode')):

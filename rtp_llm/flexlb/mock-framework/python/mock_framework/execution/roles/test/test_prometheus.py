@@ -88,7 +88,7 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
 
     async def run():
         nonlocal url
-        task = asyncio.create_task(run_case(case, registry, launch, output))
+        task = asyncio.create_task(run_case(case, launch, output))
         try:
             for _ in range(2000):
                 if all((output / f'components/prefill-{n}/ready.json').is_file() for n in range(2)):

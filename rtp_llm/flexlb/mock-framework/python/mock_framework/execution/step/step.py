@@ -84,7 +84,7 @@ class Step:
                     elif op in ('gte', 'lte'):
                         expected_type = {'type': 'number'}
                     validate(value, expected_type, 'expect.' + op)
-                gate = {'step': self.id, 'interface': self.interface, 'args': args,
+                gate = {'step': self.id, 'interface': self.interface, 'unit': interface.unit, 'args': args,
                         'query_time': context.query_time, 'expect': expected}
             budget = context.timeout
             stage = 'invoke'

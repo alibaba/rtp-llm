@@ -35,7 +35,7 @@ async def read(ctx, args: Args) -> int:
     return 'invalid' if args.invalid else args.value
 
 
-@register_step('probe/write', effect='write')
+@register_step('probe/write', effect='write', unit='tokens')
 async def write(ctx, args: Args) -> int:
     ctx.records.emit(event='mutation')
     if args.crash:
@@ -64,7 +64,7 @@ def setup(tmp_path):
         case = compile_case(path, registry)
         launch = prepare_launch({'components': {'master': {'command': [sys.executable, str(script)],
             'startup_timeout': '150ms' if child != 'ready' else '3s'}}}, case, tmp_path)
-        return case, registry, launch
+        return case, launch
     return make
 
 
@@ -82,7 +82,7 @@ def cleaned(out):
 
 
 def test_cli_sigterm_cancels_and_cleans_owned_process(setup, tmp_path):
-    case, _, launch = setup([{'id': 'leader', 'describe': 'leader', 'interface': 'master/get'}], child='hung')
+    case, launch = setup([{'id': 'leader', 'describe': 'leader', 'interface': 'master/get'}], child='hung')
     launch['components']['master']['startup_timeout'] = '30s'
     recipe = tmp_path / 'launch.yaml'
     recipe.write_text(yaml.safe_dump(launch))
@@ -111,9 +111,9 @@ def test_cli_sigterm_cancels_and_cleans_owned_process(setup, tmp_path):
 
 
 def run(setup, tmp_path, steps, **kw):
-    case, registry, launch = setup(steps, **kw)
+    case, launch = setup(steps, **kw)
     out = tmp_path / 'out'
-    result = asyncio.run(run_case(case, registry, launch, out))
+    result = asyncio.run(run_case(case, launch, out))
     cleaned(out)
     return result, out
 
@@ -122,8 +122,10 @@ def test_reads_writes_refs_and_gates_share_one_path(setup, tmp_path):
     result, out = run(setup, tmp_path, [step(), step('write', args={'value': {'ref': 'steps.read'}}, expect={'eq': 2})])
     assert result['status'] == 'PASS'
     assert len([e for e in events(out) if e['event'] == 'mutation']) == 1
-    assert events(out, 'gates')[0]['actual'] == 2
-    assert (out / 'interfaces.json').is_file()
+    gate, = events(out, 'gates')
+    assert gate['actual'] == 2
+    assert gate['unit'] == 'tokens'
+    assert not (out / 'interfaces.json').exists()
 
 
 @pytest.mark.parametrize('args,expect,status', [({}, {'eq': 3}, 'FAIL'), ({'invalid': True}, {'eq': 2}, 'ERROR')])
@@ -166,10 +168,10 @@ def test_child_exit_interrupts_operation(setup, tmp_path):
 
 
 def test_cancel_records_and_reclaims(setup, tmp_path):
-    case, registry, launch = setup([step(args={'delay': 10})])
+    case, launch = setup([step(args={'delay': 10})])
     out = tmp_path / 'out'
     async def exercise():
-        task = asyncio.create_task(run_case(case, registry, launch, out))
+        task = asyncio.create_task(run_case(case, launch, out))
         for _ in range(500):
             if (out / 'events.jsonl').exists() and any(e['event'] == 'step_started' for e in events(out)):
                 break
@@ -184,9 +186,9 @@ def test_cancel_records_and_reclaims(setup, tmp_path):
 
 
 def test_existing_output_is_not_overwritten(setup, tmp_path):
-    case, registry, launch = setup([step()])
+    case, launch = setup([step()])
     with pytest.raises(FileExistsError):
-        asyncio.run(run_case(case, registry, launch, tmp_path))
+        asyncio.run(run_case(case, launch, tmp_path))
 
 
 def test_refs_do_not_eval_and_require_actual_fields():
@@ -197,7 +199,7 @@ def test_refs_do_not_eval_and_require_actual_fields():
 
 
 def test_cli_compiles_without_java_catalog(setup, tmp_path):
-    case, _, _ = setup([{'id': 'leader', 'describe': 'leader', 'interface': 'master/get', 'args': {'is_leader': True}, 'wait_after': '1ms'}])
+    case, _ = setup([{'id': 'leader', 'describe': 'leader', 'interface': 'master/get', 'args': {'is_leader': True}, 'wait_after': '1ms'}])
     output = tmp_path / 'compiled.json'
     result = subprocess.run([sys.executable, '-m', 'mock_framework.case', 'compile', str(case.source),
         '--output', str(output)], capture_output=True, text=True, timeout=10)
@@ -239,10 +241,10 @@ def test_wait_timeout_preserves_successful_write_and_stops_next_step(setup, tmp_
 
 @pytest.mark.parametrize('interrupt', ['cancel', 'process_exit'])
 def test_wait_is_interruptible_without_losing_completed_action(setup, tmp_path, interrupt):
-    case, registry, launch = setup([step('write', wait_after='10s'), step()], timeout='20s')
+    case, launch = setup([step('write', wait_after='10s'), step()], timeout='20s')
     out = tmp_path / 'out'
     async def exercise():
-        task = asyncio.create_task(run_case(case, registry, launch, out))
+        task = asyncio.create_task(run_case(case, launch, out))
         async with asyncio.timeout(5):
             while not (out / 'events.jsonl').exists() or not any(e['event'] == 'wait_started' for e in events(out)):
                 await asyncio.sleep(.01)
@@ -263,10 +265,10 @@ def test_wait_is_interruptible_without_losing_completed_action(setup, tmp_path, 
 
 
 def test_multiple_masters_always_use_distinct_processes(setup, tmp_path):
-    case, registry, launch = setup([step()])
+    case, launch = setup([step()])
     case.environment['master']['deployment']['replicas'] = 2
     output = tmp_path / 'out'
-    assert asyncio.run(run_case(case, registry, launch, output))['status'] == 'PASS'
+    assert asyncio.run(run_case(case, launch, output))['status'] == 'PASS'
     starts = [e for e in events(output) if e['event'] == 'process_started']
     assert {e['node'] for e in starts} == {'master-0', 'master-1'}
     assert len({e['pid'] for e in starts}) == 2
@@ -336,7 +338,7 @@ def test_runner_constructs_arguments_once_per_step(case_data, compile_data, tmp_
     case = compile_data(case_data, interfaces=registry)
     constructions.clear()
     launch = prepare_launch({'components': {}}, case, tmp_path)
-    result = asyncio.run(run_case(case, registry, launch, tmp_path / 'out'))
+    result = asyncio.run(run_case(case, launch, tmp_path / 'out'))
     assert result['status'] == 'PASS'
     assert constructions == [3]
 
@@ -372,7 +374,7 @@ def test_constructor_failure_after_reference_resolution_is_not_an_unknown_write(
     case = compile_data(case_data, interfaces=registry)
     launch = prepare_launch({'components': {}}, case, tmp_path)
     output = tmp_path / 'out'
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result['status'] == 'ERROR'
     failed = [event for event in events(output) if event['event'] == 'step_finished'][-1]
     assert failed['error_stage'] == 'arguments'
@@ -382,9 +384,9 @@ def test_constructor_failure_after_reference_resolution_is_not_an_unknown_write(
 
 
 def test_trace_correlates_steps_and_gates_across_streams(setup, tmp_path):
-    case, registry, launch = setup([step(expect={'eq': 2})])
+    case, launch = setup([step(expect={'eq': 2})])
     output = tmp_path / 'trace'
-    assert asyncio.run(run_case(case, registry, launch, output))['status'] == 'PASS'
+    assert asyncio.run(run_case(case, launch, output))['status'] == 'PASS'
     events = [json.loads(line) for line in (output / 'events.jsonl').read_text().splitlines()]
     gates = [json.loads(line) for line in (output / 'gates.jsonl').read_text().splitlines()]
     result = json.loads((output / 'result.json').read_text())

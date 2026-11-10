@@ -114,11 +114,7 @@ def experiment(directory):
             for step in phase['steps']:
                 if isinstance(step, dict) and isinstance(step.get('id'), str):
                     steps[step['id']] = step
-    interfaces = optional('interfaces.json', dict)
-    interfaces = interfaces.get('interfaces', {}) if interfaces else {}
-    if not isinstance(interfaces, dict):
-        warnings.append('interfaces.json: interfaces must be an object')
-        interfaces = {}
+
     def observation_key(record):
         identity = tuple(record.get(key) for key in ('run_id', 'phase_id', 'step_id'))
         if all(isinstance(value, str) for value in identity):
@@ -172,10 +168,9 @@ def experiment(directory):
                 raise ValueError('invalid gate status')
             if not isinstance(gate.get('expect'), dict) or not isinstance(gate.get('args'), dict):
                 raise ValueError('expect and args must be objects')
-            definition = interfaces.get(gate['interface'], {})
-            unit = definition.get('unit', '') if isinstance(definition, dict) else ''
+            unit = gate.get('unit', '')
             if not isinstance(unit, str):
-                warnings.append(f"interfaces.json: {gate['interface']}.unit must be a string")
+                warnings.append(f'gates.jsonl:{number}: unit must be a string')
                 unit = ''
             a, b = windows.get(observation_key(gate), (None, None))
             gates.append({**gate, 'title': steps.get(gate['step'], {}).get('describe', gate['step']), 'point': point,

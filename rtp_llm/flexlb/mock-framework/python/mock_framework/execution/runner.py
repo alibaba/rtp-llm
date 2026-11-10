@@ -4,7 +4,7 @@ import time
 
 from ..config.validation import duration
 from .environment import RunEnvironment
-from .step_trace import StepTrace, timestamp, write_json
+from .step_trace import StepTrace, timestamp
 from .step.step import GateFailure, StepContext
 
 
@@ -50,7 +50,7 @@ class _PhaseTasks:
         await asyncio.gather(*self._background.values(), return_exceptions=True)
 
 
-async def run_case(case, registry, launch, directory):
+async def run_case(case, launch, directory):
     records = StepTrace(directory, case, launch)
     runtime = RunEnvironment(case, launch, records)
     results = {}
@@ -59,7 +59,6 @@ async def run_case(case, registry, launch, directory):
     try:
         records.versions([Path(__file__).resolve().parents[3], case.directory,
                           *[r['cwd'] for r in launch['components'].values()]])
-        write_json(records.directory / 'interfaces.json', {'interfaces': registry.interfaces})
         records.emit(event='setup_started')
         await runtime.start()
         records.emit(event='setup_finished')

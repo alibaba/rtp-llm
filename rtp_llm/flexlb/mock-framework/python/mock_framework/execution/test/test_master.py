@@ -143,7 +143,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     output = tmp_path / 'result'
 
     async def exercise():
-        task = asyncio.create_task(run_case(case, registry, launch, output))
+        task = asyncio.create_task(run_case(case, launch, output))
         try:
             ready = output / f'components/master-{replicas - 1}/ready.json'
             while not ready.exists():

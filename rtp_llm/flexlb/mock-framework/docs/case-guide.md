@@ -61,7 +61,7 @@ phases:
 
 先从同类 Case 复用步骤。基础收发在回放结束后检查逐请求结果。性能回归在预热后检查绝对阈值。故障恢复先保存实际选举出的主备地址，再按地址执行故障步骤。操作回执之后，用独立的读取 Step 验证发现、选举和流量是否恢复。[Basic](../cases/basic/case.yaml) · [性能回归](../cases/performance_regression/case.yaml) · [Master HA](../cases/master_ha_failover/case.yaml)
 
-接口名以 `standard_actions()` 注册的动作列表为准。每个动作的参数类型、默认值、返回类型和单位由函数签名及 `@register_step` 声明。Runner 将当次运行的接口契约保存到结果目录的 `interfaces.json`。[已注册的 Step](../python/mock_framework/execution/step/__init__.py)
+接口名以 `standard_actions()` 注册的动作列表为准。每个动作的参数类型、默认值、返回类型和单位由函数签名及 `@register_step` 声明。门禁记录在 `gates.jsonl` 中保存当次检查的单位。[已注册的 Step](../python/mock_framework/execution/step/__init__.py)
 
 ### 指标门禁
 
