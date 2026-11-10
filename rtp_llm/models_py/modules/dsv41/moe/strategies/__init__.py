@@ -35,6 +35,9 @@ from .grouped_fp4 import (  # noqa: F401  ep_size==1 + kernel
 )
 from .deepep import DeepEPStrategy  # noqa: F401  targeted tests/experiments
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
+from .sm80_ep_local_loop import (  # noqa: F401  ep_size>1 on pre-SM100 GPUs
+    Sm80EpLocalLoopStrategy,
+)
 
 __all__ = [
     "MoeCfg",

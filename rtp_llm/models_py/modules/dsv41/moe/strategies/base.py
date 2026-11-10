@@ -299,6 +299,21 @@ def _resolve_forced(strategy_arg: Optional[str]) -> tuple[Optional[str], bool]:
     return strategy_arg, strategy_arg is not None  # ctor kwarg → strict
 
 
+def _sm80_ep_reference_allowed(strategy_name: str) -> bool:
+    """The sm80 EP reference strategy bypasses the Mega-only EP mandate.
+
+    Mega/DeepEP cannot run pre-SM100/pre-SM90; on those GPUs the reference
+    strategy is the only executable EP path (see sm80_ep_local_loop.py).
+    """
+    if strategy_name != "sm80_ep_local_loop":
+        return False
+    from rtp_llm.models_py.modules.dsv41.sm80_support import (
+        use_reference_gemm_paths,
+    )
+
+    return use_reference_gemm_paths()
+
+
 def select_strategy(
     cfg: MoeCfg,
     forced: Optional[str] = None,
@@ -353,7 +368,11 @@ def select_strategy(
         for cls in _STRATEGY_PRIORITY:
             if cls.name == forced:
                 if cls.can_handle(cfg):
-                    if cfg.ep_size > 1 and cls.name not in ("mega", "mega_se"):
+                    if (
+                        cfg.ep_size > 1
+                        and cls.name not in ("mega", "mega_se")
+                        and not _sm80_ep_reference_allowed(cls.name)
+                    ):
                         raise RuntimeError(
                             "DSV4 EP MoE requires MegaMoEStrategy. "
                             f"Requested strategy {forced!r} would bypass Mega "
@@ -373,6 +392,16 @@ def select_strategy(
             raise RuntimeError(f"Unknown MoE strategy {forced!r}. Available: {names}")
 
     if cfg.ep_size > 1:
+        # Pre-SM100 GPUs (A100/sm80, L20/sm89) can run neither Mega (SM100
+        # symmetric memory + DeepGEMM) nor DeepEP (SM90+), but EP is mandatory
+        # there because the packed FP4 experts exceed a single card. The
+        # reference strategy replicates inputs (already TP-allreduced by the
+        # attention path) and merges partial expert sums with a TP allreduce.
+        sm80_cls = next(
+            (c for c in _STRATEGY_PRIORITY if c.name == "sm80_ep_local_loop"), None
+        )
+        if sm80_cls is not None and sm80_cls.can_handle(cfg):
+            return sm80_cls
         mega_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "mega"), None)
         if mega_cls is None:
             raise RuntimeError(
