@@ -154,11 +154,11 @@ class QuantizedLinear(nn.Module):
         self.weight = weight
         self.scale = scale
         self.scale_gemm = scale_gemm
-        if self.scale_gemm is None:
+        if self.scale_gemm is None and _deepgemm_fp4_supported():
             self.scale_gemm = prepare_fp4_weight_scale_for_deepgemm(
                 scale, self.out_features, self.in_features
             )
-        if self.scale_gemm.dtype != torch.int32:
+        if self.scale_gemm is not None and self.scale_gemm.dtype != torch.int32:
             raise TypeError(
                 f"expected packed FP4 scale int32, got {self.scale_gemm.dtype}"
             )

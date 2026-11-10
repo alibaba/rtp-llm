@@ -81,7 +81,15 @@ class V41MXFP8Linear(torch.nn.Module):
         self.raw_scales = scales
         self.N, self.K = weight.shape
         self._use_deepgemm = _deepgemm_runtime_supported()
-        self.weight_scales = self.pack_scales(scales)
+        if self._use_deepgemm:
+            self.weight_scales = self.pack_scales(scales)
+        else:
+            try:
+                # Keep the native packed layout when the layout utility works
+                # on Ada; otherwise the raw UE8M0 scale is the reference input.
+                self.weight_scales = self.pack_scales(scales)
+            except Exception:
+                self.weight_scales = scales
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
         if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
