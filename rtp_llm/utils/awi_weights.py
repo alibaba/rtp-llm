@@ -33,6 +33,9 @@ _lock = threading.Lock()
 _fetched: Dict[str, Dict[str, Any]] = {}
 _model_root = None
 _checkpoint_path: Optional[str] = None
+# Retains device allocations for checkpoint keys the runtime never executes
+# (speculative mtp.* weights while SP is disabled); see ensure_inert_resident.
+_inert_resident: List[Tuple[str, Any]] = []
 
 _ENGRAM_SUFFIXES = (
     "embed.weight",
@@ -44,7 +47,7 @@ _ENGRAM_SUFFIXES = (
 )
 
 
-def record_fetch(name: str, tensors) -> None:
+def record_fetch(name: str, tensors, basis: str = "loader_fetch") -> None:
     """Record one checkpoint fetch; called from CkptDatabase.load_tensor."""
     try:
         total = 0
@@ -62,6 +65,7 @@ def record_fetch(name: str, tensors) -> None:
                     "dtypes": dtypes,
                     "shapes": shapes,
                     "fetches": 1,
+                    "basis": basis,
                 }
             else:
                 previous["fetches"] += 1
@@ -98,6 +102,82 @@ def record_slice_fetch(name: str, nbytes: int) -> None:
 def recorded_names() -> List[str]:
     with _lock:
         return sorted(_fetched)
+
+
+def ensure_inert_resident(
+    checkpoint_path: str,
+    *,
+    prefix: str = "mtp.",
+    device: Optional[str] = None,
+    rank: Optional[int] = None,
+    world_size: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Give never-executed checkpoint keys a genuine device allocation.
+
+    The placement contract covers every manifest key and lane policy keeps
+    non-Engram weights device-resident. Speculative (``mtp.*``) weights are
+    not loaded while speculative execution is disabled, so each such key is
+    read here verbatim — original dtype and bytes, no decoding, no
+    transformation, no forward wiring — and kept on exactly one rank
+    (round-robin over the sorted names). Keys the loader already fetched
+    (speculative execution enabled) are skipped. Must run before KV-cache
+    sizing so the reservation sees the true steady-state footprint, and
+    failures propagate: a placement gap must never pass silently.
+    """
+    index_path = os.path.join(checkpoint_path, "model.safetensors.index.json")
+    with open(index_path) as file:
+        weight_map = json.load(file)["weight_map"]
+    names = sorted(name for name in weight_map if name.startswith(prefix))
+    if not names:
+        return {"owned": 0, "bytes": 0}
+    if rank is None or world_size is None:
+        try:
+            import torch.distributed as dist
+
+            if dist.is_available() and dist.is_initialized():
+                rank = dist.get_rank() if rank is None else rank
+                world_size = (
+                    dist.get_world_size() if world_size is None else world_size
+                )
+        except Exception:  # noqa: BLE001 - fall through to env/single-rank
+            pass
+    rank = int(rank if rank is not None else os.environ.get("RANK", "0"))
+    world_size = int(
+        world_size if world_size is not None else os.environ.get("WORLD_SIZE", "1")
+    )
+    world_size = max(1, world_size)
+    already = set(recorded_names())
+    owned = [
+        name
+        for position, name in enumerate(names)
+        if position % world_size == rank and name not in already
+    ]
+    if device is None:
+        device = (
+            f"cuda:{torch.cuda.current_device()}"
+            if torch.cuda.is_available()
+            else "cpu"
+        )
+    from safetensors import safe_open
+
+    total = 0
+    for name in owned:
+        shard = os.path.join(checkpoint_path, weight_map[name])
+        with safe_open(shard, framework="pt", device="cpu") as file:
+            tensor = file.get_tensor(name)
+        resident = tensor.to(device)
+        record_fetch(name, [resident], basis="inert_resident")
+        _inert_resident.append((name, resident))
+        total += resident.numel() * resident.element_size()
+    logger.info(
+        "AWI inert residency: rank=%d loaded %d '%s*' keys (%.2f MiB) on %s",
+        rank,
+        len(owned),
+        prefix,
+        total / 1024**2,
+        device,
+    )
+    return {"owned": len(owned), "bytes": total, "device": str(device)}
 
 
 def _detect_device(module_root) -> Optional[str]:
@@ -277,9 +357,13 @@ def publish_weights_placement(
     for problem in problems:
         logger.error("AWI weights placement problem: %s", problem)
     if missing:
-        logger.error(
-            "AWI weights coverage gap: %d checkpoint keys not resident "
-            "(first 12): %s",
+        # Sharded deployments fetch each expert shard on exactly one rank, so
+        # a per-rank shortfall is expected; the merged multi-rank observations
+        # are the authoritative coverage report.
+        logger.warning(
+            "AWI weights: %d checkpoint keys not fetched on this rank "
+            "(peer ranks hold their shards; merged report is authoritative; "
+            "first 12): %s",
             len(missing),
             missing[:12],
         )

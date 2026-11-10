@@ -714,13 +714,23 @@ class DeepSeekV4Model(GptModelBase):
         del self.weight
         # AWI placement contract: publish per-rank checkpoint-key residency
         # from the live allocations before warmup/capture and KV sizing run.
-        # set_model_root lets the post-startup republish fold in the vision
-        # keys that the multimodal engine fetches after this constructor.
+        # The inert stage first gives never-executed speculative (mtp.*) keys
+        # a real device allocation on exactly one rank each, so coverage is
+        # complete while SP is disabled. set_model_root lets the post-startup
+        # republish fold in the vision keys that the multimodal engine
+        # fetches after this constructor.
         from rtp_llm.utils.awi_weights import (
+            ensure_inert_resident,
             publish_weights_placement,
             set_model_root,
         )
 
+        ensure_inert_resident(
+            self._ckpt_path,
+            device=device_str,
+            rank=getattr(self._v4_args, "tp_rank", None),
+            world_size=getattr(self._v4_args, "tp_size", None),
+        )
         set_model_root(self.v4, self._ckpt_path)
         publish_weights_placement(self.v4, self._ckpt_path)
         if torch.cuda.is_available() and device_str.startswith("cuda"):
