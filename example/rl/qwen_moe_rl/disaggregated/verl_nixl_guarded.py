@@ -140,6 +140,48 @@ class RtpGuardedNixl(upstream.NIXLCheckpointEngine):
             torch.cuda.synchronize(value.device)
             yield _wire_name(name, tensor_digest(value)), value
 
+    async def _receive_weight_chunks(self):
+        """Forward each current bucket before yielding; do not await a later one.
+
+        The pinned upstream waits for next metadata before yielding current
+        metadata. A native per-source TP gather then deadlocks a multi-receiver
+        ring. The existing two registered buffers remain leased until the
+        consumer resumes and downstream READ has completed.
+        """
+        if self.prev_agent is None:
+            raise RuntimeError('NIXL receiver has no previous agent')
+        send_buf, recv_buf = self.send_buf, self.recv_buf
+        send_descs, recv_descs = self.send_descs, self.recv_descs
+        first = upstream.ReadOperation(self.agent, self.prev_agent, recv_descs, self.bucket_size)
+        metadata = await first.read_metadata()
+        first.begin_read()
+        await first.wait_for_complete()
+        send_buf, recv_buf = recv_buf, send_buf
+        send_descs, recv_descs = recv_descs, send_descs
+        while True:
+            readable = None
+            if self.next_agent is not None:
+                # Constructor synchronously sends metadata; the downstream
+                # receiver can reach its matching TP gather immediately.
+                readable = upstream.ReadableOperation(self.agent, self.next_agent, send_descs, metadata)
+            for tensor_meta in metadata['bucket_meta'].values():
+                tensor = send_buf[tensor_meta.offset:tensor_meta.offset + tensor_meta.chunk_size]
+                yield tensor_meta, tensor
+            if metadata['is_last']:
+                if readable is not None:
+                    await readable.wait_for_complete()
+                return
+            next_read = upstream.ReadOperation(self.agent, self.prev_agent, recv_descs, self.bucket_size)
+            next_metadata = await next_read.read_metadata()
+            next_read.begin_read()
+            if readable is not None:
+                await readable.wait_for_complete()
+            await next_read.wait_for_complete()
+            torch.cuda.synchronize()
+            metadata = next_metadata
+            send_buf, recv_buf = recv_buf, send_buf
+            send_descs, recv_descs = recv_descs, send_descs
+
     def receive_weights(self, global_steps=None):
         return _NativeLeaseIterator(self, global_steps)
 

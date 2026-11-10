@@ -26,7 +26,7 @@ SOURCES = {
   'standalone_rtp_adapter_v4.py': '2b918782db5107752212184343afd0cf4710f99a6b841147071151163e4cdb71',
   'rtp_cleanup.py': '4506fe79022d0d02f14118ee30d65f1a935a4bb63e51d538831287fb663bdb5b'},
  'Q36_DISAGG_CODE_DIR': {
-  'verl_nixl_guarded.py': '72716bd1e687b8a005cf0400a7ec998c5e440937268a301c0cc47b47cba3f1c8',
+  'verl_nixl_guarded.py': 'fbd10229677060126e09a9840fa4b34a758ea76170d965daa39e45839a609237',
   'full_hf_relay.py': '0043b7fee1b6e80551174460cb1401aa2eb6c4216f346778c202984ab1fe55af'}}
 MODEL_SHA = {'config.json': '93a4693fa9d8392fbfccd4b3c9873f4bfdcb14fdede978b123d07d19675efe99',
              'model.safetensors.index.json': '41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83'}
