@@ -645,6 +645,10 @@ void PrefillRpcServer::publishPrefillCache(PrefillGenerateContext& prefill_conte
     // here makes the completed prefix visible before the P->D response can let
     // the next session issue its prefix lookup.
     stream->releaseResource();
+    RTP_LLM_LOG_INFO("request [%ld] published prefill cache before final response: seq_length=%d finished=%d",
+                     prefill_context.request_id,
+                     stream->seqLength(),
+                     static_cast<int>(stream->isFinished()));
 }
 
 void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
@@ -732,6 +736,17 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         if (response.flatten_output().finished_size() == 0) {
             RTP_LLM_LOG_ERROR("request [%ld] generate output size is 0", request_id);
             break;
+        }
+        bool finished_output = false;
+        for (int i = 0; i < response.flatten_output().finished_size(); ++i) {
+            finished_output = finished_output || response.flatten_output().finished(i);
+        }
+        // Publish only after decode reports completion and before its final
+        // response is forwarded. At this point the prefill stream is terminal,
+        // the prompt keys are final, and the next session cannot start yet.
+        if (finished_output && !prefill_context.cache_published) {
+            publishPrefillCache(prefill_context);
+            prefill_context.cache_published = true;
         }
         for (size_t i = 0; i < response.flatten_output().aux_info_size(); i++) {
             response.mutable_flatten_output()->mutable_aux_info(i)->set_pd_sep(true);
@@ -848,10 +863,6 @@ grpc::Status PrefillRpcServer::finishStream(PrefillGenerateContext& prefill_cont
     EXECUTE_STAGE_FUNC(remoteLoadCacheStart, prefill_context);
     EXECUTE_STAGE_FUNC(pollLocalOutput, prefill_context);
     EXECUTE_STAGE_FUNC(remoteLoadCacheEnd, prefill_context);
-    // Decode has loaded KV but cannot return the completed request until
-    // remoteGenerate below. Publish the prefill prefix first so the next
-    // session cannot race the terminal deferred release.
-    publishPrefillCache(prefill_context);
     EXECUTE_STAGE_FUNC(remoteGenerate, prefill_context);
     EXECUTE_STAGE_FUNC(pollRemoteOutput, prefill_context);
     prefill_context.stat_info.nextStage();

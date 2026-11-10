@@ -1058,9 +1058,12 @@ TEST_F(PrefillRpcServerTest, pollRemoteOutputForwardsTokensWithoutAuxInfo) {
     public:
         bool Write(const GenerateOutputsPB& output, grpc::WriteOptions) override {
             outputs.push_back(output);
+            published_at_write.push_back(context != nullptr && context->cache_published);
             return true;
         }
         std::vector<GenerateOutputsPB> outputs;
+        std::vector<bool>              published_at_write;
+        PrefillGenerateContext*        context = nullptr;
     } writer;
 
     int                 port = 0;
@@ -1074,6 +1077,7 @@ TEST_F(PrefillRpcServerTest, pollRemoteOutputForwardsTokensWithoutAuxInfo) {
     auto context                                       = makeContext(&request);
     context->meta                                      = std::make_shared<RpcServerRuntimeMeta>();
     context->rpc_context.writer                        = &writer;
+    writer.context                                     = context.get();
     context->generate_input                            = std::make_shared<GenerateInput>();
     context->generate_input->generate_config           = std::make_shared<GenerateConfig>();
     context->generate_input->generate_config->aux_info = false;
@@ -1095,6 +1099,10 @@ TEST_F(PrefillRpcServerTest, pollRemoteOutputForwardsTokensWithoutAuxInfo) {
     ASSERT_EQ(writer.outputs.size(), 2);
     EXPECT_FALSE(writer.outputs[0].flatten_output().finished(0));
     EXPECT_TRUE(writer.outputs[1].flatten_output().finished(0));
+    ASSERT_EQ(writer.published_at_write.size(), 2);
+    EXPECT_FALSE(writer.published_at_write[0]);
+    EXPECT_TRUE(writer.published_at_write[1]);
+    EXPECT_TRUE(context->cache_published);
     for (const auto& output : writer.outputs) {
         EXPECT_EQ(output.flatten_output().aux_info_size(), 0);
         EXPECT_EQ(output.flatten_output().output_ids().int32_data().size(), sizeof(int32_t));
