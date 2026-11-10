@@ -109,6 +109,7 @@ class QwenSm90Fp8MegaMoe:
             (w13, s13), (executor._w2, executor._w2_scale)
         )
         self._logged_shapes = set()
+        self._prefill_graph_recording = False
         logger.info(
             "[QwenSM90MegaMoE] prepared module=%s rank=%d min_tokens=%d capacity_per_rank=%d",
             self.module_name, dist.get_rank(), self.min_tokens,
@@ -117,7 +118,10 @@ class QwenSm90Fp8MegaMoe:
 
     def supports(self, x):
         return (
-            not torch.cuda.is_current_stream_capturing()
+            (
+                not torch.cuda.is_current_stream_capturing()
+                or self._prefill_graph_recording
+            )
             and x.is_cuda
             and x.dtype == torch.bfloat16
             and x.ndim == 2

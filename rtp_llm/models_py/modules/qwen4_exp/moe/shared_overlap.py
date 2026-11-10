@@ -25,6 +25,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
     _fuse_ep_shared_gate = False
     _ep_shared_stream = None
     _ep_two_batch = None
+    _mega_prefill_graph = None
 
     def __init__(
         self,
@@ -45,7 +46,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
         self._sm90_mega_decode_limit = max_generate_batch_size
         self._sm90_mega_moe = None
 
-    def prepare_shared_expert_overlap(self) -> None:
+    def prepare_shared_expert_overlap(self, layer_idx=None) -> None:
         """Allocate streams only for the explicitly qualified Qwen4 layout."""
         if os.environ.get("QWEN_MOE_SM90_MEGA_MOE", "0") == "1":
             from .sm90_mega_moe import QwenSm90Fp8MegaMoe
@@ -53,6 +54,17 @@ class Qwen4MoeLayer(GenericMoeLayer):
             self._sm90_mega_moe = QwenSm90Fp8MegaMoe(
                 self, self._sm90_mega_decode_limit
             )
+            if os.environ.get("QWEN_MOE_MEGA_PREFILL_GRAPH", "0") == "1":
+                from .prefill_graph import QwenMegaGraphAdmission, QwenMegaPrefillGraph
+
+                if layer_idx == 0:
+                    self.config._qwen_mega_graph_admission = QwenMegaGraphAdmission()
+                admission = getattr(self.config, "_qwen_mega_graph_admission", None)
+                if admission is None:
+                    raise RuntimeError(
+                        "MegaMoE prefill graphs require ordered layer initialization"
+                    )
+                self._mega_prefill_graph = QwenMegaPrefillGraph(layer_idx, admission)
         self._fuse_ep_shared_gate = (
             os.environ.get("QWEN_MOE_SHARED_GATE_FUSION", "0") == "1"
         )
@@ -226,6 +238,17 @@ class Qwen4MoeLayer(GenericMoeLayer):
         return torch.sigmoid(gate) * shared_expert_output
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        graph = self._mega_prefill_graph
+        if (
+            graph is not None
+            and self._sm90_mega_moe is not None
+            and self._sm90_mega_moe.supports(hidden_states)
+            and graph.supports(hidden_states)
+        ):
+            return graph.forward(self, hidden_states, self._forward_impl)
+        return self._forward_impl(hidden_states)
+
+    def _forward_impl(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if (
             self._ep_shared_stream is not None
             and hidden_states.is_cuda

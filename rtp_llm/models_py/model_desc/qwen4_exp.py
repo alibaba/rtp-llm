@@ -613,7 +613,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             )
 
             self.mlp.select_topk = Qwen4ExpMoeTopk(self.mlp.select_topk)
-            self.mlp.prepare_shared_expert_overlap()
+            self.mlp.prepare_shared_expert_overlap(layer_idx=layer_idx)
         if self.layer_type != HybridAttentionType.LINEAR and getattr(
             config, "enable_qwen4_qsa", False
         ):
