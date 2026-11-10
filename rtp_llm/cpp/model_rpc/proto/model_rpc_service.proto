@@ -782,6 +782,9 @@ message MemoryOperationResponsePB {
     repeated Code block_errors = 2;
     // The worker's error code and all failure messages, including transfer stage and descriptor context.
     ErrorDetailsPB error_info = 3;
+    // True only when this worker's transfer can no longer access any of its buffers.
+    // Independent of transfer success; absent/false supplies no safety proof.
+    bool buffer_safe = 4;
 }
 
 message TPWorkerInfoPB {

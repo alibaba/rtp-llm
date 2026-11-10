@@ -29,7 +29,7 @@ KVCM 的字符串 T 保存在 `RemoteOperationRequestPB.trace_id`，RPC 和本�
 - `TransferResult::merge()` 在处理业务成功的提前返回之前合并安全标记。
 - `TransferStageState` 等待所有 batch 和提交结束，再发布结果；默认提交结束通知不额外否定安全证明。
 - WorkLoop、legacy DEVICE↔DISK 的连续阶段保留此前所有阶段的证明。
-- 多 rank 汇总包含成功 rank；当前 RPC 响应尚无安全字段，因此 RPC 成功仍不会产生安全证明。
+- 多 rank 汇总包含成功 rank；worker 通过 `MemoryOperationResponsePB.buffer_safe` 回传安全证明，协调端解码后逐 rank 做 AND。旧响应未携带该字段时按 `false` 处理；RPC 失败、响应缺失或非法同样不能产生安全证明。
 - `emptyAggregate()` 的 `true` 只是 AND 初值，不能用作已执行 I/O 的证明；正在等待的外部 context 默认仍为 `false`。
 
 安全失败可以是 `buffer_safe=true`，但其业务结果仍为失败。后续恢复仅释放该执行持有的物理引用，不补提交业务结果。

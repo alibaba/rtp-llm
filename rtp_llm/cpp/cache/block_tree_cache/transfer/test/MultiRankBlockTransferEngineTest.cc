@@ -8,6 +8,7 @@
 #include <future>
 #include <mutex>
 #include <map>
+#include <optional>
 #include <sys/resource.h>
 #include <thread>
 
@@ -51,6 +52,7 @@ struct MultiRankBlockTransferRpcConfig {
     ErrorInfo                                       error_info{};
     std::shared_ptr<BlockTransferDispatcher>        local_dispatcher{};
     std::vector<GroupSetPtr>                        groups{};
+    std::optional<bool>                            buffer_safe{};
 };
 
 class MultiRankBlockTransferRpcService final: public RpcService::Service {
@@ -86,6 +88,9 @@ public:
         }
         if (config_.has_mem_response) {
             response->mutable_mem_response()->set_code(config_.mem_response_code);
+            if (config_.buffer_safe.has_value()) {
+                response->mutable_mem_response()->set_buffer_safe(*config_.buffer_safe);
+            }
             auto* error_info = response->mutable_mem_response()->mutable_error_info();
             error_info->set_error_code(static_cast<int64_t>(config_.error_info.code()));
             error_info->set_error_message(config_.error_info.ToString());
@@ -629,7 +634,7 @@ TEST_F(MultiRankBlockTransferEngineTest, DispatcherAssignsDistinctWireIdsToConcu
     const auto second_result = second_done.get();
     EXPECT_TRUE(first_result.ok());
     EXPECT_TRUE(second_result.ok());
-    // The current wire response does not carry explicit buffer safety proof.
+    // These mocks omit the optional safety proof, as older workers do.
     // Even successful RPCs from every rank must not grant it implicitly.
     EXPECT_FALSE(first_result.buffer_safe);
     EXPECT_FALSE(second_result.buffer_safe);
@@ -820,6 +825,55 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferSucceedsForAllWorkers)
 
     EXPECT_TRUE(executeAndWait(
         *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, BufferSafetyRequiresEveryWorkerProofRegardlessOfBusinessResult) {
+    for (const bool first_safe : {false, true}) {
+        for (const bool second_safe : {false, true}) {
+            for (const auto second_code : {MemoryOperationResponsePB::OK, MemoryOperationResponsePB::COPY_FAILED}) {
+                SCOPED_TRACE(::testing::Message() << "first_safe=" << first_safe << " second_safe=" << second_safe
+                                                 << " second_code=" << second_code);
+                MultiRankBlockTransferRpcConfig first{true, MemoryOperationResponsePB::OK, grpc::Status::OK};
+                MultiRankBlockTransferRpcConfig second{true, second_code, grpc::Status::OK};
+                first.buffer_safe  = first_safe;
+                second.buffer_safe = second_safe;
+                std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+                auto manager = makeBroadcastManager({first, second}, servers);
+                ASSERT_NE(manager, nullptr);
+                auto cache   = makeBroadcastCache(manager);
+                auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
+                    TransferTask(makeBroadcastDescriptors(), std::chrono::seconds(5)));
+                auto completion = std::make_shared<std::promise<TransferResult>>();
+                auto finished   = completion->get_future();
+                context->onDone([completion](TransferResult result) { completion->set_value(std::move(result)); });
+                ASSERT_EQ(finished.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+                const auto result = finished.get();
+                EXPECT_EQ(result.ok(), second_code == MemoryOperationResponsePB::OK);
+                EXPECT_EQ(result.buffer_safe, first_safe && second_safe);
+                context->waitDone();
+                EXPECT_EQ(context->result().buffer_safe, result.buffer_safe);
+            }
+        }
+    }
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, MissingWorkerSafetyProofRemainsUnsafeWithSafePeer) {
+    for (const size_t legacy_rank : {0u, 1u}) {
+        SCOPED_TRACE(::testing::Message() << "legacy_rank=" << legacy_rank);
+        std::vector<MultiRankBlockTransferRpcConfig> configs{
+            {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
+            {true, MemoryOperationResponsePB::OK, grpc::Status::OK}};
+        configs[1 - legacy_rank].buffer_safe = true;
+        std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+        auto manager = makeBroadcastManager(configs, servers);
+        ASSERT_NE(manager, nullptr);
+        auto cache   = makeBroadcastCache(manager);
+        auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
+            TransferTask(makeBroadcastDescriptors(), std::chrono::seconds(5)));
+        context->waitDone();
+        EXPECT_TRUE(context->success());
+        EXPECT_FALSE(context->result().buffer_safe);
+    }
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, EachBlockCombinesOnlyItsOwnRankResults) {
@@ -1048,10 +1102,13 @@ class MultiRankBlockTransferInvalidResponseTest: public ::testing::TestWithParam
 
 TEST_P(MultiRankBlockTransferInvalidResponseTest, BroadcastTransferRejectsInvalidWorkerResponse) {
     const auto                                         param   = GetParam();
-    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+    std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::COPY_FAILED, grpc::Status::OK},
         {param.has_response, param.code, grpc::Status::OK},
     };
+    for (auto& config : configs) {
+        config.buffer_safe = true;
+    }
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(broadcast_manager, nullptr);
@@ -1062,6 +1119,7 @@ TEST_P(MultiRankBlockTransferInvalidResponseTest, BroadcastTransferRejectsInvali
     context->waitDone();
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    EXPECT_FALSE(context->result().buffer_safe);
 }
 
 INSTANTIATE_TEST_SUITE_P(InvalidWorkerResponses,
@@ -1075,10 +1133,13 @@ protected:
     void expectFailureWithCoreDumpEnabled(bool callback_only) {
         std::promise<void> release;
         auto               released = release.get_future().share();
-        const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        std::vector<MultiRankBlockTransferRpcConfig> configs = {
             {true, MemoryOperationResponsePB::OK, grpc::Status::OK, nullptr, 0, released},
             {true, MemoryOperationResponsePB::OK, grpc::Status(GetParam(), "worker failed"), nullptr, 0, released},
         };
+        for (auto& config : configs) {
+            config.buffer_safe = true;
+        }
         std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
         auto broadcast_manager = makeBroadcastManager(configs, servers);
         ASSERT_NE(broadcast_manager, nullptr);
@@ -1108,6 +1169,7 @@ protected:
         EXPECT_FALSE(context->success());
         EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
         EXPECT_EQ(result.copy_error, CacheCopyError::RPC_FAILED);
+        EXPECT_FALSE(result.buffer_safe);
     }
 };
 
