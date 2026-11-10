@@ -170,6 +170,13 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         self.experts = nn.ModuleList(
             [_expert_at(i) for i in range(cfg.physical_expert_num)]
         )
+        if torch.version.hip is not None:
+            # Experts hold their own exact BF16 caches.  The stacked FP4
+            # tensors are only needed by the DeepGEMM fast paths, so release
+            # them to keep full-context KV and weights resident together.
+            self._W1_w = self._W1_s = None
+            self._W2_w = self._W2_s = None
+            self._W3_w = self._W3_s = None
         self._local_y_buf: Optional[torch.Tensor] = None
 
     def get_eplb_weights(self) -> tuple[torch.Tensor, ...]:
