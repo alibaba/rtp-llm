@@ -5,14 +5,16 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 
-/** Subprocess killed by the Python cross-language recovery test after its first durable frame. */
+/**
+ * Subprocess killed by the Python cross-language recovery test after its first durable frame.
+ */
 public final class EvidenceCrashProbe {
     public static void main(String[] args) throws Exception {
         Path root = Path.of(args[0]), topology = root.resolve("topology.json");
         Files.createDirectories(root);
-        try (var master = new InferenceRpcClientTest.Harness();
+        try (var master = new BackendRpcClientTest.Harness();
              var client = new ReplayControlServer("client-0", topology, root.resolve("components/client-0"))) {
-            master.output = (id, response) -> response.onNext(InferenceRpcClientTest.token(id, 1, false));
+            master.output = (id, response) -> response.onNext(BackendRpcClientTest.token(id, 1, false));
             new ObjectMapper().writeValue(topology.toFile(), List.of(master.endpoint(),
                 Map.of("id", "client-0", "role", "client", "control", client.url(), "rpc", "client:1")));
             client.start(InputFixture.plan(root, null, 20, 1, 2, 32, 30000, 30000));

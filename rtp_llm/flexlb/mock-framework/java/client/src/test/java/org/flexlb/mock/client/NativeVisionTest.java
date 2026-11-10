@@ -23,17 +23,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Verifies ViT routing and preparation before Prefill and Decode scheduling.
+ */
 class NativeVisionTest {
     @TempDir Path directory;
-    com.fasterxml.jackson.databind.JsonNode config(String role) {
-        var config=role.equals("vit")?Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4,"mock.vit.skip.download",true,"mm_cache_gpu_max_bytes",1024,"mock.compute",Map.of("forward",Map.of("expression","5")))
-            :Map.of("mock.scheduler.mode","group","image_token_id",1000,"seq_size_per_block",2,"max_seq_len",128,"test_block_num",32,"reserve_block_ratio",0,"reuse_cache",true,"mock.compute",Map.of("forward",Map.of("expression","1")));
-        return new ObjectMapper().valueToTree(Map.of("id", role + "-0", "component_role", role,
-            "component", role.equals("vit") ? Map.of("config", config) : Map.of("engine", "rtp", "config", config)));
-    }
-    FlexlbServerStatusPB server(String role, Map<String, Object> endpoints) {
-        var address=endpoints.get("rpc").toString().split(":");return FlexlbServerStatusPB.newBuilder().setRole(role.toUpperCase(Locale.ROOT)).setServerIp(address[0]).setGrpcPort(Integer.parseInt(address[1])).setWorkerGeneration(1).build();
-    }
+
     @Test void nativeSingleAndMasterBatchRequestsTraverseVPD() throws Exception {
         var prefillConfig = config("prefill");
         ((com.fasterxml.jackson.databind.node.ObjectNode) prefillConfig.path("component").path("config"))
@@ -72,7 +67,7 @@ class NativeVisionTest {
                     } catch(Exception error) { response.onError(Status.INTERNAL.withCause(error).asRuntimeException()); }
                 }
             }).build().start();
-            try(var client=new InferenceRpcClient(() -> List.of("127.0.0.1:"+master.getPort()), event -> {}, 1000, 0L, 4)) {
+            try(var client=new BackendRpcClient(() -> List.of("127.0.0.1:"+master.getPort()), event -> {}, 1000, 0L, 4)) {
                 for(long id:List.of(1L,2L,3L)) {
                     var input=GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(id == 3 ? List.of(10,1000) : List.of(10,1000,20))
                         .addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("same-image")
@@ -80,7 +75,7 @@ class NativeVisionTest {
                         .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(3).setIgnoreEos(true).setReturnIncremental(true).setCanUsePdSeparation(true).setReuseCache(true)).build();
                     var request=FlexlbScheduleRequestPB.newBuilder().setRequestId(id).setSeqLen(input.getTokenIdsCount()).setMaxNewTokens(3).setCacheKeyBlockSize(1).setGenerateInput(input.toByteString()).build();
                     var result=client.send(request,input,Duration.ofSeconds(8),List.of(924)).completion().toCompletableFuture().get(10,TimeUnit.SECONDS);
-                    assertEquals(InferenceRpcClient.Outcome.success,result.outcome(),result.toString());assertEquals(3,result.outputTokens());
+                    assertEquals(BackendRpcClient.Outcome.success,result.outcome(),result.toString());assertEquals(3,result.outputTokens());
                     var cache = RpcServiceGrpc.newBlockingStub(pChannel).getCacheStatus(CacheVersionPB.newBuilder()
                         .setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
                     assertEquals(4, cache.getBlockSize());
@@ -89,5 +84,16 @@ class NativeVisionTest {
                 assertEquals(8,stages.get());
             } finally { master.shutdownNow().awaitTermination(2,TimeUnit.SECONDS);pChannel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
+    }
+
+    com.fasterxml.jackson.databind.JsonNode config(String role) {
+        var config=role.equals("vit")?Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4,"mock.vit.skip.download",true,"mm_cache_gpu_max_bytes",1024,"mock.compute",Map.of("forward",Map.of("expression","5")))
+            :Map.of("mock.scheduler.mode","group","image_token_id",1000,"seq_size_per_block",2,"max_seq_len",128,"test_block_num",32,"reserve_block_ratio",0,"reuse_cache",true,"mock.compute",Map.of("forward",Map.of("expression","1")));
+        return new ObjectMapper().valueToTree(Map.of("id", role + "-0", "component_role", role,
+            "component", role.equals("vit") ? Map.of("config", config) : Map.of("engine", "rtp", "config", config)));
+    }
+
+    FlexlbServerStatusPB server(String role, Map<String, Object> endpoints) {
+        var address=endpoints.get("rpc").toString().split(":");return FlexlbServerStatusPB.newBuilder().setRole(role.toUpperCase(Locale.ROOT)).setServerIp(address[0]).setGrpcPort(Integer.parseInt(address[1])).setWorkerGeneration(1).build();
     }
 }

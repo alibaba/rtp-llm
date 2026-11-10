@@ -16,23 +16,11 @@ import org.flexlb.mock.protocol.MediaInput;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+/**
+ * Verifies indexed request reconstruction and replay from one shared dataset.
+ */
 class IndexedTrafficTest {
     @TempDir Path directory;
-
-    private Path fixture() throws Exception { return fixture(true); }
-
-    private Path fixture(boolean image) throws Exception {
-        var rows = new ArrayList<ByteBuffer>();
-        for (int i = 0; i < 5; i++) {
-            long leaf = i == 2 ? 2 : i % 2 == 0 ? 4 : 6;
-            var row = ByteBuffer.allocate(i == 0 && image ? 42 : 26);
-            row.putLong(i * 10).putLong(leaf).putInt(-1).putInt(50).putShort((short) 1);
-            if (i == 0 && image) row.putLong(1).putInt(2).putInt(924);
-            rows.add(row);
-        }
-        var chains = ByteBuffer.allocate(40).putLong(1).putLong(0).putInt(4).putLong(5).putLong(2).putInt(2);
-        return InputFixture.indexed(directory.resolve("traffic.mckidx"), rows, chains, 40, List.of(new int[]{1024, 768}), List.of(3), 0);
-    }
 
     @Test void reconstructsSharedTextAcrossAnInteriorBranchAndInsertsMedia() throws Exception {
         try (var dataset = new IndexedTraffic(fixture())) {
@@ -125,7 +113,7 @@ class IndexedTrafficTest {
         var zeroDirectory = directory.resolve("zero");
         var oneDirectory = directory.resolve("one");
         var json = new ObjectMapper();
-        try (var backend = new InferenceRpcClientTest.Harness();
+        try (var backend = new BackendRpcClientTest.Harness();
              var zero = new ReplayControlServer("client-0", topology, zeroDirectory);
              var one = new ReplayControlServer("client-1", topology, oneDirectory)) {
             json.writeValue(topology.toFile(), List.of(backend.endpoint(),
@@ -143,5 +131,20 @@ class IndexedTrafficTest {
                 assertEquals(source.toString(), plan.get("requests_file").asText());
             }
         }
+    }
+
+    private Path fixture() throws Exception { return fixture(true); }
+
+    private Path fixture(boolean image) throws Exception {
+        var rows = new ArrayList<ByteBuffer>();
+        for (int i = 0; i < 5; i++) {
+            long leaf = i == 2 ? 2 : i % 2 == 0 ? 4 : 6;
+            var row = ByteBuffer.allocate(i == 0 && image ? 42 : 26);
+            row.putLong(i * 10).putLong(leaf).putInt(-1).putInt(50).putShort((short) 1);
+            if (i == 0 && image) row.putLong(1).putInt(2).putInt(924);
+            rows.add(row);
+        }
+        var chains = ByteBuffer.allocate(40).putLong(1).putLong(0).putInt(4).putLong(5).putLong(2).putInt(2);
+        return InputFixture.indexed(directory.resolve("traffic.mckidx"), rows, chains, 40, List.of(new int[]{1024, 768}), List.of(3), 0);
     }
 }

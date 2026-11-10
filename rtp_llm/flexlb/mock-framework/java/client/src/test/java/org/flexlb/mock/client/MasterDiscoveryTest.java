@@ -7,17 +7,17 @@ import java.util.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+/**
+ * Verifies Master selection as topology and heartbeat responses change.
+ */
 class MasterDiscoveryTest {
     @TempDir Path directory;
+
     final ObjectMapper json = new ObjectMapper();
-    void publish(Path path, List<?> nodes) throws Exception {
-        Path temp = directory.resolve("next.json");
-        json.writeValue(temp.toFile(), nodes);
-        Files.move(temp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-    }
+
     @Test void observesLeadershipThenDiscoversReplacementWithoutChangingThePlaybackPlan() throws Exception {
         Path topology = directory.resolve("topology.json");
-        try (var first = new InferenceRpcClientTest.Harness(); var second = new InferenceRpcClientTest.Harness(); var added = new InferenceRpcClientTest.Harness()) {
+        try (var first = new BackendRpcClientTest.Harness(); var second = new BackendRpcClientTest.Harness(); var added = new BackendRpcClientTest.Harness()) {
             first.leader = second.leader;
             publish(topology, List.of(first.endpoint(), second.endpoint()));
             try (var discovery = new MasterDiscovery(topology, null)) {
@@ -34,9 +34,16 @@ class MasterDiscoveryTest {
             }
         }
     }
+
+    void publish(Path path, List<?> nodes) throws Exception {
+        Path temp = directory.resolve("next.json");
+        json.writeValue(temp.toFile(), nodes);
+        Files.move(temp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+    }
+
     @Test void explicitSelectionStaysFixedAndMalformedDiscoveryFailsPlayback() throws Exception {
         Path topology = directory.resolve("topology.json");
-        try (var first = new InferenceRpcClientTest.Harness(); var second = new InferenceRpcClientTest.Harness()) {
+        try (var first = new BackendRpcClientTest.Harness(); var second = new BackendRpcClientTest.Harness()) {
             publish(topology, List.of(first.endpoint(), second.endpoint()));
             try (var discovery = new MasterDiscovery(topology, List.of(first.endpoint().get("rpc")))) {
                 assertEquals(List.of(first.endpoint().get("rpc")), discovery.routes());

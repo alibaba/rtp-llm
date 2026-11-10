@@ -15,11 +15,27 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 
-/** Network fixture for the real production protobuf; this is not the production Master. */
+/**
+ * Network fixture for the real production protobuf; this is not the production Master.
+ */
 public final class ClientProbe {
+    public static void main(String[] args) throws Exception {
+        // Json has no Java time extension dependency: keep absolute times as ISO strings at this boundary.
+        var mapper = new ObjectMapper(); var raw = exercise(args[0], args[1]);
+        var output = new LinkedHashMap<String, Object>();
+        for (var entry : raw.entrySet()) {
+            if (entry.getValue() instanceof BackendRpcClient.Result r) output.put(entry.getKey(), Map.of(
+                "request_id", r.requestId(), "sent_at", r.sentAt().toString(), "ttft_ns", r.ttftNanos(), "elapsed_ns", r.elapsedNanos(),
+                "output_tokens", r.outputTokens(), "outcome", r.outcome().name()));
+            else output.put(entry.getKey(), entry.getValue());
+        }
+        mapper.writeValue(Path.of(args[2]).toFile(), output);
+    }
+
     public static Map<String, Object> exercise(String prefill, String decode) throws Exception {
         return exercise(prefill, decode, 3);
     }
+
     public static Map<String, Object> exercise(String prefill, String decode, int expectedTokens) throws Exception {
         var p = ManagedChannelBuilder.forTarget(prefill).usePlaintext().build();
         var pRoute = endpoint("PREFILL", prefill); var dRoute = endpoint("DECODE", decode);
@@ -48,7 +64,7 @@ public final class ClientProbe {
                 response.onNext(FlexlbCancelResponsePB.newBuilder().setFound(true).build()); response.onCompleted();
             }
         }).build().start();
-        try (var client = new InferenceRpcClient("127.0.0.1:" + master.getPort())) {
+        try (var client = new BackendRpcClient("127.0.0.1:" + master.getPort())) {
             var results = new LinkedHashMap<String, Object>();
             for (long id : new long[]{1501, 1502}) {
                 var input = GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(List.of(1, 2, 3, 4))
@@ -57,27 +73,16 @@ public final class ClientProbe {
                     .setGenerateInput(input.toByteString()).build();
                 var call = client.send(request, Duration.ofSeconds(3));
                 var result = call.completion().toCompletableFuture().get(4, TimeUnit.SECONDS);
-                if (result.outcome() != InferenceRpcClient.Outcome.success || result.outputTokens() != expectedTokens || result.ttftNanos() == null || result.ttftNanos() <= 0)
+                if (result.outcome() != BackendRpcClient.Outcome.success || result.outputTokens() != expectedTokens || result.ttftNanos() == null || result.ttftNanos() <= 0)
                     throw new IllegalStateException("Native Client failed: " + result);
                 results.put(id == 1501 ? "generate" : "fetch", result);
             }
             results.put("schedule_calls", schedules.get()); return results;
         } finally { p.shutdownNow(); master.shutdownNow(); p.awaitTermination(3, TimeUnit.SECONDS); master.awaitTermination(3, TimeUnit.SECONDS); }
     }
+
     private static FlexlbServerStatusPB endpoint(String role, String address) {
         var parts = address.split(":");
         return FlexlbServerStatusPB.newBuilder().setRole(role).setServerIp(parts[0]).setGrpcPort(Integer.parseInt(parts[1])).build();
-    }
-    public static void main(String[] args) throws Exception {
-        // Json has no Java time extension dependency: keep absolute times as ISO strings at this boundary.
-        var mapper = new ObjectMapper(); var raw = exercise(args[0], args[1]);
-        var output = new LinkedHashMap<String, Object>();
-        for (var entry : raw.entrySet()) {
-            if (entry.getValue() instanceof InferenceRpcClient.Result r) output.put(entry.getKey(), Map.of(
-                "request_id", r.requestId(), "sent_at", r.sentAt().toString(), "ttft_ns", r.ttftNanos(), "elapsed_ns", r.elapsedNanos(),
-                "output_tokens", r.outputTokens(), "outcome", r.outcome().name()));
-            else output.put(entry.getKey(), entry.getValue());
-        }
-        mapper.writeValue(Path.of(args[2]).toFile(), output);
     }
 }

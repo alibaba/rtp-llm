@@ -13,25 +13,20 @@ import org.flexlb.mock.protocol.MediaInput;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+/**
+ * Verifies request evidence, final seals, and propagation of writer failures.
+ */
 class RequestJournalTest {
     @TempDir Path directory;
-    static ClientProtocol.WorkerPlan plan() {
-        return new ClientProtocol.WorkerPlan(1, null, "/unused.mckidx", 1, 0, 1, 100, "0".repeat(64), 1.0, null, 1, 1, 3000, 1000);
-    }
-    static List<JsonNode> read(Path path) throws IOException {
-        var mapper = new ObjectMapper();
-        var rows = new ArrayList<JsonNode>();
-        for (var line : Files.readAllLines(path)) rows.add(mapper.readTree(line));
-        return rows;
-    }
+
     @Test void backupAttemptsAndCancellationAreRecordedIncrementally() throws Exception {
         var path = directory.resolve("requests.jsonl");
         var journal = new RequestJournal(path, "client-0", plan());
-        try (var first = new InferenceRpcClientTest.Harness(); var backup = new InferenceRpcClientTest.Harness();
-             var client = new InferenceRpcClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")), journal::record, MediaInput.IMAGE_TOKEN, 0L, 1)) {
+        try (var first = new BackendRpcClientTest.Harness(); var backup = new BackendRpcClientTest.Harness();
+             var client = new BackendRpcClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")), journal::record, MediaInput.IMAGE_TOKEN, 0L, 1)) {
             first.scheduleFailure = io.grpc.Status.UNAVAILABLE;
-            backup.output = (id, response) -> response.onNext(InferenceRpcClientTest.token(id, 1, false));
-            var call = client.send(InferenceRpcClientTest.request(100), Duration.ofSeconds(8));
+            backup.output = (id, response) -> response.onNext(BackendRpcClientTest.token(id, 1, false));
+            var call = client.send(BackendRpcClientTest.request(100), Duration.ofSeconds(8));
             call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS);
             PlaybackTest.eventually(() -> {
                 try { return Files.readString(path).contains("\"FIRST_TOKEN\""); } catch (IOException e) { return false; }
@@ -55,6 +50,18 @@ class RequestJournalTest {
             assertThrows(FileAlreadyExistsException.class, () -> new RequestJournal(path, "client-0", plan()));
         }
     }
+
+    static ClientProtocol.WorkerPlan plan() {
+        return new ClientProtocol.WorkerPlan(1, null, "/unused.mckidx", 1, 0, 1, 100, "0".repeat(64), 1.0, null, 1, 1, 3000, 1000);
+    }
+
+    static List<JsonNode> read(Path path) throws IOException {
+        var mapper = new ObjectMapper();
+        var rows = new ArrayList<JsonNode>();
+        for (var line : Files.readAllLines(path)) rows.add(mapper.readTree(line));
+        return rows;
+    }
+
     @Test void queueOverflowCannotSealOrSilentlyDrop() throws Exception {
         var path = directory.resolve("requests.jsonl");
         var journal = new RequestJournal(path, "client-0", plan(), 1);
@@ -63,6 +70,7 @@ class RequestJournalTest {
         assertThrows(IOException.class, () -> journal.finish(1, 1));
         assertTrue(read(path).stream().noneMatch(row -> row.has("seal")));
     }
+
     @Test void ioFailureCannotReportSuccessfulClose() throws Exception {
         var journal = new RequestJournal(directory.resolve("requests.jsonl"), "client-0", plan());
         var field = RequestJournal.class.getDeclaredField("file"); field.setAccessible(true);
@@ -70,15 +78,17 @@ class RequestJournalTest {
         assertThrows(IOException.class, () -> journal.finish(0, 0));
         assertTrue(journal.failure().contains("write failed"));
     }
+
     @Test void unfinishedRequestCannotSeal() throws Exception {
         var path = directory.resolve("requests.jsonl");
         var journal = new RequestJournal(path, "client-0", plan());
         assertThrows(IOException.class, () -> journal.finish(1, 0));
         assertTrue(read(path).stream().noneMatch(row -> row.has("seal")));
     }
+
     @Test void writerFailureStopsAllClientsAndKeepsPlaybackFailed() throws Exception {
         Path topology = directory.resolve("topology.json");
-        try (var master = new InferenceRpcClientTest.Harness();
+        try (var master = new BackendRpcClientTest.Harness();
              var zero = new ReplayControlServer("client-0", topology, directory.resolve("client-0"));
              var one = new ReplayControlServer("client-1", topology, directory.resolve("client-1"))) {
             new com.fasterxml.jackson.databind.ObjectMapper().writeValue(topology.toFile(), List.of(master.endpoint(),
@@ -103,11 +113,11 @@ class RequestJournalTest {
         for (boolean timeout : List.of(false, true)) {
             var path = directory.resolve(timeout ? "timeout.jsonl" : "rejection.jsonl");
             var journal = new RequestJournal(path, "client-0", plan());
-            try (var master = new InferenceRpcClientTest.Harness();
-                 var client = new InferenceRpcClient(() -> List.of(master.endpoint().get("rpc")), journal::record, MediaInput.IMAGE_TOKEN, 0L, 1)) {
+            try (var master = new BackendRpcClientTest.Harness();
+                 var client = new BackendRpcClient(() -> List.of(master.endpoint().get("rpc")), journal::record, MediaInput.IMAGE_TOKEN, 0L, 1)) {
                 if (timeout) master.scheduleDelay = 1000;
                 else master.route = r -> r.toBuilder().setSuccess(false).setCode(429).clearLifecycle().build();
-                var call = client.send(InferenceRpcClientTest.request(100), Duration.ofMillis(timeout ? 100 : 3000));
+                var call = client.send(BackendRpcClientTest.request(100), Duration.ofMillis(timeout ? 100 : 3000));
                 call.completion().toCompletableFuture().get(4, TimeUnit.SECONDS);
                 journal.finish(1, 1);
                 var events = read(path).stream().filter(row -> row.has("kind")).toList();

@@ -212,7 +212,7 @@ Python 维护一份权威的当前发现信息，增加、移除和重启换地�
 | --- | --- |
 | Python | 启动和监视各 JVM，调用 start/stop，最后通过已有指标查询路径执行 QPS 等 Case 检查。 |
 | ReplayControlServer | 每个 Client JVM 的入口。client0 分配计划、协调起止并汇总结果。每轮在内部创建一个 Session，负责本地读数、控速、并发和排空。 |
-| InferenceRpcClient | 执行单条请求的调度和生成 RPC，消费完整输出流，处理超时、取消和终态。 |
+| BackendRpcClient | 执行单条请求的调度和生成 RPC，消费完整输出流，处理超时、取消和终态。 |
 
 client0 同时参与本地发压，不增加协调进程或选主。单 Client 与多 Client 使用同一流程，client0 到本地和其他 Client 的控制都走 TCP。准备完成后，各 JVM 独立产出和发送，请求与响应不经 client0 中转。client0 意外退出使整体失败，不做接管。
 
