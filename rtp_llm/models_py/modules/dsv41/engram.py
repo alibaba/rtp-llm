@@ -2212,7 +2212,11 @@ class Engram(nn.Module):
                     )
                 pinned = None
                 identity = None
-                if target.type == "cuda":
+                # ROCm has no portable device-mapped host registration for the
+                # 95 GiB tables (hipHostRegister fails under multi-rank load).
+                # Keep the table bytes in host RAM and serve them through the
+                # CPU lookup/staging runtime instead.
+                if target.type == "cuda" and torch.version.hip is None:
                     parts = [str(root.resolve()), prefix]
                     for suffix in ("embed.weight", "embed.scale"):
                         path = root / weight_map[prefix + suffix]
