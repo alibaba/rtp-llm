@@ -39,23 +39,35 @@ final class VitGeometryCapture {
     private final Path directory;
     private int dropped;
     private boolean closed;
+    private volatile String state = "starting";
     private volatile Archive sealed;
 
     private record Archive(Path path, long size, String sha256) {}
 
-    static VitGeometryCapture fromEnvironment() {
-        String value = System.getenv("MOCK_CAPTURE_START_MS");
+    static byte[] configuredKey() {
+        String value = System.getenv("MOCK_CAPTURE_KEY");
         if (value == null) return null;
-        long start = Long.parseLong(value);
-        long end = Long.parseLong(System.getenv("MOCK_CAPTURE_END_MS"));
-        byte[] key = HexFormat.of().parseHex(System.getenv("MOCK_CAPTURE_KEY"));
-        if (key.length != 32 || end <= start || end - start > 300_000) {
-            throw new IllegalArgumentException("Invalid ViT capture window");
-        }
-        return end + DRAIN_MS > System.currentTimeMillis() ? new VitGeometryCapture(start, end, key) : null;
+        byte[] key = HEX.parseHex(value);
+        if (key.length != 32) throw new IllegalArgumentException("Invalid ViT capture key");
+        return key;
     }
 
-    private VitGeometryCapture(long start, long end, byte[] key) {
+    static void checkArm(VitNode.CaptureArm request, byte[] key) throws GeneralSecurityException {
+        long now = System.currentTimeMillis();
+        if (request.start() <= 0 || request.start() > now + 300_000
+                || request.end() <= request.start() || request.end() - request.start() > 300_000) {
+            throw new IllegalArgumentException("invalid_capture_window");
+        }
+        verify(new SecretKeySpec(key, "HmacSHA256"), request.expires(), request.signature(),
+                "vit-capture-arm-v1\n" + request.start() + "\n" + request.end() + "\n" + request.expires());
+    }
+
+    long start() { return start; }
+    long end() { return end; }
+    String state() { return state; }
+    boolean finished() { return state.equals("sealed") || state.equals("failed"); }
+
+    VitGeometryCapture(long start, long end, byte[] key) {
         this.start = start;
         this.end = end;
         this.key = new SecretKeySpec(key, "HmacSHA256");
@@ -90,21 +102,26 @@ final class VitGeometryCapture {
         return HexFormat.of().formatHex(mac.doFinal(value.getBytes(StandardCharsets.UTF_8)), 0, 16);
     }
 
-    VitNode.CaptureChunk read(VitNode.CaptureRead request) throws IOException, GeneralSecurityException {
+    private static void verify(SecretKeySpec key, long expires, String signature, String payload)
+            throws GeneralSecurityException {
         long now = System.currentTimeMillis() / 1000;
-        if (request.start() != start || request.expires() < now || request.expires() > now + 180
-                || request.offset() < 0 || request.size() <= 0 || request.size() > MAX_CHUNK_BYTES
-                || !request.owner().matches("[0-9a-f]{64}") || !request.signature().matches("[0-9a-f]{64}")) {
-            throw new IllegalArgumentException("invalid_capture_read");
+        if (expires < now || expires > now + 180 || !signature.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("invalid_capture_signature");
         }
         var signer = Mac.getInstance("HmacSHA256");
         signer.init(key);
+        if (!MessageDigest.isEqual(signer.doFinal(payload.getBytes(StandardCharsets.US_ASCII)),
+                HEX.parseHex(signature))) throw new SecurityException("invalid_capture_signature");
+    }
+
+    VitNode.CaptureChunk read(VitNode.CaptureRead request) throws IOException, GeneralSecurityException {
+        if (request.start() != start || request.offset() < 0 || request.size() <= 0
+                || request.size() > MAX_CHUNK_BYTES || !request.owner().matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("invalid_capture_read");
+        }
         String payload = "vit-capture-read-v1\n" + start + "\n" + request.owner() + "\n" + request.expires()
                 + "\n" + request.offset() + "\n" + request.size();
-        if (!MessageDigest.isEqual(signer.doFinal(payload.getBytes(StandardCharsets.US_ASCII)),
-                HEX.parseHex(request.signature()))) {
-            throw new SecurityException("invalid_capture_signature");
-        }
+        verify(key, request.expires(), request.signature(), payload);
         if (!owner.equals(request.owner())) throw new IllegalArgumentException("capture_owner_mismatch");
 
         Archive archive = sealed;
@@ -135,6 +152,8 @@ final class VitGeometryCapture {
             try (var stream = new BufferedWriter(new OutputStreamWriter(
                     new GZIPOutputStream(Files.newOutputStream(partial)), StandardCharsets.UTF_8))) {
                 emit(stream, "[\"geometry\",3," + start + "," + end + ",\"" + shard + "\",\"" + check + "\"]");
+                stream.flush();
+                state = "armed";
                 while (true) {
                     String row = pending.poll(100, TimeUnit.MILLISECONDS);
                     if (row != null) {
@@ -158,10 +177,12 @@ final class VitGeometryCapture {
                 while ((count = file.read(buffer)) != -1) digest.update(buffer, 0, count);
             }
             sealed = new Archive(target, Files.size(target), HEX.formatHex(digest.digest()));
+            state = "sealed";
         } catch (IOException | InterruptedException | GeneralSecurityException error) {
             synchronized (this) {
                 closed = true;
             }
+            state = "failed";
             System.getLogger(VitGeometryCapture.class.getName()).log(System.Logger.Level.ERROR,
                     "ViT geometry capture failed: " + error.getClass().getSimpleName());
         }

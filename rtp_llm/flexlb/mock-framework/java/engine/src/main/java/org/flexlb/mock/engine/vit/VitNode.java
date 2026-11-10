@@ -9,6 +9,8 @@ import org.flexlb.mock.engine.EngineMain.Address;
 
 /** Standalone vision instance serving Prefill over gRPC. */
 public final class VitNode implements AutoCloseable {
+    public record CaptureArm(long start, long end, long expires, String signature) {}
+    public record CaptureState(long start, String state, String instance) {}
     public record CaptureRead(long start, String owner, long expires, long offset, int size, String signature) {}
     public record CaptureChunk(String owner, long start, String name, long bytes, String sha256, long offset,
                                String chunk_sha256, String data_base64) {}
@@ -27,8 +29,12 @@ public final class VitNode implements AutoCloseable {
             node.rpc=NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service).build().start();
             node.metrics=org.flexlb.mock.metrics.MetricsOutput.start(node.service::collectMetrics);
             node.api=new ControlServer(node.address.listener(controlPort)).health(node::checkHealthy);
-            var capture = node.service.geometryCapture();
-            if (capture != null) node.api.route("vit/capture/read", CaptureRead.class, CaptureChunk.class, capture::read);
+            var captureKey = VitGeometryCapture.configuredKey();
+            if (captureKey != null) {
+                node.api.route("vit/capture/arm", CaptureArm.class, CaptureState.class,
+                        request -> node.service.armCapture(request, captureKey));
+                node.api.route("vit/capture/read", CaptureRead.class, CaptureChunk.class, node.service::readCapture);
+            }
             if(node.metrics.prometheus()) node.api.metrics(node.service::metrics);
             node.api.start();return node;
         } catch(Exception | Error error) {

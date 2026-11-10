@@ -17,9 +17,28 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     private final VitCache cache;
     private final VitScheduler scheduler;
     private final VitPreparation preparation;
-    private final VitGeometryCapture geometryCapture = VitGeometryCapture.fromEnvironment();
+    private volatile VitGeometryCapture geometryCapture;
 
-    VitGeometryCapture geometryCapture() { return geometryCapture; }
+    synchronized VitNode.CaptureState armCapture(VitNode.CaptureArm request, byte[] key) throws Exception {
+        VitGeometryCapture.checkArm(request, key);
+        var capture = geometryCapture;
+        if (capture == null || capture.start() != request.start()) {
+            if ((capture != null && (!capture.finished() || request.start() <= capture.start()))
+                    || request.start() <= System.currentTimeMillis()) {
+                throw new IllegalArgumentException("capture_window_unavailable");
+            }
+            capture = new VitGeometryCapture(request.start(), request.end(), key);
+            geometryCapture = capture;
+        }
+        if (capture.end() != request.end()) throw new IllegalArgumentException("capture_window_conflict");
+        return new VitNode.CaptureState(capture.start(), capture.state(), instance);
+    }
+
+    VitNode.CaptureChunk readCapture(VitNode.CaptureRead request) throws Exception {
+        var capture = geometryCapture;
+        if (capture == null) throw new IllegalArgumentException("capture_not_armed");
+        return capture.read(request);
+    }
     private final String instance=UUID.randomUUID().toString();
     private final ExecutorService replies=Executors.newVirtualThreadPerTaskExecutor();
     private volatile boolean closed;
@@ -116,7 +135,8 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
                 var entry=MultimodalHashEntryPB.newBuilder().setKey(key);String tier=cache.tier(key);
                 entry.setEmbeddingHit(!tier.isEmpty()).setEmbeddingTier(tier);
                 if (image != null) {
-                    if (geometryCapture != null) geometryCapture.record(image);
+                    var capture = geometryCapture;
+                    if (capture != null) capture.record(image);
                     entry.setHashHit(true).setEntryGeneration(instance + ":" + key).addSplitSize(image.rows())
                             .setFeatureHashes(VitGeometry.hashes(image.featureIdentity(), image.rows()));
                 }
