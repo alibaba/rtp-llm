@@ -282,7 +282,7 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, UpdateKVBlockDoesNotTransferExte
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, UpdateKVBlockDoesNotTransferFrozenTail) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/3, /*seq_size_per_block=*/4);
     // This ownership test freezes one of only two usable blocks.
-    config.block_tree_device_frozen_abort_ratio = 0.0;
+    config.block_pool_frozen_abort_lower_ratio = 0.0;
     allocator_  = std::make_shared<TestAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
     auto pool   = allocator_->groupBlockPools().front();
