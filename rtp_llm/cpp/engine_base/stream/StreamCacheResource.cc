@@ -439,6 +439,7 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         return absl::UnavailableError("allocator load materialization is temporarily out of KV blocks");
     }
     if (malloc_status == MallocStatus::PERMANENT_RESOURCE_EXHAUSTED) {
+        AwiTelemetry::instance().recordCapacityFailure("kv_capacity_exceeded");
         return absl::ResourceExhaustedError("allocator load materialization exceeds KV cache capacity");
     }
     if (malloc_status == MallocStatus::INTERNAL_ERROR) {
