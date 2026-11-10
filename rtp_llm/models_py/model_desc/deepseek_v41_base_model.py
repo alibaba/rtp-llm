@@ -1296,7 +1296,17 @@ class DeepSeekV4Model(GptModelBase):
             )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        result = self._forward_impl(inputs, fmha_impl)
+        try:
+            result = self._forward_impl(inputs, fmha_impl)
+        except Exception:
+            # C++ (PyWrappedModel) only surfaces the exception message; keep the
+            # Python frames in the rank log for diagnosis.
+            import traceback
+
+            logging.error(
+                "[DeepSeekV4Model] forward raised:\n%s", traceback.format_exc()
+            )
+            raise
         if (
             self._captures_aux_hidden
             and self.v4 is not None
