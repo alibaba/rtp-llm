@@ -81,6 +81,45 @@ def test_scale_rejects_invalid_direction_or_targets(args):
         StepRegistry.standard().get('engine/scale').arguments(args)
 
 
+def test_initial_engine_start_is_bounded_and_registers_in_index_order(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from mock_framework.execution.environment import EndpointRegistry
+    from mock_framework.execution.processes import ProcessSupervisor
+    from mock_framework.execution.roles.engine import EngineRole, INITIAL_START_BATCH_SIZE
+
+    async def exercise():
+        records = SimpleNamespace(directory=tmp_path, emit=lambda **_: None)
+        count = INITIAL_START_BATCH_SIZE + 2
+        topology = EndpointRegistry(tmp_path)
+        engine = EngineRole(
+            supervisor=ProcessSupervisor(records), topology=topology, records=records,
+            environment={'prefill': {'deployment': {'replicas': count}}},
+            recipes={'prefill': {'startup_timeout': '2s'}}, monitoring=None,
+        )
+        active = peak = 0
+        ready = []
+
+        async def start_instance(role, index):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(.01 if index == 0 else 0)
+            active -= 1
+            ready.append(index)
+            control = f'http://localhost:{10000 + index}'
+            return index, control, {'id': f'{role}-{index}', 'role': role,
+                                    'control': control, 'rpc': f'localhost:{20000 + index}'}
+
+        monkeypatch.setattr(engine, '_start_instance', start_instance)
+        await engine.start()
+        assert peak == INITIAL_START_BATCH_SIZE
+        assert ready[0] != 0
+        assert [node['id'] for node in topology.active()] == [f'prefill-{i}' for i in range(count)]
+
+    asyncio.run(exercise())
+
+
 def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics(tmp_path, monkeypatch):
     @register_step('probe/lifecycle', effect='write')
     async def exercise(ctx, args: Args) -> list[str]:
