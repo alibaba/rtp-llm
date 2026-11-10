@@ -87,7 +87,8 @@ def main(config: DictConfig):
                 'NVTE_FUSED_ATTN', 'NVTE_UNFUSED_ATTN', 'WARM_UP', 'MODEL_WARM_UP',
                 'LOAD_PYTHON_MODEL', 'ENABLE_CUDA_GRAPH', 'ENABLE_NATIVE_CUDA_GRAPH',
                 'ENABLE_LAYER_MICRO_BATCH', 'HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE', 'PYTHONDONTWRITEBYTECODE',
-                'UCX_MODULES'}
+                'UCX_MODULES', 'UCX_TLS', 'UCX_NET_DEVICES', 'UCX_LOG_LEVEL',
+                'UCX_IB_ROCE_REACHABILITY_MODE', 'PYTORCH_CUDA_ALLOC_CONF'}
     for name, value in os.environ.items():
         if name in selected or name.startswith(('RTP_', 'RLLM_', 'Q36_', 'QWEN36_')):
             env[name] = value
