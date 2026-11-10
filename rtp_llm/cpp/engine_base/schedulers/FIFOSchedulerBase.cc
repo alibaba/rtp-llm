@@ -7,7 +7,7 @@
 
 #include "autil/legacy/jsonizable.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/engine_base/schedulers/AwiObservationRegistry.h"
+#include "rtp_llm/cpp/awi/AwiObservationRegistry.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"

@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/engine_base/schedulers/AwiObservationRegistry.h"
+#include "rtp_llm/cpp/awi/AwiObservationRegistry.h"
 
 #include <algorithm>
 #include <chrono>
@@ -155,6 +155,111 @@ void AwiObservationRegistry::recordReuse(const AwiReuseEvent& e) {
 void AwiObservationRegistry::recordCapture(const std::string& backend) {
     std::lock_guard<std::mutex> lock(mu_);
     capture_backends_.push_back(backend);
+}
+
+bool AwiObservationRegistry::isTracked(const std::string& request_id) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return request_to_op_.count(request_id) != 0;
+}
+
+void AwiObservationRegistry::prefillStep(const std::string& request_id,
+                                         int64_t            input_tokens,
+                                         int64_t            step_start_ns,
+                                         int64_t            step_end_ns) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (request_to_op_.count(request_id) == 0) {
+        return;
+    }
+    auto& pending = prefill_pending_[request_id];
+    if (pending.start_ns == 0) {
+        pending.start_ns = step_start_ns;
+    }
+    pending.input_tokens = input_tokens;
+    pending.end_ns       = step_end_ns;
+}
+
+void AwiObservationRegistry::finalizePrefill(const std::string& request_id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto                        it = prefill_pending_.find(request_id);
+    if (it == prefill_pending_.end() || it->second.finalized) {
+        return;
+    }
+    it->second.finalized = true;
+    AwiPrefillEvent ev;
+    ev.request_id   = request_id;
+    ev.input_tokens = it->second.input_tokens;
+    ev.start_ns     = it->second.start_ns;
+    ev.end_ns       = it->second.end_ns;
+    prefill_events_.push_back(ev);
+}
+
+int64_t AwiObservationRegistry::nextDecodeStep(const std::string& request_id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    return ++decode_steps_[request_id];
+}
+
+void AwiObservationRegistry::noteGraphReplay() {
+    graph_replay_count_.fetch_add(1, std::memory_order_relaxed);
+}
+
+uint64_t AwiObservationRegistry::graphReplayCount() const {
+    return graph_replay_count_.load(std::memory_order_relaxed);
+}
+
+void AwiObservationRegistry::recordReuseOnce(const std::string& request_id, int64_t hit_tokens) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (request_to_op_.count(request_id) == 0 || hit_tokens <= 0) {
+        return;
+    }
+    if (!reuse_recorded_.insert(request_id).second) {
+        return;
+    }
+    AwiReuseEvent ev;
+    ev.request_id = request_id;
+    ev.hit_tokens = hit_tokens;
+    reuse_events_.push_back(ev);
+}
+
+bool AwiObservationRegistry::opAwaitingResident(std::string* operation_id_out) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (const auto& entry : ops_) {
+        if (entry.second.released && !entry.second.failed && !entry.second.resident_recorded) {
+            if (operation_id_out != nullptr) {
+                *operation_id_out = entry.first;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool AwiObservationRegistry::opRequestIds(const std::string& operation_id, std::vector<std::string>* ids_out) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto                        it = ops_.find(operation_id);
+    if (it == ops_.end() || ids_out == nullptr) {
+        return false;
+    }
+    *ids_out = it->second.request_ids;
+    return true;
+}
+
+void AwiObservationRegistry::recordDeviceOom(int64_t concurrency_hint) {
+    std::lock_guard<std::mutex> lock(mu_);
+    AwiCapacityFailureEvent ev;
+    ev.failure_kind = "device_oom";
+    ev.concurrency  = concurrency_hint;
+    // Attribute to the most recently armed operation, if any.
+    const AwiBarrierOp* newest = nullptr;
+    for (const auto& entry : ops_) {
+        if (newest == nullptr || entry.second.arm_time_ns > newest->arm_time_ns) {
+            newest = &entry.second;
+        }
+    }
+    if (newest != nullptr) {
+        ev.operation_id   = newest->operation_id;
+        ev.context_tokens = newest->context_tokens;
+    }
+    capacity_events_.push_back(ev);
 }
 
 void AwiObservationRegistry::recordStartupNetworkFetch() {

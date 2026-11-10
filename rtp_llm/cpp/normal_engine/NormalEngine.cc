@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/awi/AwiObservationRegistry.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
@@ -44,6 +45,88 @@
 
 using namespace std;
 namespace rtp_llm {
+
+namespace {
+
+// AWI evaluator instrumentation: per-step observations for armed (tracked)
+// requests only. Data comes from the live step loop: synchronized step
+// latency (host+comm inclusive), the real graph-replay counter delta, stream
+// prefill/decode state, reuse length and KV residency at barrier release.
+void recordAwiStepObservations(const std::list<GenerateStreamPtr>& streams,
+                               int64_t                             step_begin_us,
+                               int64_t                             step_latency_us,
+                               uint64_t                            replays_before) {
+    auto& registry = AwiObservationRegistry::instance();
+    if (streams.empty()) {
+        return;
+    }
+    bool any_tracked = false;
+    for (const auto& stream : streams) {
+        if (registry.isTracked(stream->generateInput()->request_info.request_id)) {
+            any_tracked = true;
+            break;
+        }
+    }
+    if (!any_tracked) {
+        return;
+    }
+    const int64_t start_ns     = step_begin_us * 1000;
+    const int64_t end_ns       = start_ns + step_latency_us * 1000;
+    const bool    graph_replay = registry.graphReplayCount() > replays_before;
+
+    std::string              resident_op;
+    const bool               want_resident = registry.opAwaitingResident(&resident_op);
+    std::vector<std::string> resident_ids;
+    if (want_resident) {
+        registry.opRequestIds(resident_op, &resident_ids);
+    }
+    std::vector<AwiSeqSnapshot> resident_candidates;
+
+    for (const auto& stream : streams) {
+        const auto& request_id = stream->generateInput()->request_info.request_id;
+        if (request_id.empty() || !registry.isTracked(request_id)) {
+            continue;
+        }
+        if (stream->reuseLength() > 0) {
+            registry.recordReuseOnce(request_id, stream->reuseLength());
+        }
+        if (stream->isContextStream()) {
+            registry.prefillStep(request_id, stream->inputLength(), start_ns, end_ns);
+        } else {
+            registry.finalizePrefill(request_id);
+            AwiDecodeEvent event;
+            event.request_id   = request_id;
+            event.step         = registry.nextDecodeStep(request_id);
+#if USING_ROCM
+            event.backend = "hip";
+#else
+            event.backend      = "cuda";
+#endif
+            event.graph_replay = graph_replay;
+            event.elapsed_ms   = static_cast<double>(step_latency_us) / 1000.0;
+            registry.recordDecode(event);
+        }
+        if (want_resident && stream->seqLength() >= stream->inputLength()) {
+            for (const auto& id : resident_ids) {
+                if (id == request_id) {
+                    AwiSeqSnapshot snapshot;
+                    snapshot.request_id      = request_id;
+                    snapshot.input_tokens    = stream->inputLength();
+                    snapshot.kv_tokens       = stream->seqLength();
+                    snapshot.reserved_tokens = static_cast<int64_t>(stream->maxTokenNum());
+                    resident_candidates.push_back(snapshot);
+                    break;
+                }
+            }
+        }
+    }
+    if (want_resident && !resident_ids.empty() && resident_candidates.size() == resident_ids.size()
+        && registry.markResidentRecorded(resident_op)) {
+        registry.recordResident(resident_candidates);
+    }
+}
+
+}  // namespace
 
 namespace {
 // This terminal protocol covers one intra-node TP group only. Preserve the old
@@ -923,6 +1006,9 @@ absl::Status NormalEngine::step() try {
         }
     }
 
+    // AWI instrumentation: sample the real graph-replay counter around the
+    // executor call so the per-step graph_replay flag reflects this step.
+    const uint64_t awi_replays_before = AwiObservationRegistry::instance().graphReplayCount();
     {
         // NormalExecutor drives startStep/finishStep via callbacks; MtpExecutor
         // has no callbacks yet, so bracket the propose path here on the engine
@@ -943,15 +1029,17 @@ absl::Status NormalEngine::step() try {
     // loop() is a no-sleep tight loop and with TP>1 every iteration enters
     // process() to drive the collective tpSync even with empty streams —
     // without this gate the gauge gets diluted to ~0 by idle iterations.
+    const int64_t awi_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
     if (parallelism_config.tp_rank == 0 && !streams.empty()) {
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
-        auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
-        reportMetrics({step_latency});
+        reportMetrics({awi_step_latency_us});
     }
+    recordAwiStepObservations(streams, step_begin_time_us, awi_step_latency_us, awi_replays_before);
 
     return status;
 } catch (const std::exception& exception) {
     if (isTorchCudaOom(exception)) {
+        AwiObservationRegistry::instance().recordDeviceOom(0);
         dumpFatalTorchCudaOomDiagnostics(parallelism_config.local_rank, exception);
     }
     throw;

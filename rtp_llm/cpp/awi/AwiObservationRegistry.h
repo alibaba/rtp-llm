@@ -15,6 +15,7 @@
 // here synthesizes events from requested settings. The frontend aggregates
 // per-rank queryJson() outputs across the world group.
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -91,6 +92,26 @@ public:
     void recordCapture(const std::string& backend);
     void recordStartupNetworkFetch();
 
+    // ---- engine step-tap helpers (only armed/tracked requests are stored) ----
+    bool isTracked(const std::string& request_id) const;
+    // Chunked-prefill window tracking: first step sets start_ns, later steps
+    // extend end_ns; finalize emits the aggregated event exactly once.
+    void prefillStep(const std::string& request_id, int64_t input_tokens, int64_t step_start_ns, int64_t step_end_ns);
+    void finalizePrefill(const std::string& request_id);
+    // Strictly increasing per-request decode step counter (contract: 1..N-1).
+    int64_t nextDecodeStep(const std::string& request_id);
+    // Graph replay evidence: incremented from the real CudaGraphRunner replay
+    // path; the engine samples around executor_->process() for a per-step flag.
+    void     noteGraphReplay();
+    uint64_t graphReplayCount() const;
+    // Reuse hits are recorded once per request (first nonzero reuseLength).
+    void recordReuseOnce(const std::string& request_id, int64_t hit_tokens);
+    // Barrier bookkeeping for the resident snapshot (single emit per op).
+    bool opAwaitingResident(std::string* operation_id_out) const;
+    bool opRequestIds(const std::string& operation_id, std::vector<std::string>* ids_out) const;
+    // Device-OOM capacity failure; attributed to the newest armed operation.
+    void recordDeviceOom(int64_t concurrency_hint);
+
     // ---- metadata (python layer, once per rank) ----
     void setBuildInfo(const std::string& internal_sha, const std::string& public_sha);
     void setConfiguration(int64_t context_tokens, bool memory_kv_reuse, const std::string& graph_backend);
@@ -107,9 +128,20 @@ private:
 
     static std::string jsonEscape(const std::string& in);
 
+    struct PendingPrefill {
+        int64_t input_tokens {0};
+        int64_t start_ns {0};
+        int64_t end_ns {0};
+        bool    finalized {false};
+    };
+
     mutable std::mutex                                            mu_;
     std::unordered_map<std::string, AwiBarrierOp>                 ops_;
     std::unordered_map<std::string, std::string>                  request_to_op_;
+    std::unordered_map<std::string, PendingPrefill>               prefill_pending_;
+    std::unordered_map<std::string, int64_t>                      decode_steps_;
+    std::unordered_set<std::string>                               reuse_recorded_;
+    std::atomic<uint64_t>                                         graph_replay_count_ {0};
     std::deque<AwiPrefillEvent>                                   prefill_events_;
     std::deque<AwiDecodeEvent>                                    decode_events_;
     std::deque<std::vector<AwiSeqSnapshot>>                       resident_events_;

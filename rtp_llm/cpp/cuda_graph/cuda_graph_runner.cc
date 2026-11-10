@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/awi/AwiObservationRegistry.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
@@ -2235,7 +2236,12 @@ void CudaGraphRunner::initCapture() {
 void CudaGraphRunner::replayGraph(int key) {
     try {
         retryOnceOnTorchCudaOom(
-            [&]() { graph_instances_[key].graph_.replay(); },
+            [&]() {
+                // AWI instrumentation: genuine per-replay counter (consumed by
+                // the engine step tap for the per-step graph_replay flag).
+                rtp_llm::AwiObservationRegistry::instance().noteGraphReplay();
+                graph_instances_[key].graph_.replay();
+            },
             [&](const std::exception& exception) {
                 RTP_LLM_LOG_WARNING("[GPU Graph Replay] OOM, empty torch cache and retry once: key=%d mode=%s "
                                     "target_verify=%d error=%s",
@@ -2266,6 +2272,12 @@ void CudaGraphRunner::replayGraph(int key) {
 }
 
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
+    // AWI instrumentation: record the capture from the actual capture path.
+#if USING_ROCM
+    rtp_llm::AwiObservationRegistry::instance().recordCapture("hip");
+#else
+    rtp_llm::AwiObservationRegistry::instance().recordCapture("cuda");
+#endif
     auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
 
     // Generation/embedding prefill have framework CPU metadata consumers even
