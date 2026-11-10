@@ -1015,8 +1015,8 @@ public:
         reportQuarantineMetrics(generation, task_count, block_count, breakdown);
         if (task_count > 0 && parallelism_config_.tp_rank == 0 && quarantine_abort_ratio_ > 0.0
             && total_device_block_count_ > 0) {
-            // Quarantine metrics count per-task pins; capacity counts each
-            // physical block once, using the same FROZEN state as BTC.
+            // Block counters retain per-task pins; capacity and the aggregate
+            // quarantine ratio count physical FROZEN blocks, as BTC does.
             size_t frozen_block_count = 0;
             std::unordered_set<const DeviceBlockPool*> counted_pools;
             for (const auto& [tag, pool] : pools_by_tag_) {
@@ -1551,12 +1551,25 @@ private:
             return;
         }
         try {
-            const auto report = [this](const StorageQuarantineCounts& counts, const kmonitor::MetricsTags* tags) {
+            size_t frozen_block_count = 0;
+            // Startup/shutdown still publish an empty quarantine snapshot.
+            if (lease_count > 0 && parallelism_config_.tp_rank == 0 && total_device_block_count_ > 0) {
+                std::unordered_set<const DeviceBlockPool*> counted_pools;
+                for (const auto& [tag, pool] : pools_by_tag_) {
+                    if (counted_pools.insert(pool.get()).second) {
+                        frozen_block_count += pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
+                    }
+                }
+            }
+            const auto report = [this, frozen_block_count](const StorageQuarantineCounts& counts,
+                                                           const kmonitor::MetricsTags* tags,
+                                                           bool physical_ratio = false) {
                 RtpLLMRemoteCacheQuarantineMetricsCollector collector;
                 collector.quarantined_lease_count = static_cast<int64_t>(counts.task_count);
                 collector.quarantined_block_count = static_cast<int64_t>(counts.block_count);
                 if (parallelism_config_.tp_rank == 0 && total_device_block_count_ > 0) {
-                    collector.quarantined_block_ratio = static_cast<double>(counts.block_count)
+                    const size_t ratio_block_count = physical_ratio ? frozen_block_count : counts.block_count;
+                    collector.quarantined_block_ratio = static_cast<double>(ratio_block_count)
                                                         / static_cast<double>(total_device_block_count_);
                 }
                 metrics_reporter_->report<RtpLLMRemoteCacheQuarantineMetrics,
@@ -1564,14 +1577,15 @@ private:
             };
             const auto report_bucket = [&report](const char* op,
                                                   const char* reason,
-                                                  const StorageQuarantineCounts& counts) {
+                                                  const StorageQuarantineCounts& counts,
+                                                  bool physical_ratio = false) {
                 kmonitor::MetricsTags tags("op", op);
                 tags.AddTag("reason", reason);
-                report(counts, &tags);
+                report(counts, &tags, physical_ratio);
             };
-            // Keep the original untagged totals for existing dashboards.
-            report({lease_count, block_count}, nullptr);
-            report_bucket("total", "total", {lease_count, block_count});
+            // Totals use physical blocks; op/reason breakdowns retain task-pin attribution.
+            report({lease_count, block_count}, nullptr, /*physical_ratio=*/true);
+            report_bucket("total", "total", {lease_count, block_count}, /*physical_ratio=*/true);
             std::array<StorageQuarantineCounts, 5> reason_totals{};
             for (size_t op = 0; op < breakdown.size(); ++op) {
                 const char* operation = op == 0 ? "read" : "write";
