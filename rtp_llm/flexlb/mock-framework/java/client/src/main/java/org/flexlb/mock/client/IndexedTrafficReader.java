@@ -20,12 +20,13 @@ import org.flexlb.engine.grpc.EngineRpcService.MultimodalInputPB;
 
 /**
  * Reads requests by ordinal from an immutable traffic dataset and reconstructs their input.
- * File offsets are absolute except request and prefix-page offsets relative to the payload.
+ * Request and prefix pages are independently compressed and located relative to the payload.
  */
 final class IndexedTrafficReader implements AutoCloseable {
     private static final byte[] MAGIC = {'M', 'C', 'K', 'I', 'N', 'D', 'E', 'X'};
 
-    private static final int HEADER = 112, INDEX = 16, CHAIN = 20, CHAIN_PAGE = 28, MEDIA = 12, CAP = 8;
+    private static final int HEADER = 112, REQUEST_PAGE = 20, CHAIN = 20, CHAIN_PAGE = 28, MEDIA = 12, CAP = 8;
+    private static final int REQUESTS_PER_PAGE = 1024;
     private static final int CHAINS_PER_PAGE = 256, CACHE_CHAIN_PAGES = 128;
     private static final int REQUEST = 26, IMAGE = 16, MAX_IMAGES = 256;
     private static final int MAX_REQUEST = 1024 * 1024;
@@ -40,6 +41,10 @@ final class IndexedTrafficReader implements AutoCloseable {
 
     private final LinkedHashMap<Long, byte[]> pages = new LinkedHashMap<>(16, 0.75f, true);
     private final LinkedHashMap<Long, byte[]> chainPages = new LinkedHashMap<>(16, 0.75f, true);
+
+    private long requestPageIndex = -1;
+
+    private ByteBuffer requestPage;
 
     IndexedTrafficReader(Path path) throws IOException {
         file = FileChannel.open(path, StandardOpenOption.READ);
@@ -63,7 +68,7 @@ final class IndexedTrafficReader implements AutoCloseable {
             identity = HexFormat.of().formatHex(digest);
             caps = Math.addExact(media, Math.multiplyExact(mediaCount, MEDIA));
             if (capCount < 0 || capCount > 65535 || missingOutput < 0 || missingOutput > count || count < 1 || chainPageCount < 0 || chainPageCount > Integer.MAX_VALUE / CHAINS_PER_PAGE || mediaCount < 0
-                    || lastArrival < 0 || chains != Math.addExact(HEADER, Math.multiplyExact(count, INDEX))
+                    || lastArrival < 0 || chains != Math.addExact(HEADER, Math.multiplyExact((count - 1) / REQUESTS_PER_PAGE + 1, REQUEST_PAGE))
                     || media != Math.addExact(chains, Math.multiplyExact(chainPageCount, CHAIN_PAGE))
                     || payload != Math.addExact(caps, capCount * CAP) || payload >= fileSize)
                 throw invalid("invalid table bounds");
@@ -94,16 +99,43 @@ final class IndexedTrafficReader implements AutoCloseable {
 
     private ByteBuffer readRequestRow(long index) throws IOException {
         if (index < 0 || index >= count) throw invalid("request index out of bounds");
-        var slot = checked(table(HEADER + index * INDEX, INDEX));
-        long offset = slot.getLong();
-        int size = slot.getInt();
-        if (offset < 0 || offset > fileSize - payload || size < REQUEST + 4
-                || size > REQUEST + MAX_IMAGES * IMAGE + 4 || (size - REQUEST - 4) % IMAGE != 0)
+        long page = index / REQUESTS_PER_PAGE;
+        int rows = (int) Math.min(REQUESTS_PER_PAGE, count - page * REQUESTS_PER_PAGE);
+        if (page != requestPageIndex) {
+            requestPage = readRequestPage(page, rows);
+            requestPageIndex = page;
+        }
+        int slot = (int) (index % REQUESTS_PER_PAGE);
+        int dataStart = rows * Integer.BYTES;
+        int start = requestPage.getInt(slot * Integer.BYTES);
+        int end = slot + 1 < rows ? requestPage.getInt((slot + 1) * Integer.BYTES) : requestPage.limit() - dataStart;
+        if (start < 0 || end < start || end > requestPage.limit() - dataStart)
             throw invalid("invalid request bounds");
-        return checked(table(payload + offset, size));
+        int size = end - start;
+        if (size < REQUEST || size > REQUEST + MAX_IMAGES * IMAGE || (size - REQUEST) % IMAGE != 0)
+            throw invalid("invalid request size");
+        return requestPage.slice(dataStart + start, size);
     }
 
     private static IOException invalid(String reason) { return new IOException("Indexed traffic: " + reason); }
+
+    private ByteBuffer readRequestPage(long page, int rows) throws IOException {
+        var pointer = checked(table(HEADER + page * REQUEST_PAGE, REQUEST_PAGE));
+        long offset = pointer.getLong();
+        int size = pointer.getInt(), rawSize = pointer.getInt();
+        if (rawSize < rows * (REQUEST + Integer.BYTES) || rawSize > rows * (REQUEST + MAX_IMAGES * IMAGE + Integer.BYTES)
+                || size < 1 || size > Zstd.compressBound(rawSize) || offset < 0 || offset > fileSize - payload - size)
+            throw invalid("invalid request page bounds");
+        try {
+            byte[] raw = Zstd.decompress(read(payload + offset, size).array(), rawSize);
+            var decoded = ByteBuffer.wrap(raw);
+            if (raw.length != rawSize || decoded.getInt(0) != 0)
+                throw invalid("invalid request page contents");
+            return decoded;
+        } catch (ZstdException error) {
+            throw new IOException("Indexed traffic: invalid compressed request page", error);
+        }
+    }
 
     private static ByteBuffer checked(ByteBuffer row) throws IOException {
         int end = row.limit() - 4;

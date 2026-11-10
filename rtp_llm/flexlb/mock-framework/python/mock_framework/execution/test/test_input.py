@@ -4,7 +4,7 @@ import subprocess
 import sys
 
 import pytest
-
+import zstandard
 from mock_framework.execution.test.helpers import FRAMEWORK
 from mock_framework.execution.test.helpers.input import write_inputs
 
@@ -38,9 +38,12 @@ def test_output_cap_dictionary_and_observed_zero_are_independent(tmp_path):
     magic, count, _, _, _, _, caps, payload, _, missing, _ = struct.unpack_from(">8s9q32s", data)
     assert (magic, count, caps, missing) == (b"MCKINDEX", 4, 1, 1)
     assert struct.unpack_from(">i", data, payload - 8)[0] == 8192
+    offset, size, raw_size = struct.unpack_from(">qii", data, 112)
+    page = zstandard.ZstdDecompressor().decompress(data[payload + offset:payload + offset + size])
+    assert len(page) == raw_size
     outputs = []
     for i in range(count):
-        offset, _ = struct.unpack_from(">qi", data, 112 + i * 16)
-        _, _, observed, _, cap_id = struct.unpack_from(">qqiiH", data, payload + offset)
+        offset, = struct.unpack_from(">I", page, i * 4)
+        _, _, observed, _, cap_id = struct.unpack_from(">qqiiH", page, count * 4 + offset)
         outputs.append((observed, cap_id))
     assert outputs == [(37, 1), (-1, 1), (0, 0), (-1, 0)]

@@ -36,25 +36,36 @@ class IndexedTrafficReaderTest {
     }
 
     @Test void playerTouchesOnlyItsOrdinalsAndUsesTheirOriginalTimes() throws Exception {
-        var path = fixture();
+        var rows = new ArrayList<ByteBuffer>();
+        for (int i = 0; i <= 2048; i++) {
+            var row = ByteBuffer.allocate(74).putLong(i).putLong(3).putInt(-1).putInt(50).putShort((short) 1);
+            for (int image = 0; image < 3; image++) row.putLong(1).putInt(image).putInt(924);
+            rows.add(row);
+        }
+        var chain = ByteBuffer.allocate(20).putLong(1).putLong(0).putInt(3);
+        var path = InputFixture.indexed(directory.resolve("paged.mckidx"), rows, chain, 2048,
+            List.of(new int[]{1024, 768}), List.of(3), 0);
         String identity;
         try (var dataset = new IndexedTrafficReader(path)) { identity = dataset.identity; }
         byte[] data = Files.readAllBytes(path);
-        // Corrupt only ordinal 0. A player assigned to 1 and 3 must still finish.
-        data[Math.toIntExact(ByteBuffer.wrap(data).getLong(56))] ^= 1;
+        // Corrupt page 1. A player assigned to pages 0 and 2 must still finish.
+        var header = ByteBuffer.wrap(data);
+        data[Math.toIntExact(header.getLong(56) + header.getLong(112 + 20))] ^= 1;
         Files.write(path, data);
-        var odd = new WorkerPlan(1, null, path.toString(), 2, 1, 2, 100, identity, null, 2.0, 1, 4, 1000, 1000);
+        var plan = new WorkerPlan(1, null, path.toString(), 2, 0, 2048, 100, identity, null, 2.0, 1, 4, 1000, 1000);
         var items = new ArrayList<Session.Item>();
-        long past = System.nanoTime() - 1_000_000_000;
-        Session.play(odd, past, MediaInput.IMAGE_TOKEN, items::add);
-        assertEquals(List.of(101L, 103L), items.stream().map(Session.Item::requestId).toList());
-        assertEquals(List.of(5_000_000L, 15_000_000L), items.stream().map(item -> {
+        long past = System.nanoTime() - 2_000_000_000;
+        Session.play(plan, past, MediaInput.IMAGE_TOKEN, items::add);
+        assertEquals(List.of(100L, 2148L), items.stream().map(Session.Item::requestId).toList());
+        assertEquals(List.of(0L, 1_024_000_000L), items.stream().map(item -> {
             try { return Session.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), null, 2.0); }
             catch (IOException error) { throw new AssertionError(error); }
         }).toList());
-        assertEquals(10_000_000L, Session.delayNanos(1, items.getFirst().entry().arrivalMs(), 100.0, null));
-        var even = new WorkerPlan(1, null, path.toString(), 3, 0, 2, 100, identity, null, 2.0, 1, 4, 1000, 1000);
-        assertThrows(IOException.class, () -> Session.play(even, past, MediaInput.IMAGE_TOKEN, ignored -> fail()));
+        assertEquals(List.of(924, 924, 924), items.getFirst().entry().expectedImageTokens());
+        try (var dataset = new IndexedTrafficReader(path)) {
+            assertEquals(1023, dataset.entry(1023, MediaInput.IMAGE_TOKEN).arrivalMs());
+            assertThrows(IOException.class, () -> dataset.entry(1024, MediaInput.IMAGE_TOKEN));
+        }
     }
 
     @Test void fixedTotalQpsInterleavesWorkerDeadlines() throws Exception {

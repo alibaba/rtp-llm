@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """Seal one shared indexed replay file from anonymous text and media JSONL."""
 import argparse
-from array import array
-from contextlib import closing
 import hashlib
 import json
 import os
-from pathlib import Path
 import sqlite3
 import struct
 import sys
 import tempfile
 import zlib
+from array import array
+from contextlib import closing
+from pathlib import Path
 
 import zstandard
 
-
 HEADER = struct.Struct(">8s9q32s")
-INDEX = struct.Struct(">qi")
+REQUEST_PAGE = struct.Struct(">qii")
+REQUESTS_PER_PAGE = 1024
 CHAIN = struct.Struct(">qqi")
 CHAIN_PAGE = struct.Struct(">qqii")
 CHAINS_PER_PAGE = 256
@@ -36,6 +36,35 @@ def number(value, minimum, maximum=(1 << 31) - 1):
 def record(table, data):
     table.write(data)
     table.write(struct.pack(">I", zlib.crc32(data)))
+
+
+class RequestPages:
+    """Write independent request pages and their payload offsets."""
+
+    def __init__(self, index, payload):
+        self.index = index
+        self.payload = payload
+        self.rows = []
+        self.compressor = zstandard.ZstdCompressor(level=3, write_checksum=True)
+
+    def append(self, row):
+        self.rows.append(row)
+        if len(self.rows) == REQUESTS_PER_PAGE:
+            self.finish()
+
+    def finish(self):
+        if not self.rows:
+            return
+        offsets = bytearray()
+        position = 0
+        for row in self.rows:
+            offsets.extend(struct.pack(">I", position))
+            position += len(row)
+        raw = offsets + b"".join(self.rows)
+        encoded = self.compressor.compress(raw)
+        record(self.index, REQUEST_PAGE.pack(self.payload.tell(), len(encoded), len(raw)))
+        self.payload.write(encoded)
+        self.rows.clear()
 
 
 def text_template(db, tokens, next_node):
@@ -96,6 +125,7 @@ def build(source, target):
         next_node = 1
         last_arrival = -1
         sealed = False
+        request_pages = RequestPages(index, requests)
         for line_no, line in enumerate(source, 1):
             try:
                 kind, *fields = json.loads(line)
@@ -145,8 +175,7 @@ def build(source, target):
                         offset = number(offset, previous, length)
                         row += IMAGE.pack(number(media_id, 1, media_count), offset, number(expected, 0))
                         previous = offset
-                    record(index, INDEX.pack(requests.tell(), len(row) + 4))
-                    record(requests, row)
+                    request_pages.append(row)
                     count += 1
                     last_arrival = arrival
                 elif kind == "end":
@@ -159,7 +188,8 @@ def build(source, target):
                 raise ValueError(f"line {line_no}: {error}") from error
         if not sealed:
             raise ValueError("missing final seal")
-        chain_offset = HEADER.size + count * (INDEX.size + 4)
+        request_pages.finish()
+        chain_offset = HEADER.size + index.tell()
         chains.seek(0)
         compressor = zstandard.ZstdCompressor(level=3, write_checksum=True)
         page_count = 0
