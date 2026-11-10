@@ -4,6 +4,7 @@ The C++ executor owns TP consensus. Captured stages retain their addresses in
 ``graph_registry``; releasing an active commit only releases its undo record.
 """
 
+import os
 from collections.abc import Callable, Mapping
 from typing import Optional
 
@@ -125,20 +126,28 @@ class PLETransactionCoordinator:
             )
 
         gathered = None
-        if graph_capture:
+        if graph_capture or os.environ.get("QWEN4_PLE_DECODE_PLAN", "0") == "1":
             from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_triton import (
                 gather_target_read_state,
             )
 
-            gathered = gather_target_read_state(
-                prefixes_device,
-                ids,
-                PLECacheViews._resolve_block_table(state_inputs, PLE_STATE_TAG),
-                PLECacheViews._resolve_block_table(ctx_inputs, PLE_NGRAM_CTX_TAG),
-                state_pool,
-                ctx_pool,
-                page_size,
-            )
+            try:
+                state_table = PLECacheViews._resolve_block_table(state_inputs, PLE_STATE_TAG)
+                ctx_table = PLECacheViews._resolve_block_table(ctx_inputs, PLE_NGRAM_CTX_TAG)
+            except RuntimeError:
+                # Preserve the original state-before-context validation order.
+                pass
+            else:
+                gathered = gather_target_read_state(
+                    prefixes_device,
+                    ids,
+                    state_table,
+                    ctx_table,
+                    state_pool,
+                    ctx_pool,
+                    page_size,
+                    strict=not graph_capture,
+                )
         candidate_ids = ids.reshape(batch_size, query_len)
         if gathered is not None:
             initial_state, initial_context, history = gathered

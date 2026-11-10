@@ -50,7 +50,7 @@ class PLEDecodeFusionTest(unittest.TestCase):
 
     def test_tail_output_and_all_nine_state_rows(self):
         flag = "QWEN4_PLE_DECODE_TAIL"
-        for batch in (1, 16, 32, 64):
+        for batch in (1, 16, 32, 64, 65, 128, 256):
             with self.subTest(batch=batch):
                 fixture = TailFixture(batch)
                 before = fixture.initial.clone()

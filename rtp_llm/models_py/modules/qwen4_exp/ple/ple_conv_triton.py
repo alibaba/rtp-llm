@@ -135,7 +135,7 @@ def try_ple_conv(
             not roll_state
             or (
                 gated.shape[1] == 1
-                and 0 < gated.shape[0] <= 64
+                and gated.shape[0] > 0
                 and initial is not None
                 and not initial.requires_grad
                 and torch.cuda.get_device_capability(gated.device) == (9, 0)

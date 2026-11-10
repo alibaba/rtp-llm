@@ -57,7 +57,8 @@ def _decode_cache_plan(
     BLOCK: tl.constexpr,
     GRAPH_MODE: tl.constexpr,
 ):
-    row = tl.arange(0, BLOCK)
+    tile = tl.program_id(0)
+    row = tile.to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     live = row < B
     length = tl.load(Lengths + row, live, other=0).to(tl.int64)
     if GRAPH_MODE:
@@ -96,7 +97,8 @@ def _decode_cache_plan(
     tl.store(History + row * 3 + 1, second, live)
     tl.store(History + row * 3 + 2, token, live)
     if not GRAPH_MODE:
-        tl.store(Bad, tl.max((live & ~read_history).to(tl.int32), 0))
+        # Each CTA owns one verdict; no atomics, initialization or grid barrier.
+        tl.store(Bad + tile, tl.max((live & ~read_history).to(tl.int32), 0))
 
 
 def try_plan_decode_cache(
@@ -133,7 +135,7 @@ def try_plan_decode_cache(
         and length_supported
         and ids.is_contiguous()
         and lengths.is_contiguous()
-        and 0 < ids.numel() == lengths.numel() <= 64
+        and 0 < ids.numel() == lengths.numel()
         and all(
             table.ndim == 2
             and table.shape[0] == ids.numel()
@@ -158,13 +160,17 @@ def try_plan_decode_cache(
     ):
         return None
     batch = ids.numel()
+    # Retain the small-batch geometry; larger batches add independent CTAs
+    # instead of growing one CTA's register footprint with the whole batch.
+    block = min(triton.next_power_of_2(batch), 128)
+    tiles = triton.cdiv(batch, block)
     blocks = torch.empty((3, batch), device=ids.device, dtype=torch.int64)
     history = torch.empty((batch, 3), device=ids.device, dtype=torch.int64)
-    bad = None if graph_mode else torch.empty((), device=ids.device, dtype=torch.int32)
+    bad = None if graph_mode else torch.empty(tiles, device=ids.device, dtype=torch.int32)
     device_lengths = (
         lengths if graph_mode else lengths.to(device=ids.device, non_blocking=True)
     )
-    _decode_cache_plan[(1,)](
+    _decode_cache_plan[(tiles,)](
         device_lengths,
         ids,
         state_table,
@@ -182,10 +188,10 @@ def try_plan_decode_cache(
         C_COL=context_table.stride(1),
         S_ROWS=state_pool.shape[0],
         C_ROWS=context_pool.shape[0],
-        BLOCK=triton.next_power_of_2(batch),
+        BLOCK=block,
         GRAPH_MODE=graph_mode,
-        num_warps=1,
+        num_warps=1 if block <= 64 else 4,
     )
-    if bad is not None and bool(bad.item()):
+    if bad is not None and bool((bad if tiles == 1 else bad.any()).item()):
         return None
     return DecodeCachePlan(blocks[0], blocks[1], blocks[2], history)

@@ -282,6 +282,7 @@ def _target_read_state_kernel(
     CTX_POOL,
     STATE_OUT,
     HISTORY,
+    BAD,
     S_COLS: tl.constexpr,
     C_COLS: tl.constexpr,
     S_ROW: tl.constexpr,
@@ -295,24 +296,29 @@ def _target_read_state_kernel(
     CONTEXT: tl.constexpr,
     QUERY: tl.constexpr,
     BLOCK: tl.constexpr,
+    STRICT: tl.constexpr,
 ):
-    row, tile = tl.program_id(0), tl.program_id(1)
+    # The request dimension is unbounded by the helper; promote before
+    # multiplying by the full state width or block-table stride.
+    row = tl.program_id(0).to(tl.int64)
+    tile = tl.program_id(1).to(tl.int64)
     prefix = tl.load(PREFIX + row).to(tl.int64)
-    page = (prefix - 1) // PAGE_SIZE
+    # Clamp before subtracting so INT64_MIN cannot wrap to a valid page.
+    page = (tl.maximum(prefix, 1) - 1) // PAGE_SIZE
     sp = tl.minimum(tl.maximum(page, 0), S_COLS - 1)
     cp = tl.minimum(tl.maximum(page, 0), C_COLS - 1)
     sb = tl.load(STATE_TABLE + row * S_ROW + sp * S_COL).to(tl.int64)
     cb = tl.load(CTX_TABLE + row * C_ROW + cp * C_COL).to(tl.int64)
-    sb = tl.where(
-        (prefix > 0) & (page >= 0) & (page < S_COLS) & (sb > 0) & (sb < S_POOL), sb, 0
-    )
-    cb = tl.where(
-        (prefix > 0) & (page >= 0) & (page < C_COLS) & (cb > 0) & (cb < C_POOL), cb, 0
-    )
+    state_valid = (prefix > 0) & (page < S_COLS) & (sb > 0) & (sb < S_POOL)
+    context_valid = (prefix > 0) & (page < C_COLS) & (cb > 0) & (cb < C_POOL)
+    sb = tl.where(state_valid, sb, 0)
+    cb = tl.where(context_valid, cb, 0)
     col = tile * BLOCK + tl.arange(0, BLOCK)
     value = tl.load(STATE_POOL + sb * STATE_WIDTH + col, col < STATE_WIDTH, other=0)
     tl.store(STATE_OUT + row * STATE_WIDTH + col, value, col < STATE_WIDTH)
     if tile == 0:
+        if STRICT:
+            tl.store(BAD + row, ~(state_valid & context_valid))
         h = tl.arange(0, BLOCK)
         previous = tl.load(CTX_POOL + cb * CONTEXT + h, h < CONTEXT, other=0)
         current = tl.load(
@@ -328,12 +334,14 @@ def _target_read_state_kernel(
 
 
 def gather_target_read_state(
-    prefixes, ids, state_table, ctx_table, state_pool, ctx_pool, page_size
+    prefixes, ids, state_table, ctx_table, state_pool, ctx_pool, page_size, *, strict=False
 ):
-    """Gather independent tag-local read state and candidate history for Graph.
+    """Gather request-level state and history for uniform multi-token verify.
 
-    Persistent pools are read-only. Every invalid page/block retains the prior
-    reserved-row-zero behavior; commit validation stays with its owner.
+    Persistent pools are read-only. Graph keeps independent reserved-row-zero
+    mappings. Strict eager mode returns None on any invalid read so the caller
+    can retain its ordered metadata errors. Commit validation stays with its
+    owner; this helper never selects speculative write destinations.
     """
     tensors = (prefixes, ids, state_table, ctx_table, state_pool, ctx_pool)
     if not (
@@ -351,7 +359,7 @@ def gather_target_read_state(
         and state_pool.is_contiguous()
         and ctx_pool.is_contiguous()
         and state_table.ndim == ctx_table.ndim == 2
-        and 0 < prefixes.numel() <= 32
+        and prefixes.numel() > 0
         and ids.numel() % prefixes.numel() == 0
         and 0 < ids.numel() // prefixes.numel() <= 32
         and state_table.shape[0] == ctx_table.shape[0] == prefixes.numel()
@@ -365,6 +373,7 @@ def gather_target_read_state(
         and min(state_pool.shape[1:]) > 0
         and 0 < ctx_pool.shape[1] <= 32
         and page_size > 0
+        and (not strict or not torch.cuda.is_current_stream_capturing())
     ):
         return None
     batch = prefixes.numel()
@@ -377,6 +386,8 @@ def gather_target_read_state(
     history = torch.empty(
         (batch, context + query), device=prefixes.device, dtype=ctx_pool.dtype
     )
+    bad = torch.empty(batch, device=prefixes.device, dtype=torch.bool) if strict else None
+    # Fixed-size state tiles keep per-CTA work independent of batch size.
     _target_read_state_kernel[(batch, triton.cdiv(width, 1024))](
         prefixes,
         ids,
@@ -386,6 +397,7 @@ def gather_target_read_state(
         ctx_pool,
         state,
         history,
+        bad,
         S_COLS=state_table.shape[1],
         C_COLS=ctx_table.shape[1],
         S_ROW=state_table.stride(0),
@@ -399,6 +411,9 @@ def gather_target_read_state(
         CONTEXT=context,
         QUERY=query,
         BLOCK=1024,
+        STRICT=strict,
         num_warps=4,
     )
+    if bad is not None and bool(bad.any().item()):
+        return None
     return state, history[:, :context], history
