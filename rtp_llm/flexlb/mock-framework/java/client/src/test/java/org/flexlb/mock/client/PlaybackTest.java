@@ -45,7 +45,7 @@ class PlaybackTest {
 
     WorkerPlan workerPlan(String master, int count, double qps, int slots, int queue) throws Exception {
         var start = InputFixture.plan(directory, List.of(master), count, qps, slots, queue, 3000, 1000);
-        try (var input = new IndexedTraffic(Path.of(start.requests_file()))) {
+        try (var input = new IndexedTrafficReader(Path.of(start.requests_file()))) {
             return new WorkerPlan(1, start.masters(), start.requests_file(), input.count, 0, 1, 1, input.identity,
                 qps, null, slots, queue, 3000, 1000);
         }

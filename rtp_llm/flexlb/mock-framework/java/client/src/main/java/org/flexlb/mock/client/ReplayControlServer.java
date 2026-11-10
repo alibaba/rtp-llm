@@ -101,7 +101,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
             save(directory.resolve("coordinator/" + created.number + "/plan.json"), Map.of("clients", created.peers, "config", args));
             long total;
             String identity;
-            try (var input = new IndexedTraffic(Path.of(args.requests_file()))) {
+            try (var input = new IndexedTrafficReader(Path.of(args.requests_file()))) {
                 if (input.missingOutput > 0 && args.fallback_max_output_tokens() == null)
                     throw new IOException("Dataset requires fallback_max_output_tokens for " + input.missingOutput + " requests");
                 total = input.count;
@@ -361,7 +361,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
         }
 
         static void play(WorkerPlan plan, long startNanos, int imageToken, Consumer<Item> submit) throws IOException, InterruptedException {
-            try (var indexed = new IndexedTraffic(Path.of(plan.requests_file()))) {
+            try (var indexed = new IndexedTrafficReader(Path.of(plan.requests_file()))) {
                 long expected = ClientProtocol.requestCount(indexed.count, plan.first_index(), plan.stride());
                 if (!indexed.identity.equals(plan.sha256()) || expected != plan.count())
                     throw new IOException("Indexed traffic changed after planning");
@@ -370,7 +370,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                     if (Thread.interrupted()) throw new InterruptedException();
                     long index = plan.first_index() + position * plan.stride();
                     var entry = indexed.entry(index, imageToken);
-                    int outputLimit = entry.playbackLimit(plan.fallback_max_output_tokens());
+                    int outputLimit = playbackLimit(entry, plan.fallback_max_output_tokens());
                     long due = startNanos + delayNanos(index, entry.arrivalMs(), plan.qps(), plan.replay_speed());
                     long left;
                     while ((left = due - System.nanoTime()) > 0) TimeUnit.NANOSECONDS.sleep(left);
@@ -385,6 +385,15 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
             if (!Double.isFinite(seconds) || seconds < 0 || seconds > 86400)
                 throw new IOException("Playback exceeds 24 hours");
             return (long) (seconds * 1_000_000_000.0);
+        }
+
+        static int playbackLimit(IndexedTrafficReader.Entry entry, Integer fallback) throws IOException {
+            if (entry.observedOutputTokens() == 0)
+                throw new IOException("Indexed traffic: zero observed output cannot be replayed as generation");
+            if (entry.observedOutputTokens() > 0) return entry.observedOutputTokens();
+            if (entry.maxOutputTokens() > 0) return entry.maxOutputTokens();
+            if (fallback == null) throw new IOException("Indexed traffic: fallback_max_output_tokens is required");
+            return fallback;
         }
 
         synchronized void fail(String error) {
@@ -486,6 +495,6 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                 queue.size(), active.size(), Map.copyOf(outcomes), List.copyOf(errors));
         }
 
-        record Item(long requestId, IndexedTraffic.Entry entry, int outputLimit) {}
+        record Item(long requestId, IndexedTrafficReader.Entry entry, int outputLimit) {}
     }
 }

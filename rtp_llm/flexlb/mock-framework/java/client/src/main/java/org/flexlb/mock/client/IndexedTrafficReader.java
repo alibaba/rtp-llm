@@ -18,36 +18,30 @@ import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
 import org.flexlb.engine.grpc.EngineRpcService.MMPreprocessConfigPB;
 import org.flexlb.engine.grpc.EngineRpcService.MultimodalInputPB;
 
-/** One immutable dataset. All positions are absolute except request offsets relative to the payload. */
-final class IndexedTraffic implements AutoCloseable {
+/**
+ * Reads requests by ordinal from an immutable traffic dataset and reconstructs their input.
+ * File offsets are absolute except request and prefix-page offsets relative to the payload.
+ */
+final class IndexedTrafficReader implements AutoCloseable {
     private static final byte[] MAGIC = {'M', 'C', 'K', 'I', 'N', 'D', 'E', 'X'};
+
     private static final int HEADER = 112, INDEX = 16, CHAIN = 20, CHAIN_PAGE = 28, MEDIA = 12, CAP = 8;
     private static final int CHAINS_PER_PAGE = 256, CACHE_CHAIN_PAGES = 128;
     private static final int REQUEST = 26, IMAGE = 16, MAX_IMAGES = 256;
     private static final int MAX_REQUEST = 1024 * 1024;
     private static final int PAGE_BYTES = 4096, CACHE_PAGES = 256;
 
-    record Entry(long arrivalMs, int priority, int observedOutputTokens, int maxOutputTokens,
-                 GenerateInputPB input, List<Integer> expectedImageTokens) {
-        int playbackLimit(Integer fallback) throws IOException {
-            if (observedOutputTokens == 0) throw invalid("zero observed output cannot be replayed as generation");
-            if (observedOutputTokens > 0) return observedOutputTokens;
-            if (maxOutputTokens > 0) return maxOutputTokens;
-            if (fallback == null) throw invalid("fallback_max_output_tokens is required");
-            return fallback;
-        }
-    }
-    private record Chain(long first, long parent, int size, int symbol) {}
-
     final long count, lastArrival, missingOutput;
+
     final String identity;
     private final FileChannel file;
-    private final long fileSize, chains, chainPageCount, media, mediaCount, caps, capCount, payload;
-    private final LinkedHashMap<Long, byte[]> pages = new LinkedHashMap<>(16, 0.75f, true);
 
+    private final long fileSize, chains, chainPageCount, media, mediaCount, caps, capCount, payload;
+
+    private final LinkedHashMap<Long, byte[]> pages = new LinkedHashMap<>(16, 0.75f, true);
     private final LinkedHashMap<Long, byte[]> chainPages = new LinkedHashMap<>(16, 0.75f, true);
 
-    IndexedTraffic(Path path) throws IOException {
+    IndexedTrafficReader(Path path) throws IOException {
         file = FileChannel.open(path, StandardOpenOption.READ);
         try {
             fileSize = file.size();
@@ -79,7 +73,26 @@ final class IndexedTraffic implements AutoCloseable {
         }
     }
 
+    @Override public void close() throws IOException { file.close(); }
+
     Entry entry(long index, int imageToken) throws IOException {
+        var row = readRequestRow(index);
+        long arrival = row.getLong(), leaf = row.getLong();
+        int observed = row.getInt(), priority = row.getInt();
+        int capId = Short.toUnsignedInt(row.getShort());
+        if (capId > capCount) throw invalid("unknown output cap");
+        int maximum = capId == 0 ? 0 : checked(table(caps + (capId - 1L) * CAP, CAP)).getInt();
+        int images = (row.limit() - REQUEST) / IMAGE;
+        if (arrival < 0 || arrival > lastArrival || leaf < 0 || observed < -1 || priority < 0
+                || (capId != 0 && (maximum < 1 || observed > maximum)))
+            throw invalid("invalid request metadata");
+
+        int[] text = restoreText(leaf, images, imageToken);
+        var decoded = buildInput(row, images, text, imageToken);
+        return new Entry(arrival, priority, observed, maximum, decoded.input(), decoded.expectedImageTokens());
+    }
+
+    private ByteBuffer readRequestRow(long index) throws IOException {
         if (index < 0 || index >= count) throw invalid("request index out of bounds");
         var slot = checked(table(HEADER + index * INDEX, INDEX));
         long offset = slot.getLong();
@@ -87,17 +100,42 @@ final class IndexedTraffic implements AutoCloseable {
         if (offset < 0 || offset > fileSize - payload || size < REQUEST + 4
                 || size > REQUEST + MAX_IMAGES * IMAGE + 4 || (size - REQUEST - 4) % IMAGE != 0)
             throw invalid("invalid request bounds");
-        var row = checked(table(payload + offset, size));
-        long arrival = row.getLong(), leaf = row.getLong();
-        int observed = row.getInt(), priority = row.getInt();
-        int capId = Short.toUnsignedInt(row.getShort());
-        if (capId > capCount) throw invalid("unknown output cap");
-        int maximum = capId == 0 ? 0 : checked(table(caps + (capId - 1L) * CAP, CAP)).getInt();
-        int images = (size - REQUEST - 4) / IMAGE;
-        if (arrival < 0 || arrival > lastArrival || leaf < 0 || observed < -1 || priority < 0
-                || (capId != 0 && (maximum < 1 || observed > maximum)))
-            throw invalid("invalid request metadata");
+        return checked(table(payload + offset, size));
+    }
 
+    private static IOException invalid(String reason) { return new IOException("Indexed traffic: " + reason); }
+
+    private static ByteBuffer checked(ByteBuffer row) throws IOException {
+        int end = row.limit() - 4;
+        var crc = new CRC32();
+        crc.update(row.duplicate().limit(end));
+        if ((int) crc.getValue() != row.getInt(end)) throw invalid("record checksum mismatch");
+        return row.limit(end);
+    }
+
+    private ByteBuffer table(long offset, int size) throws IOException {
+        if (offset < HEADER || offset > fileSize - size) throw invalid("record outside file");
+        long page = offset / PAGE_BYTES * PAGE_BYTES;
+        int relative = (int) (offset - page);
+        if (relative + size > PAGE_BYTES) return read(offset, size);
+        var bytes = pages.get(page);
+        if (bytes == null) {
+            bytes = read(page, (int) Math.min(PAGE_BYTES, fileSize - page)).array();
+            pages.put(page, bytes);
+            if (pages.size() > CACHE_PAGES) pages.pollFirstEntry();
+        }
+        return ByteBuffer.wrap(bytes, relative, size).slice();
+    }
+
+    private ByteBuffer read(long offset, int size) throws IOException {
+        var bytes = ByteBuffer.allocate(size);
+        while (bytes.hasRemaining()) {
+            if (file.read(bytes, offset + bytes.position()) < 0) throw new EOFException("Truncated indexed traffic");
+        }
+        return bytes.flip();
+    }
+
+    private int[] restoreText(long leaf, int images, int imageToken) throws IOException {
         var reversed = new ArrayList<Chain>();
         int textCount = 0;
         for (long node = leaf; node != 0;) {
@@ -116,33 +154,7 @@ final class IndexedTraffic implements AutoCloseable {
             if (imageToken == 0) Arrays.fill(text, position + 1, position + chain.size, 1);
             position += chain.size;
         }
-        var request = GenerateInputPB.newBuilder();
-        var expected = new ArrayList<Integer>(images);
-        int previous = 0;
-        for (int i = 0; i < images; i++) {
-            long id = row.getLong();
-            int at = row.getInt(), expectedTokens = row.getInt();
-            if (id < 1 || id > mediaCount || at < previous || at > textCount || expectedTokens < 0)
-                throw invalid("invalid image reference");
-            var geometry = checked(table(media + (id - 1) * MEDIA, MEDIA));
-            int width = geometry.getInt(), height = geometry.getInt();
-            if (width < 1 || width > 32768 || height < 1 || height > 32768) throw invalid("invalid media dimensions");
-            for (int t = previous; t < at; t++) request.addTokenIds(text[t]);
-            request.addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("mock-image:" + id)
-                .setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(width).setHeight(height)));
-            request.addTokenIds(imageToken);
-            previous = at;
-            expected.add(expectedTokens);
-        }
-        for (int t = previous; t < textCount; t++) request.addTokenIds(text[t]);
-        var input = request.build();
-        if (input.getTokenIdsCount() == 0 || input.getSerializedSize() > MAX_REQUEST)
-            throw invalid("invalid or oversized input");
-        return new Entry(arrival, priority, observed, maximum, input, List.copyOf(expected));
-    }
-
-    private static int token(int symbol, int imageToken) {
-        return imageToken >= 0 && symbol >= imageToken ? symbol + 1 : symbol;
+        return text;
     }
 
     private Chain chain(long node) throws IOException {
@@ -192,37 +204,41 @@ final class IndexedTraffic implements AutoCloseable {
         return ByteBuffer.wrap(cached);
     }
 
-    private ByteBuffer table(long offset, int size) throws IOException {
-        if (offset < HEADER || offset > fileSize - size) throw invalid("record outside file");
-        long page = offset / PAGE_BYTES * PAGE_BYTES;
-        int relative = (int) (offset - page);
-        if (relative + size > PAGE_BYTES) return read(offset, size);
-        var bytes = pages.get(page);
-        if (bytes == null) {
-            bytes = read(page, (int) Math.min(PAGE_BYTES, fileSize - page)).array();
-            pages.put(page, bytes);
-            if (pages.size() > CACHE_PAGES) pages.pollFirstEntry();
+    private static int token(int symbol, int imageToken) {
+        return imageToken >= 0 && symbol >= imageToken ? symbol + 1 : symbol;
+    }
+
+    private DecodedInput buildInput(ByteBuffer row, int images, int[] text, int imageToken) throws IOException {
+        int textCount = text.length;
+        var request = GenerateInputPB.newBuilder();
+        var expected = new ArrayList<Integer>(images);
+        int previous = 0;
+        for (int i = 0; i < images; i++) {
+            long id = row.getLong();
+            int at = row.getInt(), expectedTokens = row.getInt();
+            if (id < 1 || id > mediaCount || at < previous || at > textCount || expectedTokens < 0)
+                throw invalid("invalid image reference");
+            var geometry = checked(table(media + (id - 1) * MEDIA, MEDIA));
+            int width = geometry.getInt(), height = geometry.getInt();
+            if (width < 1 || width > 32768 || height < 1 || height > 32768) throw invalid("invalid media dimensions");
+            for (int t = previous; t < at; t++) request.addTokenIds(text[t]);
+            request.addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("mock-image:" + id)
+                .setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(width).setHeight(height)));
+            request.addTokenIds(imageToken);
+            previous = at;
+            expected.add(expectedTokens);
         }
-        return ByteBuffer.wrap(bytes, relative, size).slice();
+        for (int t = previous; t < textCount; t++) request.addTokenIds(text[t]);
+        var input = request.build();
+        if (input.getTokenIdsCount() == 0 || input.getSerializedSize() > MAX_REQUEST)
+            throw invalid("invalid or oversized input");
+        return new DecodedInput(input, List.copyOf(expected));
     }
 
-    private static ByteBuffer checked(ByteBuffer row) throws IOException {
-        int end = row.limit() - 4;
-        var crc = new CRC32();
-        crc.update(row.duplicate().limit(end));
-        if ((int) crc.getValue() != row.getInt(end)) throw invalid("record checksum mismatch");
-        return row.limit(end);
-    }
+    record Entry(long arrivalMs, int priority, int observedOutputTokens, int maxOutputTokens,
+                 GenerateInputPB input, List<Integer> expectedImageTokens) {}
 
-    private ByteBuffer read(long offset, int size) throws IOException {
-        var bytes = ByteBuffer.allocate(size);
-        while (bytes.hasRemaining()) {
-            if (file.read(bytes, offset + bytes.position()) < 0) throw new EOFException("Truncated indexed traffic");
-        }
-        return bytes.flip();
-    }
+    private record DecodedInput(GenerateInputPB input, List<Integer> expectedImageTokens) {}
 
-    private static IOException invalid(String reason) { return new IOException("Indexed traffic: " + reason); }
-
-    @Override public void close() throws IOException { file.close(); }
+    private record Chain(long first, long parent, int size, int symbol) {}
 }

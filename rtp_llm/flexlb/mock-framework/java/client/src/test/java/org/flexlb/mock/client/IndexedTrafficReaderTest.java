@@ -19,11 +19,11 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * Verifies indexed request reconstruction and replay from one shared dataset.
  */
-class IndexedTrafficTest {
+class IndexedTrafficReaderTest {
     @TempDir Path directory;
 
     @Test void reconstructsSharedTextAcrossAnInteriorBranchAndInsertsMedia() throws Exception {
-        try (var dataset = new IndexedTraffic(fixture())) {
+        try (var dataset = new IndexedTrafficReader(fixture())) {
             var image = dataset.entry(0, 0);
             var branch = dataset.entry(1, 0).input();
             var shortPrefix = dataset.entry(2, 0).input();
@@ -38,7 +38,7 @@ class IndexedTrafficTest {
     @Test void playerTouchesOnlyItsOrdinalsAndUsesTheirOriginalTimes() throws Exception {
         var path = fixture();
         String identity;
-        try (var dataset = new IndexedTraffic(path)) { identity = dataset.identity; }
+        try (var dataset = new IndexedTrafficReader(path)) { identity = dataset.identity; }
         byte[] data = Files.readAllBytes(path);
         // Corrupt only ordinal 0. A player assigned to 1 and 3 must still finish.
         data[Math.toIntExact(ByteBuffer.wrap(data).getLong(56))] ^= 1;
@@ -59,7 +59,7 @@ class IndexedTrafficTest {
 
     @Test void fixedTotalQpsInterleavesWorkerDeadlines() throws Exception {
         var path = fixture();
-        try (var input = new IndexedTraffic(path)) {
+        try (var input = new IndexedTrafficReader(path)) {
             long past = System.nanoTime() - 1_000_000_000;
             var expected = List.of(List.of(0L, 20_000_000L, 40_000_000L), List.of(10_000_000L, 30_000_000L));
             for (int worker = 0; worker < 2; worker++) {
@@ -82,19 +82,19 @@ class IndexedTrafficTest {
         rows.add(ByteBuffer.allocate(26).putLong(4).putLong(1).putInt(0).putInt(50).putShort((short) 0));
         var chain = ByteBuffer.allocate(20).putLong(1).putLong(0).putInt(1);
         var path = InputFixture.indexed(directory.resolve("lengths.mckidx"), rows, chain, 4, List.of(), List.of(8192), 1);
-        try (var dataset = new IndexedTraffic(path)) {
+        try (var dataset = new IndexedTrafficReader(path)) {
             assertEquals(1, dataset.missingOutput);
             var observed = dataset.entry(0, 1000);
             assertEquals(8192, observed.maxOutputTokens());
-            assertEquals(37, observed.playbackLimit(6));
-            assertEquals(8192, dataset.entry(1, 1000).playbackLimit(6));
-            assertEquals(9, dataset.entry(2, 1000).playbackLimit(null));
+            assertEquals(37, Session.playbackLimit(observed, 6));
+            assertEquals(8192, Session.playbackLimit(dataset.entry(1, 1000), 6));
+            assertEquals(9, Session.playbackLimit(dataset.entry(2, 1000), null));
             var unknown = dataset.entry(3, 1000);
-            assertThrows(IOException.class, () -> unknown.playbackLimit(null));
-            assertEquals(6, unknown.playbackLimit(6));
+            assertThrows(IOException.class, () -> Session.playbackLimit(unknown, null));
+            assertEquals(6, Session.playbackLimit(unknown, 6));
             var zero = dataset.entry(4, 1000);
             assertEquals(0, zero.observedOutputTokens());
-            assertThrows(IOException.class, () -> zero.playbackLimit(6));
+            assertThrows(IOException.class, () -> Session.playbackLimit(zero, 6));
         }
         try (var client = new ReplayControlServer("client-0", directory.resolve("topology.json"), directory.resolve("worker"))) {
             new ObjectMapper().writeValue(directory.resolve("topology.json").toFile(),
