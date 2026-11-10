@@ -94,6 +94,16 @@ class RtpGuardedNixl(upstream.NIXLCheckpointEngine):
             # external supervisor must stop peers before releasing this actor.
             raise
 
+    @classmethod
+    def build_topology(cls, actor_wg_world_size, rollout_world_size, metadata):
+        actor, rollout = super().build_topology(actor_wg_world_size, rollout_world_size, metadata)
+        # The pinned upstream computes metadata[-rollout_world_size + 1:].
+        # For exactly one receiver, -1 + 1 == 0, so that slice erroneously
+        # selects every metadata item instead of no successor at all.
+        if rollout_world_size == 1:
+            rollout["next_agent_metadata"] = [None]
+        return actor, rollout
+
     async def send_weights(self, weights, global_steps=None):
         if not self.active or self.poisoned or type(global_steps) is not int or global_steps < 0:
             raise RuntimeError("invalid NIXL sender generation or step")

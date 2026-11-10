@@ -23,7 +23,12 @@ def load_plugin():
         def register(_name): return lambda cls: cls
     base.CheckpointEngineRegistry = Registry
     upstream = types.ModuleType("verl.checkpoint_engine.nixl_checkpoint_engine")
-    upstream.NIXLCheckpointEngine = type("NIXLCheckpointEngine", (), {})
+    class PinnedTopology:
+        @classmethod
+        def build_topology(cls, actor_wg_world_size, rollout_world_size, metadata):
+            return ({"rank": [0] + [-1] * (actor_wg_world_size - 1)}, {
+                "next_agent_metadata": metadata[-rollout_world_size + 1:] + [None]})
+    upstream.NIXLCheckpointEngine = PinnedTopology
     package = types.ModuleType("verl.checkpoint_engine")
     package.nixl_checkpoint_engine = upstream
     modules = {"torch":torch, "verl":types.ModuleType("verl"),
@@ -37,6 +42,18 @@ def load_plugin():
 
 
 class NixlContracts(unittest.TestCase):
+    def test_topology_one_rollout_has_no_successor(self):
+        plugin = load_plugin()
+        actor, rollout = plugin.RtpGuardedNixl.build_topology(1, 1, ["actor", "rollout"])
+        self.assertEqual(actor["rank"], [0])
+        self.assertEqual(rollout["next_agent_metadata"], [None])
+
+    def test_topology_multiple_rollouts_preserves_upstream(self):
+        plugin = load_plugin()
+        metadata = ["actor", "r0", "r1", "r2", "r3"]
+        _, rollout = plugin.RtpGuardedNixl.build_topology(1, 4, metadata)
+        self.assertEqual(rollout["next_agent_metadata"], ["r1", "r2", "r3", None])
+
     def setUp(self):
         self.module = load_plugin()
         self.engine = self.module.RtpGuardedNixl.__new__(self.module.RtpGuardedNixl)
