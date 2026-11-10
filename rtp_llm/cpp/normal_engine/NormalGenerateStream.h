@@ -43,6 +43,7 @@ private:
     bool                             finished_{false};
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status_{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
+    bool decode_graph_replay_{false};
     std::deque<GenerateOutputs> generate_outputs_;
 };
 }  // namespace rtp_llm

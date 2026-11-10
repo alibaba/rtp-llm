@@ -198,6 +198,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.speculative_verified_draft_tokens   = speculative_verified_draft_tokens_;
             generate_output.aux_info.generation_prefill_cuda_graph_status =
                 generationPrefillCudaGraphStatusString(generation_prefill_cuda_graph_status_);
+            generate_output.aux_info.decode_graph_replay = decode_graph_replay_;
 
             if (calculateSoftmaxProbs() && softmax_probs_.defined()) {
                 generate_output.aux_info.softmax_probs =
@@ -259,6 +260,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     if (update_info.generation_prefill_cuda_graph_status != GenerationPrefillCudaGraphStatus::NOT_REQUESTED) {
         generation_prefill_cuda_graph_status_ = update_info.generation_prefill_cuda_graph_status;
     }
+    decode_graph_replay_ = update_info.decode_graph_replay;
 
     if (update_info.loss.defined()) {
         setLoss(update_info.loss);

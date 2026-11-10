@@ -494,6 +494,7 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
                 aux_info->add_speculative_accepted_tokens_per_pos(accepted_tokens);
             }
             aux_info->set_generation_prefill_cuda_graph_status(response.aux_info.generation_prefill_cuda_graph_status);
+            aux_info->set_decode_graph_replay(response.aux_info.decode_graph_replay);
             aux_info->set_aux_string(aux_string);
             auto* mm_map = aux_info->mutable_multimodal_lengths();
             for (const auto& [key, value] : response.aux_info.multimodal_lengths) {

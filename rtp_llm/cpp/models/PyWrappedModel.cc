@@ -1404,6 +1404,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             if (py_model_outputs.dspark_confidence_hidden_logits.defined()) {
                 outputs.dspark_confidence_hidden_logits = py_model_outputs.dspark_confidence_hidden_logits.clone();
             }
+            outputs.decode_graph_replay = py_model_outputs.decode_graph_replay;
             return outputs;
         };
         if (dspark_model_role_ != DSparkModelRole::NONE) {

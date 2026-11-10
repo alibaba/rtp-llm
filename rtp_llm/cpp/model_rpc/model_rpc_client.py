@@ -1043,6 +1043,7 @@ def trans_output(
                     aux_info_pb.generation_prefill_cuda_graph_status
                     or GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED
                 ),
+                decode_graph_replay=aux_info_pb.decode_graph_replay,
                 aux_string=aux_info_pb.aux_string,
                 role_addrs=input_py.generate_config.role_addrs,
             )

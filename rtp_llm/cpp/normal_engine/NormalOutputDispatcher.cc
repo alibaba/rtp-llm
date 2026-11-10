@@ -681,6 +681,7 @@ void NormalOutputDispatcher::dispatchSingleStream(
                                  -1,
                                  logprobs_offset,
                                  context_kv_all_rank_gpu_ready_at};
+    update_info.decode_graph_replay = model_output.decode_graph_replay;
     stream->update(update_info);
 }
 

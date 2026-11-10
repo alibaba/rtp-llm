@@ -385,6 +385,8 @@ struct PyModelOutputs {
     // computed from pre-norm proposal hidden. The sampler adds the Markov term.
     // Explicit output ownership lets CUDA graph replay return current values.
     torch::Tensor dspark_confidence_hidden_logits;
+    // Set by the graph runner only when this forward replayed a captured graph.
+    bool decode_graph_replay = false;
 
     PyModelOutputs() = default;
 

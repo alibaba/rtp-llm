@@ -1381,6 +1381,7 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inpu
                 state.current_real_graph_bs * num_tokens_per_bs_,
                 state.seq_len_sum);
             replayDecode(state.current_real_graph_bs);
+            outputs.decode_graph_replay = true;
         }
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(

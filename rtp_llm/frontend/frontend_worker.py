@@ -363,6 +363,7 @@ class FrontendWorker:
         first_yield_ns = None
         last_yield_ns = start_ns
         step = 0
+        capture_recorded = False
         last_response = None
         text_parts: List[str] = []
         stream = self.pipeline.pipeline_async(
@@ -396,19 +397,27 @@ class FrontendWorker:
                 )
             else:
                 step += 1
+                aux_info = response.generate_outputs.generate_outputs[0].aux_info
+                graph_replay = bool(
+                    getattr(aux_info, "decode_graph_replay", False)
+                )
+                if graph_replay and not capture_recorded:
+                    capture_recorded = True
+                    telemetry.record(
+                        "capture",
+                        {
+                            "request_id": external_id,
+                            "backend": "cuda",
+                            "capture_source": "first_replayed_decode",
+                        },
+                    )
                 telemetry.record(
                     "decode",
                     {
                         "request_id": external_id,
                         "step": step,
                         "backend": "cuda",
-                        "graph_replay": bool(
-                            getattr(
-                                response.generate_outputs.generate_outputs[0].aux_info,
-                                "decode_graph_replay",
-                                False,
-                            )
-                        ),
+                        "graph_replay": graph_replay,
                         "elapsed_ms": (now_ns - last_yield_ns) / 1e6,
                     },
                 )
@@ -442,7 +451,21 @@ class FrontendWorker:
                 "total_tokens": len(input_ids) + len(output_ids),
             },
             "output_ids": output_ids,
-            "aux_info": asdict(output.aux_info) if getattr(output, "aux_info", None) else {},
+            "aux_info": {
+                field: getattr(output.aux_info, field)
+                for field in (
+                    "input_len",
+                    "reuse_len",
+                    "local_reuse_len",
+                    "remote_reuse_len",
+                    "memory_reuse_len",
+                    "disk_reuse_len",
+                    "output_len",
+                    "decode_graph_replay",
+                )
+                if getattr(output, "aux_info", None) is not None
+                and hasattr(output.aux_info, field)
+            },
         }
 
     def _format_response_new(

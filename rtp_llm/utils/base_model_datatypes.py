@@ -149,6 +149,7 @@ class AuxInfo:
     generation_prefill_cuda_graph_status: str = (
         GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED
     )
+    decode_graph_replay: bool = False
 
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""

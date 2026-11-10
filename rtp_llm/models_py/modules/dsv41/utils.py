@@ -68,6 +68,10 @@ class V41MXFP8Linear(torch.nn.Module):
             raise ValueError(
                 f"Invalid V4.1 FP8 scales: {(self.N, self.K)}, {scales.shape}"
             )
+        if self._fallback:
+            # SM80 has no DeepGEMM packing kernel; the reference dequant path
+            # reads the raw per-32x32 scales and never consumes this layout.
+            return scales
         rows = torch.arange(self.N, device=scales.device) // 32
         return get_mn_major_tma_aligned_packed_ue8m0_tensor(
             scales.float().index_select(0, rows)
