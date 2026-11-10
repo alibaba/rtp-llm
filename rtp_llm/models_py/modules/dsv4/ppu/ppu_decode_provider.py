@@ -74,6 +74,7 @@ class PpuDecodeProvider(PpuModuleProvider):
             raise ValueError("DSV4_PPU_MTP_BATCH_INDEXER must be 0 or 1")
         self._mtp_batch_indexer = batch_indexer == "1"
         self._decode_fusions = self._bool("DSV4_PPU_DECODE_FUSIONS", False)
+        self._projection_tiles = self._bool("DSV4_PPU_DECODE_PROJECTION_TILES", False)
         self._moe_backend = self.execution_options.get("DSV4_PPU_DECODE_MOE_BACKEND", "deepep")
         if self._moe_backend not in ("deepep", "megamoe"):
             raise ValueError("DSV4_PPU_DECODE_MOE_BACKEND must be deepep or megamoe")
@@ -90,9 +91,11 @@ class PpuDecodeProvider(PpuModuleProvider):
         self._decode_attention_refs = []
 
     def build_fp8_linear(self, default_factory, *args, **kwargs):
-        return super().build_fp8_linear(
+        linear = super().build_fp8_linear(
             default_factory, *args, quantization="v2_column", **kwargs
         )
+        linear._decode_projection_gemm = self._projection_tiles
+        return linear
 
     def build_wo_a_fp8_linear(self, default_factory, *args, **kwargs):
         linear = super().build_wo_a_fp8_linear(
@@ -104,6 +107,8 @@ class PpuDecodeProvider(PpuModuleProvider):
     def build_shared_expert(self, *args, **kwargs):
         shared = super().build_shared_expert(*args, **kwargs)
         shared.fuse_activation_quant = self._decode_fusions
+        for linear in (shared.w13, shared.w2):
+            linear._decode_projection_gemm = self._projection_tiles
         return shared
 
     def build_attention(self, default_factory, *args, **kwargs):
@@ -125,7 +130,13 @@ class PpuDecodeProvider(PpuModuleProvider):
         for linear in (attention.wq_b, attention.wo_a, attention.wo_b):
             if type(linear) in (PpuFp8Linear, PpuWoAFp8Linear):
                 linear._decode_attention_gemm = self._decode_fusions
+        if type(attention._decode_qkv_projection) is PpuFp8Linear:
+            attention._decode_qkv_projection._decode_projection_gemm = (
+                self._projection_tiles
+            )
         if attention.indexer is not None:
+            if type(attention.indexer.wq_b) is PpuFp8Linear:
+                attention.indexer.wq_b._decode_projection_gemm = self._projection_tiles
             attention.indexer.compressor._fuse_decode_queries = self._decode_fusions
             attention.indexer._fuse_query_slices = self._decode_fusions
             attention.indexer._fuse_topk_order = self._decode_fusions
