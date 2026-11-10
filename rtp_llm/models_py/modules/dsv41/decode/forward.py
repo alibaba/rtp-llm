@@ -419,6 +419,8 @@ def forward_layers(
                     _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
     finally:
         prefetch.close()
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print("[cap] layers done prefetch closed", flush=True)
     if v4._mtp_hidden_buffer is not None:
         if capture_ids:
             # DSpARK mode: the buffer already holds this forward's aux rows
@@ -431,12 +433,18 @@ def forward_layers(
             v4._write_mtp_hidden_buffer(
                 _pre_hc_flat, is_cuda_graph=attn_metadata.is_cuda_graph
             )
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print("[cap] head reduce start", flush=True)
     h = v4._hc_head_reduce(h)
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print("[cap] head reduce done", flush=True)
     if _rt_on:
         _rt.record("decode_hc_reduced", h)
     # Framework RMSNorm wants 2D — collapse [B, q_len, dim] then view back.
     bsz, q_len, dim_ = h.shape
     h = v4.norm(h.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print("[cap] norm done", flush=True)
     if _rt_on:
         _rt.record("decode_final_norm", h)
         step = getattr(v4, "_dbg_step", 0)
@@ -553,6 +561,8 @@ def forward_decode(
         else:
             _rt.record("decode_input_ids", input_ids)
 
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print("[cap] call forward_layers", flush=True)
     h = forward_layers(
         v4,
         kv_cache,
