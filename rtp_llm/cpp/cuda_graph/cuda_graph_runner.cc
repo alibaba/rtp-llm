@@ -2075,6 +2075,9 @@ void CudaGraphRunner::logCudaGraphPoolMemory(const char* phase) {
 }
 
 void CudaGraphRunner::initCapture() {
+    std::fprintf(stderr, "[capi] enter\n"); std::fflush(stderr);
+    c10::InferenceMode inference_guard(true);
+void CudaGraphRunner::initCapture() {
     c10::InferenceMode inference_guard(true);
 
     if (enable_cuda_graph_) {
@@ -2122,6 +2125,10 @@ void CudaGraphRunner::initCapture() {
             inputs.input_hiddens =
                 torch::zeros({max_num_token_, static_cast<int64_t>(input_hidden_size_)}, options_cuda_float_);
         }
+        std::fprintf(stderr, "[capi] inputs allocated\n"); std::fflush(stderr);
+        // Setup attention inputs using the extracted function
+        initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
+        std::fprintf(stderr, "[capi] attention inputs done\n"); std::fflush(stderr);
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 
@@ -2159,20 +2166,35 @@ void CudaGraphRunner::initCapture() {
 
         // Setup BertEmbedding inputs using the extracted function
         initCaptureBertEmbeddingInputs(inputs, max_bs_, max_num_token_);
+        std::fprintf(stderr, "[capi] bert inputs done\n"); std::fflush(stderr);
 
         torch::Tensor output;
+        // Setup BertEmbedding inputs using the extracted function
+        initCaptureBertEmbeddingInputs(inputs, max_bs_, max_num_token_);
+
+        torch::Tensor output;
+        capture_mem_hold_ = CaptureMemoryHold(output, inputs, is_prefill_cuda_graph_mode_);
+        std::fprintf(stderr, "[capi] memory hold done\n"); std::fflush(stderr);
+        initKernelInternalMemory();
+        std::fprintf(stderr, "[capi] kernel mem done\n"); std::fflush(stderr);
         capture_mem_hold_ = CaptureMemoryHold(output, inputs, is_prefill_cuda_graph_mode_);
         initKernelInternalMemory();
 
         // get real output data type (params already prepared in attn impl __init__/create_params)
         py::object     attn_pyobj;
         PyModelOutputs initial_outputs;
+        std::fprintf(stderr, "[capi] prepare fmha start\n"); std::fflush(stderr);
+        try {
+            attn_pyobj = prepareFmhaImpl(capture_mem_hold_.py_model_inputs_, true);
         try {
             attn_pyobj = prepareFmhaImpl(capture_mem_hold_.py_model_inputs_, true);
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("initCapture prepare_fmha_impl failed: %s", e.what());
             throw;
         }
+        std::fprintf(stderr, "[capi] prepare fmha done\n"); std::fflush(stderr);
+        RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
+        std::fprintf(stderr, "[capi] eager forward start\n"); std::fflush(stderr);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
         try {
             // Distributed model implementations may rendezvous during this
