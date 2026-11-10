@@ -296,26 +296,6 @@ class ModelFactory:
                     pass
                 return t
             _torch.empty = _dbg_empty
-            try:
-                from torch.utils._python_dispatch import TorchDispatchMode
-                class _AllocTrace(TorchDispatchMode):
-                    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-                        out = func(*args, **(kwargs or {}))
-                        try:
-                            if str(func).startswith("aten::empty"):
-                                for t in (out if isinstance(out, (tuple, list)) else (out,)):
-                                    if hasattr(t, "numel") and t.numel() * t.element_size() > 1 << 30:
-                                        print(
-                                            f"[mem] dispatch {func} shape={tuple(t.shape)} "
-                                            f"dtype={t.dtype} nbytes={t.numel() * t.element_size() / 2**30:.2f} GiB",
-                                            flush=True,
-                                        )
-                        except Exception:
-                            pass
-                        return out
-                _AllocTrace().__enter__()
-            except Exception as _exc:
-                print(f"[mem] dispatch trace unavailable: {_exc}", flush=True)
             if _torch.cuda.is_available():
                 _torch.cuda.memory._record_memory_history(max_entries=200000)
         # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs
