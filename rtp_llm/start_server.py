@@ -5,10 +5,17 @@ import sys
 import time
 import traceback
 
+from rtp_llm.utils.prefill_supervisor import MODE_ENV as PREFILL_SUPERVISOR_MODE_ENV
+
 # Apply before torch/native imports can allocate memory or start worker threads.
 if __name__ == "__main__":
     from rtp_llm.utils.numa import configure_numa_interleave
+    from rtp_llm.utils.prefill_supervisor import enter_worker_cgroup, supervise_prefill
 
+    if os.environ.get(PREFILL_SUPERVISOR_MODE_ENV) == "1":
+        sys.exit(supervise_prefill(sys.argv[1:]))
+    if os.environ.get(PREFILL_SUPERVISOR_MODE_ENV) == "worker":
+        enter_worker_cgroup()
     configure_numa_interleave()
 
 import requests
@@ -598,7 +605,12 @@ def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs, *, required=
         os.environ.pop(STARTUP_WARMUP_HEALTH_GATE_FILE_ENV, None)
         return None
 
-    gate_file = os.path.join(
+    managed_gate = (
+        os.environ.get(STARTUP_WARMUP_HEALTH_GATE_FILE_ENV)
+        if os.environ.get(PREFILL_SUPERVISOR_MODE_ENV) == "worker"
+        else None
+    )
+    gate_file = managed_gate or os.path.join(
         "/tmp",
         "rtp_llm_startup_warmup_ready_"
         f"{os.getpid()}_{int(py_env_configs.server_config.start_port)}",
@@ -703,6 +715,12 @@ def main():
     _install_hot_hook_runtime("main")
     py_env_configs: PyEnvConfigs = setup_args()
     setup_and_configure_server(py_env_configs)
+    if os.environ.get(PREFILL_SUPERVISOR_MODE_ENV) == "worker":
+        parallel = py_env_configs.parallelism_config
+        if parallel.local_world_size != parallel.world_size:
+            raise ValueError("in-container restart requires the full Prefill world")
+        if not _should_run_startup_real_warmup(py_env_configs):
+            raise ValueError("in-container restart requires DSV4 Prefill real warmup")
     start_server(py_env_configs)
 
 
