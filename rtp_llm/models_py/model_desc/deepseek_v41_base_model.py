@@ -1047,6 +1047,12 @@ class DeepSeekV4Model(GptModelBase):
             self._resolve_prefill_q_token_capacity(),
             self._shared_runtime_buffers.mtp_hidden_enabled,
         )
+        # The C++ CUDA graph capture runs right after this init and allocates
+        # its shared pool from raw device memory. Release cached warmup
+        # segments (400-600MB observed on 44GB cards) so capture starts from
+        # maximum headroom; persistent weights and runtime buffers stay.
+        if device_str.startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.empty_cache()
         self._materialized = True
         return True
 
