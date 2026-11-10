@@ -23,6 +23,19 @@ def _pad_heads(q, attn_sink):
 def flash_mla_sparse_fwd(
     q, kv, indices, sm_scale, d_v=512, attn_sink=None, topk_length=None
 ):
+    if torch.version.hip is not None:
+        # The native flash_mla kernels are CUDA/SM100-only; ROCm uses the
+        # reference-math joint-softmax implementation (same semantics, no
+        # head padding needed).
+        from rtp_llm.models_py.modules.dsv41.fp8._rocm_sparse_fmha import (
+            rocm_sparse_mla_fwd,
+        )
+
+        output = rocm_sparse_mla_fwd(
+            q, kv, indices, sm_scale, attn_sink=attn_sink, topk_length=topk_length
+        )
+        return output, None, None
+
     from flash_mla import flash_mla_sparse_fwd as native
 
     q, sink, heads = _pad_heads(q, attn_sink)
