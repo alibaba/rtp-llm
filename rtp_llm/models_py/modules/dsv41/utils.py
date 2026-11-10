@@ -1,5 +1,6 @@
 """Shared DSV4 utility functions used across BF16 and FP8 paths."""
 
+import os
 import weakref
 
 import torch
@@ -16,6 +17,12 @@ _FP8_LINEAR_REGISTRY = weakref.WeakSet()
 # below this element count (16MB bf16); larger (typically replicated) weights
 # dequantize per call to keep the resident footprint at FP8 size.
 _V41_MXFP8_BF16_CACHE_MAX_NUMEL = 8_000_000
+# Decode-sized batches dequantize weight-block-by-block instead of
+# materializing the whole bf16 weight (graph-capture pools stay small).
+_V41_MXFP8_CHUNKED_GEMM_MAX_ROWS = int(
+    os.environ.get("DSV41_MXFP8_CHUNKED_GEMM_MAX_ROWS", "256")
+)
+_V41_MXFP8_DEQUANT_GEMM_CHUNK_ROWS = 128
 
 
 class V41Embedding(Embedding):
@@ -163,6 +170,35 @@ class V41MXFP8Linear(torch.nn.Module):
             )
         return output
 
+    def _forward_chunked_dequant_gemm(self, x_flat_bf16: torch.Tensor):
+        """Bounded-transient exact GEMM for decode-sized batches.
+
+        Dequantizes one 128-row block of the FP8 weight at a time (e4m3 x
+        2^k stays exact in bf16) and GEMMs it into the output slice, so the
+        full dequantized weight is never materialized. Decode CUDA graph
+        captures previously OOM'd on the 314MB whole-weight temporary for
+        the Engram wkv projection; this keeps per-call transients at a few
+        MB per captured batch size while reading the same checkpoint bytes.
+        """
+        m = x_flat_bf16.shape[0]
+        output = torch.empty(
+            (m, self.N), dtype=torch.bfloat16, device=x_flat_bf16.device
+        )
+        chunk = _V41_MXFP8_DEQUANT_GEMM_CHUNK_ROWS
+        scales = self.weight_scales.to(torch.float32)
+        for begin in range(0, self.N, chunk):
+            end = min(begin + chunk, self.N)
+            col_scale = (
+                scales[begin // 32 : (end + 31) // 32]
+                .repeat_interleave(32, 0)[: end - begin]
+                .repeat_interleave(32, 1)[:, : self.K]
+                .to(torch.bfloat16)
+            )
+            w_chunk = self.weight[begin:end].to(torch.bfloat16) * col_scale
+            output[:, begin:end] = torch.nn.functional.linear(x_flat_bf16, w_chunk)
+            del col_scale, w_chunk
+        return output
+
     def forward(self, x: torch.Tensor, out=None):
         if x.numel() == 0:
             return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
@@ -171,6 +207,16 @@ class V41MXFP8Linear(torch.nn.Module):
             # dequantization of the FP8 checkpoint weights (cached for small
             # linears, per-call chunked for large replicated ones).
             w_bf16 = self._dequant_bf16
+            if w_bf16 is None and x.shape[-1] == self.K:
+                rows = x.numel() // self.K
+                if rows <= _V41_MXFP8_CHUNKED_GEMM_MAX_ROWS:
+                    y = self._forward_chunked_dequant_gemm(
+                        x.reshape(-1, self.K).to(torch.bfloat16)
+                    ).view(*x.shape[:-1], self.N)
+                    if out is None:
+                        return y
+                    out.copy_(y)
+                    return out
             temporary = w_bf16 is None
             if temporary:
                 w_bf16 = self._dequant_weight_bf16(self.weight, self.weight_scales)
