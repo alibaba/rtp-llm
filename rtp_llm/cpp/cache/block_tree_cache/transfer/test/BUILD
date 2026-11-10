@@ -234,3 +234,23 @@ cc_test(
     }),
     tags = ["exclusive-if-local"],
 )
+
+cc_test(
+    name = "transfer_buffer_safety_test",
+    srcs = ["TransferBufferSafetyTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_buffer_safety",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "worker_transfer_registry_test",
+    srcs = ["WorkerTransferRegistryTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)

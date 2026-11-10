@@ -772,11 +772,17 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
 
     MemoryOperationResponsePB* memory_response = response.mutable_mem_response();
     memory_response->set_code(MemoryOperationResponsePB::INVALID_REQUEST);
+    memory_response->set_buffer_safe(false);
     memory_response->mutable_error_info()->set_error_code(static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
     memory_response->mutable_error_info()->set_error_message("invalid grouped transfer request");
     memory_response->clear_block_errors();
     for (int i = 0; i < request.mem_request().copy_items_size(); ++i) {
         memory_response->add_block_errors(MemoryOperationResponsePB::INVALID_REQUEST);
+    }
+    if (request.mem_request().transfer_trace_id() == 0) {
+        memory_response->mutable_error_info()->set_error_message("transfer execution trace ID is required");
+        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: missing transfer execution trace ID");
+        return true;
     }
     std::vector<TransferDescriptor> descriptors;
     if (!BlockTransferRequestConverter::decodeTransfer(

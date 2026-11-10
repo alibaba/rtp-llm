@@ -35,7 +35,8 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
     const Tier    source      = descriptors.front().source_tier;
     const Tier    target      = descriptors.front().target_tier;
     const auto    deadline    = task.deadline();
-    auto          context     = std::make_shared<TransferBatchAsyncContext>(descriptors.size());
+    auto          context     =
+        std::make_shared<TransferBatchAsyncContext>(descriptors.size(), nullptr, task.completionProof());
     const int64_t queue_begin = currentTimeUs();
     const auto    identity    = CacheStageContext::local(source, target);
     const auto    request_id  = task.requestId().value_or(-1);

@@ -31,7 +31,13 @@ public:
 
 class CompletedTransferAsyncContext final: public TransferAsyncContext {
 public:
-    explicit CompletedTransferAsyncContext(TransferResult result, size_t block_count = 0): result_(std::move(result)) {
+    explicit CompletedTransferAsyncContext(TransferResult                        result,
+                                           size_t                                block_count = 0,
+                                           std::shared_ptr<TransferBufferSafety> proof       = nullptr):
+        result_(std::move(result)) {
+        if (proof) {
+            proof->report(result_.buffer_safe);
+        }
         result_.expandBlockErrors(block_count);
     }
 

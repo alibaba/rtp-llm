@@ -80,6 +80,27 @@ TEST(TransferTaskTest, CopyAndMovePreserveExecutionTrace) {
     EXPECT_EQ(assigned.parentTraceId(), task.parentTraceId());
 }
 
+TEST(TransferTaskTest, CompletionProofFollowsOwnershipButNotNewSubtasks) {
+    TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10));
+    EXPECT_EQ(task.completionProof(), nullptr);
+    auto proof = std::make_shared<TransferBufferSafety>([] {});
+    task.setCompletionProof(proof);
+    EXPECT_EQ(task.completionProof(), proof);
+
+    auto copied = task;
+    auto moved = std::move(copied);
+    EXPECT_EQ(moved.completionProof(), proof);
+    EXPECT_EQ(task.subtask(task.descriptors()).completionProof(), nullptr);
+    EXPECT_EQ(task.rpcSubtask(task.descriptors()).completionProof(), nullptr);
+
+    auto owned = task.subtask(task.descriptors());
+    owned.setCompletionProof(task.completionProof());
+    EXPECT_EQ(owned.completionProof(), proof);
+    task.setCompletionProof(nullptr);
+    EXPECT_EQ(task.completionProof(), nullptr);
+    EXPECT_EQ(owned.completionProof(), proof);
+}
+
 TEST(TransferResultTest, MergePreservesMessagesAndHighestPriorityCode) {
     for (bool crc_first : {false, true}) {
         TransferResult crc(TransferStatus::CRC_MISMATCH);

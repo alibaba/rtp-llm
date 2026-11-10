@@ -653,16 +653,20 @@ TEST_F(TransferWorkLoopTest, OrdinaryEntryExceptionCompletesOnlyThatTask) {
 
 TEST_F(TransferWorkLoopTest, AdmissionRejectionsProveNoIoWasSubmitted) {
     TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::OFFLOAD, 1, 1, {});
-    const auto check = [](const std::shared_ptr<TransferAsyncContext>& context) {
+    const auto check = [&](TransferTask task) {
+        size_t proofs = 0;
+        task.setCompletionProof(std::make_shared<TransferBufferSafety>([&] { ++proofs; }));
+        auto context = owner.execute(std::move(task));
         ASSERT_TRUE(context->done());
         EXPECT_FALSE(context->success());
         EXPECT_TRUE(context->result().buffer_safe);
         EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
+        EXPECT_EQ(proofs, 1u);
     };
-    check(owner.execute(makeTransferTask({})));
-    check(owner.execute(writes(2)));
+    check(makeTransferTask({}));
+    check(writes(2));
     owner.stopAdmission();
-    check(owner.execute(writes()));
+    check(writes());
     EXPECT_EQ(io->reads, 0u);
     EXPECT_EQ(io->writes, 0u);
 }
@@ -798,10 +802,14 @@ TEST_F(TransferWorkLoopTest, PureDiskResultsAndCallbacksBelongToOwner) {
     // Retain actual references until both operations finish; no lease is added
     // by the WorkLoop. The second transfer must wake a Disk-only sleeping loop.
     std::memset(host->blockBuffer(hosts[3]).addr, 0, 384);
-    auto read = engine->execute(makeTransferTask({TransferDescriptor::diskToHost(0, disks[2], hosts[3])}));
+    std::atomic<size_t> proofs{0};
+    auto read_task = makeTransferTask({TransferDescriptor::diskToHost(0, disks[2], hosts[3])});
+    read_task.setCompletionProof(std::make_shared<TransferBufferSafety>([&] { ++proofs; }));
+    auto read = engine->execute(std::move(read_task));
     ASSERT_TRUE(await(read));
     EXPECT_TRUE(read->success());
     EXPECT_TRUE(read->result().buffer_safe);
+    EXPECT_EQ(proofs.load(), 1u);
     engine->shutdown();
     EXPECT_NE(callback_thread, io->worker);
     EXPECT_NE(callback_thread, std::this_thread::get_id());
@@ -814,14 +822,19 @@ TEST_F(TransferWorkLoopTest, DiskWorkerExceptionProvesSafetyOnlyAfterIoReturns) 
     initialize();
     io->blocked      = true;
     io->throw_access = true;
-    auto context = engine->execute(writes(2));
+    std::atomic<size_t> proofs{0};
+    auto task = writes(2);
+    task.setCompletionProof(std::make_shared<TransferBufferSafety>([&] { ++proofs; }));
+    auto context = engine->execute(std::move(task));
     ASSERT_TRUE(io->waitWrites());
     EXPECT_FALSE(context->done());
+    EXPECT_EQ(proofs.load(), 0u);
     io->release();
     ASSERT_TRUE(await(context));
     engine->shutdown();
     EXPECT_FALSE(context->success());
     EXPECT_TRUE(context->result().buffer_safe);
+    EXPECT_EQ(proofs.load(), 1u);
     EXPECT_EQ(context->result().copy_error, CacheCopyError::IO_FAILED);
     EXPECT_EQ(context->result().block_errors, std::vector<CacheCopyError>(2, CacheCopyError::IO_FAILED));
     EXPECT_EQ(io->writes, 1u);

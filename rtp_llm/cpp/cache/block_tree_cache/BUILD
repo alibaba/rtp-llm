@@ -30,6 +30,13 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "transfer_buffer_safety",
+    hdrs = ["transfer/TransferBufferSafety.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # Leaf pool target: DeviceBlockPool owns its backing and inherits the common
 # IBlockPool lifecycle. Keeping this target below allocator/group targets avoids
 # a cycle with the full block_tree_cache library.
@@ -170,6 +177,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":transfer_buffer_safety",
         ":block_tree_cache_layout",
         "@havenask//aios/autil:common_macros",
         "//rtp_llm/cpp/cache/events:kv_cache_event",
@@ -257,6 +265,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":transfer_task_registry",
         ":block_tree_cache_layout",
         ":transfer_common",
         ":transfer_work_loop",

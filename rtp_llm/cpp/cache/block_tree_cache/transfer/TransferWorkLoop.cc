@@ -67,7 +67,8 @@ TransferWorkLoop::Queue TransferWorkLoop::Queue::take() {
 
 TransferWorkLoop::Entry::Entry(TransferTask task, BeforeCompleteCallback before_complete):
     task(std::move(task)),
-    context(std::make_shared<TransferBatchAsyncContext>(this->task.descriptors().size())),
+    context(std::make_shared<TransferBatchAsyncContext>(
+        this->task.descriptors().size(), nullptr, this->task.completionProof())),
     result(TransferResult::emptyAggregate(this->task.descriptors().size())),
     before_complete(std::move(before_complete)) {}
 
@@ -142,7 +143,9 @@ std::shared_ptr<TransferAsyncContext> TransferWorkLoop::execute(TransferTask    
             queue_timer.finish(false);
             total_timer.finish(false);
             return std::make_shared<CompletedTransferAsyncContext>(
-                unsubmittedResult(TransferResult(ErrorInfo(code, message), CacheCopyError::NOT_EXECUTED)), count);
+                unsubmittedResult(TransferResult(ErrorInfo(code, message), CacheCopyError::NOT_EXECUTED)),
+                count,
+                task.completionProof());
         };
         if (!count)
             return reject("empty WorkLoop transfer", ErrorCode::INVALID_PARAMS);
@@ -160,6 +163,9 @@ std::shared_ptr<TransferAsyncContext> TransferWorkLoop::execute(TransferTask    
         // Copy logical sizes, including nested block vectors. Do not retain a
         // caller's arbitrary excess vector capacity inside the resident budget.
         auto    owned_task = task.subtask(std::vector<TransferDescriptor>(task.descriptors()));
+        // This is the same physical batch; ordinary internal subtasks do not
+        // inherit the producer's completion token.
+        owned_task.setCompletionProof(task.completionProof());
         Entries incoming;
         incoming.push_back(std::make_unique<Entry>(std::move(owned_task), std::move(before_complete)));
         incoming.front()->task_timer     = std::move(total_timer);

@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -146,19 +147,67 @@ void BlockTransferDispatcher::retireTransfer() const noexcept {
 }
 
 std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(TransferTask task) const {
+    const auto numeric_trace_id = task.traceId();
+    const auto trace_id = std::to_string(numeric_trace_id);
+    // Allocate the owner and its completion path before recording admission.
+    // The safety callback owns the registry, not the dispatcher's business lifetime.
+    const auto ticket = std::make_shared<CompletionTicket>(this);
+    auto context = std::make_shared<TransferBatchAsyncContext>(task.descriptors().size());
+    auto safety = std::make_shared<TransferBufferSafetyTracker>([registry = task_registry_, trace_id] {
+        registry->finish(trace_id, true);
+    });
+    if (numeric_trace_id == 0 || !task_registry_->begin(trace_id)) {
+        // Do not execute again or lend the original execution's proof to this
+        // rejected submission. Its buffers may still be in use by the owner.
+        return std::make_shared<CompletedTransferAsyncContext>(
+            ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "duplicate transfer trace: " + trace_id),
+            task.descriptors().size());
+    }
+    warnRegistrySize();
     if (task.expired()) {
         TransferResult result(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before TE submission"),
                               CacheCopyError::NOT_EXECUTED);
         result.buffer_safe = true;  // No batch was submitted.
-        return std::make_shared<CompletedTransferAsyncContext>(std::move(result), task.descriptors().size());
+        safety->finishSubmitting();
+        context->complete(std::move(result));
+        return context;
     }
     // The final callback releases this ticket after notifying all local consumers;
     // the submission stack retains another owner through finishSubmitting().
-    const auto ticket  = std::make_shared<CompletionTicket>(this);
-    auto       context = std::make_shared<TransferBatchAsyncContext>(task.descriptors().size());
-    dispatchGroups(
-        std::move(task), [ticket, context](TransferResult result) { context->complete(std::move(result)); }, true);
+    try {
+        dispatchGroups(std::move(task),
+                       [ticket, context](TransferResult result) { context->complete(std::move(result)); },
+                       true,
+                       nullptr,
+                       safety);
+    } catch (...) {
+        // Closes admission only. Any attempted batch still needs its own proof.
+        safety->finishSubmitting();
+        throw;
+    }
     return context;
+}
+
+void BlockTransferDispatcher::warnRegistrySize() const noexcept {
+    try {
+        const auto count = task_registry_->size();
+        auto threshold = next_registry_warning_.load(std::memory_order_relaxed);
+        while (threshold != 0 && count >= threshold) {
+            auto next = threshold;
+            do {
+                next = next > std::numeric_limits<size_t>::max() / 2 ? 0 : next * 2;
+            } while (next != 0 && count >= next);
+            if (next_registry_warning_.compare_exchange_weak(threshold, next, std::memory_order_relaxed)) {
+                RTP_LLM_LOG_WARNING("worker transfer registry retains %zu records (warning threshold=%zu); "
+                                    "records are not deleted and admission remains open",
+                                    count,
+                                    threshold);
+                return;
+            }
+        }
+    } catch (...) {
+        // Diagnostics must not revoke an execution's recorded admission.
+    }
 }
 
 std::shared_ptr<TransferAsyncContext>
@@ -292,11 +341,17 @@ void BlockTransferDispatcher::runTransfer(TransferTask         task,
 void BlockTransferDispatcher::dispatchGroups(TransferTask         task,
                                              TransferDoneCallback callback,
                                              bool                 local,
-                                             const char*          completion_operation) const {
+                                             const char*          completion_operation,
+                                             std::shared_ptr<TransferBufferSafetyTracker> safety) const {
+    block_tree_cache_detail::ScopeRollback close_submission([safety] {
+        if (safety)
+            safety->finishSubmitting();
+    });
     const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {
         TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, "transfer task contains no descriptors"));
         result.buffer_safe = true;
+        close_submission.run();
         callback(std::move(result));
         return;
     }
@@ -304,6 +359,7 @@ void BlockTransferDispatcher::dispatchGroups(TransferTask         task,
         TransferResult result(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before dispatch"),
                               CacheCopyError::NOT_EXECUTED);
         result.buffer_safe = true;  // No batch was submitted.
+        close_submission.run();
         callback(std::move(result));
         return;
     }
@@ -344,12 +400,16 @@ void BlockTransferDispatcher::dispatchGroups(TransferTask         task,
             TransferResult      batch_error;
             TransferDoneCallback complete_batch;
             std::shared_ptr<TransferAsyncContext> context;
+            std::shared_ptr<TransferBufferSafety> proof;
+            bool execution_attempted = false;
             TransferResult observation_failure;
             try {
                 const size_t                    end = std::min(begin + batch_limit, group.descriptors.size());
                 std::vector<TransferDescriptor> batch(group.descriptors.begin() + begin,
                                                       group.descriptors.begin() + end);
                 indices.assign(group.indices.begin() + begin, group.indices.begin() + end);
+                if (safety)
+                    proof = safety->addBatch();
                 auto completed = std::make_shared<std::atomic<bool>>(false);
                 complete_batch = [stage_state, indices, completed](TransferResult result) {
                     if (completed->exchange(true, std::memory_order_acq_rel))
@@ -365,13 +425,18 @@ void BlockTransferDispatcher::dispatchGroups(TransferTask         task,
                     submitCoordinated(task.rpcSubtask(std::move(batch)), complete_batch, completion_operation);
                     continue;
                 }
-                context = per_rank_engine_->execute(task.subtask(std::move(batch)));
+                auto batch_task = task.subtask(std::move(batch));
+                batch_task.setCompletionProof(proof);
+                execution_attempted = true;
+                context = per_rank_engine_->execute(std::move(batch_task));
                 if (context == nullptr) {
                     batch_error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context");
                 } else {
                     context->onDone(complete_batch);
                 }
             } catch (const std::exception& error) {
+                if (proof && !execution_attempted)
+                    proof->report(true);
                 if (!any_batch_registered) {
                     throw;
                 }
@@ -385,6 +450,8 @@ void BlockTransferDispatcher::dispatchGroups(TransferTask         task,
                     std::terminate();
                 }
             } catch (...) {
+                if (proof && !execution_attempted)
+                    proof->report(true);
                 if (!any_batch_registered) {
                     throw;
                 }
@@ -404,6 +471,7 @@ void BlockTransferDispatcher::dispatchGroups(TransferTask         task,
             if (!batch_error.ok()) {
                 if (!batch_registered) {
                     // Stop new submissions and join the batches already registered.
+                    close_submission.run();
                     stage_state->finishSubmitting(std::move(batch_error));
                     return;
                 }
@@ -423,6 +491,7 @@ void BlockTransferDispatcher::dispatchGroups(TransferTask         task,
         }
     }
     // Final callback exceptions must propagate without re-entering submission handling.
+    close_submission.run();
     stage_state->finishSubmitting();
 }
 

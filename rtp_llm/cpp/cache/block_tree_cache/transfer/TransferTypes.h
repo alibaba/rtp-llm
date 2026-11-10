@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSetResource.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBufferSafety.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
@@ -403,6 +404,13 @@ public:
         }
     }
 
+    const std::shared_ptr<TransferBufferSafety>& completionProof() const noexcept {
+        return completion_proof_;
+    }
+    void setCompletionProof(std::shared_ptr<TransferBufferSafety> proof) noexcept {
+        completion_proof_ = std::move(proof);
+    }
+
     const std::vector<TransferDescriptor>& descriptors() const {
         return descriptors_;
     }
@@ -433,6 +441,8 @@ public:
     }
 
     TransferTask subtask(std::vector<TransferDescriptor> descriptors) const {
+        // The proof covers this complete physical batch, not an arbitrary
+        // subset or intermediate stage. Ownership must be transferred explicitly.
         auto task      = TransferTask(std::move(descriptors), deadline_, request_id_);
         task.trace_id_ = trace_id_;
         task.workflow_id_     = workflow_id_;
@@ -455,9 +465,10 @@ private:
                  std::optional<int64_t>          request_id):
         descriptors_(std::move(descriptors)), deadline_(deadline), request_id_(request_id) {}
 
-    std::vector<TransferDescriptor>     descriptors_;
-    Clock::time_point                   deadline_;
-    std::optional<int64_t>              request_id_;
+    std::vector<TransferDescriptor>       descriptors_;
+    Clock::time_point                     deadline_;
+    std::optional<int64_t>                request_id_;
+    std::shared_ptr<TransferBufferSafety> completion_proof_;
     inline static std::atomic<uint64_t> next_trace_id_{1};
     uint64_t                            trace_id_{next_trace_id_.fetch_add(1, std::memory_order_relaxed)};
     uint64_t                            workflow_id_{trace_id_};

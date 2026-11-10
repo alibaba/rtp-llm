@@ -43,11 +43,14 @@ TEST(TransferExecutorTest, WorkerQueueTimeoutDoesNotExecuteBlocks) {
     ASSERT_TRUE(pool.start());
     RecordingTransferExecutor executor(pool);
     TransferTask              task({descriptor(0), descriptor(0)}, std::chrono::seconds(1));
+    size_t                    proofs = 0;
+    task.setCompletionProof(std::make_shared<TransferBufferSafety>([&] { ++proofs; }));
     task.deadline_ = TransferTask::Clock::now() - std::chrono::milliseconds(1);
     auto context   = executor.execute(std::move(task), {HostBufferView{}, HostBufferView{}}, {nullptr, nullptr});
     context->waitDone();
     EXPECT_EQ(executor.calls, 0u);
     EXPECT_TRUE(context->result().buffer_safe);
+    EXPECT_EQ(proofs, 1u);
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
     EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
     EXPECT_EQ(context->result().block_errors,
@@ -110,15 +113,20 @@ TEST(TransferExecutorTest, BatchSafetyRequiresEveryExecutedBatchToProveCompletio
                 TransferResult second(failed ? TransferStatus::DISK_IO_ERROR : TransferStatus::OK);
                 second.buffer_safe = second_safe;
                 executor.results = {first, second};
+                size_t proofs = 0;
+                TransferTask task({descriptor(0), descriptor(0)}, std::chrono::seconds(30));
+                task.setCompletionProof(std::make_shared<TransferBufferSafety>([&] {
+                    EXPECT_EQ(executor.calls, 2u);
+                    ++proofs;
+                }));
                 auto context = executor.execute(
-                    TransferTask({descriptor(0), descriptor(0)}, std::chrono::seconds(30)),
-                    {HostBufferView{}, HostBufferView{}},
-                    {nullptr, nullptr});
+                    std::move(task), {HostBufferView{}, HostBufferView{}}, {nullptr, nullptr});
                 context->waitDone();
                 pool.waitForIdle();
                 EXPECT_EQ(executor.calls, 2u);
                 EXPECT_EQ(context->success(), !failed);
                 EXPECT_EQ(context->result().buffer_safe, first_safe && second_safe);
+                EXPECT_EQ(proofs, first_safe && second_safe ? 1u : 0u);
             }
         }
     }
@@ -129,24 +137,31 @@ TEST(TransferExecutorTest, ExecutingExceptionDoesNotClaimBufferSafety) {
     ASSERT_TRUE(pool.start());
     RecordingTransferExecutor executor(pool);
     executor.throw_on_execute = true;
-    auto context =
-        executor.execute(TransferTask({descriptor(0)}, std::chrono::seconds(30)), {HostBufferView{}}, {nullptr});
+    size_t proofs = 0;
+    TransferTask task({descriptor(0)}, std::chrono::seconds(30));
+    task.setCompletionProof(std::make_shared<TransferBufferSafety>([&] { ++proofs; }));
+    auto context = executor.execute(std::move(task), {HostBufferView{}}, {nullptr});
     context->waitDone();
     pool.waitForIdle();
     EXPECT_EQ(executor.calls, 1u);
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
     EXPECT_FALSE(context->result().buffer_safe);
+    EXPECT_EQ(proofs, 0u);
 }
 
 TEST(TransferExecutorTest, PerRankValidationRejectsBeforeBufferAccess) {
     for (const bool async : {false, true}) {
         PerRankBlockTransferEngine engine({}, false, {}, 128, 8, 1, 8, nullptr, 0, 4, async);
         for (const auto& descriptors : std::vector<std::vector<TransferDescriptor>>{{}, {descriptor(0)}}) {
-            auto context = engine.execute(TransferTask(descriptors, std::chrono::seconds(30)));
+            size_t proofs = 0;
+            TransferTask task(descriptors, std::chrono::seconds(30));
+            task.setCompletionProof(std::make_shared<TransferBufferSafety>([&] { ++proofs; }));
+            auto context = engine.execute(std::move(task));
             EXPECT_TRUE(context->done());
             EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
             EXPECT_EQ(context->result().copy_error, CacheCopyError::INVALID_REQUEST);
             EXPECT_TRUE(context->result().buffer_safe);
+            EXPECT_EQ(proofs, 1u);
         }
     }
 }
@@ -242,22 +257,29 @@ TEST(TransferExecutorTest, DeviceDiskCombinesStageProofsAndKeepsExecutingExcepti
                 disk.result.buffer_safe = disk_safe;
                 const auto desc = load ? TransferDescriptor::diskToDevice(0, 1, {1}) :
                                          TransferDescriptor::deviceToDisk(0, {1}, 1);
-                auto context = executor.execute(TransferTask({desc}, std::chrono::seconds(30)), {group.get()});
+                size_t proofs = 0;
+                TransferTask task({desc}, std::chrono::seconds(30));
+                task.setCompletionProof(std::make_shared<TransferBufferSafety>([&] { ++proofs; }));
+                auto context = executor.execute(std::move(task), {group.get()});
                 context->waitDone();
                 pool.waitForIdle();
                 EXPECT_TRUE(context->success());
                 EXPECT_EQ(context->result().buffer_safe, device_safe && disk_safe);
+                EXPECT_EQ(proofs, device_safe && disk_safe ? 1u : 0u);
             }
         }
     }
     device.result.buffer_safe = true;
     disk.throw_on_execute = true;
-    auto failed = executor.execute(
-        TransferTask({TransferDescriptor::deviceToDisk(0, {1}, 1)}, std::chrono::seconds(30)), {group.get()});
+    size_t proofs = 0;
+    TransferTask task({TransferDescriptor::deviceToDisk(0, {1}, 1)}, std::chrono::seconds(30));
+    task.setCompletionProof(std::make_shared<TransferBufferSafety>([&] { ++proofs; }));
+    auto failed = executor.execute(std::move(task), {group.get()});
     failed->waitDone();
     pool.waitForIdle();
     EXPECT_EQ(failed->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
     EXPECT_FALSE(failed->result().buffer_safe);
+    EXPECT_EQ(proofs, 0u);
 }
 
 }  // namespace

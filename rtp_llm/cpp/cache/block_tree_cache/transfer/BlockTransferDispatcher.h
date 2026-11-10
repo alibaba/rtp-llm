@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
@@ -10,6 +11,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 
 namespace rtp_llm {
 
@@ -52,18 +54,25 @@ public:
     // Local diagnostics/explicit release access. No polling or automatic release.
     std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
 
+    // Worker-local evidence only; no query RPC or recovery loop.
+    const TransferTaskRegistry& taskRegistry() const {
+        return *task_registry_;
+    }
+
 private:
     struct CompletionTicket;
     struct CoordinatedExecution;
     void registerTransfer() const;
     void retireTransfer() const noexcept;
+    void warnRegistrySize() const noexcept;
 
     // Local dispatch uses bounded, homogeneous batches. Broadcast dispatch
     // groups by direction only, as required by MemoryOperationRequestPB.
     void dispatchGroups(TransferTask         task,
                         TransferDoneCallback callback,
                         bool                 local,
-                        const char*          completion_operation = nullptr) const;
+                        const char*          completion_operation = nullptr,
+                        std::shared_ptr<TransferBufferSafetyTracker> safety = nullptr) const;
 
     std::shared_ptr<TransferAsyncContext> executeMultiRank(TransferTask task,
                                                            const char*  completion_operation = nullptr) const;
@@ -80,6 +89,8 @@ private:
     std::function<void()>                         drain_observer_for_test_;
     mutable std::mutex                            frozen_mutex_;
     mutable std::list<std::shared_ptr<FrozenTask>> frozen_tasks_;
+    std::shared_ptr<TransferTaskRegistry>          task_registry_{std::make_shared<TransferTaskRegistry>()};
+    mutable std::atomic<size_t>                   next_registry_warning_{4096};
 };
 
 using BlockTransferDispatcherPtr = std::shared_ptr<BlockTransferDispatcher>;

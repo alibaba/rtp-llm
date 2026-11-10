@@ -110,7 +110,8 @@ void DeviceDiskTransferExecutor::cancelPendingTransfers() {
 
 std::shared_ptr<TransferAsyncContext>
 DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const GroupSet*>& group_sets) {
-    auto        context     = std::make_shared<TransferBatchAsyncContext>(task.descriptors().size());
+    auto        context     =
+        std::make_shared<TransferBatchAsyncContext>(task.descriptors().size(), nullptr, task.completionProof());
     const auto& descriptors = task.descriptors();
     const auto reject = [&context](ErrorInfo error) {
         TransferResult result(std::move(error));

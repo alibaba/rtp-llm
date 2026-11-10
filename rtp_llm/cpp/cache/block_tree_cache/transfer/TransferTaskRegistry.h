@@ -10,8 +10,7 @@
 
 namespace rtp_llm {
 
-// Local completion evidence only. This registry is not yet wired into production
-// RPC admission or recovery. Entries, including safe ones, survive until destruction:
+// Local completion evidence for worker executions. Entries, including safe ones, survive until destruction:
 // deleting an entry would otherwise allow a delayed duplicate to execute again.
 // Ordinary transfer reuses its numeric trace ID; KVCM can reuse its existing string
 // identity in a separate registry instance. No per-task identity is generated here.
@@ -20,10 +19,16 @@ class TransferTaskRegistry {
 public:
     enum class State { UNKNOWN, RUNNING, BUFFER_SAFE };
 
-    explicit TransferTaskRegistry(size_t capacity = 4096): epoch_(makeEpoch()), capacity_(capacity) {}
+    TransferTaskRegistry(): epoch_(makeEpoch()) {}
 
     const std::string& epoch() const noexcept {
         return epoch_;
+    }
+
+    // Includes both pending and completed executions; records are never evicted.
+    size_t size() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return records_.size();
     }
 
     // The caller must obtain admission before starting any buffer access.
@@ -32,7 +37,7 @@ public:
             return false;
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        return records_.size() < capacity_ && records_.emplace(trace_id, State::RUNNING).second;
+        return records_.emplace(trace_id, State::RUNNING).second;
     }
 
     bool begin(uint64_t trace_id) {
@@ -97,7 +102,6 @@ private:
     }
 
     const std::string                     epoch_;
-    const size_t                          capacity_;
     mutable std::mutex                    mutex_;
     std::unordered_map<std::string, State> records_;
 };

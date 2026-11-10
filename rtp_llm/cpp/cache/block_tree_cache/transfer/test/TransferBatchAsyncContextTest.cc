@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <limits>
 #include <thread>
 #include <stdexcept>
 
@@ -208,6 +209,97 @@ TEST(TransferBatchAsyncContextTest, LateCallbackKeepsRegistrationThreadAndExcept
         throw std::runtime_error("late consumer");
     }),
                  std::runtime_error);
+}
+
+TEST(TransferBatchAsyncContextTest, LatePhysicalProofSurvivesEarlierBusinessCompletion) {
+    size_t safe_calls = 0;
+    auto proof = std::make_shared<TransferBufferSafety>([&] { ++safe_calls; });
+    TransferBatchAsyncContext context(1, nullptr, proof);
+    size_t business_calls = 0;
+    context.onDone([&](TransferResult result) {
+        ++business_calls;
+        EXPECT_FALSE(result.buffer_safe);
+        EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    });
+    context.complete(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "observation failed"));
+    EXPECT_EQ(safe_calls, 0u);
+
+    TransferResult drained_failure(TransferStatus::DEVICE_IO_ERROR);
+    drained_failure.buffer_safe = true;
+    context.complete(drained_failure);
+    context.complete(drained_failure);
+    EXPECT_EQ(safe_calls, 1u);
+    EXPECT_EQ(business_calls, 1u);
+    EXPECT_FALSE(context.result().buffer_safe);
+    EXPECT_EQ(context.errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+}
+
+TEST(TransferBatchAsyncContextTest, ProofPrecedesBusinessCallbacksAndGuardRelease) {
+    auto guard = std::make_shared<int>(1);
+    std::weak_ptr<int> weak_guard = guard;
+    size_t safe_calls = 0;
+    TransferBatchAsyncContext* active = nullptr;
+    auto proof = std::make_shared<TransferBufferSafety>([&] {
+        ++safe_calls;
+        EXPECT_FALSE(active->done());
+        EXPECT_FALSE(weak_guard.expired());
+    });
+    TransferBatchAsyncContext context(1, guard, proof);
+    active = &context;
+    guard.reset();
+    context.onDone([&](TransferResult) {
+        EXPECT_EQ(safe_calls, 1u);
+        throw std::runtime_error("business consumer");
+    });
+    TransferResult safe(TransferStatus::OK);
+    safe.buffer_safe = true;
+    EXPECT_NO_THROW(context.complete(std::move(safe)));
+    EXPECT_EQ(safe_calls, 1u);
+    EXPECT_TRUE(weak_guard.expired());
+    EXPECT_THROW(context.onDone([](TransferResult) { throw std::runtime_error("late business consumer"); }),
+                 std::runtime_error);
+    EXPECT_EQ(safe_calls, 1u);
+}
+
+TEST(TransferBatchAsyncContextTest, PhysicalProofSurvivesResultExpansionFailure) {
+    size_t safe_calls = 0;
+    auto proof = std::make_shared<TransferBufferSafety>([&] { ++safe_calls; });
+    TransferBatchAsyncContext context(std::numeric_limits<size_t>::max(), nullptr, proof);
+    TransferResult safe(TransferStatus::OK);
+    safe.buffer_safe = true;
+    EXPECT_THROW(context.complete(std::move(safe)), std::length_error);
+    EXPECT_EQ(safe_calls, 1u);
+    EXPECT_FALSE(context.done());
+}
+
+TEST(CompletedTransferAsyncContextTest, ProofPrecedesResultExpansionAndLateConsumer) {
+    size_t safe_calls = 0;
+    auto proof = std::make_shared<TransferBufferSafety>([&] { ++safe_calls; });
+    TransferResult safe(TransferStatus::INVALID_ARGS);
+    safe.buffer_safe = true;
+    EXPECT_THROW((void)CompletedTransferAsyncContext(safe, std::numeric_limits<size_t>::max(), proof),
+                 std::length_error);
+    EXPECT_EQ(safe_calls, 1u);
+
+    auto second_proof = std::make_shared<TransferBufferSafety>([&] { ++safe_calls; });
+    CompletedTransferAsyncContext context(std::move(safe), 1, second_proof);
+    EXPECT_EQ(safe_calls, 2u);
+    EXPECT_THROW(context.onDone([&](TransferResult result) {
+        EXPECT_TRUE(result.buffer_safe);
+        EXPECT_EQ(safe_calls, 2u);
+        throw std::runtime_error("completed consumer");
+    }), std::runtime_error);
+    EXPECT_EQ(safe_calls, 2u);
+}
+
+TEST(CompletedTransferAsyncContextTest, UnprovenResultDoesNotPublishSafety) {
+    size_t safe_calls = 0;
+    auto proof = std::make_shared<TransferBufferSafety>([&] { ++safe_calls; });
+    CompletedTransferAsyncContext context(TransferStatus::OK, 1, proof);
+    EXPECT_TRUE(context.success());
+    EXPECT_EQ(safe_calls, 0u);
+    proof->report(true);
+    EXPECT_EQ(safe_calls, 1u);
 }
 
 }  // namespace

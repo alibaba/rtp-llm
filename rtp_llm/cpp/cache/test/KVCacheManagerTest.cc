@@ -2215,14 +2215,66 @@ public:
         for (const auto error : copy_errors) {
             result.merge({completion_error, error});
         }
-        return std::make_shared<CompletedTransferAsyncContext>(std::move(result), task.descriptors().size());
+        result.buffer_safe = buffer_safe;
+        return std::make_shared<CompletedTransferAsyncContext>(
+            std::move(result), task.descriptors().size(), task.completionProof());
     }
 
     size_t                      submitted_batch_count{0};
     size_t                      submitted_descriptor_count{0};
     std::vector<CacheCopyError> copy_errors;
     ErrorInfo                   completion_error{ErrorInfo::OkStatus()};
+    bool                        buffer_safe{false};
 };
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMissingExecutionIdentityAndClearsOldSafetyProof) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(manager->init());
+    auto engine = std::make_shared<RecordingBatchTransferEngine>();
+    manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+    FunctionRequestPB request;
+    appendValidGroupedTransfer(manager, request);
+    request.mutable_mem_request()->clear_transfer_trace_id();
+    FunctionResponsePB response;
+    response.mutable_mem_response()->set_buffer_safe(true);
+
+    ASSERT_TRUE(manager->executeFunction(request, response));
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::INVALID_REQUEST);
+    EXPECT_EQ(response.mem_response().error_info().error_code(), static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+    EXPECT_FALSE(response.mem_response().buffer_safe());
+    EXPECT_EQ(engine->submitted_batch_count, 0u);
+}
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsDuplicateExecutionWithoutReplayingSuccessOrSafety) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(manager->init());
+    auto engine = std::make_shared<RecordingBatchTransferEngine>();
+    manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+    size_t submitted = 0;
+    for (const bool buffer_safe : {false, true}) {
+        engine->buffer_safe = buffer_safe;
+        FunctionRequestPB request;
+        appendValidGroupedTransfer(manager, request);
+        FunctionResponsePB response;
+        ASSERT_TRUE(manager->executeFunction(request, response));
+        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
+        EXPECT_EQ(response.mem_response().buffer_safe(), buffer_safe);
+        EXPECT_EQ(engine->submitted_batch_count, ++submitted);
+
+        ASSERT_TRUE(manager->executeFunction(request, response));
+        EXPECT_NE(response.mem_response().code(), MemoryOperationResponsePB::OK);
+        EXPECT_FALSE(response.mem_response().buffer_safe());
+        EXPECT_EQ(engine->submitted_batch_count, submitted);
+    }
+}
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransfer) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
@@ -2246,6 +2298,8 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransf
     }
     size_t submitted = 0;
     for (const int64_t timeout : {int64_t{0}, int64_t{-1}, static_cast<int64_t>(std::numeric_limits<int>::max())}) {
+        request.clear_mem_request();
+        appendValidGroupedTransfer(manager, request);
         request.mutable_mem_request()->set_timeout_ms(timeout);
         FunctionResponsePB response;
         EXPECT_TRUE(manager->executeFunction(request, response));
@@ -2306,11 +2360,15 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsHighestRankErrorWithoutRecordIn
     engine->completion_error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected batch failure");
     manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
     FunctionRequestPB request;
-    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
-        *request.mutable_mem_request(),
-        TransferTask({TransferDescriptor::deviceToHost(0, {1}, 1), TransferDescriptor::deviceToHost(0, {2}, 2)},
-                     std::chrono::seconds(30)),
-        manager->blockTreeCache()->groupSets()));
+    const auto prepare_request = [&] {
+        request.clear_mem_request();
+        return BlockTransferRequestConverter::encodeTransfer(
+            *request.mutable_mem_request(),
+            TransferTask({TransferDescriptor::deviceToHost(0, {1}, 1), TransferDescriptor::deviceToHost(0, {2}, 2)},
+                         std::chrono::seconds(30)),
+            manager->blockTreeCache()->groupSets());
+    };
+    ASSERT_TRUE(prepare_request());
 
     engine->copy_errors = {CacheCopyError::IO_FAILED, CacheCopyError::COPY_FAILED};
     FunctionResponsePB response;
@@ -2321,10 +2379,12 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsHighestRankErrorWithoutRecordIn
     EXPECT_EQ(response.mem_response().block_errors(1), MemoryOperationResponsePB::COPY_FAILED);
 
     engine->copy_errors = {CacheCopyError::CRC_MISMATCH, CacheCopyError::IO_FAILED};
+    ASSERT_TRUE(prepare_request());
     ASSERT_TRUE(manager->executeFunction(request, response));
     EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::CRC_MISMATCH);
 
     engine->copy_errors.clear();
+    ASSERT_TRUE(prepare_request());
     ASSERT_TRUE(manager->executeFunction(request, response));
     EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::COPY_FAILED);
     EXPECT_EQ(engine->submitted_batch_count, 3u);

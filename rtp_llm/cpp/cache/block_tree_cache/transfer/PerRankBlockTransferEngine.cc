@@ -26,10 +26,11 @@ namespace rtp_llm {
 
 namespace {
 
-std::shared_ptr<TransferAsyncContext> invalidTransferContext(size_t block_count) {
+std::shared_ptr<TransferAsyncContext> invalidTransferContext(const TransferTask& task) {
     TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request"));
     result.buffer_safe = true;
-    return std::make_shared<CompletedTransferAsyncContext>(std::move(result), block_count);
+    return std::make_shared<CompletedTransferAsyncContext>(
+        std::move(result), task.descriptors().size(), task.completionProof());
 }
 
 // Metadata follows the same physical allocations as the payload. HOST/DISK
@@ -356,24 +357,24 @@ BlockTreeQueueSizes PerRankBlockTransferEngine::queueSizes() const {
 std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(TransferTask task) {
     const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {
-        return invalidTransferContext(descriptors.size());
+        return invalidTransferContext(task);
     }
     const Tier source = descriptors.front().source_tier;
     const Tier target = descriptors.front().target_tier;
     if (async_ && descriptors.size() > batchLimit())
-        return invalidTransferContext(descriptors.size());
+        return invalidTransferContext(task);
     std::vector<const GroupSet*> group_sets;
     group_sets.reserve(descriptors.size());
     for (const auto& descriptor : descriptors) {
         if (descriptor.source_tier != source || descriptor.target_tier != target
             || (async_ && descriptor.group_set_id != descriptors.front().group_set_id)) {
-            return invalidTransferContext(descriptors.size());
+            return invalidTransferContext(task);
         }
         if (descriptor.group_set_id >= group_sets_.size() || !group_sets_[descriptor.group_set_id])
-            return invalidTransferContext(descriptors.size());
+            return invalidTransferContext(task);
         const auto* group_set = group_sets_[descriptor.group_set_id].get();
         if (!validDescriptor(descriptor, *group_set))
-            return invalidTransferContext(descriptors.size());
+            return invalidTransferContext(task);
         group_sets.push_back(group_set);
     }
 
@@ -381,14 +382,14 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(Transf
         && std::any_of(group_sets.begin(), group_sets.end(), [&](const auto* group) {
                return group->crcEnabled() != group_sets.front()->crcEnabled();
            }))
-        return invalidTransferContext(descriptors.size());
+        return invalidTransferContext(task);
     if ((source == Tier::DISK || target == Tier::DISK) && !enable_disk_cache_)
-        return invalidTransferContext(descriptors.size());
+        return invalidTransferContext(task);
     if (((source == Tier::DISK && target == Tier::DEVICE) || (source == Tier::DEVICE && target == Tier::DISK))
         && std::any_of(group_sets.begin(), group_sets.end(), [&](const auto* group) {
                return group->groupType() != group_sets.front()->groupType();
            }))
-        return invalidTransferContext(descriptors.size());
+        return invalidTransferContext(task);
     if (async_) {
         TransferWorkLoop::BeforeCompleteCallback before_complete;
         if (track_decode_origins_) {
@@ -410,6 +411,8 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(Transf
         return submit();
     std::shared_ptr<TransferBatchAsyncContext> observed;
     try {
+        // The underlying producer owns the proof; this context only observes
+        // its business result after settling decode-origin metadata.
         observed = std::make_shared<TransferBatchAsyncContext>(descriptors.size());
     } catch (const std::bad_alloc&) {
         // Attribution is optional; the already-cleared destination remains
