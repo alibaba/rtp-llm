@@ -213,6 +213,12 @@ py_test(
 )
 
 py_test(
+    name = "prefill_supervisor_test",
+    srcs = ["prefill_supervisor_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
     name = "grpc_host_channel_pool_test",
     srcs = [
         "grpc_host_channel_pool_test.py",
