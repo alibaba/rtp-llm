@@ -1691,11 +1691,19 @@ class AttentionFP8(nn.Module):
     def _rmsnorm_weighted(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         # The historical native rtp_llm_ops.rmsnorm binding left the tree with the
         # bundled C++ FlashInfer; flashinfer-python owns the same kernel now.
-        import flashinfer
-
         orig_shape = x.shape
         x_2d = x.reshape(-1, orig_shape[-1])
-        return flashinfer.norm.rmsnorm(x_2d, weight, eps=self.eps).view(orig_shape)
+        try:
+            import flashinfer
+
+            return flashinfer.norm.rmsnorm(x_2d, weight, eps=self.eps).view(orig_shape)
+        except Exception:
+            xf = x_2d.float()
+            return (
+                xf
+                * torch.rsqrt(xf.square().mean(-1, keepdim=True) + self.eps)
+                * weight.float()
+            ).to(x.dtype).view(orig_shape)
 
     def _try_fused_qr_kv(
         self,

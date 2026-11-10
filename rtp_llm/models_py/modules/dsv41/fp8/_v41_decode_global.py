@@ -599,10 +599,14 @@ def _try_native_indexer_k(attn, latent, positions, slots, cache):
 
     norm_mode = "torch"
     if attn.index_k_norm.dtype == torch.bfloat16:
-        import flashinfer.norm
+        try:
+            import flashinfer.norm
 
-        # Match the same backend selected by attention_v41.rms_norm.
-        norm_mode = "native" if flashinfer.norm._USE_CUDA_NORM else "cute"
+            # Match the same backend selected by attention_v41.rms_norm.
+            norm_mode = "native" if flashinfer.norm._USE_CUDA_NORM else "cute"
+        except Exception:
+            # No native FlashInfer norm on ROCm; the Torch reference is exact.
+            norm_mode = "torch"
     with torch.cuda.device(latent.device):
         capturing = torch.cuda.is_current_stream_capturing()
         key = _native_signature(

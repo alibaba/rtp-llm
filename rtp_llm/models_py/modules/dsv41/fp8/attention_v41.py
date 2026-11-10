@@ -348,9 +348,14 @@ def rms_norm(x, weight, eps):
         and weight.is_contiguous()
     ):
         flat = x.view(-1, x.shape[-1])
-        import flashinfer
+        try:
+            import flashinfer
 
-        return flashinfer.norm.rmsnorm(flat, weight, eps=eps).view(x.shape)
+            return flashinfer.norm.rmsnorm(flat, weight, eps=eps).view(x.shape)
+        except Exception:
+            # FlashInfer's norm extension is CUDA-only.  Fall through to the
+            # exact FP32 reference instead of failing model startup on ROCm.
+            pass
     xf = x.float()
     return (
         xf * torch.rsqrt(xf.square().mean(-1, keepdim=True) + eps) * weight.float()
