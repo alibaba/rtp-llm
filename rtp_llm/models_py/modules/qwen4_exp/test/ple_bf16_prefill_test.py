@@ -24,7 +24,7 @@ def record_conv_launches():
 
             def recorded(*args, **kwargs):
                 launches.append(
-                    (kwargs["BLOCK"], kwargs["num_warps"])
+                    (kwargs["BLOCK"], kwargs["num_warps"], kwargs["ROLL_STATE"])
                 )
                 return launch(*args, **kwargs)
 
@@ -120,7 +120,7 @@ class PLEBF16PrefillTest(unittest.TestCase):
                     ):
                         actual, actual_states = self.call(inputs)
                     self.assertEqual(
-                        conv_launches, [(512 if length >= 8192 else 1024, 4)]
+                        conv_launches, [(512 if length >= 8192 else 1024, 4, False)]
                     )
                     self.assertEqual(
                         calls,
@@ -152,7 +152,7 @@ class PLEBF16PrefillTest(unittest.TestCase):
                     ), record_conv_launches() as conv_launches:
                         actual, actual_states = self.call(inputs)
                     self.assertEqual(
-                        conv_launches, [(512 if length >= 8192 else 1024, 4)]
+                        conv_launches, [(512 if length >= 8192 else 1024, 4, False)]
                     )
                     self.assert_exact(actual, expected)
                     self.assertEqual(len(actual_states), len(expected_states))

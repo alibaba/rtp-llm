@@ -1010,6 +1010,19 @@ class Qwen4ExpPLELayer(nn.Module):
         gated_value, gated_value_normed = self._gated_values(
             hyper_state, token_history_step, embeddings=embeddings
         )
+        if os.environ.get("QWEN4_PLE_DECODE_TAIL", "0") == "1":
+            from .ple_conv_triton import try_ple_conv
+
+            fused = try_ple_conv(
+                gated_value,
+                gated_value_normed,
+                conv_buffer,
+                self.conv_weight,
+                self.conv_dilation,
+                roll_state=True,
+            )
+            if fused is not None:
+                return fused
         conv_in = torch.cat([conv_buffer, gated_value_normed], dim=1).transpose(1, 2)
         conv_out = F.silu(
             F.conv1d(

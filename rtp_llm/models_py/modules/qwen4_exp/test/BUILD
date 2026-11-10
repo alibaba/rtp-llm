@@ -857,6 +857,15 @@ py_test(
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
 
+py_test(
+    name = "ple_decode_fusion_test",
+    srcs = ["ple_decode_fusion_test.py"],
+    deps = ["//rtp_llm/models_py:ple_component_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
 
 cc_binary(
     name = "ple_native_quant_test_ops.so",
