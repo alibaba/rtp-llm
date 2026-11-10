@@ -52,7 +52,7 @@ uv run --locked mock-case run "$CASE_FILE" \
 
 `compile` 检查 Case 结构与引用，不启动服务，也不验证输入数据内容。`launch` 检查本地构建产物与配方，不启动组件或下载依赖。配方包含本机绝对路径，供本次运行使用，不提交到仓库。
 
-Case 保存业务配置、流量和门禁；启动配方保存命令、程序路径与 JVM 参数。需要调整 JVM 参数时编辑生成的 `launch.yaml`。默认 `-XX:ActiveProcessorCount=2` 只限制 JVM 看到的处理器数，不保证 CPU 配额。
+Case 保存业务配置、流量和门禁。启动配方保存命令、程序路径与 JVM 参数。需要调整 JVM 参数时可编辑本轮生成的 `launch.yaml`。
 
 P/D/V、Master 和 Client 各实例直接启动独立 JVM。ZooKeeper 由单独的角色进程提供。
 

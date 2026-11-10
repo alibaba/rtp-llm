@@ -134,7 +134,23 @@ def test_cli_generates_a_readable_launch_file_and_refuses_overwrite(
     content = output.read_text()
     assert "&id" not in content
     launch = prepare_launch(load_yaml(output), case, output.parent)
-    assert launch["components"]["master"]["command"][0] == str(java)
+    commands = launch["components"]
+    assert commands["master"]["command"][1:5] == [
+        "-XX:ActiveProcessorCount=32",
+        "-Xmx96g",
+        "-XX:MaxDirectMemorySize=16g",
+        "-XX:MaxGCPauseMillis=150",
+    ]
+    assert commands["client"]["command"][1:3] == [
+        "-XX:ActiveProcessorCount=16",
+        "-Xmx16g",
+    ]
+    for role in ("prefill", "decode"):
+        assert commands[role]["command"][1:3] == [
+            "-XX:ActiveProcessorCount=2",
+            "-Xmx2g",
+        ]
+    assert launch["zookeeper"]["command"][1] == "-XX:ActiveProcessorCount=2"
     with pytest.raises(SystemExit) as error:
         case_cli.main()
     assert error.value.code == 2 and output.read_text() == content

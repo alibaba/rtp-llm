@@ -160,7 +160,12 @@ def local_launch(case, java, prometheus, *, framework):
         )
         classpath = component_classpath("master")
         # Expose native metrics locally.
-        commands["master"] = prefix + [
+        commands["master"] = [
+            str(java),
+            "-XX:ActiveProcessorCount=32",
+            "-Xmx96g",
+            "-XX:MaxDirectMemorySize=16g",
+            "-XX:MaxGCPauseMillis=150",
             "-Dflexlb.monitor.metric-whitelist=flexlb_",
             "-cp",
             classpath,
@@ -177,6 +182,7 @@ def local_launch(case, java, prometheus, *, framework):
         }
     if {"prefill", "decode", "vit"} & case.environment.keys():
         engine = prefix + [
+            "-Xmx2g",
             "-cp",
             str(
                 artifact("java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar")
@@ -185,7 +191,10 @@ def local_launch(case, java, prometheus, *, framework):
         ]
         commands.update(prefill=engine, decode=engine, vit=engine)
     if "client" in case.environment:
-        commands["client"] = prefix + [
+        commands["client"] = [
+            str(java),
+            "-XX:ActiveProcessorCount=16",
+            "-Xmx16g",
             "-jar",
             str(artifact("java/client/target/mock-client-1.0-SNAPSHOT-all.jar")),
         ]
