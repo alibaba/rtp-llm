@@ -16,6 +16,51 @@ import time
 from typing import Any, Dict, Iterable, List, Optional
 
 
+_NETWORK_FETCHES = 0
+_NETWORK_LOCK = threading.Lock()
+_NETWORK_PATCHED = False
+
+
+def install_network_counter() -> None:
+    """Count real outbound TCP connects made by this process."""
+    global _NETWORK_PATCHED
+    with _NETWORK_LOCK:
+        if _NETWORK_PATCHED:
+            return
+        _NETWORK_PATCHED = True
+    import socket
+
+    original = socket.socket.connect
+
+    import ipaddress
+
+    local_addresses = {"127.0.0.1", "::1", "localhost"}
+    try:
+        local_addresses.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except Exception:
+        pass
+
+    def counted_connect(self, address):
+        global _NETWORK_FETCHES
+        try:
+            host = address[0]
+            remote = ipaddress.ip_address(host)
+            is_local = (
+                host in local_addresses
+                or remote.is_loopback
+                or remote.is_private
+                or remote.is_link_local
+            )
+            if not is_local:
+                with _NETWORK_LOCK:
+                    _NETWORK_FETCHES += 1
+        except Exception:
+            pass
+        return original(self, address)
+
+    socket.socket.connect = counted_connect
+
+
 class AwiTelemetry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -84,7 +129,7 @@ class AwiTelemetry:
                 "memory_kv_reuse": True,
                 "graph_backend": self._graph_backend,
             },
-            "startup_network_fetches": 0,
+            "startup_network_fetches": _NETWORK_FETCHES,
             "weights": weights,
             "events": events,
         }
@@ -151,3 +196,6 @@ def record_weight_placement(name: str, tensor: Any) -> None:
 
 
 import torch  # noqa: E402  (used by record_weight_placement)
+
+
+install_network_counter()
