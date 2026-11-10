@@ -413,6 +413,8 @@ def forward_layers(
                     ),
                     expert_load=expert_load_for_layer(expert_token_counts, layer_idx),
                 )
+                if os.environ.get("DSV41_TRACE_CAPTURE"):
+                    print(f"[cap] layer {layer_idx} done", flush=True)
                 if _rt_on:
                     _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
     finally:
