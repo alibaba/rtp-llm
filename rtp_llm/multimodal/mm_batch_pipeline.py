@@ -5,6 +5,8 @@ transfer/lifetimes. This envelope only maps prepared inputs back to surviving
 work items; it never mutates the preprocessing cache or completes a request.
 """
 
+from rtp_llm.telemetry import vit_media
+
 
 class PrefetchedMMBatch:
     def __init__(self, chunks):
@@ -18,21 +20,29 @@ class PrefetchedMMBatch:
         prepare = getattr(model, "prepare_embedding_batch", None)
         if prepare is None:
             return
-        self.prepared = prepare(
-            [item.preprocess_result for item in items],
-            [item.mm_type for item in items],
-        )
-        if self.prepared is None:
-            return
-        if len(self.prepared.data_list) != len(items):
-            raise ValueError("prepared batch input count differs from work items")
-        self.data_by_item = dict(zip(map(id, items), self.prepared.data_list))
+        try:
+            self.prepared = prepare(
+                [item.preprocess_result for item in items],
+                [item.mm_type for item in items],
+            )
+            if self.prepared is None:
+                return
+            if len(self.prepared.data_list) != len(items):
+                raise ValueError("prepared batch input count differs from work items")
+            self.data_by_item = dict(zip(map(id, items), self.prepared.data_list))
+        except BaseException as error:
+            vit_media.failure("embedding.prefetch", error, vit_media.item_media(items))
+            raise
 
     def inputs_for(self, items):
         if self.prepared is None:
             return None
-        self.prepared.wait()
-        return [self.data_by_item[id(item)] for item in items]
+        try:
+            self.prepared.wait()
+            return [self.data_by_item[id(item)] for item in items]
+        except BaseException as error:
+            vit_media.failure("embedding.prefetch", error, vit_media.item_media(items))
+            raise
 
     def close(self):
         try:

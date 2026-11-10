@@ -8,6 +8,7 @@ import unittest
 import weakref
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import requests
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -106,6 +107,7 @@ class VitMediaTraceTest(unittest.TestCase):
             @vit_media.compute_task
             def run(_self, _inputs, _key, _entry):
                 self.assertEqual(vit_media.current(), (captured[0],))
+                vit_media.end_compute_queue(_entry)
                 with vit_media.stage("embedding"):
                     pass
                 vit_media.finish_producer(entry)
@@ -188,8 +190,9 @@ class VitMediaTraceTest(unittest.TestCase):
                 "rpc", {"traceparent": f"00-{trace_id}-b7ad6b7169203331-01"}
             )
             media = vit_media._new_media(self.inputs(), 6)
-            with vit_media.stage("download", media):
-                pass
+            with self.assertRaises(TimeoutError):
+                with vit_media.stage("download", media):
+                    raise TimeoutError("must-not-be-exported")
             for member in media:
                 member.finish()
             self.root.finish()
@@ -211,6 +214,15 @@ class VitMediaTraceTest(unittest.TestCase):
                 self.assertEqual(
                     attributes[attrs.RTP_LLM_REQUEST_TRACE_ID].string_value, trace_id
                 )
+                self.assertEqual(
+                    attributes[vit_media.PREFIX + "failure_stage"].string_value,
+                    "download",
+                )
+                self.assertEqual(
+                    attributes[vit_media.PREFIX + "failure_reason"].string_value,
+                    "timeout",
+                )
+                self.assertEqual(attributes["error.type"].string_value, "TimeoutError")
             roots = [s for s in spans if s.name.endswith(".media")]
             self.assertEqual(len(roots), 2)
             for span in roots:
@@ -314,6 +326,137 @@ class VitMediaTraceTest(unittest.TestCase):
         self.assertEqual(len(self.spans()), 0)
         tracing.reset_telemetry_for_test()
         self.assertEqual(vit_media._new_media([object()], 1), ())
+
+    def test_first_failure_survives_wrapping_and_cancellation(self):
+        media = vit_media._new_media(self.inputs()[:1], 9)
+        with self.assertRaises(ValueError):
+            with vit_media.stage("preprocess", media):
+                with vit_media.stage("download", media):
+                    raise ValueError("private-error-message")
+        vit_media.failure("greennet.total", concurrent.futures.CancelledError(), media)
+        wrapper = RuntimeError("wrapper-message")
+        wrapper.exception_type = 903
+        media[0].finish(wrapper)
+        root = next(s for s in self.spans() if s.name.endswith(".media"))
+        self.assertEqual(
+            root.attributes[vit_media.PREFIX + "failure_stage"], "download"
+        )
+        self.assertEqual(
+            root.attributes[vit_media.PREFIX + "failure_reason"], "exception"
+        )
+        self.assertEqual(root.attributes["error.type"], "ValueError")
+        self.assertEqual(root.attributes[vit_media.PREFIX + "error_code"], 903)
+        self.assertNotIn("private-error-message", str(root.attributes))
+        self.assertIsNone(media[0]._failure)
+
+    def test_worker_failure_metadata_survives_pickle_without_exceptions(self):
+        media = vit_media._new_media(self.inputs()[:1], 10)
+        error = TimeoutError("not-serialized")
+        error.exception_type = 603
+        with self.assertRaises(TimeoutError):
+            with vit_media.collect_worker(
+                vit_media.worker_spec(media), preprocess=True
+            ) as recorder:
+                with vit_media.stage("download"):
+                    raise error
+        wire = pickle.dumps(recorder)
+        self.assertNotIn(b"not-serialized", wire)
+        vit_media.consume(media, pickle.loads(wire))
+        media[0].finish(RuntimeError())
+        root = next(s for s in self.spans() if s.name.endswith(".media"))
+        self.assertEqual(
+            root.attributes[vit_media.PREFIX + "failure_stage"], "download"
+        )
+        self.assertEqual(
+            root.attributes[vit_media.PREFIX + "failure_reason"], "timeout"
+        )
+        self.assertEqual(root.attributes[vit_media.PREFIX + "error_code"], 603)
+        self.assertEqual(root.attributes["error.type"], "TimeoutError")
+
+    def test_timeout_replaces_its_inner_task_cancellation(self):
+        media = vit_media._new_media(self.inputs()[:1], 14)
+        vit_media.failure("greennet", concurrent.futures.CancelledError(), media)
+        vit_media.failure("greennet.total", TimeoutError(), media)
+        media[0].finish(TimeoutError())
+        root = next(s for s in self.spans() if s.name.endswith(".media"))
+        self.assertEqual(
+            root.attributes[vit_media.PREFIX + "failure_stage"], "greennet.total"
+        )
+        self.assertEqual(
+            root.attributes[vit_media.PREFIX + "failure_reason"], "timeout"
+        )
+        self.assertEqual(root.attributes["error.type"], "TimeoutError")
+
+    def test_failed_shared_batch_marks_every_participant(self):
+        media = vit_media._new_media(self.inputs(), 11)
+        items = [
+            SimpleNamespace(mm_inputs=[1], media_traces=(member,)) for member in media
+        ]
+        vit_media.enqueue(items)
+
+        @vit_media.embedding_batch
+        def embed(_model, _items):
+            raise MemoryError("oom-message")
+
+        with self.assertRaises(MemoryError):
+            embed(None, items)
+        for member in media:
+            member.finish(RuntimeError())
+        roots = [s for s in self.spans() if s.name.endswith(".media")]
+        self.assertEqual(len(roots), 2)
+        for root in roots:
+            self.assertEqual(
+                root.attributes[vit_media.PREFIX + "failure_stage"], "embedding"
+            )
+            self.assertEqual(
+                root.attributes[vit_media.PREFIX + "failure_reason"], "oom"
+            )
+        batch = next(s for s in self.spans() if s.name.endswith("embedding.batch"))
+        self.assertEqual(len(batch.links), 2)
+        self.assertEqual(batch.status.status_code, StatusCode.ERROR)
+
+    def test_failure_classification_is_fail_open(self):
+        media = vit_media._new_media(self.inputs()[:1], 12)
+        original = ValueError("original")
+        with patch.object(
+            vit_media, "_failure_attributes", side_effect=RuntimeError("telemetry")
+        ):
+            with self.assertRaises(ValueError) as caught:
+                with vit_media.stage("download", media):
+                    raise original
+            self.assertIs(caught.exception, original)
+            with self.assertRaises(ValueError) as caught:
+                with vit_media.collect_worker(vit_media.worker_spec(media)) as recorder:
+                    with vit_media.stage("download"):
+                        raise original
+            self.assertIs(caught.exception, original)
+        self.assertEqual(recorder.records[0][4], "ValueError")
+        media[0].finish(original)
+
+    def test_async_inspection_failure_marks_media_even_without_exception(self):
+        media = vit_media._new_media(self.inputs()[:1], 13)
+        future = concurrent.futures.Future()
+
+        @vit_media.inspection
+        def inspect_media(_self, inputs):
+            return inputs, future, None
+
+        owner = SimpleNamespace(_greennet_enabled=lambda: True)
+        # select_inputs matches occurrence identity, not URL equality.
+        inputs = self.inputs()[:1]
+        media[0].input_id = id(inputs[0])
+        with vit_media.bind(media):
+            inspect_media(owner, inputs)
+        future.set_result(SimpleNamespace(passed=False, code=2))
+        media[0].finish()
+        root = next(s for s in self.spans() if s.name.endswith(".media"))
+        self.assertEqual(root.status.status_code, StatusCode.ERROR)
+        self.assertEqual(
+            root.attributes[vit_media.PREFIX + "failure_stage"], "greennet.total"
+        )
+        self.assertEqual(
+            root.attributes[vit_media.PREFIX + "failure_reason"], "rejected"
+        )
 
 
 if __name__ == "__main__":

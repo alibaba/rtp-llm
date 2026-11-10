@@ -586,7 +586,11 @@ class MMScheduler:
         if deadline is not None:
             timeout_s = min(timeout_s, deadline - time.monotonic())
             if timeout_s <= 0:
-                raise MMSchedulerTimeoutError("ViT request deadline exceeded")
+                error = MMSchedulerTimeoutError("ViT request deadline exceeded")
+                vit_media.failure(
+                    "embedding.queue", error, vit_media.item_media(work_items)
+                )
+                raise error
 
         submit_ms = current_time_ms()
         req.submit_ms = submit_ms
@@ -599,9 +603,13 @@ class MMScheduler:
                 raise RuntimeError("MMScheduler is closed, request rejected")
             if self._waiting.qsize() >= self._max_queue_size:
                 kmonitor.report(AccMetrics.VIT_EMBEDDING_OVERLOAD_QPS_METRIC, 1)
-                raise MMSchedulerOverloadError(
+                error = MMSchedulerOverloadError(
                     f"MMScheduler queue full (max_queue_size={self._max_queue_size}), request rejected"
                 )
+                vit_media.failure(
+                    "embedding.queue", error, vit_media.item_media(work_items)
+                )
+                raise error
             self._enqueue_chunk(req.chunks[0])
         return req
 
@@ -625,7 +633,10 @@ class MMScheduler:
             req.work_items = []
             req.chunks = []
             raise
-        except FutureTimeoutError:
+        except FutureTimeoutError as error:
+            vit_media.failure(
+                "embedding.wait", error, vit_media.item_media(req.work_items)
+            )
             # PENDING -> CANCELLED so the executor skips it; if it is already
             # RUNNING, cancel() is a no-op and the forward's result is discarded.
             req.cancelled.set()

@@ -27,13 +27,65 @@ _input_indices = contextvars.ContextVar("vit_input_indices", default=None)
 _MAX_RECORDS = 256
 
 
-def _end(span, error=None, end_ns=None):
+def _failure_attributes(error, stage=None, reason=None):
+    """Bounded scalar metadata only; never retain exceptions or their tracebacks."""
+    attrs = {}
+    category = None
+    is_oom = False
+    for _ in range(4):
+        code = getattr(error, "exception_type", None)
+        if isinstance(code, int):
+            attrs.setdefault(PREFIX + "error_code", int(code))
+            category = getattr(getattr(code, "category", None), "value", category)
+        is_oom = is_oom or bool(getattr(error, "is_oom", False))
+        inner = getattr(error, "error", None) or getattr(error, "__cause__", None)
+        if not isinstance(inner, BaseException) or inner is error:
+            break
+        error = inner
+    name = (
+        error
+        if isinstance(error, str)
+        else getattr(error, "source_type", None) or type(error).__name__
+    )
+    name = str(name)[:128]
+    attrs["error.type"] = name
+    if reason is None:
+        if "Timeout" in name or category == "timeout":
+            reason = "timeout"
+        elif "Cancelled" in name or category == "cancelled":
+            reason = "cancelled"
+        elif is_oom or name in ("OutOfMemoryError", "MemoryError"):
+            reason = "oom"
+        elif name == "GREENNET_REJECTED" or attrs.get(PREFIX + "error_code") == 908:
+            reason = "rejected"
+        elif category == "capacity" or name == "MMSchedulerOverloadError":
+            reason = "overload"
+        elif category == "bad_request" or name == "MMSchedulerRequestTooLargeError":
+            reason = "invalid_input"
+        else:
+            reason = "exception"
+    attrs[PREFIX + "failure_reason"] = reason
+    if stage is not None:
+        attrs[PREFIX + "failure_stage"] = stage
+    return attrs
+
+
+def failure(stage, error, media=None, reason=None):
+    """Record an observed failure boundary, without changing control flow."""
+    try:
+        for member in current() if media is None else media:
+            if member is not None:
+                member.fail(stage, error, reason)
+    except Exception:
+        pass
+
+
+def _end(span, error=None, end_ns=None, failure_attributes=None):
     if span is None:
         return
     try:
-        if error is not None:
-            name = error if isinstance(error, str) else type(error).__name__
-            span.set_attribute("error.type", name)
+        if error is not None or failure_attributes:
+            span.set_attributes(failure_attributes or _failure_attributes(error))
             span.set_status(tracing.trace.StatusCode.ERROR)
         else:
             span.set_status(tracing.trace.StatusCode.OK)
@@ -52,6 +104,7 @@ class MediaTrace:
         self.request_trace_id = format(span.get_span_context().trace_id, "032x")
         self._lock = threading.RLock()
         self._stages = {}
+        self._failure = None
         self._ended = False
         self.attribute(trace_attrs.RTP_LLM_REQUEST_TRACE_ID, self.request_trace_id)
 
@@ -89,7 +142,54 @@ class MediaTrace:
     def end(self, name, error=None):
         with self._lock:
             span = self._stages.pop(name, None)
-        _end(span, error)
+        if error is not None:
+            self.fail(name, error)
+        _end(
+            span,
+            error,
+            failure_attributes=(
+                self._stage_failure(name, error) if error is not None else None
+            ),
+        )
+
+    @staticmethod
+    def _stage_failure(name, error):
+        if error is None:
+            return None
+        try:
+            return _failure_attributes(error, name)
+        except Exception:
+            return None
+
+    def fail(self, stage, error, reason=None, attributes=None, final=False):
+        try:
+            attrs = attributes or _failure_attributes(error, stage, reason)
+            with self._lock:
+                if self._ended:
+                    return
+                if stage == "embedding.wait" and "embedding.queue" in self._stages:
+                    attrs = {**attrs, PREFIX + "failure_stage": "embedding.queue"}
+                # Cancellation is provisional: wait_for cancels its inner task
+                # before exposing TimeoutError, and sibling cleanup can race
+                # the actual failed branch. Preserve the first non-cancel cause.
+                if self._failure is None or (
+                    self._failure.get(PREFIX + "failure_reason") == "cancelled"
+                    and attrs.get(PREFIX + "failure_reason") != "cancelled"
+                ):
+                    self._failure = dict(attrs)
+                elif (
+                    PREFIX + "error_code" in attrs
+                    and (final or stage == self._failure.get(PREFIX + "failure_stage"))
+                    and (
+                        attrs.get(PREFIX + "failure_reason") != "cancelled"
+                        or self._failure.get(PREFIX + "failure_reason") == "cancelled"
+                    )
+                ):
+                    self._failure.setdefault(
+                        PREFIX + "error_code", attrs[PREFIX + "error_code"]
+                    )
+        except Exception:
+            pass
 
     def link(self, context):
         try:
@@ -106,6 +206,9 @@ class MediaTrace:
         with self._lock:
             if self._ended:
                 return
+            if error is not None:
+                self.fail(next(iter(self._stages), "unknown"), error, final=True)
+            failure_attrs, self._failure = self._failure, None
             self._ended = True
             stages, self._stages = self._stages, {}
             media_span = self.span
@@ -113,9 +216,9 @@ class MediaTrace:
             # Keep only IDs/flags for links, not the SDK span and its attributes.
             self.span = tracing.trace.NonRecordingSpan(media_span.get_span_context())
             self.context = tracing.trace.set_span_in_context(self.span)
-        for span in stages.values():
-            _end(span, error)
-        _end(media_span, error)
+        for name, span in stages.items():
+            _end(span, error, failure_attributes=self._stage_failure(name, error))
+        _end(media_span, error, failure_attributes=failure_attrs)
 
 
 def current():
@@ -244,12 +347,16 @@ def compute_task(method):
     @functools.wraps(method)
     def wrapped(self, inputs, key, entry, *args, **kwargs):
         media = getattr(entry, "_vit_media_producer", None)
-        if media is not None:
-            media.end("compute.queue")
         with bind((media,) if media is not None else ()):
             return method(self, inputs, key, entry, *args, **kwargs)
 
     return wrapped
+
+
+def end_compute_queue(entry, error=None):
+    media = getattr(entry, "_vit_media_producer", None)
+    if media is not None:
+        media.end("compute.queue", error)
 
 
 @contextmanager
@@ -275,6 +382,14 @@ def stage(name, media=None, attributes=None):
         raise
     finally:
         _outcome.reset(token)
+        error = error or outcome["error"]
+        if error is not None:
+            failure(outcome.get("name", name), error, members)
+        failure_attrs = (
+            MediaTrace._stage_failure(outcome.get("name", name), error)
+            if error is not None
+            else None
+        )
         for span in spans:
             try:
                 if span is not None:
@@ -283,7 +398,11 @@ def stage(name, media=None, attributes=None):
                     span.set_attributes(outcome["attributes"])
             except Exception:
                 pass
-            _end(span, error or outcome["error"])
+            _end(
+                span,
+                error,
+                failure_attributes=failure_attrs,
+            )
 
 
 def record_verdict(verdict):
@@ -360,9 +479,16 @@ def embedding_batch(method):
             error = caught
             raise
         finally:
+            if error is not None:
+                failure("embedding", error, media)
+            failure_attrs = (
+                MediaTrace._stage_failure("embedding", error)
+                if error is not None
+                else None
+            )
             for span in spans:
-                _end(span, error)
-            _end(batch, error)
+                _end(span, error, failure_attributes=failure_attrs)
+            _end(batch, error, failure_attributes=failure_attrs)
 
     return wrapped
 
@@ -383,6 +509,12 @@ class WorkerTimings:
             self.dropped += 1
             return
         attrs = dict(attributes or {})
+        if error is not None:
+            try:
+                attrs.update(_failure_attributes(error, name))
+                error = attrs["error.type"]
+            except Exception:
+                error = type(error).__name__
         attrs[PREFIX + "worker.pid"] = os.getpid()
         attrs[PREFIX + "shared_execution"] = self.index is None and self.count > 1
         indices = tuple(range(self.count)) if self.index is None else (self.index,)
@@ -402,7 +534,7 @@ class WorkerTimings:
         try:
             yield
         except BaseException as caught:
-            error = type(caught).__name__
+            error = caught
             raise
         finally:
             _outcome.reset(token)
@@ -433,7 +565,7 @@ def collect_worker(spec, preprocess=False):
             recorder.cpu_start = now
         yield recorder
     except BaseException as caught:
-        error = type(getattr(caught, "error", caught)).__name__
+        error = getattr(caught, "error", caught)
         raise
     finally:
         if recorder is not None:
@@ -456,7 +588,7 @@ def input_scope(index):
     try:
         yield
     except BaseException as caught:
-        error = type(caught).__name__
+        error = caught
         raise
     finally:
         recorder.pause_cpu(error)
@@ -498,8 +630,10 @@ def consume(media, recorder):
         for indices, name, start, end, error, attributes in recorder.records:
             for index in indices:
                 if index < len(media) and media[index] is not None:
+                    if error is not None:
+                        media[index].fail(name, error, attributes=attributes)
                     span = media[index].start(name, attributes, start_ns=start)
-                    _end(span, error, end)
+                    _end(span, error, end, attributes if error is not None else None)
         if recorder.dropped:
             for member in media:
                 if member is not None:
@@ -542,15 +676,30 @@ def inspection(method):
                         )
             except BaseException as caught:
                 error = caught
+            if error is not None:
+                failure("greennet.total", error, media)
             for span in spans:
-                _end(span, error)
+                _end(
+                    span,
+                    error,
+                    failure_attributes=MediaTrace._stage_failure(
+                        "greennet.total", error
+                    ),
+                )
 
         try:
             with bind(media):
                 result = method(self, mm_inputs, *args, **kwargs)
         except BaseException as error:
+            failure("greennet.total", error, media)
             for span in spans:
-                _end(span, error)
+                _end(
+                    span,
+                    error,
+                    failure_attributes=MediaTrace._stage_failure(
+                        "greennet.total", error
+                    ),
+                )
             raise
         future = result[1]
         if future is not None:

@@ -14,19 +14,24 @@ import time
 import unittest
 import weakref
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
+from rtp_llm.config.exceptions import ExceptionType
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
 from rtp_llm.multimodal.greennet_hook import (
     GreenNetHandle,
     GreenNetProvider,
     GreenNetVerdict,
 )
-from rtp_llm.multimodal.mm_preprocess import MultiprocessPreprocessExecutor
+from rtp_llm.multimodal.mm_batch_pipeline import PrefetchedMMBatch
+from rtp_llm.multimodal.mm_preprocess import (
+    MultiprocessPreprocessExecutor,
+    PreprocessExecutor,
+)
 from rtp_llm.multimodal.mm_preprocess_result import MMPreprocessResult
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.mm_work_item import MMWorkItem
@@ -250,6 +255,9 @@ class MediaPipelineTraceTest(unittest.TestCase):
         spans = self.spans()
         media = next(s for s in spans if s.name.endswith(".media"))
         self.assertEqual(media.status.status_code, StatusCode.ERROR)
+        self.assertEqual(
+            media.attributes[vit_media.PREFIX + "failure_stage"], "download"
+        )
         self.assertTrue(
             any(
                 s.name.endswith(".download")
@@ -300,6 +308,195 @@ class MediaPipelineTraceTest(unittest.TestCase):
             [s.name for s in children], [vit_media.PREFIX + "compute.queue"]
         )
         self.assertEqual(children[0].status.status_code, StatusCode.ERROR)
+        self.assertEqual(
+            cancelled[0].attributes[vit_media.PREFIX + "failure_stage"], "compute.queue"
+        )
+        self.assertEqual(
+            cancelled[0].attributes[vit_media.PREFIX + "failure_reason"], "cancelled"
+        )
+        self.assertEqual(cancelled[0].attributes[vit_media.PREFIX + "error_code"], 499)
+
+    def test_expired_compute_queue_is_error_not_success(self):
+        engine = self.engine()
+        inputs = [self.make_input()]
+        member = vit_media._new_media(inputs, 91)[0]
+        entry = SimpleNamespace(_vit_media_producer=member)
+        member.begin("compute.queue")
+        with patch.object(
+            engine,
+            "_fail_async_compute",
+            side_effect=lambda key, entry, error: vit_media.finish_producer(
+                entry, error
+            ),
+        ) as fail, patch.object(engine, "_async_compute") as compute:
+            engine._run_async_compute(inputs, "key", entry, 91, time.monotonic() - 1)
+        compute.assert_not_called()
+        self.assertEqual(
+            fail.call_args.args[2].exception_type, ExceptionType.GENERATE_TIMEOUT
+        )
+        spans = [s for s in self.spans() if s.name.startswith(vit_media.PREFIX)]
+        self.assertEqual(len(spans), 2)
+        for span in spans:
+            self.assertEqual(span.status.status_code, StatusCode.ERROR)
+            self.assertEqual(
+                span.attributes[vit_media.PREFIX + "failure_stage"], "compute.queue"
+            )
+            self.assertEqual(
+                span.attributes[vit_media.PREFIX + "failure_reason"], "timeout"
+            )
+            self.assertEqual(span.attributes[vit_media.PREFIX + "error_code"], 603)
+
+    def test_worker_wait_timeout_does_not_invent_download_stage(self):
+        item = MMWorkItem([self.make_input()])
+        item.media_traces = vit_media._new_media(item.mm_inputs, 92)
+        item.future = object()
+        item.preprocess_ready_event = Mock(wait=Mock(return_value=False))
+        with self.assertRaises(TimeoutError) as caught:
+            list(PreprocessExecutor().iter_ready([item]))
+        item.media_traces[0].finish(caught.exception)
+        spans = [s for s in self.spans() if s.name.startswith(vit_media.PREFIX)]
+        self.assertEqual(len(spans), 1)
+        self.assertEqual(
+            spans[0].attributes[vit_media.PREFIX + "failure_stage"], "preprocess.worker"
+        )
+        self.assertEqual(
+            spans[0].attributes[vit_media.PREFIX + "failure_reason"], "timeout"
+        )
+
+    def test_preprocess_and_embedding_failures_keep_original_exception(self):
+        for stage in ("preprocess", "embedding"):
+            with self.subTest(stage=stage):
+                engine = self.engine()
+                if stage == "preprocess":
+                    owner, method = engine.preprocess_executor, "preprocess_func"
+                else:
+                    owner, method = engine.mm_part, "batched_embedding"
+                error = ValueError("injected-stage-failure")
+                with patch.object(owner, method, side_effect=error), self.assertRaises(
+                    Exception
+                ):
+                    engine.get_embedding_result(
+                        [self.make_input(stage.encode())], request_id=93
+                    )
+                engine._async_compute_executor.shutdown(wait=True)
+                root = [s for s in self.spans() if s.name.endswith(".media")][-1]
+                self.assertEqual(
+                    root.attributes[vit_media.PREFIX + "failure_stage"], stage
+                )
+                self.assertEqual(root.attributes["error.type"], "ValueError")
+                self.assertEqual(root.status.status_code, StatusCode.ERROR)
+
+    def test_worker_lost_without_timing_sidecar(self):
+        executor = MultiprocessPreprocessExecutor.__new__(
+            MultiprocessPreprocessExecutor
+        )
+        executor._pool_lock = threading.Lock()
+        executor._preprocess_queue_lock = threading.Lock()
+        executor._pending_preprocess_tasks = set()
+        executor._rebuild_pool = Mock()
+        item = MMWorkItem([self.make_input()])
+        item.media_traces = vit_media._new_media(item.mm_inputs, 97)
+        error = EOFError("worker IPC closed")
+        item.future = Mock(get=Mock(side_effect=error))
+        with self.assertRaises(EOFError) as caught:
+            executor.get_result(item)
+        self.assertIs(caught.exception, error)
+        executor._rebuild_pool.assert_called_once()
+        item.media_traces[0].finish(error)
+        root = [s for s in self.spans() if s.name.endswith(".media")][-1]
+        self.assertEqual(
+            root.attributes[vit_media.PREFIX + "failure_stage"], "preprocess.worker"
+        )
+        self.assertEqual(
+            root.attributes[vit_media.PREFIX + "failure_reason"], "worker_lost"
+        )
+
+    def test_inspection_rejection_preserves_business_code(self):
+        class RejectingProvider(InspectionProvider):
+            async def submit_sources(self, request, mm_inputs, sources):
+                class Handle(GreenNetHandle):
+                    async def wait_result(self):
+                        return GreenNetVerdict(False, 2)
+
+                    def cancel(self):
+                        pass
+
+                return Handle()
+
+        engine = self.engine()
+        engine._inspection._greennet_provider = RejectingProvider()
+        with self.assertRaises(Exception) as caught:
+            engine.get_embedding_result([self.make_input(b"rejected")], request_id=98)
+        self.assertEqual(
+            caught.exception.exception_type, ExceptionType.UNSAFE_INPUT_CONTENT
+        )
+        engine._async_compute_executor.shutdown(wait=True)
+        root = [s for s in self.spans() if s.name.endswith(".media")][-1]
+        self.assertEqual(
+            root.attributes[vit_media.PREFIX + "failure_stage"], "greennet"
+        )
+        self.assertEqual(
+            root.attributes[vit_media.PREFIX + "failure_reason"], "rejected"
+        )
+        self.assertEqual(root.attributes[vit_media.PREFIX + "error_code"], 908)
+
+    def test_prefetch_and_publication_failures_are_attributed(self):
+        for stage in ("embedding.prefetch", "cache.publish"):
+            with self.subTest(stage=stage):
+                item = MMWorkItem([self.make_input(stage.encode())])
+                item.media_traces = vit_media._new_media(item.mm_inputs, 94)
+                error = ValueError("injected-boundary-failure")
+                with self.assertRaises(ValueError) as caught:
+                    if stage == "embedding.prefetch":
+                        batch = PrefetchedMMBatch([SimpleNamespace(work_items=[item])])
+                        batch.prepare(
+                            SimpleNamespace(
+                                prepare_embedding_batch=Mock(side_effect=error)
+                            )
+                        )
+                    else:
+                        item.embedding_cache = SimpleNamespace(
+                            complete=Mock(side_effect=error)
+                        )
+                        item.cache_key, item.cache_entry = "key", object()
+                        item.complete_cache((torch.ones(1, 1), None))
+                self.assertIs(caught.exception, error)
+                item.media_traces[0].finish(error)
+                root = [s for s in self.spans() if s.name.endswith(".media")][-1]
+                self.assertEqual(
+                    root.attributes[vit_media.PREFIX + "failure_stage"], stage
+                )
+
+    def test_trace_on_off_outputs_are_bitwise_identical(self):
+        outputs = []
+        for enabled in (False, True):
+            engine = self.engine()
+            inputs = [self.make_input(data) for data in (b"a", b"medium", b"a")]
+            with patch.object(tracing, "is_telemetry_active", return_value=enabled):
+                cold = engine.get_embedding_result(inputs, request_id=95)
+                warm = engine.get_embedding_result(inputs, request_id=96)
+                engine._async_compute_executor.shutdown(wait=True)
+            self.assertEqual(engine.mm_part.forward_count, 2)
+            outputs.append((cold, warm))
+        for cold_or_warm in range(2):
+            before, after = (result[cold_or_warm] for result in outputs)
+            self.assertEqual(len(before), len(after))
+            for left, right, expected in zip(before, after, (1, 6, 1)):
+                for field in (
+                    "embeddings",
+                    "position_ids",
+                    "extra_input",
+                    "feature_hashes",
+                ):
+                    lhs, rhs = getattr(left, field), getattr(right, field)
+                    self.assertEqual(len(lhs), len(rhs))
+                    for a, b in zip(lhs, rhs):
+                        self.assertEqual(a.shape, b.shape)
+                        self.assertEqual(a.dtype, b.dtype)
+                        self.assertEqual(a.device, b.device)
+                        self.assertTrue(torch.isfinite(b).all())
+                        self.assertTrue(torch.equal(a, b))
+                self.assertEqual(right.embeddings[0].item(), expected)
 
     def test_two_request_traces_share_one_real_scheduler_batch(self):
         engine = self.engine(

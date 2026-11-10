@@ -315,11 +315,17 @@ class PreprocessExecutor:
                 pending.remove(item)
                 yield item
             if pending and not ready:
-                if not event.wait(
-                    timeout=min(item.remaining_timeout_s() for item in pending)
-                ):
-                    self._on_wait_timeout(pending)
-                    raise TimeoutError("CPU preprocessing result wait timed out")
+                try:
+                    if not event.wait(
+                        timeout=min(item.remaining_timeout_s() for item in pending)
+                    ):
+                        self._on_wait_timeout(pending)
+                        raise TimeoutError("CPU preprocessing result wait timed out")
+                except Exception as error:
+                    vit_media.failure(
+                        "preprocess.worker", error, vit_media.item_media(pending)
+                    )
+                    raise
 
     def _on_wait_timeout(self, pending):
         pass
@@ -664,10 +670,14 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         except (BrokenPipeError, OSError, EOFError) as e:
             if task_id is not None:
                 self._finish_preprocess_task(task_id)
+            vit_media.failure(
+                "preprocess.submit", e, work_item.media_traces, "worker_lost"
+            )
             raise
         except Exception as e:
             if task_id is not None:
                 self._finish_preprocess_task(task_id)
+            vit_media.failure("preprocess.submit", e, work_item.media_traces)
             logging.error(f"Unexpected error during submission: {e}", exc_info=True)
             raise
 
@@ -699,7 +709,8 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             _report_vit_preprocess_samples(e.samples)
             logging.error("Preprocessing task failed: %s", e.error, exc_info=True)
             raise e.error from e
-        except multiprocessing.pool.TimeoutError:
+        except multiprocessing.pool.TimeoutError as e:
+            vit_media.failure("preprocess.worker", e, work_item.media_traces, "timeout")
             with self._pool_lock:
                 self._record_timeout_locked()
             raise TimeoutError(
@@ -707,6 +718,9 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             )
         except (BrokenPipeError, OSError, EOFError) as e:
             # worker died mid-task → pool is broken; rebuild so subsequent submits work
+            vit_media.failure(
+                "preprocess.worker", e, work_item.media_traces, "worker_lost"
+            )
             logging.error(f"Pool broken on get_result, rebuilding: {e}", exc_info=True)
             with self._pool_lock:
                 try:
@@ -715,6 +729,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                     logging.error(f"pool rebuild failed: {rb}", exc_info=True)
             raise
         except Exception as e:
+            vit_media.failure("preprocess.worker", e, work_item.media_traces)
             logging.error(f"Error getting preprocess result: {e}", exc_info=True)
             raise
         finally:

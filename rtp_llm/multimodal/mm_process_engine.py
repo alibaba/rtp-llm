@@ -1784,8 +1784,10 @@ class MMProcessEngine:
                 ExceptionType.GENERATE_TIMEOUT,
                 "ViT queue wait timed out before execution",
             )
+            vit_media.end_compute_queue(entry, error)
             self._fail_async_compute(cache_key, entry, error)
             return
+        vit_media.end_compute_queue(entry)
         return self._async_compute(
             mm_inputs,
             cache_key,
@@ -1839,6 +1841,7 @@ class MMProcessEngine:
                 _report_vit_metric(AccMetrics.VIT_QUEUE_REJECT_QPS_METRIC, 1)
                 for _, cache_key, entry in active_pending:
                     self._forget_async_task_locked(entry)
+                    vit_media.end_compute_queue(entry, error)
                     self._fail_async_compute(cache_key, entry, error)
                 raise error
 

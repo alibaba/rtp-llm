@@ -23,6 +23,7 @@ from rtp_llm.ops import (
     get_multimodal_feature_hash,
     get_multimodal_feature_hashes,
 )
+from rtp_llm.telemetry import vit_media
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 
@@ -255,21 +256,29 @@ class MMWorkItem:
             return
         if self.defer_feature_hashes:
             self.cache_entry.producer_streams = self.embedding_producer_streams or []
-        self.embedding_cache.complete(
-            self.cache_key,
-            self.cache_entry,
-            result,
-            before_publish=self._publish_cache_hashes,
-        )
+        try:
+            self.embedding_cache.complete(
+                self.cache_key,
+                self.cache_entry,
+                result,
+                before_publish=self._publish_cache_hashes,
+            )
+        except BaseException as error:
+            vit_media.failure("cache.publish", error, self.media_traces)
+            raise
 
     def _publish_cache_hashes(self) -> None:
         if self.feature_hashes is not None and self.hash_key_cache is not None:
-            self.hash_key_cache.put_for_entry(
-                self.cache_key,
-                self.feature_hashes,
-                self.cache_entry,
-                self.embedding_cache,
-            )
+            try:
+                self.hash_key_cache.put_for_entry(
+                    self.cache_key,
+                    self.feature_hashes,
+                    self.cache_entry,
+                    self.embedding_cache,
+                )
+            except BaseException as error:
+                vit_media.failure("cache.publish", error, self.media_traces)
+                raise
 
     def fail_cache(self, error: Exception) -> None:
         if (
