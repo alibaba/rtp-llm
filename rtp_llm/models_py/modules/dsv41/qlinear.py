@@ -246,8 +246,15 @@ class QuantizedLinear(nn.Module):
             if native_fp4_gemm_available():
                 return self._fp4_forward_deepgemm(x)
             # SM<100: decode the original packed FP4 rows and UE8M0 block
-            # scales on the fly. Correctness reference; the grouped Triton
-            # path replaces this for throughput.
+            # scales inside the GEMM so no full BF16 expert copy is ever
+            # materialized (nor captured in a CUDA graph pool).
+            from rtp_llm.models_py.modules.dsv41.fp4_dequant_gemm import (
+                fp4_dequant_matmul,
+            )
+
+            fused = fp4_dequant_matmul(x, self.weight, self.scale)
+            if fused is not None:
+                return fused.to(x.dtype)
             w = self.dequant_weight(out_dtype=x.dtype)
             return F.linear(x, w)
         # FP8: dequant to x's dtype on the fly.

@@ -373,6 +373,16 @@ def select_strategy(
             raise RuntimeError(f"Unknown MoE strategy {forced!r}. Available: {names}")
 
     if cfg.ep_size > 1:
+        # Non-SM100 fallback: every rank owns a contiguous expert slice and
+        # sees every token; MoE.forward all-reduces the local contributions.
+        # Opt-in because it trades cross-rank bandwidth for kernel support.
+        if (
+            os.environ.get("DSV4_MOE_EP_ALLREDUCE", "0") == "1"
+            and forced in (None, "local_loop")
+        ):
+            for cls in _STRATEGY_PRIORITY:
+                if cls.name == "local_loop" and cls.can_handle(cfg):
+                    return cls
         mega_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "mega"), None)
         if mega_cls is None:
             raise RuntimeError(

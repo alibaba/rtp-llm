@@ -254,6 +254,11 @@ class MoE(nn.Module):
         )
         forced, strict = _resolve_forced(strategy)
         strategy_cls = select_strategy(cfg, forced=forced, strict=strict)
+        self._ep_allreduce = bool(
+            ep_size > 1
+            and strategy_cls.name == "local_loop"
+            and os.environ.get("DSV4_MOE_EP_ALLREDUCE", "0") == "1"
+        )
         self._routed_includes_shared = bool(
             getattr(strategy_cls, "routed_includes_shared", False)
         )
@@ -608,6 +613,8 @@ class MoE(nn.Module):
                     expert_load=expert_load,
                     eplb_layer=self.eplb_layer,
                 )
+            if self._ep_allreduce:
+                torch.distributed.all_reduce(y)
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()

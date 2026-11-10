@@ -237,17 +237,24 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         y.zero_()
         if torch.cuda.is_current_stream_capturing():
             topk_max_n = _topk_dispatch_max_n()
+            ep_allreduce = (
+                self.cfg.ep_size > 1
+                and os.environ.get("DSV4_MOE_EP_ALLREDUCE", "0") == "1"
+            )
             if (
                 _bs1_fast_enabled()
-                and native_fp4_gemm_available()
-                and self.cfg.ep_size == 1
+                and (self.cfg.ep_size == 1 or ep_allreduce)
                 and (topk_max_n > 0)
                 and (T <= topk_max_n)
             ):
-                if T == 1:
+                if T == 1 and not native_fp4_gemm_available():
+                    self._forward_topk_bs1_reference(x, weights, indices, y)
+                elif T == 1:
                     self._forward_topk_bs1(x, weights, indices, y)
-                else:
+                elif native_fp4_gemm_available():
                     self._forward_topk_bsN(x, weights, indices, y)
+                else:
+                    self._forward_topk_bsN_reference(x, weights, indices, y)
             else:
                 self._forward_graph_safe(x, weights, indices, y, local_start, local_end)
         else:
@@ -314,6 +321,108 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             mask = (indices == i).to(weights.dtype)
             per_token_w = (weights * mask).sum(dim=-1, keepdim=True)
             y.add_(expert(x, per_token_w).float())
+        return y
+
+    def _forward_topk_bsN_reference(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        y: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-token K-slot loop for small decode batches on non-SM100."""
+        for n in range(x.size(0)):
+            self._forward_topk_bs1_reference(
+                x[n : n + 1].contiguous(),
+                weights[n : n + 1].contiguous(),
+                indices[n : n + 1].contiguous(),
+                y[n : n + 1],
+            )
+        return y
+
+    def _forward_topk_bs1_reference(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        y: torch.Tensor,
+    ) -> torch.Tensor:
+        """K-slot decode on devices without the SM100 FP8xFP4 kernel.
+
+        Same math as :meth:`_forward_topk_bs1`, but each selected expert's
+        packed weights are decoded inside the GEMM by the Triton reference
+        kernel. ``index_select`` keeps every launch shape static, so the
+        sequence is capturable by CUDA graphs; only K (not E) experts run.
+        """
+        from rtp_llm.models_py.modules.dsv41.fp4_dequant_gemm import (
+            fp4_dequant_matmul,
+        )
+
+        cfg = self.cfg
+        D = cfg.dim
+        inter = cfg.moe_inter_dim
+        swiglu_limit = cfg.swiglu_limit
+        device = x.device
+        K = indices.size(1)
+        x_2d = x.reshape(1, D)
+        if x_2d.dtype != torch.bfloat16:
+            x_2d = x_2d.to(torch.bfloat16)
+        try:
+            from rtp_llm.models_py.modules.dsv41._silu_mul_split_triton import (
+                silu_mul_split,
+            )
+
+            have_silu_mul_split = True
+        except Exception:
+            silu_mul_split = None
+            have_silu_mul_split = False
+        local_start = cfg.local_expert_start
+        local_n = cfg.n_local_experts
+        for k in range(K):
+            eid = indices[0, k : k + 1]
+            router_w = weights[0, k : k + 1, None]
+            if cfg.ep_size > 1:
+                local_eid = eid - local_start
+                valid = (local_eid >= 0) & (local_eid < local_n)
+                local_eid = torch.where(
+                    valid, local_eid, torch.zeros_like(local_eid)
+                )
+                router_w = torch.where(
+                    valid[:, None], router_w, torch.zeros_like(router_w)
+                )
+            else:
+                local_eid = eid
+            w1 = torch.index_select(self._W1_w, 0, local_eid).squeeze(0)
+            s1 = torch.index_select(self._W1_s, 0, local_eid).squeeze(0)
+            w3 = torch.index_select(self._W3_w, 0, local_eid).squeeze(0)
+            s3 = torch.index_select(self._W3_s, 0, local_eid).squeeze(0)
+            w2 = torch.index_select(self._W2_w, 0, local_eid).squeeze(0)
+            s2 = torch.index_select(self._W2_s, 0, local_eid).squeeze(0)
+            gate = fp4_dequant_matmul(x_2d, w1, s1)
+            up = fp4_dequant_matmul(x_2d, w3, s3)
+            if gate is None or up is None:
+                # Unsupported shape: fall through to the eager reference.
+                return self._forward_eager(
+                    x, weights, indices, y, cfg.local_expert_start, cfg.local_expert_end
+                )
+            gate_f = gate.float()
+            up_f = up.float()
+            if have_silu_mul_split:
+                sm_fp32 = silu_mul_split(
+                    gate_f.contiguous(), up_f.contiguous(), clamp_limit=swiglu_limit
+                )
+            else:
+                if swiglu_limit > 0:
+                    up_f = torch.clamp(up_f, min=-swiglu_limit, max=swiglu_limit)
+                    gate_f = torch.clamp(gate_f, max=swiglu_limit)
+                sm_fp32 = torch.nn.functional.silu(gate_f) * up_f
+            sm_fp32 = sm_fp32 * router_w
+            delta = fp4_dequant_matmul(sm_fp32.to(torch.bfloat16), w2, s2)
+            if delta is None:
+                return self._forward_eager(
+                    x, weights, indices, y, cfg.local_expert_start, cfg.local_expert_end
+                )
+            y.add_(delta.float())
         return y
 
     def _forward_topk_bs1(

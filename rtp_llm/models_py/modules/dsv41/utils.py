@@ -51,20 +51,17 @@ class V41MXFP8Linear(torch.nn.Module):
         self.weight_scales = None if self._fallback else self.pack_scales(scales)
 
     def _dequant_weight(self) -> torch.Tensor:
-        """Decode the original 32x32 FP8 blocks to BF16 once, on device.
+        """Decode one 32x32-block FP8 weight to BF16 without caching it.
 
-        This is only reachable on pre-SM89 devices where the weights are
-        already resident; the Engram tables never pass through this class.
+        A persistent BF16 mirror of every dense weight would not fit next
+        to the packed checkpoint on an 80 GiB device. The fused Triton path
+        avoids even this temporary; this method is the reference fallback.
         """
-        if self._fallback_weight is None:
-            rows = torch.arange(self.N, device=self.weight.device) // 32
-            cols = torch.arange(self.K, device=self.weight.device) // 32
-            scale = self._raw_scales.float().index_select(0, rows)
-            scale = scale.index_select(1, cols)
-            decoded = self.weight.float() * scale
-            self._fallback_weight = decoded.to(torch.bfloat16)
-            self._raw_scales = None
-        return self._fallback_weight
+        rows = torch.arange(self.N, device=self.weight.device) // 32
+        cols = torch.arange(self.K, device=self.weight.device) // 32
+        scale = self._raw_scales.float().index_select(0, rows)
+        scale = scale.index_select(1, cols)
+        return (self.weight.float() * scale).to(torch.bfloat16)
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
         if scales.shape != ((self.N + 31) // 32, (self.K + 31) // 32):
@@ -123,10 +120,16 @@ class V41MXFP8Linear(torch.nn.Module):
                     "activation; callers must use _quantize_input on this module"
                 )
             shape = (*x_q.shape[:-1], self.N)
-            result = torch.nn.functional.linear(
-                x_q.reshape(-1, self.K),
-                self._dequant_weight().to(x_q.dtype),
-            ).reshape(shape)
+            from rtp_llm.models_py.modules.dsv41.fp4_dequant_gemm import (
+                fp8_dequant_matmul,
+            )
+
+            result = fp8_dequant_matmul(x_q, self.weight, self._raw_scales)
+            if result is None:
+                result = torch.nn.functional.linear(
+                    x_q.reshape(-1, self.K),
+                    self._dequant_weight().to(x_q.dtype),
+                ).reshape(shape)
             if out is not None:
                 out.copy_(result)
                 return out
@@ -164,9 +167,15 @@ class V41MXFP8Linear(torch.nn.Module):
         if x.numel() == 0:
             return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
         if self._fallback:
-            result = torch.nn.functional.linear(
-                x, self._dequant_weight().to(x.dtype)
+            from rtp_llm.models_py.modules.dsv41.fp4_dequant_gemm import (
+                fp8_dequant_matmul,
             )
+
+            result = fp8_dequant_matmul(x, self.weight, self._raw_scales)
+            if result is None:
+                result = torch.nn.functional.linear(
+                    x, self._dequant_weight().to(x.dtype)
+                )
             if out is not None:
                 out.copy_(result)
                 return out
