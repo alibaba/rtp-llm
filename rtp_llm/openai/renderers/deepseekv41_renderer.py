@@ -150,9 +150,29 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
             else ThinkingMode.DISABLED
         )
 
+    def _thinking_default(self) -> bool:
+        """Boolean default for resolve_thinking/convert_request.
+
+        ``self.think_mode`` is the canonical mode STRING ("disabled" /
+        "adaptive" / "enabled"); passing it where a bool default is expected
+        made every flagless request think (bool("disabled") is True). Derive
+        the boolean from the already-normalized enum instead, preserving the
+        legacy truthy behavior for adaptive/unspecified.
+        """
+        from rtp_llm.config.generate_config import ThinkingMode
+
+        mode = getattr(self, "default_thinking_mode", None)
+        if mode is ThinkingMode.DISABLED:
+            return False
+        if mode is ThinkingMode.ENABLED:
+            return True
+        return bool(self.think_mode)
+
     def in_think_mode(self, request):
         try:
-            return resolve_thinking(self._request_dict(request), self.think_mode)[0]
+            return resolve_thinking(
+                self._request_dict(request), self._thinking_default()
+            )[0]
         except (TypeError, ValueError) as error:
             raise FtRuntimeException(
                 ExceptionType.INVALID_PARAMS, str(error)
@@ -161,7 +181,7 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
     def _recipe_request(self, request):
         try:
             return convert_request(
-                self._request_dict(request), default_thinking=self.think_mode
+                self._request_dict(request), default_thinking=self._thinking_default()
             )
         except (TypeError, ValueError) as error:
             raise FtRuntimeException(
