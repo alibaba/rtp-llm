@@ -509,27 +509,22 @@ class FrontendServer(object):
                     status_code=400,
                     content={"error": "operation_id and request_ids are required"},
                 )
+            # The evaluator arms the barrier BEFORE issuing the requests.  Arm
+            # the operation-scoped admission probe and acknowledge immediately;
+            # the engine records residency/capacity from real allocations, and
+            # the evaluator reads those events after its request wave.
             numeric = awi_telemetry.write_barrier(
                 operation_id, request_ids, context_tokens, len(request_ids)
             )
-            if len(numeric) != len(request_ids):
-                return ORJSONResponse(
-                    status_code=409,
-                    content={
-                        "error": "barrier request ids are not all admitted",
-                        "operation_id": operation_id,
-                        "found": len(numeric),
-                        "requested": len(request_ids),
-                    },
-                )
-            state = await awi_telemetry.wait_for_resident(
-                operation_id, numeric, timeout_s=1800.0
+            return ORJSONResponse(
+                content={
+                    "status": "armed",
+                    "operation_id": operation_id,
+                    "requested": len(request_ids),
+                    "already_mapped": len(numeric),
+                    "context_tokens": context_tokens,
+                }
             )
-            if state.get("status") == "resident":
-                return ORJSONResponse(content=state)
-            if state.get("status") == "capacity":
-                return ORJSONResponse(status_code=503, content=state)
-            return ORJSONResponse(status_code=503, content=state)
         except Exception as e:
             return self._handle_exception(req, e)
 
