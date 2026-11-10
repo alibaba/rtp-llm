@@ -354,6 +354,16 @@ def _prepare_wo_a_stacked(
     floor-log2 bitcasts each block scale and packs 4 UE8M0 bytes per
     int32; output shape ``[G, R, K/512]`` matches
     ``deep_gemm.fp8_einsum(..., recipe=(1, 1, 128))`` expectations."""
+    from .utils import _native_fp8_gemm_available
+
+    if not _native_fp8_gemm_available():
+        # SM80 reference path: dequantize the grouped wo_a once and run a
+        # BF16 einsum; DeepGEMM's packed UE8M0 layout is SM90+/SM100-only.
+        rows = torch.arange(G * R, device=scale_raw.device) // 32
+        cols = torch.arange(K, device=scale_raw.device) // 32
+        scale = scale_raw.float().index_select(0, rows).index_select(1, cols)
+        w_bf16 = (weight_fp8.float() * scale).view(G, R, K).to(torch.bfloat16)
+        return (w_bf16, None)
     w_stk = weight_fp8.view(G, R, K).contiguous()
     scale_block = K // scale_raw.shape[-1]
     scale_fp32 = scale_raw.float().view(G, R // scale_block, K // scale_block)
@@ -4721,6 +4731,32 @@ class AttentionFP8(nn.Module):
         """
         o_3d = o.view(-1, self.n_heads, self.head_dim)
         seqlen = o_3d.shape[0]
+        if self._wo_a_stk_s is None:
+            # SM80 reference path: inverse RoPE in BF16, then grouped wo_a.
+            from .rope import apply_rotary_emb
+
+            o_work = o_3d.view(seqlen, 1, self.n_heads, self.head_dim)
+            rope = apply_rotary_emb(
+                o_work[..., -self.rope_head_dim :].clone(),
+                freqs_cis.view(seqlen, 1, -1),
+                inverse=True,
+            )
+            o_work = torch.cat(
+                (o_work[..., : -self.rope_head_dim], rope), dim=-1
+            ).view(seqlen, self.n_heads, self.head_dim)
+            heads_per_group = self.n_heads // self.n_groups
+            grouped = o_work.view(
+                seqlen, self.n_groups, heads_per_group * self.head_dim
+            )
+            o_proj = torch.einsum(
+                "mgk,grk->mgr",
+                grouped.to(torch.bfloat16),
+                self._wo_a_stk_w,
+            )
+            with record_function_range("dsv4.fp8.attn.out.wo_b"):
+                wo_b_in = o_proj.flatten(2).reshape(seqlen, -1)
+                self.wo_b(wo_b_in, out=out)
+            return
         with record_function_range("dsv4.fp8.attn.out.fused_inv_rope_quant"):
             o_fp8, o_scale = fused_inv_rope_fp8_quant(
                 o_3d,
