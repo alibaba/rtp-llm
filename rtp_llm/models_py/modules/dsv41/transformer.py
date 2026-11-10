@@ -634,6 +634,8 @@ class V4Transformer(nn.Module):
         layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx, layer in enumerate(self.layers):
             with layer_forward_range(layer_idx):
+                if os.environ.get("DSV41_TRACE_CAPTURE") and torch.cuda.is_current_stream_capturing():
+                    print(f"[cap] layer {layer_idx} enter", flush=True)
                 expert_load = expert_load_for_layer(expert_token_counts, layer_idx)
                 h = layer.forward_decode(
                     h,
@@ -766,6 +768,8 @@ class V4Transformer(nn.Module):
         layer_forward_range = _profiler.make_layer_forward_range()
         for li, layer in enumerate(self.layers):
             with layer_forward_range(li):
+                if os.environ.get("DSV41_TRACE_CAPTURE") and torch.cuda.is_current_stream_capturing():
+                    print(f"[cap] prefill layer {li} enter", flush=True)
                 expert_load = expert_load_for_layer(expert_token_counts, li)
                 h_flat = layer(
                     h_flat,
