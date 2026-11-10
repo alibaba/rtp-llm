@@ -2362,11 +2362,13 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             try {
                 auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
                 outputs             = py_outputs_obj.cast<PyModelOutputs>();
+                std::fprintf(stderr, "[capi] capture forward returned\n"); std::fflush(stderr);
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
                 throw;
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+            std::fprintf(stderr, "[capi] capture output copied\n"); std::fflush(stderr);
             auto& mtp_target_hidden_states = graph_instances_[key].mem_hold_.mtp_target_hidden_states_;
             RTP_LLM_CHECK_WITH_INFO(mtp_target_hidden_states.defined() == outputs.mtp_target_hidden_states.defined(),
                                     "MTP target hidden output presence changed during CUDA graph capture");
@@ -2387,7 +2389,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                     "V4.1 confidence hidden-logit shape, dtype or device changed during CUDA graph capture");
                 dspark_confidence_hidden_logits.copy_(outputs.dspark_confidence_hidden_logits);
             }
+            std::fprintf(stderr, "[capi] capture end start\n"); std::fflush(stderr);
             graph.capture_end();
+            std::fprintf(stderr, "[capi] capture end done\n"); std::fflush(stderr);
         }
 #if USING_CUDA && ((TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 9))
         auto& instance = graph_instances_[key];
