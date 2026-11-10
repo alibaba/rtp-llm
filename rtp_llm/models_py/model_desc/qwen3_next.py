@@ -589,13 +589,23 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         # M >= 2048: scatter_qkv (Triton, SGLang port) avoids the .view() ->
         # .contiguous() copies that torch.split + view triggers. Below 2048,
         # kernel launch overhead beats the savings (microbench measured).
+        qk_l2normalized = False
         if mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
-            query, key, value = scatter_qkv(
+            from rtp_llm.models_py.triton_kernels.common.scatter_qkv import (
+                try_scatter_qkv_l2norm_sm90,
+            )
+
+            scatter_args = (
                 mixed_qkv,
                 self.local_num_k_heads,
                 self.local_num_v_heads,
                 self.head_k_dim,
                 self.head_v_dim,
+            )
+            prepared = try_scatter_qkv_l2norm_sm90(*scatter_args)
+            qk_l2normalized = prepared is not None
+            query, key, value = (
+                prepared if prepared is not None else scatter_qkv(*scatter_args)
             )
         else:
             query, key, value = torch.split(
@@ -688,7 +698,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 initial_state=initial_states,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens_without_padding,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=not qk_l2normalized,
             )
         if ssm_states is not None and not use_flydsl_chunk_gdn:
             store_ssm_state_to_block_map(
