@@ -85,9 +85,19 @@ def _rpc_timeout_ms(context, default_ms: int) -> int:
 
 
 def trans_output(res: MMEmbeddingRes):
-    return build_multimodal_output_pb(
+    output = build_multimodal_output_pb(
         res.embeddings, res.position_ids, res.extra_input, res.feature_hashes
     )
+    add_token_plans(output, res)
+    return output
+
+
+def add_token_plans(output, res):
+    output.ClearField("token_plans")
+    for plan in getattr(res, "token_plans", ()):
+        target = output.token_plans.add(token_ids=plan.token_ids)
+        for offset, length in plan.spans:
+            target.spans.add(offset=offset, length=length)
 
 
 def merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
@@ -101,7 +111,10 @@ def merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
             extra_input.extend(res.extra_input)
         if hashes is not None:
             hashes.extend(res.feature_hashes)
-    return MMEmbeddingRes(embeddings, position_ids or None, extra_input or None, hashes)
+    plans = [plan for res in results for plan in getattr(res, "token_plans", ())]
+    return MMEmbeddingRes(
+        embeddings, position_ids or None, extra_input or None, hashes, plans
+    )
 
 
 def _mark_vit_error_reported(context, status_details=None) -> None:
@@ -356,6 +369,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 res = merge_embedding_results(results)
             output_pb = self._transport.transfer(multimodal_inputs, res)
             add_multimodal_feature_hashes(output_pb, res.embeddings, res.feature_hashes)
+            add_token_plans(output_pb, res)
             kmonitor.report(
                 GaugeMetrics.VIT_RPC_SERVER_HANDLER_RT_US_METRIC,
                 _now_us() - start_us,

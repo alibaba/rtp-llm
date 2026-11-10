@@ -270,6 +270,7 @@ class Qwen3_5MoeVisionAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor | None = None,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        sequence_lengths: tuple[int, ...] | None = None,
         **kwargs,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
@@ -294,7 +295,11 @@ class Qwen3_5MoeVisionAttention(nn.Module):
 
         if default_attn_impl == "flash_attention_2":
             # Flash Attention: Use cu_seqlens for variable length attention
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+            max_seqlen = (
+                max(sequence_lengths)
+                if sequence_lengths is not None
+                else (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+            )
             attn_output, _ = attention_interface(
                 self,
                 query_states,
@@ -312,9 +317,13 @@ class Qwen3_5MoeVisionAttention(nn.Module):
             )
         else:
             # Other implementations: Process each chunk separately
-            lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+            lengths = (
+                sequence_lengths
+                if sequence_lengths is not None
+                else (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+            )
             splits = [
-                torch.split(tensor, lengths.tolist(), dim=2)
+                torch.split(tensor, lengths, dim=2)
                 for tensor in (query_states, key_states, value_states)
             ]
 
@@ -460,7 +469,7 @@ class Qwen3_5MoeVisionModel(PreTrainedModel):
         embeddings = embeddings.flatten(1)
         return embeddings
 
-    def fast_pos_embed_interpolate(self, grid_thw):
+    def fast_pos_embed_interpolate(self, grid_thw, *, async_metadata=False):
         grid_thw_list = grid_thw.tolist()
         grid_ts = [row[0] for row in grid_thw_list]
         grid_hs = [row[1] for row in grid_thw_list]
@@ -503,10 +512,20 @@ class Qwen3_5MoeVisionModel(PreTrainedModel):
                 idx_list[i].extend(indices[i].tolist())
                 weight_list[i].extend(weights[i].tolist())
 
-        idx_tensor = torch.tensor(idx_list, dtype=torch.long, device=device)
-        weight_tensor = torch.tensor(
-            weight_list, dtype=self.pos_embed.weight.dtype, device=device
+        metadata_device = "cpu" if async_metadata else device
+        pinned = async_metadata and device.type == "cuda"
+        idx_tensor = torch.tensor(
+            idx_list, dtype=torch.long, device=metadata_device, pin_memory=pinned
         )
+        weight_tensor = torch.tensor(
+            weight_list,
+            dtype=self.pos_embed.weight.dtype,
+            device=metadata_device,
+            pin_memory=pinned,
+        )
+        if async_metadata:
+            idx_tensor = idx_tensor.to(device=device, non_blocking=True)
+            weight_tensor = weight_tensor.to(device=device, non_blocking=True)
         pos_embeds = self.pos_embed(idx_tensor).to(device) * weight_tensor[:, :, None]
         patch_pos_embeds = pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
 
@@ -530,7 +549,12 @@ class Qwen3_5MoeVisionModel(PreTrainedModel):
         return patch_pos_embeds
 
     def forward(
-        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        async_metadata: bool = False,
+        **kwargs,
     ) -> torch.Tensor:
         """
         Args:
@@ -544,7 +568,11 @@ class Qwen3_5MoeVisionModel(PreTrainedModel):
         """
         hidden_states = self.patch_embed(hidden_states)
 
-        pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
+        pos_embeds = (
+            self.fast_pos_embed_interpolate(grid_thw, async_metadata=True)
+            if async_metadata
+            else self.fast_pos_embed_interpolate(grid_thw)
+        )
         hidden_states = hidden_states + pos_embeds
 
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
@@ -555,17 +583,18 @@ class Qwen3_5MoeVisionModel(PreTrainedModel):
         emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
         position_embeddings = (emb.cos(), emb.sin())
 
-        cu_seqlens = torch.repeat_interleave(
-            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-        ).cumsum(
-            dim=0,
-            # Select dtype based on the following factors:
-            #  - FA2 requires that cu_seqlens_q must have dtype int32
-            #  - torch.onnx.export requires that cu_seqlens_q must have same dtype as grid_thw
-            # See https://github.com/huggingface/transformers/pull/34852 for more information
-            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
-        )
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        if cu_seqlens is None:
+            cu_seqlens = torch.repeat_interleave(
+                grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+            ).cumsum(
+                dim=0,
+                # Select dtype based on the following factors:
+                #  - FA2 requires that cu_seqlens_q must have dtype int32
+                #  - torch.onnx.export requires that cu_seqlens_q must have same dtype as grid_thw
+                # See https://github.com/huggingface/transformers/pull/34852 for more information
+                dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+            )
+            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         for blk in self.blocks:
             hidden_states = blk(

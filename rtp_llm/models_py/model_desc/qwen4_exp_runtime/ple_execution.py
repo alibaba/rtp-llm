@@ -694,12 +694,12 @@ class PLEExecution:
 
 
 def ple_input_ids(inputs: PyModelInputs, eos_token_id) -> torch.Tensor:
-    """Text ids for the n-gram hash; non-text positions hash as EOS.
+    """Use vocabulary IDs for PLE, independently of visual cache hashes."""
+    from rtp_llm.multimodal.token_plan import semantic_token_ids
 
-    Mirrors upstream: ``ple_input_ids = where(text_mask, ids, eos_token_id)``,
-    so image-placeholder positions contribute the EOS id to the n-gram
-    history instead of an arbitrary vision token id.
-    """
+    mm = getattr(inputs, "multimodal_inputs", None)
+    if mm is not None and getattr(mm, "mm_extra_input", None):
+        return semantic_token_ids(inputs)
     input_ids = inputs.input_ids
     embedding_inputs = getattr(inputs, "embedding_inputs", None)
     text_mask = getattr(embedding_inputs, "text_tokens_mask", None)
@@ -710,6 +710,11 @@ def ple_input_ids(inputs: PyModelInputs, eos_token_id) -> torch.Tensor:
             "qwen4_exp PLE text token mask size does not match input ids: "
             f"{text_mask.numel()} != {input_ids.numel()}"
         )
+    features = getattr(mm, "multimodal_features", None)
+    if features is not None and not features:
+        # Native text/decode batches have no visual rows. Keep size validation
+        # above, but do not read their all-text device mask back to the host.
+        return input_ids
     text_flags = text_mask.bool()
     if bool(text_flags.all().item()):
         return input_ids

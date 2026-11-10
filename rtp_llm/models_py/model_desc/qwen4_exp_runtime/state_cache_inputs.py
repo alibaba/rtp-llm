@@ -6,12 +6,15 @@ from typing import Any
 import torch
 
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
+    INDEXER_ROPE_POS_TAG,
     INDEXER_STATE_TAG,
     PLE_NGRAM_CTX_TAG,
     PLE_STATE_TAG,
 )
 
-_STATE_TAGS = frozenset((PLE_STATE_TAG, PLE_NGRAM_CTX_TAG, INDEXER_STATE_TAG))
+_STATE_TAGS = frozenset(
+    (PLE_STATE_TAG, PLE_NGRAM_CTX_TAG, INDEXER_STATE_TAG, INDEXER_ROPE_POS_TAG)
+)
 
 
 class _GraphStateInputs:

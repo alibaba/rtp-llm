@@ -59,15 +59,14 @@ class Qwen4Renderer(Qwen35Renderer):
         )
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        # QSA side caches currently retain text positions only. Reject before
-        # image preprocessing/RPC so a request cannot stop the backend loop.
         for message in request.messages:
             if isinstance(message.content, list) and any(
-                part.type != "text" for part in message.content
+                part.type not in ("text", "image_url", "video_url")
+                for part in message.content
             ):
                 raise FtRuntimeException(
                     ExceptionType.UNSUPPORTED_OPERATION,
-                    "Qwen3.8-Flash-Next QSA currently supports text inputs only",
+                    "Qwen3.8-Flash-Next supports text, image_url and video_url inputs",
                 )
         return super().render_chat(request)
 

@@ -140,16 +140,63 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         )
         cls.addClassCleanup(cls.server.stop_server)
         if not cls.server.start_server(
-            model_path=cls.model_path, model_type="qwen4_exp", timeout=3600
+            model_path=cls.model_path, model_type="qwen4_exp", timeout=900
         ):
+            cls.dump_startup_failure()
             raise RuntimeError("Qwen4 server did not become healthy")
-        response = cls.session.post(
-            f"http://127.0.0.1:{cls.server.port}/set_log_level",
-            json={"log_level": "DEBUG"},
-            timeout=10,
-        )
-        response.raise_for_status()
         cls.addClassCleanup(cls.write_coverage)
+
+    @classmethod
+    def dump_startup_failure(cls):
+        """Keep the live server ranks' stacks before the outer watchdog kills them."""
+        import shutil
+        import subprocess
+
+        import psutil
+        from smoke.gpu_diagnostics import dump_gpu_state
+
+        dump_gpu_state(
+            failure_context="Qwen4 server did not become healthy",
+            log_path=str(cls.output_dir / "gpu_state_server_failed.log"),
+            server_pid=cls.server.server_pid,
+        )
+        debugger = shutil.which("gdb")
+        pid = cls.server.server_pid
+        if debugger is None or pid is None:
+            return
+        try:
+            children = psutil.Process(pid).children(recursive=True)
+            log = Path(cls.server.log_file_path).read_text(errors="replace")
+            ranks = set(re.findall(r"\[(\d+):\d+\] \[RANK [01]\]", log))
+            for process in children:
+                if str(process.pid) not in ranks or not process.is_running():
+                    continue
+                with (cls.output_dir / f"startup_rank_{process.pid}.stack").open(
+                    "w"
+                ) as output:
+                    subprocess.run(
+                        [
+                            debugger,
+                            "-batch",
+                            "-nx",
+                            "-ex",
+                            "set pagination off",
+                            "-ex",
+                            f"attach {process.pid}",
+                            "-ex",
+                            "thread apply all bt 20",
+                            "-ex",
+                            "py-bt",
+                            "-ex",
+                            "detach",
+                        ],
+                        stdout=output,
+                        stderr=subprocess.STDOUT,
+                        timeout=45,
+                        check=False,
+                    )
+        except (OSError, psutil.Error, subprocess.TimeoutExpired):
+            logging.exception("Could not collect live Qwen4 startup stacks")
 
     @classmethod
     def write_coverage(cls):
@@ -332,11 +379,25 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
             self.mtp_enabled,
         )
 
+    def set_log_level(self, level):
+        response = self.session.post(
+            f"http://127.0.0.1:{self.server.port}/set_log_level",
+            json={"log_level": level},
+            timeout=10,
+        )
+        response.raise_for_status()
+
     def test_05_graph_execution_mode(self):
         # Observe this request only: warmup and earlier scenarios cannot satisfy it.
         offset = Path(self.server.log_file_path).stat().st_size
         first, _ = self.long_prompts()
-        self.request("graph_probe", first, False)
+        # Only the replay observation needs DEBUG; all correctness and timing
+        # scenarios run at INFO without the debug kernel synchronization.
+        self.set_log_level("DEBUG")
+        try:
+            self.request("graph_probe", first, False)
+        finally:
+            self.set_log_level("INFO")
         with Path(self.server.log_file_path).open("rb") as reader:
             reader.seek(offset)
             runtime = reader.read().decode(errors="replace")
@@ -352,41 +413,171 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         else:
             self.assertFalse(replay, "Eager target replayed an MTP CUDA graph")
 
-    def test_06_generation_after_rejected_multimodal_request(self):
-        from rtp_llm.config.exceptions import ExceptionType
+    @staticmethod
+    def image_part(color):
+        import base64
+        from io import BytesIO
 
-        response = self.session.post(
-            self.url("/v1/chat/completions"),
-            json={
+        from PIL import Image
+
+        buffer = BytesIO()
+        Image.new("RGB", (384, 256), color).save(buffer, format="PNG")
+        return {
+            "type": "image_url",
+            "image_url": {
+                "url": "data:image/png;base64,"
+                + base64.b64encode(buffer.getvalue()).decode()
+            },
+        }
+
+    def media_request(
+        self, label, parts, question, *, reuse=False, max_tokens=64, ignore_eos=False
+    ):
+        return self.post(
+            label,
+            "/v1/chat/completions",
+            {
                 "model": "qwen4_exp",
                 "messages": [
                     {
                         "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": "https://example.invalid/image.png"
-                                },
-                            }
-                        ],
+                        "content": [*parts, {"type": "text", "text": question}],
                     }
                 ],
-                "max_tokens": 1,
+                "enable_thinking": False,
+                "temperature": 0,
+                "max_tokens": max_tokens,
+                "extra_configs": {"reuse_cache": reuse, "ignore_eos": ignore_eos},
             },
-            timeout=30,
         )
-        (self.output_dir / "multimodal_rejection.json").write_text(response.text)
-        self.assertFalse(response.ok, response.text)
-        error = response.json()
+
+    @staticmethod
+    def answer(actual):
+        return actual["choices"][0]["message"]["content"].strip().upper()
+
+    def test_06_single_image_and_text_regression(self):
+        for color in ("red", "blue"):
+            actual = self.media_request(
+                color,
+                [self.image_part(color)],
+                "What is the color of this image? Answer with one English color word only.",
+            )
+            self.assertEqual(self.answer(actual).strip(". "), color.upper())
+        self.check_chat_goldens("after_images")
+
+    def test_07_multi_image_order_and_prefix_restore(self):
+        question = "Give the colors of the first and second images, in that order. Answer only: COLOR, COLOR."
+        parts = [self.image_part("red"), self.image_part("blue")]
+        reference = self.media_request("two_images", parts, question)
         self.assertEqual(
-            error["error_code"], int(ExceptionType.UNSUPPORTED_OPERATION), error
+            re.findall(r"RED|BLUE", self.answer(reference)), ["RED", "BLUE"]
         )
-        self.assertIn(
-            "Qwen3.8-Flash-Next QSA currently supports text inputs only",
-            error["message"],
+        self.media_request("cache_fill", parts, question, reuse=True, max_tokens=1)
+        reused = self.media_request("cache_hit", parts, question, reuse=True)
+        self.assertEqual(self.answer(reference), self.answer(reused))
+        self.assertGreaterEqual(reused["aux_info"]["reuse_len"], PAGE_SIZE)
+        reversed_result = self.media_request(
+            "reverse_images", parts[::-1], question, reuse=True
         )
-        self.check_chat_goldens("after_rejected_multimodal_request")
+        self.assertEqual(
+            re.findall(r"RED|BLUE", self.answer(reversed_result)), ["BLUE", "RED"]
+        )
+
+    def test_08_video_temporal_order(self):
+        import av
+        import numpy as np
+
+        path = self.output_dir / "red_then_blue.mp4"
+        with av.open(str(path), "w") as container:
+            stream = container.add_stream("libx264", rate=4)
+            stream.width = stream.height = 256
+            stream.pix_fmt = "yuv420p"
+            for color in ([255, 0, 0], [0, 0, 255]):
+                pixels = np.full((256, 256, 3), color, dtype=np.uint8)
+                for _ in range(8):
+                    frame = av.VideoFrame.from_ndarray(pixels, format="rgb24")
+                    for packet in stream.encode(frame):
+                        container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+        actual = self.media_request(
+            "video",
+            [{"type": "video_url", "video_url": {"url": str(path)}}],
+            "Which color appears first and which appears last? Answer only: COLOR, COLOR.",
+        )
+        self.assertEqual(re.findall(r"RED|BLUE", self.answer(actual)), ["RED", "BLUE"])
+
+    def test_09_visual_context_exceeds_qsa_budget(self):
+        line = "The archive records books, maps, letters, and journeys.\n"
+        text = line
+        budget = int(self.text_config["indexer_budget"])
+        while (
+            len(self.tokenizer.encode(text, add_special_tokens=False))
+            <= budget + PAGE_SIZE
+        ):
+            text += line
+        text += (
+            "\nRepeat the single English word for the image background color 200 times, "
+            "separated by spaces. Output no explanation or other text."
+        )
+        parts = [self.image_part("red")]
+        actual = self.media_request(
+            "visual_long", parts, text, max_tokens=OUTPUT_TOKENS, ignore_eos=True
+        )
+        self.assertEqual(set(self.answer(actual).split()), {"RED"})
+        self.assertGreater(actual["aux_info"]["input_len"], budget)
+        self.assertEqual(actual["aux_info"]["output_len"], OUTPUT_TOKENS)
+        if self.mtp_enabled:
+            self.assertGreater(
+                sum(actual["aux_info"]["speculative_accepted_tokens_per_pos"]), 0
+            )
+        self.media_request("visual_long_fill", parts, text, reuse=True, max_tokens=1)
+        reused = self.media_request(
+            "visual_long_hit",
+            parts,
+            text,
+            reuse=True,
+            max_tokens=OUTPUT_TOKENS,
+            ignore_eos=True,
+        )
+        self.assertGreaterEqual(reused["aux_info"]["reuse_len"], PAGE_SIZE)
+        self.assertEqual(self.answer(reused), self.answer(actual))
+
+    def test_10_concurrent_text_image_and_repeated_new_media(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+
+        red = self.image_part("red")
+        question = (
+            "What is the color of this image? Answer with one English color word only."
+        )
+        # Make the image ready before overlapping its request with long text.
+        self.media_request("warm_red", [red], question)
+        reference = self.uncached_baseline()
+        prompt, _ = self.long_prompts()
+        barrier = Barrier(2)
+
+        def text_request():
+            barrier.wait(timeout=30)
+            return self.request("concurrent_text", prompt, False)
+
+        def image_request():
+            barrier.wait(timeout=30)
+            return self.media_request("concurrent_image", [red], question)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            text = pool.submit(text_request)
+            image = pool.submit(image_request)
+            self.assert_same_tokens(reference, text.result(timeout=600))
+            self.assertEqual(self.answer(image.result(timeout=600)).strip(". "), "RED")
+        actual = self.media_request(
+            "repeated_red_new_green",
+            [red, self.image_part("green")],
+            "Give the colors of the first and second images, in that order. Answer only: COLOR, COLOR.",
+        )
+        self.assertEqual(
+            re.findall(r"RED|GREEN", self.answer(actual)), ["RED", "GREEN"]
+        )
 
 
 if __name__ == "__main__":

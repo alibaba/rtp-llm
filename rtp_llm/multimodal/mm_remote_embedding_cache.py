@@ -5,6 +5,7 @@ removes a shared object: KVMeta V1 has no read lease for online reclamation.
 """
 
 import concurrent.futures
+import json
 import logging
 import threading
 import time
@@ -17,6 +18,7 @@ from rtp_llm.multimodal.kvcm.tensor_object import (
     plan_object,
     unpack_object,
 )
+from rtp_llm.multimodal.token_plan import MMTokenPlan
 
 
 class MMRemoteEmbeddingCache:
@@ -81,8 +83,17 @@ class MMRemoteEmbeddingCache:
         if entry.pool_owners or entry.result is None or entry.error is not None:
             return
         try:
+            result = entry.result
+            if len(result) == 4 and isinstance(result[3], MMTokenPlan):
+                # Keep the bounded, non-executable object format unchanged.
+                result = (
+                    *result[:3],
+                    json.dumps(
+                        (result[3].token_ids, result[3].spans), separators=(",", ":")
+                    ),
+                )
             plan = plan_object(
-                entry.result,
+                result,
                 devices=entry.original_devices,
                 max_bytes=self.max_object_bytes,
             )
@@ -161,8 +172,13 @@ class MMRemoteEmbeddingCache:
             value = unpack_object(
                 buffer, max_bytes=self.max_object_bytes, cuda_device=self.cuda_device
             )
-            if not isinstance(value, (list, tuple)) or len(value) not in (2, 3):
+            if not isinstance(value, (list, tuple)) or len(value) not in (2, 3, 4):
                 raise ValueError("remote object is not a multimodal result")
+            if len(value) == 4:
+                tokens, spans = json.loads(value[3])
+                token_plan = MMTokenPlan(tokens, [tuple(span) for span in spans])
+                token_plan.validate(value[0])
+                value = (*value[:3], token_plan)
             self._count("hit")
             return value
         except concurrent.futures.TimeoutError:

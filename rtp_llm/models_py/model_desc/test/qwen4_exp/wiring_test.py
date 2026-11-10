@@ -9,6 +9,7 @@ from rtp_llm.config.qwen4_exp_config import Qwen4ModelConfig as ModelConfig
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
+    INDEXER_ROPE_POS_TAG,
     INDEXER_STATE_TAG,
     PLE_NGRAM_CTX_TAG,
     PLE_STATE_TAG,
@@ -408,6 +409,9 @@ class Qwen4ExpFmhaRoutingTest(TestCase):
             "full": main_inputs,
             INDEXER_KV_TAG: kv_inputs,
             INDEXER_STATE_TAG: state_inputs,
+            # Target and draft share a global input map; the draft layer does
+            # not own the target's coordinate state in the cache topology.
+            INDEXER_ROPE_POS_TAG: object(),
         }
 
         context = model._qsa_runtime_context(
@@ -421,6 +425,8 @@ class Qwen4ExpFmhaRoutingTest(TestCase):
         self.assertEqual(context.indexer_state_cache.tag, INDEXER_STATE_TAG)
         self.assertIs(context.indexer_state_inputs, state_inputs)
         self.assertTrue(context.is_mtp_draft)
+        self.assertIsNone(context.position_state_cache)
+        self.assertIsNone(context.position_state_inputs)
 
 
 class Qwen4ExpSharedHCStorageTest(TestCase):

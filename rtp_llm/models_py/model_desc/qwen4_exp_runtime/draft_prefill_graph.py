@@ -144,8 +144,9 @@ class DraftPrefillGraphReplay(Mapping):
                     raise RuntimeError(
                         "QSA draft graph live row resolves to an unallocated or out-of-range physical block"
                     )
-        # The raw-key ring has no historical position axes. Prove the text
-        # position contract before generating canonical positions in the graph.
+        # The draft uses logical Base-RoPE coordinates. The target transports
+        # MRoPE coordinates, which differ after an image or timestamped frame;
+        # normalize this graph-owned buffer just as eager draft prefill does.
         transported = anchor.combo_position_ids
         if (
             transported is None
@@ -158,6 +159,16 @@ class DraftPrefillGraphReplay(Mapping):
             device="cpu",
             pin_memory=transported.is_cuda,
         ).to(device=transported.device, non_blocking=True)
+        canonical = torch.zeros_like(transported).reshape(
+            self.token_capacity, self.position_factor
+        )
+        canonical[: len(positions)] = expected_positions[:, None]
+        copied = set()
+        for value in groups.values():
+            target = value.combo_position_ids
+            if target.data_ptr() not in copied:
+                target.copy_(canonical.reshape_as(target))
+                copied.add(target.data_ptr())
         if state_geometry is None:
             raise RuntimeError("QSA draft graph requires a raw-state cache group")
         table, pool_size, page_size = state_geometry

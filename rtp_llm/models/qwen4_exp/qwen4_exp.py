@@ -34,6 +34,12 @@ class Qwen4Exp(Qwen35Moe):
 
     _model_config_cls = Qwen4ModelConfig
 
+    @classmethod
+    def _parse_mm_config(cls, config_json, config):
+        super()._parse_mm_config(config_json, config)
+        if config.mm_model_config.is_multimodal:
+            config.mm_model_config.include_sep_tokens = True
+
     @staticmethod
     def get_weight_cls():
         return Qwen4ExpWeight

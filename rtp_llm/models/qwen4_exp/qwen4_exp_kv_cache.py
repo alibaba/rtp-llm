@@ -41,6 +41,7 @@ PLE_STATE_TAG = "ple_conv_state"
 PLE_NGRAM_CTX_TAG = "ple_ngram_ctx"
 INDEXER_KV_TAG = "indexer_kv"
 INDEXER_STATE_TAG = "indexer_state"
+INDEXER_ROPE_POS_TAG = "indexer_rope_positions"
 
 
 def _full_group_state_desc(desc: KVCacheSpecDesc) -> KVCacheSpecDesc:
@@ -246,6 +247,14 @@ def build_qwen4_exp_kv_cache_spec_descs(
                 indexer_kv_desc(indexer_head_dim, indexer_compress_ratio),
                 indexer_state_desc(indexer_head_dim, indexer_compress_ratio),
             ]
+            if not config.is_mtp and getattr(
+                getattr(config, "mm_model_config", None), "is_multimodal", False
+            ):
+                positions = indexer_state_desc(3, indexer_compress_ratio)
+                positions.tag = INDEXER_ROPE_POS_TAG
+                positions.dtype = DataType.TYPE_INT32
+                positions.entry_dtype = DataType.TYPE_INT32
+                layer_descs[layer_idx].append(positions)
     for layer in layer_descs:
         for desc in layer:
             desc.tp_transfer_mode = (

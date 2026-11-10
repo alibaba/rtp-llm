@@ -6,6 +6,24 @@ filegroup(
     ]),
 )
 
+py_library(
+    name = "mm_cache_test_store",
+    srcs = ["mm_cache_test_store.py"],
+    testonly = True,
+)
+
+py_test(
+    name = "qwen4_multimodal_test",
+    srcs = ["qwen4_multimodal_test.py"],
+    deps = [
+        ":mm_cache_test_store",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/model_desc/test/qwen4_exp:qsa_fixtures",
+    ],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
 py_test(
     name = "multimodal_image_load_test",
     srcs = [
@@ -144,7 +162,10 @@ py_library(
 py_test(
     name = "mm_remote_embedding_cache_test",
     srcs = ["mm_remote_embedding_cache_test.py"],
-    deps = [":process_engine_test_helpers"],
+    deps = [
+        ":mm_cache_test_store",
+        ":process_engine_test_helpers",
+    ],
     exec_properties = {"gpu": "A10_CU13"},
     tags = ["A10_CU13"],
 )

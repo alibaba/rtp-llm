@@ -109,6 +109,7 @@ def select_decode_tokens(
     get_frequency = getattr(indexer, "rope_inv_freq", None)
     frequency = get_frequency(rope_config) if callable(get_frequency) else None
     prepared = None
+    position_state = self.positions(ratio, checks)
     if graph_decode and self.is_mtp_draft:
         from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_decode_positions import (
             try_prepare_decode_positions,
@@ -117,7 +118,9 @@ def select_decode_tokens(
         prepared = try_prepare_decode_positions(
             sequence_lengths, position_ids, frequency, rope_config
         )
-    if prepared is not None:
+    if position_state is not None:
+        current_cos, current_sin = position_state.rope(rope_config)
+    elif prepared is not None:
         (
             current_cos,
             current_sin,
@@ -234,7 +237,7 @@ def select_decode_tokens(
 
     # Only rows that close a compression group consume these values. Build
     # one block-start RoPE row per request instead of [0, context_len).
-    if prepared is None:
+    if prepared is None and position_state is None:
         block_starts = sequence_lengths.to(torch.int64)
         block_starts = block_starts - block_starts.remainder(ratio)
         rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
@@ -245,6 +248,9 @@ def select_decode_tokens(
             device=raw_keys.device,
             inv_freq=frequency,
         )
+    if position_state is not None:
+        rope_cos, rope_sin = position_state.rope(rope_config, group=True)
+        position_state.stage()
     fused_writer = True
     if fused_writer:
         from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (

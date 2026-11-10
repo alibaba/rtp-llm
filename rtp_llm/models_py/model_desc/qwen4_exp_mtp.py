@@ -85,6 +85,51 @@ def normalize_mtp_prefill_positions(inputs, index_factor: int) -> None:
             copied.add(tensor.data_ptr())
 
 
+def normalize_mtp_decode_positions(inputs, index_factor: int) -> None:
+    """Keep draft decode in the logical Base-RoPE coordinates of its prompt KV.
+
+    Native stream positions retain the target's media-dependent MRoPE offset.
+    Build from live device lengths inside the captured forward so replay also
+    refreshes these positions without reading a device scalar on the host.
+    """
+    groups = get_attention_inputs_value(inputs)
+    values = tuple(groups.values()) if isinstance(groups, Mapping) else (groups,)
+    if not values or any(
+        value.is_prefill or value.is_target_verify for value in values
+    ):
+        return
+    anchor = values[0]
+    lengths = (
+        anchor.sequence_lengths_plus_1_device - 1
+        if anchor.is_cuda_graph
+        else anchor.sequence_lengths
+    )
+    if (
+        index_factor <= 0
+        or lengths.ndim != 1
+        or lengths.numel() != inputs.input_ids.numel()
+    ):
+        raise RuntimeError("MTP decode position geometry is invalid")
+    positions = lengths.to(
+        device=inputs.input_ids.device, dtype=torch.int32, non_blocking=True
+    ).repeat_interleave(index_factor)
+    tensors = [
+        inputs.combo_position_ids,
+        *(value.combo_position_ids for value in values),
+    ]
+    copied = set()
+    for tensor in tensors:
+        if (
+            tensor.dtype != torch.int32
+            or tensor.device != positions.device
+            or tensor.numel() != positions.numel()
+        ):
+            raise RuntimeError("MTP decode transported position geometry is invalid")
+        if tensor.data_ptr() not in copied:
+            tensor.copy_(positions.reshape_as(tensor))
+            copied.add(tensor.data_ptr())
+
+
 class Qwen4ExpMTPInputProjection(nn.Module):
     """Fuse one token embedding into every target hyper-connection branch."""
 
@@ -292,15 +337,27 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             norm_eps=model_config.layernorm_eps,
         )
 
+    def forward(self, inputs: PyModelInputs, fmha_impl=None):
+        normalize_mtp_decode_positions(
+            inputs, int(self.config.attn_config.rope_config.index_factor)
+        )
+        return super().forward(inputs, fmha_impl)
+
     def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         input_hiddens: Optional[torch.Tensor] = getattr(inputs, "input_hiddens", None)
         if not isinstance(input_hiddens, torch.Tensor) or not input_hiddens.numel():
             raise RuntimeError(
                 "qwen4_exp MTP requires hc_mult*hidden_size-wide target input_hiddens"
             )
-        # The MTP draft consumes text ids only; do not enter Qwen35's multimodal
-        # embedding injector from this override.
-        inputs_embeds = self.embed_tokens(inputs.input_ids)
+        from rtp_llm.models_py.model_desc.qwen3_next import Qwen35Model
+
+        # Inject the shifted prompt's visual rows before the draft projection.
+        mm = getattr(inputs, "multimodal_inputs", None)
+        inputs_embeds = (
+            Qwen35Model.word_embedding(self, inputs)
+            if mm is not None and len(mm.multimodal_features)
+            else self.embed_tokens(inputs.input_ids)
+        )
         return self.mtp_input_projection(inputs_embeds, input_hiddens)
 
     def _initial_hyper_states(self, hidden_states: torch.Tensor) -> torch.Tensor:

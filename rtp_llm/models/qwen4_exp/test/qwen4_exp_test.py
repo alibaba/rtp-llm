@@ -28,9 +28,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
 from rtp_llm.models.qwen4_exp.qwen4_exp_weight import Qwen4ExpWeight
 from rtp_llm.models.qwen4_exp.test.config_fixture import qwen4_config
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
-from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_mixin import (
-    Qwen3_5MoeMixin,
-)
+from rtp_llm.multimodal.multimodal_mixins.qwen4_exp_mixin import Qwen4ExpMixin
 from rtp_llm.openai.renderer_factory_register import (
     _renderer_factory,
     ensure_renderer_registered,
@@ -136,6 +134,7 @@ class Qwen4ExpTest(unittest.TestCase):
             ple_eos_token_id(self.config), self.config.special_tokens.eos_token_id
         )
         import torch
+
         from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpNGramEmbedding
 
         embedding = SimpleNamespace(eos_token_id=ple_eos_token_id(config))
@@ -472,7 +471,7 @@ class Qwen4ExpTest(unittest.TestCase):
             "qwen4_exp",
         )
         self.assertIs(Qwen4Exp.get_weight_cls(), Qwen4ExpWeight)
-        self.assertIs(get_multimodal_mixin_cls("qwen4_exp"), Qwen3_5MoeMixin)
+        self.assertIs(get_multimodal_mixin_cls("qwen4_exp"), Qwen4ExpMixin)
 
     def test_basic_config(self):
         config = self.config
@@ -549,6 +548,7 @@ class Qwen4ExpTest(unittest.TestCase):
     def test_multimodal_config(self):
         mm_config = self.config.mm_model_config
         self.assertTrue(mm_config.is_multimodal)
+        self.assertTrue(mm_config.include_sep_tokens)
         self.assertEqual(
             [list(pair) for pair in mm_config.mm_sep_tokens], [[248053, 248054]]
         )

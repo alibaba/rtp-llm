@@ -9,6 +9,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
 from rtp_llm.models_py.model_desc.qwen4_exp_mtp import (
     Qwen4ExpMTPInputProjection,
     Qwen4ExpMTPModel,
+    normalize_mtp_decode_positions,
     normalize_mtp_prefill_positions,
 )
 from rtp_llm.ops import HybridAttentionType
@@ -149,6 +150,63 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
                 torch.testing.assert_close(
                     shifted, torch.tensor([129, 130, 130], dtype=torch.int32)
                 )
+
+    def test_decode_removes_target_media_offset_without_scalar_reads(self):
+        for graph in (False, True):
+            with self.subTest(graph=graph):
+                groups = {
+                    tag: SimpleNamespace(
+                        is_prefill=False,
+                        is_target_verify=False,
+                        is_cuda_graph=graph,
+                        sequence_lengths=torch.tensor([137, 260], dtype=torch.int32),
+                        sequence_lengths_plus_1_device=torch.tensor(
+                            [138, 261], dtype=torch.int32
+                        ),
+                        combo_position_ids=torch.tensor(
+                            [40] * 3 + [70] * 3, dtype=torch.int32
+                        ),
+                    )
+                    for tag in ("full", "indexer_kv", "indexer_state")
+                }
+                inputs = SimpleNamespace(
+                    input_ids=torch.tensor([7, 8], dtype=torch.int32),
+                    attention_inputs=groups,
+                    combo_position_ids=groups["full"].combo_position_ids.clone(),
+                )
+                with patch.object(
+                    torch.Tensor, "item", side_effect=AssertionError("decode readback")
+                ):
+                    normalize_mtp_decode_positions(inputs, 3)
+                expected = torch.tensor([137] * 3 + [260] * 3, dtype=torch.int32)
+                torch.testing.assert_close(inputs.combo_position_ids, expected)
+                for value in groups.values():
+                    torch.testing.assert_close(value.combo_position_ids, expected)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_decode_graph_refreshes_logical_positions(self):
+        lengths = torch.tensor([138, 261], dtype=torch.int32, device="cuda")
+        positions = torch.zeros(6, dtype=torch.int32, device="cuda")
+        anchor = SimpleNamespace(
+            is_prefill=False,
+            is_target_verify=False,
+            is_cuda_graph=True,
+            sequence_lengths_plus_1_device=lengths,
+            combo_position_ids=positions,
+        )
+        inputs = SimpleNamespace(
+            input_ids=torch.zeros(2, dtype=torch.int32, device="cuda"),
+            combo_position_ids=positions,
+            attention_inputs={"full": anchor},
+        )
+        normalize_mtp_decode_positions(inputs, 3)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            normalize_mtp_decode_positions(inputs, 3)
+        for actual in ([152, 290], [200, 330]):
+            lengths.copy_(torch.tensor(actual, dtype=torch.int32, device="cuda"))
+            graph.replay()
+            torch.testing.assert_close(positions, (lengths - 1).repeat_interleave(3))
 
     def test_draft_graph_does_not_prepare_unused_gdn_metadata(self):
         model = SimpleNamespace(

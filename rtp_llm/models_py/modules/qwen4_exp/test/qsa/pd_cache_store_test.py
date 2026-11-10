@@ -91,7 +91,8 @@ class Qwen4PDCacheStoreTest(unittest.TestCase):
             for cache in caches[2:]:
                 cache.payload.fill_(17)
             publish_layer_side_caches(kv, 1, writers)
-        self.assertEqual(len(self.events), 4)
+        self.assertEqual(len(self.events), len(SIDE_TAGS))
+        self.assertCountEqual([tag for tag, _, _ in self.events], SIDE_TAGS)
         for planned_tag, actual_tag, snapshot in self.events:
             self.assertEqual(planned_tag, actual_tag)
             expected = 11 if actual_tag in {x.tag for x in caches[:2]} else 17

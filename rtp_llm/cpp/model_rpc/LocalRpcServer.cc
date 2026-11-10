@@ -425,10 +425,9 @@ ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                   
     try {
         output = QueryConverter::transQuery(&input_pb);
         const auto& model_type = maga_init_params_.model_config_.model_type;
-        if ((model_type == "qwen4_exp" || model_type == "qwen4_exp_mtp")
-            && ((output->multimodal_inputs && !output->multimodal_inputs->empty()) || output->v41_inputs)) {
+        if ((model_type == "qwen4_exp" || model_type == "qwen4_exp_mtp") && output->v41_inputs) {
             return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
-                             "Qwen3.8-Flash-Next QSA currently supports text inputs only");
+                             "Qwen3.8-Flash-Next requires ordinary image/video media inputs");
         }
         if (mm_processor_ != nullptr && (output->multimodal_inputs || output->v41_inputs)) {
             RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");

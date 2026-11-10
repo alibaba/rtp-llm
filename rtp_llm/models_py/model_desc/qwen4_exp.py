@@ -10,6 +10,7 @@ from rtp_llm.config.qwen4_exp_config import IndexerGeometry, ple_eos_token_id
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
+    INDEXER_ROPE_POS_TAG,
     INDEXER_STATE_TAG,
     PLE_NGRAM_CTX_TAG,
     PLE_STATE_TAG,
@@ -751,7 +752,13 @@ class Qwen4ExpModel(Qwen35Model):
     # `_attention_tag` sees more than one candidate and raises -- full-attention
     # layers own three regions once the indexer is enabled.
     _side_region_tags = frozenset(
-        {PLE_STATE_TAG, PLE_NGRAM_CTX_TAG, INDEXER_KV_TAG, INDEXER_STATE_TAG}
+        {
+            PLE_STATE_TAG,
+            PLE_NGRAM_CTX_TAG,
+            INDEXER_KV_TAG,
+            INDEXER_STATE_TAG,
+            INDEXER_ROPE_POS_TAG,
+        }
     )
 
     def __init__(
@@ -1245,6 +1252,8 @@ class Qwen4ExpModel(Qwen35Model):
             raise RuntimeError(
                 "qwen4_exp QSA requires tag-local main/indexer cache inputs"
             )
+        is_draft = bool(getattr(self.config, "is_mtp", False))
+        has_positions = not is_draft and INDEXER_ROPE_POS_TAG in attention_inputs
         return Qwen4ExpQSARuntimeContext(
             main_cache=main_cache,
             main_inputs=main_inputs,
@@ -1258,8 +1267,16 @@ class Qwen4ExpModel(Qwen35Model):
             indexer_state_inputs=select_attention_inputs_for_tag(
                 attention_inputs, INDEXER_STATE_TAG
             ),
-            is_mtp_draft=bool(getattr(self.config, "is_mtp", False)),
+            is_mtp_draft=is_draft,
             metadata_cache=metadata_cache,
+            position_state_cache=(
+                self.kv_cache.get_layer_cache(layer_idx, INDEXER_ROPE_POS_TAG)
+                if has_positions
+                else None
+            ),
+            position_state_inputs=(
+                attention_inputs[INDEXER_ROPE_POS_TAG] if has_positions else None
+            ),
         )
 
     def _build_output_head(

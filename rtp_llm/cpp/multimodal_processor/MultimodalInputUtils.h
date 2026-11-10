@@ -34,6 +34,15 @@ inline torch::Tensor sliceMultimodalExtraInput(const torch::Tensor& extra_input,
                                                const torch::Tensor& feature,
                                                int64_t              token_start,
                                                int64_t              token_end) {
+    // A scalar int32 marks one token-plan segment. Flat sidecars retain the
+    // existing DeepStack layout, including integer-valued opaque inputs.
+    if (extra_input.dim() == 0 && extra_input.scalar_type() == torch::kInt32) {
+        RTP_LLM_CHECK_WITH_INFO(feature.dim() == 2 && feature.size(0) > 0 && feature.size(1) > 0,
+                                "semantic marker requires positive 2-D features");
+        RTP_LLM_CHECK_WITH_INFO(token_start >= 0 && token_start <= token_end && token_end <= feature.size(0),
+                                "semantic marker slice is outside feature tokens");
+        return extra_input;
+    }
     return sliceDeepstackExtraInput(reshapeMultimodalExtraInput(extra_input, feature), token_start, token_end);
 }
 

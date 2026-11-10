@@ -4,6 +4,7 @@
 #include <utility>
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/multimodal_processor/test/FakeMultimodalProcessor.h"
 
@@ -14,6 +15,18 @@ namespace rtp_llm {
 class MultimodalProcessorTest: public DeviceTestBase {};
 
 namespace {
+class PlannedMediaProcessor: public MultimodalProcessor {
+public:
+    PlannedMediaProcessor(): MultimodalProcessor(py::none(), MMModelConfig{true, {{10, 11}}, true}, 128) {}
+    MultimodalOutput output;
+
+private:
+    ErrorResult<MultimodalOutput>
+    MultimodalEmbedding(const std::vector<MultimodalInput>, std::string, int64_t, grpc::ServerContext*) override {
+        return MultimodalOutput(output);
+    }
+};
+
 class PreparedV41Processor: public FakeMultimodalProcessor {
 public:
     PreparedV41Processor(): FakeMultimodalProcessor(py::none(), {}, false, 32) {}
@@ -53,6 +66,102 @@ std::shared_ptr<GenerateInput> preparedV41Input() {
     return input;
 }
 }  // namespace
+
+TEST_F(MultimodalProcessorTest, TokenPlanExpandsFrameTextAndPreservesSemanticSidecars) {
+    PlannedMediaProcessor processor;
+    processor.output.mm_features       = {torch::ones({2, 4}), torch::ones({3, 4})};
+    processor.output.mm_feature_hashes = std::vector<torch::Tensor>{torch::tensor({101, 102}, torch::kInt32),
+                                                                    torch::tensor({103, 104, 105}, torch::kInt32)};
+    processor.output.mm_extra_input =
+        std::vector<torch::Tensor>{torch::full({}, 21, torch::kInt32), torch::full({}, 21, torch::kInt32)};
+    processor.output.token_plans = {{{55, 10, 21, 21, 11, 56, 10, 21, 21, 21, 11}, {{2, 2}, {7, 3}}}};
+    auto input                   = std::make_shared<GenerateInput>();
+    input->input_ids             = torch::tensor({3, 10, 21, 11, 4}, torch::kInt32);
+    input->multimodal_inputs     = std::vector<MultimodalInput>{MultimodalInput("video", 2)};
+    ASSERT_TRUE(processor.updateMultimodalFeatures(input).ok());
+    EXPECT_TRUE(torch::equal(input->input_ids,
+                             torch::tensor({3, 55, 10, 101, 102, 11, 56, 10, 103, 104, 105, 11, 4}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(*input->mm_locs, torch::tensor({3, 8}, torch::kInt32)));
+    EXPECT_TRUE(
+        torch::equal(*input->text_tokens_mask, torch::tensor({1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(input->mm_extra_input->at(1), torch::full({}, 21, torch::kInt32)));
+    EXPECT_EQ(input->multimodalLengths(), (std::map<int, int>{{2, 5}}));
+}
+
+TEST_F(MultimodalProcessorTest, ExtraInputSlicesPreserveLegacyIntegersAndScalarSemanticMarkers) {
+    auto feature = torch::ones({5, 4});
+    auto opaque = torch::arange(40, torch::kInt64);
+    auto expected = opaque.reshape({2, 5, 4}).slice(1, 1, 3).contiguous().reshape({-1});
+    EXPECT_TRUE(torch::equal(sliceMultimodalExtraInput(opaque, feature, 1, 3), expected));
+    auto marker = torch::full({}, 21, torch::kInt32);
+    auto sliced = sliceMultimodalExtraInput(marker, feature, 1, 3);
+    EXPECT_EQ(sliced.dim(), 0);
+    EXPECT_TRUE(torch::equal(sliced, marker));
+}
+
+#if USING_CUDA
+TEST_F(MultimodalProcessorTest, TokenPlanCudaFramesAreReadyOnPinnedCpu) {
+    for (bool strided : {false, true}) {
+        SCOPED_TRACE(strided);
+        PlannedMediaProcessor processor;
+        auto host = torch::arange(10 * 4096, torch::kFloat32).reshape({10, 4096});
+        auto gpu  = host.to(torch::kCUDA);
+        const auto step = strided ? 2 : 1;
+        auto first  = host.slice(0, 0, 2 * step, step);
+        auto second = host.slice(0, 2 * step, 5 * step, step);
+        processor.output.mm_features = {gpu.slice(0, 0, 2 * step, step), gpu.slice(0, 2 * step, 5 * step, step)};
+        processor.output.mm_feature_hashes = std::vector<torch::Tensor>{torch::tensor({101, 102}, torch::kInt32),
+                                                                       torch::tensor({103, 104, 105}, torch::kInt32)};
+        processor.output.token_plans = {{{10, 21, 21, 11, 10, 21, 21, 21, 11}, {{1, 2}, {5, 3}}}};
+        auto input = std::make_shared<GenerateInput>();
+        input->input_ids = torch::tensor({3, 10, 21, 11, 4}, torch::kInt32);
+        input->multimodal_inputs = std::vector<MultimodalInput>{MultimodalInput("video", 2)};
+        ASSERT_TRUE(processor.updateMultimodalFeatures(input).ok());
+        const auto& features = *input->multimodal_features;
+        ASSERT_EQ(features.size(), 2);
+        EXPECT_TRUE(features[0].is_pinned());
+        EXPECT_TRUE(features[1].is_pinned());
+        EXPECT_TRUE(torch::equal(features[0], first));
+        EXPECT_TRUE(torch::equal(features[1], second));
+        EXPECT_TRUE(processor.output.mm_features[0].is_cuda());
+    }
+}
+#endif
+
+TEST_F(MultimodalProcessorTest, InvalidTokenPlansFailBeforeReplacingInput) {
+    for (const std::string invalid : {"negative", "length", "overlap", "missing", "token"}) {
+        PlannedMediaProcessor processor;
+        processor.output.mm_features = {torch::ones({2, 4})};
+        processor.output.token_plans = {{{10, 20, 20, 11}, {{1, 2}}}};
+        auto& plan                   = processor.output.token_plans.front();
+        if (invalid == "negative")
+            plan.spans[0].first = -1;
+        if (invalid == "length")
+            plan.spans[0].second = 3;
+        if (invalid == "overlap")
+            plan.spans.push_back({1, 2});
+        if (invalid == "missing")
+            plan.spans.clear();
+        if (invalid == "token")
+            plan.token_ids[0] = -1;
+        auto input               = std::make_shared<GenerateInput>();
+        input->input_ids         = torch::tensor({3, 10, 20, 11, 4}, torch::kInt32);
+        auto original            = input->input_ids.clone();
+        input->multimodal_inputs = std::vector<MultimodalInput>{MultimodalInput("image")};
+        EXPECT_FALSE(processor.updateMultimodalFeatures(input).ok()) << invalid;
+        EXPECT_TRUE(torch::equal(input->input_ids, original));
+    }
+}
+
+TEST_F(MultimodalProcessorTest, SemanticMarkerSlicesValidateFeatureBounds) {
+    auto features = torch::zeros({5, 4});
+    auto marker   = torch::full({}, 21, torch::kInt32);
+    EXPECT_TRUE(torch::equal(sliceMultimodalExtraInput(marker, features, 2, 4), marker));
+    EXPECT_THROW(sliceMultimodalExtraInput(marker, features, -1, 4), std::exception);
+    EXPECT_THROW(sliceMultimodalExtraInput(marker, features, 4, 2), std::exception);
+    EXPECT_THROW(sliceMultimodalExtraInput(marker, features, 2, 6), std::exception);
+    EXPECT_THROW(sliceMultimodalExtraInput(marker, torch::zeros({0, 4}), 0, 0), std::exception);
+}
 
 TEST_F(MultimodalProcessorTest, V41PreparedMetadataPreservesImagesAndTextOnlyRequests) {
     PreparedV41Processor processor;

@@ -1,12 +1,11 @@
-"""Restricted Qwen4 QSA side-cache runtime.
+"""Qwen4 QSA side-cache runtime.
 
 This module wires pure prefill, page-aligned prefix reuse, MTP-draft incremental prefill,
 ordinary single-token decode and bounded speculative target verification into
-the independent ``indexer_kv`` and ``indexer_state`` pools. Decode is
-deliberately limited to text-only MRoPE, whose three current position axes all
-equal ``sequence_lengths``.  The side state stores raw keys but no historical
-MRoPE positions, so accepting a multimodal/non-linear position stream would
-make a compressed block that crosses the prefill/decode boundary incorrect.
+the independent ``indexer_kv`` and ``indexer_state`` pools. Multimodal main
+models also retain exact MRoPE coordinates in ``indexer_rope_positions`` so
+compression groups crossing prefill/decode boundaries use their first token's
+coordinates. Logical cache rows remain independent of those coordinates.
 
 Target verification may overwrite the uncommitted physical tail without an
 accepted-length callback only when its width is at most one compression group.
@@ -53,6 +52,9 @@ class Qwen4ExpQSARuntimeContext:
     indexer_state_inputs: PyAttentionInputs
     is_mtp_draft: bool = False
     metadata_cache: dict | None = field(default=None, repr=False, compare=False)
+    position_state_cache: LayerKVCache | None = None
+    position_state_inputs: PyAttentionInputs | None = None
+    _position_state: Any = field(default=None, init=False, repr=False, compare=False)
     _side_cache_undo: IndexerCacheUndo | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -103,6 +105,8 @@ class Qwen4ExpQSARuntimeContext:
 
     def rollback_side_cache(self) -> None:
         """Restore one failed QSA side write and make rollback idempotent."""
+        if self._position_state is not None:
+            self._position_state.rollback()
         undo = self._side_cache_undo
         if undo is None:
             return
@@ -120,6 +124,17 @@ class Qwen4ExpQSARuntimeContext:
                 "qwen4_exp QSA has no active side-cache transaction to finalize"
             )
         object.__setattr__(self, "_side_cache_undo", None)
+
+    def positions(self, ratio, checks=None):
+        if self.position_state_cache is None:
+            return None
+        if self._position_state is None:
+            from .qsa_position_state import QSAPositionState
+
+            object.__setattr__(self, "_position_state", QSAPositionState(self, ratio))
+        if checks is not None:
+            self._position_state.add_checks(checks)
+        return self._position_state
 
     def _target_verify_enabled(self) -> bool:
         all_inputs = (

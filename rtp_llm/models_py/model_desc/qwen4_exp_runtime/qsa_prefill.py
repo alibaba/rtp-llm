@@ -136,6 +136,7 @@ def write_prefill_indexer_cache(
             f"{token_count} tokens"
         )
     positions = position_ids.reshape(token_count, index_factor)
+    position_state = self.positions(ratio)
     max_len = max(lengths)
     rotary_dim = int(rope_config.dim)
     rope_cos = torch.zeros(
@@ -179,6 +180,16 @@ def write_prefill_indexer_cache(
         rope_cos[request_idx, :seq_len].copy_(cos)
         rope_sin[request_idx, :seq_len].copy_(sin)
         offset = end
+
+    if position_state is not None:
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
+
+        checks = DeviceChecks()
+        if position_state.add_checks(checks):
+            # Cold prefill can validate other tables using CPU mirrors. Only
+            # this new tag needs a device verdict, shared by all QSA layers.
+            checks.verify()
+        position_state.stage()
 
     # The fused prefill writer requires allocated pages for every request.
     # Fake/warmup batches use the transactional writer's row-level padding mask.
@@ -578,6 +589,9 @@ def _incremental_prefill_selection(
         raise RuntimeError(
             f"qwen4_exp QSA {label} paged scoring requires " "CUDA tensors"
         )
+    position_state = self.positions(int(plan.ratio))
+    if position_state is not None:
+        position_state.stage()
     triton_draft_window = (
         draft
         and max(plan.lengths) <= 4

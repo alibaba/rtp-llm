@@ -64,6 +64,14 @@ private:
                     mm_features.emplace_back(convertPyObjectToTensor(emb));
                 }
                 mm_embedding_res.mm_features = mm_features;
+                if (py::hasattr(res, "token_plans")) {
+                    for (auto item : res.attr("token_plans")) {
+                        MultimodalTokenPlan plan;
+                        plan.token_ids = item.attr("token_ids").cast<std::vector<int32_t>>();
+                        plan.spans     = item.attr("spans").cast<std::vector<std::pair<int32_t, int32_t>>>();
+                        mm_embedding_res.token_plans.push_back(std::move(plan));
+                    }
+                }
                 if (py::hasattr(res, "feature_hashes") && !res.attr("feature_hashes").is_none()) {
                     std::vector<torch::Tensor> hashes;
                     for (auto& value : convertPyObjectToVec(res.attr("feature_hashes"))) {

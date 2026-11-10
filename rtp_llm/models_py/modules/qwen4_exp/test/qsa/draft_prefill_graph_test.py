@@ -174,15 +174,32 @@ class DraftPrefillGraphTest(unittest.TestCase):
             hook.prepare_cuda_graph(groups)
         delegate.prepare_cuda_graph.assert_not_called()
 
+    def test_replay_canonicalizes_transported_media_positions_in_place(self):
+        hook, groups, delegate = self._replay()
+        anchor = groups["full"]
+        storage = anchor.combo_position_ids.data_ptr()
+        for prefixes in ([7, 127, 0], [5, 125, 0]):
+            anchor.prefix_lengths.copy_(torch.tensor(prefixes, dtype=torch.int32))
+            anchor.combo_position_ids.fill_(999)
+            hook.prepare_cuda_graph(groups)
+            expected = [prefixes[0], *range(prefixes[1], prefixes[1] + 4)] + [0] * 7
+            torch.testing.assert_close(
+                anchor.combo_position_ids,
+                torch.tensor(expected, dtype=torch.int32).repeat_interleave(3),
+            )
+            self.assertEqual(anchor.combo_position_ids.data_ptr(), storage)
+            delegate.prepare_cuda_graph.assert_called_once_with(anchor)
+            delegate.reset_mock()
+
     def test_replay_rejects_state_pages_positions_and_length_changes(self):
-        for defect in ("state", "position", "length", "cu"):
+        for defect in ("state", "position_capacity", "length", "cu"):
             with self.subTest(defect=defect):
                 hook, groups, delegate = self._replay()
                 anchor = groups["full"]
                 if defect == "state":
                     groups[INDEXER_STATE_TAG].kv_cache_block_id_device[1, 1] = 12
-                elif defect == "position":
-                    anchor.combo_position_ids[0] = 8
+                elif defect == "position_capacity":
+                    anchor.combo_position_ids = anchor.combo_position_ids[:-1]
                 elif defect == "length":
                     anchor.input_lengths[2] = 5
                 else:

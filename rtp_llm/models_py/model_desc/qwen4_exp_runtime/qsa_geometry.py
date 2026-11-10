@@ -192,7 +192,9 @@ def _draft_incremental_prefill_geometry(
         token_count=token_count,
         dtype=torch.bfloat16,
         device=device,
-        logical_positions=logical_positions,
+        logical_positions=(
+            logical_positions if self.position_state_cache is None else None
+        ),
         checks=checks,
     )
 
@@ -303,14 +305,18 @@ def _draft_incremental_prefill_geometry(
         checks=checks,
     )
 
-    block_starts = logical_positions - logical_positions.remainder(ratio)
-    rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
-        block_starts,
-        rope_config,
-        token_count=token_count,
-        dtype=torch.bfloat16,
-        device=device,
-    )
+    position_state = self.positions(ratio, checks)
+    if position_state is not None:
+        rope_cos, rope_sin = position_state.rope(rope_config, group=True)
+    else:
+        block_starts = logical_positions - logical_positions.remainder(ratio)
+        rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
+            block_starts,
+            rope_config,
+            token_count=token_count,
+            dtype=torch.bfloat16,
+            device=device,
+        )
 
     checks.verify()
     return IncrementalPrefillPlan(
@@ -480,7 +486,7 @@ def _target_verify_geometry(
             f"token, got {actual} for {token_count} tokens"
         )
     offsets = None
-    if not graph_target:
+    if not graph_target and self.position_state_cache is None:
         offsets = torch.arange(query_len, dtype=torch.int32, device=device)
         positions = positions.to(
             device=device, dtype=torch.int64, non_blocking=True
@@ -492,7 +498,7 @@ def _target_verify_geometry(
             "qwen4_exp QSA target-verify only supports contiguous text-only "
             "MRoPE whose three axes equal prefix+j",
         )
-    elif positions.device.type == "cpu":
+    elif positions.device.type == "cpu" and self.position_state_cache is None:
         # Graph replay cannot re-read device capture buffers per step without a
         # host sync, so validate host-resident positions for free here. Device
         # positions rely on the position generator's uniform-axis contract;
@@ -630,6 +636,7 @@ def _target_verify_geometry(
             checks=checks,
         )
 
+    self.positions(ratio, checks)
     checks.verify()
     return TargetVerifyPlan(
         **{

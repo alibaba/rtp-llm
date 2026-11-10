@@ -778,7 +778,7 @@ TEST(LocalRpcServerTest, AllocatorDumpAggregationRejectsMismatchedIds) {
     EXPECT_EQ(response.results_size(), 0);
 }
 
-TEST(LocalRpcServerTest, RejectsQwen4ImagesBeforeMultimodalProcessingOrScheduling) {
+TEST(LocalRpcServerTest, AllowsQwen4MediaPastAdmission) {
     for (const auto& model_type : {"qwen4_exp", "qwen4_exp_mtp"}) {
         TestLocalRpcServer server;
         server.setModelType(model_type);
@@ -788,8 +788,10 @@ TEST(LocalRpcServerTest, RejectsQwen4ImagesBeforeMultimodalProcessingOrSchedulin
         input.add_multimodal_inputs();
         std::shared_ptr<GenerateInput> output;
         const auto                     result = server.prepare(input, output);
-        EXPECT_EQ(result.code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
-        EXPECT_THAT(result.ToString(), HasSubstr("text inputs only"));
+        ASSERT_TRUE(result.ok()) << result.ToString();
+        ASSERT_NE(output, nullptr);
+        ASSERT_TRUE(output->multimodal_inputs.has_value());
+        EXPECT_EQ(output->multimodal_inputs->size(), 1);
     }
 }
 

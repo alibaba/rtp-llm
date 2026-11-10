@@ -126,10 +126,17 @@ class BackendRPCServerVisitor:
         self.sp_config = sp_config
         self.source_role = source_role
         self.mm_model_config = mm_model_config
+        # Qwen4 replaces a media marker with model-owned text and frame spans.
+        # Hash-only routing metadata cannot represent that replacement yet.
+        self._mm_token_plan_inputs = getattr(model_config, "model_type", None) in (
+            "qwen4_exp",
+            "qwen4_exp_mtp",
+        )
         self._mm_cache_routing = (
             vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
             and getattr(pd_sep_config, "role_type", None) == RoleType.FRONTEND
             and mm_model_config is not None
+            and not self._mm_token_plan_inputs
         )
         self.source_ip = str(getattr(server_config, "ip", "") or "")
         assert self.max_seq_len > 0
@@ -416,6 +423,23 @@ class BackendRPCServerVisitor:
             # Retain only compact int32 ids and segment offsets for the model RPC.
             # Drop the much larger metadata representation before scheduling.
             metadata = None
+        elif (
+            getattr(self, "_mm_token_plan_inputs", False)
+            and self.remote_vit
+            and self.mm_model_config is not None
+            and getattr(input, "mm_inputs", None)
+        ):
+            # Route on the safe text prefix, and leave original markers in the
+            # RPC input for the backend token plan. No hash-only ViT preflight.
+            token_ids, _ = multimodal_routing_tokens(
+                token_ids,
+                self.mm_model_config.mm_sep_tokens,
+                self.mm_model_config.include_sep_tokens,
+                [],
+                None,
+                self.max_seq_len,
+                compact=True,
+            )
         # Without ViT metadata, token_ids is only the text prefix before the
         # first media tag. Hashing the original media placeholder or tokens
         # after it would claim KV cache hits for content not yet expanded.

@@ -78,6 +78,15 @@ ErrorResult<MultimodalOutput> MultimodalPbConverter::inlineOutputFromPb(const Mu
 }
 
 ErrorInfo MultimodalPbConverter::featureHashesFromPb(const MultimodalOutputPB& pb, MultimodalOutput& output) {
+    output.token_plans.clear();
+    for (const auto& source : pb.token_plans()) {
+        MultimodalTokenPlan plan;
+        plan.token_ids.assign(source.token_ids().begin(), source.token_ids().end());
+        for (const auto& span : source.spans()) {
+            plan.spans.emplace_back(span.offset(), span.length());
+        }
+        output.token_plans.push_back(std::move(plan));
+    }
     if (!pb.has_multimodal_feature_hash()) {
         return ErrorInfo::OkStatus();
     }
