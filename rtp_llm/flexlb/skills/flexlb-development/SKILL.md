@@ -111,8 +111,8 @@ description: FlexLB 开发、缺陷修复、重构和代码审核规范。适用
 
 按改动风险验证，使用当前模块配置中的真实类名和测试工具：
 
-- 启用本技能且涉及 FlexLB Java 改动时，从仓库根目录运行
-  `python3 -m pre_commit run flexlb-java-conventions --hook-stage manual`，检查暂存内容。
+- FlexLB Java 检查在提交时运行。从仓库根目录提前检查暂存内容时，运行
+  `python3 -m pre_commit run flexlb-java-conventions --hook-stage pre-commit`，检查暂存内容。
 - FlexLB Java 钩子检查输入文件的成员顺序及本次新增、修改类的 Javadoc 是否存在、
   有用途或流程摘要并采用多行格式。无自定义行为的简单 record、纯字段 DTO 和简单枚举
   免于强制类注释；结构简单不保证语义自解释，隐含约束仍须审核。未触及的旧类不追溯补齐。
