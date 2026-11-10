@@ -328,7 +328,6 @@ message AuxInfoPB {
     int32 speculative_draft_rounds = 28;
     repeated int32 speculative_accepted_tokens_per_pos = 29;
     string generation_prefill_cuda_graph_status = 30;
-  bool decode_graph_replay = 31;
     int32 disk_reuse_len = 31;
     int32 prefill_disk_reuse_len = 32;
     int32 decode_disk_reuse_len = 33;
@@ -339,6 +338,7 @@ message AuxInfoPB {
     oneof speculative_verified_draft_tokens_presence {
         int64 speculative_verified_draft_tokens = 35;
     }
+    bool decode_graph_replay = 36;
 }
 
 message PromptLogitsOutputPB {
