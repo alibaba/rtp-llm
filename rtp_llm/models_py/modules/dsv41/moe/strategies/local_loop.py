@@ -151,13 +151,13 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             ew = {
                 "w1_w": stacked_routed["w1_w"][local_idx],
                 "w1_s": stacked_routed["w1_s"][local_idx],
-                "w1_s_gemm": self._W1_s_gemm[local_idx],
+                "w1_s_gemm": (None if self._W1_s_gemm is None else self._W1_s_gemm[local_idx]),
                 "w2_w": stacked_routed["w2_w"][local_idx],
                 "w2_s": stacked_routed["w2_s"][local_idx],
-                "w2_s_gemm": self._W2_s_gemm[local_idx],
+                "w2_s_gemm": (None if self._W2_s_gemm is None else self._W2_s_gemm[local_idx]),
                 "w3_w": stacked_routed["w3_w"][local_idx],
                 "w3_s": stacked_routed["w3_s"][local_idx],
-                "w3_s_gemm": self._W3_s_gemm[local_idx],
+                "w3_s_gemm": (None if self._W3_s_gemm is None else self._W3_s_gemm[local_idx]),
             }
             return Expert(
                 cfg.dim,
