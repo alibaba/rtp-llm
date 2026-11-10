@@ -561,6 +561,33 @@ TEST(XGrammarBackendTest, OrdinaryRuntimeFailureIsTransientAndNotCached) {
     EXPECT_EQ(backend->stats().invalid_cache_size, 0);
 }
 
+TEST(XGrammarBackendTest, MissingRuleHashIsUnsupportedAndCached) {
+    auto             backend = makeBackend();
+    std::atomic<int> attempts{0};
+    backend->setCompileFnForTest([&](const GrammarKeyCpp&) -> GrammarCompileResult {
+        attempts.fetch_add(1, std::memory_order_relaxed);
+        throw std::runtime_error("[10:23:28] /project/cpp/grammar_functor.cc:3567: Check failed: "
+                                 "(grammar_->ImplPtr()->per_rule_fsm_hashes[ref_rule_id].has_value()) is false: ");
+    });
+
+    const auto key = jsonKey(kSimpleSchema);
+    for (int i = 0; i < 2; ++i) {
+        const auto result = backend->compileNow(key);
+        EXPECT_EQ(result.status.code(), absl::StatusCode::kInvalidArgument);
+        EXPECT_NE(std::string(result.status.message()).find("compiler does not support this grammar"),
+                  std::string::npos);
+    }
+    EXPECT_EQ(attempts.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(backend->stats().invalid_cache_size, 1);
+}
+
+TEST(XGrammarBackendTest, RealMissingRuleHashSchemaIsUnsupported) {
+    auto       backend = makeBackend();
+    const auto result  = backend->compileNow(jsonKey(R"({"type":"string","pattern":"^[\\s\\S]{8,600}$"})"));
+    EXPECT_EQ(result.status.code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_NE(std::string(result.status.message()).find("compiler does not support this grammar"), std::string::npos);
+}
+
 TEST(XGrammarBackendTest, ExplicitSyntaxRuntimeFailuresAreDeterministicAndCached) {
     const std::vector<std::string> messages = {
         "Regex parsing error at position 4",
@@ -591,6 +618,9 @@ TEST(XGrammarBackendTest, UnqualifiedSyntaxRuntimeFailuresAreTransientAndNotCach
         "unexpected token: syntax error",
         "parser error",
         "token lexer error at byte 4",
+        "Check failed: (other_internal_invariant) is false",
+        "per_rule_fsm_hashes[ref_rule_id].has_value()",
+        "Check failed: (grammar_->ImplPtr()->per_rule_fsm_hashes[other_rule_id].has_value()) is false",
     };
 
     for (const auto& message : messages) {
