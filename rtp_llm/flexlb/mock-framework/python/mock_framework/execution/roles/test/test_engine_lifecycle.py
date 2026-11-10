@@ -81,41 +81,51 @@ def test_scale_rejects_invalid_direction_or_targets(args):
         StepRegistry.standard().get('engine/scale').arguments(args)
 
 
-def test_initial_engine_start_is_bounded_and_registers_in_index_order(tmp_path, monkeypatch):
+def test_initial_engine_start_shares_slots_across_roles(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from mock_framework.execution.environment import EndpointRegistry
     from mock_framework.execution.processes import ProcessSupervisor
-    from mock_framework.execution.roles.engine import EngineRole, INITIAL_START_BATCH_SIZE
+    from mock_framework.execution.roles.engine import EngineRole, INITIAL_START_CONCURRENCY, ROLES
 
     async def exercise():
         records = SimpleNamespace(directory=tmp_path, emit=lambda **_: None)
-        count = INITIAL_START_BATCH_SIZE + 2
+        count = INITIAL_START_CONCURRENCY // len(ROLES) + 2
         topology = EndpointRegistry(tmp_path)
         engine = EngineRole(
             supervisor=ProcessSupervisor(records), topology=topology, records=records,
-            environment={'prefill': {'deployment': {'replicas': count}}},
-            recipes={'prefill': {'startup_timeout': '2s'}}, monitoring=None,
+            environment={role: {'deployment': {'replicas': count}} for role in ROLES},
+            recipes={role: {'startup_timeout': '2s'} for role in ROLES}, monitoring=None,
         )
         active = peak = 0
+        starts = []
         ready = []
+        refilled = asyncio.Event()
 
         async def start_instance(role, index):
             nonlocal active, peak
             active += 1
             peak = max(peak, active)
-            await asyncio.sleep(.01 if index == 0 else 0)
+            starts.append(role)
+            if len(starts) > INITIAL_START_CONCURRENCY:
+                refilled.set()
+            if (role, index) == ('prefill', 0):
+                await refilled.wait()
+            await asyncio.sleep(0)
             active -= 1
-            ready.append(index)
-            control = f'http://localhost:{10000 + index}'
-            return index, control, {'id': f'{role}-{index}', 'role': role,
-                                    'control': control, 'rpc': f'localhost:{20000 + index}'}
+            ready.append((role, index))
+            slot = ROLES.index(role) * count + index
+            control = f'http://localhost:{10000 + slot}'
+            return slot, control, {'id': f'{role}-{index}', 'role': role,
+                                   'control': control, 'rpc': f'localhost:{20000 + slot}'}
 
         monkeypatch.setattr(engine, '_start_instance', start_instance)
-        await engine.start()
-        assert peak == INITIAL_START_BATCH_SIZE
-        assert ready[0] != 0
-        assert [node['id'] for node in topology.active()] == [f'prefill-{i}' for i in range(count)]
+        await asyncio.wait_for(engine.start(), timeout=2)
+        assert peak == INITIAL_START_CONCURRENCY
+        assert set(starts[:INITIAL_START_CONCURRENCY]) == set(ROLES)
+        assert ready[0] != ('prefill', 0)
+        for role in ROLES:
+            assert [node['id'] for node in topology.active(role)] == [f'{role}-{i}' for i in range(count)]
 
     asyncio.run(exercise())
 

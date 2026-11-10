@@ -1,12 +1,13 @@
 """Physical Engine placement; Case operations address instances, never JVMs."""
 import asyncio
 import socket
+from itertools import zip_longest
 from ...config.validation import duration
 from ..processes import launch_component
 from .. import ExecutionError
 
 ROLES = ('prefill', 'decode', 'vit')
-INITIAL_START_BATCH_SIZE = 32
+INITIAL_START_CONCURRENCY = 32
 
 
 class EngineRole:
@@ -44,32 +45,24 @@ class EngineRole:
             raise ExecutionError('Engine endpoints differ from the assigned identity and listeners')
         return child.pid, control, endpoint
 
-    async def scale_out(self, role, count, *, batch_size=1):
+    def _register_instance(self, pid, control, endpoint):
+        node, role, rpc = endpoint['id'], endpoint['role'], endpoint['rpc']
+        self.topology.register(node, role, control, endpoint)
+        self.records.emit(event='instance_started', node=node, pid=pid, rpc=rpc,
+                          role=role, instance_id=node, generation=0)
+        if self.monitoring:
+            self.monitoring.discover(node, self.records.directory / 'components' / node)
+        return rpc
+
+    async def scale_out(self, role, count):
         async with self.lock:
             if role not in ROLES or role not in self.environment or not 1 <= count <= 1024:
                 raise ExecutionError('scale_out requires a configured Engine role and count in 1..1024')
             result = []
-            for offset in range(0, count, batch_size):
-                first = self.counters.get(role, 0)
-                end = first + min(batch_size, count - offset)
-                self.counters[role] = end
-                # Join all starts in this batch so the run can clean up every spawned process on failure.
-                started = await asyncio.gather(
-                    *(self._start_instance(role, index) for index in range(first, end)),
-                    return_exceptions=True,
-                )
-                for instance in started:
-                    if isinstance(instance, BaseException):
-                        raise instance
-                # Register in index order, independent of the order in which processes become ready.
-                for pid, control, endpoint in started:
-                    node = endpoint['id']
-                    self.topology.register(node, role, control, endpoint)
-                    self.records.emit(event='instance_started', node=node, pid=pid, rpc=endpoint['rpc'],
-                                      role=role, instance_id=node, generation=0)
-                    result.append(endpoint['rpc'])
-                    if self.monitoring:
-                        self.monitoring.discover(node, self.records.directory / 'components' / node)
+            for _ in range(count):
+                index = self.counters.get(role, 0)
+                self.counters[role] = index + 1
+                result.append(self._register_instance(*await self._start_instance(role, index)))
             if self.monitoring and self.monitoring.baselined:
                 await self.monitoring.baseline([item['id'] for item in self.topology.active() if item['rpc'] in result])
             return result
@@ -106,11 +99,46 @@ class EngineRole:
             return [item['rpc'] for item in selected]
 
     async def start(self):
-        for role, recipe in self.recipes.items():
-            if role in ROLES:
+        async with self.lock:
+            jobs_by_role, next_registration = [], {}
+            timeout = 0.0
+            for role, recipe in self.recipes.items():
+                if role not in ROLES:
+                    continue
                 count = self.environment[role]['deployment']['replicas']
-                await self.supervisor.guard(self.scale_out(role, count, batch_size=INITIAL_START_BATCH_SIZE),
-                                            float(duration(recipe['startup_timeout'])) * count)
+                if not 1 <= count <= 1024:
+                    raise ExecutionError(f'{role} startup requires a replica count in 1..1024')
+                first = self.counters.get(role, 0)
+                self.counters[role] = first + count
+                next_registration[role] = first
+                jobs_by_role.append([(role, index) for index in range(first, first + count)])
+                timeout += float(duration(recipe['startup_timeout'])) * count
+            if not jobs_by_role:
+                return
+
+            # Interleave roles while keeping a single budget for all in-flight starts.
+            jobs = (job for group in zip_longest(*jobs_by_role) for job in group if job is not None)
+            ready = {}
+
+            async def worker():
+                for role, index in jobs:
+                    ready[role, index] = await self._start_instance(role, index)
+                    # Keep scale-in selection stable even if readiness arrives out of order.
+                    first = next_registration[role]
+                    while (role, first) in ready:
+                        self._register_instance(*ready.pop((role, first)))
+                        first += 1
+                    next_registration[role] = first
+
+            async def start_workers():
+                try:
+                    async with asyncio.TaskGroup() as group:
+                        for _ in range(min(INITIAL_START_CONCURRENCY, sum(map(len, jobs_by_role)))):
+                            group.create_task(worker())
+                except ExceptionGroup as errors:
+                    raise errors.exceptions[0] from errors
+
+            await self.supervisor.guard(start_workers(), timeout)
 
     async def close(self):
         names = [name for name, _ in self.supervisor.children if name in self.processes]
