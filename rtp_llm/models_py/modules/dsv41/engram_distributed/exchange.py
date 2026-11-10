@@ -15,8 +15,6 @@ from .config import build_config
 from .manifest import prepare_manifest
 
 MAX_MESSAGE = 4 << 20
-RESIDENT_DIR_ENV = "RTP_ENGRAM_RESIDENT_DIR"
-RESIDENT_GENERATION_ENV = "RTP_ENGRAM_RESIDENT_GENERATION"
 
 # Only these protocol codes may cross the wire. An arbitrary exception message,
 # including one wrapped in ExchangeError by an extension, is never public data.
@@ -566,10 +564,10 @@ def _prepare_package(group, package):
 
 
 class EngramStartup:
-    """Stage the Engram package for one RTP rank.
+    """One rank's startup attempt, including publication, exchange and cleanup.
 
-    Worker-owned Fabric backing uses a world Store borrowed from DistributedServer.
-    Resident Fabric backing is discovered independently of the worker cohort.
+    The world Store is borrowed from DistributedServer. Only host leaders use
+    the metadata channel; its reuse/create decision stays in _get_exchange_store.
     """
 
     def __init__(
@@ -589,14 +587,7 @@ class EngramStartup:
         self._env = os.environ if environ is None else environ
         from .config import StorageMode, StoragePolicy
 
-        self._resident = None
         self._local_startup = None
-        if RESIDENT_DIR_ENV in self._env or RESIDENT_GENERATION_ENV in self._env:
-            from .resident import ResidentGeneration
-
-            self._resident = ResidentGeneration(self._env, checkpoint=checkpoint)
-            self._install = install
-            return
         if StoragePolicy.from_environ(self._env).mode == StorageMode.CUDA_LOCAL:
             from .local import LocalCudaStartup
 
@@ -629,9 +620,6 @@ class EngramStartup:
 
     def run(self):
         """Publish, exchange and install once, before engine construction."""
-        if self._resident is not None:
-            self._install(self._resident.load(), self._resident.options)
-            return None
         if self._local_startup is not None:
             return self._local_startup.run()
         if self._config is None:

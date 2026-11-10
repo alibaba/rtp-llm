@@ -15,7 +15,6 @@ from rtp_llm.utils.process_manager import (
     SHUTDOWN_TIMEOUT_ENV,
     STOP_TIMEOUT_MS_ENV,
     ProcessManager,
-    RuntimeWatchdog,
 )
 
 
@@ -1813,73 +1812,6 @@ class TestFailureShutdownPaths(unittest.TestCase):
             self.manager.failure_detected,
             "graceful path should not flip failure_detected",
         )
-
-
-class RuntimeWatchdogTest(unittest.TestCase):
-    def test_readiness_withdrawn_when_last_child_exits_between_polls(self):
-        manager = ProcessManager()
-        watchdog, withdraw = Mock(), Mock()
-        manager.set_runtime_watchdog(watchdog, withdraw)
-        manager._monitor_processes_health()
-        withdraw.assert_called_once_with()
-        watchdog.poll.assert_not_called()
-
-    def test_timeout_streak_resets_on_success_or_admission_pressure(self):
-        probe = Mock(side_effect=[False, None, False, True, False, False])
-        with patch("rtp_llm.utils.process_manager.time.monotonic") as now:
-            now.return_value = 0
-            watchdog = RuntimeWatchdog(probe, 5, 2, 2)
-            self.assertTrue(watchdog.poll())
-            probe.assert_not_called()
-            for when in (5, 10, 15, 20, 25):
-                now.return_value = when
-                self.assertTrue(watchdog.poll())
-            now.return_value = 30
-            self.assertFalse(watchdog.poll())
-        self.assertEqual(probe.call_count, 6)
-        probe.assert_called_with(2)
-
-    def test_runtime_failure_withdraws_readiness_before_instance_cleanup(self):
-        manager = ProcessManager()
-        manager.set_runtime_watchdog(Mock(**{"poll.return_value": False}), Mock())
-        with (
-            patch.object(manager, "_is_any_process_alive", return_value=True),
-            patch.object(manager, "_is_all_processes_alive", return_value=True),
-            patch.object(manager, "_terminate_processes") as terminate,
-            patch.object(manager, "_force_kill_processes"),
-            patch.object(manager, "_join_all_processes"),
-            patch("rtp_llm.utils.process_manager.time.sleep"),
-            patch("rtp_llm.utils.process_manager.os._exit") as exit_process,
-        ):
-            terminate.side_effect = (
-                lambda *_args, **_kwargs: manager._withdraw_readiness.assert_called_once()
-            )
-            manager.processes = [Mock()]
-            manager.monitor_and_release_processes()
-        self.assertTrue(manager.failure_detected)
-        exit_process.assert_called_once_with(1)
-        terminate.assert_called_once_with(0, staged=True)
-
-    def test_planned_shutdown_during_probe_keeps_graceful_exit(self):
-        manager = ProcessManager(shutdown_timeout=24)
-
-        def stop_during_probe():
-            manager.shutdown_requested = True
-            return False
-
-        manager.set_runtime_watchdog(
-            Mock(**{"poll.side_effect": stop_during_probe}), Mock()
-        )
-        with (
-            patch.object(manager, "_is_any_process_alive", return_value=True),
-            patch.object(manager, "_is_all_processes_alive", return_value=True),
-            patch.object(manager, "_terminate_processes") as terminate,
-            patch.object(manager, "_force_kill_processes"),
-            patch("rtp_llm.utils.process_manager.time.sleep"),
-        ):
-            manager._monitor_processes_health()
-        self.assertFalse(manager.failure_detected)
-        terminate.assert_called_once_with(24, staged=True)
 
 
 if __name__ == "__main__":

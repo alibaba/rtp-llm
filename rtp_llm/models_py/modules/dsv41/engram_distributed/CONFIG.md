@@ -1,6 +1,6 @@
 # 分布式 Engram：启用、拓扑与启动交换
 
-更新时间 2026-11-10。默认由每个存储 host 的 RTP worker 持有一片 Engram。Prefill 的 `host_shared` 和 `gpu_shared` 也可接入独立常驻 Owner。GPU 在线直接读取映射后的内存。
+更新时间：2026-11-09。每个存储 host 的 RTP worker 持有一片 Engram，GPU 在线直接读映射后的内存。没有独立 sidecar/holder，没有在线查表 RPC，也不分发 bundle 文件。
 
 ## 最小配置
 
@@ -86,7 +86,7 @@ Engram 按本机地址自动匹配成员。正常部署读取 `/etc/podinfo/anno
 | `RTP_ENGRAM_COHORT_PORT` | 跨实例交换的监听端口，平台指定或默认 29483；同一个 RTP world 不使用此端口 |
 | `RTP_ENGRAM_COHORT_TIMEOUT` | 启动交换超时，默认 1800 秒 |
 
-**由业务 worker 持片时，无需配置 UUID、generation、本机分片下标或 ranks-per-part。**
+**不需要配置 UUID、generation、本机分片下标或 ranks-per-part。**
 `RTP_ENGRAM_GENERATION` 不再读取；原有 manifest 内部标识仍保留，不是部署配置。
 旧 `RTP_ENGRAM_LOCAL_DESCRIPTORS` 文件启动模式已移除，显式报错防止误用。
 
@@ -222,102 +222,6 @@ TCPStore 使用可信计算网络，不提供 TLS；显式设置已移除的 `RT
 
 部分 rank 重启会等待其他 rank 而有界失败，不是自动恢复。恢复时重建整个 gang/共享组及其 Store；先排空并停止旧消费者，再释放持片进程。
 cohort Store 关闭不释放分片；映射和 backing 保持到 worker 退出。该机制不代替运行时故障检测或高可用。
-
-### Prefill 使用独立常驻 Owner
-
-在每个存储 host 启动一个独立 Owner 进程，放在 `python-worker` 容器及其回收范围之外。
-Owner 通过自己的 checkpoint 挂载加载一片 host NUMA 或 GPU HBM backing，持有 CUDA VMM 分配并导出 Fabric handle。
-各 Prefill 实例启动时独立导入同一代分片。RTP 校验模型布局、hash ABI 和 GPU 读回样本后完成 warmup，
-在线请求继续直接读 Fabric 映射。重启后的消费者复用已加载的分片，只重建自身模型和映射。
-
-Owner 和消费者使用相同的配置。 `RTP_ENGRAM_RESIDENT_DIR` 需要是平台预建的专用 POSIX 共享卷目录，
-在各节点可见，由同一服务 UID 持有且权限为 `0700`。Owner 需要写权限，消费者挂载为只读。
-目录含 Fabric capability，仅授予该 Engram 共享组。Owner 与消费者仍需同一受控 IMEX 域和相应设备权限。
-
-```bash
-export RTP_ENGRAM_STORAGE=host_shared
-export ENGRAM_SHARD_COUNT=4
-export RTP_ENGRAM_RESIDENT_DIR=/run/engram-shared
-export RTP_ENGRAM_RESIDENT_GENERATION=5fdfe813-a0a0-4db4-b324-cc8d7a597c77
-export RTP_ENGRAM_MODEL_REVISION='immutable-model-revision'
-export RTP_ENGRAM_CHECKPOINT=/models/deepseek-v41
-
-# 每台存储 host 运行一个前台 Owner，传入该台对应的下标 0–3。
-exec python -m rtp_llm.models_py.modules.dsv41.engram_distributed.resident \
-  --shard 0 --host-id storage-node-0 --device 0
-```
-
-使用 GPU HBM 时，Owner 与消费者设置 `RTP_ENGRAM_STORAGE=gpu_shared`。Owner 可通过
-`--gpu-devices 0 1 2 3` 在指定的本机可见 GPU 上分配同一片，默认使用 `--device` 指定的卡。
-每张卡仍应用 `RTP_ENGRAM_GPU_RESERVE_BYTES`，平台需为权重、KV cache 和运行峰值预留显存。
-
-部署时生成新的 UUID，给同代 Owner 和消费者注入相同值。每片启动时独占其发布目录，
-写完后原子发布 `ready.json`。该片一旦认领便不允许在同一代重建，避免同代名称混用新旧分配。
-每个消费者在 `RTP_ENGRAM_COHORT_TIMEOUT`（默认 1800 秒）内等待全部分片。
-设置任一 resident 环境变量即进入显式校验，缺失、超时、版本或数据不匹配使启动失败。
-未配置 resident 参数的部署继续使用原有路径。
-
-Owner 每两秒更新描述符的 mtime，消费者把超过 30 秒的描述符视为未就绪并有界等待。
-共享卷需要跨节点可见的 mtime、原子 mkdir/rename 和同步的节点时钟。发布卷写入故障时，
-Owner 保留已有 backing，存量消费者在线读取 GPU 映射。恢复后以同一文件的下一次心跳开放新导入。
-
-单实例收到 SIGKILL、SIGTERM 或触发业务容器级 OOM 时，平台仅摘流和恢复该实例。
-运行时回收该实例的进程和 CUDA 映射。新请求由路由发到其他就绪的完整 Prefill 实例。
-如单个实例由多个计算 rank 组成，计算通信组按整个实例恢复。滚动替换单个消费者时保留 Owner。
-显式作用于共享组的操作（如整组升级、停止或下线）可统一退出。先冻结旧代消费者的创建、
-自动重启与流量入口，排空并确认全部消费者进程退出，再向旧 Owner 发送 SIGTERM。
-Owner 收到信号后撤下描述文件并释放分片，平台在该代退休后可清理发布目录。
-
-Owner 进程崩溃可能留下描述文件，导入和 GPU 样本校验仍是消费者的启动门槛。
-Owner 丢失时按故障代处理，平台停止向受影响组接流并用新 UUID 重建该代。
-当前实现覆盖消费者生命周期隔离，Owner、宿主机、IMEX 或整个 Fabric 域故障需要另外的副本和路由切换。
-
-### 容器内重启 Prefill 业务进程
-
-需要保留现有容器时，可在正常的 `python -m rtp_llm.start_server` 入口配置：
-
-```bash
-export RTP_LLM_IN_CONTAINER_RESTART=1
-# 本容器负责发布一个分片时设置。纯消费者不配置此项。
-export RTP_LLM_RESIDENT_OWNER_ARGS='--shard 0 --host-id storage-node-0 --device 0'
-# 平台需要为 worker OOM 提供独立 cgroup 时配置。
-export RTP_LLM_WORKER_CGROUP=/sys/fs/cgroup/prefill-worker
-export RTP_LLM_SUPERVISOR_STOP_TIMEOUT_S=300
-```
-
-需要启用 resident Engram、真实 DSV4 Prefill warmup，并且完整计算 world 在同一个容器内。
-Supervisor 把 Owner 和业务进程放在不同 session。业务父进程退出时撤销就绪，
-回收同一业务进程组的所有残留进程，再以 1 至 60 秒的指数退避拉起业务。
-旧 rank 暂时未退出时，supervisor 保留容器和 Owner，持续回收旧进程并保持未就绪。
-同容器 Owner 保持原 PID 和 generation。新进程重新导入、校验和 warmup 后才能回流。
-默认开启 Prefill 本地 watchdog。Owner 退出后，当前容器撤销就绪并等待平台处理；
-共享组由平台使用新 generation 恢复。
-
-要隔离 Linux OOM，ASI 需预建并授权业务 leaf cgroup v2，设置有限的 `memory.max`
-和 `memory.oom.group=1`，并为上级容器及 Owner 预留资源。Worker 在导入 torch 前进入
-业务 leaf，子进程继承其 cgroup，supervisor 与 Owner 留在另一个 leaf。普通进程组与 cgroup
-作用域分别管理信号与内存。整个容器 cgroup 被回收时，同容器 Owner 会一起退出。
-
-计划下线时，ASI 应向容器入口或 supervisor 发停止信号。Supervisor 关闭业务重启，
-先给业务父进程 TERM，使用现有优雅退出路径，超时再回收其进程组，然后停止本地 Owner。
-停止预算需要包含业务宽限、进程回收和 Owner 清理。共享 Owner 所在容器的更换需等该代
-所有消费者排空，或先切到已验证的新代。若要求容器替换时继续保留该代，使用外置 Owner。
-
-### 可选的 Prefill 本地运行期 watchdog
-
-在单业务实例内承载完整计算 world 的 Prefill 可设置 `RTP_LLM_PREFILL_WATCHDOG=1`。
-正常启动和 warmup 完成后，父进程定期走 loopback gRPC 发一个双 token 的本地 Prefill-only 请求。
-请求禁用 P→D 和缓存复用，只验证本实例能完成实际推理。收到明确的资源耗尽响应时中断失败计数。
-连续失败达到阈值后先撤销 `/health` 就绪门，再按既有失败路径回收该实例的子进程并以失败码退出。
-使用容器内 supervisor 时，业务进程由 supervisor 拉起并退避。否则由 ASI 重启容器。
-
-| 环境变量 | 默认值 |
-| --- | --- |
-| `RTP_LLM_PREFILL_WATCHDOG_INTERVAL_S` | 15 秒 |
-| `RTP_LLM_PREFILL_WATCHDOG_TIMEOUT_S` | 5 秒 |
-| `RTP_LLM_PREFILL_WATCHDOG_FAILURES` | 连续 3 次 |
-
-先在目标负载下验收探测开销和误判率。业务 P→D 链路、跨实例流量和共享组路由仍由实际链路指标和平台探测验收。
 
 ## 校验边界
 

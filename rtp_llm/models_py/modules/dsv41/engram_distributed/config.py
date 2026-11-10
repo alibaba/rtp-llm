@@ -461,34 +461,6 @@ def _checkpoint_revision(checkpoint):
     raise ShardConfigError("MODEL_REVISION_REQUIRED")
 
 
-def resolve_checkpoint(env, checkpoint=None):
-    # Prefer the resolved local model mount over the raw checkpoint URI.
-    checkpoint = env.get(CHECKPOINT_ENV) or checkpoint or env.get("CHECKPOINT_PATH")
-    if not checkpoint:
-        raise ShardConfigError("CHECKPOINT_REQUIRED")
-    return checkpoint
-
-
-def startup_timeout(env):
-    raw = env.get(TIMEOUT_ENV)
-    timeout = DEFAULT_TIMEOUT if raw is None else float(raw)
-    if not 0 < timeout <= 86400:
-        raise ShardConfigError("INVALID_TIMEOUT")
-    return timeout
-
-
-def gpu_reserve_bytes(env):
-    reserve = env.get("RTP_ENGRAM_GPU_RESERVE_BYTES", str(32 << 30))
-    if (
-        type(reserve) is not str
-        or not reserve.isascii()
-        or not reserve.isdecimal()
-        or not 0 < int(reserve) < 2**63
-    ):
-        raise ShardConfigError("INVALID_ENGRAM_GPU_RESERVE")
-    return int(reserve)
-
-
 def _instance_index(env, cohort, local_host=None):
     raw = env.get(INDEX_ENV)
     if raw is not None:
@@ -632,7 +604,11 @@ def build_group(
             raise ShardConfigError("STORAGE_HOST_COUNT_MUST_MATCH_COHORT")
     else:
         raise ShardConfigError("STORAGE_HOST_COUNT_REQUIRED")
-    checkpoint = resolve_checkpoint(env, checkpoint)
+    # The launcher resolves an oss:// checkpoint to its local fuse mount before
+    # the engine starts; prefer that over the raw URI, which is not readable here.
+    checkpoint = env.get(CHECKPOINT_ENV) or checkpoint or env.get("CHECKPOINT_PATH")
+    if not checkpoint:
+        raise ShardConfigError("CHECKPOINT_REQUIRED")
     revision = env.get(REVISION_ENV) or _checkpoint_revision(checkpoint)
     index = _instance_index(
         env, cohort, gang_hosts[rank] if gang_hosts is not None else None
@@ -681,7 +657,10 @@ def build_group(
         json.dumps(group, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     local = members[index]
-    timeout = startup_timeout(env)
+    raw_timeout = env.get(TIMEOUT_ENV)
+    timeout = DEFAULT_TIMEOUT if raw_timeout is None else float(raw_timeout)
+    if not 0 < timeout <= 86400:
+        raise ShardConfigError("INVALID_TIMEOUT")
     # Reuse DistributedServer.store when its world covers every storage host.
     reuse_world_store = parts is not None and len(parts) == instances
     # One line that answers "which topology did this pod pick, and why".
@@ -744,9 +723,19 @@ def build_config(
     config["gpu_devices"] = tuple(
         range(config["group"]["members"][config["index"]]["world_size"])
     )
-    config["gpu_reserve_bytes"] = gpu_reserve_bytes(
-        env if policy.memory_kind == "gpu" else {}
+    reserve = (
+        env.get("RTP_ENGRAM_GPU_RESERVE_BYTES", str(32 << 30))
+        if policy.memory_kind == "gpu"
+        else str(32 << 30)
     )
+    if (
+        type(reserve) is not str
+        or not reserve.isascii()
+        or not reserve.isdecimal()
+        or not 0 < int(reserve) < 2**63
+    ):
+        raise ShardConfigError("INVALID_ENGRAM_GPU_RESERVE")
+    config["gpu_reserve_bytes"] = int(reserve)
     config["release_page_cache"] = env.get("RTP_ENGRAM_RELEASE_INPUT_PAGE_CACHE") == "1"
     config["max_allocation_bytes"], config["budget_bytes"] = capacity_from_environ(env)
     return config

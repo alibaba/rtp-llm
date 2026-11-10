@@ -1,5 +1,4 @@
 import logging
-import math
 import os
 import signal
 import threading
@@ -30,45 +29,6 @@ PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 600
 DEFAULT_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS = 60.0
 DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS = 120.0
-
-
-class RuntimeWatchdog:
-    """Require consecutive failures from a bounded, instance-local probe."""
-
-    def __init__(self, probe, interval, timeout, failure_threshold):
-        if (
-            not math.isfinite(interval)
-            or not math.isfinite(timeout)
-            or not 0 < timeout <= interval <= 300
-            or not 2 <= failure_threshold <= 100
-        ):
-            raise ValueError("invalid Prefill watchdog interval, timeout or threshold")
-        self.probe = probe
-        self.interval = interval
-        self.timeout = timeout
-        self.failure_threshold = failure_threshold
-        self._next_check = time.monotonic() + interval
-        self._failures = 0
-
-    def poll(self):
-        now = time.monotonic()
-        if now < self._next_check:
-            return True
-        self._next_check = now + self.interval
-        try:
-            result = self.probe(self.timeout)
-        except Exception:
-            logging.exception("prefill watchdog probe failed")
-            result = False
-        # None denotes explicit admission pressure, so it breaks a failure streak.
-        self._failures = self._failures + 1 if result is False else 0
-        if self._failures:
-            logging.warning(
-                "prefill watchdog probe failed consecutive=%d threshold=%d",
-                self._failures,
-                self.failure_threshold,
-            )
-        return self._failures < self.failure_threshold
 
 
 class ProcessManager:
@@ -105,8 +65,6 @@ class ProcessManager:
         self.pre_exit_cleanup = pre_exit_cleanup
         self.shutdown_timeout = shutdown_timeout
         self.monitor_interval = monitor_interval
-        self._runtime_watchdog = None
-        self._withdraw_readiness = None
         self.frontend_pre_stop_drain_seconds = normalize_non_negative_seconds(
             frontend_pre_stop_drain_seconds,
             0.0,
@@ -777,28 +735,11 @@ class ProcessManager:
         graceful exit inside _terminate_processes, then give wait4() a short
         reap window and SIGKILL any survivor.
         """
-        while True:
-            any_alive = self._is_any_process_alive()
-            if (
-                any_alive
-                and not self.shutdown_requested
-                and self._is_all_processes_alive()
-            ):
-                watchdog = self._runtime_watchdog
-                if watchdog is not None and not watchdog.poll():
-                    if not self.shutdown_requested:
-                        logging.error(
-                            "prefill event=runtime_unavailable reason=watchdog"
-                        )
-                        self.request_failure_shutdown()
-                elif not self.shutdown_requested:
-                    time.sleep(self.monitor_interval)
-                    continue
+        while self._is_any_process_alive():
+            if not self.shutdown_requested and self._is_all_processes_alive():
+                time.sleep(self.monitor_interval)
+                continue
 
-            if self._withdraw_readiness is not None:
-                self._withdraw_readiness()
-            if not any_alive:
-                break
             if self.shutdown_requested:
                 drain_timeout = 0 if self.failure_detected else self.shutdown_timeout
                 self._terminate_processes(drain_timeout, staged=True)
@@ -860,10 +801,6 @@ class ProcessManager:
             os._exit(1)
         logging.info("Process monitoring completed")
 
-    def set_runtime_watchdog(self, watchdog, withdraw_readiness):
-        self._runtime_watchdog = watchdog
-        self._withdraw_readiness = withdraw_readiness
-
     def request_failure_shutdown(self):
         """Mark failure-driven shutdown.
 
@@ -874,8 +811,8 @@ class ProcessManager:
         Normal SIGTERM/SIGINT shutdown does NOT call this method; the signal
         handler sets shutdown_requested directly, leaving failure_detected=False.
         """
-        self.failure_detected = True
         self.shutdown_requested = True
+        self.failure_detected = True
 
     def register_health_check(
         self,
