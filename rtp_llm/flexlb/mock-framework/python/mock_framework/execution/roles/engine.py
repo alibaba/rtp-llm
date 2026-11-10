@@ -6,7 +6,7 @@ from ..processes import launch_component
 from .. import ExecutionError
 
 ROLES = ('prefill', 'decode', 'vit')
-INITIAL_START_BATCH_SIZE = 8
+INITIAL_START_BATCH_SIZE = 32
 
 
 class EngineRole:
