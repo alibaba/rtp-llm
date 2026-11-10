@@ -112,8 +112,13 @@ std::shared_ptr<TransferAsyncContext>
 DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const GroupSet*>& group_sets) {
     auto        context     = std::make_shared<TransferBatchAsyncContext>(task.descriptors().size());
     const auto& descriptors = task.descriptors();
+    const auto reject = [&context](ErrorInfo error) {
+        TransferResult result(std::move(error));
+        result.buffer_safe = true;
+        context->complete(std::move(result));
+    };
     if (descriptors.empty() || descriptors.size() != group_sets.size() || !group_sets.front()) {
-        context->complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid device-disk batch"));
+        reject(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid device-disk batch"));
         return context;
     }
     const Tier source = descriptors.front().source_tier;
@@ -123,7 +128,7 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
         || std::any_of(descriptors.begin(), descriptors.end(), [source, target](const TransferDescriptor& descriptor) {
                return descriptor.source_tier != source || descriptor.target_tier != target;
            })) {
-        context->complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid device-disk direction"));
+        reject(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid device-disk direction"));
         return context;
     }
     const char*          transfer_name = load ? "disk-to-device" : "device-to-disk";
@@ -132,13 +137,13 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
     if (std::any_of(group_sets.begin(), group_sets.end(), [group_type](const GroupSet* group_set) {
             return group_set == nullptr || group_set->groupType() != group_type;
         })) {
-        context->complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "mixed device-disk cache group types"));
+        reject(ErrorInfo(ErrorCode::INVALID_PARAMS, "mixed device-disk cache group types"));
         return context;
     }
     HostStagingBlockPool* pool     = stagingPool(group_type);
     const size_t          capacity = std::min(batchCapacity(group_type), max_descriptors_per_batch_);
     if (pool == nullptr || capacity == 0) {
-        context->complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported device-disk cache group type"));
+        reject(ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported device-disk cache group type"));
         return context;
     }
 
@@ -198,15 +203,15 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
                 if (!leases.has_value()) {
                     batch_timer.finish(false);
                     const bool timed_out = batch_task.expired();
-                    stage_state->completeBatch(
-                        TransferResult(
-                            ErrorInfo(timed_out ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION,
-                                      std::string(transfer_name)
-                                          + (timed_out ? " staging admission timed out, descriptor_range=[" :
-                                                         " staging admission cancelled, descriptor_range=[")
-                                          + std::to_string(begin) + "," + std::to_string(end) + ")"),
-                            CacheCopyError::NOT_EXECUTED),
-                        indices);
+                    TransferResult result(
+                        ErrorInfo(timed_out ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION,
+                                  std::string(transfer_name)
+                                      + (timed_out ? " staging admission timed out, descriptor_range=[" :
+                                                     " staging admission cancelled, descriptor_range=[")
+                                      + std::to_string(begin) + "," + std::to_string(end) + ")"),
+                        CacheCopyError::NOT_EXECUTED);
+                    result.buffer_safe = true;
+                    stage_state->completeBatch(std::move(result), indices);
                     return;
                 }
 
@@ -239,13 +244,13 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
                         metrics_reporter_->reportQueueWaitMetric(
                             false, "transfer", nullptr, source, target, currentTimeUs() - queue_begin);
                     }
-                    stage_state->completeBatch(
-                        TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED,
-                                                 std::string(transfer_name)
-                                                     + " expired in TE worker queue, descriptor_range=["
-                                                     + std::to_string(begin) + "," + std::to_string(end) + ")"),
-                                       CacheCopyError::NOT_EXECUTED),
-                        indices);
+                    TransferResult result(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED,
+                                                    std::string(transfer_name)
+                                                        + " expired in TE worker queue, descriptor_range=["
+                                                        + std::to_string(begin) + "," + std::to_string(end) + ")"),
+                                          CacheCopyError::NOT_EXECUTED);
+                    result.buffer_safe = true;
+                    stage_state->completeBatch(std::move(result), indices);
                 };
                 auto&      task_pool = load ? *load_task_pool_ : transfer_task_pool_;
                 const bool accepted  = task_pool.submit(
@@ -332,13 +337,13 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
                 if (!accepted) {
                     queue_timer.finish(false);
                     batch_timer.finish(false);
-                    stage_state->completeBatch(
-                        TransferResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
-                                                 std::string("RESOURCE_EXHAUSTED: ") + transfer_name
-                                                     + " queue is full or stopped, descriptor_range=["
-                                                     + std::to_string(begin) + "," + std::to_string(end) + ")"),
-                                       CacheCopyError::NOT_EXECUTED),
-                        indices);
+                    TransferResult result(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                                                    std::string("RESOURCE_EXHAUSTED: ") + transfer_name
+                                                        + " queue is full or stopped, descriptor_range=["
+                                                        + std::to_string(begin) + "," + std::to_string(end) + ")"),
+                                          CacheCopyError::NOT_EXECUTED);
+                    result.buffer_safe = true;
+                    stage_state->completeBatch(std::move(result), indices);
                 }
             });
     }

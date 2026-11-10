@@ -121,6 +121,7 @@ TEST(BlockTransferDispatcherTest, ExpiredTaskFailsBeforePerRankExecution) {
 
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+    EXPECT_TRUE(context->result().buffer_safe);
     EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
     EXPECT_EQ(context->result().block_errors,
               (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED, CacheCopyError::NOT_EXECUTED}));
@@ -171,6 +172,7 @@ TEST(BlockTransferDispatcherTest, EmptyTaskFailsBeforeDispatch) {
     size_t    callback_count = 0;
     ErrorInfo final_error    = ErrorInfo::OkStatus();
     dispatcher.runTransfer(TransferTask({}, std::chrono::milliseconds(100)), [&](TransferResult error) {
+        EXPECT_TRUE(error.buffer_safe);
         ++callback_count;
         final_error = std::move(error.status);
     });
@@ -461,6 +463,7 @@ TEST(BlockTransferDispatcherTest, ExpiredTaskFailsWithoutSubmittingABatch) {
     dispatcher.runTransfer(std::move(task), [&](TransferResult error) {
         ++callback_count;
         EXPECT_EQ(error.copy_error, CacheCopyError::NOT_EXECUTED);
+        EXPECT_TRUE(error.buffer_safe);
         EXPECT_EQ(error.block_errors,
                   (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED, CacheCopyError::NOT_EXECUTED}));
         final_error = std::move(error.status);

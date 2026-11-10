@@ -27,8 +27,9 @@ namespace rtp_llm {
 namespace {
 
 std::shared_ptr<TransferAsyncContext> invalidTransferContext(size_t block_count) {
-    return std::make_shared<CompletedTransferAsyncContext>(
-        ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request"), block_count);
+    TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request"));
+    result.buffer_safe = true;
+    return std::make_shared<CompletedTransferAsyncContext>(std::move(result), block_count);
 }
 
 // Metadata follows the same physical allocations as the payload. HOST/DISK

@@ -3,6 +3,12 @@
 
 namespace rtp_llm {
 namespace {
+TransferResult rejectedWithoutIo() {
+    TransferResult result(TransferStatus::INVALID_ARGS);
+    result.buffer_safe = true;
+    return result;
+}
+
 bool validCopyBuffers(const HostBufferView& host, const TransferDescriptor& descriptor, const GroupSet& group) {
     const auto& blocks = descriptor.blocksAt(Tier::DEVICE);
     if (!isValidHostBufferView(host, group.payloadBytes(), group.storageBytes())
@@ -24,7 +30,7 @@ TransferResult CrcTransferService::execute(int                                  
         std::unique_lock<std::mutex> lock(mutex_);
         const auto                   found = slots_.find(device);
         if (found == slots_.end() || !accepting_)
-            return TransferStatus::INVALID_ARGS;
+            return rejectedWithoutIo();
         // Blocking compatibility path only. Async admission never waits here.
         cv_.wait(lock, [&] {
             if (!accepting_)
@@ -38,7 +44,7 @@ TransferResult CrcTransferService::execute(int                                  
             return false;
         });
         if (!slot)
-            return TransferStatus::INVALID_ARGS;
+            return rejectedWithoutIo();
     }
     block_tree_cache_detail::ScopeRollback release([&] {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -55,7 +61,7 @@ TransferResult CrcTransferService::copy(const std::vector<HostBufferView>&     h
                                         const std::vector<TransferDescriptor>& descriptors,
                                         const std::vector<const GroupSet*>&    groups) {
     if (async_ || hosts.empty() || hosts.size() != descriptors.size() || hosts.size() != groups.size())
-        return TransferStatus::INVALID_ARGS;
+        return rejectedWithoutIo();
     const bool               store = descriptors.front().source_tier == Tier::DEVICE;
     std::vector<CrcCopyItem> items;
     items.reserve(hosts.size());
@@ -63,7 +69,7 @@ TransferResult CrcTransferService::copy(const std::vector<HostBufferView>&     h
         const auto& group = groups_.at(groups[i]);
         if (!group->crcEnabled() || (descriptors[i].source_tier == Tier::DEVICE) != store
             || !validCopyBuffers(hosts[i], descriptors[i], *group))
-            return TransferStatus::INVALID_ARGS;
+            return rejectedWithoutIo();
         items.push_back(makeItem(hosts[i], descriptors[i], group));
     }
     return execute(

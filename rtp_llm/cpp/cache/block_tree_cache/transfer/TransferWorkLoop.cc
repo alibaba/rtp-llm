@@ -15,6 +15,17 @@
 
 namespace rtp_llm {
 
+namespace {
+
+TransferResult unsubmittedResult(TransferResult result) {
+    // This stage has not submitted I/O. recordResult still ANDs any earlier
+    // stage's proof, including when a successor expires while waiting.
+    result.buffer_safe = true;
+    return result;
+}
+
+}  // namespace
+
 void TransferWorkLoop::Queue::push(Entry& entry) {
     assert(entry.next == nullptr && entry.previous == nullptr);
     entry.previous = tail;
@@ -131,7 +142,7 @@ std::shared_ptr<TransferAsyncContext> TransferWorkLoop::execute(TransferTask    
             queue_timer.finish(false);
             total_timer.finish(false);
             return std::make_shared<CompletedTransferAsyncContext>(
-                TransferResult(ErrorInfo(code, message), CacheCopyError::NOT_EXECUTED), count);
+                unsubmittedResult(TransferResult(ErrorInfo(code, message), CacheCopyError::NOT_EXECUTED)), count);
         };
         if (!count)
             return reject("empty WorkLoop transfer", ErrorCode::INVALID_PARAMS);
@@ -244,8 +255,9 @@ bool TransferWorkLoop::plan(Entry& entry) {
         }
         if (expired) {
             fail(entry,
-                 TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in WorkLoop queue"),
-                                CacheCopyError::NOT_EXECUTED));
+                 unsubmittedResult(TransferResult(
+                     ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in WorkLoop queue"),
+                     CacheCopyError::NOT_EXECUTED)));
             return false;
         }
     }
@@ -278,8 +290,8 @@ bool TransferWorkLoop::plan(Entry& entry) {
 bool TransferWorkLoop::acquireStaging(Entry& entry, bool waiting) {
     if (!waiting && entry.task.expired()) {
         fail(entry,
-             TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "staging admission timed out"),
-                            CacheCopyError::NOT_EXECUTED));
+             unsubmittedResult(TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "staging admission timed out"),
+                                              CacheCopyError::NOT_EXECUTED)));
         return false;
     }
     auto& resource = staging_;
@@ -318,8 +330,9 @@ void TransferWorkLoop::retryStaging(StagingResource& resource) {
             if (waiting->task.expired()) {
                 unqueue.run();
                 fail(*waiting,
-                     TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "staging admission timed out"),
-                                    CacheCopyError::NOT_EXECUTED));
+                     unsubmittedResult(TransferResult(
+                         ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "staging admission timed out"),
+                         CacheCopyError::NOT_EXECUTED)));
                 return;
             }
             if (!acquireStaging(*waiting, true)) {
@@ -342,8 +355,9 @@ void TransferWorkLoop::tryStep(Entry& entry) {
             return;
         if (entry.task.expired()) {
             fail(entry,
-                 TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired before stage submission"),
-                                CacheCopyError::NOT_EXECUTED));
+                 unsubmittedResult(TransferResult(
+                     ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired before stage submission"),
+                     CacheCopyError::NOT_EXECUTED)));
             return;
         }
         if (isCrc(entry.step))
@@ -391,7 +405,7 @@ void TransferWorkLoop::submitDisk(Entry& entry) {
         const auto& host  = entry.hosts[i];
         const auto& owner = *group(entry);
         if (owner.storageBytes() > stride || !isValidHostBufferView(host, owner.payloadBytes(), stride)) {
-            fail(entry, TransferStatus::DISK_IO_ERROR);
+            fail(entry, unsubmittedResult(TransferStatus::DISK_IO_ERROR));
             return;
         }
         blocks.push_back(descriptors[i].singleBlockAt(Tier::DISK));
@@ -440,15 +454,17 @@ void TransferWorkLoop::pollOnce() {
         for (auto& [device, waiting] : crc_waiting_)
             while (auto* entry = waiting.head) {
                 removeWaiter(*entry);
-                fail(*entry, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "CRC Busy without a pending direction record"));
+                fail(*entry,
+                     unsubmittedResult(
+                         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "CRC Busy without a pending direction record")));
             }
 }
 
 void TransferWorkLoop::recordDiskResult(Entry& entry, BlockIOStatus status) noexcept {
     assert(entry.result.ok());
-    // BlockIOStatus has no explicit completion proof yet. Do not inherit the
-    // empty aggregate's identity as evidence for an executed disk operation.
-    entry.result.buffer_safe = false;
+    // Only called after a zero-I/O rejection or the final DiskIOExecutor callback,
+    // which joins every accepted worker even on partial failure or exception.
+    // This stage contributes true to the AND; preserve the earlier stages' proof.
     const auto transfer_status = blockIOStatusToTransferStatus(status);
     const auto copy_error      = cacheCopyErrorFor(transfer_status);
     const bool intermediate    = transfer_status == TransferStatus::OK && entry.step == Step::DISK_READ
@@ -561,8 +577,8 @@ void TransferWorkLoop::cancelStaging() {
     while (auto* entry = staging_.waiting.head) {
         removeWaiter(*entry);
         fail(*entry,
-             TransferResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "staging admission cancelled"),
-                            CacheCopyError::NOT_EXECUTED));
+             unsubmittedResult(TransferResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "staging admission cancelled"),
+                                              CacheCopyError::NOT_EXECUTED)));
     }
 }
 
@@ -594,8 +610,8 @@ void TransferWorkLoop::expireResourceWaiters() {
         auto& entry = *wait_deadlines_.begin()->second;
         removeWaiter(entry);
         fail(entry,
-             TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer resource wait timed out"),
-                            CacheCopyError::NOT_EXECUTED));
+             unsubmittedResult(TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer resource wait timed out"),
+                                              CacheCopyError::NOT_EXECUTED)));
     }
     // An expired FIFO head may have needed more blocks than the next waiter.
     // Retry against existing free capacity without waiting for another release.

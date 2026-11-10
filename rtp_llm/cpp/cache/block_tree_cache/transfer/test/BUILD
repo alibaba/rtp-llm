@@ -54,7 +54,10 @@ cc_test(
     name = "per_rank_transfer_engine_device_host_test",
     exec_properties = {"gpu": "L20_CU13"},
     testonly = True,
-    srcs = ["PerRankBlockTransferEngineDeviceHostTest.cc"],
+    srcs = [
+        "DeviceHostBufferSafetyTest.cc",
+        "PerRankBlockTransferEngineDeviceHostTest.cc",
+    ],
     copts = test_copts,
     tags = [
         "L20_CU13",

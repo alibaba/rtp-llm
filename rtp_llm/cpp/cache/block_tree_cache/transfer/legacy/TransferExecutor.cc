@@ -66,8 +66,10 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
             metrics_reporter_->reportQueueWaitMetric(
                 false, "transfer", nullptr, source, target, currentTimeUs() - queue_begin);
         }
-        context->complete(TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in TE worker queue"),
-                                         CacheCopyError::NOT_EXECUTED));
+        TransferResult result(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in TE worker queue"),
+                              CacheCopyError::NOT_EXECUTED);
+        result.buffer_safe = true;
+        context->complete(std::move(result));
     };
     const auto task_class = isLoadTransfer(source, target) ? BlockTreeTaskClass::LOAD : BlockTreeTaskClass::BACKGROUND;
     auto&      task_pool  = task_class == BlockTreeTaskClass::LOAD ? *load_task_pool_ : transfer_task_pool_;
@@ -153,9 +155,11 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
     if (!accepted) {
         queue_timer.finish(false);
         total_timer.finish(false);
-        context->complete(TransferResult(
+        TransferResult result(
             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "RESOURCE_EXHAUSTED: transfer queue is full or stopped"),
-            CacheCopyError::NOT_EXECUTED));
+            CacheCopyError::NOT_EXECUTED);
+        result.buffer_safe = true;
+        context->complete(std::move(result));
     }
     return context;
 }

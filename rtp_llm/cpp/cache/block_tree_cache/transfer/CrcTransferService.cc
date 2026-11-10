@@ -150,6 +150,11 @@ TransferResult CrcTransferService::mapResult(CrcCopyState                       
                                              + std::to_string(failure.item_index) + ", " + descriptor.debugString()),
                                cacheCopyErrorFor(failure_status)});
     }
+    // These states either rejected before CUDA submission or returned after
+    // the workspace completed diagnostics and drained all submitted accesses.
+    // Set the proof after merging diagnostic errors, whose default is unknown.
+    transfer_result.buffer_safe = result == CrcCopyState::OK || result == CrcCopyState::INVALID_ARGS
+                                  || result == CrcCopyState::CRC_MISMATCH || result == CrcCopyState::DEVICE_ERROR;
     return transfer_result;
 }
 
@@ -173,7 +178,9 @@ bool CrcTransferService::trySubmit(const std::vector<HostBufferView>&     hosts,
     if (!done)
         throw std::invalid_argument("CRC stage callback is required");
     const auto reject = [&] {
-        done(TransferStatus::INVALID_ARGS);
+        TransferResult result(TransferStatus::INVALID_ARGS);
+        result.buffer_safe = true;  // This request has not submitted any CUDA access.
+        done(std::move(result));
         return true;
     };
     if (unlikely(!async_) || !group || !groups_.count(group.get()) || !group->crcEnabled()
@@ -212,6 +219,8 @@ bool CrcTransferService::trySubmit(const std::vector<HostBufferView>&     hosts,
     }
     TransferResult invalid(TransferStatus::INVALID_ARGS);
     TransferResult failed(TransferStatus::DEVICE_IO_ERROR);
+    invalid.buffer_safe = true;
+    failed.buffer_safe  = true;
     slot->operation       = std::move(operation);
     slot->operation->done = std::move(done);
 

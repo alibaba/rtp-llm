@@ -147,10 +147,10 @@ void BlockTransferDispatcher::retireTransfer() const noexcept {
 
 std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(TransferTask task) const {
     if (task.expired()) {
-        return std::make_shared<CompletedTransferAsyncContext>(
-            TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before TE submission"),
-                           CacheCopyError::NOT_EXECUTED),
-            task.descriptors().size());
+        TransferResult result(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before TE submission"),
+                              CacheCopyError::NOT_EXECUTED);
+        result.buffer_safe = true;  // No batch was submitted.
+        return std::make_shared<CompletedTransferAsyncContext>(std::move(result), task.descriptors().size());
     }
     // The final callback releases this ticket after notifying all local consumers;
     // the submission stack retains another owner through finishSubmitting().
@@ -295,12 +295,16 @@ void BlockTransferDispatcher::dispatchGroups(TransferTask         task,
                                              const char*          completion_operation) const {
     const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {
-        callback(ErrorInfo(ErrorCode::INVALID_PARAMS, "transfer task contains no descriptors"));
+        TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, "transfer task contains no descriptors"));
+        result.buffer_safe = true;
+        callback(std::move(result));
         return;
     }
     if (task.expired()) {
-        callback(TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before dispatch"),
-                                CacheCopyError::NOT_EXECUTED));
+        TransferResult result(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before dispatch"),
+                              CacheCopyError::NOT_EXECUTED);
+        result.buffer_safe = true;  // No batch was submitted.
+        callback(std::move(result));
         return;
     }
 
