@@ -1096,6 +1096,52 @@ message CancelResponsePB {
     CancelStatusPB status = 1;
 }
 
+// ---- AWI adaptation-evaluator observation contract ------------------------
+// One aggregated event per request/step, recorded from real engine execution
+// (step loop, CUDA graph runner, cache manager, scheduler admission). The
+// frontend aggregates every backend rank's events per operation_id.
+
+message AwiEventPB {
+    string type = 1;             // capture|prefill|decode|resident|reuse|capacity_failure
+    int64 rank = 2;              // recording backend rank
+    string operation_id = 3;     // armed benchmark operation, empty if none
+    int64 request_id = 4;        // engine-internal id; -1 for rank step aggregates
+    string awi_request_id = 5;   // X-AWI-Request-ID header passthrough
+    int64 input_tokens = 6;
+    int64 start_ns = 7;          // monotonic host clock, common across ranks
+    int64 end_ns = 8;
+    int64 step = 9;              // decode step 1..N-1, or engine step counter
+    string backend = 10;         // cuda|hip, from the actual graph runner
+    int32 graph_replay = 11;     // 1 replayed, 0 eager fallback, -1 unknown
+    double elapsed_ms = 12;      // synchronized step incl host/communication
+    int64 kv_tokens = 13;        // resident snapshot: materialized KV tokens
+    int64 reserved_tokens = 14;  // resident snapshot: full reservation
+    int64 hit_tokens = 15;       // reuse: tokens from actually reused memory KV blocks
+    int64 concurrency = 16;      // capacity_failure: requested concurrency
+    int64 context_tokens = 17;   // capacity_failure: full context per sequence
+    string failure_kind = 18;    // device_oom|kv_capacity_exceeded
+    string detail_json = 19;     // capture shapes etc.
+}
+
+message AwiBarrierRequestPB {
+    string operation_id = 1;         // empty disarms the probe
+    repeated string request_ids = 2; // participating X-AWI request ids
+    int64 context_tokens = 3;        // full per-sequence reservation incl output
+}
+
+message AwiObservationsRequestPB {
+    string operation_id = 1;         // empty returns all retained events
+}
+
+message AwiObservationsResponsePB {
+    int32 rank = 1;
+    string build_info_json = 2;
+    string configuration_json = 3;
+    string weights_json = 4;             // every checkpoint key placement
+    int64 startup_network_fetches = 5;   // measured; -1 = not yet recorded
+    repeated AwiEventPB events = 6;
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
@@ -1115,6 +1161,8 @@ service RpcService {
     rpc DumpTorchAllocator(TorchAllocatorDumpRequestPB) returns (TorchAllocatorDumpResponsePB);
     rpc DumpTorchAllocatorInternal(TorchAllocatorDumpRequestPB) returns (TorchAllocatorDumpResultPB);
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
+    rpc AwiBarrier(AwiBarrierRequestPB) returns (EmptyPB);
+    rpc AwiObservations(AwiObservationsRequestPB) returns (AwiObservationsResponsePB);
 
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);

@@ -1,8 +1,11 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/awi/AwiCollector.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 namespace rtp_llm {
 void CudaGraphRunner::replayDecode(int bs) {
+    // AWI: real replay observation consumed by the engine step hook.
+    AwiCollector::instance().noteGraphReplay(true);
     replayGraph(bs);
 }
 
@@ -73,6 +76,15 @@ void CudaGraphRunner::captureDecode() {
         // as a partially captured graph instead of deleting in-flight storage.
         capture_session_may_be_dirty_.store(false, std::memory_order_release);
         RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
+        {
+            // AWI: capture event from the actual capture+replay-check path.
+            AwiEvent capture_event;
+            capture_event.type        = "capture";
+            capture_event.backend     = awiGraphBackendName();
+            capture_event.detail_json = std::string("{\"kind\":\"decode\",\"batch_size\":")
+                                        + std::to_string(bs) + ",\"replay_checked\":true}";
+            AwiCollector::instance().recordEvent(std::move(capture_event));
+        }
     }
     RTP_LLM_LOG_INFO("Capture Decode End");
 }

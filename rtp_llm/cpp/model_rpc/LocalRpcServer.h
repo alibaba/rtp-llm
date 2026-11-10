@@ -80,6 +80,12 @@ public:
     grpc::Status
     UpdateSchedulerInfo(grpc::ServerContext* context, const UpdateSchedulerInfoRequestPB* request, EmptyPB* response);
 
+    // AWI adaptation-evaluator contract: arm/disarm the operation-scoped
+    // admission/residency probe, and serve this rank's recorded observations.
+    grpc::Status AwiBarrier(grpc::ServerContext* context, const AwiBarrierRequestPB* request, EmptyPB* response);
+    grpc::Status
+    AwiObservations(grpc::ServerContext* context, const AwiObservationsRequestPB* request, AwiObservationsResponsePB* response);
+
     KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version, bool need_cache_keys);
 
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version);

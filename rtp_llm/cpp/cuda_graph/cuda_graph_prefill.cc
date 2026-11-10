@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/awi/AwiCollector.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include <optional>
 
@@ -194,6 +195,15 @@ std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
 void CudaGraphRunner::capturePrefillOneSeqLen(int seq_len) {
     try {
         captureOneGraphInstance(seq_len, "seq len");
+        {
+            // AWI: capture event recorded only after the instance is captured.
+            AwiEvent capture_event;
+            capture_event.type        = "capture";
+            capture_event.backend     = awiGraphBackendName();
+            capture_event.detail_json =
+                std::string("{\"kind\":\"prefill\",\"seq_len\":") + std::to_string(seq_len) + "}";
+            AwiCollector::instance().recordEvent(std::move(capture_event));
+        }
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("Exception in capturePrefillOneSeqLen for seq_len %d: %s", seq_len, e.what());
         throw;
@@ -204,6 +214,8 @@ void CudaGraphRunner::capturePrefillOneSeqLen(int seq_len) {
 }
 
 void CudaGraphRunner::replayPrefill(int seq_len) {
+    // AWI: real replay observation consumed by the engine step hook.
+    AwiCollector::instance().noteGraphReplay(false);
     replayGraph(seq_len);
 }
 }  // namespace rtp_llm

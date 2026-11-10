@@ -103,6 +103,7 @@ cc_library(
         ":prefill_request_logger",
         ":rpc_error_code",
         ":tensor_pb_convert",
+        "//rtp_llm/cpp/awi:awi_collector",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",

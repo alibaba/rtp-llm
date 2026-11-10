@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/awi/AwiCollector.h"
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
@@ -296,6 +297,8 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
 }
 
 void NormalEngine::initScheduler() {
+    // AWI: tag this backend process's observations with its serving rank.
+    AwiCollector::instance().setRank(parallelism_config.tp_rank);
     const auto pdfusion_scheduler_mode =
         parsePDFusionSchedulerMode(runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode);
     if (pdfusion_scheduler_mode == PDFusionSchedulerMode::UNKNOWN) {
@@ -909,6 +912,10 @@ absl::Status NormalEngine::step() try {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
+    // AWI: bracket the synchronized step with graph-replay epochs so the
+    // decode observations report real replay vs eager fallback per step.
+    const int64_t awi_decode_epoch_before  = AwiCollector::instance().graphReplayEpoch(true);
+    const int64_t awi_prefill_epoch_before = AwiCollector::instance().graphReplayEpoch(false);
 
     // Per-request timeline: if any stream requested gen_timeline and no session is
     // active yet, configure the profiler so the executor-driven step window
@@ -949,6 +956,8 @@ absl::Status NormalEngine::step() try {
         reportMetrics({step_latency});
     }
 
+    recordAwiStepObservations(streams, step_begin_time_us, awi_decode_epoch_before, awi_prefill_epoch_before);
+
     return status;
 } catch (const std::exception& exception) {
     if (isTorchCudaOom(exception)) {
@@ -959,6 +968,82 @@ absl::Status NormalEngine::step() try {
 
 void NormalEngine::startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {
     step_profiler_.configure(true, trace_name, start_step, num_steps);
+}
+
+void NormalEngine::recordAwiStepObservations(const std::list<GenerateStreamPtr>& streams,
+                                             int64_t                             step_begin_time_us,
+                                             int64_t                             decode_epoch_before,
+                                             int64_t                             prefill_epoch_before) {
+    static constexpr const char* kAwiGraphBackend = awiGraphBackendName();
+    auto&         awi              = AwiCollector::instance();
+    const int64_t step_end_us      = autil::TimeUtility::currentTimeInMicroSeconds();
+    const double  elapsed_ms       = static_cast<double>(step_end_us - step_begin_time_us) / 1000.0;
+    const bool    decode_replayed  = awi.graphReplayEpoch(true) > decode_epoch_before;
+    const bool    prefill_replayed = awi.graphReplayEpoch(false) > prefill_epoch_before;
+
+    bool had_decode_stream = false;
+    if (parallelism_config.tp_rank == 0) {
+        for (const auto& stream : streams) {
+            if (!stream) {
+                continue;
+            }
+            const auto generate_input = stream->generateInput();
+            if (generate_input == nullptr || stream->isContextStream()) {
+                continue;
+            }
+            had_decode_stream        = true;
+            const int64_t request_id = generate_input->request_id;
+            const auto    time_info  = stream->getTimeInfo();
+            if (time_info.first_token_time_us > 0 && awi.markPrefillEmitted(request_id)) {
+                // Whole prefill window incl. all chunks on the common host clock.
+                AwiEvent prefill_event;
+                prefill_event.type           = "prefill";
+                prefill_event.request_id     = request_id;
+                prefill_event.awi_request_id = generate_input->request_info.request_id;
+                prefill_event.input_tokens   = stream->inputLength();
+                prefill_event.start_ns       = time_info.running_started_time_us * 1000;
+                prefill_event.end_ns         = time_info.first_token_time_us * 1000;
+                awi.recordEvent(std::move(prefill_event));
+
+                const int64_t memory_reuse = stream->prefillMemoryReuseLen();
+                if (memory_reuse > 0) {
+                    AwiEvent reuse_event;
+                    reuse_event.type           = "reuse";
+                    reuse_event.request_id     = request_id;
+                    reuse_event.awi_request_id = generate_input->request_info.request_id;
+                    reuse_event.input_tokens   = stream->inputLength();
+                    reuse_event.hit_tokens     = memory_reuse;
+                    awi.recordEvent(std::move(reuse_event));
+                }
+            }
+            // First output token belongs to prefill: decode steps are 1..N-1.
+            const int generated = stream->seqLength() - stream->inputLength();
+            if (generated >= 2) {
+                AwiEvent decode_event;
+                decode_event.type           = "decode";
+                decode_event.request_id     = request_id;
+                decode_event.awi_request_id = generate_input->request_info.request_id;
+                decode_event.step           = generated - 1;
+                decode_event.input_tokens   = stream->inputLength();
+                decode_event.backend        = kAwiGraphBackend;
+                decode_event.graph_replay   = decode_replayed ? 1 : 0;
+                decode_event.elapsed_ms     = elapsed_ms;
+                awi.recordEvent(std::move(decode_event));
+            }
+        }
+    }
+
+    // Every rank records the synchronized step window; non-zero TP ranks have
+    // no scheduled stream list but still execute the collective step, so the
+    // aggregate proves per-rank participation and surfaces eager fallbacks.
+    AwiEvent step_event;
+    step_event.type         = "decode";
+    step_event.request_id   = -1;
+    step_event.step         = execute_step_;
+    step_event.backend      = kAwiGraphBackend;
+    step_event.graph_replay = decode_replayed ? 1 : (had_decode_stream ? 0 : (prefill_replayed ? -1 : 0));
+    step_event.elapsed_ms   = elapsed_ms;
+    awi.recordEvent(std::move(step_event));
 }
 
 bool NormalEngine::isMTPEagle() {

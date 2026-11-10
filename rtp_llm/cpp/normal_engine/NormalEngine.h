@@ -49,6 +49,14 @@ public:
     void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
 
 private:
+    // AWI adaptation-evaluator observations: emits per-request prefill/reuse/
+    // decode events (rank 0, which owns the scheduled streams) and a per-step
+    // aggregate on every rank, measured on the synchronized step window.
+    void recordAwiStepObservations(const std::list<GenerateStreamPtr>& streams,
+                                   int64_t                             step_begin_time_us,
+                                   int64_t                             decode_epoch_before,
+                                   int64_t                             prefill_epoch_before);
+
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
     bool                            validateStreamForScheduling(const GenerateStreamPtr& stream) const;

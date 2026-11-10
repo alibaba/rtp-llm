@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <c10/core/InferenceMode.h>
 #include "autil/Scope.h"
+#include "rtp_llm/cpp/awi/AwiCollector.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -847,6 +848,54 @@ grpc::Status LocalRpcServer::UpdateSchedulerInfo(grpc::ServerContext*           
                                                  EmptyPB*                            response) {
     const std::string scheduler_info = request->scheduler_info();
     engine_->getScheduler().updateSchedulerInfo(scheduler_info);
+    return grpc::Status::OK;
+}
+
+grpc::Status
+LocalRpcServer::AwiBarrier(grpc::ServerContext* context, const AwiBarrierRequestPB* request, EmptyPB* response) {
+    // Arm (or, with an empty operation_id, disarm) the operation-scoped
+    // admission/residency probe state. Scheduler-side residency gating and
+    // prior-benchmark cache eviction consume this state in the engine step
+    // loop; observations are served per rank by AwiObservations below.
+    AwiOperation operation;
+    operation.operation_id = request->operation_id();
+    operation.awi_request_ids.insert(request->request_ids().begin(), request->request_ids().end());
+    operation.context_tokens = request->context_tokens();
+    AwiCollector::instance().armOperation(std::move(operation));
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::AwiObservations(grpc::ServerContext*            context,
+                                             const AwiObservationsRequestPB* request,
+                                             AwiObservationsResponsePB*      response) {
+    auto& collector = AwiCollector::instance();
+    response->set_rank(collector.rank());
+    response->set_build_info_json(collector.buildInfoJson());
+    response->set_configuration_json(collector.configurationJson());
+    response->set_weights_json(collector.weightsJson());
+    response->set_startup_network_fetches(collector.startupNetworkFetches());
+    for (const auto& event : collector.events(request->operation_id())) {
+        auto* pb = response->add_events();
+        pb->set_type(event.type);
+        pb->set_rank(event.rank);
+        pb->set_operation_id(event.operation_id);
+        pb->set_request_id(event.request_id);
+        pb->set_awi_request_id(event.awi_request_id);
+        pb->set_input_tokens(event.input_tokens);
+        pb->set_start_ns(event.start_ns);
+        pb->set_end_ns(event.end_ns);
+        pb->set_step(event.step);
+        pb->set_backend(event.backend);
+        pb->set_graph_replay(event.graph_replay);
+        pb->set_elapsed_ms(event.elapsed_ms);
+        pb->set_kv_tokens(event.kv_tokens);
+        pb->set_reserved_tokens(event.reserved_tokens);
+        pb->set_hit_tokens(event.hit_tokens);
+        pb->set_concurrency(event.concurrency);
+        pb->set_context_tokens(event.context_tokens);
+        pb->set_failure_kind(event.failure_kind);
+        pb->set_detail_json(event.detail_json);
+    }
     return grpc::Status::OK;
 }
 
