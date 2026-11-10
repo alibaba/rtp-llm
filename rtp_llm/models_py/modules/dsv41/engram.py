@@ -1074,7 +1074,10 @@ class HostEngramEmbedding:
                             uva[1].record_stream(
                                 torch.cuda.current_stream(indices.device)
                             )
-        if indices.is_cuda:
+        # The UVA gather needs _PinnedSharedTable (cuda.bindings), which ROCm
+        # never builds; fall through to the host gather below, which keeps the
+        # tables in host RAM and stages only the selected rows to the device.
+        if indices.is_cuda and torch.version.hip is None:
             from rtp_llm.models_py.modules.dsv41 import _engram_triton
 
             lookup = (
