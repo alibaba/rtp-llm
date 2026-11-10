@@ -39,7 +39,7 @@ void registerEmbeddingOutput(const py::module& m) {
         .def("setMapOutput", &EmbeddingOutput::setMapOutput);
 }
 
-void registerAwiObservationHooks(const py::module& m) {
+void registerAwiObservationHooks(py::module& m) {
     // Startup facts for the AWI adaptation-evaluator observations. The Python
     // layer measures/derives these (weight placement from real allocations,
     // network-fetch audit count, build identity) and injects them once; the
