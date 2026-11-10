@@ -5,10 +5,13 @@ import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.config.RtpConfig;
 import static org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure.Reason.*;
 
-/** Explicit-group admission, isolated from ordinary FIFO scheduling. */
+/**
+ * Explicit-group admission, isolated from ordinary FIFO scheduling.
+ */
 final class RtpPrefillGroupScheduler extends AbstractRtpScheduler {
     private final ArrayDeque<ArrayDeque<GenerateStream>> groups = new ArrayDeque<>();
     private final Map<GenerateStream, ArrayDeque<GenerateStream>> memberships = new IdentityHashMap<>();
+
     private boolean preferGroup;
 
     RtpPrefillGroupScheduler(Object lock, RtpConfig config, KvCacheManager cache) {
@@ -54,13 +57,6 @@ final class RtpPrefillGroupScheduler extends AbstractRtpScheduler {
         selected.forEach(memberships::remove);
     }
 
-    private void selectGroup(List<GenerateStream> selected) {
-        if (groups.isEmpty()) return;
-        var group = groups.getFirst();
-        admitPrefill(group, selected, 0);
-        if (group.isEmpty()) groups.remove(group);
-    }
-
     @Override protected void removeWaiting(GenerateStream stream) {
         super.removeWaiting(stream);
         var group = memberships.remove(stream);
@@ -70,9 +66,14 @@ final class RtpPrefillGroupScheduler extends AbstractRtpScheduler {
         }
     }
 
-    @Override protected Set<GenerateStream> waitingStreams() {
-        var entries = super.waitingStreams();
-        groups.forEach(entries::addAll);
-        return entries;
+    @Override protected boolean isWaiting(GenerateStream stream) {
+        return memberships.containsKey(stream) || super.isWaiting(stream);
+    }
+
+    private void selectGroup(List<GenerateStream> selected) {
+        if (groups.isEmpty()) return;
+        var group = groups.getFirst();
+        admitPrefill(group, selected, 0);
+        if (group.isEmpty()) groups.remove(group);
     }
 }

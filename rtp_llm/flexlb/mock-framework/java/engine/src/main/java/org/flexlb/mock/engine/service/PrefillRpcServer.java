@@ -17,8 +17,12 @@ import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 import org.flexlb.mock.protocol.MediaInput;
 
-/** P protocol sessions, input preparation and output delivery. EngineScheduler owns local execution and KV. */
+/**
+ * P protocol sessions, input preparation and output delivery. EngineScheduler owns local execution and KV.
+ */
 final class PrefillRpcServer implements AutoCloseable {
+    private static final long REGISTRY_TTL = TimeUnit.MINUTES.toNanos(10);
+
     private final RtpRpcService.Config config;
     private final Object executionLock;
     private final Runnable recordCancellation;
@@ -34,9 +38,8 @@ final class PrefillRpcServer implements AutoCloseable {
         Thread.ofPlatform().daemon().name("rtp-pd-deadline").factory());
     private final Map<Long, Call> active = new HashMap<>();
     private final Map<Long, GeneratedOutput> outputs = new LinkedHashMap<>();
-    private record Fence(long expires, boolean preempted) {}
-    private static final long REGISTRY_TTL = TimeUnit.MINUTES.toNanos(10);
     private final Map<Long, Fence> fences = new LinkedHashMap<>();
+
     private long nextOutputSweep;
     private volatile boolean closed;
 
@@ -52,200 +55,24 @@ final class PrefillRpcServer implements AutoCloseable {
         deadlines.setRemoveOnCancelPolicy(true);
     }
 
-    record Result(GenerateOutputsPB output, Status status, long engineCode) {}
-    final class Session implements EngineScheduler.Listener {
-        GenerateInputPB input;
-        final long started, deadline;
-        final long id;
-        boolean ended;
-        final boolean retained;
-        final CompletableFuture<Result> result = new CompletableFuture<>();
-        final CompletableFuture<Result> termination = new CompletableFuture<>();
-        EngineScheduler.Request request;
-
-        Session(GenerateInputPB input, boolean retained, long started, long deadline) {
-            this.input = input; this.retained = retained; this.started = started; this.deadline = deadline;
-            id = input.getRequestId();
-            synchronized (executionLock) {
-                if (closed) throw Status.UNAVAILABLE.withDescription("Prefill node closing").asRuntimeException();
-                engine.checkHealthy();
-                if (sessions.containsKey(id)) throw Status.ALREADY_EXISTS.withDescription("Active request identity already exists").asRuntimeException();
-                sessions.put(id, this);
-            }
-        }
-        CompletionStage<Result> completion() { return result.minimalCompletionStage(); }
-        void cancel() { finish(Status.CANCELLED.withDescription("Client cancelled local generation"), 0); }
-        void preempt() { finish(Status.RESOURCE_EXHAUSTED.withDescription("Preempted by a higher-priority request"), 8429); }
-        void expire() { finish(Status.DEADLINE_EXCEEDED.withDescription("RPC deadline expired"), 603); }
-        private void finish(Status status, long code) { finish(RpcErrors.scheduling(status, code)); }
-        private void fail(Throwable error) { finish(RpcErrors.scheduling(error)); }
-        private void finish(RequestFailure failure) {
-            synchronized (executionLock) {
-                if (ended) return;
-                if (request != null) { engine.abortRequest(request, failure); return; }
-                var task = RpcMessages.pending(input);
-                finished.add(new EngineScheduler.Task(id, task.batchId(), task.inputLength(), 0, task.priority(),
-                    EngineScheduler.ReportedPhase.PENDING, 0, 0, 0, System.currentTimeMillis(), failure));
-                ended = true;
-                sessions.remove(id, this);
-            }
-            complete(null, failure);
-        }
-        private Result success(EngineScheduler.Request request, boolean finished) {
-            return new Result(RpcMessages.token(input, RpcMessages.sampledToken(input), 1, 1, request.reused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
-        }
-        @Override public void progressed(EngineScheduler.Request request) {
-            var output = request.progress();
-            if (retained) result.complete(success(request, output.finished()));
-        }
-        @Override public void terminal(EngineScheduler.Request request, RequestFailure failure) {
-            synchronized (executionLock) {
-                if (ended) return;
-                ended = true;
-                sessions.remove(id, this);
-            }
-            complete(request, failure);
-        }
-        private void complete(EngineScheduler.Request request, RequestFailure failure) {
-            var ended = failure == null ? success(request, true) : new Result(null, RpcErrors.status(failure), RpcErrors.code(failure));
-            result.complete(ended);
-            termination.complete(ended);
-        }
-    }
-
-    Session submit(GenerateInputPB input) { return submit(input, Long.MAX_VALUE); }
-    Session submit(GenerateInputPB input, long rpcDeadline) { return submit(input, rpcDeadline, false); }
-    Session submit(GenerateInputPB input, long rpcDeadline, boolean retained) {
-        return submit(input, rpcDeadline, retained, System.nanoTime());
-    }
-    Session submit(GenerateInputPB input, long rpcDeadline, boolean retained, long started) {
-        return submit(MediaInput.text(input), rpcDeadline, retained, started);
-    }
-    Session submit(MediaInput.Prepared prepared, long rpcDeadline, boolean retained, long started) {
-        var input = prepared.input();
-        validate(input, retained);
-        requirePrepared(input);
-        var session = new Session(input, retained, started, RpcMessages.deadline(input, started, rpcDeadline));
-        return submit(session, prepared);
-    }
-    Session submit(Session session, MediaInput.Prepared prepared) {
-        try {
-            requirePrepared(prepared.input());
-            var input = RpcMessages.toSchedulerInput(prepared, Long.toString(session.id), session.started,
-                session.deadline, session.retained, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
-            synchronized (executionLock) {
-                requirePending(session, prepared.input());
-                session.input = prepared.input();
-                session.request = engine.enqueue(input, session);
-            }
-        } catch (RuntimeException error) {
-            var nativeError = error instanceof RequestFailure f ? rpcFailure(f) : error;
-            session.fail(nativeError);
-            throw nativeError;
-        }
-        return session;
-    }
-
-    record Submission(MediaInput.Prepared prepared, long deadline, Session session) {
-        Submission(GenerateInputPB input, long deadline) { this(MediaInput.text(input), deadline, null); }
-        GenerateInputPB input() { return prepared.input(); }
-    }
-    record Admission(Session session, RuntimeException failure) {}
-
-    List<Admission> submit(List<Submission> batch) {
-        var items = new ArrayList<EngineScheduler.InputItem>();
-        var admittedSessions = new ArrayList<Session>();
-        var positions = new ArrayList<Integer>();
-        var results = new ArrayList<Admission>(Collections.nCopies(batch.size(), null));
-        for (int i = 0; i < batch.size(); i++) {
-            var item = batch.get(i);
-            Session session = item.session();
-            try {
-                if (session == null) validate(item.input(), true);
-                requirePrepared(item.input());
-                long started = System.nanoTime();
-                if (session == null) session = new Session(item.input(), true, started,
-                    RpcMessages.deadline(item.input(), started, item.deadline()));
-                var input = RpcMessages.toSchedulerInput(item.prepared(), Long.toString(session.id),
-                    session.started, session.deadline, true, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
-                admittedSessions.add(session); positions.add(i); items.add(new EngineScheduler.InputItem(input, session));
-            } catch (RuntimeException error) {
-                var failure = error instanceof RequestFailure f ? rpcFailure(f) : error;
-                if (session != null) session.fail(failure);
-                results.set(i, new Admission(null, failure));
-            }
-        }
+    @Override public void close() {
+        List<Call> owned;
+        synchronized (this) { closed = true; owned = List.copyOf(active.values()); }
+        for (var call : owned) call.finish(Status.UNAVAILABLE.withDescription("Prefill node closed").asRuntimeException());
+        synchronized (this) { outputs.clear(); }
+        List<Session> preparing;
         synchronized (executionLock) {
-            // Input hashing may race cancellation; revalidate every session before atomic batch admission.
-            for (int i = items.size() - 1; i >= 0; i--) {
-                var session = admittedSessions.get(i);
-                try {
-                    var input = batch.get(positions.get(i)).input();
-                    requirePending(session, input); session.input = input;
-                }
-                catch (RuntimeException error) {
-                    var failure = error instanceof RequestFailure f ? rpcFailure(f) : error;
-                    session.fail(failure); results.set(positions.get(i), new Admission(null, failure));
-                    items.remove(i); admittedSessions.remove(i); positions.remove(i);
-                }
-            }
-            if (!items.isEmpty()) {
-                List<EngineScheduler.InputResult> admitted;
-                try { admitted = engine.enqueue(items); }
-                catch (RuntimeException error) {
-                    admittedSessions.forEach(session -> session.fail(error));
-                    throw error;
-                }
-                for (int i = 0; i < admitted.size(); i++) {
-                    var result = admitted.get(i); var session = admittedSessions.get(i);
-                    if (result.failure() == null) {
-                        session.request = result.request(); results.set(positions.get(i), new Admission(session, null));
-                    } else {
-                        var failure = rpcFailure(result.failure());
-                        session.fail(failure);
-                        results.set(positions.get(i), new Admission(null, failure));
-                    }
-                }
-            }
+            preparing = sessions.values().stream().filter(session -> session.request == null).toList();
         }
-        return List.copyOf(results);
-    }
-
-    private void requirePending(Session session, GenerateInputPB input) {
-        if (session.ended || session.request != null || sessions.get(session.id) != session)
-            throw new RequestFailure(RequestFailure.Reason.CANCELLED, "Admission already ended");
-        if (session.id != input.getRequestId()) throw new IllegalArgumentException("Admission identity changed");
-    }
-
-    private static io.grpc.StatusRuntimeException rpcFailure(RequestFailure failure) {
-        return failure.reason() == RequestFailure.Reason.INVALID
-            ? RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription(failure.getMessage()), 605) : RpcErrors.failure(failure);
-    }
-
-    private static void requirePrepared(GenerateInputPB input) {
-        if (org.flexlb.mock.protocol.MediaInput.present(input))
-            throw Status.INVALID_ARGUMENT.withDescription("Prepare multimodal input before EngineScheduler submission").asRuntimeException();
-    }
-
-    void validate(GenerateInputPB input, boolean retained) {
-        if (config.role() != Role.prefill || (retained ? input.getGenerateConfig().getMaxNewTokens() < 1 : input.getGenerateConfig().getMaxNewTokens() != 1))
-            throw Status.UNIMPLEMENTED.withDescription("Local generation supports one token; transfer prepares only the Prefill token").asRuntimeException();
-        var generation = input.getGenerateConfig();
-        RpcMessages.supported(input);
-        if (input.getTokenIdsCount() < 1
-                || generation.getTimeoutMs() < 0 || generation.getMinNewTokens() < 0 || generation.getMinNewTokens() > generation.getMaxNewTokens()
-                || generation.getNumBeams() < 0 || generation.getNumReturnSequences() < 0)
-            throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid input length or local generation settings"), 605);
+        for (var session : preparing) session.finish(Status.UNAVAILABLE.withDescription("Prefill node closed"), 0);
+        workers.shutdownNow(); deadlines.shutdownNow(); vision.close(); channels.close(); engine.close();
     }
 
     RequestState.Use beginTransfer(Session session) {
         try { return engine.beginKvTransfer(session.request); }
         catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
-    private void acknowledgeLoad(Session session) {
-        try { engine.updateRequest(session.request, RtpControl.TRANSFER_ACKNOWLEDGED); }
-        catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
-    }
+
     EngineScheduler.Status snapshot(long latestFinished) {
         synchronized (executionLock) {
             var execution = engine.status(latestFinished);
@@ -255,6 +82,7 @@ final class PrefillRpcServer implements AutoCloseable {
             return new EngineScheduler.Status(tasks, execution.finished(), execution.finishedVersion(), execution.waiting(), execution.running());
         }
     }
+
     void checkHealthy() { engine.checkHealthy(); }
 
     void generate(GenerateInputPB input, StreamObserver<GenerateOutputsPB> observer) {
@@ -289,6 +117,189 @@ final class PrefillRpcServer implements AutoCloseable {
             try { response.onNext(result.output()); response.onCompleted(); }
             catch (RuntimeException error) { session.cancel(); }
         });
+    }
+
+    void validate(GenerateInputPB input, boolean retained) {
+        if (config.role() != Role.prefill || (retained ? input.getGenerateConfig().getMaxNewTokens() < 1 : input.getGenerateConfig().getMaxNewTokens() != 1))
+            throw Status.UNIMPLEMENTED.withDescription("Local generation supports one token; transfer prepares only the Prefill token").asRuntimeException();
+        var generation = input.getGenerateConfig();
+        RpcMessages.supported(input);
+        if (input.getTokenIdsCount() < 1
+                || generation.getTimeoutMs() < 0 || generation.getMinNewTokens() < 0 || generation.getMinNewTokens() > generation.getMaxNewTokens()
+                || generation.getNumBeams() < 0 || generation.getNumReturnSequences() < 0)
+            throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Invalid input length or local generation settings"), 605);
+    }
+
+    Session submit(GenerateInputPB input) { return submit(input, Long.MAX_VALUE); }
+
+    Session submit(GenerateInputPB input, long rpcDeadline) { return submit(input, rpcDeadline, false); }
+
+    Session submit(GenerateInputPB input, long rpcDeadline, boolean retained) {
+        return submit(input, rpcDeadline, retained, System.nanoTime());
+    }
+
+    Session submit(GenerateInputPB input, long rpcDeadline, boolean retained, long started) {
+        return submit(MediaInput.text(input), rpcDeadline, retained, started);
+    }
+
+    Session submit(MediaInput.Prepared prepared, long rpcDeadline, boolean retained, long started) {
+        var input = prepared.input();
+        validate(input, retained);
+        requirePrepared(input);
+        var session = new Session(input, retained, started, RpcMessages.deadline(input, started, rpcDeadline));
+        return submit(session, prepared);
+    }
+
+    Session submit(Session session, MediaInput.Prepared prepared) {
+        try {
+            requirePrepared(prepared.input());
+            var input = RpcMessages.toSchedulerInput(prepared, Long.toString(session.id), session.started,
+                session.deadline, session.retained, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
+            synchronized (executionLock) {
+                requirePending(session, prepared.input());
+                session.input = prepared.input();
+                session.request = engine.enqueue(input, session);
+            }
+        } catch (RuntimeException error) {
+            var nativeError = error instanceof RequestFailure f ? rpcFailure(f) : error;
+            session.fail(nativeError);
+            throw nativeError;
+        }
+        return session;
+    }
+
+    List<Admission> submit(List<Submission> batch) {
+        var prepared = new ArrayList<PreparedAdmission>();
+        var results = new ArrayList<Admission>(Collections.nCopies(batch.size(), null));
+        for (int i = 0; i < batch.size(); i++) {
+            var item = batch.get(i);
+            Session session = item.session();
+            try {
+                if (session == null) validate(item.input(), true);
+                requirePrepared(item.input());
+                long started = System.nanoTime();
+                if (session == null) session = new Session(item.input(), true, started,
+                    RpcMessages.deadline(item.input(), started, item.deadline()));
+                var input = RpcMessages.toSchedulerInput(item.prepared(), Long.toString(session.id),
+                    session.started, session.deadline, true, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
+                prepared.add(new PreparedAdmission(i, session, new EngineScheduler.InputItem(input, session)));
+            } catch (RuntimeException error) {
+                var failure = error instanceof RequestFailure f ? rpcFailure(f) : error;
+                if (session != null) session.fail(failure);
+                results.set(i, new Admission(null, failure));
+            }
+        }
+        synchronized (executionLock) {
+            // Input hashing may race cancellation; revalidate every session before atomic batch admission.
+            for (int i = prepared.size() - 1; i >= 0; i--) {
+                var admission = prepared.get(i);
+                var session = admission.session();
+                try {
+                    var input = batch.get(admission.batchIndex()).input();
+                    requirePending(session, input); session.input = input;
+                }
+                catch (RuntimeException error) {
+                    var failure = error instanceof RequestFailure f ? rpcFailure(f) : error;
+                    session.fail(failure);
+                    results.set(admission.batchIndex(), new Admission(null, failure));
+                    prepared.remove(i);
+                }
+            }
+            if (!prepared.isEmpty()) {
+                List<EngineScheduler.InputResult> admitted;
+                try { admitted = engine.enqueue(prepared.stream().map(PreparedAdmission::inputItem).toList()); }
+                catch (RuntimeException error) {
+                    prepared.forEach(admission -> admission.session().fail(error));
+                    throw error;
+                }
+                for (int i = 0; i < admitted.size(); i++) {
+                    var result = admitted.get(i);
+                    var admission = prepared.get(i);
+                    var session = admission.session();
+                    if (result.failure() == null) {
+                        session.request = result.request();
+                        results.set(admission.batchIndex(), new Admission(session, null));
+                    } else {
+                        var failure = rpcFailure(result.failure());
+                        session.fail(failure);
+                        results.set(admission.batchIndex(), new Admission(null, failure));
+                    }
+                }
+            }
+        }
+        return List.copyOf(results);
+    }
+
+    List<CompletableFuture<Void>> enqueue(List<GenerateInputPB> inputs, long attachMillis) {
+        var calls = new ArrayList<Call>(); var results = new ArrayList<CompletableFuture<Void>>();
+        for (var input : inputs) {
+            try {
+                var call = start(input, null, attachMillis, true, null); calls.add(call); results.add(call.admitted);
+            } catch (RuntimeException error) { results.add(CompletableFuture.failedFuture(error)); }
+        }
+        var prepared = calls.stream().map(call -> call.prepared.handle((unused, error) -> null)).toArray(CompletableFuture[]::new);
+        CompletableFuture.allOf(prepared).thenRunAsync(() -> submitGroup(calls), workers)
+            .exceptionally(error -> { calls.forEach(call -> call.finish(error)); return null; });
+        return List.copyOf(results);
+    }
+
+    void fetch(long id, StreamObserver<GenerateOutputsPB> observer) {
+        var response = (ServerCallStreamObserver<GenerateOutputsPB>) observer;
+        GeneratedOutput output; Fence fence;
+        synchronized (this) { output = outputs.get(id); fence = fences.get(id); }
+        if (fence != null && fence.preempted() && fence.expires() > System.nanoTime()) {
+            response.onError(preempted()); return;
+        }
+        if (output == null || output.expired()) {
+            response.onError(Status.NOT_FOUND.withDescription("No fetchable request").asRuntimeException()); return;
+        }
+        output.attach(response, () -> {});
+    }
+
+    CancelStatusPB cancel(long id) {
+        if (id <= 0) throw Status.INVALID_ARGUMENT.withDescription("Cancel requires a positive request_id").asRuntimeException();
+        Call call;
+        synchronized (this) {
+            if (closed) return CancelStatusPB.CANCEL_STATUS_NOT_FOUND;
+            sweepFences();
+            call = active.get(id);
+            if (call == null || !call.deferred) {
+                var fence = fences.get(id);
+                if (fence != null) return fence.preempted() ? CancelStatusPB.CANCEL_STATUS_TOMBSTONED : CancelStatusPB.CANCEL_STATUS_NOT_FOUND;
+                if (call != null) return CancelStatusPB.CANCEL_STATUS_NOT_FOUND;
+                remember(id, true);
+                return CancelStatusPB.CANCEL_STATUS_TOMBSTONED;
+            }
+        }
+        synchronized (call) {
+            if (call.terminal) return CancelStatusPB.CANCEL_STATUS_NOT_FOUND;
+            call.priorityPreempted = true;
+            synchronized (this) { remember(id, true); }
+            call.source.preempt();
+            call.finish(preempted());
+            return CancelStatusPB.CANCEL_STATUS_ACCEPTED;
+        }
+    }
+
+    private void requirePending(Session session, GenerateInputPB input) {
+        if (session.ended || session.request != null || sessions.get(session.id) != session)
+            throw new RequestFailure(RequestFailure.Reason.CANCELLED, "Admission already ended");
+        if (session.id != input.getRequestId()) throw new IllegalArgumentException("Admission identity changed");
+    }
+
+    private static io.grpc.StatusRuntimeException rpcFailure(RequestFailure failure) {
+        return failure.reason() == RequestFailure.Reason.INVALID
+            ? RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription(failure.getMessage()), 605) : RpcErrors.failure(failure);
+    }
+
+    private static void requirePrepared(GenerateInputPB input) {
+        if (org.flexlb.mock.protocol.MediaInput.present(input))
+            throw Status.INVALID_ARGUMENT.withDescription("Prepare multimodal input before EngineScheduler submission").asRuntimeException();
+    }
+
+    private void acknowledgeLoad(Session session) {
+        try { engine.updateRequest(session.request, RtpControl.TRANSFER_ACKNOWLEDGED); }
+        catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
 
     private Call start(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, long attachMillis,
@@ -332,18 +343,25 @@ final class PrefillRpcServer implements AutoCloseable {
         return call;
     }
 
-    List<CompletableFuture<Void>> enqueue(List<GenerateInputPB> inputs, long attachMillis) {
-        var calls = new ArrayList<Call>(); var results = new ArrayList<CompletableFuture<Void>>();
-        for (var input : inputs) {
-            try {
-                var call = start(input, null, attachMillis, true, null); calls.add(call); results.add(call.admitted);
-            } catch (RuntimeException error) { results.add(CompletableFuture.failedFuture(error)); }
+    private void sweepFences() {
+        long now = System.nanoTime();
+        var entries = fences.values().iterator();
+        while (entries.hasNext()) {
+            if (entries.next().expires() > now) break;
+            entries.remove();
         }
-        var prepared = calls.stream().map(call -> call.prepared.handle((unused, error) -> null)).toArray(CompletableFuture[]::new);
-        CompletableFuture.allOf(prepared).thenRunAsync(() -> submitGroup(calls), workers)
-            .exceptionally(error -> { calls.forEach(call -> call.finish(error)); return null; });
-        return List.copyOf(results);
     }
+
+    private static StatusRuntimeException preempted() {
+        return RpcErrors.failure(Status.RESOURCE_EXHAUSTED.withDescription("Preempted by a higher-priority request"), 8429);
+    }
+
+    // Registry monitor held; refresh insertion order so expiry never scans live history.
+    private void remember(long id, boolean preempted) {
+        fences.remove(id);
+        fences.put(id, new Fence(System.nanoTime() + REGISTRY_TTL, preempted));
+    }
+
     private void submitGroup(List<Call> calls) {
         var live = new ArrayList<Call>(); var inputs = new ArrayList<Submission>();
         for (var call : calls) synchronized (call) {
@@ -372,76 +390,136 @@ final class PrefillRpcServer implements AutoCloseable {
         });
     }
 
-    void fetch(long id, StreamObserver<GenerateOutputsPB> observer) {
-        var response = (ServerCallStreamObserver<GenerateOutputsPB>) observer;
-        GeneratedOutput output; Fence fence;
-        synchronized (this) { output = outputs.get(id); fence = fences.get(id); }
-        if (fence != null && fence.preempted() && fence.expires() > System.nanoTime()) {
-            response.onError(preempted()); return;
-        }
-        if (output == null || output.expired()) {
-            response.onError(Status.NOT_FOUND.withDescription("No fetchable request").asRuntimeException()); return;
-        }
-        output.attach(response, () -> {});
+    private static long rpcDeadline() {
+        var deadline = Context.current().getDeadline();
+        return deadline == null ? Long.MAX_VALUE : RpcMessages.after(System.nanoTime(), deadline.timeRemaining(TimeUnit.NANOSECONDS));
     }
 
-    CancelStatusPB cancel(long id) {
-        if (id <= 0) throw Status.INVALID_ARGUMENT.withDescription("Cancel requires a positive request_id").asRuntimeException();
-        Call call;
-        synchronized (this) {
-            if (closed) return CancelStatusPB.CANCEL_STATUS_NOT_FOUND;
-            sweepFences();
-            call = active.get(id);
-            if (call == null || !call.deferred) {
-                var fence = fences.get(id);
-                if (fence != null) return fence.preempted() ? CancelStatusPB.CANCEL_STATUS_TOMBSTONED : CancelStatusPB.CANCEL_STATUS_NOT_FOUND;
-                if (call != null) return CancelStatusPB.CANCEL_STATUS_NOT_FOUND;
-                remember(id, true);
-                return CancelStatusPB.CANCEL_STATUS_TOMBSTONED;
+    private record Fence(long expires, boolean preempted) {}
+
+    record Result(GenerateOutputsPB output, Status status, long engineCode) {}
+
+    /**
+     * Tracks local Prefill from request registration through scheduler completion.
+     */
+    final class Session implements EngineScheduler.Listener {
+        GenerateInputPB input;
+
+        final long started, deadline;
+        final long id;
+
+        boolean ended;
+
+        final boolean retained;
+
+        final CompletableFuture<Result> result = new CompletableFuture<>();
+        final CompletableFuture<Result> termination = new CompletableFuture<>();
+
+        EngineScheduler.Request request;
+
+        Session(GenerateInputPB input, boolean retained, long started, long deadline) {
+            this.input = input; this.retained = retained; this.started = started; this.deadline = deadline;
+            id = input.getRequestId();
+            synchronized (executionLock) {
+                if (closed) throw Status.UNAVAILABLE.withDescription("Prefill node closing").asRuntimeException();
+                engine.checkHealthy();
+                if (sessions.containsKey(id)) throw Status.ALREADY_EXISTS.withDescription("Active request identity already exists").asRuntimeException();
+                sessions.put(id, this);
             }
         }
-        synchronized (call) {
-            if (call.terminal) return CancelStatusPB.CANCEL_STATUS_NOT_FOUND;
-            call.priorityPreempted = true;
-            synchronized (this) { remember(id, true); }
-            call.source.preempt();
-            call.finish(preempted());
-            return CancelStatusPB.CANCEL_STATUS_ACCEPTED;
+
+        @Override public void progressed(EngineScheduler.Request request) {
+            var output = request.progress();
+            if (retained) result.complete(success(request, output.finished()));
         }
-    }
-    // Registry monitor held; refresh insertion order so expiry never scans live history.
-    private void remember(long id, boolean preempted) {
-        fences.remove(id);
-        fences.put(id, new Fence(System.nanoTime() + REGISTRY_TTL, preempted));
-    }
-    private void sweepFences() {
-        long now = System.nanoTime();
-        var entries = fences.values().iterator();
-        while (entries.hasNext()) {
-            if (entries.next().expires() > now) break;
-            entries.remove();
+
+        @Override public void terminal(EngineScheduler.Request request, RequestFailure failure) {
+            synchronized (executionLock) {
+                if (ended) return;
+                ended = true;
+                sessions.remove(id, this);
+            }
+            complete(request, failure);
         }
-    }
-    private static StatusRuntimeException preempted() {
-        return RpcErrors.failure(Status.RESOURCE_EXHAUSTED.withDescription("Preempted by a higher-priority request"), 8429);
+
+        CompletionStage<Result> completion() { return result.minimalCompletionStage(); }
+
+        void cancel() { finish(Status.CANCELLED.withDescription("Client cancelled local generation"), 0); }
+
+        void preempt() { finish(Status.RESOURCE_EXHAUSTED.withDescription("Preempted by a higher-priority request"), 8429); }
+
+        void expire() { finish(Status.DEADLINE_EXCEEDED.withDescription("RPC deadline expired"), 603); }
+
+        private void fail(Throwable error) { finish(RpcErrors.scheduling(error)); }
+
+        private void finish(Status status, long code) { finish(RpcErrors.scheduling(status, code)); }
+
+        private void finish(RequestFailure failure) {
+            synchronized (executionLock) {
+                if (ended) return;
+                if (request != null) { engine.abortRequest(request, failure); return; }
+                var task = RpcMessages.pending(input);
+                finished.add(new EngineScheduler.Task(id, task.batchId(), task.inputLength(), 0, task.priority(),
+                    EngineScheduler.ReportedPhase.PENDING, 0, 0, 0, System.currentTimeMillis(), failure));
+                ended = true;
+                sessions.remove(id, this);
+            }
+            complete(null, failure);
+        }
+
+        private void complete(EngineScheduler.Request request, RequestFailure failure) {
+            var ended = failure == null ? success(request, true) : new Result(null, RpcErrors.status(failure), RpcErrors.code(failure));
+            result.complete(ended);
+            termination.complete(ended);
+        }
+
+        private Result success(EngineScheduler.Request request, boolean finished) {
+            return new Result(RpcMessages.token(input, RpcMessages.sampledToken(input), 1, 1, request.reused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
+        }
     }
 
+    /**
+     * Prepared input and deadline for local admission, with an existing session when already registered.
+     */
+    record Submission(MediaInput.Prepared prepared, long deadline, Session session) {
+        Submission(GenerateInputPB input, long deadline) { this(MediaInput.text(input), deadline, null); }
+        GenerateInputPB input() { return prepared.input(); }
+    }
+
+    record Admission(Session session, RuntimeException failure) {}
+
+    private record PreparedAdmission(int batchIndex, Session session, EngineScheduler.InputItem inputItem) {}
+
+    /**
+     * Coordinates the remote Decode exchange and delivers its output to the caller.
+     */
     private final class Call {
         GenerateInputPB input;
+
         final GeneratedOutput output;
+
         final boolean deferred;
+
         final CompletableFuture<Void> admitted = new CompletableFuture<>(), prepared = new CompletableFuture<>();
         final CompletableFuture<Session> batchSource;
         final String target;
+
         final long started, deadline;
+
         final Context.CancellableContext context;
+
         org.flexlb.mock.protocol.MediaInput.Prepared media;
+
         final Session source;
+
         RequestState.Use transferUse;
         Future<?> worker;
         ScheduledFuture<?> timeout;
+
         boolean terminal, priorityPreempted;
+
         final Runnable rpcCompleted;
+
         Call(GenerateInputPB input, ServerCallStreamObserver<GenerateOutputsPB> response, String target, long attachMillis, boolean grouped, Runnable completed) {
             this.input = input; this.target = target; this.deferred = response == null;
             batchSource = grouped ? new CompletableFuture<>() : null;
@@ -452,10 +530,39 @@ final class PrefillRpcServer implements AutoCloseable {
             source = new Session(input, true, started, deadline);
             rpcCompleted=completed==null?trackRequest.get():completed;
         }
+
         void attach(ServerCallStreamObserver<GenerateOutputsPB> response) {
             output.attach(response, () -> finish(Status.CANCELLED.asRuntimeException()));
         }
+
+        synchronized void finish(Throwable error) {
+            if (terminal) return;
+            terminal = true;
+            if (error != null && Status.fromThrowable(error).getCode() == Status.Code.CANCELLED)
+                recordCancellation.run();
+            if (timeout != null) timeout.cancel(false);
+            Throwable failure = error == null ? Status.CANCELLED.asRuntimeException() : error;
+            prepared.completeExceptionally(failure);
+            if (batchSource != null) batchSource.completeExceptionally(failure);
+            if (!admitted.isDone()) admitted.completeExceptionally(failure);
+            context.cancel(null);
+            if (error != null) source.fail(error);
+            else source.cancel();
+            if (transferUse != null) { transferUse.close(); transferUse = null; }
+            if (worker != null) worker.cancel(true);
+            synchronized (PrefillRpcServer.this) {
+                active.remove(input.getRequestId(), this);
+                if (deferred) {
+                    var old = fences.get(input.getRequestId());
+                    remember(input.getRequestId(), old != null && old.preempted());
+                }
+            }
+            rpcCompleted.run();
+            output.finish(error);
+        }
+
         void run() { context.run(this::exchange); }
+
         void exchange() {
             try {
                 checkActive();
@@ -535,58 +642,44 @@ final class PrefillRpcServer implements AutoCloseable {
             catch (ExecutionException error) { finish(Status.INTERNAL.withCause(error.getCause()).asRuntimeException()); }
             catch (RuntimeException error) { finish(error); }
         }
+
         synchronized void checkActive() {
             if (terminal || context.isCancelled() || Thread.currentThread().isInterrupted())
                 throw Status.CANCELLED.withDescription("Prefill request cancelled before downstream preparation").asRuntimeException();
             if (System.nanoTime() >= deadline)
                 throw Status.DEADLINE_EXCEEDED.withDescription("Prefill request expired before downstream preparation").asRuntimeException();
         }
+
         GenerateRequestPB frame(RemoteStage stage) {
             var frame = GenerateRequestPB.newBuilder().setStage(stage).setRequestId(input.getRequestId()).setClientId(config.id());
             if (stage == RemoteStage.GENERATE) frame.setPrefillKvHandoff(PrefillKvHandoffPB.newBuilder().setComputedKvEnd(input.getTokenIdsCount()));
             return frame.build();
         }
+
         void send(GenerateOutputsPB value) { output.add(value); }
-        synchronized void finish(Throwable error) {
-            if (terminal) return;
-            terminal = true;
-            if (error != null && Status.fromThrowable(error).getCode() == Status.Code.CANCELLED)
-                recordCancellation.run();
-            if (timeout != null) timeout.cancel(false);
-            Throwable failure = error == null ? Status.CANCELLED.asRuntimeException() : error;
-            prepared.completeExceptionally(failure);
-            if (batchSource != null) batchSource.completeExceptionally(failure);
-            if (!admitted.isDone()) admitted.completeExceptionally(failure);
-            context.cancel(null);
-            if (error != null) source.fail(error);
-            else source.cancel();
-            if (transferUse != null) { transferUse.close(); transferUse = null; }
-            if (worker != null) worker.cancel(true);
-            synchronized (PrefillRpcServer.this) {
-                active.remove(input.getRequestId(), this);
-                if (deferred) {
-                    var old = fences.get(input.getRequestId());
-                    remember(input.getRequestId(), old != null && old.preempted());
-                }
-            }
-            rpcCompleted.run();
-            output.finish(error);
-        }
     }
-    private static long rpcDeadline() {
-        var deadline = Context.current().getDeadline();
-        return deadline == null ? Long.MAX_VALUE : RpcMessages.after(System.nanoTime(), deadline.timeRemaining(TimeUnit.NANOSECONDS));
-    }
+
+    /**
+     * Collects Decode responses for the Prefill call that drives the transfer.
+     */
     private static final class Inbox implements ClientResponseObserver<GenerateRequestPB, GenerateOutputsPB> {
         final BlockingQueue<Object> values = new LinkedBlockingQueue<>(2);
+
         volatile Throwable failure;
+
         final java.util.function.Consumer<Throwable> failed;
-        Inbox(java.util.function.Consumer<Throwable> failed) { this.failed = failed; }
         final AtomicReference<ClientCallStreamObserver<GenerateRequestPB>> stream = new AtomicReference<>();
+
+        Inbox(java.util.function.Consumer<Throwable> failed) { this.failed = failed; }
+
         @Override public void beforeStart(ClientCallStreamObserver<GenerateRequestPB> request) { stream.set(request); request.disableAutoRequestWithInitial(1); }
+
         @Override public void onNext(GenerateOutputsPB value) { values.add(value); }
+
         @Override public void onError(Throwable error) { failure = error; values.add(error); failed.accept(error); }
+
         @Override public void onCompleted() { values.add(Boolean.TRUE); }
+
         GenerateOutputsPB next() throws InterruptedException {
             var value = values.take();
             if (value instanceof Throwable error) throw Status.fromThrowable(error).asRuntimeException(Status.trailersFromThrowable(error));
@@ -594,33 +687,26 @@ final class PrefillRpcServer implements AutoCloseable {
             return null;
         }
     }
-    @Override public void close() {
-        List<Call> owned;
-        synchronized (this) { closed = true; owned = List.copyOf(active.values()); }
-        for (var call : owned) call.finish(Status.UNAVAILABLE.withDescription("Prefill node closed").asRuntimeException());
-        synchronized (this) { outputs.clear(); }
-        List<Session> preparing;
-        synchronized (executionLock) {
-            preparing = sessions.values().stream().filter(session -> session.request == null).toList();
-        }
-        for (var session : preparing) session.finish(Status.UNAVAILABLE.withDescription("Prefill node closed"), 0);
-        workers.shutdownNow(); deadlines.shutdownNow(); vision.close(); channels.close(); engine.close();
-    }
 
-    /** Node-owned connections shared by Prefill sessions. */
+    /**
+     * Node-owned connections shared by Prefill sessions.
+     */
     private static final class RpcChannels implements AutoCloseable {
         private final Map<String, ManagedChannel> channels = new HashMap<>();
+
         private boolean closed;
-        synchronized ManagedChannel get(String address) {
-            if (closed) throw Status.UNAVAILABLE.withDescription("RPC connections closed").asRuntimeException();
-            return channels.computeIfAbsent(address, key -> ManagedChannelBuilder.forTarget(key).usePlaintext().build());
-        }
+
         @Override public void close() {
             List<ManagedChannel> owned;
             synchronized (this) { closed = true; owned = List.copyOf(channels.values()); channels.clear(); }
             owned.forEach(ManagedChannel::shutdownNow);
             for (var channel : owned) try { channel.awaitTermination(3, TimeUnit.SECONDS); }
             catch (InterruptedException error) { Thread.currentThread().interrupt(); return; }
+        }
+
+        synchronized ManagedChannel get(String address) {
+            if (closed) throw Status.UNAVAILABLE.withDescription("RPC connections closed").asRuntimeException();
+            return channels.computeIfAbsent(address, key -> ManagedChannelBuilder.forTarget(key).usePlaintext().build());
         }
     }
 }
