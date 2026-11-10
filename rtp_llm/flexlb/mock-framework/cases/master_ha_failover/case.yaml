@@ -53,7 +53,7 @@ phases:
     interface: client/start
     args:
       requests_file: data/traffic/deepseek.mckidx
-      concurrency: 4096
+      total_concurrency: 4096
       queue_capacity: 4096
       request_timeout: 120s
       drain_timeout: 150s

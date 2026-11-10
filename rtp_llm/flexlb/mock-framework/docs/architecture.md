@@ -276,7 +276,7 @@ uv run --locked python scripts/build-indexed-traffic.py anonymous.jsonl traffic.
 
 可信实际输出量大于零时，Client 用它作为本次 `max_new_tokens` 并屏蔽 EOS。实际量缺省时，保留请求自身上限并启用 Engine EOS。两项都缺省的请求使用 `client/start.args.fallback_max_output_tokens`。这项运行参数缺省时，Client 在启动前报告缺少上限。数据集中的上限表只去重，每个请求仍保留自己的上限引用。旧 Basic 和 DeepSeek 的合成输出量迁为请求上限。
 
-`qps` 和 `replay_speed` 二选一。QPS 模式按全局序号均匀发送，倍速模式保留源到达时间与突发。并发是全局预算，每个 Client 至少有一个并发槽和一条请求。计划时长最多 24 小时。Client 各自维护有界播放队列，单请求超时从原生 RPC 发送开始。主动停止时，未发请求计入 `unsent`，正在执行的请求按 `drain_timeout` 收尾。下次启动从新的请求 ID 起点开始。
+`qps` 和 `replay_speed` 二选一。QPS 模式按全局序号均匀发送，倍速模式保留源到达时间与突发。`total_concurrency` 是所有 Client 的合计并发上限，每个 Client 至少有一个并发槽和一条请求。计划时长最多 24 小时。Client 各自维护有界播放队列，单请求超时从原生 RPC 发送开始。主动停止时，未发请求计入 `unsent`，正在执行的请求按 `drain_timeout` 收尾。下次启动从新的请求 ID 起点开始。
 
 `client0` 的 `input.json` 记录共享文件路径、请求总数与数据集摘要。各 Client 的计划另记录首个全局序号、步长和本地请求数。运行时校验被访问的记录和页，读失败会中止这一轮回放。控制接口只传计划和结果元数据。
 

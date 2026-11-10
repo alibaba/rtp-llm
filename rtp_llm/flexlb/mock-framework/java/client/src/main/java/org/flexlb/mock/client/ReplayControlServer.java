@@ -91,7 +91,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
             var peers = new ArrayList<String>();
             for (var node : nodes) if (node.path("role").asText().equals("client")) peers.add(node.path("control").asText());
             if (peers.isEmpty() || new HashSet<>(peers).size() != peers.size() || !peers.contains(url())
-                    || args.concurrency() < peers.size())
+                    || args.total_concurrency() < peers.size())
                 throw new IllegalArgumentException("Need unique Client endpoints and at least one request/concurrency slot per Client");
             long firstId = nextRequestId;
             created = new Group(++sequence, List.copyOf(peers), args, firstId);
@@ -116,7 +116,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
             for (int i = 0; i < clients; i++) {
                 if (created.stop || closed) throw new IOException("Client start stopped during preparation");
                 long count = ClientProtocol.requestCount(total, i, clients);
-                int slots = args.concurrency() / clients + (i < args.concurrency() % clients ? 1 : 0);
+                int slots = args.total_concurrency() / clients + (i < args.total_concurrency() % clients ? 1 : 0);
                 call(created.peers.get(i), "worker/prepare", new ClientReplayPlan(created.number, args.masters(), args.requests_file(),
                     count, i, clients, created.firstId, identity, args.qps(), args.replay_speed(), slots,
                     args.queue_capacity(), args.request_timeout_ms(), args.drain_timeout_ms(), args.reuse_cache(),

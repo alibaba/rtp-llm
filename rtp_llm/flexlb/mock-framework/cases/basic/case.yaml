@@ -33,7 +33,7 @@ phases:
         args:
           requests_file: data/traffic/basic.mckidx
           qps: 2
-          concurrency: 2
+          total_concurrency: 2
           queue_capacity: 4
           request_timeout: 3s
           drain_timeout: 5s

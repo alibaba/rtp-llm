@@ -26,16 +26,19 @@ public interface ClientProtocol {
 
     record Empty() {}
 
+    /**
+     * Starts one replay using a concurrency budget shared by all Clients.
+     */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     record Start(@Argument(optional=true) List<String> masters, String requests_file,
                  @Argument(optional=true) Double qps, @Argument(optional=true) Double replay_speed,
-                 int concurrency, int queue_capacity,
+                 int total_concurrency, int queue_capacity,
                  long request_timeout_ms, long drain_timeout_ms,
                  @Argument(optional=true) Boolean reuse_cache,
                  @Argument(optional=true) Integer fallback_max_output_tokens) {
         public Start(List<String> masters, String requests_file, Double qps, Double replay_speed,
-                     int concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms) {
-            this(masters, requests_file, qps, replay_speed, concurrency, queue_capacity,
+                     int total_concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms) {
+            this(masters, requests_file, qps, replay_speed, total_concurrency, queue_capacity,
                 request_timeout_ms, drain_timeout_ms, false, null);
         }
         public Start {
@@ -49,7 +52,7 @@ public interface ClientProtocol {
             if (fallback_max_output_tokens != null && fallback_max_output_tokens < 1)
                 throw new IllegalArgumentException("fallback_max_output_tokens must be positive");
             if ((qps == null) == (replay_speed == null)
-                    || !Double.isFinite(qps != null ? qps : replay_speed) || (qps != null ? qps : replay_speed) <= 0 || concurrency < 1 || queue_capacity < 1 || queue_capacity > 100000
+                    || !Double.isFinite(qps != null ? qps : replay_speed) || (qps != null ? qps : replay_speed) <= 0 || total_concurrency < 1 || queue_capacity < 1 || queue_capacity > 100000
                     || request_timeout_ms < 1 || request_timeout_ms > 3600000 || drain_timeout_ms < 1 || drain_timeout_ms > 3600000)
                 throw new IllegalArgumentException("Invalid finite playback plan (maximum 24 hours)");
         }

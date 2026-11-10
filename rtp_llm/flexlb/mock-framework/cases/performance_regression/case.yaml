@@ -52,7 +52,7 @@ phases:
       requests_file: data/traffic/frontend-300s-paged.mckidx
       reuse_cache: true
       replay_speed: 1.0
-      concurrency: 32000
+      total_concurrency: 32000
       queue_capacity: 48000
       request_timeout: 120s
       drain_timeout: 150s
