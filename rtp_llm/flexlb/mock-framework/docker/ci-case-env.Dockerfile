@@ -21,7 +21,7 @@ ENV JAVA_HOME=/opt/java/openjdk PATH=/opt/java/openjdk/bin:$PATH \
 FROM tools AS dependencies
 COPY rtp_llm/flexlb /opt/mock-source/rtp_llm/flexlb
 COPY rtp_llm/cpp/model_rpc/proto /opt/mock-source/rtp_llm/cpp/model_rpc/proto
-RUN uv sync --project /opt/mock-source/rtp_llm/flexlb/mock-framework --locked \
+RUN uv sync --project /opt/mock-source/rtp_llm/flexlb/mock-framework --locked --no-dev \
     && /opt/mock-source/rtp_llm/flexlb/mock-framework/scripts/build-java.sh -DskipTests '-P!internal,!internal-monitoring,!internal-discovery'
 
 FROM tools
