@@ -1,4 +1,5 @@
-FLEXLB_CONFIG: '{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550},"queueTimeoutMs":60000},"dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":64},"requestLifecycle":{"request":{"timeoutMs":60000},"decision":{"lifetime":2.0}},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA","expression":"max(196,
+FLEXLB_CONFIG:
+  '{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550},"queueTimeoutMs":60000},"dispatcher":{"type":"NON_BATCH","maxInflightPerPrefillWorker":64},"requestLifecycle":{"request":{"timeoutMs":60000},"decision":{"lifetime":2.0}},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA","expression":"max(196,
   -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 * batchSize + 0.158123254797307 * sum(hitCacheTokens
   / 1024.) + 0.575522710053703 * sum(computeTokens / 1024.) + 0.0517623430739831 * sum(computeTokens / 1024. * computeTokens
   / 1024.) + 0.0395308136993267 * sum(hitCacheTokens / 1024. * computeTokens / 1024.) + 0.0104363634681015 * sum(hitCacheTokens
@@ -16,4 +17,4 @@ FLEXLB_CONFIG: '{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type
   - 0.0299132587297009 * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 * max(batchSize -
   8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) * sum(computeTokens / 1024.) + 0.0542737877321807
   * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))"},"cacheAffinity":{"maxExtraTtftMs":20,"minPrefixHitPercent":20}},"decode":{"availability":{"maxEngineRequests":132,"maxKvUsagePercent":90}}}},"workerRegistry":{"health":{"statusPollIntervalMs":20,"statusRpcTimeoutMs":1000,"cleanupIntervalMs":3000}}}'
-MODEL_SERVICE_CONFIG: '{"service_id":"aigc.text-generation.generation.mock","role_endpoints":[{"group":"group","prefill_endpoint":{"address":"p-domain","protocol":"grpc"},"decode_endpoint":{"address":"d-domain","protocol":"grpc"}}]}'
+MODEL_SERVICE_CONFIG: '{"service_id":"aigc.text-generation.generation.mock","role_endpoints":[{"group":"group","prefill_endpoint":{"address":"p-domain","protocol":"grpc"},"decode_endpoint":{"address":"d-domain","protocol":"grpc"},"vit_endpoint":{"address":"v-domain","protocol":"grpc"}}]}'

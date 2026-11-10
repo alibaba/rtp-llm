@@ -20,8 +20,8 @@ phases:
       - id: check_master_leader
         describe: 只有一个主 Master。
         interface: master/get
-        args: {is_leader: true}
-        expect: {count: 1}
+        args: { is_leader: true }
+        expect: { count: 1 }
         wait_after: 2s
   - id: traffic
     describe: 20 条请求按总 QPS=2 播放，收尾后检查完整结果。
@@ -31,9 +31,9 @@ phases:
         describe: Client 自行发现主 Master，开始单轮播放。
         interface: client/start
         args:
-          requests_file: data/traffic/basic.jsonl
+          requests_file: data/traffic/basic.mckidx
           qps: 2
-          concurrency: 2
+          total_concurrency: 2
           queue_capacity: 4
           request_timeout: 3s
           drain_timeout: 5s
@@ -41,8 +41,8 @@ phases:
       - id: check_client_qps
         describe: 启动预热后，在持续播放中检查已发请求速率。
         interface: client/qps
-        args: {range: [-4s, 0s]}
-        expect: {gte: 1.5, lte: 2.5}
+        args: { range: [-4s, 0s] }
+        expect: { gte: 1.5, lte: 2.5 }
         wait_after: 6s
       - id: stop_client
         describe: 收集 Client 结果并验证请求证据完整。
@@ -50,10 +50,10 @@ phases:
       - id: check_client_requests
         describe: 所有 20 条请求成功，没有错误、超时或取消。
         interface: client/requests
-        args: {limit: 0}
+        args: { limit: 0 }
         expect:
           eq:
             matched: 20
-            outcomes: {success: 20, error: 0, timeout: 0, cancelled: 0}
+            outcomes: { success: 20, error: 0, timeout: 0, cancelled: 0 }
             records: []
             truncated: true

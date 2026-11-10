@@ -300,11 +300,13 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
             "mock.compute.forward.expression": "1 + batchSize",
         },
     }
-    from mock_framework.execution.test.helpers.input import pb, write_inputs
+    from mock_framework.execution.test.helpers.input import write_inputs
 
-    source = tmp_path / "traffic.binpb.zst"
+    source = tmp_path / "traffic.mckidx"
     write_inputs(
-        source, (pb.Request(token_ids=[1, 2, 3], max_new_tokens=3) for _ in range(800))
+        source,
+        ((3, 0, {"max_output_tokens": 3}, 50, []) for _ in range(800)),
+        chains=[(1, 0, 3)],
     )
     steps = [
         step("leader", "master/get", args={"is_leader": True}, expect={"count": 1}),
@@ -314,7 +316,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
             args={
                 "requests_file": source.name,
                 "qps": 8,
-                "concurrency": 32,
+                "total_concurrency": 32,
                 "queue_capacity": 64,
                 "request_timeout": "5s",
                 "drain_timeout": "5s",

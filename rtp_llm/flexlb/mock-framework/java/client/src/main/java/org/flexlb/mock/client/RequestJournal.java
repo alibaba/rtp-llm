@@ -10,7 +10,9 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.concurrent.TimeUnit;
 
-/** One bounded, nonblocking producer queue; only the writer touches disk. */
+/**
+ * Writes Client request events to disk from a bounded queue.
+ */
 final class RequestJournal {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final int capacity;
@@ -24,10 +26,10 @@ final class RequestJournal {
     private boolean closing;
     private volatile String failure;
 
-    RequestJournal(Path path, String client, ClientProtocol.Shard plan) throws IOException {
+    RequestJournal(Path path, String client, ClientProtocol.ClientReplayPlan plan) throws IOException {
         this(path, client, plan, 8 * 1024 * 1024);
     }
-    RequestJournal(Path path, String client, ClientProtocol.Shard plan, int capacity) throws IOException {
+    RequestJournal(Path path, String client, ClientProtocol.ClientReplayPlan plan, int capacity) throws IOException {
         this.capacity = capacity;
         header = JSON.createObjectNode().put("version", 1).put("client", client)
             .put("playback", Long.toString(plan.sequence()))

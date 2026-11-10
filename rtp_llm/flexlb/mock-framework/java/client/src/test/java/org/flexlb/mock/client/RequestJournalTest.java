@@ -9,25 +9,21 @@ import java.nio.file.*;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import org.flexlb.mock.protocol.MediaInput;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+/**
+ * Verifies request evidence, final seals, and propagation of writer failures.
+ */
 class RequestJournalTest {
     @TempDir Path directory;
-    static ClientProtocol.Shard plan() {
-        return new ClientProtocol.Shard(1, null, "/unused", 1, 0, 1, 100, "0".repeat(64), 1.0, null, 1, 1, 3000, 1000);
-    }
-    static List<JsonNode> read(Path path) throws IOException {
-        var mapper = new ObjectMapper();
-        var rows = new ArrayList<JsonNode>();
-        for (var line : Files.readAllLines(path)) rows.add(mapper.readTree(line));
-        return rows;
-    }
+
     @Test void backupAttemptsAndCancellationAreRecordedIncrementally() throws Exception {
         var path = directory.resolve("requests.jsonl");
         var journal = new RequestJournal(path, "client-0", plan());
         try (var first = new NativeClientTest.Harness(); var backup = new NativeClientTest.Harness();
-             var client = new NativeClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")), journal::record)) {
+             var client = new NativeClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")), journal::record, MediaInput.IMAGE_TOKEN, 0L, 1)) {
             first.scheduleFailure = io.grpc.Status.UNAVAILABLE;
             backup.output = (id, response) -> response.onNext(NativeClientTest.token(id, 1, false));
             var call = client.send(NativeClientTest.request(100), Duration.ofSeconds(8));
@@ -54,6 +50,18 @@ class RequestJournalTest {
             assertThrows(FileAlreadyExistsException.class, () -> new RequestJournal(path, "client-0", plan()));
         }
     }
+
+    static ClientProtocol.ClientReplayPlan plan() {
+        return new ClientProtocol.ClientReplayPlan(1, null, "/unused.mckidx", 1, 0, 1, 100, "0".repeat(64), 1.0, null, 1, 1, 3000, 1000);
+    }
+
+    static List<JsonNode> read(Path path) throws IOException {
+        var mapper = new ObjectMapper();
+        var rows = new ArrayList<JsonNode>();
+        for (var line : Files.readAllLines(path)) rows.add(mapper.readTree(line));
+        return rows;
+    }
+
     @Test void queueOverflowCannotSealOrSilentlyDrop() throws Exception {
         var path = directory.resolve("requests.jsonl");
         var journal = new RequestJournal(path, "client-0", plan(), 1);
@@ -62,6 +70,7 @@ class RequestJournalTest {
         assertThrows(IOException.class, () -> journal.finish(1, 1));
         assertTrue(read(path).stream().noneMatch(row -> row.has("seal")));
     }
+
     @Test void ioFailureCannotReportSuccessfulClose() throws Exception {
         var journal = new RequestJournal(directory.resolve("requests.jsonl"), "client-0", plan());
         var field = RequestJournal.class.getDeclaredField("file"); field.setAccessible(true);
@@ -69,25 +78,27 @@ class RequestJournalTest {
         assertThrows(IOException.class, () -> journal.finish(0, 0));
         assertTrue(journal.failure().contains("write failed"));
     }
+
     @Test void unfinishedRequestCannotSeal() throws Exception {
         var path = directory.resolve("requests.jsonl");
         var journal = new RequestJournal(path, "client-0", plan());
         assertThrows(IOException.class, () -> journal.finish(1, 0));
         assertTrue(read(path).stream().noneMatch(row -> row.has("seal")));
     }
+
     @Test void writerFailureStopsAllClientsAndKeepsPlaybackFailed() throws Exception {
         Path topology = directory.resolve("topology.json");
         try (var master = new NativeClientTest.Harness();
-             var zero = new ClientNode("client-0", topology, directory.resolve("client-0"));
-             var one = new ClientNode("client-1", topology, directory.resolve("client-1"))) {
+             var zero = new ReplayControlServer("client-0", topology, directory.resolve("client-0"));
+             var one = new ReplayControlServer("client-1", topology, directory.resolve("client-1"))) {
             new com.fasterxml.jackson.databind.ObjectMapper().writeValue(topology.toFile(), List.of(master.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
             zero.start(InputFixture.plan(directory, null, 100, 10, 4, 16, 3000, 1000));
             PlaybackTest.eventually(() -> one.state(new ClientProtocol.Sequence(1)).issued() > 0);
-            var workerField = ClientNode.class.getDeclaredField("worker"); workerField.setAccessible(true);
-            var journalField = LoadClient.class.getDeclaredField("journal"); journalField.setAccessible(true);
+            var sessionField = ReplayControlServer.class.getDeclaredField("session"); sessionField.setAccessible(true);
+            var journalField = ReplayControlServer.Session.class.getDeclaredField("journal"); journalField.setAccessible(true);
             var channelField = RequestJournal.class.getDeclaredField("file"); channelField.setAccessible(true);
-            var journal = (RequestJournal) journalField.get(workerField.get(one));
+            var journal = (RequestJournal) journalField.get(sessionField.get(one));
             ((FileChannel) channelField.get(journal)).close();
             PlaybackTest.eventually(() -> zero.state(new ClientProtocol.Sequence(1)).done());
             var result = zero.stop(new ClientProtocol.Empty());
@@ -103,7 +114,7 @@ class RequestJournalTest {
             var path = directory.resolve(timeout ? "timeout.jsonl" : "rejection.jsonl");
             var journal = new RequestJournal(path, "client-0", plan());
             try (var master = new NativeClientTest.Harness();
-                 var client = new NativeClient(() -> List.of(master.endpoint().get("rpc")), journal::record)) {
+                 var client = new NativeClient(() -> List.of(master.endpoint().get("rpc")), journal::record, MediaInput.IMAGE_TOKEN, 0L, 1)) {
                 if (timeout) master.scheduleDelay = 1000;
                 else master.route = r -> r.toBuilder().setSuccess(false).setCode(429).clearLifecycle().build();
                 var call = client.send(NativeClientTest.request(100), Duration.ofMillis(timeout ? 100 : 3000));

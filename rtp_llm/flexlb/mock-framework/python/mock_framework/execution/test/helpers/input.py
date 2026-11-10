@@ -1,124 +1,74 @@
-"""Test playback fixtures: bounded Protobuf chunks in checksummed Zstd frames."""
-from pathlib import Path
-import struct
+"""Write small MCKIDX fixtures from explicit prefix chains and request leaves."""
 
-from google.protobuf.message import DecodeError
+import hashlib
+import struct
+import zlib
+
 import zstandard
 
-from . import client_input_pb2 as pb
 
-MAGIC = b'MCKINP01'
-MAX_FRAME = 4 * 1024 * 1024
-MAX_REQUEST = 1024 * 1024
-MAX_CHUNK_REQUESTS = 1024
+def _checked_record(data):
+    return data + struct.pack(">I", zlib.crc32(data))
 
 
-def _known(message):
-    clean = type(message)()
-    clean.CopyFrom(message)
-    clean.DiscardUnknownFields()
-    if clean != message:
-        raise ValueError('Unknown playback input fields')
+def write_inputs(path, requests, *, chains=((1, 0, 1),), media=()):
+    requests = list(requests)
+    caps = {}
+    missing = 0
+    payload = bytearray()
+    request_index = bytearray()
+    chain_index = bytearray()
+    compressor = zstandard.ZstdCompressor(level=3, write_checksum=True)
 
+    for start in range(0, len(requests), 1024):
+        offsets = bytearray()
+        rows = bytearray()
+        for leaf, arrival, output, priority, images in requests[start : start + 1024]:
+            observed = output.get("observed_output_tokens", -1)
+            maximum = output.get("max_output_tokens")
+            cap_id = 0 if maximum is None else caps.setdefault(maximum, len(caps) + 1)
+            missing += observed == -1 and cap_id == 0
+            offsets += struct.pack(">I", len(rows))
+            rows += struct.pack(">qqiiH", arrival, leaf, observed, priority, cap_id)
+            for image in images:
+                rows += struct.pack(">qii", *image)
+        raw = offsets + rows
+        encoded = compressor.compress(raw)
+        request_index += _checked_record(
+            struct.pack(">qii", len(payload), len(encoded), len(raw))
+        )
+        payload += encoded
 
-def _validate(request):
-    if not isinstance(request, pb.Request):
-        raise TypeError('Expected client_input_pb2.Request')
-    _known(request)
-    if (not request.token_ids or any(token < 0 for token in request.token_ids)
-            or request.max_new_tokens < 1 or request.HasField('arrival_offset_ms') and request.arrival_offset_ms < 0
-            or request.HasField('priority') and request.priority < 0
-            or request.ByteSize() > MAX_REQUEST):
-        raise ValueError('Invalid or unsupported playback request')
-    end = 0
-    if len(request.images) > 256:
-        raise ValueError('Too many images')
-    for image in request.images:
-        size_provided = image.width != 0 or image.height != 0
-        if (not image.url.strip() or len(image.url) > 4096
-                or size_provided and not (1 <= image.width <= 32768 and 1 <= image.height <= 32768)
-                or image.offset < end
-                or image.offset >= len(request.token_ids)):
-            raise ValueError('Invalid image placeholder or geometry')
-        end = image.offset + 1
+    for start in range(0, len(chains), 256):
+        page = chains[start : start + 256]
+        raw = b"".join(struct.pack(">qqi", *chain) for chain in page)
+        encoded = compressor.compress(raw)
+        chain_index += _checked_record(
+            struct.pack(">qqii", page[0][0], len(payload), len(encoded), len(page))
+        )
+        payload += encoded
 
-
-def write_inputs(path, requests):
-    """Write protobuf Request objects directly; refuse overwrite and remove failed output."""
-    path = Path(path)
-    stream = path.open('xb')
-    try:
-        with stream:
-            stream.write(MAGIC)
-            compressor = zstandard.ZstdCompressor(level=3, write_checksum=True, write_content_size=True)
-            sequence = count = size = 0
-            chunk = pb.InputChunk()
-
-            def flush():
-                nonlocal sequence
-                sequence += 1
-                chunk.sequence = sequence
-                encoded = compressor.compress(chunk.SerializeToString())
-                if len(encoded) > MAX_FRAME:
-                    raise ValueError('Oversized compressed input chunk')
-                stream.write(struct.pack('>I', len(encoded)))
-                stream.write(encoded)
-                chunk.Clear()
-
-            for request in requests:
-                _validate(request)
-                length = request.ByteSize() + 5
-                if chunk.requests and (size + length > MAX_REQUEST or len(chunk.requests) == MAX_CHUNK_REQUESTS):
-                    flush()
-                    size = 0
-                chunk.requests.add().CopyFrom(request)
-                size += length
-                count += 1
-            if chunk.requests:
-                flush()
-            chunk.total_requests = count
-            flush()
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
-
-
-def read_inputs(path):
-    """Stream validated Request objects; reaching EOF requires a valid final seal."""
-    path = Path(path)
-    try:
-        with path.open('rb') as stream:
-            if stream.read(len(MAGIC)) != MAGIC:
-                raise ValueError('Expected Protobuf+Zstd playback input v1')
-            sequence = count = 0
-            while True:
-                header = stream.read(4)
-                if len(header) != 4:
-                    raise ValueError('Truncated input or missing seal')
-                size, = struct.unpack('>I', header)
-                if not 6 <= size <= MAX_FRAME:
-                    raise ValueError('Invalid compressed input chunk size')
-                encoded = stream.read(size)
-                if len(encoded) != size:
-                    raise ValueError('Truncated input chunk')
-                parameters = zstandard.get_frame_parameters(encoded)
-                if not 1 <= parameters.content_size <= MAX_FRAME or not parameters.has_checksum or not encoded[4] & 0x20:
-                    raise ValueError('Input chunk requires bounded content size and checksum')
-                raw = zstandard.ZstdDecompressor().decompress(encoded, max_output_size=MAX_FRAME, allow_extra_data=False)
-                chunk = pb.InputChunk.FromString(raw)
-                _known(chunk)
-                sequence += 1
-                if chunk.sequence != sequence:
-                    raise ValueError('Noncontiguous input chunk sequence')
-                if chunk.HasField('total_requests'):
-                    if chunk.requests or chunk.total_requests != count or stream.read(1):
-                        raise ValueError('Input seal count mismatch or trailing data')
-                    return
-                if not 1 <= len(chunk.requests) <= MAX_CHUNK_REQUESTS:
-                    raise ValueError('Invalid input chunk request count')
-                for request in chunk.requests:
-                    _validate(request)
-                count += len(chunk.requests)
-                yield from chunk.requests
-    except (ValueError, DecodeError, zstandard.ZstdError) as error:
-        raise ValueError(f'Invalid playback input at {path}: {error}') from error
+    media_table = b"".join(_checked_record(struct.pack(">ii", *size)) for size in media)
+    cap_table = b"".join(_checked_record(struct.pack(">i", cap)) for cap in caps)
+    header = struct.Struct(">8s9q32s")
+    chain_offset = header.size + len(request_index)
+    media_offset = chain_offset + len(chain_index)
+    payload_offset = media_offset + len(media_table) + len(cap_table)
+    body = request_index + chain_index + media_table + cap_table + payload
+    with path.open("xb") as stream:
+        stream.write(
+            header.pack(
+                b"MCKINDEX",
+                len(requests),
+                chain_offset,
+                len(chain_index) // 28,
+                media_offset,
+                len(media),
+                len(caps),
+                payload_offset,
+                requests[-1][1],
+                missing,
+                hashlib.sha256(body).digest(),
+            )
+        )
+        stream.write(body)

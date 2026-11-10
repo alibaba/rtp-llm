@@ -1,7 +1,7 @@
 from mock_framework.execution.test.helpers import FRAMEWORK
 from mock_framework.execution.test.helpers.zookeeper import command as zookeeper_command
 
-"""Real Master plus independent V/P/D processes, using the standard binary playback path."""
+"""Real Master plus independent V/P/D processes and two indexed readers."""
 import asyncio
 import json
 import os
@@ -13,7 +13,7 @@ from mock_framework.config import compile_case
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 from mock_framework.execution.step.step_registry import StepRegistry
-from mock_framework.execution.test.helpers.input import pb, write_inputs
+from mock_framework.execution.test.helpers.input import write_inputs
 from test_master import configuration
 
 
@@ -57,6 +57,10 @@ def test_vision_playback_through_real_master(tmp_path):
             "mock.compute.forward.expression": "1",
         },
     }
+    decode = {
+        **engine,
+        "config": {**engine["config"], "mock.compute.eos.probability": 1},
+    }
     vision = {
         "config": {
             "patch_size": 14,
@@ -76,9 +80,12 @@ def test_vision_playback_through_real_master(tmp_path):
         "environment": {
             "master": {"config": native},
             "prefill": engine,
-            "decode": engine,
+            "decode": decode,
             "vit": vision,
-            "client": {"config": {"image_token_id": 1000}},
+            "client": {
+                "config": {"image_token_id": 1000},
+                "deployment": {"replicas": 2},
+            },
         },
         "phases": [
             {
@@ -91,12 +98,13 @@ def test_vision_playback_through_real_master(tmp_path):
                         "describe": "Play image input",
                         "interface": "client/start",
                         "args": {
-                            "requests_file": "requests.binpb.zst",
-                            "qps": 4,
-                            "concurrency": 4,
+                            "requests_file": "requests.mckidx",
+                            "replay_speed": 2,
+                            "total_concurrency": 4,
                             "queue_capacity": 8,
                             "request_timeout": "5s",
                             "drain_timeout": "5s",
+                            "fallback_max_output_tokens": 6,
                         },
                         "wait_after": "6s",
                     },
@@ -116,19 +124,27 @@ def test_vision_playback_through_real_master(tmp_path):
             yaml.safe_dump(component["config"])
         )
         data["environment"][role] = {**component, "config": f"configs/{role}.yaml"}
-    requests = [
-        pb.Request(
-            token_ids=[10, 0, 20],
-            max_new_tokens=3,
-            images=[
-                pb.Image(
-                    url="mock://image-" + str(i % 2), width=56, height=28, offset=1
-                )
-            ],
-        )
-        for i in range(8)
+    lengths = [
+        {"observed_output_tokens": 3, "max_output_tokens": 8},
+        {"max_output_tokens": 8},
+        {},
+        {"observed_output_tokens": 4},
     ]
-    write_inputs(tmp_path / "requests.binpb.zst", requests)
+    write_inputs(
+        tmp_path / "requests.mckidx",
+        (
+            (
+                2 if i < 4 else 3,
+                i * 250,
+                lengths[i % 4],
+                50,
+                [[i % 2 + 1, 1, 924]],
+            )
+            for i in range(8)
+        ),
+        chains=[(1, 0, 2), (3, 1, 1)],
+        media=[(56, 28), (56, 28)],
+    )
     path = tmp_path / "case.yaml"
     path.write_text(yaml.safe_dump(data))
     registry = StepRegistry.standard()
@@ -179,10 +195,36 @@ def test_vision_playback_through_real_master(tmp_path):
         (output / "components/client-0/coordinator/1/result.json").read_text()
     )
     assert not summary["errors"], summary
-    (client,) = summary["clients"].values()
-    assert (
-        client["issued"] == client["finished"] == client["outcomes"]["success"] == 8
-    ), client
+    clients = list(summary["clients"].values())
+    assert len(clients) == 2
+    for client in clients:
+        assert (
+            client["issued"] == client["finished"] == client["outcomes"]["success"] == 4
+        ), client
+    assert not (output / "components/client-0/coordinator/1/shards").exists()
+    for index in range(2):
+        component = output / f"components/client-{index}"
+        plan = json.loads((component / "playback/1/plan.json").read_text())
+        assert plan["requests_file"] == str(tmp_path / "requests.mckidx")
+        rows = [
+            json.loads(line)
+            for line in (component / "playback/1/requests.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        issued = [int(row["request_id"]) for row in rows if row.get("kind") == "ISSUED"]
+        assert issued == list(range(index + 1, 9, 2))
+        assert sum(row.get("kind") == "SCHEDULE_START" for row in rows) == 8
+        expected = [3, 2, 2, 4]
+        assert {
+            int(row["request_id"]): int(row["output_tokens"])
+            for row in rows
+            if row.get("kind") == "TERMINAL"
+        } == {request_id: expected[(request_id - 1) % 4] for request_id in issued}
+        assert any(
+            "ViT replay length differs" in path.read_text(errors="replace")
+            for path in component.glob("*.log")
+        )
     events = [
         json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()
     ]

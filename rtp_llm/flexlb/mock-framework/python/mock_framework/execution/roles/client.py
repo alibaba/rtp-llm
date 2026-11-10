@@ -95,7 +95,7 @@ class ClientManager:
 
     async def start_playback(self, body, query_time, timeout):
         clients = self.topology.active("client")
-        if not clients or body["concurrency"] < len(clients):
+        if not clients or body["total_concurrency"] < len(clients):
             raise ExecutionError("Need at least one concurrency slot per Client")
         available = {node["rpc"] for node in self.topology.active("master")}
         if not available or "masters" in body and set(body["masters"]) - available:

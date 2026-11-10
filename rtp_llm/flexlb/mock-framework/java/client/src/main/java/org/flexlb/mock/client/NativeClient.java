@@ -5,6 +5,7 @@ import io.grpc.stub.*;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
@@ -14,9 +15,12 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.flexlb.mock.protocol.*;
 
 /**
- * One native Schedule -> Fetch/Generate exchange. Frontend-style primary/backup scheduling; no Engine fallback.
+ * Sends a request through Master scheduling and streams the result from Prefill.
+ * Prepares multimodal inputs through ViT before requesting the Prefill and Decode route.
  */
 public final class NativeClient implements AutoCloseable {
+    private static final System.Logger LOG = System.getLogger(NativeClient.class.getName());
+
     private final java.util.function.Supplier<List<String>> masters;
     private final java.util.function.Consumer<ObjectNode> events;
     private final VitClient vision;
@@ -29,6 +33,7 @@ public final class NativeClient implements AutoCloseable {
     private final ScheduledThreadPoolExecutor timers = new ScheduledThreadPoolExecutor(1,
         Thread.ofPlatform().daemon().name("mock-client-deadline").factory());
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
+    private final AtomicLong visionMismatches = new AtomicLong();
 
     private boolean closed, closing;
 
@@ -62,17 +67,39 @@ public final class NativeClient implements AutoCloseable {
     }
 
     public Call send(FlexlbScheduleRequestPB request, Duration timeout) {
-        Objects.requireNonNull(timeout);
-        long budget = timeout.toNanos();
-        if (budget <= 0) throw new IllegalArgumentException("Positive request timeout required");
         GenerateInputPB input;
         try { input = GenerateInputPB.parseFrom(request.getGenerateInput()); }
         catch (com.google.protobuf.InvalidProtocolBufferException error) { throw new IllegalArgumentException("Invalid native generate_input", error); }
+        return send(request, input, timeout, List.of());
+    }
+
+    @Override public void close() {
+        List<Call> calls;
+        synchronized (this) { if (closed || closing) return; closing = true; calls = List.copyOf(active.values()); }
+        for (var call : calls) call.cancel();
+        timers.shutdownNow(); vision.close(); workers.shutdown();
+        try { workers.awaitTermination(2, TimeUnit.SECONDS); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+        workers.shutdownNow();
+        long mismatches = visionMismatches.get();
+        if (mismatches > 8) LOG.log(System.Logger.Level.WARNING, "ViT replay length mismatches: {0}", mismatches);
+        List<ManagedChannel> owned;
+        synchronized (this) { closed = true; owned = List.copyOf(channels.values()); }
+        owned.forEach(ManagedChannel::shutdownNow);
+        for (var channel : owned) try { channel.awaitTermination(3, TimeUnit.SECONDS); }
+        catch (InterruptedException error) { Thread.currentThread().interrupt(); break; }
+    }
+
+    Call send(FlexlbScheduleRequestPB request, GenerateInputPB input, Duration timeout, List<Integer> expectedImageTokens) {
+        Objects.requireNonNull(timeout);
+        long budget = timeout.toNanos();
+        if (budget <= 0) throw new IllegalArgumentException("Positive request timeout required");
         if (request.getRequestId() <= 0 || input.getRequestId() != request.getRequestId() || input.getTokenIdsCount() == 0
                 || input.getTokenIdsCount() != request.getSeqLen() || input.getGenerateConfig().getMaxNewTokens() < 1
                 || input.getGenerateConfig().getMaxNewTokens() != request.getMaxNewTokens() || request.getVitRouteOnly()
                 || input.getGenerateConfig().getNumBeams() > 1 || input.getGenerateConfig().getNumReturnSequences() > 1)
             throw new IllegalArgumentException("Client currently requires matching single-sequence request metadata");
+        if (!expectedImageTokens.isEmpty() && expectedImageTokens.size() != input.getMultimodalInputsCount())
+            throw new IllegalArgumentException("Image reference count differs from playback input");
         if (input.getGenerateConfig().getTimeoutMs() > 0) budget = Math.min(budget, TimeUnit.MILLISECONDS.toNanos(input.getGenerateConfig().getTimeoutMs()));
         long baseBlockSize = request.getCacheKeyBlockSize();
         if (baseBlockSize > 0) {
@@ -86,7 +113,7 @@ public final class NativeClient implements AutoCloseable {
         synchronized (this) {
             if (closed || closing) throw new IllegalStateException("Client closed");
             if (active.containsKey(request.getRequestId())) throw new IllegalArgumentException("Active request_id already exists");
-            call = new Call(request, input, budget, baseBlockSize);
+            call = new Call(request, input, budget, baseBlockSize, List.copyOf(expectedImageTokens));
             events.accept(call.event("ISSUED").put("epoch_ms", Long.toString(call.sentAt.toEpochMilli())));
             active.put(request.getRequestId(), call);
         }
@@ -98,20 +125,6 @@ public final class NativeClient implements AutoCloseable {
             if (!call.terminal) call.context.run(() -> call.schedule(0));
         }
         return call;
-    }
-
-    @Override public void close() {
-        List<Call> calls;
-        synchronized (this) { if (closed || closing) return; closing = true; calls = List.copyOf(active.values()); }
-        for (var call : calls) call.cancel();
-        timers.shutdownNow(); vision.close(); workers.shutdown();
-        try { workers.awaitTermination(2, TimeUnit.SECONDS); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
-        workers.shutdownNow();
-        List<ManagedChannel> owned;
-        synchronized (this) { closed = true; owned = List.copyOf(channels.values()); }
-        owned.forEach(ManagedChannel::shutdownNow);
-        for (var channel : owned) try { channel.awaitTermination(3, TimeUnit.SECONDS); }
-        catch (InterruptedException error) { Thread.currentThread().interrupt(); break; }
     }
 
     private synchronized ManagedChannel channel(String target) {
@@ -141,7 +154,7 @@ public final class NativeClient implements AutoCloseable {
                          int outputTokens, Outcome outcome, String grpcCode, long errorCode, String message, Long tpotNanos) {}
 
     /**
-     * Tracks one generation from Master routing and optional ViT preparation through streaming completion.
+     * Tracks one request through scheduling, generation, and terminal cleanup.
      */
     public final class Call {
         private FlexlbScheduleRequestPB request;
@@ -170,9 +183,13 @@ public final class NativeClient implements AutoCloseable {
 
         private final long baseBlockSize;
 
-        private Call(FlexlbScheduleRequestPB request, GenerateInputPB input, long budget, long baseBlockSize) {
+        private final List<Integer> expectedImageTokens;
+
+        private Call(FlexlbScheduleRequestPB request, GenerateInputPB input, long budget, long baseBlockSize,
+                     List<Integer> expectedImageTokens) {
             this.request = request; this.input = input;
             this.baseBlockSize = baseBlockSize;
+            this.expectedImageTokens = expectedImageTokens;
             routes = List.copyOf(masters.get());
             if (routes.size() > 2 || new HashSet<>(routes).size() != routes.size() || routes.stream().anyMatch(String::isBlank))
                 throw new IllegalArgumentException("Expected distinct primary and optional backup Master");
@@ -299,6 +316,15 @@ public final class NativeClient implements AutoCloseable {
                             System.nanoTime() + Math.max(0, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS)));
                         synchronized (Call.this) {
                             if (terminal) return;
+                            for (int i = 0; i < expectedImageTokens.size(); i++) {
+                                int expected = expectedImageTokens.get(i);
+                                int actual = prepared.spans().get(i).getRowHashesCount();
+                                if (expected > 0 && expected != actual && visionMismatches.incrementAndGet() <= 8) {
+                                    LOG.log(System.Logger.Level.WARNING,
+                                        "ViT replay length differs for request {0}, image {1}: captured {2}, actual {3}",
+                                        request.getRequestId(), i, expected, actual);
+                                }
+                            }
                             visionPrepared = true;
                             request = request.toBuilder().setGenerateInput(media.toByteString()).setSeqLen(prepared.input().getTokenIdsCount())
                                 .setSelectedVit(selected).clearBlockCacheKeys()

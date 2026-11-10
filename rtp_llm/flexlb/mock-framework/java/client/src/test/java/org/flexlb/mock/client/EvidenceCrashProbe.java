@@ -5,13 +5,15 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 
-/** Subprocess killed by the Python cross-language recovery test after its first durable frame. */
+/**
+ * Subprocess killed by the Python cross-language recovery test after its first durable frame.
+ */
 public final class EvidenceCrashProbe {
     public static void main(String[] args) throws Exception {
         Path root = Path.of(args[0]), topology = root.resolve("topology.json");
         Files.createDirectories(root);
         try (var master = new NativeClientTest.Harness();
-             var client = new ClientNode("client-0", topology, root.resolve("components/client-0"))) {
+             var client = new ReplayControlServer("client-0", topology, root.resolve("components/client-0"))) {
             master.output = (id, response) -> response.onNext(NativeClientTest.token(id, 1, false));
             new ObjectMapper().writeValue(topology.toFile(), List.of(master.endpoint(),
                 Map.of("id", "client-0", "role", "client", "control", client.url(), "rpc", "client:1")));

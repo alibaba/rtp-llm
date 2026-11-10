@@ -11,7 +11,7 @@ from mock_framework.execution.step import _metrics as metrics
 from mock_framework.execution.step.client_qps import client_qps
 from mock_framework.execution.step.step_registry import StepRegistry
 from mock_framework.execution.test.helpers import FRAMEWORK
-from mock_framework.execution.test.helpers.input import pb, read_inputs, write_inputs
+from mock_framework.execution.test.helpers.input import write_inputs
 from mock_framework.execution.test.helpers.zookeeper import command as zookeeper_command
 
 
@@ -53,9 +53,9 @@ def context():
 def args():
     return {
         "masters": ["master:1"],
-        "requests_file": str(FRAMEWORK / "data/traffic/basic.jsonl"),
+        "requests_file": str(FRAMEWORK / "data/traffic/basic.mckidx"),
         "qps": 10,
-        "concurrency": 2,
+        "total_concurrency": 2,
     }
 
 
@@ -74,7 +74,7 @@ def test_start_only_calls_client_zero_and_does_not_multiply_total_rate(monkeypat
     )
     assert len(calls) == 1 and calls[0][0] == "http://c:1"
     assert calls[0][1]["args"]["qps"] == 10
-    assert calls[0][1]["args"]["concurrency"] == 2
+    assert calls[0][1]["args"]["total_concurrency"] == 2
     assert calls[0][1]["args"]["masters"] == ["master:1"]
     assert "master" not in calls[0][1]["args"] and ctx.runtime.clients.pending
     with pytest.raises(ExecutionError, match="previous"):
@@ -150,6 +150,8 @@ def test_stop_does_not_hide_missing_workers_or_execution_errors(monkeypatch, bad
         {"qps": float("inf")},
         {"masters": []},
         {"masters": ["a", "a"]},
+        {"total_concurrency": 0},
+        {"concurrency": 2},
         {"queue_capacity": 0},
         {"request_timeout": "0s"},
         {"requests_file": ""},
@@ -240,9 +242,9 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
                         "interface": "client/start",
                         "args": {
                             "masters": {"ref": "globals.masters"},
-                            "requests_file": "requests.binpb.zst",
+                            "requests_file": "requests.mckidx",
                             "qps": 4,
-                            "concurrency": 4,
+                            "total_concurrency": 4,
                             "queue_capacity": 8,
                             "request_timeout": "5s",
                             "drain_timeout": "5s",
@@ -259,21 +261,25 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
         ],
     }
     count = 720 if large_input else 12
-    source = tmp_path / "requests.binpb.zst"
+    source = tmp_path / "requests.mckidx"
+    text_length = 1024 if large_input else 3
     write_inputs(
         source,
         (
-            pb.Request(
-                token_ids=[index + 10000] * (1024 if large_input else 3),
-                max_new_tokens=3,
+            (
+                (index + 1) * text_length,
+                0,
+                {"max_output_tokens": 3},
+                50,
+                [],
             )
             for index in range(count)
         ),
+        chains=[(index * text_length + 1, 0, text_length) for index in range(count)],
     )
     if large_input:
-        assert sum(request.ByteSize() for request in read_inputs(source)) > 1024 * 1024
         start = data["phases"][0]["steps"][0]
-        start["args"].update(qps=24, concurrency=16, queue_capacity=32)
+        start["args"].update(qps=24, total_concurrency=16, queue_capacity=32)
         start["wait_after"] = "24s"
         data["phases"][0]["timeout"] = "60s"
     data["phases"][0]["steps"].append(
@@ -393,20 +399,17 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
     manifest = json.loads(
         (output / "components/client-0/coordinator/1/input.json").read_text()
     )
-    assert manifest["count"] == count and len(manifest["shards"]) == replicas
-    seen = set()
-    for shard in manifest["shards"]:
-        import hashlib
-
-        contents = Path(shard["path"]).read_bytes()
-        assert hashlib.sha256(contents).hexdigest() == shard["sha256"]
-        if large_input:
-            for request in read_inputs(shard["path"]):
-                index = request.token_ids[0] - 10000
-                assert index not in seen
-                seen.add(index)
-    if large_input:
-        assert seen == set(range(count))
+    assert manifest["count"] == count and manifest["path"] == str(source)
+    assert not (output / "components/client-0/coordinator/1/shards").exists()
+    for i in range(replicas):
+        plan = json.loads(
+            (output / f"components/client-{i}/playback/1/plan.json").read_text()
+        )
+        assert (
+            plan["requests_file"] == str(source)
+            and plan["sha256"] == manifest["sha256"]
+        )
+        assert (plan["first_index"], plan["stride"]) == (i, replicas)
     from mock_framework.execution.evidence.client import read_requests
     from mock_framework.execution.step.client_requests import playback_directories
 
@@ -523,8 +526,8 @@ def test_unknown_master_selection_is_rejected_before_start(monkeypatch):
 def test_file_input_resolves_against_case_and_only_sends_metadata(
     tmp_path, monkeypatch
 ):
-    source = tmp_path / "requests.binpb.zst"
-    write_inputs(source, [pb.Request(token_ids=[1], max_new_tokens=2)])
+    source = tmp_path / "requests.mckidx"
+    write_inputs(source, [(1, 0, {"max_output_tokens": 2}, 50, [])])
     ctx = context()
     ctx.runtime.case = SimpleNamespace(directory=tmp_path)
     calls = []
@@ -540,7 +543,10 @@ def test_file_input_resolves_against_case_and_only_sends_metadata(
     assert calls[0]["requests_file"] == str(source) and "requests" not in calls[0]
 
 
-@pytest.mark.parametrize("source", ["", "https://example.com/data", None])
+@pytest.mark.parametrize(
+    "source",
+    ["", "https://example.com/data", None, "requests.jsonl", "basic.mckidx.json"],
+)
 def test_missing_or_invalid_input_source_fails_contract(source):
     value = args()
     value["requests_file"] = source
@@ -558,8 +564,10 @@ def test_removed_inline_input_is_rejected():
 def test_non_file_source_is_rejected_before_marking_client_pending(tmp_path):
     ctx = context()
     ctx.runtime.case = SimpleNamespace(directory=tmp_path)
+    directory = tmp_path / "directory.mckidx"
+    directory.mkdir()
     value = args()
-    value["requests_file"] = str(tmp_path)
+    value["requests_file"] = str(directory)
     with pytest.raises(ExecutionError, match="regular file"):
         asyncio.run(StepRegistry.standard().get("client/start").invoke(ctx, value))
     assert not ctx.runtime.clients.pending
@@ -581,6 +589,43 @@ def test_replay_speed_replaces_qps_and_is_forwarded_without_timestamp_conversion
     values["replay_speed"] = 5
     assert asyncio.run(StepRegistry.standard().get("client/start").invoke(ctx, values))
     assert calls[0]["replay_speed"] == 5 and "qps" not in calls[0]
+
+
+@pytest.mark.parametrize("rate", [{"qps": 10}, {"replay_speed": 2}])
+def test_warmup_is_forwarded_with_either_rate(monkeypatch, rate):
+    ctx = context()
+    calls = []
+
+    async def start(body, query_time, timeout):
+        calls.append(body)
+        return True
+
+    monkeypatch.setattr(ctx.runtime.clients, "start_playback", start)
+    values = args()
+    values.pop("qps")
+    values.update(rate, warmup={"duration": "1.25s", "rate_scale": 0.25})
+    assert asyncio.run(StepRegistry.standard().get("client/start").invoke(ctx, values))
+    assert calls[0]["warmup"] == {"duration_ms": 1250, "rate_scale": 0.25}
+    assert all(calls[0][name] == value for name, value in rate.items())
+
+
+@pytest.mark.parametrize(
+    "warmup",
+    [
+        {"duration": "0s", "rate_scale": 0.25},
+        {"duration": "1us", "rate_scale": 0.25},
+        {"duration": "25h", "rate_scale": 0.25},
+        {"duration": "1s", "rate_scale": 0},
+        {"duration": "1s", "rate_scale": 1},
+        {"duration": "1s", "rate_scale": float("nan")},
+        {"duration": "1s", "qps": 1},
+    ],
+)
+def test_invalid_warmup_fails_at_python_boundary(warmup):
+    with pytest.raises(ConfigError):
+        StepRegistry.standard().get("client/start").arguments(
+            args() | {"warmup": warmup}
+        )
 
 
 @pytest.mark.parametrize(
@@ -605,7 +650,7 @@ def test_shared_requests_resolve_independently_of_case_directory(monkeypatch, tm
     ctx = context()
     ctx.runtime.case.directory = tmp_path / "cases/example"
     ctx.runtime.case.shared_root = tmp_path / "shared"
-    source = ctx.runtime.case.shared_root / "data/traffic/example.binpb.zst"
+    source = ctx.runtime.case.shared_root / "data/traffic/example.mckidx"
     source.parent.mkdir(parents=True)
     source.touch()
 
@@ -614,5 +659,5 @@ def test_shared_requests_resolve_independently_of_case_directory(monkeypatch, tm
         return True
 
     monkeypatch.setattr(ctx.runtime.clients, "start_playback", start)
-    values = args() | {"requests_file": "data/traffic/example.binpb.zst"}
+    values = args() | {"requests_file": "data/traffic/example.mckidx"}
     assert asyncio.run(StepRegistry.standard().get("client/start").invoke(ctx, values))

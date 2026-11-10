@@ -34,3 +34,4 @@ mock.compute:
   eos:
     probability: 0.0025
     seed: 20260922
+image_token_id: 129264

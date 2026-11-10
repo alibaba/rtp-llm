@@ -1,6 +1,6 @@
 id: performance_regression
 name: 性能回归
-describe: 固定 DeepSeek 回放、P/D 计算模型和部署规模，以绝对阈值检查吞吐、延迟、复用和成功率。
+describe: 固定 DeepSeek V4.1 回放、P/D/V 计算模型和部署规模，以绝对阈值检查吞吐、延迟、复用和成功率。
 environment:
   master:
     deployment:
@@ -16,10 +16,15 @@ environment:
     deployment:
       replicas: 192
     config: configs/decode.yaml
+  vit:
+    deployment:
+      replicas: 4
+    config: configs/vit.yaml
   client:
     config:
       seq_size_per_block: 128
       prefill_cp_size: 4
+      image_token_id: 129264
     deployment:
       replicas: 2
 phases:
@@ -43,10 +48,10 @@ phases:
         describe: 两 Client 按总 0.1 倍速回放 DeepSeek，启用请求级缓存复用。
         interface: client/start
         args:
-          requests_file: data/traffic/deepseek.binpb.zst
+          requests_file: data/traffic/deepseek-v4.1.mckidx
           reuse_cache: true
           replay_speed: 0.1
-          concurrency: 4096
+          total_concurrency: 4096
           queue_capacity: 4096
           request_timeout: 120s
           drain_timeout: 150s

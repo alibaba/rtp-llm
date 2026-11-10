@@ -208,12 +208,12 @@ Python 维护一份权威的当前发现信息，增加、移除和重启换地�
 
 所有 Client 同时只有一份相同的 start 计划。Python 只操作 client0，Java 负责拆分计划和自行发压；Python 不轮询播放进度、不实时检查 QPS。先调用 client/stop 收集上一轮结果，再启动下一轮。
 
-| 组件                                | 职责                                                                                       |
-| ----------------------------------- | ------------------------------------------------------------------------------------------ |
-| Python                              | 启动和监视各 JVM，调用 start/stop，最后通过已有指标查询路径执行 QPS 等 Case 检查。         |
-| client0 协调者                      | 固定全部参与者，分配总请求数、QPS 和并发额度，协调准备/开始/停止，汇总执行异常与最终结果。 |
-| LoadClient 的播放线程               | 读取分片并按计划将请求放入本地发送队列。                                                   |
-| Client（LoadClient + NativeClient） | 管理小队列和在途并发，发送请求，消费完整响应，处理超时、取消和终态，产生实际调用指标。     |
+| 组件                                         | 职责                                                                                       |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Python                                       | 启动和监视各 JVM，调用 start/stop，最后通过已有指标查询路径执行 QPS 等 Case 检查。         |
+| client0 协调者                               | 固定全部参与者，分配总请求数、QPS 和并发额度，协调准备/开始/停止，汇总执行异常与最终结果。 |
+| ReplayControlServer 的播放线程               | 按序号读取共享索引并按计划将请求放入本地发送队列。                                         |
+| Client（ReplayControlServer + NativeClient） | 管理小队列和在途并发，发送请求，消费完整响应，处理超时、取消和终态，产生实际调用指标。     |
 
 client0 同时参与本地发压，不增加协调进程或选主。单 Client 与多 Client 使用同一流程，client0 到本地和其他 Client 的控制都走 TCP。准备完成后，各 JVM 独立产出和发送，请求与响应不经 client0 中转。client0 意外退出使整体失败，不做接管。
 
@@ -229,7 +229,7 @@ Client 取快了就在队列为空时等待；取慢了允许小队列暂时积�
 
 队列满说明当前配置无法继续执行计划，不能单凭它归责服务端或发压端。播放器慢但队列未满时，留给最终 QPS check 判断。队列会改变短时间发送节奏，本版不承诺严格复现 trace 到达时间。
 
-总流量只分配一次。均匀播放的全局序号 k 对应相对时间 k/Q，再按 k % Client 数分片，各 Client 不从同一个相位重复完整速率。总并发均分，余数按固定参与者顺序分配；不运行时借用配额或重分片。首版每个 Client 至少分到一个请求和一个并发槽位，否则拒绝启动。
+总流量只分配一次。均匀播放的全局序号 k 对应相对时间 k/Q，再按 k % Client 数分配，各 Client 不从同一个相位重复完整速率。总并发均分，余数按固定参与者顺序分配；不运行时借用配额或重分片。首版每个 Client 至少分到一个请求和一个并发槽位，否则拒绝启动。
 
 #### 只暴露 start/stop
 
@@ -242,58 +242,32 @@ Client 取快了就在队列为空时等待；取慢了允许小队列暂时积�
 
 Python 在 stop 或最终清理时收集异常，不增加实时发压监控。开始响应丢失也必须尝试最终 stop，不能据此重发 start。Runner 原有进程退出监视保留。收尾先停 Client、获取结果，再做 Prometheus 最后采样和进程清理；不能遗漏 stop 后仍给出虚假的成功。收尾超时取消剩余调用，记录执行错误，不补造远端释放事实。
 
-#### 标准压缩输入与分片
+#### 共享索引回放输入
 
-`client/start` 通过 `requests_file` 读取 JSONL 或 Protobuf + Zstd 输入。以 `data/` 开头的路径从共享根解析，其他相对路径从 Case YAML 所在目录解析，也可使用绝对路径。当前所有 Client 位于同一机器并共享文件系统。
+`client/start.args.requests_file` 指向本机共享的 `.mckidx`。以 `data/` 开头的路径从共享根解析，其他相对路径从 Case 目录解析。协调者读文件头并分配请求序号。各 Client 按同一文件的索引独立读取所需的 Zstd 页，校验访问到的记录；读入失败会停止整轮回放。`input.json` 记录输入路径、请求数和文件头的数据摘要。每个 Client 的计划保存同一摘要及其负责的起始序号、步长和条数。请求 ID 在多轮启动之间单调分配。
 
-压缩输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 测试辅助目录 python/mock_framework/execution/test/helpers 提交同一 protoc 3.25.1 生成的 client_input_pb2.py；输入读写器 input.py 也仅供框架测试与镜像终验生成、检查测试数据，不发布到 mock_framework 运行包。Request 保存未展开的回放输入：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。可选 images 保存 url、width、height、offset；每张图只占 token_ids 中的一个位置，offset 按升序排列且不得重复。LoadClient 按显式配置的 image_token_id 将这些位置写为图片标记；Mock V 默认异步下载真实图片，使用 Java 读取尺寸并按文件内容摘要生成模拟特征身份；本地 mock.vit.skip.download=true 时使用回放宽高，其他准入、排队和计算路径相同。Client 查询 V 元数据后计算路由长度和缓存 key，发送给后端的仍是原始媒体输入。P 在进入 EngineScheduler 前展开图片位置，保留语义图片标记，将逐行特征 hash 单独保存在缓存区间中；hash 不替换语义 token。完整生成参数及真实观测仍不是此播放格式的内容。未知字段、非法请求及不支持的版本均拒绝。
+文本前缀链、媒体尺寸和输出上限保存在共享表中。图片记录包含媒体 ID、文本插入位置和参考展开长度。Client 使用记录中的尺寸请求 ViT，根据 ViT 返回的实际长度和行 hash 生成路由键，发送给 P 的仍是原始媒体输入。参考长度有差异时记录告警。
 
-文件以 `MCKINP01` 标识输入格式 v1，之后每批为 4 字节大端压缩长度加一个 Zstd 压缩的 Protobuf InputChunk。帧必须为 single-segment、声明解压长度并带校验和，压缩及解压单批上限均为 4 MiB；每请求 Protobuf 上限 1 MiB，每批至多 1024 个请求。写入器按约 1 MiB 或 1024 请求封批，不累积整个文件。InputChunk.sequence 从 1 连续递增，末批只含 total_requests；缺末批、计数不符、截断或尾随数据均报错。InputChunk 仅用于文件分块，不决定请求发送或 Engine 计算的 batch。压缩输入和分片使用同一份格式与读写器。
+每条请求分别保存实际输出长度和请求上限。有正数实际长度时按该值生成并屏蔽 EOS。实际长度缺省时按上限生成，保留 Decode 的 EOS 行为。两项均缺省时使用 `fallback_max_output_tokens`，未配置则启动失败。已观测到零输出的记录在生成回放时会报错。
 
-前缀采集文件的 `block_size` 统一表示**每个已记录的共享前缀块覆盖多少 token**。采集端在写出前缀键前确定这个跨度。如果记录的是 CP4 抽样后的键，基础块 128 对应的跨度就是 512，和基础块 512、CP1 的采集结果使用相同的 `block_size=512`。前缀格式只需要这个最终值。
-
-转换器直接按 `block_size` 将每个前缀块标签展开为 token 序列，最后按原始输入长度截断。共享关系的精度由采集时的跨度决定。当前 DeepSeek 源数据已记录 `block_size=512`，展开后的回放文件存储 `token_ids`。Client 和 Engine 回放时再按各自的启动配置生成缓存键。
-
-client0 在 start 的步骤预算内流式校验整个输入，按全局序号 `k % Client 数` 写本轮压缩分片；校验、封口、关闭和发布全部完成后才 prepare/begin。分片位于 `components/client-0/coordinator/<轮次>/shards/`，直接写压缩 `.part`，成功后原子发布为 `.binpb.zst`。input.json 只记录条数和摘要等元数据，不保存可读请求副本。准备失败不启动播放；源文件在准备期间发生可检测的大小、修改时间或文件身份变化会报错。
-
-每份 worker 计划只包含分片路径、条数、全局序号起点/步长、请求 ID 起点、SHA-256 和发流参数。LoadClient 的播放线程使用 ReplayInput.Reader 按批次解压，交给原有小队列；不把完整输入放进堆，也不把请求/响应经 client0 转发。请求 ID 在多轮 start 之间单调分配，主动停止留下的未发请求不会重新分配给后续轮次。播放读失败、条数或完整读取后的 SHA-256 不符使整组失败；主动 stop 不扫描未消费的后缀，剩余请求计入 unsent。
-
-masters 可省略，Client 默认持续发现本实验的全部 Master；显式填写时固定为该 step 的地址集合，播放期间只在其中选主备。qps 和 replay_speed 必须且只能提供一个正有限值。qps 模式按全局请求序号控制均匀发送；replay_speed 模式要求每条请求有 arrival_offset_ms，准备时检查时间非递减，播放线程按 offset/replay_speed 投递。所有分片保留同一个源起点，不按各自首条请求重新归零；相同时间允许突发，不再叠加 QPS 限速。concurrency 是全局预算。queue_capacity 默认每 Client 16，允许 1–100000；request_timeout 和 drain_timeout 默认 30s，允许 1ms–1h 的整毫秒值。计划时长最多 24h；每个 Client 至少分到一个请求和并发槽。准备时间计入 start 的 within/phase timeout，大文件需明确足够的预算。
-
-参与发压的 Client 在本轮固定；单请求 timeout 从 NativeClient 调用开始，不包含小队列等待。只支持本机多 JVM，未承诺跨机器时钟同步。准备后 30s 未收到 begin 的 Client 报错退出本轮。请求循环、多轮对话、ramp、动态参与者和运行时旧格式转换不在当前范围。
+`qps` 和 `replay_speed` 必须且只能提供一个正有限值。固定 QPS 使用全局请求序号，按源速回放使用记录中的到达偏移除以 `replay_speed`。可选的 `warmup` 在指定时长内按 `rate_scale` 降低速率，每条请求只播放一次。`total_concurrency` 是全部 Client 的总预算，`queue_capacity` 是每个 Client 的队列上限。`masters` 省略时持续发现本实验的 Master，显式传入时将候选范围固定在这些地址。每轮最多 24 小时，每个 Client 至少分到一个请求和一个并发槽。
 
 ```yaml
 - id: load
-  describe: 全体 Client 合计 24 QPS
   interface: client/start
   within: 60s
   args:
-    requests_file: traffic.binpb.zst
-    qps: 24
-    concurrency: 16
+    requests_file: data/traffic/basic.mckidx
+    qps: 2
+    total_concurrency: 4
   wait_after: 10s
 - id: stop_load
-  describe: 收集全部 Client 的执行结果
   interface: client/stop
 ```
 
-测试代码通过 python/mock_framework/execution/test/helpers/input.py 构造 Protobuf Request 并写压缩文件（下面的导入用于 pytest 或将源码目录 python 加入 sys.path 的镜像终验脚本）：
-
-```python
-from mock_framework.execution.test.helpers.input import pb, write_inputs
-write_inputs("traffic.binpb.zst", (
-    pb.Request(token_ids=[1, 2, i + 3], max_new_tokens=3)
-    for i in range(20)
-))
-```
-
-测试写入器拒绝覆盖已有文件，生成失败删除本次不完整文件。Case 传入 JSONL 或标准二进制文件路径，由 Java ReplayInput 校验、读取并生成压缩分片。基础 Case 使用可读 JSONL 输入。控制接口仍传小型 HTTP 元数据，不在 JSON 控制报文中传请求数据。
-
-`RequestFilesTest` 在独立 48 MiB 堆的 JVM 中分片并完整播放解压后超过 64 MiB 的输入，覆盖非法输入、截断、校验和、内容变化和准备取消。跨语言测试验证 Python 写→Java 读、Java 写→Python 读；真实 Master 接线测试在 1/2 个 Client JVM 中播放并校验分片总量、全局请求 ID 和发压窗口内的合计 QPS。这些是有界读取和功能接线验证，不测量最大可达 QPS。
-
 `client/qps` 复用公共 Python 查询，统计 mock_client_requests_issued_total，是发出 QPS；最终检查选择实际发压窗口，不能用含空闲和收尾的实验全时长稀释目标。latest 在自然结束后可能为零，all 尚不支持；缺实例或采样不足按公共查询规则报错。各 Client 仅上报自己的指标，client0 不重复上报全局汇总，不再增加一套发压有效性门禁。
 
-每个 Client 在自己的 playback/<轮次>/ 保存计划与结果，client0 另在 coordinator/<轮次>/ 保存总计划、参与者和汇总。文件单写并原子替换，多 JVM 和后续轮次不会覆盖旧结果。每轮输入分片与逐请求执行证据分别保存，输入不作为已发送/已完成的证明；磁盘须容纳输入和各轮分片。Client 结果包含 produced/issued/finished/unsent、在途/队列余量、终态计数和异常，业务错误计数不等于执行异常。
+每个 Client 在自己的 playback/<轮次>/ 保存计划与结果，client0 另在 coordinator/<轮次>/ 保存总计划、参与者和汇总。文件单写并原子替换，多 JVM 和后续轮次不会覆盖旧结果。共享输入只保存一份。已发送和完成情况以各 Client 的逐请求证据为准。Client 结果包含 produced/issued/finished/unsent、在途/队列余量、终态计数和异常，业务错误计数不等于执行异常。
 
 启动配方中的 Client 使用 java -jar <framework>/java/client/target/mock-client-1.0-SNAPSHOT-all.jar，由 Runner 注入配置、拓扑和独立输出目录。部分停止与队列/并发默认值的压力校准仍待讨论。
 
