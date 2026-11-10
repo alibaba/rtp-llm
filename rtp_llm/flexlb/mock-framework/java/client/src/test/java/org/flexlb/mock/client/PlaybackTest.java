@@ -143,7 +143,7 @@ class PlaybackTest {
                  var one = new ReplayControlServer("client-1", topology, directory.resolve("one-" + early))) {
                 new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                     Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
-                zero.start(new Start(List.of(master(h)), source.toString(), null, 5.0, 4, 8, 3000, 1000, true, null));
+                zero.start(new Start(List.of(master(h)), source.toString(), null, 5.0, 4, 8, 3000, 1000, true, null, null));
                 assertTrue(h.scheduleEntered.await(3, TimeUnit.SECONDS));
                 if (!early) eventually(() -> zero.state(new Sequence(1)).done() && one.state(new Sequence(1)).done());
                 var result = zero.stop(new Empty());

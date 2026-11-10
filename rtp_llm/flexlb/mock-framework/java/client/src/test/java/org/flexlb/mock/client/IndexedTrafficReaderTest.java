@@ -58,7 +58,7 @@ class IndexedTrafficReaderTest {
         Session.play(plan, past, MediaInput.IMAGE_TOKEN, items::add);
         assertEquals(List.of(100L, 2148L), items.stream().map(Session.Item::requestId).toList());
         assertEquals(List.of(0L, 1_024_000_000L), items.stream().map(item -> {
-            try { return Session.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), null, 2.0); }
+            try { return Session.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), null, 2.0, null); }
             catch (IOException error) { throw new AssertionError(error); }
         }).toList());
         assertEquals(List.of(924, 924, 924), items.getFirst().entry().expectedImageTokens());
@@ -78,10 +78,27 @@ class IndexedTrafficReaderTest {
                     100, input.identity, 100.0, null, 1, 4, 1000, 1000);
                 var times = new ArrayList<Long>();
                 Session.play(plan, past, MediaInput.IMAGE_TOKEN, item -> times.add(assertDoesNotThrow(() ->
-                    Session.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), plan.qps(), null))));
+                    Session.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), plan.qps(), null, null))));
                 assertEquals(expected.get(worker), times);
             }
         }
+    }
+
+    @Test void warmupScalesBothClocksAndJoinsTheFormalScheduleAtTheBoundary() throws Exception {
+        var warmup = new Warmup(4000, 0.25);
+        assertEquals(0L, Session.delayNanos(0, 0, 2.0, null, warmup));
+        assertEquals(2_000_000_000L, Session.delayNanos(1, 0, 2.0, null, warmup));
+        assertEquals(4_000_000_000L, Session.delayNanos(2, 0, 2.0, null, warmup));
+        assertEquals(4_500_000_000L, Session.delayNanos(3, 0, 2.0, null, warmup));
+
+        assertEquals(2_000_000_000L, Session.delayNanos(9, 1000, null, 2.0, warmup));
+        assertEquals(4_000_000_000L, Session.delayNanos(10, 2000, null, 2.0, warmup));
+        assertEquals(4_500_000_000L, Session.delayNanos(11, 3000, null, 2.0, warmup));
+        assertThrows(IOException.class, () -> Session.checkPlaybackEnd(1, 0, 2.0, null, warmup));
+        assertDoesNotThrow(() -> Session.checkPlaybackEnd(2, 0, 2.0, null, warmup));
+        assertThrows(IOException.class, () -> Session.checkPlaybackEnd(0, 172_800_000, null, 2.0, warmup));
+        assertThrows(IllegalArgumentException.class, () -> new Warmup(0, 0.25));
+        assertThrows(IllegalArgumentException.class, () -> new Warmup(1000, 1.0));
     }
 
     @Test void outputLengthsStayIndependentAndFallbackIsOnlyForMissingValues() throws Exception {
@@ -129,7 +146,7 @@ class IndexedTrafficReaderTest {
              var one = new ReplayControlServer("client-1", topology, oneDirectory)) {
             json.writeValue(topology.toFile(), List.of(backend.endpoint(),
                 Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
-            zero.start(new Start(List.of(PlaybackTest.master(backend)), source.toString(), null, 2.0, 4, 8, 3000, 1000));
+            zero.start(new Start(List.of(PlaybackTest.master(backend)), source.toString(), null, 2.0, 4, 8, 3000, 1000, false, null, new Warmup(20, 0.25)));
             PlaybackTest.eventually(() -> zero.state(new Sequence(1)).done() && one.state(new Sequence(1)).done());
             var summary = zero.stop(new Empty());
             assertTrue(summary.errors().isEmpty(), summary.toString());
@@ -140,6 +157,8 @@ class IndexedTrafficReaderTest {
             for (var directory : List.of(zeroDirectory, oneDirectory)) {
                 var plan = json.readTree(directory.resolve("playback/1/plan.json").toFile());
                 assertEquals(source.toString(), plan.get("requests_file").asText());
+                assertEquals(20, plan.at("/warmup/duration_ms").intValue());
+                assertEquals(0.25, plan.at("/warmup/rate_scale").doubleValue());
             }
         }
     }

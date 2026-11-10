@@ -586,6 +586,43 @@ def test_replay_speed_replaces_qps_and_is_forwarded_without_timestamp_conversion
     assert calls[0]["replay_speed"] == 5 and "qps" not in calls[0]
 
 
+@pytest.mark.parametrize("rate", [{"qps": 10}, {"replay_speed": 2}])
+def test_warmup_is_forwarded_with_either_rate(monkeypatch, rate):
+    ctx = context()
+    calls = []
+
+    async def start(body, timeout):
+        calls.append(body)
+        return True
+
+    monkeypatch.setattr(ctx.runtime.clients, "start_playback", start)
+    values = args()
+    values.pop("qps")
+    values.update(rate, warmup={"duration": "1.25s", "rate_scale": 0.25})
+    assert asyncio.run(StepRegistry.standard().get("client/start").invoke(ctx, values))
+    assert calls[0]["warmup"] == {"duration_ms": 1250, "rate_scale": 0.25}
+    assert all(calls[0][name] == value for name, value in rate.items())
+
+
+@pytest.mark.parametrize(
+    "warmup",
+    [
+        {"duration": "0s", "rate_scale": 0.25},
+        {"duration": "1us", "rate_scale": 0.25},
+        {"duration": "25h", "rate_scale": 0.25},
+        {"duration": "1s", "rate_scale": 0},
+        {"duration": "1s", "rate_scale": 1},
+        {"duration": "1s", "rate_scale": float("nan")},
+        {"duration": "1s", "qps": 1},
+    ],
+)
+def test_invalid_warmup_fails_at_python_boundary(warmup):
+    with pytest.raises(ConfigError):
+        StepRegistry.standard().get("client/start").arguments(
+            args() | {"warmup": warmup}
+        )
+
+
 @pytest.mark.parametrize(
     "rate",
     [

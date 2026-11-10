@@ -278,6 +278,8 @@ uv run --locked python scripts/build-indexed-traffic.py anonymous.jsonl traffic.
 
 `qps` 和 `replay_speed` 二选一。QPS 模式按全局序号均匀发送，倍速模式保留源到达时间与突发。`total_concurrency` 是所有 Client 的合计并发上限，每个 Client 至少有一个并发槽和一条请求。计划时长最多 24 小时。Client 各自维护有界播放队列，单请求超时从原生 RPC 发送开始。主动停止时，未发请求计入 `unsent`，正在执行的请求按 `drain_timeout` 收尾。下次启动从新的请求 ID 起点开始。
 
+`client/start.args.warmup` 可选，包含 `duration` 和 `rate_scale`。前者从所有 Client 共用的开始时刻算起，后者须大于 0、小于 1。预热阶段的固定 QPS 或回放倍速等于正式配置乘以该比例。到时直接恢复正式速率，每条请求只播放一次。各 Client 用自己的全局序号或源时间戳算发出时刻。整轮时长上限包含预热造成的额外时间，预热结束时须还有请求可以发出。一次 `client/stop` 收集整轮结果。正式性能窗口从恢复正式速率后开始计算。
+
 `client0` 的 `input.json` 记录共享文件路径、请求总数与数据集摘要。各 Client 的计划另记录首个全局序号、步长和本地请求数。运行时校验被访问的记录和页，读失败会中止这一轮回放。控制接口只传计划和结果元数据。
 
 ## 当前代码职责

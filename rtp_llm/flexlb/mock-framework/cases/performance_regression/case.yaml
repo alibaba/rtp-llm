@@ -41,46 +41,28 @@ phases:
     expect:
       count: 1
     wait_after: 10s
-- id: warmup
-  describe: 先用低速流量预热并排空，保留 P/D/V 缓存。
-  timeout: 530s
-  steps:
-  - id: start_warmup_client
-    describe: 按 0.25 倍速预热 300 秒。
-    interface: client/start
-    args:
-      requests_file: data/traffic/frontend-300s-paged.mckidx
-      reuse_cache: true
-      replay_speed: 0.25
-      total_concurrency: 16000
-      queue_capacity: 16000
-      request_timeout: 120s
-      drain_timeout: 150s
-    within: 335s
-    wait_after: 300s
-  - id: stop_warmup_client
-    describe: 停止预热发压并排空已发请求。
-    interface: client/stop
-    within: 180s
 - id: playback
-  describe: 原速播放并回查两个完整的缓存窗口。
-  timeout: 420s
+  describe: 同一轮先低速预热，再原速播放剩余请求并回查缓存窗口。
+  timeout: 660s
   steps:
   - id: start_client
-    describe: 四个 Client 按 1.0 倍速回放五分钟多模态采样。
+    describe: 四个 Client 先以 0.25 倍速预热 300 秒，再以 1.0 倍速播放剩余流量。
     interface: client/start
     args:
       requests_file: data/traffic/frontend-300s-paged.mckidx
       reuse_cache: true
       replay_speed: 1.0
+      warmup:
+        duration: 300s
+        rate_scale: 0.25
       total_concurrency: 32000
       queue_capacity: 48000
       request_timeout: 120s
       drain_timeout: 150s
-    within: 335s
-    wait_after: 305s
+    within: 565s
+    wait_after: 530s
   - id: check_cache_warmup_first
-    describe: 回查约第 210–240 秒的 Prefill 命中率。
+    describe: 回查约第 435–465 秒的 Prefill 命中率。
     interface: engine/cache/hit_rate
     args:
       range: [-95s, -65s]
@@ -88,7 +70,7 @@ phases:
       gte: 0.9
     within: 30s
   - id: check_cache_warmup_second
-    describe: 回查约第 240–270 秒的 Prefill 命中率。
+    describe: 回查约第 465–495 秒的 Prefill 命中率。
     interface: engine/cache/hit_rate
     args:
       range: [-65s, -35s]
@@ -189,7 +171,7 @@ phases:
     interface: client/stop
     within: 180s
   - id: check_total_success_rate
-    describe: 检查正式原速回放是否完整，以及排空后的全程成功率。
+    describe: 检查整轮回放是否完整，以及排空后的全程成功率。
     interface: client/success_rate
     args:
       playback_result: {ref: steps.stop_client}

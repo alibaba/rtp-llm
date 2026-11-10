@@ -107,7 +107,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                 total = input.count;
                 identity = input.identity;
                 if (total < created.peers.size()) throw new IOException("Need at least one request per Client");
-                Session.delayNanos(total - 1, input.lastArrival, args.qps(), args.replay_speed());
+                Session.checkPlaybackEnd(total - 1, input.lastArrival, args.qps(), args.replay_speed(), args.warmup());
             }
             synchronized (this) { nextRequestId = Math.addExact(created.firstId, total); }
             save(directory.resolve("coordinator/" + created.number + "/input.json"),
@@ -120,7 +120,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                 call(created.peers.get(i), "worker/prepare", new ClientReplayPlan(created.number, args.masters(), args.requests_file(),
                     count, i, clients, created.firstId, identity, args.qps(), args.replay_speed(), slots,
                     args.queue_capacity(), args.request_timeout_ms(), args.drain_timeout_ms(), args.reuse_cache(),
-                    args.fallback_max_output_tokens()));
+                    args.fallback_max_output_tokens(), args.warmup()));
             }
             long startAt = System.currentTimeMillis() + Math.max(1000, created.peers.size() * 100L);
             for (String peer : created.peers) {
@@ -365,13 +365,13 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                 long expected = ClientProtocol.requestCount(indexed.count, plan.first_index(), plan.stride());
                 if (!indexed.identity.equals(plan.sha256()) || expected != plan.count())
                     throw new IOException("Indexed traffic changed after planning");
-                delayNanos(indexed.count - 1, indexed.lastArrival, plan.qps(), plan.replay_speed());
+                checkPlaybackEnd(indexed.count - 1, indexed.lastArrival, plan.qps(), plan.replay_speed(), plan.warmup());
                 for (long position = 0; position < plan.count(); position++) {
                     if (Thread.interrupted()) throw new InterruptedException();
                     long index = plan.first_index() + position * plan.stride();
                     var entry = indexed.entry(index, imageToken);
                     int outputLimit = playbackLimit(entry, plan.fallback_max_output_tokens());
-                    long due = startNanos + delayNanos(index, entry.arrivalMs(), plan.qps(), plan.replay_speed());
+                    long due = startNanos + delayNanos(index, entry.arrivalMs(), plan.qps(), plan.replay_speed(), plan.warmup());
                     long left;
                     while ((left = due - System.nanoTime()) > 0) TimeUnit.NANOSECONDS.sleep(left);
                     if (Thread.interrupted()) throw new InterruptedException();
@@ -380,8 +380,19 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
             }
         }
 
-        static long delayNanos(long index, long arrivalMs, Double qps, Double speed) throws IOException {
+        static void checkPlaybackEnd(long index, long arrivalMs, Double qps, Double speed, Warmup warmup) throws IOException {
+            long end = delayNanos(index, arrivalMs, qps, speed, warmup);
+            if (warmup != null && end < TimeUnit.MILLISECONDS.toNanos(warmup.duration_ms()))
+                throw new IOException("Dataset ends during warmup; no requests remain at the formal rate");
+        }
+
+        static long delayNanos(long index, long arrivalMs, Double qps, Double speed, Warmup warmup) throws IOException {
             double seconds = speed == null ? index / qps : arrivalMs / (1000.0 * speed);
+            if (warmup != null) {
+                double wallWarmup = warmup.duration_ms() / 1000.0;
+                double replayWarmup = wallWarmup * warmup.rate_scale();
+                seconds = seconds < replayWarmup ? seconds / warmup.rate_scale() : wallWarmup + (seconds - replayWarmup);
+            }
             if (!Double.isFinite(seconds) || seconds < 0 || seconds > 86400)
                 throw new IOException("Playback exceeds 24 hours");
             return (long) (seconds * 1_000_000_000.0);
