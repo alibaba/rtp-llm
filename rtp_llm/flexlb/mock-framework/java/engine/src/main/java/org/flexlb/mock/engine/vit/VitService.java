@@ -31,7 +31,8 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
             geometryCapture = capture;
         }
         if (capture.end() != request.end()) throw new IllegalArgumentException("capture_window_conflict");
-        return new VitNode.CaptureState(capture.start(), capture.state(), instance);
+        var geometry = new VitNode.CaptureGeometry(config.patch(), config.merge(), config.minPixels(), config.maxTokens());
+        return new VitNode.CaptureState(capture.start(), capture.state(), instance, geometry);
     }
 
     VitNode.CaptureChunk readCapture(VitNode.CaptureRead request) throws Exception {

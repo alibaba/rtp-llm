@@ -10,7 +10,8 @@ import org.flexlb.mock.engine.EngineMain.Address;
 /** Standalone vision instance serving Prefill over gRPC. */
 public final class VitNode implements AutoCloseable {
     public record CaptureArm(long start, long end, long expires, String signature) {}
-    public record CaptureState(long start, String state, String instance) {}
+    public record CaptureState(long start, String state, String instance, CaptureGeometry geometry) {}
+    public record CaptureGeometry(int patch_size, int downsample_ratio, int min_pixels, int max_image_tokens) {}
     public record CaptureRead(long start, String owner, long expires, long offset, int size, String signature) {}
     public record CaptureChunk(String owner, long start, String name, long bytes, String sha256, long offset,
                                String chunk_sha256, String data_base64) {}

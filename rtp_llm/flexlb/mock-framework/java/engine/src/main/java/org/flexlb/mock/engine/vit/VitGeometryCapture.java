@@ -90,7 +90,7 @@ final class VitGeometryCapture {
         String identity = digest("image", image.key());
         if (seen.contains(identity)) return;
         if (seen.size() >= MAX_IMAGES || !pending.offer("[\"image\",\"" + identity + "\","
-                + image.width() + "," + image.height() + "]")) {
+                + image.width() + "," + image.height() + "," + image.rows() + "]")) {
             dropped++;
             return;
         }
@@ -151,7 +151,7 @@ final class VitGeometryCapture {
             }
             try (var stream = new BufferedWriter(new OutputStreamWriter(
                     new GZIPOutputStream(Files.newOutputStream(partial)), StandardCharsets.UTF_8))) {
-                emit(stream, "[\"geometry\",3," + start + "," + end + ",\"" + shard + "\",\"" + check + "\"]");
+                emit(stream, "[\"geometry\",4," + start + "," + end + ",\"" + shard + "\",\"" + check + "\"]");
                 stream.flush();
                 state = "armed";
                 while (true) {
