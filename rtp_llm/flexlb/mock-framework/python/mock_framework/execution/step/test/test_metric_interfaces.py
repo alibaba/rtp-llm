@@ -1,17 +1,22 @@
-from mock_framework.execution.step.client_success_rate import SuccessRateArgs
-from mock_framework.execution.step.client_success_rate import client_success_rate
-from mock_framework.execution.step.engine_prefill_tps_with_cache import engine_prefill_tps_with_cache
-from mock_framework.execution.step.engine_prefill_tps import engine_prefill_tps
-from mock_framework.execution.step.engine_cache_hit_rate import engine_cache_hit_rate
 import asyncio
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from types import SimpleNamespace
 from urllib.parse import parse_qs
+
 import pytest
-from mock_framework.execution.step import _metrics as metrics
 from mock_framework.execution import ExecutionError
+from mock_framework.execution.step import _metrics as metrics
+from mock_framework.execution.step.client_success_rate import (
+    SuccessRateArgs,
+    client_success_rate,
+)
+from mock_framework.execution.step.engine_cache_hit_rate import engine_cache_hit_rate
+from mock_framework.execution.step.engine_prefill_tps import engine_prefill_tps
+from mock_framework.execution.step.engine_prefill_tps_with_cache import (
+    engine_prefill_tps_with_cache,
+)
 
 
 @pytest.fixture
@@ -167,10 +172,25 @@ def test_success_rate_rejects_a_missing_outcome_series(monkeypatch):
 @pytest.mark.parametrize('args', [{}, {'range': 'latest'}, {'range': 'all'},
     {'range': ['0s', '0s']}, {'range': ['-20s', '1s']}, {'range': ['-20s']}])
 def test_success_rate_requires_an_explicit_valid_window(args):
-    from mock_framework.execution.step.step_registry import StepRegistry
     from mock_framework.config import ConfigError
+    from mock_framework.execution.step.step_registry import StepRegistry
     with pytest.raises(ConfigError):
         StepRegistry.standard().get('client/success_rate').arguments(args)
+
+
+def test_success_rate_from_stop_counts_only_the_selected_playback():
+    from mock_framework.execution.step.step_registry import StepRegistry
+    step = StepRegistry.standard().get('client/success_rate')
+    summary = {
+        'done': True, 'stopped': True, 'produced': 1000, 'issued': 1000, 'finished': 1000,
+        'unsent': 0, 'queued': 0, 'inflight': 0, 'errors': [],
+        'outcomes': {'success': 999, 'error': 1, 'timeout': 0, 'cancelled': 0},
+    }
+    result = {'127.0.0.1:1001': summary}
+    assert asyncio.run(step.invoke(None, {'playback_result': result})) == 0.999
+    summary['unsent'] = 1
+    with pytest.raises(ExecutionError, match='unsent'):
+        asyncio.run(step.invoke(None, {'playback_result': result}))
 
 
 def test_success_rate_window_keeps_selected_clients_and_fixed_end(monkeypatch):
@@ -241,7 +261,7 @@ def test_series_checks_every_point_and_each_instances_history(monkeypatch):
 
 
 def test_latency_interval_uses_request_weights_and_merges_histogram_buckets(monkeypatch):
-    from mock_framework.execution.step.client_ttft import client_ttft, LatencyArgs
+    from mock_framework.execution.step.client_ttft import LatencyArgs, client_ttft
     ctx = context()
     for node in ctx.nodes:
         node['role'] = 'client'

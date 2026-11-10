@@ -1,23 +1,42 @@
-from dataclasses import dataclass
 import json
 import math
+from dataclasses import dataclass
 from typing import Annotated, Literal
-from .step_registry import register_step
-from .step import StepContext
+
 from .. import ExecutionError
-from ._targets import Targets
+from ..roles.client import ClientResult
 from . import _metrics
+from ._targets import Targets
+from .step import StepContext
+from .step_registry import register_step
 
 
 @dataclass(frozen=True, kw_only=True)
 class SuccessRateArgs(Targets):
-    range: Annotated[list[str], 'range']
+    range: Annotated[list[str], 'range'] | None = None
     mode: Literal['interval', 'series'] = 'interval'
+    playback_result: dict[str, ClientResult] | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if (self.range is None) == (self.playback_result is None):
+            raise ValueError('Supply exactly one range or playback_result')
+        if self.playback_result is not None and (self.targets is not None or self.mode != 'interval'):
+            raise ValueError('playback_result is the complete playback and does not support targets or series')
 
 
 @register_step('client/success_rate', effect='read', unit='ratio')
 async def client_success_rate(ctx: StepContext, args: SuccessRateArgs) -> float | list[float]:
-    """Success share of terminal observations in an explicit [start, end] window; no request-count floor."""
+    """Success share from a Prometheus window or one completed client/stop result."""
+    if args.playback_result is not None:
+        clients = args.playback_result.values()
+        if any(client.unsent for client in clients):
+            raise ExecutionError('Playback ended with unsent requests')
+        finished = sum(client.finished for client in clients)
+        if not finished:
+            raise ExecutionError('Playback has no terminal observations')
+        return sum(client.outcomes['success'] for client in clients) / finished
+
     at, millis, _ = _metrics.evaluation_window(ctx, args)
     labels, targets = _metrics.scope(ctx, args, 'client')
     ctx.records.emit(event='metric_window', query_time=ctx.query_time, start=at - millis / 1000, end=at)

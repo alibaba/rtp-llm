@@ -42,7 +42,28 @@ phases:
       count: 1
     wait_after: 10s
 - id: warmup
-  describe: 回放并确认连续两个完整的缓存窗口。
+  describe: 先用低速流量预热并排空，保留 P/D/V 缓存。
+  timeout: 530s
+  steps:
+  - id: start_warmup_client
+    describe: 按 0.25 倍速预热 300 秒。
+    interface: client/start
+    args:
+      requests_file: data/traffic/frontend-300s-paged.mckidx
+      reuse_cache: true
+      replay_speed: 0.25
+      total_concurrency: 16000
+      queue_capacity: 16000
+      request_timeout: 120s
+      drain_timeout: 150s
+    within: 335s
+    wait_after: 300s
+  - id: stop_warmup_client
+    describe: 停止预热发压并排空已发请求。
+    interface: client/stop
+    within: 180s
+- id: playback
+  describe: 原速播放并回查两个完整的缓存窗口。
   timeout: 420s
   steps:
   - id: start_client
@@ -167,12 +188,11 @@ phases:
     describe: 待整份数据回放完毕后停止 Client，并收齐已发请求的终态。
     interface: client/stop
     within: 180s
-    wait_after: 10s
   - id: check_total_success_rate
-    describe: 检查含预热和排空在内的全程成功率。
+    describe: 检查正式原速回放是否完整，以及排空后的全程成功率。
     interface: client/success_rate
     args:
-      range: [-550s, 0s]
+      playback_result: {ref: steps.stop_client}
     expect:
       gte: 0.999
     within: 30s

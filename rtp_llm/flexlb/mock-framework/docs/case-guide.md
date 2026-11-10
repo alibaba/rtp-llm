@@ -73,7 +73,7 @@ phases:
 
 ### 查询和断言
 
-普通指标优先使用语义接口，YAML 不写 PromQL。range 使用相对该 Step 固定查询时刻的区间，例如 `[-60s, 0s]`，不支持 `latest` 或 `all`。省略 range 时默认最近 60 秒；`client/success_rate` 必须显式提供 range，不隐式切换为整轮累计成功率。
+普通指标优先使用语义接口，YAML 不写 PromQL。range 使用相对该 Step 固定查询时刻的区间，例如 `[-60s, 0s]`，不支持 `latest` 或 `all`。省略 range 时默认最近 60 秒。`client/success_rate` 必须显式选择 `range` 或 `playback_result`。
 
 数值指标的 `mode` 默认为 `interval`，Case 中省略 `mode: interval`，只有逐点检查时才写 `mode: series`：
 
@@ -97,7 +97,7 @@ phases:
 | `engine/prefill/tps_with_cache` | Prefill 的 `rtp_llm_context_tps_with_cache`，吞吐包含复用 token。 |
 | `engine/decode/tps` | Decode 已提交输出 token counter 的增量 / 墙钟时长。 |
 | `engine/cache/hit_rate` | Prefill 实际复用 token / 查询输入 token 的增量比值。 |
-| `client/success_rate` | 成功终态 / 全部终态的增量比值，包括 error、timeout、cancelled。必须显式指定 range。 |
+| `client/success_rate` | 成功终态 / 全部终态。用 `range` 查询区间增量，或用 `playback_result: {ref: steps.stop_client}` 按已排空的单轮汇总计算。单轮仍有未发请求时报告不完整。 |
 | `client/ttft` | 调用开始到收到首 token 的延迟，包含所有收到首 token 的请求。 |
 | `client/tpot` | 首末 token 间隔 / 首 token 之后的 token 数，只统计成功且输出多于一个 token 的请求。 |
 
