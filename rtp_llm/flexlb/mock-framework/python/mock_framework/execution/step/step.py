@@ -102,6 +102,7 @@ class Step:
                 gate = {
                     "step": self.id,
                     "interface": self.interface,
+                    "unit": interface.unit,
                     "args": args,
                     "query_time": context.query_time,
                     "expect": expected,

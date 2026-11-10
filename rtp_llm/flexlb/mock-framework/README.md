@@ -1,12 +1,6 @@
 # Mock 框架使用说明
 
-用已有 Case 启动真实 FlexLB Master、Mock RTP Prefill/Decode、可选 ViT 和 Client，执行流量与故障步骤，保存门禁、请求证据和 Prometheus 数据，再用 View 查看结果。Master 使用生产调度和 ZK 选举；Mock Engine 使用生产协议，在 CPU 上模拟计算与缓存行为。
-
-当前支持 RTP、Engine 扩缩容、Master 停启与恢复、多 Client 播放及主备发现。vLLM 尚未接通。小流量 Case 用于功能验证，不能作为真实 GPU 性能或规模容量结论。
-
-本分支 `codex/mock-on-main-dev-dsv41` 以 main 的生产 Master、KVCM 和协议为基础，按需对齐 DSV4.1 多模态链路。迁移范围、固定基线与验证状态见[迁移审查](docs/migration-audit.md)。
-
-多模态回放使用原始 token 和图片占位位置 `Image.offset`，不再接受预展开的 `Image.length`。Client 使用显式配置的 image_token_id，将占位位置编码为该标记，V 给出长度/hash 元数据，P 准备计算输入并通过原生 PD 请求传递缓存身份。V4.1 几何、ViT 负载及 KVCM 接入范围见[组件参考](docs/component-reference.md)。
+用 Case 启动真实 FlexLB Master 和 Mock RTP Engine，回放流量、验证故障恢复，再用 View 查看门禁结果和指标。
 
 ## 准备环境
 
@@ -66,14 +60,14 @@ P/D/V、Master 和 Client 各实例直接启动独立 JVM。ZooKeeper 由单独�
 
 ## 检查结果与失败请求
 
-| 产物                     | 查看内容                                                                 |
-| ------------------------ | ------------------------------------------------------------------------ |
-| `result.json`            | 最终状态、起止时间及清理错误。状态为 PASS / FAIL / ERROR / CANCELLED。   |
-| `gates.jsonl` 和事件记录 | 实际执行的步骤、门禁预期与实际值、查询时刻和窗口；未执行的检查不算通过。 |
-| 配置与源码记录           | 原始 Case、编译配置、启动配方、接口清单、源码版本和工作区差异。          |
-| `components/`            | 组件生效配置、端点、日志和 Client 播放结果/请求证据。                    |
-| `prometheus/`            | 采集配置、日志、完整性记录及 TSDB/WAL；缺指标不能补零。                  |
-| `view.json`              | 本次保存的大盘快照，供之后回看。                                         |
+| 产物                     | 查看内容                                                               |
+| ------------------------ | ---------------------------------------------------------------------- |
+| `result.json`            | 最终状态、起止时间及清理错误。状态为 PASS / FAIL / ERROR / CANCELLED。 |
+| `gates.jsonl` 和事件记录 | 步骤事件、门禁预期与实际值、单位、查询时刻和窗口。                     |
+| 配置与源码记录           | 原始 Case、编译配置、启动配方、源码版本和工作区差异。                  |
+| `components/`            | 组件生效配置、端点、日志和 Client 播放结果/请求证据。                  |
+| `prometheus/`            | 采集配置、日志、完整性记录及 TSDB/WAL；缺指标不能补零。                |
+| `view.json`              | 本次保存的大盘快照，供之后回看。                                       |
 
 检查 Client 的 issued、finished、success/error/timeout/cancelled，以及 queued、inflight、unsent。Case 主动提前停止播放时，未发送的输入不算失败；已发送请求是否收齐终态、请求证据是否完整，要分别确认。清理错误和采集错误也应单独报告，不能解释成请求失败或忽略后宣称 PASS。
 
@@ -106,7 +100,7 @@ View 只读已完成实验，复制 TSDB 后启动独立指标服务，不重跑
 
 多 Master 使用不同的回环 IP、相同服务端口。Linux 默认支持 127/8；macOS 未配置所需回环别名时无法运行双 Master，不会自动修改系统网络。每次实验独占 ZK 和选举路径。
 
-Case 字段、相对路径、共享资源、引用、断言、扩缩容与 Master 停启用法见 [Case 指南](docs/case-guide.md)。
+新增 Case、编写 YAML 和扩展接口见 [Case 指南](docs/case-guide.md)。
 
 ## 开发检查与详细文档
 
@@ -118,27 +112,9 @@ PROMETHEUS_BIN="$PROMETHEUS_BIN" ./scripts/test-framework.sh
 
 `test-framework.sh` 会先调用 `build-java.sh`，再运行 Python 测试。缺少 Prometheus 时会跳过真实采集集成测试；macOS 缺少回环别名时跳过双 Master 测试。报告检查结果时说明跳过项，测试通过不代替完整 Case 验收。
 
-## CI Case
-
-CI 构建一次 Java 运行产物，再由各 worker 解包并独立运行选中的 Case。构建和运行需要 Java 21，运行还需要预装的 Prometheus 和 uv 依赖缓存。
-
-```sh
-./scripts/build-ci-case.sh /absolute/path/to/mock-case-runtime.tar.gz
-./scripts/run-ci-case.sh basic /absolute/path/to/mock-case-runtime.tar.gz /absolute/path/to/new-output
-```
-
-归档包含 Engine、Client、Master 和 ZooKeeper 运行产物。Case 脚本在目标 worker 重建 classpath，按锁文件离线安装 Python 环境，并保存编译结果、启动配方和完整的运行结果。收到 SIGTERM 时，Runner 会取消 Case 并回收子进程。
-
-在源码仓库根目录构建预制环境：
-
-```sh
-docker build -f rtp_llm/flexlb/mock-framework/docker/ci-case-env.Dockerfile -t mock-case-ci:local .
-```
-
-镜像预热 Maven 和 uv 缓存。运行产物由当次 CI 构建生成。
-
-- [Case 指南](docs/case-guide.md)：配置、路径、Step/ref、断言、启动配方与生命周期操作。
-- [组件配置与指标参考](docs/component-reference.md)：Master、RTP、ViT、KV、Compute/EOS、Client 协议及指标口径。
+- [Case 指南](docs/case-guide.md)涵盖目录约定、YAML 字段、门禁和接口扩展。
+- [在 AoneCI 运行 Case](docs/ci-case.md)：构建环境镜像、指定源码和 Case、查看结果。
+- Master、RTP、ViT、KV、Compute 和 KVCM 参数见 [组件配置参考](docs/component-reference.md)。
 - [架构与设计边界](docs/architecture.md)：组件职责、Scheduler/EngineLoop、协议和资源生命周期、接口扩展。
 - [View 指南](docs/view-guide.md)：报告内容、事件标注、异常展示与服务生命周期。
 - [大盘说明](views/README.md)与[指标覆盖](views/coverage.md)：查询分区、标签与缺口。

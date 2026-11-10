@@ -1,16 +1,15 @@
 """Physical Engine placement; Case operations address instances, never JVMs."""
 
 import asyncio
-import copy
-import json
-import os
 import socket
+from itertools import zip_longest
 
 from ...config.validation import duration
 from .. import ExecutionError
-from ..step_trace import write_json
+from ..processes import launch_component
 
 ROLES = ("prefill", "decode", "vit")
+INITIAL_START_CONCURRENCY = 32
 
 
 class EngineRole:
@@ -23,7 +22,7 @@ class EngineRole:
             recipes,
             monitoring,
         )
-        self.instances, self.counters = set(), {}
+        self.counters = {}
         self.processes = set()
         self.used_ports = set()
         self.lock = asyncio.Lock()
@@ -39,116 +38,64 @@ class EngineRole:
                 return port
         raise ExecutionError("Cannot allocate a fresh Engine listener port")
 
-    async def _start_instance(self, role, node, directory):
-        recipe = self.recipes[role]
+    async def _start_instance(self, role, index):
+        node = f"{role}-{index}"
         rpc_port, control_port = self._port(), self._port()
-        ready = directory / "ready.json"
         self.processes.add(node)
-        child = await self.supervisor.spawn(
-            node,
-            recipe["command"],
-            recipe["cwd"],
-            {
-                **os.environ,
-                **recipe["env"],
+        child, control, endpoint = await launch_component(
+            self.supervisor,
+            self.records,
+            self.environment,
+            role,
+            index,
+            self.recipes[role],
+            configure=lambda _: {
                 "MOCK_BIND_HOST": "127.0.0.1",
                 "MOCK_ADVERTISE_HOST": "127.0.0.1",
-                "MOCK_CONFIG_FILE": str(directory / "config.json"),
-                "MOCK_OUTPUT_DIR": str(directory),
-                "MOCK_READY_FILE": str(ready),
                 "START_PORT": str(control_port),
                 "MOCK_RPC_PORT": str(rpc_port),
             },
-            directory,
         )
+        expected = {
+            "id": node,
+            "role": role,
+            "rpc": f"127.0.0.1:{rpc_port}",
+            "control": f"http://127.0.0.1:{control_port}",
+        }
+        if (
+            endpoint is None
+            or control != expected["control"]
+            or any(endpoint.get(key) != value for key, value in expected.items())
+        ):
+            raise ExecutionError(
+                "Engine endpoints differ from the assigned identity and listeners"
+            )
+        return child.pid, control, endpoint
 
-        async def read_ready():
-            while not ready.exists():
-                await asyncio.sleep(0.02)
-            control = f"http://127.0.0.1:{control_port}"
-            rpc = f"127.0.0.1:{rpc_port}"
-            endpoint = json.loads((directory / "endpoints.json").read_text())
-            expected = {"id": node, "role": role, "rpc": rpc, "control": control}
-            if json.loads(ready.read_text()) != {"url": control} or any(
-                endpoint.get(key) != value for key, value in expected.items()
-            ):
-                raise ExecutionError(
-                    "Engine endpoints differ from the assigned identity and listeners"
-                )
-            return endpoint
-
-        endpoint = await self.supervisor.guard(
-            read_ready(), float(duration(recipe["startup_timeout"]))
-        )
-        self.instances.add(node)
-        self.topology.register(node, role, endpoint["control"], endpoint)
-        self.records.emit(
-            event="process_ready",
-            node=node,
-            url=endpoint["control"],
-            role=role,
-            instance_id=node,
-            generation=0,
-        )
+    def _register_instance(self, pid, control, endpoint):
+        node, role, rpc = endpoint["id"], endpoint["role"], endpoint["rpc"]
+        self.topology.register(node, role, control, endpoint)
         self.records.emit(
             event="instance_started",
             node=node,
-            pid=child.pid,
-            rpc=endpoint["rpc"],
+            pid=pid,
+            rpc=rpc,
             role=role,
             instance_id=node,
             generation=0,
         )
-        return endpoint["rpc"]
+        if self.monitoring:
+            self.monitoring.discover(node, self.records.directory / "components" / node)
+        return rpc
 
     async def scale_out(self, role, count):
-        async with self.lock:
-            if (
-                role not in ROLES
-                or role not in self.environment
-                or not 1 <= count <= 1024
-            ):
-                raise ExecutionError(
-                    "scale_out requires a configured Engine role and count in 1..1024"
-                )
-            result = []
-            for _ in range(count):
-                index = self.counters.get(role, 0)
-                self.counters[role] = index + 1
-                node = f"{role}-{index}"
-                directory = self.records.directory / "components" / node
-                directory.mkdir(parents=True)
-                component = copy.deepcopy(self.environment[role])
-                write_json(
-                    directory / "config.json",
-                    {
-                        "component_role": role,
-                        "component": component,
-                        "environment": self.environment,
-                        "index": index,
-                        "id": node,
-                    },
-                )
-                result.append(await self._start_instance(role, node, directory))
-                if self.monitoring:
-                    self.monitoring.discover(node, directory)
-            if self.monitoring and self.monitoring.baselined:
-                await self.monitoring.baseline(
-                    [
-                        item["id"]
-                        for item in self.topology.active()
-                        if item["rpc"] in result
-                    ]
-                )
-            return result
+        return await self._start_roles({role: count}, concurrency=1)
 
     async def scale_in(self, role, targets, count):
         async with self.lock:
-            candidates = [
-                item
-                for item in self.topology.active()
-                if item["role"] == role and item["id"] in self.instances
-            ]
+            if role not in ROLES:
+                raise ExecutionError("scale_in requires an Engine role")
+            candidates = self.topology.active(role)
             known = {item["rpc"]: item for item in candidates}
             if targets is not None:
                 if (
@@ -186,7 +133,6 @@ class EngineRole:
                     missing_ok=True
                 )
                 self.processes.remove(node)
-                self.instances.remove(node)
                 self.topology.retire(node)
                 if self.monitoring:
                     self.monitoring.retire(node)
@@ -201,17 +147,79 @@ class EngineRole:
             return [item["rpc"] for item in selected]
 
     async def start(self):
-        for role, recipe in self.recipes.items():
-            if role in ROLES:
-                count = self.environment[role]["deployment"]["replicas"]
-                await self.supervisor.guard(
-                    self.scale_out(role, count),
-                    float(duration(recipe["startup_timeout"])) * count,
+        counts = {
+            role: self.environment[role]["deployment"]["replicas"]
+            for role in self.recipes
+            if role in ROLES
+        }
+        if counts:
+            timeout = sum(
+                float(duration(self.recipes[role]["startup_timeout"])) * count
+                for role, count in counts.items()
+            )
+            await self.supervisor.guard(
+                self._start_roles(counts, INITIAL_START_CONCURRENCY), timeout
+            )
+
+    async def _start_roles(self, counts, concurrency):
+        async with self.lock:
+            if any(
+                role not in ROLES
+                or role not in self.environment
+                or not 1 <= count <= 1024
+                for role, count in counts.items()
+            ):
+                raise ExecutionError(
+                    "Engine startup requires configured roles and counts in 1..1024"
                 )
+            next_registration = {role: self.counters.get(role, 0) for role in counts}
+            jobs_by_role = [
+                [(role, index) for index in range(first, first + counts[role])]
+                for role, first in next_registration.items()
+            ]
+
+            # Interleave roles while keeping a single budget for all in-flight starts.
+            jobs = (
+                job
+                for group in zip_longest(*jobs_by_role)
+                for job in group
+                if job is not None
+            )
+            ready, result = {}, []
+
+            async def worker():
+                for role, index in jobs:
+                    self.counters[role] = index + 1
+                    ready[role, index] = await self._start_instance(role, index)
+                    # Keep scale-in selection stable even if readiness arrives out of order.
+                    first = next_registration[role]
+                    while (role, first) in ready:
+                        result.append(
+                            self._register_instance(*ready.pop((role, first)))
+                        )
+                        first += 1
+                    next_registration[role] = first
+
+            try:
+                async with asyncio.TaskGroup() as group:
+                    for _ in range(min(concurrency, sum(counts.values()))):
+                        group.create_task(worker())
+            except ExceptionGroup as errors:
+                raise errors.exceptions[0] from errors
+            if self.monitoring and self.monitoring.baselined:
+                await self.monitoring.baseline(
+                    [
+                        item["id"]
+                        for item in self.topology.active()
+                        if item["rpc"] in result
+                    ]
+                )
+            return result
 
     async def close(self):
         names = [name for name, _ in self.supervisor.children if name in self.processes]
-        errors = await self.supervisor.stop(names, 3)
+        # All Engine JVMs shut down concurrently, including in full-scale Cases.
+        errors = await self.supervisor.stop(names, 15)
         active = {name for name, _ in self.supervisor.children}
         for node in self.processes - active:
             (self.records.directory / "components" / node / "ready.json").unlink(

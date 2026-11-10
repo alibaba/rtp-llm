@@ -287,6 +287,29 @@ def test_success_rate_requires_an_explicit_valid_window(args):
         StepRegistry.standard().get("client/success_rate").arguments(args)
 
 
+def test_success_rate_from_stop_counts_only_the_selected_playback():
+    from mock_framework.execution.step.step_registry import StepRegistry
+
+    step = StepRegistry.standard().get("client/success_rate")
+    summary = {
+        "done": True,
+        "stopped": True,
+        "produced": 1000,
+        "issued": 1000,
+        "finished": 1000,
+        "unsent": 0,
+        "queued": 0,
+        "inflight": 0,
+        "errors": [],
+        "outcomes": {"success": 999, "error": 1, "timeout": 0, "cancelled": 0},
+    }
+    result = {"127.0.0.1:1001": summary}
+    assert asyncio.run(step.invoke(None, {"playback_result": result})) == 0.999
+    summary["unsent"] = 1
+    with pytest.raises(ExecutionError, match="unsent"):
+        asyncio.run(step.invoke(None, {"playback_result": result}))
+
+
 def test_success_rate_window_keeps_selected_clients_and_fixed_end(monkeypatch):
     from mock_framework.execution.step.step_registry import StepRegistry
 

@@ -16,7 +16,7 @@ class EndpointRegistry:
     def __init__(self, directory):
         self.directory = directory
         self._active = {}
-        self._publishers = []
+        self._publish_discovery = None
 
     def active(self, role=None):
         return copy.deepcopy(
@@ -27,14 +27,14 @@ class EndpointRegistry:
             ]
         )
 
-    def add_publisher(self, publish):
-        self._publishers.append(publish)
+    def set_discovery_publisher(self, publish):
+        self._publish_discovery = publish
 
     def publish(self):
         snapshot = self.active()
         write_json(self.directory / "topology.json", snapshot)
-        for publish in self._publishers:
-            publish(copy.deepcopy(snapshot))
+        if self._publish_discovery is not None:
+            self._publish_discovery(snapshot)
 
     def register(self, name, role, control, endpoint=None):
         if name in self._active:
@@ -92,7 +92,7 @@ class RunEnvironment:
             records=records,
             monitoring=self.monitoring,
         )
-        self.topology.add_publisher(self.masters.publish_discovery)
+        self.topology.set_discovery_publisher(self.masters.publish_discovery)
         self.engines = EngineRole(
             supervisor=self.supervisor,
             topology=self.topology,
@@ -143,10 +143,13 @@ class RunEnvironment:
             except Exception as error:
                 errors.append(f"{label}: {type(error).__name__}: {error}")
 
+        async def drain_clients():
+            await self.clients.stop_playback()
+
         if self.supervisor.failure.done():
             errors.append(self.supervisor.failure.result())
         # Keep producers and observers alive through Client drain and the final scrape.
-        await cleanup("client final stop", self.clients.stop_playback)
+        await cleanup("client final stop", drain_clients)
         if self.monitoring:
             await cleanup("prometheus final scrape", self.monitoring.final_scrape)
         await cleanup("client processes", self.clients.close)

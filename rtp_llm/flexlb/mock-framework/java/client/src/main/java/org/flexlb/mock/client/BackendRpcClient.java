@@ -18,8 +18,8 @@ import org.flexlb.mock.protocol.*;
  * Sends a request through Master scheduling and streams the result from Prefill.
  * Prepares multimodal inputs through ViT before requesting the Prefill and Decode route.
  */
-public final class NativeClient implements AutoCloseable {
-    private static final System.Logger LOG = System.getLogger(NativeClient.class.getName());
+public final class BackendRpcClient implements AutoCloseable {
+    private static final System.Logger LOG = System.getLogger(BackendRpcClient.class.getName());
 
     private final java.util.function.Supplier<List<String>> masters;
     private final java.util.function.Consumer<ObjectNode> events;
@@ -37,28 +37,16 @@ public final class NativeClient implements AutoCloseable {
 
     private boolean closed, closing;
 
-    public NativeClient(String master) {
+    public BackendRpcClient(String master) {
         this(() -> List.of(master));
         if (master == null || master.isBlank()) throw new IllegalArgumentException("Master gRPC address required");
     }
 
-    public NativeClient(java.util.function.Supplier<List<String>> masters) {
-        this(masters, event -> {});
+    public BackendRpcClient(java.util.function.Supplier<List<String>> masters) {
+        this(masters, event -> {}, MediaInput.IMAGE_TOKEN, 0L, 1);
     }
 
-    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events) {
-        this(masters, events, MediaInput.IMAGE_TOKEN);
-    }
-
-    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events, int imageToken) {
-        this(masters, events, imageToken, 0L);
-    }
-
-    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events, int imageToken, long seed) {
-        this(masters, events, imageToken, seed, 1);
-    }
-
-    NativeClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events, int imageToken, long seed, int prefillCpSize) {
+    BackendRpcClient(java.util.function.Supplier<List<String>> masters, java.util.function.Consumer<ObjectNode> events, int imageToken, long seed, int prefillCpSize) {
         cacheKeySeed = seed;
         this.prefillCpSize = prefillCpSize;
         vision = new VitClient(imageToken);
@@ -277,7 +265,7 @@ public final class NativeClient implements AutoCloseable {
             scheduleResult(status, code, null);
             if (!firstToken.isDone()) firstToken.completeExceptionally(status.asRuntimeException());
             context.cancel(null);
-            synchronized (NativeClient.this) { active.remove(request.getRequestId(), this); }
+            synchronized (BackendRpcClient.this) { active.remove(request.getRequestId(), this); }
             if (outcome != Outcome.success && scheduleStarted && !routeRejected) {
                 // Cancel against this request's last attempted Master, not a newer discovery snapshot.
                 try { workers.submit(() -> {
@@ -286,7 +274,7 @@ public final class NativeClient implements AutoCloseable {
                             FlexlbCancelRequestPB.newBuilder().setRequestId(request.getRequestId()).setBatchId(batchId)
                                 .setReason(outcome == Outcome.timeout ? CancelReasonPB.CANCEL_REASON_DEADLINE_EXCEEDED : CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED).build());
                     } catch (RuntimeException failure) {
-                        System.getLogger(NativeClient.class.getName()).log(System.Logger.Level.WARNING,
+                        System.getLogger(BackendRpcClient.class.getName()).log(System.Logger.Level.WARNING,
                             "Best-effort Master Cancel failed for request " + request.getRequestId() + ": " + Status.fromThrowable(failure).getCode());
                     }
                 }); } catch (RejectedExecutionException closing) { /* Client shutdown owns the remaining channels. */ }

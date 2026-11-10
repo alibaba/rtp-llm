@@ -19,7 +19,7 @@ import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Checks Decode admission, cache preparation, failure and cancellation.
+ * Exercises KV admission and cancellation through the Decode RPC.
  */
 class DecodeAdmissionTest {
     @TempDir Path directory;
@@ -86,7 +86,7 @@ class DecodeAdmissionTest {
         for (boolean disabled : List.of(false, true)) {
             try (var node = node(disabled); var call = new Call(node, 0)) {
                 var input = input("p", 1, 5, 0);
-                var keys = org.flexlb.mock.protocol.MediaInput.cacheKeys(org.flexlb.mock.protocol.MediaInput.text(input.getInput()), 2);
+                var keys = org.flexlb.mock.protocol.MediaInput.sequence(org.flexlb.mock.protocol.MediaInput.text(input.getInput()), 2, 0, 1).keys();
                 try (var lease = node.node.cacheManager().acquire(6, List.of()).lease()) {
                     lease.publish(keys, 5);
                 }
@@ -131,7 +131,7 @@ class DecodeAdmissionTest {
                 } while (!"completed".equals(reply));
                 var all = allocate.getInput().toBuilder().addAllTokenIds(Collections.nCopies(5, 7)).build();
                 var full = new org.flexlb.mock.protocol.MediaInput.Prepared(all, spans);
-                var allKeys = org.flexlb.mock.protocol.MediaInput.cacheKeys(full, 2);
+                var allKeys = org.flexlb.mock.protocol.MediaInput.sequence(full, 2, 0, 1).keys();
                 // Three input tokens + four computed output tokens: three full blocks.
                 var expected = Set.copyOf(allKeys.subList(0, 3));
                 await(() -> cacheKeys(node.node).equals(expected));
@@ -239,7 +239,7 @@ class DecodeAdmissionTest {
     }
 
     /**
-     * Owns the Decode Engine fixture and its resources for one admission test.
+     * Owns the local Decode engine and the channel used to call it.
      */
     private static final class Harness implements AutoCloseable {
         final LLMMockEngine node;
@@ -253,7 +253,7 @@ class DecodeAdmissionTest {
     }
 
     /**
-     * Records a Decode request's outputs and completion for assertions.
+     * Drives one Decode RPC and exposes its responses to tests.
      */
     private static final class Call implements AutoCloseable {
         final Context.CancellableContext context = Context.current().withCancellation();

@@ -7,7 +7,7 @@ import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.forward.*;
 
 /**
- * One Forward lane; only prepared, deduplicated media enter this queue.
+ * Batches prepared, deduplicated media on a single Forward lane.
  */
 final class VitScheduler implements AutoCloseable {
     private final VitConfig config;
@@ -23,8 +23,6 @@ final class VitScheduler implements AutoCloseable {
     private int running;
     private long sequence;
 
-    VitScheduler(VitConfig config) { this(config,new VitMetrics()); }
-
     VitScheduler(VitConfig config,VitMetrics metrics) {
         this.config=config; this.metrics=metrics;
         worker=Thread.ofVirtual().name("vision-"+config.id()).start(this::run);
@@ -37,8 +35,6 @@ final class VitScheduler implements AutoCloseable {
         for(var job:rest) complete(job,error);
         compute.close();worker.interrupt();
     }
-
-    Work submit(VitGeometry.Image image) { return submit(image,Long.MAX_VALUE); }
 
     synchronized Work submit(VitGeometry.Image image,long deadline) {
         if(closed || failure!=null) throw Status.UNAVAILABLE.withDescription("V scheduler stopped").asRuntimeException();
@@ -106,7 +102,7 @@ final class VitScheduler implements AutoCloseable {
                         ?Status.DEADLINE_EXCEEDED.withDescription("V media computation expired").asRuntimeException():null;
                     if(failure==null) {
                         metrics.events.observe("py_rtp_vit_embedding_rt",(completed-job.enqueued)/1e6);
-                        metrics.events.observe("py_rtp_vit_embedding_tps",job.image.rows());
+                        metrics.events.add("py_rtp_vit_embedding_tps", job.image.rows());
                     }
                     complete(job,failure);
                 }
@@ -144,7 +140,7 @@ final class VitScheduler implements AutoCloseable {
     }
 
     /**
-     * Carries one ready media work item and its completion through a ViT Forward.
+     * Carries a prepared image, its deadline and its Forward result.
      */
     static final class Work {
         private final VitGeometry.Image image;

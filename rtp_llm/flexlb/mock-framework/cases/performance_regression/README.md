@@ -1,19 +1,15 @@
 # 性能回归
 
-按[框架 README](../../README.md)运行，设置 `CASE_FILE=cases/performance_regression/case.yaml`。每次运行独立使用 Case 中的绝对阈值。
+在开发机用 **2 Master、55 Prefill、192 Decode、160 ViT、4 Client** 回放 316,367 条采样请求。前 120 秒以 0.25 倍速播放原始流量的前约 30 秒，随后以 **1.0 倍速**接着播放余下约 270 秒。整份数据只播放一遍，预计用时约 390 秒，原速阶段平均目标约 1,055 QPS。
 
-Case 使用两个 Master、48 个 Prefill、192 个 Decode、4 个 ViT 和两个 Client，以总 0.1 倍速回放 DeepSeek V4.1 多模态样本。Client 和 Prefill 使用相同的 128-token 基础块与 CP4，Master 用同一组路由键做缓存亲和性调度。请求和 Prefill 实例均启用缓存复用。组件配置由本 Case 维护，流量引用共享数据，结果使用框架默认大盘。
+按[框架 README](../../README.md)运行，设置 `CASE_FILE=cases/performance_regression/case.yaml`。Case 默认使用仓库内的 `data/traffic/deepseek-v4.1.mckidx`。基准文件的 SHA-256 为 `14b96f91201044a3cbf9f453107fbc9cfe002c0b4f7050735fa1a28d7e44eda9`。
 
-回放启动后先等待 370 秒，再检查两个连续的 60 秒窗口。每段命中率都须在 40%～46%，任一窗口越界即结束 Case。两次检查通过后再等待 65 秒，让首个性能窗口完整落在确认稳定之后。第一组性能门禁约在启动回放后 495 秒执行，每项查询汇总过去 60 秒并预留 5 秒采集余量。
+业务配置来自 2026-11-10 的 Whale 部署 `dsv41_mock_no_kvcm_align`。P/D/V 和 Master 副本数、计算公式、KV 容量、CP4 和 Master 调度参数按该部署设置。开发机使用本地发现和 ZooKeeper，由 Client 回放代替线上 Frontend。ViT 使用采样宽高走计算路径，省略图片下载。
 
-现有阈值按旧数据校准。切换到 DeepSeek V4.1 样本后，需重新校准才能用作性能验收。
+此前的冷启动原速验证跑在开发机 133，源码 `a49398941f`，FlexLB run `20261110_035731_cde01974`。启动配方将 Prometheus 采样设为 5 秒。Master 设置 `-XX:ActiveProcessorCount=32 -Xmx96g -XX:MaxDirectMemorySize=16g -XX:MaxGCPauseMillis=150`，P/D/V 各设 2 个可见处理器和 2 GiB 最大堆，Client 各设 16 个可见处理器和 16 GiB 最大堆。各角色共享开发机 CPU。
 
-初始阈值基于开发机 133 对 `035b266a6c` 的同配置校准。12 个完整窗口中，第 6～12 个窗口的命中率为 40.65%～43.25%，已发 QPS 为 84.9～93.5，成功率为 100%。吞吐下限比这一段的实测最小值留出约 13%～15%，延迟使用独立上限。校准记录位于 FlexLB run `20261109_033835_c0348f12` 的 `calibration-routed-result`。
+切速过渡期的 TTFT 和命中率在 View 中观察。Case 在回放约第 395 秒回查约第 360–390 秒的稳态窗口，在同一窗口检查吞吐、延迟和 Prefill 命中率，命中率门槛为 90%。该窗口与 300 秒预热基线对应同一段原始流量。随后停止 Client 并排空，按本轮 `client/stop` 的终态汇总检查完整性和成功率，预热和切速过渡期的失败、超时及取消都计入。
 
-含缓存 Prefill TPS 对应 Real 的 `context_tps_with_cache`，统计含复用 token 的输入吞吐。输出 TPS 按已提交输出 token 计算墙钟吞吐。TTFT 包含所有收到首 token 的请求，TPOT 统计成功且输出多于一个 token 的请求。
+原始流量每 30 秒约为 1,025–1,085 QPS，门禁范围设为 960–1,150 QPS，全程成功率门槛为 99.9%。300 秒预热原速基线的稳态 TTFT 均值为 416 ms、P95 为 1.23 s，稳态门槛设为 600 ms 和 1.5 s。Prefill Forward、Master 调度响应和 Prefill 等待在 View 中用于诊断。
 
-指标接口的 mode 默认为 interval，Case 中省略不写；逐点检查时显式写 mode: series。interval 返回一个值，gauge 取区间平均并跨 Worker 求和，比率用分子分母的区间增量汇总后相除，延迟均值用耗时增量除以样本数，P95/P99 合并 bucket 增量后求分位数。series 返回按采集周期排列的数值列表，gte/lte 要求每个点都满足。派生 counter 查询的内部统计长度固定为四个采集周期。缺点、缺实例、NaN 和零分母均报错，不能当作通过。
-
-性能窗口内先检查成功率。随后 `client/stop` 停止回放并排空，检查所有已发请求的终态完整性。再等 5 秒收齐 Prometheus 样本，检查覆盖预热、性能窗口和排空的全程成功率。
-
-不再支持数值指标的 `range: latest`。省略 range 时使用最近 60 秒；需要逐点门禁时明确使用 `mode: series` 和时间范围。
+Prefill TPS 和含缓存 Prefill TPS 使用各 Worker 原生 gauge 的窗口均值之和。Decode TPS 是输出 token 的墙钟吞吐。实际缓存命中率和成功率按窗口内分子、分母增量汇总后相除。TTFT 按首 token 样本统计，TPOT 按成功且输出多个 token 的请求统计。ViT 的工作量及错误率保留在大盘供排查。

@@ -1,7 +1,7 @@
 {
   "uid": "mock-experiment",
   "title": "Mock 实验 · 默认指标",
-  "description": "唯一线上参考：Whale-LLM-New【禁止修改】iZ5Q_81nz v514。P/D 分区并显式过滤逻辑 role；每个 row 默认折叠。待埋点指标保留无数据，Mock 当前观测独立标明，不以近似值冒充 real。共享 JVM 资源归宿主，不按 Engine 拆分。",
+  "description": "唯一线上参考：Whale-LLM-New【禁止修改】iZ5Q_81nz v514。P/D 分区并显式过滤逻辑 role；每个 row 默认折叠。待埋点指标保留无数据，Mock 当前观测独立标明，不以近似值冒充 real。Engine 进程资源指标暂未接入。",
   "schemaVersion": 39,
   "version": 5,
   "editable": false,
@@ -3159,7 +3159,7 @@
               "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "每轮选批后的等待数和 KV prepare 异步加载数，按调度轮次加权。",
+          "description": "每轮选批后的等待数，按调度轮次加权。同步 KV prepare 的加载队列为零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -10622,7 +10622,7 @@
               "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "每轮选批后的等待数和 KV prepare 异步加载数，按调度轮次加权。",
+          "description": "每轮选批后的等待数，按调度轮次加权。同步 KV prepare 的加载队列为零。",
           "links": [
             {
               "title": "RTP-LLM 原面板",

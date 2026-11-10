@@ -366,7 +366,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
         case = compile_case(path, registry)
     launch = prepare_launch(recipe, case, tmp_path)
     output = tmp_path / "result"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
     if "prometheus" in recipe:
         gates = [
@@ -458,6 +458,7 @@ def test_teardown_collects_unstopped_playback_before_final_scrape(failed, tmp_pa
         order.append("client")
         if failed:
             raise ExecutionError("queue full")
+        return {"127.0.0.1:9000": {"done": True}}
 
     async def scrape():
         order.append("scrape")
@@ -579,7 +580,7 @@ def test_replay_speed_replaces_qps_and_is_forwarded_without_timestamp_conversion
     ctx = context()
     calls = []
 
-    async def start(body, query_time, timeout):
+    async def start(body, timeout):
         calls.append(body)
         return True
 
@@ -596,7 +597,7 @@ def test_warmup_is_forwarded_with_either_rate(monkeypatch, rate):
     ctx = context()
     calls = []
 
-    async def start(body, query_time, timeout):
+    async def start(body, timeout):
         calls.append(body)
         return True
 
@@ -654,7 +655,7 @@ def test_shared_requests_resolve_independently_of_case_directory(monkeypatch, tm
     source.parent.mkdir(parents=True)
     source.touch()
 
-    async def start(body, query_time, timeout):
+    async def start(body, timeout):
         assert body["requests_file"] == str(source)
         return True
 

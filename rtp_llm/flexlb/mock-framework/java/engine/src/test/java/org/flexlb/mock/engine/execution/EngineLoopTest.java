@@ -1,8 +1,9 @@
 package org.flexlb.mock.engine.execution;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.*;
-import org.flexlb.mock.engine.forward.ComputeSpec;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.forward.*;
 import org.flexlb.mock.engine.scheduler.EngineScheduler.QueueSnapshot;
@@ -14,7 +15,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Checks how the Engine loop sequences scheduling, Forward and completion.
+ * Exercises scheduling, simulated compute and wakeups in the engine loop.
  */
 class EngineLoopTest {
     @Test void healthChecksExposeLoopFailures() throws Exception {
@@ -169,7 +170,7 @@ class EngineLoopTest {
                     lease.close(); super.processOutputs(work, result);
                 }
             };
-            try (var loop = new EngineLoop(policy, (domain, storage, finished) -> policy, new TaskHistory(), cache, new ComputeModel(new ComputeSpec(new ComputeSpec.Forward("1", null), null, null)), Role.prefill, "capacity")) {
+            try (var loop = new EngineLoop(policy, (domain, storage, finished) -> policy, new TaskHistory(), cache, compute("1"), Role.prefill, "capacity")) {
                 loop.wakeUp();
                 assertTrue(tried.await(2, TimeUnit.SECONDS));
                 Thread.sleep(100);
@@ -185,12 +186,18 @@ class EngineLoopTest {
         return new EngineScheduler.Work(new Object(), new ForwardBatch(id, List.of(item)));
     }
 
-    private EngineLoop engine(Object lock, Policy policy, String expression) {
-        return new EngineLoop(lock, (domain, cache, finished) -> policy, new TaskHistory(), new org.flexlb.mock.engine.cache.KvCacheManager(1, 1, 0), new ComputeModel(new ComputeSpec(new ComputeSpec.Forward(expression, null), null, null)), Role.prefill, "test");
+    private EngineLoop engine(Object lock, Policy policy, String expression) throws IOException {
+        return new EngineLoop(lock, (domain, cache, finished) -> policy, new TaskHistory(), new org.flexlb.mock.engine.cache.KvCacheManager(1, 1, 0), compute(expression), Role.prefill, "test");
+    }
+
+    private static ComputeModel compute(String expression) throws IOException {
+        var config = new ObjectMapper().createObjectNode();
+        config.putObject("forward").put("expression", expression);
+        return ComputeModel.fromJson(config);
     }
 
     /**
-     * Two policies with different queue order exercise the same execution loop.
+     * Lets tests exercise the same loop with two different queue orders.
      */
     private static class Policy implements EngineScheduler {
         final Deque<Work> queue = new ArrayDeque<>();

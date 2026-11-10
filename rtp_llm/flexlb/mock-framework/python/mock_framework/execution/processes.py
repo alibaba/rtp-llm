@@ -219,7 +219,7 @@ async def launch_component(
         },
     )
     env = {} if configure is None else configure(directory)
-    await supervisor.spawn(
+    child = await supervisor.spawn(
         process,
         recipe["command"],
         recipe["cwd"],
@@ -229,7 +229,6 @@ async def launch_component(
             **env,
             "MOCK_TOPOLOGY_FILE": str(records.directory / "topology.json"),
             "MOCK_NODE_ID": name,
-            "MOCK_COMPONENT": role,
             "MOCK_CONFIG_FILE": str(config),
             "MOCK_READY_FILE": str(ready),
             "MOCK_OUTPUT_DIR": str(directory),
@@ -258,4 +257,4 @@ async def launch_component(
     )
     path = directory / "endpoints.json"
     endpoint = json.loads(path.read_text()) if path.is_file() else None
-    return control, endpoint
+    return child, control, endpoint

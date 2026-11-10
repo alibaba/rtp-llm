@@ -298,7 +298,7 @@ class MasterRole:
                 if item.index == index
             )
             self._instances[address].directory = directory
-        control, endpoint = await launch_component(
+        _, control, endpoint = await launch_component(
             self.supervisor,
             self.records,
             self._configuration,
@@ -346,29 +346,24 @@ class MasterRole:
             raise ExecutionError("Master targets are empty or unknown")
         return [available[address] for address in addresses]
 
-    async def _read_state(self, master, operation, args, query_time, remaining):
+    async def _read_state(self, master, operation, args, remaining):
         return await post(
             master["control"],
             {
                 "interface": operation,
                 "args": args,
-                "context": {
-                    "run": "foreground",
-                    "query_time": query_time,
-                    "observation": None,
-                    "timeout_ms": max(1, int(remaining() * 1000)),
-                },
+                "timeout_ms": max(1, int(remaining() * 1000)),
             },
         )
 
-    async def get(self, targets, is_leader, *, query_time, remaining):
+    async def get(self, targets, is_leader, *, remaining):
         masters = self._read_targets(targets)
         if is_leader is None:
             return [master["rpc"] for master in masters]
         result = []
         for master in masters:
             value = await self._read_state(
-                master, "master/leadership/get", {}, query_time, remaining
+                master, "master/leadership/get", {}, remaining
             )
             own = value["instances"]
             if own not in ([], [{"id": master["id"]}]):
@@ -379,11 +374,11 @@ class MasterRole:
                 result.append(master["rpc"])
         return result
 
-    async def get_engines(self, targets, role, *, query_time, remaining):
+    async def get_engines(self, targets, role, *, remaining):
         result = {}
         for master in self._read_targets(targets):
             value = await self._read_state(
-                master, "master/engine/get", {"role": role}, query_time, remaining
+                master, "master/engine/get", {"role": role}, remaining
             )
             if set(value["instances"]) != {master["id"]}:
                 raise ExecutionError("Master returned another instance observation")

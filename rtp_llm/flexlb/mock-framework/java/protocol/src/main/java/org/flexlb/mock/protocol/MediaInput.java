@@ -9,7 +9,7 @@ import java.util.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 
 /**
- * Native media and Mock metadata contract, shared by V producers and P consumers.
+ * Converts native multimodal metadata to input tokens and cache spans.
  */
 public final class MediaInput {
     public static final int IMAGE_TOKEN = -200;
@@ -20,11 +20,16 @@ public final class MediaInput {
         return input.getMultimodalInputsCount() > 0;
     }
 
-    public static MultimodalInputsPB media(GenerateInputPB input) {
-        var media=MultimodalInputsPB.newBuilder().setRequestId(input.getRequestId())
-            .addAllMultimodalInputs(input.getMultimodalInputsList()).setTimeoutMs(input.getGenerateConfig().getTimeoutMs());
-        return media.build();
+    public static String key(MultimodalInputPB input) {
+        if (input.getMultimodalUrl().isBlank()) throw invalid("Image cache identity must be nonempty");
+        var p = input.getMmPreprocessConfig();
+        String crop = p.getCropPositionsList().stream().map(v -> String.format(Locale.ROOT,"%.6f",v)).collect(java.util.stream.Collectors.joining(":"));
+        return Long.toUnsignedString(linuxString(input.getMultimodalUrl().getBytes(StandardCharsets.UTF_8)))+"_"+input.getMultimodalType()+"_"
+            +p.getWidth()+"_"+p.getHeight()+"_"+p.getMinPixels()+"_"+p.getMaxPixels()+"_"+p.getFps()+"_"+p.getMinFrames()+"_"+p.getMaxFrames()+"_"+crop+"_"
+            +(p.getMaxLongSidePixel()>0?p.getMaxLongSidePixel():-1);
     }
+
+    public static RuntimeException invalid(String message) { return Status.INVALID_ARGUMENT.withDescription(message).asRuntimeException(); }
 
     public static Prepared text(GenerateInputPB input) { return new Prepared(input, List.of()); }
 
@@ -44,44 +49,6 @@ public final class MediaInput {
         return applyRows(input,output.getSplitSizeList(),hashes.getInt32Data(),imageToken);
     }
 
-    public static Prepared applyHashes(GenerateInputPB input, MultimodalHashResponsePB metadata, int imageToken) {
-        var entries=new HashMap<String,MultimodalHashEntryPB>();
-        for(var entry:metadata.getEntriesList()) {
-            if(entries.putIfAbsent(entry.getKey(),entry)!=null) throw Status.DATA_LOSS.withDescription("Duplicate vision hash entry").asRuntimeException();
-        }
-        var sizes=new ArrayList<Integer>();ByteString payload=ByteString.EMPTY;
-        for(var media:input.getMultimodalInputsList()) {
-            var entry=entries.get(key(media));
-            if(entry==null || !entry.getHashHit() || entry.getSplitSizeCount()!=1 || entry.getSplitSize(0)<1
-                    || entry.getFeatureHashes().size()!=(long)entry.getSplitSize(0)*4)
-                throw Status.DATA_LOSS.withDescription("Missing or invalid vision feature hashes").asRuntimeException();
-            sizes.add(entry.getSplitSize(0));payload=payload.concat(entry.getFeatureHashes());
-        }
-        return applyRows(input,sizes,payload,imageToken);
-    }
-
-    public static String key(MultimodalInputPB input) {
-        if (input.getMultimodalUrl().isBlank()) throw invalid("Image cache identity must be nonempty");
-        var p = input.getMmPreprocessConfig();
-        String crop = p.getCropPositionsList().stream().map(v -> String.format(Locale.ROOT,"%.6f",v)).collect(java.util.stream.Collectors.joining(":"));
-        return Long.toUnsignedString(linuxString(input.getMultimodalUrl().getBytes(StandardCharsets.UTF_8)))+"_"+input.getMultimodalType()+"_"
-            +p.getWidth()+"_"+p.getHeight()+"_"+p.getMinPixels()+"_"+p.getMaxPixels()+"_"+p.getFps()+"_"+p.getMinFrames()+"_"+p.getMaxFrames()+"_"+crop+"_"
-            +(p.getMaxLongSidePixel()>0?p.getMaxLongSidePixel():-1);
-    }
-
-    public static RuntimeException invalid(String message) { return Status.INVALID_ARGUMENT.withDescription(message).asRuntimeException(); }
-
-    public static List<Long> cacheKeys(Prepared prepared, int blockSize) {
-        if (blockSize < 1) throw invalid("Invalid cache block size");
-        return sequence(prepared, blockSize).keys();
-    }
-
-    public static CacheSequence sequence(Prepared prepared, int blockSize) { return sequence(prepared, blockSize, 0); }
-
-    public static CacheSequence sequence(Prepared prepared, int blockSize, long seed) {
-        return sequence(prepared,blockSize,seed,1);
-    }
-
     public static CacheSequence sequence(Prepared prepared, int blockSize, long seed, int keyStride) {
         validateSpans(prepared.input(), prepared.spans());
         return new CacheSequence(blockSize, prepared.input().getTokenIdsList(),
@@ -89,21 +56,10 @@ public final class MediaInput {
                 span.getOffset(), span.getRowHashesList())).toList(), seed, keyStride);
     }
 
-    public static void validateSpans(GenerateInputPB input, List<MultimodalCacheSpanPB> spans) {
-        long previous = 0;
-        for (var span : spans) {
-            long end = (long) span.getOffset() + span.getRowHashesCount();
-            if (span.getOffset() < previous || span.getRowHashesCount() < 1 || end > input.getTokenIdsCount())
-                throw invalid("Invalid multimodal cache span");
-            previous = end;
-        }
-    }
-
-    public static String address(GenerateInputPB input) {
-        var addresses = input.getGenerateConfig().getRoleAddrsList().stream().filter(a -> a.getRole() == RoleAddrPB.RoleType.VIT).toList();
-        if (addresses.size() != 1 || addresses.getFirst().getIp().isBlank() || addresses.getFirst().getGrpcPort() < 1 || addresses.getFirst().getGrpcPort() > 65535)
-            throw invalid("Exactly one valid VIT role address is required");
-        var a = addresses.getFirst(); return (a.getIp().contains(":") ? "[" + a.getIp() + "]" : a.getIp()) + ":" + a.getGrpcPort();
+    static MultimodalInputsPB media(GenerateInputPB input) {
+        var media=MultimodalInputsPB.newBuilder().setRequestId(input.getRequestId())
+            .addAllMultimodalInputs(input.getMultimodalInputsList()).setTimeoutMs(input.getGenerateConfig().getTimeoutMs());
+        return media.build();
     }
 
     // Linux libstdc++ string hash used by MultimodalInput::cache_key, not Java String.hashCode.
@@ -119,6 +75,29 @@ public final class MediaInput {
             hash^=tail;hash*=m;
         }
         hash^=hash>>>47;hash*=m;return hash^(hash>>>47);
+    }
+
+    static Prepared applyHashes(GenerateInputPB input, MultimodalHashResponsePB metadata, int imageToken) {
+        var entries=new HashMap<String,MultimodalHashEntryPB>();
+        for(var entry:metadata.getEntriesList()) {
+            if(entries.putIfAbsent(entry.getKey(),entry)!=null) throw Status.DATA_LOSS.withDescription("Duplicate vision hash entry").asRuntimeException();
+        }
+        var sizes=new ArrayList<Integer>();ByteString payload=ByteString.EMPTY;
+        for(var media:input.getMultimodalInputsList()) {
+            var entry=entries.get(key(media));
+            if(entry==null || !entry.getHashHit() || entry.getSplitSizeCount()!=1 || entry.getSplitSize(0)<1
+                    || entry.getFeatureHashes().size()!=(long)entry.getSplitSize(0)*4)
+                throw Status.DATA_LOSS.withDescription("Missing or invalid vision feature hashes").asRuntimeException();
+            sizes.add(entry.getSplitSize(0));payload=payload.concat(entry.getFeatureHashes());
+        }
+        return applyRows(input,sizes,payload,imageToken);
+    }
+
+    static String address(GenerateInputPB input) {
+        var addresses = input.getGenerateConfig().getRoleAddrsList().stream().filter(a -> a.getRole() == RoleAddrPB.RoleType.VIT).toList();
+        if (addresses.size() != 1 || addresses.getFirst().getIp().isBlank() || addresses.getFirst().getGrpcPort() < 1 || addresses.getFirst().getGrpcPort() > 65535)
+            throw invalid("Exactly one valid VIT role address is required");
+        var a = addresses.getFirst(); return (a.getIp().contains(":") ? "[" + a.getIp() + "]" : a.getIp()) + ":" + a.getGrpcPort();
     }
 
     private static Prepared applyRows(GenerateInputPB input, List<Integer> sizes, ByteString payload, int imageToken) {
@@ -144,8 +123,18 @@ public final class MediaInput {
         return new Prepared(result.build(), spans);
     }
 
+    private static void validateSpans(GenerateInputPB input, List<MultimodalCacheSpanPB> spans) {
+        long previous = 0;
+        for (var span : spans) {
+            long end = (long) span.getOffset() + span.getRowHashesCount();
+            if (span.getOffset() < previous || span.getRowHashesCount() < 1 || end > input.getTokenIdsCount())
+                throw invalid("Invalid multimodal cache span");
+            previous = end;
+        }
+    }
+
     /**
-     * Carries expanded semantic input and media cache spans used to prepare routing keys.
+     * Pairs the native generation input with resolved media cache spans.
      */
     public record Prepared(GenerateInputPB input, List<MultimodalCacheSpanPB> spans) {
         public Prepared { spans = List.copyOf(spans); }

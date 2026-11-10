@@ -56,9 +56,6 @@ public final class SimulatedCompute implements AutoCloseable {
 
     public record Outcome(State state, NoiseModel.Sample sample, long elapsedNanos) {}
 
-    /**
-     * Carries the simulated Forward completion and the timing observed by the engine loop.
-     */
     public final class Execution {
         private final NoiseModel.Sample sample;
         private final long started = System.nanoTime();

@@ -10,30 +10,41 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 
-/** Constant-size synthetic output progress. Only the sender materializes a bounded token frame. */
-final class GeneratedOutput {
+/**
+ * Streams acknowledgements and builds bounded token frames from cumulative output progress.
+ */
+final class GenerateResponseStream {
     static final int MAX_FRAME_TOKENS = 4096;
+
     private final Executor executor;
+
     private final long expires;
+
     private final ScheduledExecutorService deadlines;
-    private final Consumer<GeneratedOutput> onExpired;
+    private final Consumer<GenerateResponseStream> onExpired;
+
     private ScheduledFuture<?> deliveryTimeout;
     private ServerCallStreamObserver<GenerateOutputsPB> response;
+
     private long requestId;
     private int tokenId, generated, sent;
+
     private AuxInfoPB metadata = AuxInfoPB.getDefaultInstance();
+
     private boolean allocateReady, allocateSent, loadReady, loadSent, generationFinished, finalSent;
     private boolean attached, draining, terminal, delivered, cancelled;
+
     private Throwable failure;
 
-    GeneratedOutput(Executor executor, ScheduledExecutorService deadlines, long retainMillis, Consumer<GeneratedOutput> onExpired) {
+    GenerateResponseStream(Executor executor, ScheduledExecutorService deadlines, long retainMillis, Consumer<GenerateResponseStream> onExpired) {
         this.executor = executor;
         this.deadlines = deadlines;
         this.onExpired = onExpired;
         expires = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(retainMillis);
     }
-    synchronized boolean expired() { return !attached && System.nanoTime() >= expires; }
+
     synchronized boolean finished() { return terminal; }
+
     synchronized boolean discardable() { return terminal && (delivered || cancelled); }
 
     void attach(ServerCallStreamObserver<GenerateOutputsPB> observer, Runnable onCancel) {
@@ -52,18 +63,10 @@ final class GeneratedOutput {
         schedule();
     }
 
+    synchronized boolean expired() { return !attached && System.nanoTime() >= expires; }
+
     // D starts after P has already delivered its first token.
     synchronized void startAt(int length) { generated = sent = length; }
-
-    void advance(long id, int token, int length, AuxInfoPB info, boolean finished) {
-        synchronized (this) {
-            if (terminal) throw new IllegalStateException("Progress after terminal");
-            if (length < generated) throw new IllegalArgumentException("Output length moved backwards");
-            requestId = id; tokenId = token; generated = length; metadata = info;
-            generationFinished |= finished;
-        }
-        schedule();
-    }
 
     /** P relays synthetic D frames by retaining only cumulative length and fixed metadata. */
     void add(GenerateOutputsPB value) {
@@ -83,6 +86,16 @@ final class GeneratedOutput {
             }
             schedule();
         }
+    }
+
+    void advance(long id, int token, int length, AuxInfoPB info, boolean finished) {
+        synchronized (this) {
+            if (terminal) throw new IllegalStateException("Progress after terminal");
+            if (length < generated) throw new IllegalArgumentException("Output length moved backwards");
+            requestId = id; tokenId = token; generated = length; metadata = info;
+            generationFinished |= finished;
+        }
+        schedule();
     }
 
     void finish(Throwable error) {
@@ -107,10 +120,6 @@ final class GeneratedOutput {
         // Registry cleanup is independent of a blocked transport writer. Do not cancel computation.
         onExpired.accept(this);
         schedule();
-    }
-
-    private void cancelTimeout() {
-        if (deliveryTimeout != null) { deliveryTimeout.cancel(false); deliveryTimeout = null; }
     }
 
     private void schedule() {
@@ -163,5 +172,9 @@ final class GeneratedOutput {
         } catch (RuntimeException disconnected) {
             synchronized (this) { cancelled = true; draining = false; cancelTimeout(); }
         }
+    }
+
+    private void cancelTimeout() {
+        if (deliveryTimeout != null) { deliveryTimeout.cancel(false); deliveryTimeout = null; }
     }
 }

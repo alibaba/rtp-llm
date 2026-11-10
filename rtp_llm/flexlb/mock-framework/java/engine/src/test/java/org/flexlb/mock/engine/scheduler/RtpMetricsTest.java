@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Checks RTP queue samples and token, time and completion metric accounting.
+ * Verifies RTP metric names, samples, and aggregation.
  */
 class RtpMetricsTest {
     private static final RtpMetrics.State IDLE = new RtpMetrics.State(0, 0, 0, 0, 100, 100, 100, 0, 1);
@@ -146,11 +146,11 @@ class RtpMetricsTest {
 
     @Test void nativeQueueAndKvMetricsKeepRealUnitsAndDoNotInventHostAvailability() {
         var metrics = new RtpMetrics("prefill", () -> new RtpMetrics.State(2, 1, 3, 4, 100, 70, 50, 30, 5));
-        metrics.schedulerRound(2, 1, 3);
+        metrics.schedulerRound(2, 1);
         var text = metrics.scrape();
         assertEquals(2, mean(text, "rtp_llm_wait_stream_size", ""));
         assertEquals(1, mean(text, "rtp_llm_running_stream_size", ""));
-        assertEquals(3, mean(text, "rtp_llm_loading_cache_stream_size", ""));
+        assertEquals(0, mean(text, "rtp_llm_loading_cache_stream_size", ""));
         assertEquals(70, sample(text, "rtp_llm_kv_cache_left_seq", ""));
         assertEquals(20, sample(text, "rtp_llm_kv_cache_total_blocks", "tier=\"DEVICE\""));
         assertEquals(14, sample(text, "rtp_llm_kv_cache_available_blocks", "tier=\"DEVICE\""));

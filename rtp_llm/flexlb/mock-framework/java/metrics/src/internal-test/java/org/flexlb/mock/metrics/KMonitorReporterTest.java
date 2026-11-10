@@ -13,7 +13,7 @@ import java.util.*;
 import org.junit.jupiter.api.Test;
 
 /**
- * Checks conversion and delivery of Mock metric samples through KMonitor.
+ * Checks event registration, SDK sample weights and periodic gauge reporting.
  */
 class KMonitorReporterTest {
     @Test void nativeSdkSerializationRetainsUnequalInstanceSampleWeights() {
@@ -38,12 +38,20 @@ class KMonitorReporterTest {
         var sdk = new NativeGauge();
         var events = new EventMetrics("vit", sdk.reporter, Map.of());
         events.increment("vit_qps"); events.increment("vit_qps");
-        events.observe("py_rtp_vit_embedding_tps", 60);
+        events.add("embedding_tokens", 60);
+        events.observe("sample_qps", 5);
         sdk.reporter.report(events.collect());
         assertEquals(List.of(1.0, 1.0), sdk.values.get("vit_qps"));
         assertEquals(MetricType.QPS, sdk.types.get("vit_qps"));
-        assertEquals(MetricType.QPS, sdk.types.get("py_rtp_vit_embedding_tps"));
-        assertEquals(List.of(60.0), sdk.values.get("py_rtp_vit_embedding_tps"));
+        assertEquals(MetricType.QPS, sdk.types.get("embedding_tokens"));
+        assertEquals(List.of(60.0), sdk.values.get("embedding_tokens"));
+        assertEquals(MetricType.GAUGE, sdk.types.get("sample_qps"));
+        assertEquals(List.of(5.0), sdk.values.get("sample_qps"));
+        var anotherEngine = new EventMetrics("prefill", sdk.reporter, Map.of());
+        assertThrows(IllegalStateException.class, () -> sdk.reporter.observe(
+            "embedding_tokens", MetricReporter.EventKind.SAMPLE, Map.of(), 1));
+        anotherEngine.add("embedding_tokens", 30);
+        assertEquals(List.of(60.0, 30.0), sdk.values.get("embedding_tokens"));
         var state = new GaugeMetricFamily("context_tps", "Rate already computed by the engine.", List.of("role"));
         state.addMetric(List.of("prefill"), 123);
         var helper = new CounterMetricFamily("local_helper_total", "Prometheus cumulative helper.", List.of("role"));
@@ -69,7 +77,7 @@ class KMonitorReporterTest {
     }
 
     /**
-     * Records a native gauge report for comparison with the Mock sample.
+     * Captures native SDK calls and serializes samples with the SDK gauge.
      */
     private static final class NativeGauge {
         final GaugeMetric gauge = new GaugeMetric("input_length", 0);

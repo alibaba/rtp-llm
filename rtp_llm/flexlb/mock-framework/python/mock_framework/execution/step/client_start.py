@@ -82,4 +82,4 @@ async def client_start(ctx: StepContext, args: Start) -> bool:
             "duration_ms": int(duration(args.warmup.duration) * 1000),
             "rate_scale": args.warmup.rate_scale,
         }
-    return await ctx.runtime.clients.start_playback(body, ctx.query_time, ctx.timeout)
+    return await ctx.runtime.clients.start_playback(body, ctx.timeout)

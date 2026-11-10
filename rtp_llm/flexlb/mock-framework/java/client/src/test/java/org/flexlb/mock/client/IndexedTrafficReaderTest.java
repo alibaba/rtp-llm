@@ -141,7 +141,7 @@ class IndexedTrafficReaderTest {
         var zeroDirectory = directory.resolve("zero");
         var oneDirectory = directory.resolve("one");
         var json = new ObjectMapper();
-        try (var backend = new NativeClientTest.Harness();
+        try (var backend = new BackendRpcClientTest.Harness();
              var zero = new ReplayControlServer("client-0", topology, zeroDirectory);
              var one = new ReplayControlServer("client-1", topology, oneDirectory)) {
             json.writeValue(topology.toFile(), List.of(backend.endpoint(),

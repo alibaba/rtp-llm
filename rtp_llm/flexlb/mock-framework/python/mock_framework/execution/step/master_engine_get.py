@@ -17,8 +17,5 @@ async def master_engine_get(
 ) -> dict[str, list[str]]:
     """Keep each Master's discovered Engine addresses separate."""
     return await ctx.runtime.masters.get_engines(
-        args.targets,
-        args.role,
-        query_time=ctx.query_time,
-        remaining=lambda: ctx.timeout,
+        args.targets, args.role, remaining=lambda: ctx.timeout
     )

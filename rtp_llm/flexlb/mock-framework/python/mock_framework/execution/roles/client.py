@@ -9,7 +9,6 @@ from ...config.validation import validate
 from .. import ExecutionError
 from ..processes import launch_component
 from ..step.step_registry import Bounds, schema
-from ..step_trace import timestamp
 from ..transport import post
 
 
@@ -56,7 +55,7 @@ class ClientManager:
         for index in range(self.component["deployment"]["replicas"]):
             name = f"client-{index}"
             self._owned.append(name)
-            control, endpoint = await launch_component(
+            _, control, endpoint = await launch_component(
                 self.supervisor,
                 self.records,
                 self._configuration,
@@ -78,22 +77,17 @@ class ClientManager:
             raise ExecutionError("Expected exactly one client-0 coordinator")
         return nodes[0]["control"]
 
-    async def _control(self, operation, args, query_time, timeout):
+    async def _control(self, operation, args, timeout):
         envelope = {
             "interface": operation,
             "args": args,
-            "context": {
-                "run": "foreground",
-                "query_time": query_time,
-                "observation": None,
-                "timeout_ms": max(1, int(timeout * 1000)),
-            },
+            "timeout_ms": max(1, int(timeout * 1000)),
         }
         if len(json.dumps(envelope).encode()) > 1024 * 1024:
             raise ExecutionError("Client control parameters exceed the 1 MiB limit")
         return await post(self._coordinator(), envelope)
 
-    async def start_playback(self, body, query_time, timeout):
+    async def start_playback(self, body, timeout):
         clients = self.topology.active("client")
         if not clients or body["total_concurrency"] < len(clients):
             raise ExecutionError("Need at least one concurrency slot per Client")
@@ -107,21 +101,21 @@ class ClientManager:
         # A lost acknowledgement may still leave Java sending; teardown must attempt collection.
         self.pending = True
         self.stop_timeout = body["drain_timeout_ms"] / 1000 + 15 + len(clients) * 6
-        result = await self._control("client/start", body, query_time, timeout)
+        result = await self._control("client/start", body, timeout)
         if result != {"accepted": True}:
             raise ExecutionError("Invalid Client start acknowledgement")
         return True
 
-    async def stop_playback(self, query_time=None, timeout=None):
+    async def stop_playback(self, timeout=None):
         if timeout is None:
             if not self.pending:
                 return {}
             async with asyncio.timeout(self.stop_timeout):
-                return await self._stop_playback(timestamp(), self.stop_timeout)
-        return await self._stop_playback(query_time, timeout)
+                return await self._stop_playback(self.stop_timeout)
+        return await self._stop_playback(timeout)
 
-    async def _stop_playback(self, query_time, timeout):
-        result = await self._control("client/stop", {}, query_time, timeout)
+    async def _stop_playback(self, timeout):
+        result = await self._control("client/stop", {}, timeout)
         self.records.emit(event="client_result", result=result)
         if not isinstance(result, dict) or set(result) != {"clients", "errors"}:
             raise ExecutionError("Invalid Client result")

@@ -6,7 +6,7 @@ import java.util.concurrent.*;
 import java.util.function.Supplier;
 
 /**
- * Selects the event backend once; state and precomputed rate snapshots retain one periodic reader.
+ * Selects the event backend and schedules periodic state reporting.
  */
 public final class MetricsOutput implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(MetricsOutput.class.getName());
@@ -57,7 +57,7 @@ public final class MetricsOutput implements AutoCloseable {
     }
 
     /**
-     * Binds a metrics reporter to the transport selected for this Engine.
+     * Discovers the installed push backend and shares one sender across engine metrics.
      */
     private static final class Provider {
         static final MetricReporter RAW = discover(ServiceLoader.load(MetricReporter.class), System.getenv());
@@ -65,7 +65,7 @@ public final class MetricsOutput implements AutoCloseable {
     }
 
     /**
-     * One SDK owner; business threads only offer original observations to its bounded queue.
+     * Serializes SDK calls through a bounded queue so producers can continue without waiting.
      */
     static final class Sender implements MetricReporter, AutoCloseable {
         private final MetricReporter delegate;
@@ -82,9 +82,9 @@ public final class MetricsOutput implements AutoCloseable {
 
         @Override public long intervalMillis() { return delegate.intervalMillis(); }
 
-        @Override public void observe(String name, Map<String, String> tags, double value) {
+        @Override public void observe(String name, EventKind kind, Map<String, String> tags, double value) {
             var copiedTags = Map.copyOf(tags);
-            send(() -> delegate.observe(name, copiedTags, value));
+            send(() -> delegate.observe(name, kind, copiedTags, value));
         }
 
         @Override public void report(List<MetricFamilySamples> snapshot) {

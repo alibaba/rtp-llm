@@ -335,9 +335,6 @@ public final class KvcmReporter implements AutoCloseable {
         return TimeUnit.MILLISECONDS.toNanos(500L << Math.min(failures, 5));
     }
 
-    /**
-     * Specifies the Meta endpoint, event reporting mode and snapshot interval.
-     */
     public record Configuration(KvcmDiscovery endpoint, boolean events, long snapshotMillis) {
         public Configuration {
             Objects.requireNonNull(endpoint);

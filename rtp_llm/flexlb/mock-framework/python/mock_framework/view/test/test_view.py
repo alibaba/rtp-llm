@@ -76,10 +76,6 @@ def completed(tmp_path):
     )
     (source / "case.yaml").write_text("id: basic\n")
     write(
-        source / "interfaces.json",
-        {"interfaces": {"client/qps": {"unit": "requests/s"}}},
-    )
-    write(
         source / "code.json",
         [{"commit": "saved-sha", "diff": "saved working tree diff"}],
     )
@@ -103,6 +99,7 @@ def completed(tmp_path):
             "expect": {"gte": 2},
             "actual": 1,
             "status": "FAIL",
+            "unit": "requests/s",
         },
         {
             "step": "raw",
@@ -149,6 +146,11 @@ def test_view_uses_saved_values_windows_versions_and_failed_results(completed):
     value = experiment(completed)
     assert value["result"]["status"] == "ERROR"
     assert value["gates"][0]["status"] == "FAIL" and value["gates"][0]["actual"] == 1
+    assert value["gates"][0]["unit"] == "requests/s"
+    assert any(
+        "requests/s" in annotation["text"] for annotation in value["annotations"]
+    )
+    assert not any("interfaces.json" in warning for warning in value["warnings"])
     # The actual recorded window wins over a reconstructed interpretation of args.range.
     assert value["gates"][0]["from"] == 1793232005000
     assert value["gates"][0]["to"] == 1793232010000
@@ -328,7 +330,6 @@ def test_view_refuses_to_write_inside_experiment_outputs(completed):
         "configuration.json",
         "case.yaml",
         "code.json",
-        "interfaces.json",
         "prometheus/collection.json",
         "events.jsonl",
         "gates.jsonl",
@@ -804,11 +805,14 @@ def test_invalid_annotation_selection_is_reported(tmp_path, selected):
 
 
 def test_invalid_unit_metadata_does_not_hide_a_saved_gate(completed):
-    write(completed / "interfaces.json", {"interfaces": {"client/qps": {"unit": None}}})
+    path = completed / "gates.jsonl"
+    gates = [json.loads(line) for line in path.read_text().splitlines()]
+    gates[0]["unit"] = None
+    path.write_text("".join(json.dumps(gate) + "\n" for gate in gates))
     body = experiment(completed)
     assert len(body["gates"]) == 2
     assert body["gates"][0]["actual"] == 1
-    assert any("unit must be a string" in warning for warning in body["warnings"])
+    assert "gates.jsonl:1: unit must be a string" in body["warnings"]
 
 
 def test_default_dashboard_variables_bind_and_freeze_full_experiment_choices(tmp_path):

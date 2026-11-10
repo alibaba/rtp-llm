@@ -2,12 +2,14 @@ package org.flexlb.mock.engine.cache;
 
 import java.util.*;
 
-/** Physical block accounting, independent of cache keys, engine, tier, or eviction policy. */
+/**
+ * Physical block accounting, independent of cache keys, engine, tier, or eviction policy.
+ */
 public final class BlockPool {
-    public enum Kind { REQUEST, CACHE }
-    public record Snapshot(int total, int free, int available, int active) {}
     private final int capacity;
+
     private final int[] referenced = new int[Kind.values().length];
+
     private int allocated, active, cachedActive;
     private long generation;
 
@@ -39,12 +41,12 @@ public final class BlockPool {
     public synchronized Snapshot snapshot() {
         return new Snapshot(capacity, capacity - allocated, capacity - active, active);
     }
+
     public synchronized int referencedBlocks(Kind kind) { return referenced[kind.ordinal()]; }
-    synchronized int cachedActiveBlocks() { return cachedActive; }
+
     public synchronized long generation() { return generation; }
-    public synchronized void awaitChange(long observed, long waitMs) throws InterruptedException {
-        if (generation == observed) wait(Math.max(1, waitMs));
-    }
+
+    synchronized int cachedActiveBlocks() { return cachedActive; }
 
     private Reference add(Block block, Kind kind) {
         if (block.refs[kind.ordinal()] == Integer.MAX_VALUE) throw new IllegalStateException("Block reference overflow");
@@ -55,6 +57,11 @@ public final class BlockPool {
         block.totalRefs++;
         return new Reference(this, block, kind);
     }
+
+    private static boolean isCachedActive(Block block) {
+        return block.activeRefs > 0 && block.refs[Kind.CACHE.ordinal()] > 0;
+    }
+
     private synchronized void release(Reference reference) {
         if (reference.closed) return;
         reference.closed = true;
@@ -65,30 +72,41 @@ public final class BlockPool {
         if (reference.kind != Kind.CACHE && --block.activeRefs == 0) { active--; increased = true; }
         if (cached && !isCachedActive(block)) cachedActive--;
         if (--block.totalRefs == 0) { allocated--; increased = true; }
-        if (increased) { generation++; notifyAll(); }
+        if (increased) generation++;
     }
-    private static boolean isCachedActive(Block block) {
-        return block.activeRefs > 0 && block.refs[Kind.CACHE.ordinal()] > 0;
-    }
+
     private void requireOwned(Reference reference) {
         if (reference == null || reference.owner != this || reference.closed)
             throw new IllegalArgumentException("Reference is closed or belongs to another block pool");
     }
+
+    public enum Kind { REQUEST, CACHE }
+
+    public record Snapshot(int total, int free, int available, int active) {}
+
     private static final class Block {
         final int[] refs = new int[Kind.values().length];
         long totalRefs, activeRefs;
     }
+
+    /**
+     * Holds one block reference and releases it once on close.
+     */
     public static final class Reference implements AutoCloseable {
         private final BlockPool owner;
         private final Block block;
         private final Kind kind;
+
         private boolean closed;
+
         private Reference(BlockPool owner, Block block, Kind kind) {
             this.owner = owner; this.block = block; this.kind = kind;
         }
+
+        @Override public void close() { owner.release(this); }
+
         boolean inUse() {
             synchronized (owner) { return block.activeRefs > 0; }
         }
-        @Override public void close() { owner.release(this); }
     }
 }

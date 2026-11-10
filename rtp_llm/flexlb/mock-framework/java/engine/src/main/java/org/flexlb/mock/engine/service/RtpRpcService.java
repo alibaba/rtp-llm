@@ -75,7 +75,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         if (input.hasRemoteRequest()) {
             var operation = input.getRemoteRequest().getOp();
             if (operation == RemoteOpType.REMOTE_OPERATION_READ || operation == RemoteOpType.REMOTE_OPERATION_WRITE) {
-                // No SDK or external I/O was submitted: the operation fails before touching any payload.
+                // Reject unsupported remote I/O before touching any payload.
                 response.onNext(FunctionResponsePB.newBuilder().setRemoteResponse(RemoteOperationResponsePB.newBuilder()
                     .setTransferStatus(RemoteTransferStatusPB.REMOTE_TRANSFER_STATUS_FAILED)).build());
                 response.onCompleted(); return;
@@ -210,9 +210,6 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         observer.onNext(value); observer.onCompleted();
     }
 
-    /**
-     * Supplies the Engine settings used when exposing native RPC status and request admission.
-     */
     public record Config(String id, Role role, int blockSize, int maxSeqLen,
                          int maxBatchTokens, ComputeModel compute, int imageToken, long cacheKeySeed, int cacheKeyStride) {
         public Config {

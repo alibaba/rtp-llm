@@ -66,10 +66,8 @@ final class RtpPrefillGroupScheduler extends AbstractRtpScheduler {
         }
     }
 
-    @Override protected Set<GenerateStream> waitingStreams() {
-        var entries = super.waitingStreams();
-        groups.forEach(entries::addAll);
-        return entries;
+    @Override protected boolean isWaiting(GenerateStream stream) {
+        return memberships.containsKey(stream) || super.isWaiting(stream);
     }
 
     private void selectGroup(List<GenerateStream> selected) {

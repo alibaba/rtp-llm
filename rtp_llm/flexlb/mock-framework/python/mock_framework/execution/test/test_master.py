@@ -332,7 +332,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
     output = tmp_path / "result"
 
     async def exercise():
-        task = asyncio.create_task(run_case(case, registry, launch, output))
+        task = asyncio.create_task(run_case(case, launch, output))
         try:
             ready = output / f"components/master-{replicas - 1}/ready.json"
             while not ready.exists():
@@ -371,7 +371,6 @@ def test_real_master_routes_to_isolated_rtp_processes(
                 result["tokens"] == 3 and 0 < result["ttft_ns"] <= result["elapsed_ns"]
             )
             if replicas == 2:
-                from mock_framework.execution.step_trace import timestamp
                 from mock_framework.execution.transport import post
 
                 nodes = {
@@ -389,12 +388,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
                             {
                                 "interface": "master/leadership/get",
                                 "args": {},
-                                "context": {
-                                    "run": "foreground",
-                                    "query_time": timestamp(),
-                                    "observation": None,
-                                    "timeout_ms": 3000,
-                                },
+                                "timeout_ms": 3000,
                             },
                         )
                         result.extend(item["id"] for item in value["instances"])

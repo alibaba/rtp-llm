@@ -79,13 +79,14 @@ public interface EngineScheduler extends AutoCloseable {
         public List<Long> keys() { return cacheSequence.keys(); }
     }
 
-    /** Read-only handle. Late callbacks must keep this identity, not look up a reusable request ID. */
+    /**
+     * Read-only handle. Late callbacks must keep this identity, not look up a reusable request ID.
+     */
     interface Request {
         Input input();
         RequestState.Snapshot snapshot();
         Progress progress();
         int reused();
-        default int remoteReused() { return 0; }
     }
 
     record Progress(int generated, int iterations, boolean finished) {}
@@ -140,9 +141,6 @@ public interface EngineScheduler extends AutoCloseable {
         public Work { Objects.requireNonNull(owner); Objects.requireNonNull(batch); }
     }
 
-    /**
-     * Carries prepared input and its listener into one scheduler submission.
-     */
     record InputItem(Input input, Listener listener) {
         public InputItem { Objects.requireNonNull(input); Objects.requireNonNull(listener); }
     }

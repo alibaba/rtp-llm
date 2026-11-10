@@ -211,9 +211,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
     }
 
     private JsonNode call(String url, String operation, Object args, int timeoutMillis) throws Exception {
-        var body = Map.of("interface", operation, "args", args, "context", Map.of(
-            "run", "foreground", "query_time", Instant.now().toString(),
-            "timeout_ms", timeoutMillis, "observation", Map.of()));
+        var body = Map.of("interface", operation, "args", args, "timeout_ms", timeoutMillis);
         var request = HttpRequest.newBuilder(URI.create(url + "/invoke")).timeout(Duration.ofMillis(timeoutMillis + 1_000L))
             .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofByteArray(JSON.writeValueAsBytes(body))).build();
         var response = http.send(request, HttpResponse.BodyHandlers.ofString());
@@ -305,12 +303,12 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
      */
     static final class Session implements AutoCloseable {
         private final ClientReplayPlan plan;
-        private final NativeClient client;
+        private final BackendRpcClient client;
         private final RequestJournal journal;
         private final MasterDiscovery discovery;
         private final ClientMetrics metrics;
         private final ArrayBlockingQueue<Item> queue;
-        private final Map<Long, NativeClient.Call> active = new HashMap<>();
+        private final Map<Long, BackendRpcClient.Call> active = new HashMap<>();
         private final Map<String, Long> outcomes = new TreeMap<>();
         private final List<String> errors = new ArrayList<>();
         private final CompletableFuture<State> completion = new CompletableFuture<>();
@@ -332,20 +330,20 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
             this.imageToken = imageToken; this.blockSize = blockSize;
             this.plan = plan; this.metrics = metrics;
             queue = new ArrayBlockingQueue<>(plan.queue_capacity());
-            for (var outcome : NativeClient.Outcome.values()) outcomes.put(outcome.name(), 0L);
+            for (var outcome : BackendRpcClient.Outcome.values()) outcomes.put(outcome.name(), 0L);
             discovery = new MasterDiscovery(topology, plan.masters());
             try { journal = new RequestJournal(evidence, id, plan); }
             catch (Exception error) { discovery.close(); throw error; }
-            client = new NativeClient(discovery::routes, journal::record, imageToken, seed, prefillCpSize);
+            client = new BackendRpcClient(discovery::routes, journal::record, imageToken, seed, prefillCpSize);
             // A lost begin command must not leave a prepared worker alive forever.
             dispatcher = Thread.ofVirtual().name("client-dispatch").start(this::dispatch);
         }
 
         @Override public void close() {
             halt();
-            List<NativeClient.Call> calls;
+            List<BackendRpcClient.Call> calls;
             synchronized (this) { calls = List.copyOf(active.values()); }
-            calls.forEach(NativeClient.Call::cancel);
+            calls.forEach(BackendRpcClient.Call::cancel);
             try { completion.get(8, TimeUnit.SECONDS); }
             catch (Exception error) { dispatcher.interrupt(); }
         }
@@ -457,7 +455,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                 while (true) {
                     discovery.check();
                     if (journal.failure() != null) fail(journal.failure());
-                    List<NativeClient.Call> cancel = List.of();
+                    List<BackendRpcClient.Call> cancel = List.of();
                     synchronized (this) {
                         if (!begun && !stopped && System.nanoTime() >= prepareDeadline) fail("Timed out waiting for begin");
                         if (producerDone && queue.isEmpty() && active.isEmpty()) break;
@@ -467,7 +465,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                         } else if (begun && !stopped && !queue.isEmpty() && active.size() < plan.concurrency()) {
                             var item = queue.remove();
                             var entry = item.entry();
-                            var input = entry.input().toBuilder().setRequestId(item.requestId());
+                            var input = entry.input().toBuilder().setRequestId(item.requestId()).setPriority(entry.priority());
                             input.getGenerateConfigBuilder().setReuseCache(Boolean.TRUE.equals(plan.reuse_cache()))
                                 .setMaxNewTokens(item.outputLimit()).setIgnoreEos(entry.observedOutputTokens() > 0)
                                 .setCanUsePdSeparation(true).setReturnIncremental(true).setIsStreaming(true);
@@ -490,7 +488,7 @@ public final class ReplayControlServer implements ClientProtocol, AutoCloseable 
                         }
                     }
                     // Native completion callbacks acquire this object's monitor; never cancel while holding it.
-                    cancel.forEach(NativeClient.Call::cancel);
+                    cancel.forEach(BackendRpcClient.Call::cancel);
                     LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(100));
                     if (Thread.interrupted()) throw new InterruptedException();
                 }

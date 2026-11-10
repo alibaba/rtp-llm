@@ -6,10 +6,10 @@ import io.prometheus.client.Collector.MetricFamilySamples;
 import java.util.*;
 
 /**
- * Internal SDK transport. MetricsOutput supplies the single sending owner after initialization.
+ * Maps event kinds and state snapshots to native KMonitor metrics.
  */
 public final class KMonitorReporter implements MetricReporter {
-    private final Set<String> registered = new HashSet<>();
+    private final Map<String, MetricType> registered = new HashMap<>();
 
     private KMonitor monitor;
 
@@ -35,9 +35,9 @@ public final class KMonitorReporter implements MetricReporter {
 
     @Override public long intervalMillis() { return interval; }
 
-    @Override public void observe(String name, Map<String, String> tags, double value) {
+    @Override public void observe(String name, EventKind kind, Map<String, String> tags, double value) {
         if (monitor == null) throw new IllegalStateException("KMonitor reporter is not initialized");
-        register(name, EventMetrics.isRate(name) ? MetricType.QPS : MetricType.GAUGE);
+        register(name, kind == EventKind.DELTA ? MetricType.QPS : MetricType.GAUGE);
         monitor.report(name, new ImmutableMetricTags(tags), value);
     }
 
@@ -80,9 +80,12 @@ public final class KMonitorReporter implements MetricReporter {
     }
 
     private void register(String name, MetricType type) {
-        if (registered.add(name) && !monitor.register(name, type)) {
-            registered.remove(name);
-            throw new IllegalStateException("Cannot register KMonitor metric: " + name);
+        var previous = registered.get(name);
+        if (previous != null) {
+            if (previous != type) throw new IllegalStateException("Inconsistent KMonitor metric type: " + name);
+            return;
         }
+        if (!monitor.register(name, type)) throw new IllegalStateException("Cannot register KMonitor metric: " + name);
+        registered.put(name, type);
     }
 }

@@ -22,11 +22,11 @@ class RequestJournalTest {
     @Test void backupAttemptsAndCancellationAreRecordedIncrementally() throws Exception {
         var path = directory.resolve("requests.jsonl");
         var journal = new RequestJournal(path, "client-0", plan());
-        try (var first = new NativeClientTest.Harness(); var backup = new NativeClientTest.Harness();
-             var client = new NativeClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")), journal::record, MediaInput.IMAGE_TOKEN, 0L, 1)) {
+        try (var first = new BackendRpcClientTest.Harness(); var backup = new BackendRpcClientTest.Harness();
+             var client = new BackendRpcClient(() -> List.of(first.endpoint().get("rpc"), backup.endpoint().get("rpc")), journal::record, MediaInput.IMAGE_TOKEN, 0L, 1)) {
             first.scheduleFailure = io.grpc.Status.UNAVAILABLE;
-            backup.output = (id, response) -> response.onNext(NativeClientTest.token(id, 1, false));
-            var call = client.send(NativeClientTest.request(100), Duration.ofSeconds(8));
+            backup.output = (id, response) -> response.onNext(BackendRpcClientTest.token(id, 1, false));
+            var call = client.send(BackendRpcClientTest.request(100), Duration.ofSeconds(8));
             call.firstToken().toCompletableFuture().get(2, TimeUnit.SECONDS);
             PlaybackTest.eventually(() -> {
                 try { return Files.readString(path).contains("\"FIRST_TOKEN\""); } catch (IOException e) { return false; }
@@ -88,7 +88,7 @@ class RequestJournalTest {
 
     @Test void writerFailureStopsAllClientsAndKeepsPlaybackFailed() throws Exception {
         Path topology = directory.resolve("topology.json");
-        try (var master = new NativeClientTest.Harness();
+        try (var master = new BackendRpcClientTest.Harness();
              var zero = new ReplayControlServer("client-0", topology, directory.resolve("client-0"));
              var one = new ReplayControlServer("client-1", topology, directory.resolve("client-1"))) {
             new com.fasterxml.jackson.databind.ObjectMapper().writeValue(topology.toFile(), List.of(master.endpoint(),
@@ -113,11 +113,11 @@ class RequestJournalTest {
         for (boolean timeout : List.of(false, true)) {
             var path = directory.resolve(timeout ? "timeout.jsonl" : "rejection.jsonl");
             var journal = new RequestJournal(path, "client-0", plan());
-            try (var master = new NativeClientTest.Harness();
-                 var client = new NativeClient(() -> List.of(master.endpoint().get("rpc")), journal::record, MediaInput.IMAGE_TOKEN, 0L, 1)) {
+            try (var master = new BackendRpcClientTest.Harness();
+                 var client = new BackendRpcClient(() -> List.of(master.endpoint().get("rpc")), journal::record, MediaInput.IMAGE_TOKEN, 0L, 1)) {
                 if (timeout) master.scheduleDelay = 1000;
                 else master.route = r -> r.toBuilder().setSuccess(false).setCode(429).clearLifecycle().build();
-                var call = client.send(NativeClientTest.request(100), Duration.ofMillis(timeout ? 100 : 3000));
+                var call = client.send(BackendRpcClientTest.request(100), Duration.ofMillis(timeout ? 100 : 3000));
                 call.completion().toCompletableFuture().get(4, TimeUnit.SECONDS);
                 journal.finish(1, 1);
                 var events = read(path).stream().filter(row -> row.has("kind")).toList();

@@ -11,16 +11,10 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 
-/** End-to-end probe against a separately launched, unmocked production Master. */
+/**
+ * End-to-end probe against a separately launched, unmocked production Master.
+ */
 public final class MasterProbe {
-    private static GenerateInputPB input(long id) {
-        return GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(List.of(1, 2, 3, 4))
-            .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(3).setReturnIncremental(true).setCanUsePdSeparation(true)).build();
-    }
-    static FlexlbScheduleRequestPB request(long id) {
-        return FlexlbScheduleRequestPB.newBuilder().setRequestId(id).setModel("mock").setSeqLen(4).setMaxNewTokens(3)
-            .setCacheKeyBlockSize(16).setPriority(50).setRequestTimeMs(System.currentTimeMillis()).setGenerateInput(input(id).toByteString()).build();
-    }
     public static void main(String[] args) throws Exception {
         var master = ManagedChannelBuilder.forTarget(args[0]).usePlaintext().build();
         try {
@@ -43,13 +37,23 @@ public final class MasterProbe {
                 }
                 if (tokens != 3 || !finished) throw new IllegalStateException("Native routed stream incomplete");
             } finally { engine.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
-            try (var client = new NativeClient(args[0])) {
+            try (var client = new BackendRpcClient(args[0])) {
                 var result = client.send(request(1601), Duration.ofSeconds(8)).completion().toCompletableFuture().get(9, TimeUnit.SECONDS);
-                if (result.outcome() != NativeClient.Outcome.success || result.outputTokens() != 3 || result.ttftNanos() == null)
+                if (result.outcome() != BackendRpcClient.Outcome.success || result.outputTokens() != 3 || result.ttftNanos() == null)
                     throw new IllegalStateException("Client failed through production Master: " + result);
                 new ObjectMapper().writeValue(Path.of(args[2]).toFile(), Map.of("enqueued_by_master", route.getEnqueuedByMaster(),
                     "outcome", result.outcome().name(), "tokens", result.outputTokens(), "ttft_ns", result.ttftNanos(), "elapsed_ns", result.elapsedNanos()));
             }
         } finally { master.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+    }
+
+    static FlexlbScheduleRequestPB request(long id) {
+        return FlexlbScheduleRequestPB.newBuilder().setRequestId(id).setModel("mock").setSeqLen(4).setMaxNewTokens(3)
+            .setCacheKeyBlockSize(16).setPriority(50).setRequestTimeMs(System.currentTimeMillis()).setGenerateInput(input(id).toByteString()).build();
+    }
+
+    private static GenerateInputPB input(long id) {
+        return GenerateInputPB.newBuilder().setRequestId(id).addAllTokenIds(List.of(1, 2, 3, 4))
+            .setGenerateConfig(GenerateConfigPB.newBuilder().setMaxNewTokens(3).setReturnIncremental(true).setCanUsePdSeparation(true)).build();
     }
 }

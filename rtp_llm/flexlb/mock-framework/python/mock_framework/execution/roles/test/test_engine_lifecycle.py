@@ -124,7 +124,7 @@ def setup_case(tmp_path, operation, monitor=False, invalid=False, master=False):
             "binary": os.environ["PROMETHEUS_BIN"],
             "scrape_interval": "100ms",
         }
-    return case, registry, prepare_launch(raw, case, tmp_path)
+    return case, prepare_launch(raw, case, tmp_path)
 
 
 def no_children(output):
@@ -147,6 +147,72 @@ def test_scale_rejects_invalid_direction_or_targets(args):
         StepRegistry.standard().get("engine/scale").arguments(args)
 
 
+def test_initial_engine_start_shares_slots_across_roles(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from mock_framework.execution.environment import EndpointRegistry
+    from mock_framework.execution.processes import ProcessSupervisor
+    from mock_framework.execution.roles.engine import (
+        INITIAL_START_CONCURRENCY,
+        ROLES,
+        EngineRole,
+    )
+
+    async def exercise():
+        records = SimpleNamespace(directory=tmp_path, emit=lambda **_: None)
+        count = INITIAL_START_CONCURRENCY // len(ROLES) + 2
+        topology = EndpointRegistry(tmp_path)
+        engine = EngineRole(
+            supervisor=ProcessSupervisor(records),
+            topology=topology,
+            records=records,
+            environment={role: {"deployment": {"replicas": count}} for role in ROLES},
+            recipes={role: {"startup_timeout": "2s"} for role in ROLES},
+            monitoring=None,
+        )
+        active = peak = 0
+        starts = []
+        ready = []
+        refilled = asyncio.Event()
+
+        async def start_instance(role, index):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            starts.append(role)
+            if len(starts) > INITIAL_START_CONCURRENCY:
+                refilled.set()
+            if (role, index) == ("prefill", 0):
+                await refilled.wait()
+            await asyncio.sleep(0)
+            active -= 1
+            ready.append((role, index))
+            slot = ROLES.index(role) * count + index
+            control = f"http://localhost:{10000 + slot}"
+            return (
+                slot,
+                control,
+                {
+                    "id": f"{role}-{index}",
+                    "role": role,
+                    "control": control,
+                    "rpc": f"localhost:{20000 + slot}",
+                },
+            )
+
+        monkeypatch.setattr(engine, "_start_instance", start_instance)
+        await asyncio.wait_for(engine.start(), timeout=2)
+        assert peak == INITIAL_START_CONCURRENCY
+        assert set(starts[:INITIAL_START_CONCURRENCY]) == set(ROLES)
+        assert ready[0] != ("prefill", 0)
+        for role in ROLES:
+            assert [node["id"] for node in topology.active(role)] == [
+                f"{role}-{i}" for i in range(count)
+            ]
+
+    asyncio.run(exercise())
+
+
 def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics(
     tmp_path, monkeypatch
 ):
@@ -154,7 +220,13 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
     async def exercise(ctx, args: Args) -> list[str]:
         owner = ctx.runtime
         assert (
-            len({owner.supervisor.child(node).pid for node in owner.engines.instances})
+            len(
+                {
+                    owner.supervisor.child(node["id"]).pid
+                    for node in owner.topology.active()
+                    if node["role"] in ("prefill", "decode", "vit")
+                }
+            )
             == 3
         )
         original = ctx.globals()["prefill"]
@@ -289,9 +361,9 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
         return removed + created
 
     monitor = bool(os.environ.get("PROMETHEUS_BIN"))
-    case, registry, launch = setup_case(tmp_path, exercise, monitor)
+    case, launch = setup_case(tmp_path, exercise, monitor)
     output = tmp_path / "result"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
     events = no_children(output)
     assert len([event for event in events if event["event"] == "instance_stopped"]) == 4
@@ -319,9 +391,9 @@ def test_process_failure_or_partial_startup_fails_the_run_and_cleans_every_proce
         await asyncio.sleep(20)
         return True
 
-    case, registry, launch = setup_case(tmp_path, crash, invalid=invalid)
+    case, launch = setup_case(tmp_path, crash, invalid=invalid)
     output = tmp_path / "result"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "ERROR"
     events = no_children(output)
     assert len([event for event in events if event["event"] == "process_started"]) == 3
@@ -387,9 +459,9 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(
             await engine_scale(ctx, Scale(direction="in", count=2))
         raise AssertionError("Partial failure was swallowed")
 
-    case, registry, launch = setup_case(tmp_path, exercise)
+    case, launch = setup_case(tmp_path, exercise)
     output = tmp_path / "result"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "ERROR", result
     events = no_children(output)
     injected = [e for e in events if e["event"] == "injected_failure"]
@@ -557,9 +629,9 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
                     await child.wait()
                 assert child.returncode == 0, (directory / "stderr.log").read_text()
 
-    case, registry, launch = setup_case(tmp_path, exercise, monitor=True, master=True)
+    case, launch = setup_case(tmp_path, exercise, monitor=True, master=True)
     output = tmp_path / "result"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
     no_children(output)
     assert json.loads((output / "prometheus/collection.json").read_text())["complete"]

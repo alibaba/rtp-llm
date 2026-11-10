@@ -14,13 +14,14 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.execution.LLMMockEngine;
+import org.flexlb.mock.engine.forward.ComputeModel;
 import org.flexlb.mock.engine.scheduler.LLMMockEngineTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Exercises Prefill to Decode generation, handoff and streaming completion.
+ * Exercises Prefill and Decode together over the native gRPC protocol.
  */
 class PdGenerationTest {
     @TempDir Path directory;
@@ -38,7 +39,7 @@ class PdGenerationTest {
             var query=CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build();
             var ps=rpc.getCacheStatus(query);
             var ds=RpcServiceGrpc.newBlockingStub(d.channel).withDeadlineAfter(2,TimeUnit.SECONDS).getCacheStatus(query);
-            var base=org.flexlb.mock.protocol.MediaInput.cacheKeys(org.flexlb.mock.protocol.MediaInput.text(request),2);
+            var base=org.flexlb.mock.protocol.MediaInput.sequence(org.flexlb.mock.protocol.MediaInput.text(request), 2, 0, 1).keys();
             assertEquals(Set.of(base.get(3),base.get(7)),ps.getCacheKeysMap().keySet());
             assertTrue(ds.getCacheKeysMap().keySet().containsAll(base));
             assertEquals(8,ps.getBlockSize());assertEquals(128,ps.getTotalKvCache());
@@ -84,8 +85,8 @@ class PdGenerationTest {
             }
             // Cache identity must use the prepared hash, not the image placeholder token.
             var prepared = image(input(d, 0, 4, 1, 3000, true), vision.getPort()).toBuilder().clearMultimodalInputs().build();
-            var keys = org.flexlb.mock.protocol.MediaInput.cacheKeys(new org.flexlb.mock.protocol.MediaInput.Prepared(prepared,
-                List.of(MultimodalCacheSpanPB.newBuilder().setOffset(1).addRowHashes(777).build())), 2);
+            var keys = org.flexlb.mock.protocol.MediaInput.sequence(new org.flexlb.mock.protocol.MediaInput.Prepared(prepared,
+                List.of(MultimodalCacheSpanPB.newBuilder().setOffset(1).addRowHashes(777).build())), 2, 0, 1).keys();
             var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
             assertTrue(keys.stream().allMatch(cached.getCacheKeysMap()::containsKey));
             assertEquals(6, calls.size());
@@ -515,7 +516,11 @@ class PdGenerationTest {
     }
 
     @Test void eosLengthIsStableAcrossRoundWidths() throws Exception {
-        int expected = new org.flexlb.mock.engine.forward.StoppingModel(new org.flexlb.mock.engine.forward.StoppingSpec(.2, 42L)).complete("77", 0, 20, 3, 20, false).committedTokens();
+        var compute = ComputeModel.fromJson(new ObjectMapper().readTree("""
+            {"forward":{"expression":"1"},"eos":{"probability":0.2,"seed":42}}
+            """));
+        var generation = new ComputeModel.Request("77", 0, 5, 0, 3, 20, 25, false);
+        int expected = compute.completed(new ComputeModel.Plan(generation, 20)).committedTokens();
         for (int width : new int[]{1, 4}) {
             try (var p = node("prefill", 16, 1, Map.of("eos", Map.of("probability", .2, "seed", 42)));
                     var d = node("decode", 16, 1, Map.of("decode", Map.of("tokens.per.step", width), "eos", Map.of("probability", .2, "seed", 42)))) {
@@ -687,7 +692,8 @@ class PdGenerationTest {
 
     @Test void unlimitedRequestIsOwnedByItsPCallAndCanCompleteNormally() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1); var call = new Call(p, input(d, 1, 3, 4, 0, true))) {
-            call.completeOutput(4);
+            for (int i = 1; i <= 4; i++) call.output(i, i == 4, 1);
+            assertEquals("completed", call.next());
         }
     }
 
@@ -917,7 +923,7 @@ class PdGenerationTest {
     }
 
     /**
-     * Owns the P/D Engine fixtures and RPC channels for one generation test.
+     * Owns a local mock engine and the gRPC channel used by the test.
      */
     private static final class Harness implements AutoCloseable {
         final LLMMockEngine node;
@@ -931,7 +937,7 @@ class PdGenerationTest {
     }
 
     /**
-     * Records generated frames and completion for a PD request.
+     * Opens a Prefill stream and exposes its responses to the test.
      */
     private static final class Call implements AutoCloseable {
         final Context.CancellableContext context = Context.current().withCancellation();
@@ -969,7 +975,7 @@ class PdGenerationTest {
                 int width = Math.toIntExact(flat.getOutputIds().getShape(2)); length += width;
                 assertEquals(length, flat.getAuxInfo(0).getOutputLen());
                 assertEquals(width * 4, flat.getOutputIds().getInt32Data().size());
-                assertTrue(width <= GeneratedOutput.MAX_FRAME_TOKENS);
+                assertTrue(width <= GenerateResponseStream.MAX_FRAME_TOKENS);
                 if (flat.getFinished(0)) break;
             }
             assertEquals(expected, length); assertEquals("completed", next());

@@ -1,17 +1,16 @@
-max_seq_len: 1048576
 seq_size_per_block: 128
-reuse_cache: true
-enable_device_cache: true
-reserve_block_ratio: 8
+max_seq_len: 1048576
 concurrency_limit: 128
-max_batch_tokens_size: 1048576
-test_block_num: 221485
-mock.compute:
-  forward:
-    expression: 19.5 + 0.175 * batchSize
-  decode:
-    tokens.per.step: 2.6
-  eos:
-    probability: 0.0025
-    seed: 20260922
+reuse_cache: false
+enable_device_cache: true
+enable_remote_cache: false
+mock.compute.forward.expression: 15.26 + 0.10343 * batchSize
+mock.compute.decode.tokens.per.step: 2.874334269284765
+test_block_num: 991894
+reserve_block_ratio: 5
+mock.compute.eos.probability: 0.00089
+mock.compute.eos.seed: 20261105
 image_token_id: 129264
+cache_key_hash_seed: "4923373599811257905"
+enable_memory_cache: false
+kv_cache_event_publisher_type: none

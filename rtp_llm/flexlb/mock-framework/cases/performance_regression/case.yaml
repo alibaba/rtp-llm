@@ -1,6 +1,6 @@
 id: performance_regression
 name: 性能回归
-describe: 固定 DeepSeek V4.1 回放、P/D/V 计算模型和部署规模，以绝对阈值检查吞吐、延迟、复用和成功率。
+describe: 按线上 Mock 的 P/D/V 和 Master 规模回放五分钟采样，检查缓存稳定后的吞吐、延迟和成功率。
 environment:
   master:
     deployment:
@@ -9,7 +9,7 @@ environment:
   prefill:
     engine: rtp
     deployment:
-      replicas: 48
+      replicas: 55
     config: configs/prefill.yaml
   decode:
     engine: rtp
@@ -18,160 +18,147 @@ environment:
     config: configs/decode.yaml
   vit:
     deployment:
-      replicas: 4
+      replicas: 160
     config: configs/vit.yaml
   client:
+    deployment:
+      replicas: 4
     config:
       seq_size_per_block: 128
       prefill_cp_size: 4
       image_token_id: 129264
-    deployment:
-      replicas: 2
+      cache_key_hash_seed: "4923373599811257905"
 phases:
   - id: startup
-    describe: 确认唯一主 Master，等待发现传播。
-    timeout: 120s
+    describe: 确认唯一主 Master 并等待发现。
+    timeout: 150s
     steps:
       - id: check_master_leader
-        describe: 两个 Master 中恰有一个主节点。
+        describe: 双 Master 中恰有一个主节点。
         interface: master/get
         args:
           is_leader: true
         expect:
           count: 1
         wait_after: 10s
-  - id: warmup
-    describe: 回放流量预热缓存，并用连续两个完整窗口确认命中率。
-    timeout: 600s
+  - id: playback
+    describe: 同一轮先低速预热，再原速播放剩余请求。
+    timeout: 525s
     steps:
       - id: start_client
-        describe: 两 Client 按总 0.1 倍速回放 DeepSeek，启用请求级缓存复用。
+        describe: 四个 Client 先以 0.25 倍速预热 120 秒，再以 1.0 倍速播放剩余流量。
         interface: client/start
         args:
           requests_file: data/traffic/deepseek-v4.1.mckidx
           reuse_cache: true
-          replay_speed: 0.1
-          total_concurrency: 4096
-          queue_capacity: 4096
+          replay_speed: 1.0
+          warmup:
+            duration: 120s
+            rate_scale: 0.25
+          total_concurrency: 32000
+          queue_capacity: 48000
           request_timeout: 120s
           drain_timeout: 150s
-        within: 510s
-        wait_after: 370s
-      - id: check_cache_warmup_first
-        describe: 第一段 60 秒命中率进入稳定带。
-        interface: engine/cache/hit_rate
-        args:
-          range: [-65s, -5s]
-        expect: { gte: 0.40, lte: 0.46 }
-        within: 90s
-        wait_after: 60s
-      - id: check_cache_warmup_second
-        describe: 第二段 60 秒命中率仍在稳定带，之后采集独立的性能窗口。
-        interface: engine/cache/hit_rate
-        args:
-          range: [-65s, -5s]
-        expect: { gte: 0.40, lte: 0.46 }
-        within: 95s
-        wait_after: 65s
+        within: 430s
+        wait_after: 395s
   - id: performance
-    describe: 检查缓存稳定后完整 60 秒的吞吐、延迟和成功率。
-    timeout: 360s
+    describe: 检查稳态性能、完整回放和排空后的成功率。
+    timeout: 540s
     steps:
       - id: check_client_qps
-        describe: 已发请求速率，避免未施加足够负载时通过性能门禁。
+        describe: 总已发 QPS。
         interface: client/qps
         args:
-          range: [-65s, -5s]
+          range: [-35s, -5s]
         expect:
-          gte: 78
-          lte: 98
+          gte: 960
+          lte: 1150
         within: 30s
       - id: check_prefill_tps
-        describe: 集群原生 Prefill TPS，按各 Worker 的区间平均求和。
+        describe: 集群原生 Prefill TPS。
         interface: engine/prefill/tps
         args:
-          range: [-65s, -5s]
+          range: [-35s, -5s]
         expect:
-          gte: 230000
+          gte: 2200000
         within: 30s
       - id: check_prefill_tps_with_cache
-        describe: 集群原生含缓存 Prefill TPS，包含输入中的复用 token。
+        describe: 集群原生含缓存 Prefill TPS。
         interface: engine/prefill/tps_with_cache
         args:
-          range: [-65s, -5s]
+          range: [-35s, -5s]
         expect:
-          gte: 400000
+          gte: 34000000
         within: 30s
       - id: check_output_tps
-        describe: 集群已提交输出 token 的墙钟吞吐。
+        describe: 集群 Decode 输出 TPS。
         interface: engine/decode/tps
         args:
-          range: [-65s, -5s]
+          range: [-35s, -5s]
         expect:
-          gte: 30000
+          gte: 220000
         within: 30s
-      - id: check_client_ttft_mean
-        describe: Client 首 token 延迟的请求加权均值。
+      - id: check_ttft_mean
+        describe: 客户端首 token 延迟均值。
         interface: client/ttft
         args:
-          range: [-65s, -5s]
+          range: [-35s, -5s]
           statistic: mean
         expect:
-          lte: 400ms
+          lte: 600ms
         within: 30s
-      - id: check_client_ttft_p95
-        describe: 合并 Client Histogram 后计算 P95。
+      - id: check_ttft_p95
+        describe: 客户端首 token 延迟 P95。
         interface: client/ttft
         args:
-          range: [-65s, -5s]
+          range: [-35s, -5s]
           statistic: p95
         expect:
-          lte: 650ms
+          lte: 1500ms
         within: 30s
-      - id: check_client_tpot_mean
-        describe: 成功且输出多于一个 token 的 Client TPOT 均值。
+      - id: check_tpot_mean
+        describe: 成功多 token 请求 TPOT 均值。
         interface: client/tpot
         args:
-          range: [-65s, -5s]
+          range: [-35s, -5s]
           statistic: mean
         expect:
-          lte: 10ms
+          lte: 8ms
         within: 30s
-      - id: check_client_tpot_p95
-        describe: 成功多 token 请求的 Client TPOT P95。
+      - id: check_tpot_p95
+        describe: 成功多 token 请求 TPOT P95。
         interface: client/tpot
         args:
-          range: [-65s, -5s]
+          range: [-35s, -5s]
           statistic: p95
         expect:
           lte: 13ms
         within: 30s
-      - id: check_prefill_cache_hit_rate
-        describe: Prefill 实际复用 token / 输入 token 的区间增量比值。
+      - id: check_cache_hit_rate
+        describe: Prefill token 加权实际命中率。
         interface: engine/cache/hit_rate
         args:
-          range: [-65s, -5s]
+          range: [-35s, -5s]
         expect:
-          gte: 0.39
+          gte: 0.9
         within: 30s
-      - id: check_client_success_rate
-        describe: 已完成请求成功率的区间增量比值。
+      - id: check_success_rate
+        describe: 测量窗口内的客户端终态成功率。
         interface: client/success_rate
         args:
-          range: [-65s, -5s]
+          range: [-35s, -5s]
         expect:
           gte: 0.999
         within: 30s
       - id: stop_client
-        describe: 停止回放并收齐全部已发请求的终态，队列/在途/结果不完整时报错。
+        describe: 待整份数据回放完毕后停止 Client，并收齐已发请求的终态。
         interface: client/stop
         within: 180s
-        wait_after: 5s
-      - id: check_client_success_rate_after_drain
-        describe: 排空后检查本次运行全部终态的成功率，包含预热和排空阶段的失败。
+      - id: check_total_success_rate
+        describe: 检查整轮回放是否完整，以及排空后的全程成功率。
         interface: client/success_rate
         args:
-          range: [-960s, 0s]
+          playback_result: { ref: steps.stop_client }
         expect:
           gte: 0.999
         within: 30s

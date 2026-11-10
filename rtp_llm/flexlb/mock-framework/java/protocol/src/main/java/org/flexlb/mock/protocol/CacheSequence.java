@@ -97,9 +97,6 @@ public final class CacheSequence {
         return hash ^ (value + 0x9e3779b97f4a7c15L + (hash << 12) + (hash >> 32));
     }
 
-    /**
-     * Attaches ordered media row hashes to an offset in the semantic token sequence.
-     */
     public record Span(int offset, List<Integer> rowHashes) {
         public Span { rowHashes = List.copyOf(rowHashes); }
     }

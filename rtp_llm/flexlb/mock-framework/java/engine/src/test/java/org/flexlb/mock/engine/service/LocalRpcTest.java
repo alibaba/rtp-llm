@@ -19,7 +19,7 @@ import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Checks local Engine generation through native RPC calls.
+ * Exercises the local RTP RPC surface and its cache key reporting.
  */
 class LocalRpcTest {
     @TempDir Path directory;
@@ -74,7 +74,7 @@ class LocalRpcTest {
                     .addAllTokenIds(java.util.stream.IntStream.rangeClosed(1,17).boxed().toList()).build();
                 var first=rpc.generateStreamCall(input);while(first.hasNext()) first.next();
                 var cache=rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
-                var base=org.flexlb.mock.protocol.MediaInput.cacheKeys(org.flexlb.mock.protocol.MediaInput.text(input),2);
+                var base=org.flexlb.mock.protocol.MediaInput.sequence(org.flexlb.mock.protocol.MediaInput.text(input), 2, 0, 1).keys();
                 assertEquals(Set.of(base.get(3),base.get(7)),cache.getCacheKeysMap().keySet());
                 assertEquals(8,cache.getBlockSize());assertEquals(64,cache.getTotalKvCache());
                 var worker = rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance());
@@ -240,7 +240,7 @@ class LocalRpcTest {
 
     @Test void nativePrefixKeysAgreeWithProductionCppReferenceIncludingNegativeToken() {
         var input = GenerateInputPB.newBuilder().addAllTokenIds(List.of(1, 2, 3, 4, 5, -1)).build();
-        assertEquals(List.of(-8366447769517741626L, 455111481605203084L, 3534810267006820515L), org.flexlb.mock.protocol.MediaInput.cacheKeys(org.flexlb.mock.protocol.MediaInput.text(input), 2));
+        assertEquals(List.of(-8366447769517741626L, 455111481605203084L, 3534810267006820515L), org.flexlb.mock.protocol.MediaInput.sequence(org.flexlb.mock.protocol.MediaInput.text(input), 2, 0, 1).keys());
     }
 
     private RtpConfig config(String expression) throws Exception { return config(expression,Map.of()); }

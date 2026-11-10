@@ -4,9 +4,6 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.util.*;
 import org.junit.jupiter.api.Test;
 
-/**
- * Checks prefix keys, media spans and block boundaries in the shared cache sequence.
- */
 class CacheSequenceTest {
     @Test void appendedKeysEqualHashingTheEntireComputedSequenceAcrossPartialBlocksAndMedia() {
         var random = new Random(20261106);

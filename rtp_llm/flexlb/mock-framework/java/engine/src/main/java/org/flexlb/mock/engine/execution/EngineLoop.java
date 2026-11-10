@@ -223,9 +223,6 @@ public final class EngineLoop implements AutoCloseable {
 
     private void checkFailure() { if (failure != null) throw failure; }
 
-    /**
-     * Keeps the scheduled batch and its compute completion together until the loop resumes.
-     */
     private static final class ForwardExecution {
         final EngineScheduler.Work work;
         SimulatedCompute.Execution execution;

@@ -13,4 +13,4 @@ class Empty:
 @register_step("client/stop", effect="write")
 async def client_stop(ctx: StepContext, args: Empty) -> dict[str, ClientResult]:
     """Stop all Clients and collect bounded cleanup; natural completion returns its saved result."""
-    return await ctx.runtime.clients.stop_playback(ctx.query_time, ctx.timeout)
+    return await ctx.runtime.clients.stop_playback(ctx.timeout)

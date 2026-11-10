@@ -2,9 +2,11 @@ package org.flexlb.mock.engine.forward;
 
 import java.util.SplittableRandom;
 
-/** shortcut: constant per-output-token EOS probability; calibrate a richer model when workload data requires it. */
-public record StoppingModel(StoppingSpec configuration) {
-    public StoppingModel { java.util.Objects.requireNonNull(configuration); }
+/**
+ * Applies a constant per-token EOS probability at each absolute output position.
+ */
+record StoppingModel(Config configuration) {
+    StoppingModel { java.util.Objects.requireNonNull(configuration); }
 
     public ComputeModel.Result complete(String requestKey, int generated, int candidates, int minimum, int maximum, boolean ignoreEos) {
         if (requestKey == null || requestKey.isBlank() || generated < 0 || candidates < 1
@@ -21,5 +23,20 @@ public record StoppingModel(StoppingSpec configuration) {
             }
         }
         return new ComputeModel.Result(count, generated + count == maximum, candidates);
+    }
+
+    /**
+     * Validates EOS probability and requires a seed when stopping is random.
+     */
+    record Config(Double probability,
+                               Long seed) {
+        Config {
+            probability = probability == null ? 0 : probability;
+            if (!Double.isFinite(probability) || probability < 0 || probability > 1)
+                throw new IllegalArgumentException("probability must be within [0,1]");
+            if (probability > 0 && probability < 1 && seed == null)
+                throw new IllegalArgumentException("Random EOS stopping requires seed");
+            seed = seed == null ? 0 : seed;
+        }
     }
 }

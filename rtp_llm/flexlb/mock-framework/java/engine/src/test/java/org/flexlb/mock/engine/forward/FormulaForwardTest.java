@@ -6,9 +6,6 @@ import java.util.*;
 import org.flexlb.balance.prediction.PrefillTimeFormula;
 import org.junit.jupiter.api.Test;
 
-/**
- * Checks the inputs and timing predictions of the Forward formula.
- */
 class FormulaForwardTest {
     @Test void agreesWithProductionPrefillBindingsWithoutCopyingFormulaImplementation() {
         String expression = "param(baseMs, 1.25) + 2*batchSize + 0.5*totalComputeTokens"

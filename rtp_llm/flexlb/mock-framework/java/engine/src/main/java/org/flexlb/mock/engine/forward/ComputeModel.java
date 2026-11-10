@@ -8,7 +8,9 @@ import java.io.IOException;
 import java.util.*;
 import org.flexlb.mock.protocol.Role;
 
-/** Composes Forward timing, Decode progress and EOS/length completion without mutating request state. */
+/**
+ * Composes Forward timing, Decode progress and EOS without mutating request state.
+ */
 public final class ComputeModel {
     private static final ObjectMapper JSON = JsonMapper.builder()
         .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
@@ -16,48 +18,6 @@ public final class ComputeModel {
         .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT)
         .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
         .serializationInclusion(JsonInclude.Include.NON_NULL).build();
-    private final ComputeSpec configuration;
-    private final FormulaForward forward;
-    private final NoiseModel noise;
-    private final DecodeStepModel decode;
-    private final StoppingModel stopping;
-
-    public record Request(String key, long round, int inputTokens, int generated, int minimum,
-                          int maximum, int maxSequence, boolean ignoreEos) {
-        public Request {
-            if (key == null || key.isBlank() || round < 0 || inputTokens < 1 || generated < 0 || minimum < 0
-                    || maximum < 1 || minimum > maximum || maxSequence <= inputTokens
-                    || generated >= Math.min(maximum, maxSequence - inputTokens))
-                throw new IllegalArgumentException("Invalid generation request/limits");
-        }
-        int limit() { return Math.min(maximum, maxSequence - inputTokens); }
-    }
-    public record Plan(Request request, int candidates) {
-        public int additionalKvTokens() { return Math.min(request.limit() - request.generated(), candidates) - 1; }
-    }
-    public record Result(int committedTokens, boolean finished, int candidates) {
-        public Result { if (committedTokens < 1 || candidates < committedTokens) throw new IllegalArgumentException("Invalid generation result"); }
-    }
-
-    public ComputeModel(ComputeSpec spec) {
-        this(spec, Map.of());
-    }
-
-    public ComputeModel(ComputeSpec spec, Map<String, Double> constants) {
-        configuration = Objects.requireNonNull(spec);
-        forward = new FormulaForward(spec.forward().expression(), constants); noise = new NoiseModel(spec.forward().noise());
-        decode = new DecodeStepModel(spec.decode()); stopping = new StoppingModel(spec.eos());
-    }
-
-    public static ComputeModel fromJson(JsonNode node) throws IOException {
-        return fromJson(node, Map.of());
-    }
-
-    public static ComputeModel fromJson(JsonNode node, Map<String, Double> constants) throws IOException {
-        rejectNull(node);
-        return new ComputeModel(JSON.treeToValue(node, ComputeSpec.class), constants);
-    }
-
     private static final Map<String, String> SETTINGS = Map.ofEntries(
         Map.entry("forward.expression", "forward.expression"),
         Map.entry("forward.noise.stddev.ms", "forward.noise.stddev_ms"),
@@ -67,6 +27,18 @@ public final class ComputeModel {
         Map.entry("decode.tokens.per.step", "decode.tokens_per_step"),
         Map.entry("eos.probability", "eos.probability"),
         Map.entry("eos.seed", "eos.seed"));
+
+    private final Config configuration;
+    private final FormulaForward forward;
+    private final NoiseModel noise;
+    private final DecodeStepModel decode;
+    private final StoppingModel stopping;
+
+    private ComputeModel(Config spec, Map<String, Double> constants) {
+        configuration = Objects.requireNonNull(spec);
+        forward = new FormulaForward(spec.forward().expression(), constants); noise = new NoiseModel(spec.forward().noise());
+        decode = new DecodeStepModel(spec.decode()); stopping = new StoppingModel(spec.eos());
+    }
 
     public static Set<String> settingNames() {
         var names = new HashSet<String>();
@@ -92,6 +64,15 @@ public final class ComputeModel {
         return fromJson(spec, constants);
     }
 
+    public static ComputeModel fromJson(JsonNode node) throws IOException {
+        return fromJson(node, Map.of());
+    }
+
+    public static ComputeModel fromJson(JsonNode node, Map<String, Double> constants) throws IOException {
+        rejectNull(node);
+        return new ComputeModel(JSON.treeToValue(node, Config.class), constants);
+    }
+
     public JsonNode effectiveSettings() {
         var result = JSON.createObjectNode();
         var spec = effectiveConfiguration();
@@ -99,9 +80,11 @@ public final class ComputeModel {
         return result;
     }
 
-
-    public ComputeSpec configuration() { return configuration; }
     public JsonNode effectiveConfiguration() { return JSON.valueToTree(configuration); }
+
+    public boolean hasCustomDecodeStep() {
+        return !configuration.decode().equals(DecodeStepModel.Config.DEFAULT);
+    }
 
     public Plan prepare(Role role, Request request) {
         if (role != Role.prefill && role != Role.decode) throw new IllegalArgumentException("Unsupported generation role");
@@ -125,5 +108,55 @@ public final class ComputeModel {
     private static void rejectNull(JsonNode node) {
         if (node == null || node.isNull() || node.isMissingNode()) throw new IllegalArgumentException("Compute configuration cannot be null");
         node.forEach(ComputeModel::rejectNull);
+    }
+
+    /**
+     * Captures generation progress and limits for one scheduler round.
+     */
+    public record Request(String key, long round, int inputTokens, int generated, int minimum,
+                          int maximum, int maxSequence, boolean ignoreEos) {
+        public Request {
+            if (key == null || key.isBlank() || round < 0 || inputTokens < 1 || generated < 0 || minimum < 0
+                    || maximum < 1 || minimum > maximum || maxSequence <= inputTokens
+                    || generated >= Math.min(maximum, maxSequence - inputTokens))
+                throw new IllegalArgumentException("Invalid generation request/limits");
+        }
+        int limit() { return Math.min(maximum, maxSequence - inputTokens); }
+    }
+
+    /**
+     * Carries the candidate count used for KV reservation and generation.
+     */
+    public record Plan(Request request, int candidates) {
+        public int additionalKvTokens() { return Math.min(request.limit() - request.generated(), candidates) - 1; }
+    }
+
+    /**
+     * Reports committed output, completion and the original candidate count.
+     */
+    public record Result(int committedTokens, boolean finished, int candidates) {
+        public Result { if (committedTokens < 1 || candidates < committedTokens) throw new IllegalArgumentException("Invalid generation result"); }
+    }
+
+    /**
+     * Defines the compute settings read by Jackson and supplies default generation settings.
+     */
+    private record Config(Forward forward, DecodeStepModel.Config decode, StoppingModel.Config eos) {
+        private Config {
+            if (forward == null) throw new IllegalArgumentException("Compute requires forward");
+            decode = decode == null ? DecodeStepModel.Config.DEFAULT : decode;
+            eos = eos == null ? new StoppingModel.Config(null, null) : eos;
+        }
+
+        /**
+         * Defines the timing formula and supplies default noise settings.
+         */
+        private record Forward(String expression, NoiseModel.Config noise) {
+            private Forward {
+                if (expression == null || expression.isBlank() || expression.length() > 32768)
+                    throw new IllegalArgumentException("Compute expression must contain 1..32768 characters");
+                noise = noise == null ? new NoiseModel.Config(null, null, null, null) : noise;
+            }
+        }
     }
 }

@@ -13,7 +13,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Checks registration, event delivery, snapshots and recovery of the Engine reporter.
+ * Verifies KVCM registration, snapshots, and incremental reporting.
  */
 class KvcmReporterTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -197,9 +197,6 @@ class KvcmReporterTest {
         }
     }
 
-    /**
-     * Records Meta HTTP reports and injects replies used to test reporter recovery.
-     */
     private static final class Meta implements AutoCloseable {
         final HttpServer server;
         final ExecutorService threads = Executors.newVirtualThreadPerTaskExecutor();

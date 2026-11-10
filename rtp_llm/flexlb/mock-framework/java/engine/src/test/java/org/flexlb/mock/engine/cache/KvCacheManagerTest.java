@@ -6,7 +6,7 @@ import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
 
 /**
- * Checks cache allocation, prefix reuse and lease cleanup.
+ * Verifies KV reservations, shared prefixes, and eviction.
  */
 class KvCacheManagerTest {
     @Test void keySnapshotsAreDetachedAndEachReaderUsesItsOwnVersion() {
@@ -58,27 +58,6 @@ class KvCacheManagerTest {
             held.close();
             var ready = assertInstanceOf(KvCacheManager.Ready.class, failed.retry());
             ready.lease().close();
-        }
-    }
-
-    @Test void preparationFallsBackToLocalPrefixAfterRemoteFailure() {
-        var remote = new CompletableFuture<Integer>();
-        try (var cache = new KvCacheManager(2, 8, 0, true, keys -> {
-            assertEquals(List.of(2L), keys);
-            return remote;
-        })) {
-            try (var seed = cache.acquire(2, List.of()).lease()) {
-                assertTrue(seed.publish(List.of(1L), 2));
-            }
-            var loading = assertInstanceOf(KvCacheManager.Loading.class, cache.prepare(5, List.of(1L, 2L)));
-            assertSame(loading, loading.poll());
-            remote.completeExceptionally(new IllegalStateException("remote read failed"));
-            var ready = assertInstanceOf(KvCacheManager.Ready.class, loading.poll());
-            try (var lease = ready.lease()) {
-                assertEquals(2, lease.reusedTokens());
-                assertEquals(5, cache.snapshot(0, false).availableBlocks());
-            }
-            assertEquals(8, cache.snapshot(0, false).availableBlocks());
         }
     }
 
@@ -176,7 +155,7 @@ class KvCacheManagerTest {
     }
 
     @Test void fullyCachedRequestsStillCompeteForDeviceResidencyAndRetryAfterRelease() {
-        try (var cache = new KvCacheManager(1, 3, 8, 0, true, null)) {
+        try (var cache = new KvCacheManager(1, 3, 8, 0, true)) {
             for (var keys : List.of(List.of(1L, 2L, 3L), List.of(4L, 5L, 6L)))
                 try (var seed = cache.acquire(3, List.of()).lease()) { seed.publish(keys, 3); }
             assertEquals(6, cache.itemCount());
@@ -194,7 +173,7 @@ class KvCacheManagerTest {
     }
 
     @Test void sharedPrefixesUseOneDeviceSlotUntilTheirLastOwnerReleasesIt() {
-        try (var cache = new KvCacheManager(1, 3, 8, 0, true, null)) {
+        try (var cache = new KvCacheManager(1, 3, 8, 0, true)) {
             try (var seed = cache.acquire(2, List.of()).lease()) { seed.publish(List.of(1L, 2L), 2); }
             var a = cache.acquire(2, List.of(1L, 2L)).lease();
             var b = cache.acquire(2, List.of(1L, 2L)).lease();
@@ -210,7 +189,7 @@ class KvCacheManagerTest {
     }
 
     @Test void singleRequestCannotBorrowLogicalCacheCapacityAsDeviceCapacity() {
-        try (var cache = new KvCacheManager(128, 2, 8, 0, true, null)) {
+        try (var cache = new KvCacheManager(128, 2, 8, 0, true)) {
             assertEquals(KvCacheManager.Failure.PERMANENT, cache.acquire(257, List.of()).failure());
             assertEquals(2, cache.snapshot(0, false).availableBlocks());
             try (var lease = cache.acquire(256, List.of()).lease()) {
@@ -221,7 +200,7 @@ class KvCacheManagerTest {
     }
 
     @Test void deviceReserveAppliesToAdmissionButCanBeConsumedByDecodeGrowth() {
-        try (var cache = new KvCacheManager(1, 4, 8, 1, true, null)) {
+        try (var cache = new KvCacheManager(1, 4, 8, 1, true)) {
             assertEquals(KvCacheManager.Failure.PERMANENT, cache.acquire(4, List.of()).failure());
             try (var lease = cache.acquire(3, List.of()).lease()) {
                 assertEquals(KvCacheManager.Failure.RETRYABLE, cache.acquire(1, List.of()).failure());
@@ -232,21 +211,8 @@ class KvCacheManagerTest {
         }
     }
 
-    @Test void pendingRemoteLoadPinsDeviceAndCancellationReleasesBothBudgets() {
-        var restored = new CompletableFuture<Integer>();
-        try (var cache = new KvCacheManager(1, 2, 8, 0, true, keys -> restored)) {
-            var loading = assertInstanceOf(KvCacheManager.Loading.class, cache.prepare(2, List.of(1L, 2L)));
-            var blocked = assertInstanceOf(KvCacheManager.Failed.class, cache.prepare(1, List.of()));
-            assertEquals(0, cache.snapshot(0, false).availableBlocks());
-            loading.close(); assertTrue(restored.isCancelled());
-            var ready = assertInstanceOf(KvCacheManager.Ready.class, blocked.retry()); ready.lease().close();
-            assertEquals(2, cache.snapshot(0, false).availableBlocks());
-            assertEquals(2, cache.snapshot(0, false).freeBlocks());
-        }
-    }
-
     @Test void logicalPoolEvictionUsesTotalCapacityRatherThanDeviceCapacity() {
-        try (var cache = new KvCacheManager(1, 2, 4, 0, true, null)) {
+        try (var cache = new KvCacheManager(1, 2, 4, 0, true)) {
             for (long key = 1; key <= 5; key++)
                 try (var seed = cache.acquire(1, List.of()).lease()) { seed.publish(List.of(key), 1); }
             assertEquals(4, cache.itemCount());

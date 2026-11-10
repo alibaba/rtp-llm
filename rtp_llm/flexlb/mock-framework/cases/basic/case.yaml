@@ -37,9 +37,9 @@ phases:
           queue_capacity: 4
           request_timeout: 3s
           drain_timeout: 5s
-        wait_after: 8s
+        wait_after: 6s
       - id: check_client_qps
-        describe: 启动预热后，在持续播放中检查已发请求速率。
+        describe: 在持续播放中检查已发请求速率，容许采样误差。
         interface: client/qps
         args: { range: [-4s, 0s] }
         expect: { gte: 1.5, lte: 2.5 }

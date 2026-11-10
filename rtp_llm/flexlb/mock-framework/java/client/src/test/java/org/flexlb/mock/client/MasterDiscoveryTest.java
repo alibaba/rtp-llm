@@ -22,7 +22,7 @@ class MasterDiscoveryTest {
 
     @Test void observesLeadershipThenDiscoversReplacementWithoutChangingThePlaybackPlan() throws Exception {
         Path topology = directory.resolve("topology.json");
-        try (var first = new NativeClientTest.Harness(); var second = new NativeClientTest.Harness(); var added = new NativeClientTest.Harness()) {
+        try (var first = new BackendRpcClientTest.Harness(); var second = new BackendRpcClientTest.Harness(); var added = new BackendRpcClientTest.Harness()) {
             first.leader = second.leader;
             publish(topology, List.of(first.endpoint(), second.endpoint()));
             try (var discovery = new MasterDiscovery(topology, null)) {
@@ -56,7 +56,7 @@ class MasterDiscoveryTest {
 
     @Test void explicitSelectionStaysFixedAndMalformedDiscoveryFailsPlayback() throws Exception {
         Path topology = directory.resolve("topology.json");
-        try (var first = new NativeClientTest.Harness(); var second = new NativeClientTest.Harness()) {
+        try (var first = new BackendRpcClientTest.Harness(); var second = new BackendRpcClientTest.Harness()) {
             publish(topology, List.of(first.endpoint(), second.endpoint()));
             try (var discovery = new MasterDiscovery(topology, List.of(first.endpoint().get("rpc")))) {
                 assertEquals(List.of(first.endpoint().get("rpc")), discovery.routes());
@@ -72,9 +72,21 @@ class MasterDiscoveryTest {
         }
     }
 
+    @Test void deduplicatesRpcAddressesWithoutDerivingThemFromHttpPorts() throws Exception {
+        Path topology = directory.resolve("topology.json");
+        try (var master = new BackendRpcClientTest.Harness()) {
+            String rpc = "127.0.0.1:1";
+            var endpoint = Map.of("role", "master", "http", master.http(), "rpc", rpc);
+            publish(topology, List.of(endpoint, endpoint));
+            try (var discovery = new MasterDiscovery(topology, null)) {
+                assertEquals(List.of(rpc), discovery.routes());
+            }
+        }
+    }
+
     private void assertRoutesAfterFirstFailure(int status, boolean retained) throws Exception {
         Path topology = directory.resolve("topology.json");
-        try (var first = new NativeClientTest.Harness(); var second = new NativeClientTest.Harness()) {
+        try (var first = new BackendRpcClientTest.Harness(); var second = new BackendRpcClientTest.Harness()) {
             first.leader = first.http().substring(7);
             second.leader = first.leader;
             publish(topology, List.of(first.endpoint(), second.endpoint()));

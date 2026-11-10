@@ -1,122 +1,111 @@
-# Whale Engine 镜像与启动
+---
+name: mock-engine-whale-deploy
+description: 在 Whale 上构建并部署 FlexLB Mock Prefill、Decode、ViT，配置 CP、KV 容量和性能模拟。
+---
 
-P/D/V 共用一个 Mock Engine 镜像，每 Pod 一个 JVM。Master、Frontend 继续使用各自正常镜像；镜像内不带 Case Runner、本地 Prometheus/Grafana、Master bundle 或代码覆盖程序。
+# 在 Whale 上部署 Mock Engine
 
-Whale 拆分部署的角色类型使用 `PY_PREFILL`、`PY_DECODE`、`PY_VIT`、`PY_MASTER`、`PY_FRONT_APP`、`PY_KVCM`。不要把 Prefill、Decode 都定义成 `PY_INFERENCE` 再靠 ENV 或手改域名区分；平台会把它们识别为融合角色。P/D/V、Master、Frontend、KVCM 使用各自部署独立的发现域名，发布前回读角色类型与实际 Carbon 注册计划。
+P/D/V 共用一个 Mock Engine 镜像，每个 Pod 启动一个 JVM。Master 使用 FlexLB 镜像，Frontend 使用与节点架构匹配的完整 RTP 镜像。
 
-## 构建
+## 1. 构建 CI 镜像
 
-在框架目录执行：
+使用官方 `a1` CLI。将 `SOURCE_SHA` 设为已推送到开源仓的 40 位源码 SHA，`RECIPE_REF` 设为内部仓中承载构建配方的分支。在 Code 查看该分支的 `.aoneci/image.yaml`，确认含有 `mock-image` 和 `hangzhou-convert-dadi-image-mock-engine`，并确认 amd64 配方与目标节点架构一致。以下使用 `foundation_models/RTP-LLM` 的镜像流水线 `18410`。
 
-```sh
-JAVA_HOME=/path/to/jdk21 python3 scripts/package-whale-engine.py
+```bash
+a1 ci pipeline run 18410 \
+  --repo foundation_models/RTP-LLM --branch "${RECIPE_REF:?}" \
+  --param 'pre-jobs=["mock-image"]' --param "github_commit=${SOURCE_SHA:?}" \
+  --param 'github_source_repo=https://github.com/alibaba/rtp-llm.git' \
+  --param 'cancel-in-progress=false' --param 'trigger_beta_downstream_sm9x=false' -f json
+
+# RUN_ID 取触发返回的 Run ID。
+a1 ci run get "$RUN_ID" --repo foundation_models/RTP-LLM -f json
+a1 ci job list --run "$RUN_ID" --repo foundation_models/RTP-LLM -f json
+# DADI_JOB_ID 取 hangzhou-convert-dadi-image-mock-engine 的 Job ID。
+a1 ci job summary "$DADI_JOB_ID" --run "$RUN_ID" --repo foundation_models/RTP-LLM -f json
 ```
 
-脚本调用现有 Maven 构建入口，编译 `java/engine` 及其依赖，生成 `target/image`。该目录只包含 Dockerfile、固定启动脚本、Engine JAR 和 build-manifest.json。manifest 记录源码 SHA、CI 配方 SHA（本地未提供时为空）、JAR SHA256；打包默认跳过单测执行，并如实记录 tests_executed=false。修改工作区后做的本地打包不能仅凭 HEAD SHA 作为干净源码构建的证明。
+等整次运行结束且无失败，再从成功的 DADI Job 摘要取完整镜像地址。摘要可能同时列出 `_accelerated` 和 `_containerd_accelerated`，按目标模板的容器运行时选用对应产物。打开 `mock-image` Job 的 **Package Mock Engine** 步骤日志，核对 `source_sha`、`recipe_sha`、`internal_discovery=true`、`metrics_backend=kmonitor` 和 `service_startup_verified=true`。
 
-```sh
-docker build -t mock-engine:local target/image
-```
+## 2. 创建模板
 
-源码配方 `docker/whale-engine.Dockerfile` 在打包时复制为 `target/image/Dockerfile`。配方采用与当前 real FlexLB 生产镜像相同的固定 CPU/JDK 基础镜像；不安装 GPU 栈，不在容器启动时编译、下载或覆盖代码。继承镜像的 Master 入口被显式替换，JVM 前台运行。
+在 Whale 控制台的模板管理中创建模板和首版。以兼容的 RTP/FlexLB 模板为底座，固定源版本，保留框架、模型类型和角色启动契约。以 DSV4.1 V1 为例，框架类别为 `FT`，P/D 共用 `inference_zone_plan`，V 用 `vit_zone_plan`，Master 和 Frontend 分别用 `master_zone_plan` 和 `front_app_zone_plan`。
 
-内部仓 `.aoneci/image.yaml` 增加显式选择的 `mock-engine` 构建项。选择 `pre-jobs: [mock-engine]`，`github_commit` 必须是包含新框架的完整源码 SHA；`github_source_repo` 按标准生产流程指定源码仓。CI 沿用 Java 21、build-image、DADI 转换及区域镜像同步流程，不改已有角色的默认构建项。
+P/D/V 的资源候选绑定同一个 CI 镜像，按实际节点架构选择资源。启动命令用 `/bin/bash /home/admin/whale_start.sh`，脚本会直接启动 Engine JAR。Master 和 Frontend 沿用各自镜像的启动命令。模板保存共用入口和资源候选，本部署的容量、公式和并发写在 zone。
 
-CI 执行 package-whale-engine.py 时传入 EXPECTED_SOURCE_SHA 与 CI_RECIPE_SHA。源码不匹配则在编译前失败。普通镜像仓库为 `hub.docker.alibaba-inc.com/isearch/flexlb_mock_engine`，标签遵循生产配方的 release/weights/version 组合；Whale 需要的 accelerated 镜像以对应转换任务的实际结果为准。
+### 创建无 GPU 的 Mock P/D/V
 
-## 启动
+1. **模板先提供 GPU=0 的候选。** 在推理角色的资源候选中添加一项供 P/D 共用，在 ViT 的资源候选中另加一项。两项都绑定 Mock Engine 镜像，GPU 数量（`resource_tag.gpu_amount`）填 `0`，CPU、内存、磁盘和节点架构按目标资源池配置。
+2. **创建部署时选中该候选。** 在 Prefill、Decode、ViT 三个 zone 的资源规格中分别选匹配的 GPU=0 项，再填副本数。资源列表没有该项时，先给模板补候选并让服务关联该模板版本。
+3. **提交后看 Carbon 实际申请。** 确认 P/D/V 均无正数 GPU 资源申请。资源池若要求填写 GPU 型号，可保留匹配的型号标签。例如 `L20D` 可以是节点选择条件，GPU 数量仍为 0。
 
-镜像入口为 `/home/admin/whale_start.sh`，只设置默认监听地址并 exec Java。JVM 参数直接使用标准 `JAVA_TOOL_OPTIONS`，不解析另一套 JVM 参数字符串，不使用 eval。
+## 3. 创建服务和部署
 
-```sh
-docker run --rm \
-  -e ROLE_TYPE=PREFILL -e START_PORT=8088 \
-  -e SEQ_SIZE_PER_BLOCK=128 -e MAX_SEQ_LEN=32768 -e TEST_BLOCK_NUM=1025 \
-  -e MOCK_COMPUTE_FORWARD_EXPRESSION='1 + batchSize' \
-  -e JAVA_TOOL_OPTIONS='-Xmx1g' \
-  -p 8088:8088 -p 8089:8089 mock-engine:local
-```
+1. **创建服务。** 在 Whale 选择仅创建服务。填写服务名、团队、属主、模型类型、模型和 tokenizer 资源，关联上一步的模板版本。启用 P/D 分离、独立 ViT、Master 和 Frontend。记下服务配置版本，创建部署时固定到该版本。
+2. **创建部署。** 在该服务下新建多组部署。填写部署名、服务配置版本、地域/代理、配额组和各 zone 副本。按下表选择正式角色类型和 HTTP 端口。
+3. **接好发现。** 为每个 zone 注册本部署独立的 VIP 域名，在 zone 的服务发现配置中绑定。Master 的 `MODEL_SERVICE_CONFIG.role_endpoints` 指向本部署的 P/D/V，使用 `vipserver` 发现和 `protocol: http`。`FLEXLB_CONFIG.cacheMatching.type` 设为 `LOCAL_SYNC`。Frontend 的 `MODEL_SERVICE_CONFIG.master_endpoint` 指向本部署的 Master VIP。独立 ViT 使用 `VIT_SEPARATION=2`、`MM_TRANSPORT_MODE=grpc`，流式返回启用 `FETCH_OUTPUT_STREAM=1`。
 
-V 使用 `ROLE_TYPE=VIT`；native 和 Mock 参数遵循[配置参考](component-reference.md#engine-配置规则)。未提供 MOCK_NODE_ID 时，身份使用 role 与本机发布地址；需要指定发布地址时设置 MOCK_ADVERTISE_HOST。共享主机上的实例物理资源仍由平台/JVM 统计，不伪造每 Engine 的 CPU/内存。
+| Zone                   | `zone_type`                           | 参考 HTTP 端口与探针     | 发现与调用                                                                |
+| ---------------------- | ------------------------------------- | ------------------------ | ------------------------------------------------------------------------- |
+| Prefill / Decode / ViT | `PY_PREFILL` / `PY_DECODE` / `PY_VIT` | `8088 /health`           | VIP 注册 HTTP 端口，Master 按 HTTP 发现将端口加 1 得到 Engine gRPC 端口。 |
+| Master                 | `PY_MASTER`                           | `7001 /health`           | VIP 注册 HTTP 端口，原生 Master gRPC 端口为 HTTP + 2。                    |
+| Frontend               | `PY_FRONT_APP`                        | `20550 /frontend_health` | 入口 VIP 注册 Frontend HTTP 端口。                                        |
 
-多模态 V 显式设置 `PATCH_SIZE`、`DOWNSAMPLE_RATIO`、`HIDDEN_SIZE`、`MIN_PIXELS` 和 `MAX_IMAGE_TOKENS`。默认异步 GET 图片 URL 并读取尺寸，不依赖 Frontend 提供宽高；准备执行器和 Forward 队列分离。`VIT_CONCURRENCY` 限制异步媒体工作线程，`VIT_MAX_QUEUE_SIZE` 提供额外等待额度，`VIT_GPU_MAX_BATCH_SIZE`/`VIT_GPU_BATCH_WAIT_MS` 控制就绪工作的合批。`MM_TIMEOUT_MS`、`MM_IMAGE_MAX_FILE_SIZE_KB`、`DOWNLOAD_HEADERS` 使用 real 名称与单位。支持的 URL/图片格式和模拟边界见组件参考。
+## 4. 配置 zone 并发布
 
-本地假 URL 回放设置 `mock.vit.skip.download: true`（ENV 为 `MOCK_VIT_SKIP_DOWNLOAD=true`），并提供图片宽高；它只跳过读取，仍经过相同的准入、执行器、就绪队列和结果发布流程。Whale 使用默认 false；跳过读取不能用于评估真实下载吞吐。
+1. 用正式字段设置 zone 类型、端口、资源和副本。平台根据角色及端口配置提供 `ROLE_TYPE`、`START_PORT`，以 Carbon 启动计划为准。P/D/V 的 JVM 堆用 `JAVA_TOOL_OPTIONS` 设置。
+2. 在 `zone_process_setting.process_info.envs` 写业务参数。P/D 配 `MAX_SEQ_LEN`、`CONCURRENCY_LIMIT` 及下文的 CP、容量、性能参数。多模态 P/D 的 `IMAGE_TOKEN_ID` 取目标模型的图像 token ID。V 配 `PATCH_SIZE`、`DOWNSAMPLE_RATIO`、`HIDDEN_SIZE`、`MIN_PIXELS`、`MAX_IMAGE_TOKENS`，取实际模型的媒体配置。
+3. 在 Whale 的部署页保存目标 zone 配置，检查启动命令、镜像、资源覆盖和 ENV 的差异。修改 zone 配置后提交当前部署。更换服务配置版本时，在发布页面选中对应版本和目标部署。
+4. 回读 Carbon 启动计划、镜像、健康探针和 VIP 注册端口。确认各角色就绪、`engine_started` 日志中的 `effective_config` 与预期一致，再从 Frontend 发一条真实请求。滚动更新后观察成功率、TTFT 和 Prefill 复用率回稳。
 
-HTTP 为 START_PORT，gRPC 为 START_PORT+1；平台探针访问 HTTP `/health`，指标访问 `/metrics`。注册端口必须与 Master 配置的发现协议一致：GRPC 发现发布实际 gRPC 端口，HTTP 发现发布 HTTP 端口；当前 real WorkerAddressService 会据此转换地址，不能把任意控制端口注册进去。
+## main 分支的 Frontend 与 KVCM
 
-服务不读取本地 topology，不创建实验目录、ready 或 endpoints 文件。固定配置、实际端点在启动日志中记录。正常 TERM 关闭实例；内部 Loop/Scheduler 不可恢复故障使健康检查失败，进程随后非零退出，平台负责重拉。同一工作目录重启不受旧实验文件影响。
+DSV4.1 的 Frontend 使用 `MOCK_FRONTEND_DSV41_MEDIA_URLS=true` 和 `VIT_SEPARATION=2` 连接 Mock V/P/D。Frontend 保留原始媒体输入，用 ViT 返回的行哈希计算 Master 路由键。
 
-## 部署接线边界
+使用 KVCM 时，在所有 Master 上选择 `FLEXLB_CONFIG.cacheMatching.type=KVCM`，并在 `MODEL_SERVICE_CONFIG.kvcm` 填写原生发现配置和命名空间。Prefill 的事件上报实例 ID 必须与 Master 查询的命名空间及逻辑块跨度匹配。[KVCM 配置](component-reference.md#dsv41-engine-与-kvcm-接线)
 
-同一源码构建的真实 Frontend 连接 DSV4.1 Mock P/D/V 时，只在 Frontend 设置
-`MOCK_FRONTEND_DSV41_MEDIA_URLS=true`，并使用远端 ViT（`VIT_SEPARATION=2`）。
-OpenAI Chat 和 DashScope gRPC 保留原始图片占位及媒体描述。Frontend 使用 ViT 返回的长度和
-row hash 计算路由 key，P 再根据 ViT 结果展开原始输入。未设置时走现有真实 Engine 协议。
+## CP 与 block size
 
-Mock Engine 启动不读取 checkpoint 或请求 C2 Fuse 挂载。P/D 使用显式的 `MAX_SEQ_LEN`、`IMAGE_TOKEN_ID`（多模态）和 `CACHE_KEY_HASH_SEED`（与真实 Frontend 匹配时）。Seed 使用有符号十进制 int64。部署迁移时将有效参数加入角色配置后再切换镜像。
+使用支持显式 Prefill CP 的 Frontend。Frontend 和 Mock Prefill 的 `SEQ_SIZE_PER_BLOCK` 都填 **CP 前的基础块大小**，`PREFILL_CP_SIZE` 填相同值，Frontend 额外设 `PREFILL_CP_KV_CACHE_SHARDED=1`。两端按基础块滚动哈希，每组取最后一个 key，Master 的路由跨度为基础块大小 × CP。Mock P/D 的 `CACHE_KEY_HASH_SEED` 与 Frontend 生效值对齐。
 
-这些文件提供可构建的镜像和服务入口，不自动修改 Whale 模板、发布角色或注册 VIP。接入目标部署时，使用其现有角色发现、探针、资源和停止宽限设置。Master 仍是独立 JVM，不起本地 ZK 或 Mock 集群管理器。
+| 示例              | Frontend 和 Mock Prefill 的基础块 / CP | Master 路由跨度        |
+| ----------------- | -------------------------------------- | ---------------------- |
+| DeepSeek V4.1 CP4 | `128 / 4`                              | 512 token，取 K4、K8…  |
+| GLM-5.3 CP8       | `64 / 8`                               | 512 token，取 K8、K16… |
 
-`/metrics` 是 Prometheus 导出；目标部署必须配置实际采集链路。它不等于已经接入 KMonitor，原生指标命名也不代表采集器已经抓到数据。KMonitor SDK/平台采集接线需另行验证，不能以端点存在代替验收。
+Mock 的基础块默认 64，Prefill CP 默认 1。CP 大于 1 时，`CP_FORCE_SINGLE_PREFILL` 默认开启，设为 `0` 可同轮接纳多个 Prefill。Mock Decode 固定 CP1，基础块按目标 Decode 填写。
 
-首次平台验收应检查实际镜像与生效配置、P/D/V 注册地址、真实请求、TERM 与故障重拉、指标采集。本批不部署到 Whale。
+Mock 的 WorkerStatus 上报 Prefill TP 为 CP size、Decode TP 为 1、DP 为 1。Whale 资源规格按单 JVM 实际需求配置。
 
-## KVCM 开关
+## KV 容量
 
-两套部署使用相同镜像、模型、输入和计算配置，只在 Whale 中调整下列原生配置；本地运行直接配置 Case，不另外维护完整部署配置副本。
+P/D 按每实例的**逻辑 block**配置。先用该角色的每块 token 数换算目标 token 容量，再填块数。CP 只改变每块代表的 token 数，填写的块数保持原值。
 
-| Role               | 开启                                                                                                   | 关闭                                 |
-| ------------------ | ------------------------------------------------------------------------------------------------------ | ------------------------------------ |
-| Master（全部主备） | `FLEXLB_CONFIG.cacheMatching.type=KVCM`，配置 `MODEL_SERVICE_CONFIG.kvcm` 的服务地址、端口和 namespace | `cacheMatching.type=LOCAL_SYNC`      |
-| P/D                | `KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm`，配置原生 `RECO_*` 发现参数及共享 `KV_CACHE_EVENT_INSTANCE_ID`    | `KV_CACHE_EVENT_PUBLISHER_TYPE=none` |
-| Frontend、ViT      | 保持原有链路和配置                                                                                     | 相同                                 |
+| 参数                      | 单位与含义                                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------------- |
+| `TEST_BLOCK_NUM`          | 必填，至少 2。Device block 数，含一个 null block。可用 Device 容量为 `TEST_BLOCK_NUM - 1`。 |
+| `MOCK_CACHE_TOTAL_BLOCKS` | 统一缓存能保留的 block 数，不含 null block。默认等于可用 Device 容量，至少为该值。          |
+| `RESERVE_BLOCK_RATIO`     | 首次分配预留的 Device 百分比，默认 5。按可用 Device block 数向下取整。                      |
+| `REUSE_CACHE`             | 默认 `false`。启用前缀复用时，角色和请求都要允许复用，且 Device 前缀索引已开启。            |
+| `ENABLE_DEVICE_CACHE`     | 默认 `true`。控制本地前缀查找和发布。设为 `false` 时，请求执行仍会分配 KV block。           |
+| `ENABLE_REMOTE_CACHE`     | 默认 `false`。Mock 启动时校验此值，设为 `true` 会拒绝启动。                                 |
+| `ENABLE_MEMORY_CACHE`     | 默认 `false`。Mock 启动时校验此值，设为 `true` 会拒绝启动。                                 |
 
-这里只启用缓存元信息查询和上报，未实现远端 KV 数据加载。Engine 的共享 instance*id 必须等于 Master 查询的 `<namespace>*<cacheKeyBlockSize>`，host 身份必须与 Master 发现结果一致。更改 Master 查询模式需要重启。
+这三个 `ENABLE_*` 参数使用默认值时可省略。模拟本地前缀复用时，显式设置 `REUSE_CACHE=true`。需要扩大统一缓存容量时，调整 `MOCK_CACHE_TOTAL_BLOCKS`。
 
-当前 KVCM 查询只使用本地 HBM 命中，Master 的 cacheMatching 同时显式配置 `medium: [hbm]`、`globalKvsHostCount: 0`、`enableP2p: false`。仍需核对实际 MetaService descriptor；不能将 global 命中或本地回退成功当成 KVCM 本地查询成功。协议及回退边界见[组件参考](component-reference.md#dsv41-engine--kvcm-契约)。
+例如 P 为 CP4、基础块为 128，配置 `TEST_BLOCK_NUM=1025`、`MOCK_CACHE_TOTAL_BLOCKS=4096`。Device 可用 1024 块，即 524,288 token，统一缓存最多保留 4096 块，即 2,097,152 token。缓存命中也要取得 Device 驻留额度才可进入计算。
 
-## 监控自动选择
+## 性能模拟
 
-Engine 只启用一个指标后端，不需要额外部署开关。公共构建没有 `MetricReporter` SPI 实现，P/D/V 提供 Prometheus `/metrics`；CI 发现原生 `internal_source/java/kmonitor/pom.xml` 时自动启用 `internal-monitoring` profile，将内部 KMonitor reporter、SDK 和 SPI 文件打入 Engine JAR。启动时发现该实现就使用 KMonitor，不注册 `/metrics`，endpoints 的 `metrics_backend` 为 `kmonitor`、`metrics` 为空字符串。内部包在本地启动也会选择 KMonitor；本地 Case 使用公共构建。
+每个 P/D/V zone 必填 `MOCK_COMPUTE_FORWARD_EXPRESSION`。结果为**每个 Forward batch 的毫秒数**。按目标模型、负载和角色校准。下列公式仅展示写法。
 
-内部 reporter 读取 real 的 `kmonitorSinkAddress`（默认 `HIPPO_SLAVE_IP`，再回退 127.0.0.1）、`kmonitorPort`（4141）、`kmonitorServiceName`、`kmonitorTenant`（default）和 `kmonitorNormalSamplePeriod`（1 秒）。`kmonitorTags` 使用原生 `key^value@key^value` 格式，合并到现有 Hippo 身份标签，平台显式标签优先。没有使用 Master 的 `FLEXLB_MONITOR_*` 配置或 `whale-lb` 默认服务名。
+| 角色    | Forward 公式示例                         | 同时配置                                                                                                                                                                   |
+| ------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Prefill | `110 + 0.0032 * sum(computeTokens)`      | `computeTokens` 是实际重算 token。用 `CONCURRENCY_LIMIT` 控制每轮请求数，按需要设置 `MAX_BATCH_TOKENS_SIZE` 和 `MAX_BATCH_TOKENS_WITHOUT_CACHE`。                          |
+| Decode  | `15 + 0.1 * batchSize`                   | 用 `CONCURRENCY_LIMIT` 控制每轮请求数。每轮耗时与每轮产出量共同决定 TPOT。                                                                                                 |
+| ViT     | `43` 或 `2 + 0.00001 * totalImagePixels` | 用 `VIT_GPU_MAX_BATCH_SIZE`、`VIT_GPU_BATCH_WAIT_MS` 控制合批。用 `VIT_CONCURRENCY`、`VIT_MAX_QUEUE_SIZE` 控制准备并发和等待额度。公式只模拟 Forward，图片下载与排队另计。 |
 
-两种后端消费同一份结构化快照，各自只有一个采集入口，不解析 Prometheus 文本，不重复清空窗口。快照里的 QPS 已是速率、counter 是累计值，KMonitor 按 Gauge 上报，避免再次转换成 QPS；Histogram bucket/sum/count 保留为同名数值序列，不冒充原始延迟样本。SDK 的 JVM 内置资源采集关闭，避免当成每个模拟 Engine 的资源。指标实例在关闭前停止其采集线程；SDK 为 JVM 共享，在进程退出时关闭。
+- **投机解码。** 只在 Decode 配 `MOCK_COMPUTE_DECODE_TOKENS_PER_STEP`，默认 1。设为 `2.6` 时，每请求每轮产出 2 或 3 个 token，长期均值为 2.6。Mock 用这个值模拟接受后的产出量。
+- **EOS。** P/D 可配 `MOCK_COMPUTE_EOS_PROBABILITY`，默认 0，按 token 判断。概率在 0 和 1 之间时必填整数 `MOCK_COMPUTE_EOS_SEED`。请求的 `min_new_tokens` 和 `ignore_eos` 控制 EOS 是否生效，`max_new_tokens` 和剩余上下文限制最终长度。
 
-缺少 provider 时使用 Prometheus；provider 存在但 SDK 加载或初始化失败则启动失败，不静默回退。运行期间上报异常记录错误并在后续周期继续尝试。打包会检查 reporter、SDK、SPI 及服务启动后 `/metrics` 的互斥行为；本地公共测试不能替代内部 CI 的 SDK 编译、配置测试，以及 Whale 上实际指标验收。内部配置测试命令为 `scripts/build-java.sh -pl java/engine -am -Pinternal-monitoring -Dtest=KMonitorReporterTest -Dsurefire.failIfNoSpecifiedTests=false`。
-
-### 配置初始化边界
-
-文件配置和 Whale ENV 都在 `RtpConfig` / `VitConfig` 中完成默认值、派生值和校验，随后才创建组件。
-`EngineConfig` 负责输入转换和模型文件读取，`LLMMockEngine` / `VitNode` 负责装配与生命周期；Scheduler 使用最终值，不重新解释自动配置。
-模型元信息每次加载只读一次，缓存 key namespace 由共享 `CacheSequence` 解析，Client 与 Engine 共用。
-ENV 路径始终使用入口传入的环境，包括模型下载和 DSV4.1 namespace，不混入另一份进程 ENV。
-
-- `max_batch_tokens_size` 缺省或为 0 时，使用 `max_context_batch_size × max_seq_len`；context batch 默认 1。显式非零预算保持不变，超出支持的整数范围会在启动前报错。
-- `seq_size_per_block` 缺省或为 0 时使用普通设备路径的 64。Mock 不根据宿主硬件推断 ROCm/XPU；需要这些布局时显式设置原生参数。
-- `max_seq_len` 缺省或为 0 时使用 8192；Mock 不从 checkpoint 推导长度，模拟长上下文时显式配置。
-- CP 开启时，`cp_force_single_prefill` 默认 true；设为 false 才允许同轮接纳多个 Prefill。uncached token 配额按 real 的 `2 × CP size` 对齐计数。
-- WorkerStatus 和 KVCM 注册保留单 DP 的协议元信息。DP size 固定为 1，WorkerStatus 的 rank 固定为 0，TP size 在 P 上取 CP size，在 D 上取 1。
-- ViT 将 `vit_concurrency` 归一为至少 1，`vit_max_queue_size` 归一为至少 0；不额外限制一小时超时上限。
-
-容量只保留两个入口：`test_block_num` 必填，表示包含 null block 的真实 device 块数（至少 2）；可选 `mock.cache.total.blocks` 表示统一缓存保留容量，不含 null block，默认 `test_block_num - 1` 且不能更小。ENV 分别为 `TEST_BLOCK_NUM`、`MOCK_CACHE_TOTAL_BLOCKS`。`reserve_block_ratio` 只按 device 容量计算。
-
-例如 `TEST_BLOCK_NUM=1025 MOCK_CACHE_TOTAL_BLOCKS=4096` 表示 device 最多容纳 1024 个不同的活动 KV block，统一索引最多保留 4096 个 block。缓存命中同样需要 device 额度，初次容量不足等待重试，Decode 增长不足失败；不模拟 Host/device 搬运耗时。
-
-`device_blocks`、`reserve_blocks` 仅为派生输出。旧 `mock.cache.memory.blocks`、`capacity.*` 和 `device_eviction_policy` 不再接受，LRU 固定；不要为扩大统一池配置 `enable_memory_cache`。`memory_cache_size_mb` 及真实 GPU 显存预算不用于推算 block 数。Mock Case 应只保留实际消费的参数。
-
-### 真实 Frontend 的 CP 缓存布局
-
-Whale 的真实 Frontend 按原生配置开启分片。对于基础块为 128 的 CP4 布局，Mock P 的缓存配置如下。
-
-```text
-SEQ_SIZE_PER_BLOCK=128
-PREFILL_CP_SIZE=4
-```
-
-Mock P 上报 K4、K8 等 canonical keys，CacheStatus 的逻辑块为 512。哈希和 KVCM 注册的基础块大小为 128。Frontend 与 Mock P 使用相同的 seed、基础块和抽样步长。
-
-迁移旧 Mock 部署时，直接填写所需的 `PREFILL_CP_SIZE`。旧的 `TP_SIZE`、`DP_SIZE`、`CP_ROTATE_METHOD` 和 `PREFILL_CP_KV_CACHE_SHARDED` 已退出 Mock 配置。原来只配置了 CP size 的部署，现在会同时应用对应的 Prefill 准入规则。
-
-D 的本地 FULL KV 按基础块管理。P→D 传完整语义输入和媒体身份，不增加 CP 协议字段。本地 Client/Case 可保持不分片，无需把 CP 写进数据集。具体范围见 [Prefill CP](component-reference.md#prefill-cp)。
+完整 ENV、默认值和公式变量见 [组件配置参考](component-reference.md#engine-配置规则)。

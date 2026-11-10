@@ -7,9 +7,6 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
-/**
- * Checks that simulated Forward returns its output and measured timing.
- */
 class SimulatedComputeTest {
     @Test void waitsForPlannedTimeAndReportsActualElapsed() throws Exception {
         try (var compute = new SimulatedCompute()) {

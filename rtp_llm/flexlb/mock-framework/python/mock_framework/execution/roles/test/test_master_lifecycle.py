@@ -80,7 +80,7 @@ def test_stop_selection_and_replacement_preserve_identity_and_artifacts(tmp_path
         ],
     )
     output = tmp_path / "run"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
     completed = {
         v["step"]: v["result"] for v in logs(output) if v["event"] == "step_finished"
@@ -111,7 +111,7 @@ def test_stale_reference_cannot_stop_replacement(tmp_path):
         replicas=1,
     )
     output = tmp_path / "run"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "ERROR" and "active addresses" in result["error"]
     assert [v["node"] for v in logs(output) if v["event"] == "process_started"] == [
         "master-0",
@@ -128,7 +128,7 @@ def test_partial_start_failure_is_not_retried_and_reclaims_started_jvms(tmp_path
         fail_index=2,
     )
     output = tmp_path / "run"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "ERROR" and "unexpectedly" in result["error"]
     assert [v["node"] for v in logs(output) if v["event"] == "process_started"] == [
         "master-0",
@@ -152,7 +152,7 @@ def test_partial_stop_failure_aborts_and_keeps_completed_operations(
         tmp_path, [step("stop", "master/stop"), step("never", "master/start")]
     )
     output = tmp_path / "run"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "ERROR" and "injected stop failure" in result["error"]
     assert not any(v.get("step") == "never" for v in logs(output))
     assert len([v for v in logs(output) if v["event"] == "process_stopped"]) == 2
@@ -243,12 +243,7 @@ async def progress(ctx, args: Empty) -> int:
                 {
                     "interface": "worker/state",
                     "args": {"sequence": 1},
-                    "context": {
-                        "run": "foreground",
-                        "query_time": ctx.query_time,
-                        "observation": None,
-                        "timeout_ms": 1000,
-                    },
+                    "timeout_ms": 1000,
                 },
             )
             successes += value["outcomes"]["success"]
@@ -428,9 +423,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
             "scrape_interval": "250ms",
         }
     output = tmp_path / "result"
-    result = asyncio.run(
-        run_case(case, registry, prepare_launch(recipe, case, tmp_path), output)
-    )
+    result = asyncio.run(run_case(case, prepare_launch(recipe, case, tmp_path), output))
     assert result["status"] == "PASS", result
     values = {
         v["step"]: v["result"] for v in logs(output) if v["event"] == "step_finished"
@@ -520,7 +513,7 @@ def test_kill_and_restore_keep_addresses_and_preserve_each_launch_artifact(tmp_p
         ],
     )
     output = tmp_path / "run"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
     values = {
         v["step"]: v["result"] for v in logs(output) if v["event"] == "step_finished"
@@ -626,7 +619,7 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(
         framework=root,
     )
     output = tmp_path / "run"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
     values = {
         item["step"]: item["result"]
@@ -676,7 +669,7 @@ def test_restart_does_not_hide_unexpected_exit_of_new_process(tmp_path):
         )
     )
     output = tmp_path / "run"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert (
         result["status"] == "ERROR"
         and "master-0-restart-1 exited unexpectedly with code 19" in result["error"]
@@ -695,6 +688,6 @@ def test_restart_does_not_hide_unexpected_exit_of_new_process(tmp_path):
 def test_restart_requires_owned_stopped_masters(tmp_path, steps):
     case, registry, launch = generic(tmp_path, steps)
     output = tmp_path / "run"
-    result = asyncio.run(run_case(case, registry, launch, output))
+    result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "ERROR" and "stopped addresses" in result["error"]
     assert_reaped(output)

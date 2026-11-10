@@ -59,11 +59,10 @@ final class MasterDiscovery implements AutoCloseable {
             if (!node.path("role").asText().equals("master")) continue;
             String rpc = node.path("rpc").asText(), address = node.path("http").asText();
             var uri = URI.create(address);
-            if (!"http".equals(uri.getScheme()) || uri.getHost() == null || uri.getPort() < 1
-                    || !rpc.equals(uri.getHost() + ":" + (uri.getPort() + 2)))
-                throw new IOException("Invalid native Master endpoints: " + node);
+            if (!"http".equals(uri.getScheme()) || uri.getHost() == null || uri.getPort() < 1 || rpc.isBlank())
+                throw new IOException("Invalid Master endpoints: " + node);
             if (allowed != null && !allowed.contains(rpc)) continue;
-            if (!discovered.add(rpc)) throw new IOException("Duplicate Master endpoint");
+            discovered.add(rpc);
             hosts.computeIfAbsent(rpc, k -> new Host(address, rpc));
         }
         // Probe previously healthy hosts even when the latest complete topology omits them.

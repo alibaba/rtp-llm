@@ -18,9 +18,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
-/**
- * Checks that control requests can inject scheduler work through the Engine entry point.
- */
 class SchedulerInjectionTest {
     @TempDir Path directory;
 

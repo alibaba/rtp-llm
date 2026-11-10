@@ -18,9 +18,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
-/**
- * Checks media download, preparation errors and timing in ViT.
- */
 class VitDownloadTest {
     @TempDir Path directory;
 

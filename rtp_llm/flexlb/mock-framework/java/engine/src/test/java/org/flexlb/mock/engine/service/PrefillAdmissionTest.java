@@ -18,9 +18,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
-/**
- * Checks Prefill admission, preparation and cancellation across native RPC paths.
- */
 class PrefillAdmissionTest {
     @TempDir Path directory;
 

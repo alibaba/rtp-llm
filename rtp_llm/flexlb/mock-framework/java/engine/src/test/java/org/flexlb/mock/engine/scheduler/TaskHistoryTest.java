@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Checks how completed requests are retained and reported by version.
+ * Verifies finished-task retention and versioned reads.
  */
 class TaskHistoryTest {
     @Test void laggingReadersKeepCurrentStateAndReceiveExplicitGapEvidence() {

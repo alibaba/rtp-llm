@@ -14,9 +14,6 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 
 import org.junit.jupiter.api.Test;
 
-/**
- * Checks Engine startup, service selection and shutdown.
- */
 class EngineServiceTest {
     @Test void urlOnlyFrontendRequestDownloadsRealImageAndCompletesPrefillDecode() throws Exception {
         var json = new ObjectMapper();

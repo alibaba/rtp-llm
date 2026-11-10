@@ -10,7 +10,7 @@ import java.util.function.Supplier;
 import java.util.function.LongSupplier;
 
 /**
- * RTP metric names and statistics; the scheduler supplies events and state snapshots.
+ * Defines RTP metric names and statistics from scheduler events and state.
  */
 final class RtpMetrics {
     public static final String CACHE_LOOKUPS = "rtp_llm_cache_lookup_tokens_total";
@@ -78,7 +78,7 @@ final class RtpMetrics {
         plannedForward = Gauge.build().name("mock_model_forward_planned_us").help("Planned Forward duration in microseconds.")
             .labelNames(LABELS).register(registry).labels(identity);
         for (String name : List.of("rtp_llm_framework_qps", "rtp_llm_framework_error_qps", "rtp_llm_cancel_qps"))
-            events.observe(name, 0);
+            events.add(name, 0);
         // Operational gauges describe live state. Native scheduler metrics are round observations.
         new Collector() {
             @Override public List<MetricFamilySamples> collect() {
@@ -131,12 +131,12 @@ final class RtpMetrics {
 
     public String scrape() { return MetricTags.scrape(registry, tags); }
 
-    void schedulerRound(int waiting, int running, int loading) {
-        boolean active = waiting > 0 || running > 0 || loading > 0;
+    void schedulerRound(int waiting, int running) {
+        boolean active = waiting > 0 || running > 0;
         if (active || schedulingActive) {
             events.observe("rtp_llm_wait_stream_size", waiting);
             events.observe("rtp_llm_running_stream_size", running);
-            events.observe("rtp_llm_loading_cache_stream_size", loading);
+            events.observe("rtp_llm_loading_cache_stream_size", 0); // KV prepare is synchronous.
         }
         schedulingActive = active;
     }
@@ -330,7 +330,7 @@ final class RtpMetrics {
                      long acceptedTokens, long tpotStepNanos) {}
 
     /**
-     * Captures the queue and cache state needed to report one Engine observation.
+     * Captures live scheduler counts and logical KV capacity.
      */
     public record State(long waiting, long running, long loading, long ready, long totalTokens, long availableTokens,
                         long freeTokens, long heldTokens, int blockSize) {
@@ -344,7 +344,7 @@ final class RtpMetrics {
     }
 
     /**
-     * Tracks token counts used by the Forward throughput samples.
+     * Carries completed Forward token counts that can be summed across rounds.
      */
     record TokenCounts(long context, long withCache, long generate, long total) {
         TokenCounts plus(TokenCounts other) {

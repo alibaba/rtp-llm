@@ -11,7 +11,7 @@ import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Checks generation through the native RTP Client and Engine RPCs.
+ * Verifies that the Client completes requests using the native RTP gRPC protocol.
  */
 class NativeRtpTest {
     @TempDir Path directory;
@@ -20,8 +20,8 @@ class NativeRtpTest {
         try (var p = node("prefill"); var d = node("decode")) {
             var result = ClientProbe.exercise(p.rpcAddress(), d.rpcAddress());
             assertEquals(2, result.get("schedule_calls"));
-            assertEquals(3, ((NativeClient.Result) result.get("generate")).outputTokens());
-            assertEquals(3, ((NativeClient.Result) result.get("fetch")).outputTokens());
+            assertEquals(3, ((BackendRpcClient.Result) result.get("generate")).outputTokens());
+            assertEquals(3, ((BackendRpcClient.Result) result.get("fetch")).outputTokens());
         }
     }
 
@@ -38,8 +38,8 @@ class NativeRtpTest {
     @Test void contextBoundedGenerateAndFetchEndNormallyIncludingEmptyTerminalFrames() throws Exception {
         for (int sequence : new int[]{5, 6}) try (var p = node("prefill"); var d = node("decode", sequence)) {
             var result = ClientProbe.exercise(p.rpcAddress(), d.rpcAddress(), sequence - 4);
-            assertEquals(sequence - 4, ((NativeClient.Result) result.get("generate")).outputTokens());
-            assertEquals(sequence - 4, ((NativeClient.Result) result.get("fetch")).outputTokens());
+            assertEquals(sequence - 4, ((BackendRpcClient.Result) result.get("generate")).outputTokens());
+            assertEquals(sequence - 4, ((BackendRpcClient.Result) result.get("fetch")).outputTokens());
         }
     }
 

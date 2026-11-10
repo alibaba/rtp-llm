@@ -2,9 +2,6 @@ package org.flexlb.mock.engine.cache;
 
 import java.util.*;
 import org.flexlb.mock.engine.config.RtpConfig;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.CancellationException;
 import static org.flexlb.mock.engine.cache.BlockPool.Kind.*;
 
 /**
@@ -19,8 +16,6 @@ public final class KvCacheManager implements AutoCloseable {
     private final int blockSize, deviceBlocks, reserve;
     private final boolean deviceCache;
 
-    private final RemotePrefixLoader remote;
-    private final Set<Loading> pending = new HashSet<>();
     private final Set<Lease> active = Collections.newSetFromMap(new IdentityHashMap<>());
 
     private boolean closed;
@@ -35,15 +30,11 @@ public final class KvCacheManager implements AutoCloseable {
     }
 
     public KvCacheManager(int blockSize, int blocks, int reserve, boolean deviceCache) {
-        this(blockSize, blocks, reserve, deviceCache, null);
-    }
-
-    public KvCacheManager(int blockSize, int blocks, int reserve, boolean deviceCache, RemotePrefixLoader remote) {
-        this(blockSize, blocks, blocks, reserve, deviceCache, remote);
+        this(blockSize, blocks, blocks, reserve, deviceCache);
     }
 
     public KvCacheManager(int blockSize, int deviceBlocks, int totalBlocks, int reserve,
-                   boolean deviceCache, RemotePrefixLoader remote) {
+                   boolean deviceCache) {
         if (blockSize < 1 || deviceBlocks <= 0 || totalBlocks < deviceBlocks || reserve < 0 || reserve > deviceBlocks)
             throw new IllegalArgumentException("Invalid device/total block capacity or reserve");
         pool = new BlockPool(totalBlocks);
@@ -51,7 +42,6 @@ public final class KvCacheManager implements AutoCloseable {
         this.blockSize = blockSize;
         this.reserve = reserve;
         this.deviceCache = deviceCache;
-        this.remote = remote;
     }
 
     /** The observer must only signal; it must never acquire an Engine scheduling lock. */
@@ -107,22 +97,7 @@ public final class KvCacheManager implements AutoCloseable {
     public synchronized Preparation prepare(long requiredTokens, List<Long> keys) {
         var admission = acquire(requiredTokens, keys);
         if (admission.failure() != null) return new Failed(admission.failure(), requiredTokens, keys);
-        var ready = new Ready(admission.lease(), admission.matchNanos(), 0);
-        int localBlocks = ready.lease().reused;
-        if (remote == null || localBlocks >= keys.size()) return ready;
-
-        var suffix = List.copyOf(keys.subList(localBlocks, keys.size()));
-        CompletableFuture<Integer> restore;
-        try {
-            restore = Objects.requireNonNull(remote.load(suffix));
-        } catch (RuntimeException failure) {
-            return ready;
-        }
-        var loading = new Loading(ready, restore, suffix.size());
-        pending.add(loading);
-        Runnable wake = changed;
-        restore.whenComplete((blocks, failure) -> wake.run());
-        return loading.poll();
+        return new Ready(admission.lease(), admission.matchNanos());
     }
 
     public synchronized Admission acquire(long requiredTokens, List<Long> keys) {
@@ -190,7 +165,6 @@ public final class KvCacheManager implements AutoCloseable {
         try { if (owned != null) owned.close(); }
         finally {
             synchronized (this) {
-                for (var load : List.copyOf(pending)) load.close();
                 for (var lease : List.copyOf(active)) lease.close();
                 tree.clear();
             }
@@ -228,21 +202,10 @@ public final class KvCacheManager implements AutoCloseable {
      * A Mock restore source reports the number of consecutive suffix blocks read successfully.
      * The future must be returned without blocking and never owns local block references.
      */
-    @FunctionalInterface
-    public interface RemotePrefixLoader {
-        CompletableFuture<Integer> load(List<Long> suffixKeys);
-    }
+    public sealed interface Preparation permits Ready, Failed {}
 
-    /**
-     * Describes whether cache preparation is ready, loading remotely, or unable to proceed.
-     */
-    public sealed interface Preparation permits Ready, Loading, Failed {}
+    public record Ready(Lease lease, long matchNanos) implements Preparation {}
 
-    public record Ready(Lease lease, long matchNanos, int remoteReusedTokens) implements Preparation {}
-
-    /**
-     * Reports why cache preparation stopped and which cache state a retry depends on.
-     */
     public final class Failed implements Preparation {
         private final Failure failure;
         private final long generation, requiredTokens;
@@ -266,52 +229,6 @@ public final class KvCacheManager implements AutoCloseable {
         }
     }
 
-    /**
-     * Holds the cache lease while a remote prefix is loading and releases it on cancellation.
-     */
-    public final class Loading implements Preparation, AutoCloseable {
-        private final Ready local;
-        private final CompletableFuture<Integer> restore;
-        private final int suffixSize;
-        private boolean settled;
-
-        private Loading(Ready local, CompletableFuture<Integer> restore, int suffixSize) {
-            this.local = local;
-            this.restore = restore;
-            this.suffixSize = suffixSize;
-        }
-
-        /** Returns this handle while pending, or transfers ownership of the ready lease once. */
-        public Preparation poll() {
-            synchronized (KvCacheManager.this) {
-                if (settled) throw new IllegalStateException("KV preparation already settled");
-                if (!restore.isDone()) return this;
-                settled = true;
-                pending.remove(this);
-                try {
-                    Integer restored = restore.join();
-                    if (restored != null && restored > 0 && restored <= suffixSize) {
-                        local.lease().reused += restored;
-                        return new Ready(local.lease(), local.matchNanos(), restored * blockSize);
-                    }
-                } catch (CompletionException | CancellationException failure) {
-                    // The original allocation still holds a valid local prefix and writable suffix.
-                }
-                return local;
-            }
-        }
-
-        @Override public void close() {
-            synchronized (KvCacheManager.this) {
-                if (settled) return;
-                settled = true;
-                pending.remove(this);
-                local.lease().close();
-                restore.cancel(false);
-            }
-        }
-    }
-
     public record Admission(Lease lease, Failure failure, long matchNanos) {}
 
     /**
@@ -320,9 +237,6 @@ public final class KvCacheManager implements AutoCloseable {
     public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
                            int referencedBlocks, long version, long[] keys) {}
 
-    /**
-     * Holds request references to allocated blocks until publication or release.
-     */
     public final class Lease implements AutoCloseable {
         private final List<Slot> slots;
         private int reused;
@@ -384,9 +298,6 @@ public final class KvCacheManager implements AutoCloseable {
         private void requireOpen() { if (terminal) throw new IllegalStateException("Lease is closed"); }
     }
 
-    /**
-     * Pairs an allocated block reference with its cache key once the block is published.
-     */
     private static final class Slot {
         final BlockPool.Reference reference;
         Long key;

@@ -109,17 +109,11 @@ public final class EngineMain {
         return new Started(node::close, node::checkHealthy, node::endpoints, config.effective());
     }
 
-    /**
-     * Owns the started Engine service and the address exposed for local control.
-     */
     private record Started(Runnable stop, Runnable health, Supplier<Map<String, Object>> endpoints,
                            JsonNode effective) implements AutoCloseable {
         @Override public void close() { stop.run(); }
     }
 
-    /**
-     * Parses and validates the host and port used by the Engine launcher.
-     */
     public record Address(String bind, String advertise) {
         public static Address local() {
             String bind=System.getenv().getOrDefault("MOCK_BIND_HOST","127.0.0.1");

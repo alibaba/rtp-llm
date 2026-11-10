@@ -9,10 +9,9 @@ import java.nio.file.Path;
 import java.util.*;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.forward.ComputeModel;
-import org.flexlb.mock.engine.forward.DecodeSpec;
 
 /**
- * Native RTP names/units stay native; resolved pool capacity excludes the native null block.
+ * Loads and validates effective configuration for an RTP mock engine.
  */
 public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, int totalCacheBlocks, int reserveBlocks,
                         boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
@@ -88,7 +87,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         if (root.path("environment").has("compute")) throw new IllegalArgumentException("Removed environment.compute: use component.config.compute");
         var compute = ComputeModel.fromSettings(config, Map.of(
             "cpSize", (double) cpSize, "cpEnabled", cpSize > 1 ? 1.0 : 0.0));
-        if (role == Role.prefill && !compute.configuration().decode().equals(new DecodeSpec(null)))
+        if (role == Role.prefill && compute.hasCustomDecodeStep())
             throw new IllegalArgumentException("Decode progress settings belong in Decode compute");
         if (!root.path("id").isTextual()) throw new IllegalArgumentException("Node id must be a string");
         return new RtpConfig(root.path("id").textValue(), role,

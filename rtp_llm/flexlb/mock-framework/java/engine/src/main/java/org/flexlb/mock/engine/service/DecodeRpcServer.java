@@ -2,6 +2,9 @@ package org.flexlb.mock.engine.service;
 
 import io.grpc.*;
 import io.grpc.stub.*;
+import java.util.HashSet;
+import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.*;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.*;
@@ -10,9 +13,10 @@ import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpControl;
 import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpTransferResult;
 import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
+import org.flexlb.mock.engine.scheduler.RequestState;
 
 /**
- * Native ALLOCATE/LOAD/GENERATE protocol. Queue membership and progress stay behind EngineScheduler.
+ * Handles the native ALLOCATE/LOAD/GENERATE protocol for Decode.
  */
 final class DecodeRpcServer implements AutoCloseable {
     private final RtpRpcService.Config config;
@@ -211,11 +215,11 @@ final class DecodeRpcServer implements AutoCloseable {
     private enum Stage { ALLOCATING, ALLOCATED, LOADING, LOADED, GENERATING, FINISHING }
 
     /**
-     * Manages one Decode RPC from admission through output delivery and cancellation.
+     * Tracks one Decode RPC through allocation, loading and generation.
      */
     private final class Call implements StreamObserver<GenerateRequestPB>, EngineScheduler.Listener {
         final ServerCallStreamObserver<GenerateOutputsPB> response;
-        final GeneratedOutput delivery;
+        final GenerateResponseStream delivery;
         final Runnable rpcCompleted;
         final long started = System.nanoTime();
         final long rpcDeadline;
@@ -232,7 +236,7 @@ final class DecodeRpcServer implements AutoCloseable {
             rpcCompleted=trackRequest.get();
             rpcDeadline = context.getDeadline() == null ? Long.MAX_VALUE
                 : RpcMessages.after(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
-            delivery = new GeneratedOutput(transport, deadlines, TimeUnit.MINUTES.toMillis(10), ignored -> {});
+            delivery = new GenerateResponseStream(transport, deadlines, TimeUnit.MINUTES.toMillis(10), ignored -> {});
             delivery.attach(response, () -> {
                 boolean expired = context.getDeadline() != null && context.getDeadline().isExpired();
                 disconnected(this, expired ? Status.DEADLINE_EXCEEDED.withDescription("Decode RPC deadline expired")
@@ -252,12 +256,83 @@ final class DecodeRpcServer implements AutoCloseable {
             int elapsedUs = (int) Math.min(Integer.MAX_VALUE, (System.nanoTime() - started) / 1000);
             var info = AuxInfoPB.newBuilder().setInputLen(input.getTokenIdsCount())
                 .setIterCount(progress.iterations() + 1).setPrefixLen(request.reused()).setTotalReuseLen(request.reused())
-                .setLocalReuseLen(request.reused() - request.remoteReused()).setRemoteReuseLen(request.remoteReused()).setPdSep(true)
+                .setLocalReuseLen(request.reused()).setPdSep(true)
                 .setCostTimeUs(elapsedUs).setFirstTokenCostTimeUs(elapsedUs);
             delivery.advance(input.getRequestId(), token, progress.generated(), info.build(), progress.finished());
         }
         @Override public void terminal(EngineScheduler.Request request, RequestFailure failure) {
             ended(this, RpcErrors.status(failure), RpcErrors.code(failure));
+        }
+    }
+
+    /**
+     * Simulates zero-time KV loading asynchronously and holds resources until it quiesces.
+     */
+    static final class SimulatedKvLoad implements AutoCloseable {
+        private final Object lock = new Object();
+        private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
+        private final Set<Execution> active = new HashSet<>();
+
+        private boolean closed;
+
+        /** Ownership transfers only on a successful return. The zero-time model executes asynchronously. */
+        public Execution submit(RequestState.Use use) {
+            Objects.requireNonNull(use);
+            synchronized (lock) {
+                if (closed) throw new IllegalStateException("Transfer executor is closed");
+                var execution = new Execution(use);
+                active.add(execution);
+                try { workers.execute(execution::run); }
+                catch (RuntimeException error) { active.remove(execution); throw error; }
+                return execution;
+            }
+        }
+
+        @Override public void close() {
+            synchronized (lock) {
+                if (!closed) {
+                    closed = true;
+                    active.forEach(Execution::cancel);
+                    workers.shutdown();
+                }
+            }
+            try {
+                if (!workers.awaitTermination(3, TimeUnit.SECONDS)) throw new IllegalStateException("KV transfer did not quiesce");
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted closing KV transfer", error);
+            }
+        }
+
+        public enum State { COMPLETED, CANCELLED, FAILED }
+
+        public record Outcome(State state, RuntimeException error) {}
+
+        /**
+         * Tracks cancellation and releases the KV reference before reporting completion.
+         */
+        public final class Execution {
+            private final RequestState.Use use;
+            private final CompletableFuture<Outcome> completion = new CompletableFuture<>();
+            private boolean cancelled, terminal;
+            private Execution(RequestState.Use use) { this.use = use; }
+            public CompletionStage<Outcome> completion() { return completion.minimalCompletionStage(); }
+            public boolean cancel() {
+                synchronized (lock) {
+                    if (terminal) return false;
+                    cancelled = true;
+                    return true;
+                }
+            }
+            private void run() {
+                State state;
+                synchronized (lock) { terminal = true; state = cancelled ? State.CANCELLED : State.COMPLETED; }
+                RuntimeException failure = null;
+                try { use.close(); }
+                catch (RuntimeException error) { state = State.FAILED; failure = error; }
+                synchronized (lock) { active.remove(this); }
+                completion.complete(new Outcome(state, failure));
+            }
         }
     }
 }

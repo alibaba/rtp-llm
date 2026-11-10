@@ -32,11 +32,10 @@ public final class LLMMockEngine implements AutoCloseable {
     private org.flexlb.mock.metrics.MetricsOutput metrics;
     private java.util.function.Supplier<List<MetricFamilySamples>> metricSource;
 
-    private LLMMockEngine(RtpConfig config, EngineScheduler.Factory schedulers, KvCacheManager.RemotePrefixLoader remote) {
+    private LLMMockEngine(RtpConfig config, EngineScheduler.Factory schedulers) {
         this.config = Objects.requireNonNull(config);
         Objects.requireNonNull(schedulers);
-        cacheManager = new KvCacheManager(config.cacheBlockSize(), config.deviceBlocks(), config.totalCacheBlocks(), config.reserveBlocks(), config.deviceCache(),
-            config.role() == org.flexlb.mock.protocol.Role.prefill ? remote : null);
+        cacheManager = new KvCacheManager(config.cacheBlockSize(), config.deviceBlocks(), config.totalCacheBlocks(), config.reserveBlocks(), config.deviceCache());
         var lock = new Object();
         var finished = new TaskHistory();
         try {
@@ -69,12 +68,7 @@ public final class LLMMockEngine implements AutoCloseable {
     }
 
     public static LLMMockEngine start(RtpConfig config, int rpcPort, int controlPort, EngineScheduler.Factory schedulers) throws IOException {
-        return start(config, rpcPort, controlPort, schedulers, null);
-    }
-
-    public static LLMMockEngine start(RtpConfig config, int rpcPort, int controlPort, EngineScheduler.Factory schedulers,
-                                KvCacheManager.RemotePrefixLoader remote) throws IOException {
-        var node = new LLMMockEngine(config, schedulers, remote);
+        var node = new LLMMockEngine(config, schedulers);
         try {
             var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
             node.rpc = builder.build().start();

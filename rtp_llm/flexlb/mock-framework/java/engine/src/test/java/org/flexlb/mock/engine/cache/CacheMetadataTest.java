@@ -4,9 +4,6 @@ import java.util.*;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
-/**
- * Checks block key snapshots and cache metadata updates.
- */
 class CacheMetadataTest {
     @Test void publishesOnlyValidBlocksAndReportsReclamation() throws Exception {
         try (var cache = new KvCacheManager(1, 4, 0)) {

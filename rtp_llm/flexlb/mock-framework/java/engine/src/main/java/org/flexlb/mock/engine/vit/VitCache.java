@@ -7,7 +7,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Byte-budgeted embedding/hash LRU. Results held by callers outlive cache residency.
+ * Holds pending shared work and byte-budgeted embedding and hash LRU tiers.
  */
 final class VitCache implements AutoCloseable {
     private final VitConfig config;
@@ -17,8 +17,6 @@ final class VitCache implements AutoCloseable {
 
     private long deviceBytes, hostBytes, hashBytes;
     private boolean closed;
-
-    VitCache(VitConfig config) { this(config, new VitMetrics()); }
 
     VitCache(VitConfig config, VitMetrics metrics) { this.config = config; this.metrics = metrics; }
 
@@ -141,7 +139,7 @@ final class VitCache implements AutoCloseable {
     private static long hashBytes(VitGeometry.Image image) { return (long)image.rows()*4 + image.key().length(); }
 
     /**
-     * Associates a media cache lookup with the shared result and the caller waiting for it.
+     * Tracks one consumer of a shared image result and cancels work when the last consumer leaves.
      */
     static final class Claim implements AutoCloseable {
         private final String key;

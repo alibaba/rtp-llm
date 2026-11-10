@@ -19,7 +19,7 @@ import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Checks Engine Meta report payloads and the response to remote payload requests.
+ * Verifies Mock Engine reporting and remote operation replies against the native protocol.
  */
 class KvcmProtocolTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -46,7 +46,7 @@ class KvcmProtocolTest {
         }
     }
 
-    @Test void unimplementedPayloadIoAndRankShutdownNeverFabricateSuccess() throws Exception {
+    @Test void unimplementedPayloadIoNeverFabricatesSuccess() throws Exception {
         var path = directory.resolve("native.json"); JSON.writeValue(path.toFile(),LLMMockEngineTest.configuration("prefill"));
         try(var node = LLMMockEngine.start(RtpConfig.load(path))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
@@ -56,10 +56,6 @@ class KvcmProtocolTest {
                     var result = rpc.executeFunction(FunctionRequestPB.newBuilder().setRemoteRequest(RemoteOperationRequestPB.newBuilder().setOp(op)).build()).getRemoteResponse();
                     assertEquals(RemoteTransferStatusPB.REMOTE_TRANSFER_STATUS_FAILED,result.getTransferStatus());
                 }
-                var failure = assertThrows(StatusRuntimeException.class, () -> rpc.executeFunction(
-                    FunctionRequestPB.getDefaultInstance()));
-                assertEquals(Status.Code.UNIMPLEMENTED,failure.getStatus().getCode());
-
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
         }
     }
@@ -96,9 +92,6 @@ class KvcmProtocolTest {
         while (!condition.getAsBoolean()) { assertTrue(System.nanoTime() < until,"Condition timed out"); Thread.sleep(10); }
     }
 
-    /**
-     * Captures Engine HTTP events at a local Meta fixture.
-     */
     static final class Meta implements AutoCloseable {
         final List<JsonNode> requests = new CopyOnWriteArrayList<>();
         final AtomicInteger registrations = new AtomicInteger();

@@ -9,7 +9,7 @@ import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Checks RTP settings loaded from model and runtime configuration.
+ * Verifies RTP engine configuration parsing and validation.
  */
 class RtpConfigTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -85,7 +85,7 @@ class RtpConfigTest {
         compute.putObject("eos").put("probability", .1);
         assertThrows(Exception.class, () -> load(root));
         ((ObjectNode) compute.path("eos")).put("seed", 42);
-        assertEquals(.1, load(root).compute().configuration().eos().probability());
+        assertEquals(.1, load(root).compute().effectiveSettings().get("mock.compute.eos.probability").doubleValue());
         ((ObjectNode) compute.path("eos")).put("extra", 1); assertThrows(Exception.class, () -> load(root));
         compute.remove("eos"); compute.putObject("decode").put("tokens.per.step", 2.6);
         assertThrows(IllegalArgumentException.class, () -> load(root));
@@ -109,9 +109,9 @@ class RtpConfigTest {
         var config = (ObjectNode) root.path("component").path("config");
         ((ObjectNode) config.path("mock.compute")).putObject("decode").put("tokens.per.step", 2.6);
         var model = load(root);
-        assertEquals(2.6, model.compute().configuration().decode().tokens_per_step());
+        assertEquals(2.6, model.compute().effectiveSettings().get("mock.compute.decode.tokens.per.step").doubleValue());
         ((ObjectNode) root.path("component")).set("config", model.effective());
-        assertEquals(2.6, load(root).compute().configuration().decode().tokens_per_step());
+        assertEquals(2.6, load(root).compute().effectiveSettings().get("mock.compute.decode.tokens.per.step").doubleValue());
     }
 
     @Test void acceptsOnlyLocalLru() throws Exception {

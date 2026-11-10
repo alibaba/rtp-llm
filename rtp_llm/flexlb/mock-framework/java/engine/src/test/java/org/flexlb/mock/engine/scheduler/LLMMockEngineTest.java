@@ -13,9 +13,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
-/**
- * Checks Engine assembly and native status using configured roles.
- */
 public class LLMMockEngineTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 

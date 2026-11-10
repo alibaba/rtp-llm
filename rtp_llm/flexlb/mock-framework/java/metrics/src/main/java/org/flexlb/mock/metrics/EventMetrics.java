@@ -2,9 +2,10 @@ package org.flexlb.mock.metrics;
 
 import io.prometheus.client.*;
 import java.util.*;
+import org.flexlb.mock.metrics.MetricReporter.EventKind;
 
 /**
- * One event API: Prometheus retains counters and sum/count; an installed SDK receives original observations.
+ * Records counter deltas and original event samples for the selected backend.
  */
 public final class EventMetrics extends Collector {
     private static final System.Logger LOG = System.getLogger(EventMetrics.class.getName());
@@ -13,7 +14,7 @@ public final class EventMetrics extends Collector {
     private final MetricReporter reporter;
     private final Map<String, String> identityTags;
     private final CollectorRegistry registry = new CollectorRegistry();
-    private final Map<String, Set<String>> labelNames = new HashMap<>();
+    private final Map<String, Schema> schemas = new HashMap<>();
     private final Map<String, Summary> summaries = new LinkedHashMap<>();
     private final Map<String, Counter> counters = new HashMap<>();
 
@@ -29,27 +30,46 @@ public final class EventMetrics extends Collector {
         this.identityTags = Map.copyOf(identityTags);
     }
 
-    public void increment(String name) { observe(name, 1); }
+    public void increment(String name) { add(name, 1); }
+
+    public void add(String name, double delta) { add(name, delta, Map.of()); }
+
+    public void add(String name, double delta, Map<String, String> tags) {
+        record(name, EventKind.DELTA, delta, tags);
+    }
 
     public void observe(String name, double value) { observe(name, value, Map.of()); }
 
-    public synchronized void observe(String name, double value, Map<String, String> tags) {
+    public void observe(String name, double value, Map<String, String> tags) {
+        record(name, EventKind.SAMPLE, value, tags);
+    }
+
+    @Override public List<MetricFamilySamples> collect() {
+        var result = new ArrayList<MetricFamilySamples>();
+        registry.metricFamilySamples().asIterator().forEachRemaining(result::add);
+        return result;
+    }
+
+    private synchronized void record(String name, EventKind kind, double value, Map<String, String> tags) {
         if (!Double.isFinite(value) || value < 0 || tags.containsKey("role"))
             throw new IllegalArgumentException("Invalid metric observation");
-        var previous = labelNames.putIfAbsent(name, Set.copyOf(tags.keySet()));
-        if (previous != null && !previous.equals(tags.keySet()))
-            throw new IllegalArgumentException("Inconsistent metric labels: " + name);
+        var schema = schemas.get(name);
+        if (schema == null) schemas.put(name, new Schema(kind, Set.copyOf(tags.keySet())));
+        else {
+            if (schema.kind() != kind) throw new IllegalArgumentException("Inconsistent metric type: " + name);
+            if (!schema.labels().equals(tags.keySet())) throw new IllegalArgumentException("Inconsistent metric labels: " + name);
+        }
         var ordered = new TreeMap<>(tags);
         if (reporter != null) {
             ordered.put("role", role);
             ordered.putAll(identityTags);
-            try { reporter.observe(name, Map.copyOf(ordered), value); }
+            try { reporter.observe(name, kind, Map.copyOf(ordered), value); }
             catch (RuntimeException error) { LOG.log(System.Logger.Level.ERROR, "Engine metric observation failed: " + name, error); }
             return;
         }
         var names = new ArrayList<>(List.of("role")); names.addAll(ordered.keySet());
         var labels = new ArrayList<>(List.of(role)); labels.addAll(ordered.values());
-        if (isRate(name)) {
+        if (kind == EventKind.DELTA) {
             counters.computeIfAbsent(name, ignored -> Counter.build().name(name + "_total")
                 .help("Cumulative events; use rate() for events per second.")
                 .labelNames(names.toArray(String[]::new)).register(registry))
@@ -62,12 +82,5 @@ public final class EventMetrics extends Collector {
             .labels(labels.toArray(String[]::new)).observe(value);
     }
 
-    @Override public List<MetricFamilySamples> collect() {
-        var result = new ArrayList<MetricFamilySamples>();
-        registry.metricFamilySamples().asIterator().forEachRemaining(result::add);
-        return result;
-    }
-
-    // Native ViT embedding TPS is an accumulating token metric, just like event QPS.
-    static boolean isRate(String name) { return name.endsWith("_qps") || name.equals("py_rtp_vit_embedding_tps"); }
+    private record Schema(EventKind kind, Set<String> labels) {}
 }

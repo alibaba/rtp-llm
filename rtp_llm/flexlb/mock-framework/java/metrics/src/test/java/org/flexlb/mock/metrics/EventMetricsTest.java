@@ -4,10 +4,11 @@ import io.prometheus.client.CollectorRegistry;
 import io.prometheus.client.Collector.MetricFamilySamples;
 import java.util.*;
 import org.junit.jupiter.api.Test;
+import org.flexlb.mock.metrics.MetricReporter.EventKind;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Checks sample aggregation and repeated scrapes of event metrics.
+ * Verifies explicit event types and sample weights across scrapes and push reporting.
  */
 class EventMetricsTest {
     @Test void summariesKeepLabelsAndDoNotExposeAmbiguousWindowMeans() {
@@ -30,11 +31,15 @@ class EventMetricsTest {
         var metrics = prometheus("vit", registry);
         metrics.observe("py_rtp_vit_embedding_rt", 10); metrics.observe("py_rtp_vit_embedding_rt", 30);
         metrics.increment("py_rtp_vit_qps"); metrics.increment("py_rtp_vit_qps");
-        metrics.observe("py_rtp_vit_embedding_tps", 20); metrics.observe("py_rtp_vit_embedding_tps", 40);
+        metrics.add("embedding_tokens", 20); metrics.add("embedding_tokens", 40);
+        metrics.observe("sample_qps", 4);
+        assertThrows(IllegalArgumentException.class, () -> metrics.add("sample_qps", 1));
+        assertThrows(IllegalArgumentException.class, () -> metrics.observe("embedding_tokens", 1));
         for (int i = 0; i < 3; i++) {
             var text = MetricTags.scrape(registry, Map.of());
             assertEquals(2, sample(text, "py_rtp_vit_qps_total", ""));
-            assertEquals(60, sample(text, "py_rtp_vit_embedding_tps_total", ""));
+            assertEquals(60, sample(text, "embedding_tokens_total", ""));
+            assertEquals(4, sample(text, "sample_qps_sum", ""));
             assertEquals(40, sample(text, "py_rtp_vit_embedding_rt_sum", ""));
             assertEquals(2, sample(text, "py_rtp_vit_embedding_rt_count", ""));
             assertTrue(text.contains("# TYPE py_rtp_vit_qps_total counter"));
@@ -65,11 +70,11 @@ class EventMetricsTest {
     }
 
     @Test void sdkReceivesOriginalSamplesAndNoPeriodicEventFacade() {
-        record Event(String name, Map<String, String> tags, double value) {}
+        record Event(String name, EventKind kind, Map<String, String> tags, double value) {}
         var received = new ArrayList<Event>();
         MetricReporter reporter = new MetricReporter() {
             public void initialize(Map<String,String> env) { }
-            public void observe(String name, Map<String,String> tags, double value) { received.add(new Event(name, tags, value)); }
+            public void observe(String name, EventKind kind, Map<String,String> tags, double value) { received.add(new Event(name, kind, tags, value)); }
             public void report(List<MetricFamilySamples> snapshot) { assertTrue(snapshot.isEmpty()); }
         };
         var events = new EventMetrics("prefill", reporter, Map.of("dp_rank", "0"));
@@ -82,6 +87,8 @@ class EventMetricsTest {
         assertEquals(10, received.getFirst().value()); assertEquals(1000, received.get(100).value());
         assertEquals(Map.of("role", "prefill", "dp_rank", "0", "tier", "DEVICE"), received.get(101).tags());
         assertEquals(0, received.get(101).value()); assertEquals(1, received.getLast().value());
+        assertEquals(EventKind.SAMPLE, received.get(101).kind());
+        assertEquals(EventKind.DELTA, received.getLast().kind());
         reporter.report(MetricTags.collect(registry, Map.of()));
         assertEquals(103, received.size());
     }
