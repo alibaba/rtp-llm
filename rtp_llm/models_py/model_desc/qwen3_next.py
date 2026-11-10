@@ -825,9 +825,11 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         )
         origin_shape = mixed_qkv.shape
         mixed_qkv = mixed_qkv.reshape(batch, seq, -1).transpose(1, 2)
+        # The AscendC operator consumes the raw paged pool view
+        # (pages, state_len, dim); the Triton kernel keeps (page, dim, state).
         out = causal_conv1d_update(
             mixed_qkv,
-            conv_states.transpose(1, 2),
+            conv_states if _IS_ASCEND else conv_states.transpose(1, 2),
             self.conv_weights,
             bias=None,
             activation="silu",
