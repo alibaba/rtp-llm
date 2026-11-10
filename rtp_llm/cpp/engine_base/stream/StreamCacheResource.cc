@@ -530,6 +530,33 @@ absl::Status StreamCacheResource::waitForAllocatorLoad() {
     return finalizeAllocatorLoad();
 }
 
+StreamCacheResource::InlineLoadCompletion
+StreamCacheResource::tryCompleteLocalOnlyLoadNow(std::chrono::milliseconds inline_wait) {
+    if (!allocator_load_context_) {
+        return InlineLoadCompletion::COMPLETED;
+    }
+    const auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
+    if (!load_context || !load_context->isLocalOnlyAdoption()) {
+        return InlineLoadCompletion::NOT_LOCAL;
+    }
+    // Bounded inline wait for the already-submitted copyless load. The engine
+    // loop is not a BlockTreeTaskPool worker, so this cannot self-deadlock; a
+    // timeout or failure falls back to the async LOADING_CACHE path unchanged.
+    if (!load_context->waitDoneFor(inline_wait) || !load_context->done()) {
+        return InlineLoadCompletion::PENDING;
+    }
+    if (!load_context->success()) {
+        // Failure finalization (error events / malloc retry) is identical to the
+        // async path: leave the LOADING_CACHE handling to the next pass.
+        return InlineLoadCompletion::PENDING;
+    }
+    // Runs the existing finalizeAllocatorLoad() (with its metrics, reuse
+    // publication and decode-source adoption) on the engine-loop thread, which
+    // already owns loadCacheDone() at round boundaries.
+    loadCacheDone();
+    return InlineLoadCompletion::COMPLETED;
+}
+
 absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     RTP_LLM_PROFILE_FUNCTION();
     // TODO(xinfei.sxf) add reserver_blocks

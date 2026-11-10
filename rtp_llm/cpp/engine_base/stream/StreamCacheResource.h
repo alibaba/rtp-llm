@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -40,6 +41,17 @@ public:
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::Status         initKVBlock();
     absl::Status         waitForAllocatorLoad();
+    // Experiment 00028: completes a LOCAL-ONLY (copyless device-tier reference
+    // adoption) load inline in the admission pass so the stream does not wait
+    // for the next schedule() round boundary in LOADING_CACHE. Outcomes:
+    // COMPLETED - load settled (or no load context) and was finalized via the
+    // existing loadCacheDone() path; NOT_LOCAL - the load has host/disk copy
+    // descriptors, joins, or a pending backend match, keep the async path;
+    // PENDING - the bounded inline wait timed out (or the load failed; failure
+    // handling is identical to the async path on the next pass), keep waiting
+    // in LOADING_CACHE exactly as before.
+    enum class InlineLoadCompletion { NOT_LOCAL, PENDING, COMPLETED };
+    InlineLoadCompletion tryCompleteLocalOnlyLoadNow(std::chrono::milliseconds inline_wait);
     // Empty while pending; a terminal status preserves retryable materialization failures.
     std::optional<absl::Status> pollAllocatorLoad();
     absl::Status                incrKVBlock(int seq_len_override = -1);

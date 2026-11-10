@@ -1570,3 +1570,54 @@ TEST(LoadAsyncContextTest, ShutdownRejectsCommitBeforeAbortCleanupFinishes) {
 
 }  // namespace
 }  // namespace rtp_llm
+
+// Experiment 00028: a load with only device-source descriptors, no joined
+// dependencies and no storage-backend match is a copyless local-only reference
+// adoption. Such a context must be identifiable (so the admission pass can
+// complete it inline instead of parking the stream in LOADING_CACHE until the
+// next round boundary) and its bounded wait must report timeout while pending
+// and completion once the transfer counter is settled.
+TEST(LoadAsyncContextTest, LocalOnlyAdoptionPredicateAndBoundedInlineWait) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+
+    TransferDescriptor device_descriptor;
+    device_descriptor.source_tier = Tier::DEVICE;
+    auto local_only_context = coordinator->create({device_descriptor}, {false}, 1);
+    ASSERT_TRUE(coordinator->registerContext(local_only_context));
+    EXPECT_TRUE(local_only_context->isLocalOnlyAdoption());
+    EXPECT_FALSE(local_only_context->done());
+    EXPECT_FALSE(local_only_context->waitDoneFor(std::chrono::milliseconds(1)));
+
+    ASSERT_TRUE(local_only_context->commit());
+    ASSERT_TRUE(local_only_context->completeTransfers(1, true));
+    EXPECT_TRUE(local_only_context->done());
+    EXPECT_TRUE(local_only_context->waitDoneFor(std::chrono::milliseconds(1)));
+    EXPECT_EQ(commits, 1u);
+
+    // Host-source descriptors carry copy work and are not local-only adoptions.
+    TransferDescriptor host_descriptor;
+    host_descriptor.source_tier = Tier::HOST;
+    auto host_context = coordinator->create({host_descriptor}, {false}, 1);
+    ASSERT_TRUE(coordinator->registerContext(host_context));
+    EXPECT_FALSE(host_context->isLocalOnlyAdoption());
+
+    // Joined dependencies wait on foreign transfers and are not local-only.
+    TransferDescriptor joined_descriptor;
+    joined_descriptor.source_tier = Tier::DEVICE;
+    auto joined_context = coordinator->create({joined_descriptor}, {true}, 1);
+    ASSERT_TRUE(coordinator->registerContext(joined_context));
+    EXPECT_FALSE(joined_context->isLocalOnlyAdoption());
+
+    // A context with a storage backend attached is never local-only.
+    auto   backend = std::make_shared<ManualBackend>();
+    auto   pool    = std::make_shared<TestBlockPool>();
+    initBackend(*backend, pool);
+    auto backend_context = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(backend_context));
+    EXPECT_FALSE(backend_context->isLocalOnlyAdoption());
+
+    EXPECT_EQ(aborts, 0u);
+    coordinator->shutdown();
+}

@@ -80,6 +80,28 @@ void GenerateStateMachine::handleWaiting() {
         // 设置 LoadInitiated 标志，表示已尝试asyncLoadCache. 当前实现即便asyncLoadCache失败也不再重试
         reportEvent(StreamEvents::LoadInitiated);
         if (ret) {
+            // Experiment 00028: a local-only (copyless device-tier reference
+            // adoption) load settles in ~ms, but the stream would otherwise sit
+            // in LOADING_CACHE until the next schedule() round boundary because
+            // the engine loop is blocked in the forward during each round.
+            // Complete such loads inline in the admission pass instead; every
+            // other load (host/disk copies, joins, backend match) and any
+            // timeout or failure keeps the async LOADING_CACHE path unchanged.
+            if (stream_cache_resource_->tryCompleteLocalOnlyLoadNow(std::chrono::milliseconds(50))
+                == StreamCacheResource::InlineLoadCompletion::COMPLETED) {
+                if (stream != nullptr) {
+                    stream->recordLoadingCacheStartTime();
+                    stream->recordLoadingCacheDoneTime();
+                }
+                if (stream_cache_resource_->resourceContext().role_type != RoleType::DECODE) {
+                    // Same transition as the no-load-needed path above.
+                    transitionToRunning();
+                } else {
+                    // Same transition handleLoading() applies on completion.
+                    status.store(StreamState::WAITING, std::memory_order_release);
+                }
+                return;
+            }
             if (stream != nullptr) {
                 stream->recordLoadingCacheStartTime();
             }

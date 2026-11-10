@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <condition_variable>
 #include <cstdint>
@@ -111,6 +112,17 @@ public:
     bool                  settle(bool success, bool host_success = false);
     bool                  onTaskFail();
     void                  waitDone() override;
+    // Experiment 00028: a load is a LOCAL-ONLY reference adoption when every
+    // descriptor sources the device tier (no host/disk copy work), no descriptor
+    // joins an in-flight transfer, and no storage-backend match is pending. Such
+    // loads settle in ~ms (queue wait + settlement only) and can be completed
+    // inline by the admission pass instead of waiting for the next schedule()
+    // round boundary in LOADING_CACHE.
+    bool isLocalOnlyAdoption() const;
+    // Bounded variant of waitDone(): returns true when the context reached a
+    // terminal state within the timeout. The unbounded deadline semantics of
+    // waitDone() are unchanged for every other caller.
+    bool waitDoneFor(std::chrono::milliseconds timeout);
     void                  onDone(DoneCallback callback) override;
     bool                  done() const override;
     bool                  success() const override;

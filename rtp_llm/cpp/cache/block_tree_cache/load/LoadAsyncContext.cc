@@ -544,6 +544,25 @@ void LoadAsyncContext::waitDone() {
     }
 }
 
+bool LoadAsyncContext::isLocalOnlyAdoption() const {
+    // need_backend_match_ is immutable after construction; when it is false the
+    // backend flags below are never written, so this const read is race-free.
+    if (need_backend_match_ || backend_started_ || backend_pending_) {
+        return false;
+    }
+    for (size_t index = 0; index < load_descs_.size(); ++index) {
+        if (joined_load_[index] || load_descs_[index].source_tier != Tier::DEVICE) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool LoadAsyncContext::waitDoneFor(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, timeout, [this] { return done(); });
+}
+
 void LoadAsyncContext::onDone(DoneCallback callback) {
     if (!callback) {
         return;
