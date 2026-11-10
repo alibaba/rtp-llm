@@ -72,6 +72,18 @@ class MasterDiscoveryTest {
         }
     }
 
+    @Test void deduplicatesRpcAddressesWithoutDerivingThemFromHttpPorts() throws Exception {
+        Path topology = directory.resolve("topology.json");
+        try (var master = new BackendRpcClientTest.Harness()) {
+            String rpc = "127.0.0.1:1";
+            var endpoint = Map.of("role", "master", "http", master.http(), "rpc", rpc);
+            publish(topology, List.of(endpoint, endpoint));
+            try (var discovery = new MasterDiscovery(topology, null)) {
+                assertEquals(List.of(rpc), discovery.routes());
+            }
+        }
+    }
+
     private void assertRoutesAfterFirstFailure(int status, boolean retained) throws Exception {
         Path topology = directory.resolve("topology.json");
         try (var first = new BackendRpcClientTest.Harness(); var second = new BackendRpcClientTest.Harness()) {
