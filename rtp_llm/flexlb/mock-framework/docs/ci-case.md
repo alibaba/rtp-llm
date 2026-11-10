@@ -1,0 +1,91 @@
+# 在 AoneCI 运行 Mock Case
+
+用 `a1` CLI 在内部仓 `foundation_models/RTP-LLM` 触发流水线。有兼容的 Case 环境镜像时，直接跳到第 2 步。环境镜像可以复用，每次功能测试都会从指定的源码提交构建 Java 运行产物。
+
+`RECIPE_REF` 是**内部仓**的 CI 配方分支。换分支时，先确认该分支的 `.aoneci/image-base.yaml` 有 `mock-ci-image`，且 `.aoneci/main.yaml` 有 `mock-ci-case` 入口。`SOURCE_SHA` 是已推送到 `SOURCE_REPO` 的完整 40 位源码提交 SHA。
+
+```sh
+CI_REPO=foundation_models/RTP-LLM
+RECIPE_REF=feat/mock-case-ci-20261103-wzy
+SOURCE_REPO=git@github.com:alibaba/rtp-llm.git
+# 在已推送的源码 checkout 中执行，或手动填写要测的完整 SHA。
+SOURCE_SHA=$(git rev-parse HEAD)
+```
+
+## 1. 准备 Case 环境镜像
+
+环境镜像提供 Java 21、Prometheus 和 Maven、uv 依赖缓存。首次使用或构建依赖变更时，用 **base/dev 镜像**流水线 `3828` 构建。下面只选 `mock-ci-image` Job。
+
+```sh
+a1 ci pipeline run 3828 --repo "$CI_REPO" --branch "$RECIPE_REF" \
+  --param 'mock-ci-image=true' \
+  --param 'ppu=false' --param 'amd=false' --param 'cuda12_9=false' \
+  --param 'cuda13=false' --param 'cuda13_arm=false' --param 'flexlb=false' \
+  --param "github_commit=${SOURCE_SHA:?}" --param "github_source_repo=$SOURCE_REPO" \
+  --param 'cancel-in-progress=false' -f json
+```
+
+将触发返回的 Run ID 填入 `IMAGE_RUN_ID`。确认运行成功后，从 Job 列表找到 `mock-ci-image` 的 ID，填入 `IMAGE_JOB_ID`。
+
+```sh
+a1 ci run get "$IMAGE_RUN_ID" --repo "$CI_REPO" -f json
+a1 ci job list --run "$IMAGE_RUN_ID" --repo "$CI_REPO" -f json
+a1 ci job summary "$IMAGE_JOB_ID" --run "$IMAGE_RUN_ID" --repo "$CI_REPO" -f json
+```
+
+从摘要复制 `hub.docker.alibaba-inc.com/isearch/rtp_llm_mock_case_ci` 的完整镜像地址（带 digest 或 tag），设为 `CASE_IMAGE`。
+
+## 2. 运行一个或多个 Case
+
+用**功能测试**流水线 `1346`。将 `SOURCE_SHA` 设为这次要验证的源码提交，并把兼容的环境镜像地址填入 `CASE_IMAGE`。
+
+| 参数 | 填法 |
+| --- | --- |
+| `--branch` | 内部仓 CI 配方分支。 |
+| `github_source_repo`、`github_commit` | 源码仓地址和已推送的 40 位提交 SHA。 |
+| `pre-jobs` | 设为 `["mock-ci-case"]`，选择 Mock Case 测试范围。 |
+| `mock-cases` | Case ID 数组。默认 `["basic"]`，可以显式指定一个或多个不同的 ID。 |
+| `mock-case-image` | 第 1 步产出的完整环境镜像地址，或兼容的已有镜像。 |
+| `cancel-in-progress` | 设为 `false`，避免这次触发取消同一配方分支上已在运行的 CI。 |
+
+以下命令同时选中两个 Case。只跑一个时，把 `mock-cases` 改为 `["basic"]` 或 `["master_ha_failover"]`。示例中的参数文件按 `a1 --params-file` 接受的字符串格式传值，AoneCI 会将数组和布尔参数解析为对应类型。
+
+```sh
+PARAMS_FILE=$(mktemp)
+cat > "$PARAMS_FILE" <<EOF
+{
+  "pre-jobs": "[\"mock-ci-case\"]",
+  "mock-cases": "[\"basic\", \"master_ha_failover\"]",
+  "github_source_repo": "${SOURCE_REPO:?}",
+  "github_commit": "${SOURCE_SHA:?}",
+  "mock-case-image": "${CASE_IMAGE:?}",
+  "cancel-in-progress": "false"
+}
+EOF
+a1 ci pipeline run 1346 --repo "$CI_REPO" --branch "$RECIPE_REF" \
+  --params-file "$PARAMS_FILE" -f json
+```
+
+| Case ID | Job |
+| --- | --- |
+| `basic` | `mock-ci-case-basic` |
+| `master_ha_failover` | `mock-ci-case-master-ha-failover` |
+
+同一次运行会先执行一次 `mock-ci-case-build`。共享构建成功后，每个选中的 Case 在独立 Job 中运行，worker 有空位就能并行。某个 Case 失败时，另一个仍可跑完并上传自己的报告。可选 ID 由配方分支注册，当前 `performance_regression` 还没有 CI Job。
+
+## 3. 查看结果
+
+将触发返回的 Run ID 填入 `RUN_ID`。先用 `run get` 回读源码 SHA、Case 列表和运行状态，再用 `job list` 查看共享构建及各 Case 的状态。
+
+```sh
+a1 ci run get "$RUN_ID" --repo "$CI_REPO" -f json
+a1 ci job list --run "$RUN_ID" --repo "$CI_REPO" -f json
+a1 ci artifact list --run "$RUN_ID" --repo "$CI_REPO" -f json
+```
+
+从制品列表复制目标 Job 对应的 `mock-case-<Job ID>-<配方提交>` 名称，填入 `ARTIFACT_NAME`。用独立的输出文件保存各 Case 的报告。Case 执行失败时也可下载已上传的报告。
+
+```sh
+a1 ci artifact download "$ARTIFACT_NAME" --run "$RUN_ID" --repo "$CI_REPO" \
+  --output "${ARTIFACT_NAME}.tar.gz"
+```

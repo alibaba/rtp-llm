@@ -118,26 +118,8 @@ PROMETHEUS_BIN="$PROMETHEUS_BIN" ./scripts/test-framework.sh
 
 `test-framework.sh` 会先调用 `build-java.sh`，再运行 Python 测试。缺少 Prometheus 时会跳过真实采集集成测试；macOS 缺少回环别名时跳过双 Master 测试。报告检查结果时说明跳过项，测试通过不代替完整 Case 验收。
 
-## CI Case
-
-CI 构建一次 Java 运行产物，再由各 worker 解包并独立运行选中的 Case。构建和运行需要 Java 21，运行还需要预装的 Prometheus 和 uv 依赖缓存。
-
-```sh
-./scripts/build-ci-case.sh /absolute/path/to/mock-case-runtime.tar.gz
-./scripts/run-ci-case.sh basic /absolute/path/to/mock-case-runtime.tar.gz /absolute/path/to/new-output
-```
-
-归档包含 Engine、Client、Master 和 ZooKeeper 运行产物。Case 脚本在目标 worker 重建 classpath，按锁文件离线安装 Python 环境，并保存编译结果、启动配方和完整的运行结果。收到 SIGTERM 时，Runner 会取消 Case 并回收子进程。
-
-在源码仓库根目录构建预制环境：
-
-```sh
-docker build -f rtp_llm/flexlb/mock-framework/docker/ci-case-env.Dockerfile -t mock-case-ci:local .
-```
-
-镜像预热 Maven 和 uv 缓存。运行产物由当次 CI 构建生成。
-
 - [Case 指南](docs/case-guide.md)：配置、路径、Step/ref、断言、启动配方与生命周期操作。
+- [在 AoneCI 运行 Case](docs/ci-case.md)：构建环境镜像、指定源码和 Case、查看结果。
 - [组件配置与指标参考](docs/component-reference.md)：Master、RTP、ViT、KV、Compute/EOS、Client 协议及指标口径。
 - [架构与设计边界](docs/architecture.md)：组件职责、Scheduler/EngineLoop、协议和资源生命周期、接口扩展。
 - [View 指南](docs/view-guide.md)：报告内容、事件标注、异常展示与服务生命周期。
