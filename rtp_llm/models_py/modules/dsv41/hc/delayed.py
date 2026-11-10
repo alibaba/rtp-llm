@@ -169,20 +169,13 @@ class DelayedHCUnit(HCUnitBase):
             and torch.version.hip is None
         ):
             return TileLangHCUnit._post_impl(self, x, residual, post, comb)
-        try:
-            return (
-                post.float() * x.float().unsqueeze(-2)
-                + torch.matmul(comb.float().transpose(-1, -2), residual.float())
-            ).to(residual.dtype)
-        except RuntimeError:
-            print(
-                "[hc] post shapes "
-                f"x={tuple(x.shape)} residual={tuple(residual.shape)} "
-                f"post={tuple(post.shape)} comb={tuple(comb.shape)} "
-                f"dtypes={x.dtype},{residual.dtype},{post.dtype},{comb.dtype}",
-                flush=True,
-            )
-            raise
+        mixed = (
+            comb.float().transpose(-1, -2).unsqueeze(-1)
+            * residual.float().unsqueeze(-3)
+        ).sum(dim=-2)
+        return (
+            post.float() * x.float().unsqueeze(-2) + mixed
+        ).to(residual.dtype)
 
 
 class DelayedHCHead(nn.Module):
