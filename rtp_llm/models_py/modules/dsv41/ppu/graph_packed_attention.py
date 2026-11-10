@@ -1,5 +1,6 @@
-"""Ordinary Decode Graph attention over the native packed KV pools."""
+"""Decode and Verify Graph attention over the native packed KV pools."""
 
+from contextlib import contextmanager
 from functools import lru_cache
 from types import SimpleNamespace
 
@@ -14,8 +15,10 @@ from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import (
 from rtp_llm.models_py.modules.dsv41.ppu.packed_decode import packed_decode
 
 GRAPH_PACKED_ATTENTION_ENV = "RTP_V41_PPU_GRAPH_PACKED_ATTENTION"
+VERIFY_PACKED_ATTENTION_ENV = "RTP_V41_PPU_VERIFY_PACKED_ATTENTION"
 GRAPH_VISIBLE_INDEXER_ENV = "RTP_V41_PPU_GRAPH_VISIBLE_INDEXER"
 GRAPH_SHARED_MLA_METADATA_ENV = "RTP_V41_PPU_GRAPH_SHARED_MLA_METADATA"
+_PACKED_WIDTHS = {"swa_kv": 528, "global_kv_1": 288, "global_kv_2": 288}
 
 
 @lru_cache(maxsize=1)
@@ -26,12 +29,14 @@ def _packed_metadata_kernel():
     @triton.jit
     def packed_slots_and_lengths(
         positions, valid, selected, table, slots, lengths, write_slots,
+        verify_requests, verify_starts, verify_prefixes, verify_generations,
         POSITION_STRIDE: tl.constexpr, VALID_STRIDE: tl.constexpr,
         SELECTED_ROW_STRIDE: tl.constexpr, SELECTED_COL_STRIDE: tl.constexpr,
         TABLE_ROW_STRIDE: tl.constexpr, TABLE_COL_STRIDE: tl.constexpr,
         TABLE_COLS: tl.constexpr, POOL_BLOCKS: tl.constexpr,
         SPAN: tl.constexpr, ENTRIES: tl.constexpr, WIDTH: tl.constexpr,
-        RATIO: tl.constexpr, GLOBAL: tl.constexpr, BLOCK: tl.constexpr,
+        RATIO: tl.constexpr, GLOBAL: tl.constexpr, ROWS: tl.constexpr,
+        VERIFY_LAG: tl.constexpr, BLOCK: tl.constexpr,
     ):
         row = tl.program_id(0)
         segment = tl.program_id(1)
@@ -60,9 +65,24 @@ def _packed_metadata_kernel():
             mapped, other=0,
         ).to(tl.int64)
         mapped = mapped & (block > 0) & (block < POOL_BLOCKS) & (offset < ENTRIES)
+        slot = tl.where(mapped, block * ENTRIES + offset, -1)
+        if verify_generations is not None:
+            request = tl.load(verify_requests + row)
+            start = tl.load(verify_starts + request)
+            prefix = tl.load(verify_prefixes + request)
+            relative = raw + VERIFY_LAG - prefix
+            candidate = tl.minimum(tl.maximum(start + relative, 0), ROWS - 1)
+            tentative = (
+                mapped & (relative >= 0)
+                & tl.load(valid + candidate * VALID_STRIDE)
+                & (tl.load(verify_requests + candidate) == request)
+                & (tl.load(verify_generations + candidate) == raw)
+            )
+            # Candidate rows occupy offsets [0, ROWS) of reserved block 0.
+            slot = tl.where(tentative, candidate, slot)
         tl.store(
             slots + row * WIDTH + column,
-            tl.where(mapped, block * ENTRIES + offset, -1),
+            slot,
             column < WIDTH,
         )
         if segment == 0:
@@ -90,27 +110,36 @@ def _packed_metadata_kernel():
 class GraphPackedAttention:
     """Bind the provider and zero-copy pool views before bucket capture."""
 
-    def __init__(self, cache, geometry):
+    @staticmethod
+    def supports_verify(cache, rows):
+        return all(
+            rows <= cache.entries[cache._table_tag(owner, tag)]
+            for owner, tag in cache.geometry.pool_keys() if tag in _PACKED_WIDTHS
+        )
+
+    def __init__(self, cache, geometry, *, journal=None):
         backend, _ = load_packed_backend()
         self.native = backend.flash_mla_with_kvcache
         self.metadata_factory = backend.get_mla_metadata
         self.share_mla_metadata = enabled(GRAPH_SHARED_MLA_METADATA_ENV, default=True)
         self.cache = cache
+        self.journal = journal
         g = geometry
         if g.window != 128 or g.head_dim != 512 or not 0 < g.n_heads <= 128:
             raise ValueError("unsupported PPU packed Decode Graph geometry")
+        if journal is not None and not self.supports_verify(cache, journal.rows):
+            raise ValueError("packed Verify Graph exceeds the reserved page capacity")
         self.offsets = torch.arange(g.window, dtype=torch.int64, device=cache.device)
         self.views = {}
         self.swa_domains = {}
-        widths = {"swa_kv": 528, "global_kv_1": 288, "global_kv_2": 288}
         for owner, tag in cache.geometry.pool_keys():
-            if tag not in widths:
+            if tag not in _PACKED_WIDTHS:
                 continue
             tensor = cache.pool(owner, tag)
             domain = cache._table_tag(owner, tag)
             entries = cache.entries[domain]
             self.views[owner, tag] = packed_pool_view(
-                SimpleNamespace(tensor=tensor, entries=entries), widths[tag]
+                SimpleNamespace(tensor=tensor, entries=entries), _PACKED_WIDTHS[tag]
             )
             if tag == "swa_kv":
                 self.swa_domains[owner] = (domain, tensor.shape[0])
@@ -142,7 +171,8 @@ class GraphPackedAttention:
         ):
             return None
         domain = cache._table_tag(owner, tag)
-        table = cache.tables[domain]
+        journal = self.journal
+        table = cache.tables[domain] if journal is None else journal.row_tables[domain]
         if (
             table.device != positions.device
             or table.dtype not in (torch.int32, torch.int64)
@@ -165,24 +195,35 @@ class GraphPackedAttention:
         triton, kernel = _packed_metadata_kernel()
         kernel[(rows, triton.cdiv(width, 128))](
             positions, valid, selected, table, slots, length_output, write_slots,
+            None if journal is None else journal.requests,
+            None if journal is None else journal.starts,
+            None if journal is None else journal.prefixes,
+            None if journal is None else journal.generations[owner, tag],
             positions.stride(0), valid.stride(0),
             0 if selected is None else selected.stride(0),
             0 if selected is None else selected.stride(1),
             table.stride(0), table.stride(1), table.shape[1],
             cache.pool(owner, tag).shape[0], cache.spans[domain], cache.entries[domain],
-            width, ratio, selected is not None, 128, num_warps=4,
+            width, ratio, selected is not None, rows, int(selected is not None and ratio == 2),
+            128, num_warps=4,
         )
         return slots, lengths
 
     def _swa_metadata(self, layer_id, positions, valid, shared):
-        key = ("packed_swa", id(positions), id(valid), self.swa_domains[layer_id])
+        journal = self.journal
+        key = (
+            "packed_swa", id(positions), id(valid), self.swa_domains[layer_id],
+            None if journal is None else layer_id,
+        )
         if key not in shared:
             width = self.offsets.numel()
-            writes = torch.empty(positions.shape, dtype=torch.int64, device=positions.device)
+            writes = None if journal is not None else torch.empty_like(positions, dtype=torch.int64)
             indices = self._native_indices(
                 layer_id, "swa_kv", positions, valid, width, write_slots=writes, shared=shared,
             )
             if indices is None:
+                if journal is not None:
+                    raise ValueError("invalid paged SWA metadata for packed Verify")
                 end = positions + 1
                 lengths = torch.where(valid, end.clamp_max(width), 0).int()
                 raw = (end - width).clamp_min(0)[:, None] + self.offsets[None]
@@ -210,6 +251,8 @@ class GraphPackedAttention:
                 selected=selected, ratio=ratio, shared=shared,
             )
             if indices is None:
+                if self.journal is not None:
+                    raise ValueError("invalid paged global KV metadata for packed Verify")
                 visible = (positions + 1) // ratio
                 lengths = torch.where(valid, visible.clamp_max(selected.shape[-1]), 0).int()
                 live = valid[:, None] & (selected >= 0) & (selected < visible[:, None])
@@ -219,13 +262,33 @@ class GraphPackedAttention:
             shared[key] = indices
         return shared[key]
 
+    @contextmanager
+    def _stage_verify_tail(self, keys):
+        if self.journal is None:
+            yield
+            return
+        # The framework never allocates block 0 to a live request. The
+        # synchronous Verify stream borrows it only across this MLA call,
+        # then restores its previous bytes for other Graph modes.
+        pages = [self.views[key][0, :self.journal.rows, 0] for key in keys]
+        backups = [page.clone() for page in pages]
+        try:
+            for key, page in zip(keys, pages):
+                page.copy_(self.journal.payloads[key])
+            yield
+        finally:
+            for page, backup in zip(pages, backups):
+                page.copy_(backup)
+
     def forward(self, attn, q, selected, metadata, shared, *, mask_output=True, share_scheduler=False):
         positions, valid = metadata.positions, metadata.valid_mask
         swa_indices, swa_lengths = self._swa_indices(attn.layer_id, positions, valid, shared)
+        keys = [(attn.layer_id, "swa_kv")]
         global_view = global_indices = global_lengths = None
         if selected is not None:
             source, ratio = attn.kv_source_layer_id, attn.compress_ratio
             tag = "global_kv_2" if ratio == 2 else "global_kv_1"
+            keys.append((source, tag))
             global_view = self.views[source, tag]
             global_indices, global_lengths = self._global_indices(
                 source, attn.index_source_layer_id, tag, ratio, selected,
@@ -233,12 +296,12 @@ class GraphPackedAttention:
             )
         # The provider masks -1 slots inside each live prefix, including
         # unmapped warmup pages. Both prefixes keep their original key order.
-        # Share only while building an ordinary graph. A fresh per-forward
+        # Share only while building a graph. A fresh per-forward
         # dictionary makes the first layer of each group capture the provider
         # scheduler, whose device work then runs on every replay.
         scheduler_cache = None
         if (
-            share_scheduler
+            (share_scheduler or self.journal is not None)
             and self.share_mla_metadata
             and type(self.cache) is NativeGraphCache
             and q.is_cuda
@@ -256,7 +319,8 @@ class GraphPackedAttention:
             global_lengths=global_lengths,
             valid_mask=valid,
         )
-        return packed_decode(
-            q, plan, softmax_scale=attn.geometry.sm_scale(), attn_sink=attn.attn_sink,
-            mask_output=mask_output, scheduler_cache=scheduler_cache,
-        )
+        with self._stage_verify_tail(keys):
+            return packed_decode(
+                q, plan, softmax_scale=attn.geometry.sm_scale(), attn_sink=attn.attn_sink,
+                mask_output=mask_output, scheduler_cache=scheduler_cache,
+            )

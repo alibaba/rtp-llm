@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.graph_attention import (
 from rtp_llm.models_py.modules.dsv41.ppu.graph_packed_attention import GraphPackedAttention
 from rtp_llm.models_py.modules.dsv41.ppu.graph_swa_write import (
     try_compress_csa,
+    try_prepare_verify_csa_pairs,
     try_rope_,
     try_rotate_q_and_write_swa,
     try_write_csa_state,
@@ -33,12 +34,18 @@ GRAPH_BATCHED_WO_A_ENV = "RTP_V41_PPU_GRAPH_BATCHED_WO_A"
 
 
 def _try_batched_wo_a(
-    output: torch.Tensor, weight: torch.Tensor
+    output: torch.Tensor, weight: torch.Tensor, *,
+    verify_q4: bool = False, proposal_q3: bool = False,
 ) -> torch.Tensor | None:
-    """Project qualified BF16 Decode buckets directly into the wo_b layout."""
+    """Project qualified BF16 Graph buckets directly into the wo_b layout."""
+    rows = (1, 8)
+    if verify_q4:
+        rows = (32,)
+    elif proposal_q3:
+        rows = (24,)
     if (
         output.ndim != 3
-        or output.shape[0] not in (1, 8)
+        or output.shape[0] not in rows
         or output.shape[1:] != (8, 4096)
         or weight.shape != (8192, 4096)
         or not output.is_cuda
@@ -105,16 +112,23 @@ def _shared_decode_attention(
     return torch.where(valid_mask[:, None, None], output, torch.zeros_like(output))
 
 
-def _rotate_graph_value(value, freqs, *, inplace=False, inverse=False, valid_mask=None):
+def _rotate_graph_value(
+    value, freqs, *, inplace=False, inverse=False, valid_mask=None, preserve_signed_zero=False
+):
     if inplace:
-        rotated = try_rope_(value, freqs, inverse=inverse, valid_mask=valid_mask)
+        rotated = try_rope_(
+            value, freqs, inverse=inverse, valid_mask=valid_mask,
+            preserve_signed_zero=preserve_signed_zero,
+        )
         if rotated is not None:
             return rotated
     if valid_mask is not None:
         value = torch.where(valid_mask[:, None, None], value, torch.zeros_like(value))
         # An unsupported provider layout can become contiguous after masking.
         if inplace:
-            rotated = try_rope_(value, freqs, inverse=inverse)
+            rotated = try_rope_(
+                value, freqs, inverse=inverse, preserve_signed_zero=preserve_signed_zero
+            )
             if rotated is not None:
                 return rotated
     return _rope_tail(value, freqs, inverse=inverse)
@@ -130,16 +144,32 @@ def _normalize_graph_value(value, weight, eps, *, fused=False):
     return _norm(value, weight, eps)
 
 
-def produce_global(attn, x, state, *, fused_graph=False):
+def _store_graph_compressed_key(attn, cache, tag, slots, value, rope, *, fused_graph, verify_rope):
+    layer_id = attn.layer_id
+    if verify_rope and try_write_packed_kv(
+        value, cache, layer_id, tag, slots, journal=True, freqs=rope
+    ):
+        return
+    keys = _rotate_graph_value(
+        value, rope, inplace=fused_graph or verify_rope, preserve_signed_zero=verify_rope
+    )
+    if not fused_graph or not try_write_packed_kv(keys, cache, layer_id, tag, slots):
+        cache.write_rows(layer_id, tag, slots, attn.ops.encode_kv(keys, pool_tag=tag))
+
+
+def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
+    from rtp_llm.models_py.modules.dsv41.ppu.layers import full_graph_rmsnorm_enabled
+
     g, cache = attn.geometry, state.cache
     positions, valid = state.metadata.positions, state.metadata.valid_mask
     layer_id, ratio = attn.layer_id, attn.compress_ratio
     freqs = state.freqs[layer_id]
+    full_norm = full_graph_rmsnorm_enabled(state)
     values = attn.global_wkv(x)
     compressed = None
     if ratio == 1:
         latent = _normalize_graph_value(
-            values, attn.global_norm, g.norm_eps, fused=fused_graph
+            values, attn.global_norm, g.norm_eps, fused=fused_graph or full_norm
         ).bfloat16()
         entry_positions, commit = positions, valid
     elif ratio == 2:
@@ -156,18 +186,37 @@ def produce_global(attn, x, state, *, fused_graph=False):
             commit = valid & ((positions & 1) == 1)
             entry_positions = positions - 1
             csa_slots = cache.slots(layer_id, "csa_state", torch.where(valid, positions, -1))
-            if verify:
+            if verify and (
+                not verify_rope or not try_write_csa_state(
+                    values, scores, cache, layer_id, csa_slots, journal=True
+                )
+            ):
                 # The journal keeps every raw generation. An odd row in this
                 # bucket may need the immediately preceding even row's payload.
                 cache.write_rows(layer_id, "csa_state", csa_slots, torch.cat((values, scores), -1).float())
-            previous = cache.read_rows(layer_id, "csa_state", cache.slots(
+            previous_slots = cache.slots(
                 layer_id, "csa_state", torch.where(commit, entry_positions, -1)
-            ))
-            latent = _compress_pairs(
-                torch.stack((previous[:, :g.head_dim].to(values.dtype), values), 1),
-                torch.stack((previous[:, g.head_dim:].to(scores.dtype), scores), 1),
-                attn.global_norm, g.norm_eps,
             )
+            pairs = (
+                try_prepare_verify_csa_pairs(values, scores, cache, layer_id, previous_slots)
+                if verify_rope else None
+            )
+            if pairs is None:
+                previous = cache.read_rows(layer_id, "csa_state", previous_slots)
+                pairs = (
+                    torch.stack((previous[:, :g.head_dim].to(values.dtype), values), 1),
+                    torch.stack((previous[:, g.head_dim:].to(scores.dtype), scores), 1),
+                )
+            if full_norm:
+                pair_values, pair_scores = pairs
+                weights = torch.softmax(pair_scores.float(), dim=-2)
+                # Keep the BF16 pooled boundary before normalization.
+                pooled = (pair_values.float() * weights).sum(-2).to(torch.bfloat16)
+                latent = _normalize_graph_value(
+                    pooled, attn.global_norm, g.norm_eps, fused=True
+                )
+            else:
+                latent = _compress_pairs(*pairs, attn.global_norm, g.norm_eps)
         # Reads for every request must finish before any current-row write
         # can overwrite a previous slot when the CSA ring wraps.
         if not verify and (
@@ -176,33 +225,43 @@ def produce_global(attn, x, state, *, fused_graph=False):
             cache.write_rows(layer_id, "csa_state", csa_slots, torch.cat((values, scores), -1).float())
     else:
         raise ValueError("shared Graph producer requires compression ratio1/2")
-    if compressed is None:
+    if verify_rope:
+        key = ("verify_global_rope", id(freqs), ratio)
+        if key not in state.shared:
+            state.shared[key] = freqs[entry_positions.clamp(min=0, max=freqs.shape[0] - 1)]
+        rope = state.shared[key]
+    elif compressed is None:
         rope = freqs[entry_positions.clamp(min=0, max=freqs.shape[0] - 1)]
-    if fused_graph:
+    inplace_rope = fused_graph or verify_rope
+    if inplace_rope:
         # The Indexer consumes the unrotated latent on this same stream.
         index = _normalize_graph_value(
             F.linear(latent, attn.index_wk.weight), attn.index_k_norm, g.norm_eps,
-            fused=True,
+            fused=fused_graph or full_norm,
         )
-    keys = _rotate_graph_value(latent, rope, inplace=fused_graph)
     tag = "global_kv_2" if ratio == 2 else "global_kv_1"
     if compressed is None:
         raw = torch.where(commit, entry_positions, -1)
         main_slots = cache.slots(layer_id, tag, raw)
-    if not fused_graph or not try_write_packed_kv(keys, cache, layer_id, tag, main_slots):
-        cache.write_rows(layer_id, tag, main_slots, attn.ops.encode_kv(keys, pool_tag=tag))
-    if not fused_graph:
-        index = _norm(F.linear(latent, attn.index_wk.weight), attn.index_k_norm, g.norm_eps)
-    index = _rotate_graph_value(index, rope, inplace=fused_graph)
+    _store_graph_compressed_key(
+        attn, cache, tag, main_slots, latent, rope, fused_graph=fused_graph, verify_rope=verify_rope
+    )
+    if not inplace_rope:
+        index = _normalize_graph_value(
+            F.linear(latent, attn.index_wk.weight),
+            attn.index_k_norm,
+            g.norm_eps,
+            fused=full_norm,
+        )
     if compressed is None:
         index_slots = cache.slots(layer_id, "indexer_kv", raw)
-    if not fused_graph or not try_write_packed_kv(index, cache, layer_id, "indexer_kv", index_slots):
-        cache.write_rows(
-            layer_id, "indexer_kv", index_slots, attn.ops.encode_kv(index, pool_tag="indexer_kv")
-        )
+    _store_graph_compressed_key(
+        attn, cache, "indexer_kv", index_slots, index, rope,
+        fused_graph=fused_graph, verify_rope=verify_rope,
+    )
 
 
-def select_indices(attn, x, qr, state, freqs, *, fused_graph=False):
+def select_indices(attn, x, qr, state, freqs, *, fused_graph=False, verify_rope=False):
     g = attn.geometry
     source = attn.kv_source_layer_id
     ratio = g.ratio(source)
@@ -210,7 +269,8 @@ def select_indices(attn, x, qr, state, freqs, *, fused_graph=False):
     query = _rotate_graph_value(
         attn.index_wq(qr).reshape(-1, g.index_n_heads, g.index_head_dim),
         freqs,
-        inplace=fused_graph,
+        inplace=fused_graph or verify_rope,
+        preserve_signed_zero=verify_rope,
     )
     projected_weights = F.linear(x, attn.index_weights)
     weight_scale = (g.index_head_dim * g.index_n_heads) ** -0.5
@@ -257,8 +317,28 @@ def select_indices(attn, x, qr, state, freqs, *, fused_graph=False):
             )
         state.attention_calls["visible_indexer"] += 1
         return selected
-    visible = (positions + 1) // ratio
     weights = projected_weights.float() * weight_scale
+    if use_visible_indexer and verify_rope:
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_indexer import select_verify_indices
+
+        result = select_verify_indices(
+            query, weights, cache=state.cache, source_layer=source, ratio=ratio,
+            positions=positions, valid_mask=valid, topk=g.index_topk,
+            candidate_block_size=block, candidate_topk_blocks=candidate_k if publish else 0,
+            candidates=state.shared["candidates"] if consume else None,
+            candidate_active=state.shared["candidate_active"] if consume else None,
+            shared=state.shared,
+        )
+        if result is not None:
+            selected, published, visible = result
+            if publish:
+                state.shared["candidates"] = published
+                state.shared["candidate_active"] = (
+                    (visible > block * candidate_k) & (visible > g.index_topk)
+                )
+            state.attention_calls["visible_indexer"] += 1
+            return selected
+    visible = (positions + 1) // ratio
     if use_visible_indexer:
         from rtp_llm.models_py.modules.dsv41.ppu.graph_indexer import (
             indexer_scores, select_topk, verify_indexer_scores,
@@ -302,10 +382,15 @@ def forward_graph_attention(attn, x, state):
     x = x.reshape(-1, g.hidden_size)
     positions, valid = state.metadata.positions, state.metadata.valid_mask
     packed = getattr(state, "packed_attention", None)
-    ordinary_packed = packed is not None and not getattr(state, "verify", False)
+    verify = getattr(state, "verify", False)
+    ordinary_packed = packed is not None and not verify
     native_packed = ordinary_packed and type(packed) is GraphPackedAttention
+    verify_packed = (
+        verify and type(packed) is GraphPackedAttention and packed.journal is cache
+    )
+    inplace_rope = native_packed or verify_packed
     table = state.freqs[attn.layer_id]
-    if native_packed:
+    if inplace_rope:
         # The runtime interns tables by RoPE base. Gather each one once
         # from the replay's current positions and reuse across layers.
         key = ("packed_rope", id(table))
@@ -319,29 +404,44 @@ def forward_graph_attention(attn, x, state):
     kv = attn.kv_norm(attn.wkv(x))
     if native_packed:
         swa_slots = packed.swa_write_slots(attn.layer_id, positions, valid, state.shared)
+    elif verify_packed:
+        domain = packed.swa_domains[attn.layer_id]
+        key = ("verify_swa_slots", domain)
+        if key not in state.shared:
+            state.shared[key] = cache.slots(
+                attn.layer_id, "swa_kv", torch.where(valid, positions, -1)
+            )
+        swa_slots = state.shared[key]
     else:
         swa_slots = cache.slots(
             attn.layer_id, "swa_kv", torch.where(valid, positions, -1)
         )
     q_rotated = (
-        try_rotate_q_and_write_swa(q, kv, freqs, cache, attn.layer_id, swa_slots)
-        if ordinary_packed else None
+        try_rotate_q_and_write_swa(
+            q, kv, freqs, cache, attn.layer_id, swa_slots, journal=verify_packed
+        )
+        if ordinary_packed or verify_packed else None
     )
     if q_rotated is None:
-        q_rotated = _rope_tail(q, freqs)
+        q_rotated = _rotate_graph_value(
+            q, freqs, inplace=verify_packed, preserve_signed_zero=verify_packed
+        )
         kv = _rope_tail(kv, freqs)
         cache.write_rows(
             attn.layer_id, "swa_kv", swa_slots, attn.ops.encode_kv(kv, pool_tag="swa_kv")
         )
     else:
-        state.attention_calls["direct_swa_write"] += 1
+        counter = "direct_swa_journal" if verify_packed else "direct_swa_write"
+        state.attention_calls[counter] += 1
     q = q_rotated
     if attn.is_kv_source:
-        produce_global(attn, x, state, fused_graph=ordinary_packed)
+        produce_global(attn, x, state, fused_graph=ordinary_packed, verify_rope=verify_packed)
     selected = None
     if attn.compress_ratio:
         if attn.is_index_source:
-            selected = select_indices(attn, x, qr, state, freqs, fused_graph=ordinary_packed)
+            selected = select_indices(
+                attn, x, qr, state, freqs, fused_graph=ordinary_packed, verify_rope=verify_packed
+            )
             state.shared[attn.layer_id] = selected
         else:
             selected = state.shared[attn.index_source_layer_id]
@@ -353,29 +453,36 @@ def forward_graph_attention(attn, x, state):
             sm_scale=g.sm_scale(), attn_sink=attn.attn_sink,
         )
     else:
-        if native_packed:
+        if inplace_rope:
             output = packed.forward(
                 attn, q, selected, state.metadata, state.shared,
                 mask_output=False,
-                share_scheduler=getattr(state, "grouped_moe", None) is None,
+                share_scheduler=native_packed and getattr(state, "grouped_moe", None) is None,
             )
         else:
             output = packed.forward(attn, q, selected, state.metadata, state.shared)
         state.attention_calls["packed_attention"] += 1
     rotated = _rotate_graph_value(
-        output, freqs, inplace=ordinary_packed, inverse=True,
-        valid_mask=valid if native_packed else None,
+        output, freqs, inplace=ordinary_packed or verify_packed, inverse=True,
+        valid_mask=valid if inplace_rope else None,
+        preserve_signed_zero=verify_packed,
     )
     output = rotated.reshape(-1, g.o_groups, g.n_heads * g.head_dim // g.o_groups)
     weight = attn.wo_a.weight
+    verify_q4 = (
+        verify_packed
+        and state.metadata.batch_size == 8
+        and state.metadata.q_len_per_req == 4
+    )
     projected = (
-        _try_batched_wo_a(output, weight)
-        if native_packed and state.grouped_moe is None and g.o_lora_rank == 1024
+        _try_batched_wo_a(output, weight, verify_q4=verify_q4)
+        if (native_packed or verify_q4)
+        and state.grouped_moe is None and g.o_lora_rank == 1024
         else None
     )
     if projected is not None:
         state.attention_calls["batched_wo_a"] += 1
-    elif ordinary_packed and weight.is_contiguous() and not (
+    elif (ordinary_packed or verify_packed) and weight.is_contiguous() and not (
         torch.is_grad_enabled() and (output.requires_grad or weight.requires_grad)
     ):
         # PPU GEMM accepts row strides on both sides of the contraction.

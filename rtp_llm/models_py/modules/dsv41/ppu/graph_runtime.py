@@ -5,6 +5,7 @@ clears PPU device resources. Work/stop votes and asset preparation stay outside
 capture; the same forward is used for capture and graph-safe eager.
 """
 
+import os
 import weakref
 from collections import Counter
 from contextlib import contextmanager
@@ -12,10 +13,68 @@ from types import SimpleNamespace
 
 import torch
 
+from rtp_llm.config.v41_runtime import env_bool
 from rtp_llm.models_py.modules.dsv41.ppu._quant import prepare_e2m1_codebooks
 from rtp_llm.models_py.modules.dsv41.ppu.graph_engram import GraphEngram
 from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import increment_decode_counters
 from rtp_llm.ops import PyModelOutputs
+
+
+_GRAPH_WEIGHT_NAMES = ("weight", "bias", "fn", "base", "scale", "q_weight", "k_weight")
+_GRAPH_WEIGHT_NAME_SET = frozenset(_GRAPH_WEIGHT_NAMES)
+_MODULE_LOOKUP_HOOKS = frozenset(("__dict__", "__getattribute__", "__getattr__"))
+_STANDARD_MODULE_GETATTR = torch.nn.Module.__getattr__
+
+
+def _plain_module_weight_lookup(cls):
+    if type(cls) is not type:
+        return False
+    for base in cls.__mro__:
+        members = vars(base)
+        if not _GRAPH_WEIGHT_NAME_SET.isdisjoint(members):
+            return False
+        if base not in (torch.nn.Module, object) and not _MODULE_LOOKUP_HOOKS.isdisjoint(members):
+            return False
+    return True
+
+
+def _graph_module_weights(root, *, direct):
+    tensor_type = torch.Tensor
+    # Cache the lookup rules only for this traversal. Modules and their
+    # attributes are still read live for every validation.
+    plain_types = {}
+    direct = (
+        direct and torch.nn.Module.__getattr__ is _STANDARD_MODULE_GETATTR
+        and torch.nn.Module.__getattribute__ is object.__getattribute__
+    )
+    for module in root.modules():
+        if direct:
+            cls = type(module)
+            plain = plain_types.get(cls)
+            if plain is None:
+                plain = plain_types[cls] = _plain_module_weight_lookup(cls)
+            if plain:
+                attrs = vars(module)
+                params = attrs.get("_parameters")
+                buffers = attrs.get("_buffers")
+                children = attrs.get("_modules")
+                if type(params) is type(buffers) is type(children) is dict:
+                    for name in _GRAPH_WEIGHT_NAMES:
+                        if name in attrs:
+                            value = attrs[name]
+                        elif name in params:
+                            value = params[name]
+                        elif name in buffers:
+                            value = buffers[name]
+                        else:
+                            value = children.get(name)
+                        if isinstance(value, tensor_type):
+                            yield value
+                    continue
+        for name in _GRAPH_WEIGHT_NAMES:
+            value = getattr(module, name, None)
+            if isinstance(value, tensor_type):
+                yield value
 
 
 class SharedGraphRuntime:
@@ -45,11 +104,11 @@ class SharedGraphRuntime:
                 raise ValueError("grouped Graph does not support fake expert balance")
             self.grouped = GroupedW4A8Graph(engine, example, range(g.num_layers))
             self.workspace = self.grouped
-        elif not draft and row_width == 1:
+        elif (engine.backend, engine.precision) == ("megamoe", "w4a4"):
             engine.prepare_shared_graph(example, range(g.num_layers))
             self.workspace = engine._mega_buffer
         else:
-            raise ValueError("speculative PPU Graph requires grouped W4A8")
+            raise ValueError("PPU Graph requires grouped W4A8 or MegaMoE W4A4")
         self.freqs = tuple(model.shared_runtime.freqs_for(i) for i in range(g.num_layers))
         self.layer_calls = torch.zeros(g.num_layers, dtype=torch.int64, device=self.device)
         self.moe_calls = torch.zeros_like(self.layer_calls)
@@ -70,23 +129,32 @@ class SharedGraphRuntime:
                 dtype=torch.bool, device=self.device,
             )
             model.v4.norm.runtime = model.shared_runtime
+        elif (draft or row_width > 1) and self.grouped is None and model._is_speculative:
+            # Verify and proposal RMSNorm read the current Graph state.
+            model.v4.norm.runtime = model.shared_runtime
+            for layer in layers:
+                layer.ffn_norm.runtime = model.shared_runtime
+        # Bind the optional full-fusion path independently of the existing
+        # Verify epilogue, which stays available for unsupported inputs.
+        model.v4.norm._full_graph_runtime = model.shared_runtime
+        for layer in layers:
+            layer.ffn_norm._full_graph_runtime = model.shared_runtime
         self.engram = GraphEngram(
             self.ops, g, device=self.device, max_batch_size=self.max_rows,
             fuse_metadata=self._bulk_counters,
         )
         self.routed_rows_device = torch.zeros_like(self.layer_calls)
         self.attention_capture_calls = Counter()
+        self._fast_storage_signature = env_bool(
+            os.environ, "RTP_V41_PPU_GRAPH_FAST_STORAGE_SIGNATURE", default=model._is_speculative,
+        )
         self._pointers = self._storage_signature()
 
     def _storage_signature(self):
         model = self._model()
         weights = [model.v4.embed.weight, model.v4.norm.weight]
         weights.extend(model.shared_weight_views._resident.values())
-        for module in model.v4.modules():
-            for name in ("weight", "bias", "fn", "base", "scale", "q_weight", "k_weight"):
-                value = getattr(module, name, None)
-                if isinstance(value, torch.Tensor):
-                    weights.append(value)
+        weights.extend(_graph_module_weights(model.v4, direct=self._fast_storage_signature))
         for values in self.ops.moe_engine._weights.values():
             weights.extend(values)
         for values in self.ops.moe_engine._processed.values():
@@ -108,7 +176,48 @@ class SharedGraphRuntime:
             raise RuntimeError("shared Graph cannot overlap an eager/verify transaction")
         if impl.runtime is not self or impl.cache.native is not model.kv_cache:
             raise ValueError("shared Graph metadata belongs to another model/native pool")
-        verify = getattr(impl, "mode", None) in ("dense", "packed")
+        mode = getattr(impl, "mode", None)
+        verify = mode in ("dense", "packed")
+        proposal_q3 = (
+            mode == "proposal"
+            and self.grouped is None
+            and impl.width == 3
+            and metadata.valid_mask.numel() == 24
+        )
+        mhc_post_mode = None
+        mhc_reduce_block_m = None
+        if (
+            mode == "dense"
+            and self.grouped is None
+            and getattr(impl, "packed_attention", None) is not None
+            and metadata.q_len_per_req == 4
+        ):
+            selected = os.environ.get("RTP_V41_PPU_VERIFY_MHC_POST", "dot")
+            if selected != "off":
+                if selected not in ("dot", "epilogue"):
+                    raise ValueError("RTP_V41_PPU_VERIFY_MHC_POST must be off, dot or epilogue")
+                mhc_post_mode = selected
+            if metadata.valid_mask.numel() == 32:
+                rows = os.environ.get("RTP_V41_PPU_VERIFY_MHC_REDUCE_BLOCK_M", "1")
+                if rows not in ("0", "1", "2", "4", "8"):
+                    raise ValueError("RTP_V41_PPU_VERIFY_MHC_REDUCE_BLOCK_M must be 0, 1, 2, 4 or 8")
+                if rows != "0":
+                    mhc_reduce_block_m = int(rows)
+        elif proposal_q3:
+            selected = os.environ.get("RTP_V41_PPU_PROPOSAL_MHC_POST", "dot")
+            if selected not in ("off", "dot", "epilogue"):
+                raise ValueError("RTP_V41_PPU_PROPOSAL_MHC_POST must be off, dot or epilogue")
+            if selected != "off":
+                mhc_post_mode = selected
+            rows = os.environ.get("RTP_V41_PPU_PROPOSAL_MHC_REDUCE_BLOCK_M", "1")
+            if rows not in ("0", "1", "2", "4", "8"):
+                raise ValueError("RTP_V41_PPU_PROPOSAL_MHC_REDUCE_BLOCK_M must be 0, 1, 2, 4 or 8")
+            if rows != "0":
+                mhc_reduce_block_m = int(rows)
+        mhc_post = (mhc_post_mode, proposal_q3) if mhc_post_mode is not None else None
+        proposal_batched_wo_a = proposal_q3 and env_bool(
+            os.environ, "RTP_V41_PPU_PROPOSAL_BATCHED_WO_A", default=True,
+        )
         bulk_counters = self._bulk_counters and not verify
         hashes = None
         if self.geometry.engram_layer_ids:
@@ -123,7 +232,8 @@ class SharedGraphRuntime:
             layer_calls=self.layer_calls, moe_calls=self.moe_calls,
             engram_calls=self.engram_calls, routed_rows_device=self.routed_rows_device,
             grouped_moe=self.grouped,
-            verify=verify, bulk_counters=bulk_counters,
+            verify=verify, proposal=mode == "proposal", bulk_counters=bulk_counters,
+            proposal_batched_wo_a=proposal_batched_wo_a,
             packed_attention=getattr(impl, "packed_attention", None),
             visible_indexer=getattr(impl, "visible_indexer", False),
             attention_calls=Counter(),
@@ -133,6 +243,11 @@ class SharedGraphRuntime:
             for index, layer in enumerate(model.v4.layers):
                 layer.attn_hc.state = layer.ffn_hc.state = None
                 layer.attn_hc.pre_mix_out = layer.ffn_hc.pre_mix_out = None
+                if mhc_post is not None:
+                    layer.attn_hc._graph_mhc_post = layer.ffn_hc._graph_mhc_post = mhc_post
+                if mhc_reduce_block_m is not None:
+                    layer.attn_hc._graph_mhc_reduce_block_m = mhc_reduce_block_m
+                    layer.ffn_hc._graph_mhc_reduce_block_m = mhc_reduce_block_m
                 if layer.engram is not None:
                     column = self.geometry.engram_layer_ids.index(index)
                     layer.engram_hashes = hashes[:, column]
@@ -143,6 +258,11 @@ class SharedGraphRuntime:
             for layer in model.v4.layers:
                 layer.attn_hc.state = layer.ffn_hc.state = None
                 layer.attn_hc.pre_mix_out = layer.ffn_hc.pre_mix_out = None
+                if mhc_post is not None:
+                    layer.attn_hc._graph_mhc_post = layer.ffn_hc._graph_mhc_post = None
+                if mhc_reduce_block_m is not None:
+                    layer.attn_hc._graph_mhc_reduce_block_m = None
+                    layer.ffn_hc._graph_mhc_reduce_block_m = None
                 if layer.engram is not None:
                     layer.engram._graph_state = None
                     layer.engram_hashes = layer.engram_token_mask = None

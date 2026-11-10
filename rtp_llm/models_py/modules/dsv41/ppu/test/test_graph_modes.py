@@ -87,10 +87,8 @@ class NativeReceiptContract(unittest.TestCase):
 
 class SourceBoundaries(unittest.TestCase):
     def test_shared_commit_layout_and_serving_gate(self):
-        config = (PUBLIC / "rtp_llm/config/v41_runtime.py").read_text()
         commit = (PUBLIC / "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.cc").read_text()
         runner = (PUBLIC / "rtp_llm/cpp/cuda_graph/cuda_graph_runner.cc").read_text()
-        self.assertIn('self.speculative == "DSPARK" and self.cuda_graph and not self.shared_grouped_graph', config)
         tail = commit.split("void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(", 1)[1]
         tail = tail.split("void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(", 1)[0]
         self.assertNotIn("USE_PPU", tail)
@@ -122,6 +120,7 @@ class SourceBoundaries(unittest.TestCase):
         ], type_ignores=[])
         namespace = dict(os=os, json=json, V41RuntimeConfig=runtime.V41RuntimeConfig,
                          PPU_STRATEGY=runtime.PPU_STRATEGY, env_bool=runtime.env_bool,
+                         MEGAMOE_DSPARK_ASYNC_FLAGS=runtime.MEGAMOE_DSPARK_ASYNC_FLAGS,
                          DEFAULT_PREFILL_WAIT_TIMEOUT_MS=1800000, MAX_PREFILL_WAIT_TIMEOUT_MS=86400000)
         exec(compile(selected, "launch.py", "exec"), namespace)
         preset = namespace["preset_env"]
@@ -136,7 +135,6 @@ class SourceBoundaries(unittest.TestCase):
             self.assertNotIn("GENERATION_PREFILL_CAPTURE_CONFIG", env)
         for role, options in (
             ("prefill", {"shared_grouped_graph": True}),
-            ("decode", {"shared_decode_graph": True, "dspark_gamma": 3}),
             ("decode", {"shared_graph_async": True}),
         ):
             with self.subTest(role=role, options=options), self.assertRaises(ValueError):
@@ -148,6 +146,12 @@ class SourceBoundaries(unittest.TestCase):
                      shared_decode_graph=True)
         self.assertEqual(runtime.V41RuntimeConfig.from_env(env).moe_precision, "w4a4")
         self.assertEqual(env["RTP_LLM_STREAM_ASYNC"], "0")
+        env = preset(
+            "decode", "/weights", shared_decode_graph=True, dspark_gamma=3,
+            parent={"RTP_V41_PPU_MOE_BACKEND": "megamoe", "RTP_LLM_MTP_ASYNC_PREPARE": "1"},
+        )
+        self.assertEqual(runtime.V41RuntimeConfig.from_env(env).speculative, "DSPARK")
+        self.assertEqual(env["RTP_LLM_MTP_ASYNC_PREPARE"], "0")
 
     def test_fixed_ep_forward_has_no_dynamic_host_sizes(self):
         src = DRIVER.parents[1] / "graph_moe.py"

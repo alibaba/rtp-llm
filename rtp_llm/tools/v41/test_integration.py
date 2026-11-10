@@ -15,7 +15,11 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-from rtp_llm.config.v41_runtime import V41RuntimeConfig, select_v41_backend
+from rtp_llm.config.v41_runtime import (
+    MEGAMOE_DSPARK_ASYNC_FLAGS,
+    V41RuntimeConfig,
+    select_v41_backend,
+)
 from rtp_llm.tools.v41.launch import preset_env
 from rtp_llm.tools.v41.preflight import (
     WHEELS,
@@ -461,6 +465,69 @@ class IntegrationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "PPU Graph"):
             V41RuntimeConfig.from_env(env)
 
+    def test_megamoe_dspark_graph_uses_synchronous_dense_verify(self):
+        parent = {"RTP_V41_PPU_MOE_BACKEND": "megamoe"}
+        parent.update(dict.fromkeys(MEGAMOE_DSPARK_ASYNC_FLAGS, "1"))
+        parent["GENERATION_PREFILL_CAPTURE_CONFIG"] = "512"
+        options = dict(shared_decode_graph=True, dspark_gamma=3, parent=parent)
+        env = preset_env("decode", "/weights", **options)
+        runtime = V41RuntimeConfig.from_env(env)
+        self.assertEqual(
+            (runtime.speculative, runtime.cuda_graph, runtime.moe_precision),
+            ("DSPARK", True, "w4a4"),
+        )
+        self.assertNotIn("GENERATION_PREFILL_CAPTURE_CONFIG", env)
+        for flag in MEGAMOE_DSPARK_ASYNC_FLAGS:
+            self.assertEqual(env[flag], "0")
+            with self.subTest(flag=flag), self.assertRaisesRegex(ValueError, "synchronous dense"):
+                V41RuntimeConfig.from_env(dict(env, **{flag: "1"}))
+        with self.assertRaisesRegex(ValueError, "synchronous dense"):
+            preset_env(
+                "decode",
+                "/weights",
+                dspark_confidence="bounded",
+                dspark_verify_mode="packed",
+                dspark_verify_budget=1,
+                **options,
+            )
+        with self.assertRaisesRegex(ValueError, "synchronous dense"):
+            V41RuntimeConfig.from_env(dict(env, SP_DSPARK_VERIFY_MODE="packed"))
+
+    def test_print_command_includes_megamoe_dspark_graph_selection(self):
+        from rtp_llm.tools.v41.launch import main
+
+        output = io.StringIO()
+        argv = [
+            "launch", "decode", "--checkpoint-path", "/weights",
+            "--shared-decode-graph", "--dspark-gamma", "3", "--print-command",
+        ]
+        with patch.dict(os.environ, {"RTP_V41_PPU_MOE_BACKEND": "megamoe"}, clear=True), patch.object(
+            sys, "argv", argv
+        ), redirect_stdout(output):
+            self.assertEqual(main(), 0)
+        self.assertIn("RTP_V41_PPU_MOE_BACKEND=megamoe", output.getvalue())
+        self.assertIn("SP_TYPE=dspark", output.getvalue())
+
+    def test_preflight_uses_effective_graph_selection(self):
+        from rtp_llm.tools.v41.launch import main
+
+        argv = [
+            "launch", "decode", "--checkpoint-path", "/weights",
+            "--shared-decode-graph", "--dspark-gamma", "3", "--check-only",
+        ]
+        parent = {
+            "RTP_V41_PPU_MOE_BACKEND": "megamoe",
+            "RTP_V41_PPU_SHARED_GROUPED_GRAPH": "1",
+        }
+        with patch.dict(os.environ, parent, clear=True), patch.object(
+            sys, "argv", argv
+        ), patch("rtp_llm.tools.v41.launch.collect_report", return_value={"prerequisites_ok": True}) as report:
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(), 0)
+        runtime = V41RuntimeConfig.from_env(report.call_args.args[0])
+        self.assertFalse(runtime.shared_grouped_graph)
+        self.assertEqual(runtime.speculative, "DSPARK")
+
     def test_native_pd_route_preserves_http_endpoints_and_peer_discovery(self):
         options = dict(
             prefill_address="192.0.2.10:18090",
@@ -526,6 +593,15 @@ class IntegrationTest(unittest.TestCase):
             config.model_args.max_seq_len = None
             with self.assertRaisesRegex(ValueError, "explicit"):
                 V41RuntimeConfig.from_server(config)
+            config.model_args.max_seq_len = 32768
+            config.py_hw_kernel_config.enable_cuda_graph = True
+            config.sp_config = NS(type="DSPARK", sp_dspark_verify_mode="dense")
+            with patch.dict(os.environ, {"RTP_V41_PPU_MOE_BACKEND": "megamoe"}):
+                runtime = V41RuntimeConfig.from_server(config)
+                self.assertEqual((runtime.speculative, runtime.moe_precision), ("DSPARK", "w4a4"))
+                config.sp_config.sp_dspark_verify_mode = "packed"
+                with self.assertRaisesRegex(ValueError, "synchronous dense"):
+                    V41RuntimeConfig.from_server(config)
 
     def test_device_selection_has_no_implicit_fallback(self):
         self.assertEqual(select_v41_backend("Ppu", {}), "ppu")

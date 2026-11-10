@@ -163,8 +163,19 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
         if self.shared_runtime is not None:
             self.shared_runtime.bind_native_stop(requested, observed)
 
+    def prepare_speculative_forward_completion(self):
+        self.shared_runtime.prepare_speculative_forward_completion()
+
+    def prepare_speculative_forward_completion_with_private_draft(self, draft, prefixes):
+        self.shared_runtime.prepare_speculative_forward_completion_with_private_draft(draft, prefixes)
+
     def finish_speculative_forward(self, request_ids, prefixes, accepted_rows):
         return self.shared_runtime.finish_speculative_forward(request_ids, prefixes, accepted_rows)
+
+    def try_finish_speculative_forward_with_private_draft(self, draft, request_ids, prefixes, accepted_rows):
+        return self.shared_runtime.try_finish_speculative_forward_with_private_draft(
+            draft, request_ids, prefixes, accepted_rows,
+        )
 
     def abort_speculative_forward(self):
         if self.shared_runtime is not None:
@@ -217,6 +228,17 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
     def cuda_graph_engram_window_size(self):
         return self.shared_weight_views.geometry.engram_max_ngram_size
 
+    def _uses_host_graph_vote(self):
+        return (
+            self._is_speculative
+            and self._shared_ops.moe_engine.backend == "megamoe"
+            and os.environ.get("RTP_V41_PPU_DSPARK_HOST_GRAPH_VOTE", "0") == "1"
+        )
+
+    def start_dspark_verify_host_vote(self, local_proposal_rows):
+        if self._uses_host_graph_vote():
+            self.shared_runtime.start_verify_host_vote(local_proposal_rows)
+
     def prepare_native_graph_step(self, inputs):
         if self._graph_receipt is not None:
             self._graph_receipt.flush()
@@ -227,7 +249,9 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
             return True
         if self.shared_graph_runtime is not None:
             self.shared_graph_runtime.validate()
-        return self.shared_runtime.vote(0 if inputs.is_fake_stream else inputs.input_ids.numel())
+        count = 0 if inputs.is_fake_stream else inputs.input_ids.numel()
+        # Use a model-wide choice so fake and live ranks vote on the same group.
+        return self.shared_runtime.vote(count, host=self._uses_host_graph_vote())
 
     def native_graph_idle_output(self, inputs):
         from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_tagged_attention_inputs

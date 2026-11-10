@@ -769,7 +769,7 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
 
     torch::Tensor markov_embedding;
 #if USE_PPU
-    const auto ppu_markov_w2 = markov_w2.to(torch::kFloat32);
+    torch::Tensor ppu_markov_w2;
 #endif
 #if USING_CUDA
     // Each step consumes this FP32 bias before the next same-stream GEMM
@@ -793,7 +793,11 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
         {
 #if USE_PPU
             // CUDA's BF16 input GEMM accumulates into FP32 before the bias is
-            // added to logits. Keep that boundary on the PPU eager path too.
+            // added to logits. Materialize FP32 weights only for the fallback
+            // and reuse them across the Markov steps in this call.
+            if (!ppu_markov_w2.defined()) {
+                ppu_markov_w2 = markov_w2.to(torch::kFloat32);
+            }
             markov_bias = torch::mm(markov_embedding.to(torch::kFloat32), ppu_markov_w2.transpose(0, 1));
 #else
             markov_bias = torch::mm(markov_embedding, markov_w2.transpose(0, 1));

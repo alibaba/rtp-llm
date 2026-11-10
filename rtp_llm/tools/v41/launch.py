@@ -9,7 +9,12 @@ import shlex
 import sys
 from pathlib import Path
 
-from rtp_llm.config.v41_runtime import PPU_STRATEGY, V41RuntimeConfig, env_bool
+from rtp_llm.config.v41_runtime import (
+    MEGAMOE_DSPARK_ASYNC_FLAGS,
+    PPU_STRATEGY,
+    V41RuntimeConfig,
+    env_bool,
+)
 from rtp_llm.tools.v41.preflight import collect_report
 
 DEFAULT_PREFILL_WAIT_TIMEOUT_MS = 1800000
@@ -308,8 +313,7 @@ def preset_env(
     if shared_decode_graph or shared_grouped_graph:
         from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import moe_backend, moe_precision
 
-        if (role != "decode" or (dspark_gamma and not shared_grouped_graph)
-            or fake_balance_expert):
+        if role != "decode" or fake_balance_expert:
             raise ValueError("shared Decode Graph requires shared DP8 Decode without fake balance")
         expected = ("grouped", "w4a8") if shared_grouped_graph else ("megamoe", "w4a4")
         if (moe_backend(env), moe_precision(env)) != expected:
@@ -319,6 +323,9 @@ def preset_env(
         if shared_grouped_graph:
             env["RTP_V41_PPU_SHARED_GROUPED_GRAPH"] = "1"
             env["RTP_LLM_DEVICE_INPUT"] = str(int(shared_graph_async))
+        elif dspark_gamma:
+            env.update(dict.fromkeys(MEGAMOE_DSPARK_ASYNC_FLAGS, "0"))
+        if shared_grouped_graph or dspark_gamma:
             env.pop("GENERATION_PREFILL_CAPTURE_CONFIG", None)
     if not cp_prefill:
         # The public string parser has no DISABLED spelling. Omitting the
@@ -409,7 +416,7 @@ def main():
     parser.add_argument("--yoco-keep-tokens", type=int)
     parser.add_argument("--max-rollback-tokens", type=int)
     parser.add_argument("--shared-decode-graph", action="store_true",
-                        help="explicit shared MegaMoE/W4A4 synchronous Decode bucket1")
+                        help="shared MegaMoE/W4A4 synchronous Decode bucket1, including dense DSpARK")
     parser.add_argument("--shared-grouped-graph", action="store_true",
                         help="explicit shared grouped W4A8 Decode bucket1")
     parser.add_argument("--shared-graph-async", action="store_true",
@@ -457,7 +464,11 @@ def main():
         owned = preset_env(
             args.role,
             args.checkpoint_path,
-            parent={},
+            parent={
+                name: env[name]
+                for name in ("RTP_V41_PPU_MOE_BACKEND", "RTP_V41_PPU_MOE_PRECISION")
+                if name in env
+            },
             **{**options, "fake_balance_expert": env_bool(env, "FAKE_BALANCE_EXPERT")},
         )
         if args.token_map_cache:
@@ -474,7 +485,7 @@ def main():
     # Model providers and device detection see the same fixed env as the child.
     os.environ.update(env)
     report = collect_report(
-        require_backend=not args.check_only, probe_allocations=args.probe_allocations
+        env, require_backend=not args.check_only, probe_allocations=args.probe_allocations
     )
     value = json.dumps(report, indent=2, ensure_ascii=False)
     print(value, flush=True)

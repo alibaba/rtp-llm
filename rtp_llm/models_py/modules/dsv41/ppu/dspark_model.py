@@ -3,6 +3,7 @@
 import json
 import hashlib
 import os
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -51,6 +52,18 @@ def _draft_config(config):
     return result
 
 
+def _private_draft_request_ids(request_ids):
+    if (
+        not isinstance(request_ids, torch.Tensor)
+        or request_ids.device.type != "cpu"
+        or request_ids.dtype not in (torch.int32, torch.int64)
+        or request_ids.shape != (8,)
+    ):
+        return None
+    ids = tuple(request_ids.tolist())
+    return ids if len(set(ids)) == len(ids) else None
+
+
 class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
 
     def __init__(self, model_config, parallelism_config, weights, moe_config,
@@ -96,6 +109,9 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
         self._shared_ops = None
         self.shared_runtime = None
         self.shared_graph_runtime = None
+        self._private_draft_capture = None
+        self._private_draft_armed_ids = None
+        self._private_draft_pending = None
 
     def _load_extra_weights(self, weights):
         views, g = self.shared_weight_views, self.shared_weight_views.geometry
@@ -157,6 +173,11 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
         self._load_extra_weights(self.weight)
         self._materialized = True
         self.shared_runtime = SharedNativeRuntime(self)
+        if self._is_decode_role:
+            # Commit has its own Graph state and can capture before proposal.
+            self.main_norm._full_graph_runtime = self.shared_runtime
+            for layer in self.v4.layers:
+                layer.attn.kv_norm._full_graph_runtime = self.shared_runtime
         if hasattr(self, "_shared_stop_callbacks"):
             self.shared_runtime.bind_native_stop(*self._shared_stop_callbacks)
         return True
@@ -197,7 +218,69 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
             impl.writes = torch.zeros(
                 self.shared_runtime.geometry.num_layers, dtype=torch.int64, device=impl.device
             )
+            if (
+                getattr(impl, "private_draft_journal", None) is not None
+                and (impl.batch_size, impl.width) == (8, 4)
+            ):
+                self._private_draft_capture = weakref.ref(impl)
         return impl
+
+    def arm_private_draft_commit(self, request_ids):
+        if self._private_draft_armed_ids is not None or self._private_draft_pending is not None:
+            raise RuntimeError("another private Draft KV commit is active")
+        if os.environ.get("RTP_V41_PPU_DSPARK_PRIVATE_DRAFT_KV") != "1":
+            return False
+        impl = self._private_draft_capture() if self._private_draft_capture is not None else None
+        if impl is None or not impl.cuda_graph_preparation_in_graph:
+            return False
+        ids = _private_draft_request_ids(request_ids)
+        if ids is None:
+            return False
+        self._private_draft_armed_ids = ids
+        return True
+
+    def note_private_draft_replay(self, impl, inputs):
+        """Bind a native Commit replay to the active private-KV lease."""
+        if inputs.warmup or inputs.is_fake_stream:
+            return
+        if self._private_draft_pending is not None:
+            raise RuntimeError("private Draft KV replay is already staged")
+        ids = self._private_draft_armed_ids
+        if ids is None:
+            impl.publish_dense_private_draft_commit(inputs)
+            return
+        if (
+            self._private_draft_capture() is not impl
+            or _private_draft_request_ids(inputs.request_id) != ids
+        ):
+            raise ValueError("private Draft KV replay does not match the armed requests")
+        receipt = impl.stage_private_draft_commit(inputs)
+        if receipt is not None:
+            self._private_draft_pending = (ids, receipt)
+
+    def finish_private_draft_stage(self):
+        self._private_draft_armed_ids = None
+        return self._private_draft_pending is not None
+
+    def private_draft_commit_receipt(self, request_ids):
+        if self._private_draft_armed_ids is not None or self._private_draft_pending is None:
+            raise RuntimeError("private Draft KV commit requires a finished stage")
+        ids, receipt = self._private_draft_pending
+        if request_ids != ids:
+            raise ValueError("private Draft KV acceptance request order changed")
+        return receipt
+
+    def publish_private_draft_commit(self, request_ids, prefixes, accepted_rows):
+        try:
+            receipt = self.private_draft_commit_receipt(_private_draft_request_ids(request_ids))
+            receipt.publish(prefixes, accepted_rows)
+        finally:
+            self.abort_private_draft_commit()
+
+    def abort_private_draft_commit(self):
+        """Discard the lease after the caller joins the Draft stage stream."""
+        self._private_draft_armed_ids = None
+        self._private_draft_pending = None
 
     def _commit_layer_features(self, layer_idx, main_x, context_req_ids, context_positions,
                                committed_ends, block_table, tokens_per_block, batch_size,
@@ -276,6 +359,15 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
         runtime = self.shared_runtime
         if runtime is None or runtime.current is not None:
             raise RuntimeError("shared DSpark resources are uninitialized or reentrant")
+        if kind == "commit":
+            if self._private_draft_armed_ids is not None:
+                from rtp_llm.ops import PyModelOutputs
+
+                return PyModelOutputs(
+                    torch.empty((0, self._dspark_hidden_dim), dtype=torch.bfloat16, device=runtime.device)
+                )
+            if self._private_draft_pending is not None:
+                raise RuntimeError("private Draft KV commit is awaiting publication")
         if fmha_impl is not None:
             return self._call_graph(kind, inputs, fmha_impl)
         idle = bool(inputs.is_fake_stream)

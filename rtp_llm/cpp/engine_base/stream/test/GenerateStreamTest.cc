@@ -355,6 +355,11 @@ TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewBelowWholePacketMinKeepsE
     expectSpeculativePreviewMatchesUpdate(makeSpeculativePreviewStream(12, 10), {201, 1, 19513}, 3, 3);
 }
 
+TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewValidatesOnlyClippedPacket) {
+    expectSpeculativePreviewMatchesUpdate(makeSpeculativePreviewStream(8, 8), {201, 1, 19513, -1}, 4, 3);
+    expectSpeculativePreviewMatchesUpdate(makeSpeculativePreviewStream(8, 8), {201, -1, 19513, 7}, 4, 0);
+}
+
 TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewCrossingMinUsesWholePacketGate) {
     // The EOS itself is output7, but post-packet output8 enables the existing
     // whole-packet scan. A per-column minimum would incorrectly keep 3 rows.

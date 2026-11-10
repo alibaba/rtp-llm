@@ -55,6 +55,7 @@ if [[ "$v41_role" == shared-optimized-boundary ]]; then
     exec "$v41_python" -B -m unittest \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_packed_attention.SharedPackedAttentionDevice \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_fused_ops.SharedFusedOpsDevice \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_fused_ops.GraphSwaWriteDevice \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_projection_streams.SharedStreamsDevice
 fi
 if [[ "$v41_role" == graph-packed-boundary ]]; then
@@ -69,8 +70,11 @@ if [[ "$v41_role" == shared-grouped-graph-decode ]]; then
     exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.graph_modes_role
 fi
 if [[ "$v41_role" == shared-dspark-direct-graph ]]; then
-    [[ "${RTP_V41_PPU_MOE_BACKEND:?select grouped explicitly}" == grouped ]]
-    [[ "${RTP_V41_PPU_MOE_PRECISION:?select w4a8 explicitly}" == w4a8 ]]
+    [[ "${RTP_V41_PPU_MOE_BACKEND:?select a backend explicitly}" == "${2:-grouped}" ]]
+    [[ "${RTP_V41_PPU_MOE_PRECISION:?select a precision explicitly}" == "${3:-w4a8}" ]]
+    if [[ -n "${4:-}" ]]; then
+        export RTP_V41_N9_DIRECT_MODE="$4"
+    fi
     exec "$v41_python" -B -m rtp_llm.models_py.modules.dsv41.ppu.test.graph_modes_role --direct
 fi
 if [[ "$v41_role" == shared-eplb-prefill || "$v41_role" == shared-eplb-decode ]]; then

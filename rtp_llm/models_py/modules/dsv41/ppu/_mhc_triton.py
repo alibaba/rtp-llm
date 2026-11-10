@@ -310,12 +310,15 @@ def _num_slices_for(k: int) -> int:
     return 1
 
 
-def hc_mix_stats(x_flat: torch.Tensor, hc_fn: torch.Tensor, eps: float) -> torch.Tensor:
+def hc_mix_stats(
+    x_flat: torch.Tensor, hc_fn: torch.Tensor, eps: float, *,
+    reduce_block_m: int | None = None, aiu_prenorm: bool = False,
+) -> torch.Tensor:
     """Batch-invariant F.linear(x_flat.float(), hc_fn) * rsqrt(mean(x_flat^2) + eps).
 
     x_flat is [M, K] in any float dtype; hc_fn is [MIX, K] fp32; returns [M, MIX] fp32.
-    K slicing and reduction order are independent of M, so each row is bitwise
-    identical whether computed alone or in any batch routed to this backend.
+    The default path has batch-invariant K slicing. The opt-in AIU projection
+    uses the provider's split-K geometry and FP32 partials.
     """
     assert x_flat.dim() == 2 and hc_fn.dim() == 2
     assert x_flat.stride(1) == 1 and hc_fn.stride(1) == 1
@@ -323,36 +326,52 @@ def hc_mix_stats(x_flat: torch.Tensor, hc_fn: torch.Tensor, eps: float) -> torch
     m, k = x_flat.shape
     mix = hc_fn.shape[0]
     assert hc_fn.shape[1] == k
-    num_slices = _num_slices_for(k)
     mix_pad = max(16, triton.next_power_of_2(mix))
-    part_mix = torch.empty(
-        (num_slices, m, mix), dtype=torch.float32, device=x_flat.device
-    )
-    part_sq = torch.empty((num_slices, m), dtype=torch.float32, device=x_flat.device)
     mixes = torch.empty((m, mix), dtype=torch.float32, device=x_flat.device)
     if m == 0:
         return mixes
     block_m = _block_m_for(m)
     grid_m = triton.cdiv(m, block_m)
-    _hc_mix_stats_partial_kernel[(grid_m, num_slices)](
-        x_flat,
-        hc_fn,
-        part_mix,
-        part_sq,
-        m,
-        k,
-        x_flat.stride(0),
-        hc_fn.stride(0),
-        MIX=mix,
-        MIX_PAD=mix_pad,
-        NUM_SLICES=num_slices,
-        BLOCK_M=block_m,
-        BLOCK_K=_HC_MIX_BLOCK_K,
-        DOT_PRECISION=_HC_MIX_DOT_PRECISION,
-        num_warps=_HC_MIX_NUM_WARPS,
-        num_stages=_HC_MIX_NUM_STAGES,
-    )
-    _hc_mix_stats_reduce_kernel[(grid_m,)](
+    if (
+        aiu_prenorm and 1024 <= m <= 16384 and k == 20480 and mix == 24
+        and x_flat.dtype == torch.bfloat16 and x_flat.is_contiguous()
+        and hc_fn.is_contiguous() and torch.cuda.get_device_capability(x_flat.device) == (8, 9)
+    ):
+        from rtp_llm.models_py.modules.dsv4.ppu.hc import ppu_hc_prenorm
+
+        # The Flash tile also covers the V4.1 K dimension in whole split-K tiles.
+        geometry = ppu_hc_prenorm.launch_geometry(m, 16384, mix)
+        geometry["K"] = k
+        num_slices = geometry["NUM_SPLITS"]
+        part_mix, part_sq = ppu_hc_prenorm._launch_partials(x_flat, hc_fn, geometry)
+    else:
+        num_slices = _num_slices_for(k)
+        part_mix = torch.empty(
+            (num_slices, m, mix), dtype=torch.float32, device=x_flat.device
+        )
+        part_sq = torch.empty((num_slices, m), dtype=torch.float32, device=x_flat.device)
+        _hc_mix_stats_partial_kernel[(grid_m, num_slices)](
+            x_flat,
+            hc_fn,
+            part_mix,
+            part_sq,
+            m,
+            k,
+            x_flat.stride(0),
+            hc_fn.stride(0),
+            MIX=mix,
+            MIX_PAD=mix_pad,
+            NUM_SLICES=num_slices,
+            BLOCK_M=block_m,
+            BLOCK_K=_HC_MIX_BLOCK_K,
+            DOT_PRECISION=_HC_MIX_DOT_PRECISION,
+            num_warps=_HC_MIX_NUM_WARPS,
+            num_stages=_HC_MIX_NUM_STAGES,
+        )
+    # Only the final ordered reduction's row tile changes. Partial GEMM
+    # partitioning and the per-row FP32 slice fold stay identical.
+    reduce_rows = block_m if reduce_block_m is None else reduce_block_m
+    _hc_mix_stats_reduce_kernel[(triton.cdiv(m, reduce_rows),)](
         part_mix,
         part_sq,
         mixes,
@@ -362,7 +381,7 @@ def hc_mix_stats(x_flat: torch.Tensor, hc_fn: torch.Tensor, eps: float) -> torch
         MIX=mix,
         MIX_PAD=mix_pad,
         NUM_SLICES=num_slices,
-        BLOCK_M=block_m,
+        BLOCK_M=reduce_rows,
         num_warps=4,
     )
     return mixes
@@ -538,5 +557,67 @@ def mhc_post(
         BLOCK_H=block_h,
         HAS_SHARED=shared is not None,
         num_warps=4,
+    )
+    return out
+
+
+@triton.jit
+def _verify_mhc_post_kernel(
+    branch, residual, post, comb, output,
+    H: tl.constexpr, BLOCK_H: tl.constexpr, FUSED_DOT: tl.constexpr,
+):
+    """Keep the Verify matmul and branch product as separate FP32 terms."""
+    token = tl.program_id(0).to(tl.int64)
+    channel = tl.program_id(1) * BLOCK_H + tl.arange(0, BLOCK_H)
+    lane = tl.arange(0, 4)
+    address = (token * 4 + lane[:, None]) * H + channel[None, :]
+    live = channel < H
+
+    if FUSED_DOT:
+        dot = tl.full((4, BLOCK_H), 0, tl.float32)
+        for source_lane in tl.static_range(4):
+            coefficient = tl.load(comb + token * 16 + source_lane * 4 + lane)
+            value = tl.load(
+                residual + (token * 4 + source_lane) * H + channel, live, other=0
+            ).to(tl.float32)
+            dot = tl.fma(coefficient[:, None], value[None, :], dot)
+    else:
+        # Native torch.matmul has already rounded the residual projection.
+        dot = tl.load(residual + address, live[None, :], other=0)
+
+    post_weight = tl.load(post + token * 4 + lane)
+    x = tl.load(branch + token * H + channel, live, other=0).to(tl.float32)
+    branch_term = post_weight[:, None] * x[None, :]
+    tl.store(output + address, branch_term + dot, live[None, :])
+
+
+def try_verify_mhc_post(x, residual, post, comb, *, mode, proposal_q3=False):
+    """Apply dot-first post to dense Verify or B8/Q3 Proposal activations."""
+    width = 3 if proposal_q3 else 4
+    if (
+        mode not in ("dot", "epilogue")
+        or not residual.is_cuda
+        or residual.ndim != 4
+        or residual.shape[0] <= 0
+        or (proposal_q3 and residual.shape[0] != 8)
+        or residual.shape[1:] != (width, 4, 5120)
+        or x.shape != (*residual.shape[:2], 5120)
+        or post.shape != (*residual.shape[:3], 1)
+        or comb.shape != (*residual.shape[:3], 4)
+        or x.dtype != residual.dtype or x.dtype != torch.bfloat16
+        or post.dtype != comb.dtype or post.dtype != torch.float32
+        or torch.is_grad_enabled()
+        or not all(t.device == residual.device and t.is_contiguous() for t in (x, residual, post, comb))
+    ):
+        return None
+
+    fused_dot = mode == "dot"
+    source = residual if fused_dot else torch.matmul(comb.transpose(-1, -2), residual.float())
+    out = torch.empty_like(residual)
+    tokens = residual.shape[0] * residual.shape[1]
+    block = 1024
+    _verify_mhc_post_kernel[(tokens, triton.cdiv(x.shape[-1], block))](
+        x, source, post, comb if fused_dot else None, out,
+        x.shape[-1], block, fused_dot, num_warps=4, enable_fp_fusion=False,
     )
     return out

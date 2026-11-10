@@ -2044,6 +2044,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     SamplerOutput                         draft_sampler_output;
     speculative::SpeculativeSamplerOutput speculative_sampler_output;
+    torch::Tensor                         next_history;
+    bool                                  accept_packet_ready = false;
     MtpTargetLogprobs                     target_logprobs;
     std::shared_ptr<MtpTargetLogprobs>    early_target_logprobs_finalize_state;
 
@@ -2218,6 +2220,22 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             tpSyncModelInputs(model_input, parallelism_config_);
             ensureModelInputsOnCuda(model_input, "decode.dspark_target_verify_after_tp_sync");
         }
+#if USE_PPU
+        if (role_type_ == RoleType::DECODE && parallelism_config_.tp_size == 1 && parallelism_config_.dp_size > 1
+            && !dspark_packed_verify_ && !proposal_input.warmup && !useAsyncPrepare()) {
+            static const bool early_verify_vote = readEnvFlagOnce(
+                "RTP_V41_PPU_DSPARK_EARLY_VERIFY_VOTE", "ppu-dspark-verify", "early_verify_vote");
+            if (early_verify_vote) {
+                if (auto* target = dynamic_cast<PyWrappedModel*>(model_.get())) {
+                    // Proposal and Verify input kernels are already queued.
+                    // Vote while they run and include collective-only ranks.
+                    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(start_verify_host_vote)");
+                    target->startDSparkVerifyHostVote(
+                        proposal_input.is_fake_stream ? 0 : proposal_input.combo_tokens.numel());
+                }
+            }
+        }
+#endif
         if (dspark_packed_verify_) {
             // The proposal has now fixed the live request lengths. Preserve
             // that immutable geometry while preparing on the auxiliary stream.
@@ -2341,6 +2359,102 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+
+#if USE_PPU
+    struct PrivateDraftCommitGuard {
+        PyWrappedModel*              model = nullptr;
+        std::shared_ptr<torch::Event> ready;
+        std::optional<GptModelInputs> inputs;
+        bool                         staged = false;
+
+        void join() {
+            if (ready) {
+                ready->block(cuda_graph::graphGetCurrentStream());
+                ready.reset();
+            }
+        }
+
+        ~PrivateDraftCommitGuard() {
+            if (model != nullptr) {
+                try {
+                    join();
+                    model->abortPrivateDraftCommit();
+                } catch (const std::exception& e) {
+                    RTP_LLM_LOG_ERROR("DSpARK private draft cleanup failed: %s", e.what());
+                } catch (...) {
+                    RTP_LLM_LOG_ERROR("DSpARK private draft cleanup failed");
+                }
+            }
+        }
+    } private_draft_commit;
+    struct DraftAttentionPrepareGuard {
+        PyWrappedModel* model = nullptr;
+        ~DraftAttentionPrepareGuard() {
+            if (model != nullptr) {
+                model->discardPreparedAttentionInputs();
+            }
+        }
+    } draft_attention_prepare;
+    if (is_dspark_ && role_type_ == RoleType::DECODE && parallelism_config_.tp_size == 1
+        && sp_prefill_draft_model_ && !useAsyncPrepare() && !model_input.warmup && !model_input.is_fake_stream
+        && !model_input.is_packed_target_verify && !model_input.pd_separation) {
+        auto* draft = dynamic_cast<PyWrappedModel*>(sp_prefill_draft_model_.get());
+        static const bool use_private_draft_kv = readEnvFlagOnce(
+            "RTP_V41_PPU_DSPARK_PRIVATE_DRAFT_KV", "ppu-dspark-commit", "private_draft_kv");
+        if (use_private_draft_kv && draft != nullptr && !useStreamAsync() && !useAsyncDeviceState()
+            && batch_size == 8 && propose_step_ == 3 && model_input.combo_tokens.numel() == 32
+            && model_input.request_id.defined() && model_input.request_id.numel() == 8) {
+            auto main_stream  = cuda_graph::graphGetCurrentStream();
+            auto draft_stream = draft_prefill_prepare_runner_.stream();
+            if (draft_stream != static_cast<torch::Stream>(main_stream)) {
+                RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
+                RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(stage_private_draft_kv)");
+                auto& commit_input = private_draft_commit.inputs.emplace(model_input);
+                batch_stream_processor_->updateDecodePostDSparkCommitInput(
+                    commit_input, model_output.all_hidden_states, batch_size);
+                applyCacheStrideToModelInput(commit_input, cache_manager_->getMTPModuleCacheConfig(0));
+                ensureModelInputsOnCuda(commit_input, "decode.stage_private_draft_kv");
+                auto input_ready = cuda_graph::makeGraphEvent();
+                input_ready.record(main_stream);
+                auto stage_ready = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+                private_draft_commit.model = draft;
+                {
+                    cuda_graph::GraphStreamGuard guard(cuda_graph::toGraphStream(draft_stream));
+                    input_ready.block(draft_stream);
+                    try {
+                        private_draft_commit.staged = draft->tryStagePrivateDraftCommit(commit_input);
+                    } catch (...) {
+                        stage_ready->record(draft_stream);
+                        private_draft_commit.ready = stage_ready;
+                        throw;
+                    }
+                    stage_ready->record(draft_stream);
+                }
+                private_draft_commit.ready = stage_ready;
+                if (!private_draft_commit.staged) {
+                    private_draft_commit.join();
+                    draft->abortPrivateDraftCommit();
+                    private_draft_commit.model = nullptr;
+                }
+            }
+        }
+        static const bool prepare_early = readEnvFlagOnce(
+            "RTP_V41_PPU_DSPARK_EARLY_DRAFT_COMMIT_PREPARE", "ppu-dspark-commit", "early_prepare");
+        if (prepare_early && !private_draft_commit.staged && draft != nullptr) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_dspark_draft_commit)");
+            // Dense Commit shares this round's verified geometry. Bind
+            // the Draft's own cache tables now and leave the replay and
+            // feature binding until after the acceptance transaction.
+            auto commit_input = model_input;
+            commit_input.is_target_verify = true;
+            applyCacheStrideToModelInput(commit_input, cache_manager_->getMTPModuleCacheConfig(0));
+            ensureModelInputsOnCuda(commit_input, "decode.early_dspark_draft_commit_prepare");
+            draft_attention_prepare.model = draft;
+            draft->prepareAttentionInputs(
+                commit_input, /*skip_forward_event_sync=*/true, nullptr, /*defer_graph_prepare=*/true);
+        }
+    }
+#endif
 
     // Submit target verify before waiting for previous bookkeeping in the launch
     // helper. The earlier token-ready event lets spec-logits D2H/CPU work still
@@ -2505,8 +2619,49 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // advance the Python-side row count, so pass the explicit verify
             // geometry.
 #if USE_PPU
-            auto accepted = speculative_sampler_output.accept_len.to(torch::kCPU).to(torch::kInt32).clone();
-            auto emitted = speculative_sampler_output.accept_tokens.to(torch::kCPU).to(torch::kInt32).contiguous();
+            static const bool use_joint_kv_publish = readEnvFlagOnce(
+                "RTP_V41_PPU_DSPARK_JOINT_KV_PUBLISH", "ppu-dspark-commit", "joint_kv_publish");
+            static const bool overlap_verify_epilogue = readEnvFlagOnce(
+                "RTP_V41_PPU_DSPARK_OVERLAP_VERIFY_EPILOGUE", "ppu-dspark-commit", "overlap_verify_epilogue");
+            const bool overlap_epilogue = private_draft_commit.staged && use_joint_kv_publish && overlap_verify_epilogue;
+            if (overlap_epilogue && engram_anchor_windows.defined()) {
+                // This computes a new buffer. Only publish it to the streams
+                // after the same successful dispatch as in the regular tail.
+                RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_next_engram_window)");
+                next_history = MtpBatchStreamProcessor::advanceEngramTokenWindows(
+                    engram_anchor_windows, speculative_sampler_output.accept_tokens, speculative_sampler_output.accept_len);
+            }
+            static const bool deferred_verify_stage =
+                readEnvFlagOnce("RTP_V41_PPU_VERIFY_DEFERRED_STAGE", "ppu-dspark-verify", "deferred_stage");
+            if (deferred_verify_stage) {
+                if (auto* model = dynamic_cast<PyWrappedModel*>(model_.get())) {
+                    // Both GPU phases are queued. Consume the earlier Verify
+                    // receipt while target sampling and its D2H can still run.
+                    static const bool prepare_joint_publication = readEnvFlagOnce(
+                        "RTP_V41_PPU_DSPARK_PREPARE_JOINT_PUBLICATION", "ppu-dspark-commit", "prepare_joint_publication");
+                    if (!(overlap_epilogue && prepare_joint_publication
+                          && model->prepareSpeculativeForwardCompletionWithPrivateDraft(
+                              *private_draft_commit.model, model_input.prefix_lengths))) {
+                        model->prepareSpeculativeForwardCompletion();
+                    }
+                }
+            }
+            auto accepted = speculative_sampler_output.accept_len_cpu;
+            auto emitted  = speculative_sampler_output.accept_tokens_cpu;
+            if (accepted.defined() && emitted.defined()) {
+                // The CUDA sampler has already staged the packet used by
+                // bookkeeping. Wait for that transfer before previewing it.
+                speculative_sampler_output.transfer_done_event->synchronize();
+                accept_packet_ready = overlap_epilogue;
+            } else {
+                // Fake Verify creates its acceptance tensors without a sampler.
+                accepted = speculative_sampler_output.accept_len.cpu();
+                emitted  = speculative_sampler_output.accept_tokens.cpu();
+            }
+            // Preview clamps counts for KV publication. Keep the sampler's
+            // original result available for dispatch and metrics.
+            accepted = accepted.to(torch::kInt32).clone();
+            emitted  = emitted.to(torch::kInt32).contiguous();
             int64_t row = 0;
             for (const auto& stream : stream_groups.allStreams()) {
                 auto& count = accepted.data_ptr<int32_t>()[row];
@@ -2518,7 +2673,28 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 count = stream->previewSpeculativeCommitRows(update_info);
                 ++row;
             }
-            model_->finishSpeculativeForward(model_input.request_id, model_input.prefix_lengths, accepted);
+            bool published_pair = false;
+            if (private_draft_commit.staged && use_joint_kv_publish) {
+                if (auto* target = dynamic_cast<PyWrappedModel*>(model_.get())) {
+                    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(publish_joint_verify_draft_kv)");
+                    private_draft_commit.join();
+                    published_pair = target->tryFinishSpeculativeForwardWithPrivateDraft(
+                        *private_draft_commit.model, model_input.request_id, model_input.prefix_lengths, accepted);
+                    if (published_pair) {
+                        private_draft_commit.model = nullptr;
+                    }
+                }
+            }
+            if (!published_pair) {
+                model_->finishSpeculativeForward(model_input.request_id, model_input.prefix_lengths, accepted);
+                if (private_draft_commit.staged) {
+                    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(publish_private_draft_kv)");
+                    private_draft_commit.join();
+                    private_draft_commit.model->publishPrivateDraftCommit(
+                        model_input.request_id, model_input.prefix_lengths, accepted);
+                    private_draft_commit.model = nullptr;
+                }
+            }
 #endif
             batch_stream_processor_->updateDecodePostDSparkCommitInput(
                 model_input, model_output.all_hidden_states, batch_size);
@@ -2591,7 +2767,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // round's proposal is produced at the next round head, from this
         // freshly committed ring.
         try {
-            draft_prefill_model_output = runDraftPrefillForward(model_input);
+#if USE_PPU
+            if (!private_draft_commit.staged)
+#endif
+            {
+                draft_prefill_model_output = runDraftPrefillForward(model_input);
+            }
         } catch (...) {
             auto forward_exception = std::current_exception();
             try {
@@ -2685,10 +2866,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                              model_forward_us,
                              draft_sampler_output.confidence_rates,
                              confidence_valid_lengths,
-                             dspark_verify_plan.draft_budget);
+                             dspark_verify_plan.draft_budget,
+                             accept_packet_ready);
     }
 
-    torch::Tensor next_history;
     auto dispatch_position_ids = packed_target_layout.packed_to_dense.defined() ?
                                      packed_target_layout.dense_position_ids : model_input.combo_position_ids;
     auto          dispatch_result =
@@ -3462,7 +3643,8 @@ void MtpExecutor::collectDecodeMetrics(const StreamGroups&                      
                                        int64_t                                      model_forward_us,
                                        const torch::Tensor&                         confidence_rates,
                                        const torch::Tensor&                         confidence_valid_lengths,
-                                       int64_t                                      verify_draft_token_num) {
+                                       int64_t                                      verify_draft_token_num,
+                                       bool                                         accept_packet_ready) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(collect_metrics)");
     auto& executor_collector  = metrics_collector.executor_collector;
     auto& sp_engine_collector = metrics_collector.sp_engine_collector;
@@ -3475,7 +3657,12 @@ void MtpExecutor::collectDecodeMetrics(const StreamGroups&                      
     for (const auto& stream : stream_groups.allStreams()) {
         accept_len_row_priorities.push_back(stream->priority());
     }
-    const bool staged = stageAcceptLenMetrics(speculative_sampler_output.accept_len,
+    // Confidence statistics still use the existing GPU pipeline. For plain
+    // metrics the host preview already waited for the original sampler counts.
+    const auto& accept_len_for_metrics = accept_packet_ready && !confidence_rates.defined()
+                                             ? speculative_sampler_output.accept_len_cpu
+                                             : speculative_sampler_output.accept_len;
+    const bool staged = stageAcceptLenMetrics(accept_len_for_metrics,
                                               accept_len_ready_event,
                                               stream_groups.size(),
                                               std::move(accept_len_row_priorities),

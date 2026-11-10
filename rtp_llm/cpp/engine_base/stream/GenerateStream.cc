@@ -1389,6 +1389,27 @@ int GenerateStream::previewSpeculativeCommitRows(const StreamSpecUpdateInfo& upd
     if (update_info.num_new_tokens == 0 || old_seq_length >= max_token_num) {
         return 0;
     }
+    const int   count           = std::min<size_t>(update_info.num_new_tokens, max_token_num - old_seq_length);
+    const int   next_seq_length = old_seq_length + count;
+    const auto& config = *generate_input_->generate_config;
+    // needFinish checks the maximum first and the minimum on the whole
+    // packet. Outside a stop-word scan, only these new tokens are needed.
+    const bool scan_for_stop = static_cast<size_t>(next_seq_length) < max_token_num
+                               && next_seq_length >= config.min_new_tokens + inputLength();
+    if (!isPerfTest() && (!scan_for_stop || config.stop_words_list.empty())) {
+        const auto* begin = new_tokens.data_ptr<int32_t>();
+        const auto* end = begin + count;
+        if (std::any_of(begin, end, [this](int32_t token) { return token < 0 || token >= vocab_size_; })) {
+            return 0;
+        }
+        if (scan_for_stop && !config.ignore_eos) {
+            const auto* eos = std::find(begin, end, special_tokens_.eos_token_id);
+            if (eos != end) {
+                return eos - begin + 1;
+            }
+        }
+        return count;
+    }
     // Never share the real token buffer: update/matchers may append and truncate.
     CompleteTokenIds tokens(*complete_token_ids_, false);
     auto             states         = sub_generate_status_;

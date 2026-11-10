@@ -59,6 +59,7 @@ class NativeGraphCache:
         self.native = kv_cache
         self.entries, self.spans, self.tables = {}, {}, {}
         self._pools, self._handles, self._pool_identity = {}, {}, {}
+        self._native_pool_identity = {}
         self._table_fields, self._table_identity = {}, {}
         self._framework_tags, self._table_framework_tags = {}, {}
         by_tag = as_attention_inputs_by_tag(attention_inputs, kv_cache)
@@ -82,6 +83,7 @@ class NativeGraphCache:
                 raise ValueError(
                     f"Graph pool {(owner, tag)} must be contiguous on {self.device}"
                 )
+            self._native_pool_identity[owner, tag] = _identity(tensor)
             tensor = tensor.view(tensor.shape[0], math.prod(tensor.shape[1:]))
             entries = int(kv_cache.get_entries_per_block(framework_tag))
             span = int(
@@ -204,11 +206,16 @@ class NativeGraphCache:
             current = self.native.get_layer_cache(
                 key[0], self._framework_tags[key]
             ).kv_cache_base
-            current = current.view(current.shape[0], math.prod(current.shape[1:]))
-            if (
-                _identity(current) != self._pool_identity[key]
-                or _identity(pool) != self._pool_identity[key]
-            ):
+            expected = self._pool_identity[key]
+            if _identity(current) != self._native_pool_identity[key]:
+                # Accept equivalent native shapes through the original flattened
+                # check. Stable native handles need no replay-time Tensor view.
+                current = current.view(current.shape[0], math.prod(current.shape[1:]))
+                if _identity(current) != expected:
+                    raise RuntimeError(
+                        "Framework cache allocation changed after Graph binding"
+                    )
+            if _identity(pool) != expected:
                 raise RuntimeError(
                     "Framework cache allocation changed after Graph binding"
                 )

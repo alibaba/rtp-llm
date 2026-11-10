@@ -192,6 +192,75 @@ torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
     return result.is_none() ? torch::Tensor() : result.cast<torch::Tensor>();
 }
 
+void PyWrappedModel::prepareSpeculativeForwardCompletion() {
+    py::gil_scoped_acquire gil;
+    if (py_model_ && py::hasattr(py_model_, "prepare_speculative_forward_completion")) {
+        py_model_.attr("prepare_speculative_forward_completion")();
+    }
+}
+
+#if USE_PPU
+void PyWrappedModel::startDSparkVerifyHostVote(int64_t local_proposal_rows) {
+    if (!enable_cuda_graph_ || (int(device_props_.enable_layer_micro_batch) && supports_micro_batch_)) {
+        return;
+    }
+    py::gil_scoped_acquire gil;
+    if (py_model_ && py::hasattr(py_model_, "start_dspark_verify_host_vote")) {
+        py_model_.attr("start_dspark_verify_host_vote")(local_proposal_rows);
+    }
+}
+
+bool PyWrappedModel::tryStagePrivateDraftCommit(const GptModelInputs& inputs) {
+    {
+        py::gil_scoped_acquire gil;
+        if (dspark_model_role_ != DSparkModelRole::COMMIT || !py_model_
+            || !py::hasattr(py_model_, "arm_private_draft_commit")
+            || !py_model_.attr("arm_private_draft_commit")(inputs.request_id).cast<bool>()) {
+            return false;
+        }
+    }
+    forwardImpl(inputs, /*private_draft_stage=*/true);
+    py::gil_scoped_acquire gil;
+    return py_model_.attr("finish_private_draft_stage")().cast<bool>();
+}
+
+bool PyWrappedModel::prepareSpeculativeForwardCompletionWithPrivateDraft(PyWrappedModel& draft,
+                                                                         const torch::Tensor& prefixes) {
+    py::gil_scoped_acquire gil;
+    if (!py_model_ || !draft.py_model_
+        || !py::hasattr(py_model_, "prepare_speculative_forward_completion_with_private_draft")) {
+        return false;
+    }
+    py_model_.attr("prepare_speculative_forward_completion_with_private_draft")(draft.py_model_, prefixes);
+    return true;
+}
+
+bool PyWrappedModel::tryFinishSpeculativeForwardWithPrivateDraft(PyWrappedModel& draft,
+                                                                  const torch::Tensor& request_ids,
+                                                                  const torch::Tensor& prefixes,
+                                                                  const torch::Tensor& accepted_rows) {
+    py::gil_scoped_acquire gil;
+    return py_model_ && draft.py_model_ && py::hasattr(py_model_, "try_finish_speculative_forward_with_private_draft")
+           && py_model_.attr("try_finish_speculative_forward_with_private_draft")(
+                           draft.py_model_, request_ids, prefixes, accepted_rows)
+                  .cast<bool>();
+}
+
+void PyWrappedModel::publishPrivateDraftCommit(const torch::Tensor& request_ids,
+                                                const torch::Tensor& prefixes,
+                                                const torch::Tensor& accepted_rows) {
+    py::gil_scoped_acquire gil;
+    py_model_.attr("publish_private_draft_commit")(request_ids, prefixes, accepted_rows);
+}
+
+void PyWrappedModel::abortPrivateDraftCommit() {
+    py::gil_scoped_acquire gil;
+    if (py_model_ && py::hasattr(py_model_, "abort_private_draft_commit")) {
+        py_model_.attr("abort_private_draft_commit")();
+    }
+}
+#endif
+
 void PyWrappedModel::finishSpeculativeForward(const torch::Tensor& request_ids,
                                               const torch::Tensor& prefixes,
                                               const torch::Tensor& accepted_rows) {
@@ -1115,6 +1184,10 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
+    return forwardImpl(inputs, /*private_draft_stage=*/false);
+}
+
+GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool private_draft_stage) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
 
     // Establish the cleanup guard before touching inputs: both the performance
@@ -1312,6 +1385,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
                                    && graph_runner->canRun(py_model_inputs, graph_state);
+        if (private_draft_stage && (!can_run_graph || !native_graph_work_available)) {
+            // The early path may only write into a captured private journal.
+            // Leave eager and idle fallback to the normal post-accept caller.
+            return {};
+        }
         if (!capture_hidden_states && !inputs.warmup && !dspark_graph_budgets_.empty()
             && py_model_inputs.attention_inputs.is_target_verify) {
             RTP_LLM_CHECK_WITH_INFO(
@@ -1415,6 +1493,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs = outputs.cast<PyModelOutputs>();
         }
 
+        if (private_draft_stage) {
+            cache_store_write_cycle.finish();
+            return {};
+        }
         if (capture_hidden_states || dspark_model_role_ == DSparkModelRole::PROPOSE) {
             // Capture owns its explicit output buffer. The proposal head reads
             // its graph output on the replay stream before the next replay, so

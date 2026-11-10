@@ -9,6 +9,13 @@ from rtp_llm.models_py.modules.dsv41.ppu.attention import flash_mla_sparse_fwd_p
 from rtp_llm.models_py.modules.dsv41.ppu.prefill import _rope_tail
 from rtp_llm.models_py.modules.dsv41.ppu.block import SharedPPUBlock
 from rtp_llm.models_py.modules.dsv41.ppu.layers import PPUSharedRMSNorm
+from rtp_llm.models_py.modules.dsv41.ppu.graph_swa_write import (
+    dequantize_draft_swa,
+    try_prepare_draft_swa,
+    try_rotate_q_and_pack_swa,
+    try_write_rotary_swa,
+    unique_commit_swa_slots,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -40,42 +47,99 @@ def project_commit(attn, main_x, positions, freqs):
     return _rope_tail(attn.kv_norm(attn.wkv(main_x)), freqs[positions.long().clamp_min(0)])
 
 
+def _swa_geometry(cache, layer_id):
+    domain = cache._table_tag(layer_id, "swa_kv")
+    return domain, cache.entries[domain], cache.spans[domain], cache.pool(layer_id, "swa_kv").shape[0]
+
+
 def graph_commit_layer(model, state, layer_idx, main_x, requests, positions, ends):
     """The public commit loop calls this with the actual feature-row map."""
     runtime = model.shared_runtime
     cache = state.cache
     g = runtime.geometry
-    req = requests.long().clamp_min(0)
-    end = ends[req]
-    live = (
-        (requests >= 0) & state.live[req] & (positions >= 0)
-        & (positions >= end - g.window) & (positions < end)
-        & (positions < cache.max_seq_len)
-    )
-    pos = positions.clamp(0, cache.max_seq_len - 1)
+    private = getattr(cache, "is_private_draft_commit", False)
+    # The public loop passes the same feature-row map to every draft layer.
+    # This state belongs to one capture and is rebuilt on every invocation.
+    if not hasattr(state, "shared"):
+        state.shared = {}
+    shared = state.shared
+    if "commit_positions" not in shared:
+        req = requests.long().clamp_min(0)
+        end = ends[req]
+        live = (
+            (requests >= 0) & state.live[req] & (positions >= 0)
+            & (positions >= end - g.window) & (positions < end)
+            & (positions < cache.max_seq_len)
+        )
+        pos = positions.clamp(0, cache.max_seq_len - 1).long()
+        raw = torch.where(live, pos, -1)
+        shared["commit_positions"] = (req, pos, raw)
+        if private:
+            cache.bind_commit(req, live, state.live)
+            shared["commit_private_rows"] = live.sum()
+    req, pos, raw = shared["commit_positions"]
     attn = model.v4.layers[layer_idx].attn
-    values = project_commit(attn, main_x, pos, runtime.freqs_for(layer_idx))
-    packed = model._shared_ops.encode_kv(values, pool_tag="swa_kv")
-    from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import position_slots
+    values = attn.kv_norm(attn.wkv(main_x))
+    table = runtime.freqs_for(layer_idx)
+    rope_key = ("commit_rope", id(table))
+    if rope_key not in shared:
+        shared[rope_key] = table[pos]
+    freqs = shared[rope_key]
+    if private:
+        if not try_write_rotary_swa(values, freqs, cache, layer_idx, raw, journal=True):
+            packed = model._shared_ops.encode_kv(_rope_tail(values, freqs), pool_tag="swa_kv")
+            cache.write_rows(layer_idx, "swa_kv", raw, packed)
+        state.writes[layer_idx].copy_(shared["commit_private_rows"])
+        return
+    geometry = _swa_geometry(cache, layer_idx)
+    slot_key = ("commit_swa", geometry)
+    if slot_key not in shared:
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import position_slots
 
-    tag = cache._table_tag(layer_idx, "swa_kv")
-    slots = position_slots(
-        torch.where(live, pos, -1), cache.tables[tag][req],
-        span=cache.spans[tag], entries=cache.entries[tag], ratio=1, full=False,
-        pool_blocks=cache.pool(layer_idx, "swa_kv").shape[0],
-    )
-    cache.write_rows(layer_idx, "swa_kv", slots, packed)
-    state.writes[layer_idx].copy_((slots >= 0).sum())
+        domain, entries, span, blocks = geometry
+        slots = position_slots(
+            raw, cache.tables[domain][req], span=span, entries=entries,
+            ratio=1, full=False, pool_blocks=blocks,
+        )
+        shared[slot_key] = (unique_commit_swa_slots(slots), (slots >= 0).sum())
+    slots, writes = shared[slot_key]
+    if not try_write_rotary_swa(values, freqs, cache, layer_idx, slots):
+        packed = model._shared_ops.encode_kv(_rope_tail(values, freqs), pool_tag="swa_kv")
+        cache.write_rows(layer_idx, "swa_kv", slots, packed)
+    state.writes[layer_idx].copy_(writes)
 
 
-def _project_query_output(attn, g, output, freqs, shape):
-    output = _rope_tail(output, freqs, inverse=True).reshape(
-        -1, g.o_groups, g.n_heads * g.head_dim // g.o_groups
-    )
-    projected = torch.stack([
-        F.linear(output[:, i].contiguous(), attn.wo_a.weight[i * g.o_lora_rank:(i + 1) * g.o_lora_rank].contiguous())
-        for i in range(g.o_groups)
-    ], 1)
+def _project_query_output(
+    attn, g, output, freqs, shape, *, valid_mask=None, proposal_batched_wo_a=False,
+):
+    if valid_mask is not None:
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_attention_layer import _rotate_graph_value
+
+        output = _rotate_graph_value(
+            output, freqs, inplace=True, inverse=True, valid_mask=valid_mask,
+            preserve_signed_zero=True,
+        )
+    else:
+        output = _rope_tail(output, freqs, inverse=True)
+    output = output.reshape(-1, g.o_groups, g.n_heads * g.head_dim // g.o_groups)
+    weight = attn.wo_a.weight
+    if valid_mask is not None and proposal_batched_wo_a:
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_attention_layer import _try_batched_wo_a
+
+        projected = _try_batched_wo_a(output, weight, proposal_q3=True)
+        if projected is not None:
+            return attn.wo_b(projected.flatten(1)).reshape(shape)
+    if valid_mask is not None and weight.is_contiguous() and not (
+        torch.is_grad_enabled() and (output.requires_grad or weight.requires_grad)
+    ):
+        projected = output.new_empty((output.shape[0], g.o_groups, g.o_lora_rank))
+        for i, group_weight in enumerate(weight.view(g.o_groups, g.o_lora_rank, -1)):
+            torch.mm(output[:, i], group_weight.T, out=projected[:, i])
+    else:
+        projected = torch.stack([
+            F.linear(output[:, i].contiguous(), weight[i * g.o_lora_rank:(i + 1) * g.o_lora_rank].contiguous())
+            for i in range(g.o_groups)
+        ], 1)
     return attn.wo_b(projected.flatten(1)).reshape(shape)
 
 
@@ -89,31 +153,52 @@ def forward_graph_query(model, layer_id, x, positions, prefixes, active):
     batch, width = x.shape[:2]
     cache = state.cache
     flat = x.reshape(-1, g.hidden_size)
-    freqs = state.freqs[layer_id][positions.reshape(-1).clamp(0, cache.max_seq_len - 1)]
-    q = _rope_tail(attn.wq_b(attn.query_latent(flat)).reshape(-1, g.n_heads, g.head_dim), freqs)
-    fresh = _rope_tail(attn.kv_norm(attn.wkv(flat)), freqs)
-    fresh = model._shared_ops.encode_kv(fresh, pool_tag="swa_kv").reshape(batch, width, -1)
+    table = state.freqs[layer_id]
+    key = ("draft_rope", id(table))
+    if key not in state.shared:
+        state.shared[key] = table[positions.reshape(-1).clamp(0, cache.max_seq_len - 1)]
+    freqs = state.shared[key]
+    q = attn.wq_b(attn.query_latent(flat)).reshape(-1, g.n_heads, g.head_dim)
+    fresh = attn.kv_norm(attn.wkv(flat))
+    packed = try_rotate_q_and_pack_swa(q, fresh, freqs)
+    if packed is None:
+        q = _rope_tail(q, freqs)
+        fresh = model._shared_ops.encode_kv(_rope_tail(fresh, freqs), pool_tag="swa_kv")
+    else:
+        q, fresh = packed
 
-    context = prefixes.long()[:, None] - g.window + torch.arange(g.window, device=x.device)
-    slots = cache.slots(layer_id, "swa_kv", torch.where(active[:, None], context, -1))
-    committed = cache.read_rows(layer_id, "swa_kv", slots)
-    bank_width = g.window + width
-    bank = torch.cat((committed, fresh), dim=1)
-    kv = dequantize_swa_kv_rows(bank.flatten(0, 1)).reshape(-1, 1, g.head_dim)
-    live = torch.cat((slots >= 0, active[:, None].expand(batch, width)), dim=1)
-    ordinals = torch.arange(batch * bank_width, device=x.device, dtype=torch.int32).reshape(batch, bank_width)
-    indices = torch.where(live, ordinals, -1)
-    # Empty owners use their own dummy row to keep sparse MLA well-defined.
-    indices[:, 0] = torch.where(active, indices[:, 0], ordinals[:, 0])
-    # The PPU sparse MLA contract uses a 128-aligned candidate width.
-    indices = F.pad(indices, (0, (-bank_width) % 128), value=-1)
-    indices, lengths = _compact_workspace_indices(indices[:, None])
+    key = ("draft_swa", _swa_geometry(cache, layer_id), g.window, width)
+    if key not in state.shared:
+        state.shared[key] = try_prepare_draft_swa(
+            cache, layer_id, prefixes, active, window=g.window, width=width,
+        )
+    metadata = state.shared[key]
+    if metadata is not None:
+        slots, indices, lengths = metadata
+        kv = dequantize_draft_swa(cache, layer_id, slots, fresh, width=width)
+    else:
+        context = prefixes.long()[:, None] - g.window + torch.arange(g.window, device=x.device)
+        slots = cache.slots(layer_id, "swa_kv", torch.where(active[:, None], context, -1))
+        committed = cache.read_rows(layer_id, "swa_kv", slots)
+        bank_width = g.window + width
+        bank = torch.cat((committed, fresh.reshape(batch, width, -1)), dim=1)
+        kv = dequantize_swa_kv_rows(bank.flatten(0, 1)).reshape(-1, 1, g.head_dim)
+        live = torch.cat((slots >= 0, active[:, None].expand(batch, width)), dim=1)
+        ordinals = torch.arange(batch * bank_width, device=x.device, dtype=torch.int32).reshape(batch, bank_width)
+        indices = torch.where(live, ordinals, -1)
+        # Empty owners use their own dummy row to keep sparse MLA well-defined.
+        indices[:, 0] = torch.where(active, indices[:, 0], ordinals[:, 0])
+        indices = F.pad(indices, (0, (-bank_width) % 128), value=-1)
+        indices, lengths = _compact_workspace_indices(indices[:, None])
+        indices = indices.repeat_interleave(width, dim=0)
+        lengths = lengths.repeat_interleave(width)
     output, _, _ = flash_mla_sparse_fwd_ppu(
-        q.contiguous(), kv, indices.repeat_interleave(width, dim=0), g.sm_scale(),
-        attn_sink=attn.attn_sink, topk_length=lengths.repeat_interleave(width),
+        q.contiguous(), kv, indices, g.sm_scale(), attn_sink=attn.attn_sink, topk_length=lengths,
     )
-    output = torch.where(state.metadata.valid_mask[:, None, None], output, 0)
-    return _project_query_output(attn, g, output, freqs, x.shape)
+    return _project_query_output(
+        attn, g, output, freqs, x.shape, valid_mask=state.metadata.valid_mask,
+        proposal_batched_wo_a=getattr(state, "proposal_batched_wo_a", False),
+    )
 
 
 def unsampled_anchor_metadata(prefixes, active, *, width, window, virtual_span):

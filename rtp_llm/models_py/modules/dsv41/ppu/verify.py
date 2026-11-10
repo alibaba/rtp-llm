@@ -13,6 +13,10 @@ class VerifyLayout:
     def from_inputs(cls, primary, rows):
         lengths = tuple(int(x) for x in primary.input_lengths.cpu().tolist())
         prefixes = tuple(int(x) for x in primary.prefix_lengths.cpu().tolist())
+        return cls.from_lengths_and_prefixes(lengths, prefixes, rows)
+
+    @classmethod
+    def from_lengths_and_prefixes(cls, lengths, prefixes, rows):
         if len(prefixes) != len(lengths) or sum(lengths) != rows:
             raise ValueError("verify rows must be request-major dense/packed queries")
         if any(length < 1 for length in lengths) or any(

@@ -9,6 +9,12 @@ from typing import Mapping
 
 PPU_STRATEGY = "bf16_dense_w4a16_moe_sparse_mla_host_enp_v1"
 CONFIG_SHA256 = "8be45ce0476004a3f529fd896115a4a2e800a129ad2d3ec05b16050f52e21879"
+MEGAMOE_DSPARK_ASYNC_FLAGS = (
+    "RTP_LLM_STREAM_ASYNC",
+    "RTP_LLM_DEVICE_INPUT",
+    "RTP_LLM_MTP_ASYNC_PREPARE",
+    "RTP_LLM_MTP_ASYNC_DEVICE_STATE",
+)
 
 
 def enum_name(value) -> str:
@@ -85,6 +91,7 @@ class V41RuntimeConfig:
     moe_precision: str = "w4a8"
     shared_eplb: bool = False
     shared_grouped_graph: bool = False
+    dspark_verify_mode: str = "dense"
 
     @property
     def attention_cp(self):
@@ -94,7 +101,7 @@ class V41RuntimeConfig:
     def attention_tp(self):
         return 1
 
-    def validate(self):
+    def validate(self, *, env=None):
         expected = {
             "PREFILL": ((8, 1, "ALL_GATHER", 8), (1, 8, "DISABLED", 1)),
             "DECODE": ((1, 8, "PREFILL_CP", 8), (1, 8, "DISABLED", 1)),
@@ -134,8 +141,12 @@ class V41RuntimeConfig:
             errors.append("PPU Graph requires DP8 DECODE with MegaMoE/W4A4")
         if self.speculative not in ("NONE", "DSPARK"):
             errors.append("PPU speculative execution supports DSpark or NONE")
-        if self.speculative == "DSPARK" and self.cuda_graph and not self.shared_grouped_graph:
-            errors.append("PPU DSpark Graph requires shared grouped W4A8 Decode")
+        if self.speculative == "DSPARK" and self.cuda_graph and self.moe_backend == "megamoe":
+            if self.dspark_verify_mode != "dense" or (
+                env is not None
+                and any(env_bool(env, flag) for flag in MEGAMOE_DSPARK_ASYNC_FLAGS)
+            ):
+                errors.append("PPU MegaMoE DSpARK Graph requires synchronous dense verification")
         if self.eplb not in ("NONE", "STATS", "EPLB", "ALL"):
             errors.append("EPLB mode must be NONE, STATS, EPLB or ALL")
         if (self.eplb != "NONE" or self.redundant_experts != 0) and not self.shared_eplb:
@@ -202,7 +213,8 @@ class V41RuntimeConfig:
             strategy=env.get("RTP_V41_PPU_STRATEGY", PPU_STRATEGY),
             moe_backend=moe_backend(env),
             moe_precision=moe_precision(env),
-        ).validate()
+            dspark_verify_mode=env.get("SP_DSPARK_VERIFY_MODE", "dense"),
+        ).validate(env=env)
 
     @classmethod
     def from_server(cls, config):
@@ -216,8 +228,12 @@ class V41RuntimeConfig:
         env = os.environ
         shared_eplb = env_bool(env, "RTP_V41_PPU_EPLB")
         shared_grouped_graph = shared_grouped_graph_enabled(env)
-        if shared_grouped_graph and getattr(config.py_hw_kernel_config, "generation_prefill_capture_token_buckets", None):
-            raise ValueError("shared grouped PPU Graph keeps generation Prefill eager")
+        speculative = enum_name(config.sp_config.type)
+        cuda_graph = config.py_hw_kernel_config.enable_cuda_graph
+        if (shared_grouped_graph or (cuda_graph and speculative == "DSPARK")) and getattr(
+            config.py_hw_kernel_config, "generation_prefill_capture_token_buckets", None
+        ):
+            raise ValueError("shared PPU DSpARK/grouped Graph keeps generation Prefill eager")
         if config.model_args.max_seq_len is None:
             raise ValueError("V4.1 PPU requires explicit positive --max_seq_len")
         if p.local_world_size != 8:
@@ -233,9 +249,9 @@ class V41RuntimeConfig:
             source_cp=cp.prefill_cp_size,
             max_seq_len=int(config.model_args.max_seq_len),
             kv_sharded=cp.kv_cache_sharded,
-            cuda_graph=config.py_hw_kernel_config.enable_cuda_graph,
+            cuda_graph=cuda_graph,
             shared_grouped_graph=shared_grouped_graph,
-            speculative=enum_name(config.sp_config.type),
+            speculative=speculative,
             eplb=enum_name(config.eplb_config.eplb_mode),
             shared_eplb=shared_eplb,
             low_latency=config.moe_config.use_deepep_low_latency,
@@ -248,7 +264,8 @@ class V41RuntimeConfig:
             strategy=env.get("RTP_V41_PPU_STRATEGY", PPU_STRATEGY),
             moe_backend=moe_backend(env),
             moe_precision=moe_precision(env),
-        ).validate()
+            dspark_verify_mode=getattr(config.sp_config, "sp_dspark_verify_mode", "dense"),
+        ).validate(env=env)
 
 
 def shared_grouped_graph_enabled(env=None):

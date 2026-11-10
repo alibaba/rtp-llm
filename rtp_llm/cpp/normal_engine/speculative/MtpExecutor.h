@@ -189,7 +189,8 @@ protected:
                               int64_t                                      model_forward_us,
                               const torch::Tensor&                         confidence_rates         = torch::Tensor(),
                               const torch::Tensor&                         confidence_valid_lengths = torch::Tensor(),
-                              int64_t                                      verify_draft_token_num   = -1);
+                              int64_t                                      verify_draft_token_num   = -1,
+                              bool                                         accept_packet_ready       = false);
     std::shared_ptr<MtpTargetLogprobs>
                  launchEarlyMtpTargetLogprobsFinalize(const StreamGroups&                          stream_groups,
                                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,

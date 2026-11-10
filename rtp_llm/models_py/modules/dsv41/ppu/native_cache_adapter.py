@@ -49,7 +49,10 @@ def _latest_csa_indices(blocks, offsets, positions):
 class SharedNativeCache(NativeCacheBridge):
     """Per-forward resources. Slots are (request row, absolute token position)."""
 
-    def __init__(self, config, geometry, native, inputs, lengths, *, device, prefill=False):
+    def __init__(
+        self, config, geometry, native, inputs, lengths, *, device, prefill=False,
+        defer_producer_slots=False,
+    ):
         self.config, self.native, self.device = config, native, device
         self._is_prefill = prefill
         self.policy = PrefillPolicy.from_config(config)
@@ -103,14 +106,30 @@ class SharedNativeCache(NativeCacheBridge):
                 self.placements[owner, tag] = PoolPlacement.create(
                     self.cp, (owner, tag), self.pools[owner, tag], native, meta, geometry,
                 )
-        self.slots = {
-            rid: SimpleNamespace(global_slots={
-                source: self.slots_at_positions(source, "indexer_kv", rid, torch.arange(n // geometry.ratio(source), device=device) * geometry.ratio(source))
-                for source in geometry.kv_source_layer_ids
-            }) for rid, n in enumerate(self.lengths)
-        }
-        for handle in self.slots.values():
-            handle.indexer_slots = handle.global_slots
+        self._slots = None
+        if not defer_producer_slots:
+            self._slots = self._build_producer_slots()
+
+    def _build_producer_slots(self):
+        slots = {}
+        for rid, length in enumerate(self.lengths):
+            layer_slots = {}
+            for source in self.geometry.kv_source_layer_ids:
+                ratio = self.geometry.ratio(source)
+                positions = torch.arange(length // ratio, device=self.device) * ratio
+                layer_slots[source] = self.slots_at_positions(
+                    source, "indexer_kv", rid, positions,
+                )
+            slots[rid] = SimpleNamespace(
+                global_slots=layer_slots, indexer_slots=layer_slots,
+            )
+        return slots
+
+    @property
+    def slots(self):
+        if self._slots is None:
+            self._slots = self._build_producer_slots()
+        return self._slots
 
     def owned_positions(self, key, positions):
         positions = positions.to(device=self.device, dtype=torch.int64)

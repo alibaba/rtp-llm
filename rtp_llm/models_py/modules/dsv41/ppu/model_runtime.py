@@ -69,6 +69,18 @@ class _NoBusinessVerifyToken:
                 "verified_rows": self.lengths, "native_rows_published": 0}
 
 
+@dataclass(frozen=True)
+class _DeferredGraphVerify:
+    impl: object
+    cache: object
+    request_ids: torch.Tensor
+    tokens: torch.Tensor
+    windows: torch.Tensor
+    receipt: object
+    bindings: object
+    joint_checks: tuple | None
+
+
 class SharedNativeRuntime:
     def __init__(self, model):
         self._model = weakref.ref(model)
@@ -78,6 +90,7 @@ class SharedNativeRuntime:
         self._freqs = {}
         self._requested, self._observed = lambda: False, lambda: None
         self._stopped = False
+        self._pending_verify_host_vote = None
         self.observer = None
         self.qkv_streams = None
         self.last_n5_routes = []
@@ -126,13 +139,42 @@ class SharedNativeRuntime:
     def bind_native_stop(self, requested, observed):
         self._requested, self._observed = requested, observed
 
-    def vote(self, count):
+    def start_verify_host_vote(self, count):
+        if self._stopped or not dist.is_initialized():
+            return
+        if self._pending_verify_host_vote is not None:
+            raise RuntimeError("another target Verify host vote is already in flight")
+        packet = torch.tensor([int(count > 0), int(self._requested())], dtype=torch.int64, device="cpu")
+        work = dist.all_reduce(packet, group=_native_shutdown_group(), async_op=True)
+        self._pending_verify_host_vote = (count > 0, packet, work)
+
+    def vote(self, count, *, host=False):
         if self._stopped:
             return False
-        value = torch.tensor([count, int(self._requested())], dtype=torch.int64, device=self.device)
+        if host and self._pending_verify_host_vote is not None:
+            had_work, packet, work = self._pending_verify_host_vote
+            self._pending_verify_host_vote = None
+            work.wait()
+            if had_work != (count > 0):
+                raise RuntimeError("target Verify work changed after the Proposal vote")
+            return self._finish_vote(packet, host=True)
+        value = torch.tensor(
+            [count, int(self._requested())], dtype=torch.int64,
+            device="cpu" if host else self.device,
+        )
         if dist.is_initialized():
-            dist.all_reduce(value)
+            if host:
+                dist.all_reduce(value, group=_native_shutdown_group())
+            else:
+                dist.all_reduce(value)
+        return self._finish_vote(value, host=host)
+
+    def _finish_vote(self, value, *, host):
         count, stopping = value.tolist()
+        # Work continues on the engine stream. Preserve the old device fence
+        # when this vote instead returns early or observes shutdown.
+        if host and (stopping or count == 0) and self.device.type == "cuda":
+            torch.cuda.current_stream(self.device).synchronize()
         if stopping:
             self._stopped = True
             self._observed()
@@ -340,11 +382,107 @@ class SharedNativeRuntime:
         self._idle_verify_calls += 1
         self.pending_idle_verify = replace(token, reason=reason)
 
+    def try_stage_deferred_graph_verify(self, inputs, impl, aux_features):
+        """Queue replay validation before launching the target LM head."""
+        if (
+            os.environ.get("RTP_V41_PPU_VERIFY_DEFERRED_STAGE") != "1"
+            or impl.mode != "dense"
+            or inputs.warmup
+            or inputs.is_fake_stream
+            or os.environ.get("RTP_V41_SHARED_EVIDENCE_DIR")
+            or os.environ.get("RTP_V41_SHARED_VALIDATE_STATE") == "1"
+        ):
+            return False
+
+        from rtp_llm.models_py.modules.dsv41.ppu.verify_transaction import (
+            SharedVerifyCache,
+            try_enqueue_graph_verify_receipt,
+        )
+
+        if self.current is not None or self.pending_verify is not None or self.pending_idle_verify is not None:
+            raise RuntimeError("another native verification transaction is active")
+        model = self.model
+        if impl.runtime is not model.shared_graph_runtime:
+            raise ValueError("target verify requires this model's captured journal")
+        config = model.shared_weight_views.config
+        request_ids = inputs.request_id
+        if (
+            config.get("_ppu_cp_cache", {}).get("sliced_prefill", False)
+            or not isinstance(request_ids, torch.Tensor)
+            or request_ids.device.type != "cpu"
+        ):
+            return False
+        attn = as_tagged_attention_inputs(inputs.attention_inputs)
+        if not attn.is_target_verify or attn.is_packed_target_verify:
+            raise ValueError("verify inputs do not match captured layout")
+        if aux_features is None or aux_features.shape[0] != inputs.input_ids.numel():
+            raise ValueError("Graph target aux rows differ from verify rows")
+        receipt = try_enqueue_graph_verify_receipt(impl, inputs, attn)
+        if receipt is None:
+            return False
+        try:
+            # Non-sharded Graph bindings only need pool handles and live page tables.
+            # Build them while the queued Verify runs, then set lengths from its receipt.
+            cache = SharedVerifyCache(
+                config, self.geometry, model.kv_cache, inputs.attention_inputs, (),
+                device=self.device, defer_producer_slots=True,
+            )
+            batch = attn.input_lengths.numel()
+            joint_checks = None
+            if (
+                (batch, impl.width) == (8, 4)
+                and os.environ.get("RTP_V41_PPU_DSPARK_JOINT_KV_PUBLISH") == "1"
+                and os.environ.get("RTP_V41_PPU_DSPARK_OVERLAP_VERIFY_EPILOGUE") == "1"
+            ):
+                # These are owned by this replay's cache and capture. Reuse
+                # their host descriptors for the exact late device comparison.
+                joint_checks = tuple(impl.cache.binding_checks(cache))
+            bindings = impl.cache.try_enqueue_binding_check(cache, batch, checks=joint_checks)
+            if bindings is None:
+                return False
+            # Keep tensor owners, since the native PyModelInputs is call-local.
+            self.pending_verify = _DeferredGraphVerify(
+                impl, cache, request_ids.clone(), inputs.input_ids,
+                inputs.engram_token_windows, receipt, bindings, joint_checks,
+            )
+            return True
+        finally:
+            if self.pending_verify is None:
+                receipt.discard()
+
+    def _finish_deferred_graph_stage(self, pending):
+        from rtp_llm.models_py.modules.dsv41.ppu.verify_transaction import SharedVerifyTransaction
+
+        impl = pending.impl
+        completion, layout, tokens, windows = pending.receipt.read()
+        if completion <= impl.staged_completion:
+            raise ValueError("target verify journal was already staged")
+        if max(layout.lengths) > self.policy.max_rollback_tokens or any(
+            length != impl.width for length in layout.lengths
+        ):
+            raise ValueError("logical verify lengths exceed captured scope")
+        ends = tuple(p + n for p, n in zip(layout.prefixes, layout.lengths))
+        if max(ends) > impl.cache.max_seq_len:
+            raise ValueError("verify positions exceed captured rotary/cache capacity")
+        pending.bindings.validate()
+        pending.cache.lengths = ends
+        tx = SharedVerifyTransaction(
+            pending.cache, pending.request_ids, layout, pending.windows, pending.tokens,
+            call_id=self.calls + 1, max_backtracking=self.policy.max_rollback_tokens,
+            graph_journal=impl.cache, host_payload=(tokens, windows),
+            batch_binding_checks=True, joint_binding_checks=pending.joint_checks,
+        )
+        self.calls += 1
+        impl.staged_completion = completion
+        impl.armed_verify = None
+        return tx
+
     def stage_graph_verify(self, inputs, impl, aux_features, *, native_replay=False):
         """Stage the completed verify on the consumer stream for acceptance."""
         from rtp_llm.models_py.modules.dsv41.ppu.dspark_graph import SharedDSparkGraphImpl
         from rtp_llm.models_py.modules.dsv41.ppu.verify_transaction import (
             SharedVerifyCache, SharedVerifyTransaction, VerifyLayout,
+            try_read_graph_verify_receipt,
         )
 
         if self.current is not None or self.pending_verify is not None or self.pending_idle_verify is not None:
@@ -352,16 +490,24 @@ class SharedNativeRuntime:
         if (not isinstance(impl, SharedDSparkGraphImpl) or impl.mode not in ("dense", "packed")
             or impl.runtime is not self.model.shared_graph_runtime):
             raise ValueError("target verify requires this model's captured journal")
-        completion = int(impl.cache.completions.item())
+        attn = as_tagged_attention_inputs(inputs.attention_inputs)
+        if not attn.is_target_verify or bool(attn.is_packed_target_verify) != (impl.mode == "packed"):
+            raise ValueError("verify inputs do not match captured layout")
+        rows = inputs.input_ids.numel()
+        layout = None if inputs.is_fake_stream else VerifyLayout.from_inputs(attn, rows)
+        completion = (
+            try_read_graph_verify_receipt(impl, inputs, layout)
+            if native_replay and layout is not None else None
+        )
+        fused_receipt = completion is not None
+        if not fused_receipt:
+            completion = int(impl.cache.completions.item())
         armed = impl.armed_verify
         if native_replay:
             if completion <= impl.staged_completion:
                 raise ValueError("target verify journal was already staged")
         elif armed is None or completion != armed[0] + 1 or not torch.equal(armed[1], inputs.request_id):
             raise ValueError("target verify journal does not identify this request and completion")
-        attn = as_tagged_attention_inputs(inputs.attention_inputs)
-        if not attn.is_target_verify or bool(attn.is_packed_target_verify) != (impl.mode == "packed"):
-            raise ValueError("verify inputs do not match captured layout")
         if inputs.is_fake_stream:
             if bool(impl.consumed_lengths.any()):
                 raise ValueError("fake verify replay consumed live rows")
@@ -369,14 +515,15 @@ class SharedNativeRuntime:
             impl.staged_completion = completion
             impl.armed_verify = None
             return
-        rows = inputs.input_ids.numel()
-        layout = VerifyLayout.from_inputs(attn, rows)
         batch = len(layout.lengths)
-        if (not 0 < batch <= impl.batch_size or rows > impl.rows
-            or tuple(impl.consumed_lengths.tolist()) != layout.lengths + (0,) * (impl.batch_size - batch)
+        if not 0 < batch <= impl.batch_size or rows > impl.rows:
+            raise ValueError("acceptance input does not identify this completed verify replay")
+        if not fused_receipt and (
+            tuple(impl.consumed_lengths.tolist()) != layout.lengths + (0,) * (impl.batch_size - batch)
             or tuple(impl.consumed_prefixes[:batch].tolist()) != layout.prefixes
             or not torch.equal(impl.consumed_ids[:rows], inputs.input_ids)
-            or not torch.equal(impl.consumed_windows[:rows], inputs.engram_token_windows)):
+            or not torch.equal(impl.consumed_windows[:rows], inputs.engram_token_windows)
+        ):
             raise ValueError("acceptance input does not identify this completed verify replay")
         if max(layout.lengths) > self.policy.max_rollback_tokens or (
             impl.mode == "dense" and any(n != impl.width for n in layout.lengths)
@@ -390,14 +537,22 @@ class SharedNativeRuntime:
         cache = SharedVerifyCache(
             self.model.shared_weight_views.config, self.geometry, self.model.kv_cache,
             inputs.attention_inputs, ends, device=self.device,
+            defer_producer_slots=True,
         )
+        graph_journal = None if cache.sharded else impl.cache
         tx = SharedVerifyTransaction(
             cache, inputs.request_id, layout, inputs.engram_token_windows, inputs.input_ids,
             call_id=self.calls + 1, max_backtracking=self.policy.max_rollback_tokens,
+            graph_journal=graph_journal,
         )
         try:
-            impl.cache.stage(cache, layout)
-            tx.aux_features = aux_features.clone()
+            if graph_journal is None:
+                impl.cache.stage(cache, layout)
+            else:
+                graph_journal.validate_bindings(cache, layout)
+            if (os.environ.get("RTP_V41_SHARED_EVIDENCE_DIR")
+                or os.environ.get("RTP_V41_SHARED_VALIDATE_STATE") == "1"):
+                tx.aux_features = aux_features.clone()
         except Exception:
             tx.abort()
             raise
@@ -406,7 +561,101 @@ class SharedNativeRuntime:
         impl.staged_completion = completion
         impl.armed_verify = None
 
+    def prepare_speculative_forward_completion(self):
+        pending = self.pending_verify
+        if isinstance(pending, _DeferredGraphVerify):
+            self.pending_verify = None
+            self.pending_verify = self._finish_deferred_graph_stage(pending)
+
+    def prepare_speculative_forward_completion_with_private_draft(self, draft, prefixes):
+        """Bind this round's launch descriptors while the sampler is in flight."""
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import prepare_verify_pair
+        from rtp_llm.models_py.modules.dsv41.ppu.verify_transaction import SharedVerifyTransaction
+
+        self.prepare_speculative_forward_completion()
+        tx = self.pending_verify
+        if not isinstance(tx, SharedVerifyTransaction) or tx.joint_binding_checks is None:
+            return
+        receipt = draft.private_draft_commit_receipt(tx.request_ids)
+        # The actual accepted prefix is still decided by the host. Preflight
+        # can proceed only if the exact live tables cover every Verify row.
+        last_possible = max(p + n - 1 for p, n in zip(tx.layout.prefixes, tx.layout.lengths))
+        target_inputs = tx.graph_journal.joint_publication_inputs(
+            tx.cache, last_possible, checks=tx.joint_binding_checks,
+        )
+        draft_inputs = receipt.joint_inputs_if_covered(last_possible)
+        if target_inputs is not None and draft_inputs is not None:
+            prepared = prepare_verify_pair(target_inputs, draft_inputs, prefixes, tx.layout.prefixes)
+            if prepared is not None:
+                tx.prepared_joint_publication = (receipt, prefixes, prepared)
+
+    def try_finish_speculative_forward_with_private_draft(self, draft, request_ids, prefixes, accepted_rows):
+        """Publish two private journals from the same host-approved row counts."""
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import try_publish_verify_pair
+        from rtp_llm.models_py.modules.dsv41.ppu.verify_transaction import SharedVerifyTransaction
+
+        tx = self.pending_verify
+        if (
+            not isinstance(tx, SharedVerifyTransaction)
+            or tx.graph_journal is None or not tx.batch_binding_checks
+            or tx.layout.lengths != (4,) * 8
+            or any(
+                value.device.type != "cpu" or value.shape != (8,)
+                or value.dtype not in (torch.int32, torch.int64)
+                for value in (request_ids, accepted_rows)
+            )
+            or not prefixes.is_cuda
+        ):
+            return False
+
+        try:
+            if tx.closed or tuple(request_ids.tolist()) != tx.request_ids:
+                raise ValueError("stale acceptance: scheduler request order changed")
+            counts = tuple(accepted_rows.tolist())
+            if any(not 0 <= count <= 4 for count in counts):
+                raise ValueError("accepted input rows exceed verified causal scope")
+            bases = tx.layout.prefixes
+            last_accepted = max(
+                (base + count - 1 for base, count in zip(bases, counts) if count), default=-1,
+            )
+            receipt = draft.private_draft_commit_receipt(tx.request_ids)
+            published = False
+            if tx.prepared_joint_publication is not None:
+                prepared_receipt, prepared_prefixes, prepared = tx.prepared_joint_publication
+                if (
+                    receipt is prepared_receipt
+                    and prefixes.data_ptr() == prepared_prefixes.data_ptr()
+                    and prefixes.shape == prepared_prefixes.shape
+                    and prefixes.dtype == prepared_prefixes.dtype
+                    and prefixes.device == prepared_prefixes.device
+                    and prefixes.stride() == prepared_prefixes.stride()
+                ):
+                    receipt.check_joint_publication(bases, last_accepted)
+                    published = prepared.publish(counts)
+            if not published:
+                target_inputs = tx.graph_journal.joint_publication_inputs(
+                    tx.cache, last_accepted, checks=tx.joint_binding_checks,
+                )
+                if target_inputs is None:
+                    return False
+                draft_inputs = receipt.joint_publication_inputs(bases, last_accepted)
+                if draft_inputs is None or not try_publish_verify_pair(
+                    target_inputs, draft_inputs, prefixes, counts, bases,
+                ):
+                    return False
+        except Exception:
+            tx.abort()
+            self.pending_verify = None
+            raise
+
+        receipt.closed = True
+        tx.abort()
+        self.pending_verify = None
+        draft.abort_private_draft_commit()
+        return True
+
     def finish_speculative_forward(self, request_ids, prefixes, accepted_rows):
+        self.prepare_speculative_forward_completion()
         tx = self.pending_verify
         if tx is None:
             token = self.pending_idle_verify
@@ -420,13 +669,16 @@ class SharedNativeRuntime:
             return
         try:
             evidence = tx.finish(request_ids, prefixes, accepted_rows)
+            validate_state = os.environ.get("RTP_V41_SHARED_VALIDATE_STATE") == "1"
+            if not validate_state and not os.environ.get("RTP_V41_SHARED_EVIDENCE_DIR"):
+                return
             features = torch.cat([
                 tx.aux_features[start:start + count]
                 for start, count in zip(tx.layout.starts, evidence["accepted_input_rows"])
             ])
             evidence["accepted_feature_sha256"] = hashlib.sha256(features.contiguous().cpu().view(torch.uint8).numpy().tobytes()).hexdigest()
             evidence["accepted_feature_rows"] = features.shape[0]
-            if os.environ.get("RTP_V41_SHARED_VALIDATE_STATE", "0") == "1":
+            if validate_state:
                 evidence["native_state_after"] = tx.cache.native_fingerprint(evidence["accepted_ends"])
             self.event("accept", evidence)
         finally:
@@ -435,9 +687,18 @@ class SharedNativeRuntime:
             self.pending_verify = None
 
     def abort_speculative_forward(self):
+        vote, self._pending_verify_host_vote = self._pending_verify_host_vote, None
+        if vote is not None:
+            _, packet, work = vote
+            work.wait()
+            self._finish_vote(packet, host=True)
         tx, self.pending_verify = self.pending_verify, None
         token, self.pending_idle_verify = self.pending_idle_verify, None
-        if tx is not None:
+        if isinstance(tx, _DeferredGraphVerify):
+            completion = tx.receipt.discard()
+            tx.impl.staged_completion = max(tx.impl.staged_completion, completion)
+            tx.impl.armed_verify = None
+        elif tx is not None:
             tx.abort()
             self.event("abort", {"call": tx.call_id, "request_ids": tx.request_ids, "native_rows_published": 0})
         elif token is not None:

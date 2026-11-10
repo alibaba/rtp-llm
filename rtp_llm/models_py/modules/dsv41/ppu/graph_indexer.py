@@ -17,6 +17,8 @@ _TOPK_TILE = 65536
 # truncate a coarse bin at 4,096 values, which is unsafe for tied block scores.
 _CANDIDATE_RADIX_WIDTH = 32772
 _SPARSE_INDEXER_ENV = "RTP_V41_PPU_GRAPH_SPARSE_INDEXER"
+_VERIFY_FUSED_INDEXER_ENV = "RTP_V41_PPU_VERIFY_FUSED_INDEXER"
+_VERIFY_FUSED_TOPK_ENV = "RTP_V41_PPU_VERIFY_FUSED_INDEXER_TOPK"
 
 
 def indexer_scores(
@@ -66,8 +68,19 @@ def _candidate_flags(candidates, capacity, block_size):
     return flags
 
 
-def _score_inputs(query, head_weights, pool, physical_page, compact):
-    payload, scales = _quantize_score_query(query, compact)
+def _cached_candidate_flags(candidates, capacity, block_size, shared):
+    if shared is None:
+        return _candidate_flags(candidates, capacity, block_size)
+    key = ("indexer_candidate_flags", id(candidates), capacity, block_size)
+    if key not in shared:
+        shared[key] = candidates, _candidate_flags(candidates, capacity, block_size)
+    return shared[key][1]
+
+
+def _score_inputs(query, head_weights, pool, physical_page, compact, quantized_query=None):
+    payload, scales = (
+        _quantize_score_query(query, compact) if quantized_query is None else quantized_query
+    )
     entry_bytes = _quant.INDEXER_K_ENTRY_BYTES
     packed_pool = pool.as_strided(
         (pool.shape[0], physical_page, 1, entry_bytes),
@@ -79,8 +92,8 @@ def _score_inputs(query, head_weights, pool, physical_page, compact):
 
 def _indexer_score_tiles(
     query, head_weights, *, cache, source_layer, ratio, visible, valid_mask,
-    compact=False, candidate_block_size=0, candidates=None, candidate_active=None,
-    candidate_flags_cache=None,
+    compact=False, fused_tiles=False, candidate_block_size=0, candidates=None, candidate_active=None,
+    candidate_flags_cache=None, quantized_query=None, tile_metadata_cache=None,
 ):
     """Score the visible prefix in capture-sized tiles.
 
@@ -113,13 +126,16 @@ def _indexer_score_tiles(
         raise ValueError("unsupported PPU paged FP4 Graph Indexer geometry")
 
     capacity = min(max(1, cache.max_seq_len // ratio), table.shape[1] * logical_page)
-    if not compact:
+    kernels = _compact_kernels() if compact or fused_tiles else None
+    if kernels is None:
         visible = torch.where(valid_mask, visible.clamp(0, capacity).to(torch.int32), 0)
-    packed_query, packed_pool, weights = _score_inputs(query, head_weights, pool, physical_page, compact)
-    if compact:
-        rows = torch.empty(query.shape[0], dtype=torch.int32, device=query.device)
-    else:
+    packed_query, packed_pool, weights = _score_inputs(
+        query, head_weights, pool, physical_page, compact, quantized_query,
+    )
+    if kernels is None:
         rows = torch.arange(query.shape[0], dtype=torch.int32, device=query.device)
+    else:
+        rows = None
     logical_blocks = logical_page // tile
     physical_blocks = physical_page // tile
     chunk_pages = _MAX_SPARSE_BLOCKS // logical_blocks
@@ -129,26 +145,28 @@ def _indexer_score_tiles(
     # Metadata, scores and all temporary shapes are fixed at capture. The
     # number of blocks scored per row comes from lengths on every replay.
     chunk_width = chunk_pages * logical_page
-    kernels = _compact_kernels() if compact else None
     allowed = None
     if candidates is not None:
-        if candidate_flags_cache is None:
-            allowed = _candidate_flags(candidates, capacity, candidate_block_size)
-        else:
-            key = ("indexer_candidate_flags", id(candidates), capacity, candidate_block_size)
-            entry = candidate_flags_cache.get(key)
-            if entry is None:
-                allowed = _candidate_flags(candidates, capacity, candidate_block_size)
-                candidate_flags_cache[key] = candidates, allowed
-            else:
-                allowed = entry[1]
+        allowed = _cached_candidate_flags(
+            candidates, capacity, candidate_block_size, candidate_flags_cache,
+        )
     for start in range(0, capacity, chunk_width):
         width = min(chunk_width, capacity - start)
         first_page = start // logical_page
         last_page = first_page + (width + logical_page - 1) // logical_page
         pages = table[:, first_page:last_page]
         blocks = ((width + tile * 4 - 1) // (tile * 4)) * 4
-        if kernels is None:
+        entry = None
+        if tile_metadata_cache is not None:
+            key = (
+                "verify_indexer_tile_metadata", table.data_ptr(), table.shape,
+                table.stride(), id(visible), id(valid_mask), pool.shape[0],
+                physical_page, logical_page, tile, start, width,
+            )
+            entry = tile_metadata_cache.get(key)
+        if entry is not None:
+            safe_pages, lengths, metadata = entry
+        elif kernels is None:
             valid_pages = (pages > 0) & (pages < pool.shape[0])
             safe_pages = torch.where(valid_pages, pages, 0).contiguous()
             lengths = (visible - start).clamp(0, width)
@@ -158,6 +176,8 @@ def _indexer_score_tiles(
             ) * physical_blocks + block_ids % logical_blocks
             block_ids = block_ids.unsqueeze(0).expand(query.shape[0], -1).contiguous()
         else:
+            if rows is None:
+                rows = torch.empty(query.shape[0], dtype=torch.int32, device=query.device)
             safe_pages = torch.empty(pages.shape, dtype=torch.int32, device=query.device)
             lengths = torch.empty_like(rows)
             block_ids = torch.empty(
@@ -170,9 +190,12 @@ def _indexer_score_tiles(
                 pages.stride(0), pages.stride(1), pages.shape[1], pool.shape[0],
                 logical_blocks, physical_blocks, blocks, start, width, 256,
             )
-        metadata = get_paged_sparse_mqa_logits_metadata(
-            lengths, safe_pages, rows, physical_page, block_ids, torch.int8, tile
-        )
+        if entry is None:
+            metadata = get_paged_sparse_mqa_logits_metadata(
+                lengths, safe_pages, rows, physical_page, block_ids, torch.int8, tile
+            )
+            if tile_metadata_cache is not None:
+                tile_metadata_cache[key] = safe_pages, lengths, metadata
         scores = fp8_fp4_paged_sparse_mqa_logits(
             packed_query, packed_pool, weights, metadata, blocks, tile
         )
@@ -282,6 +305,72 @@ def _compact_kernels():
             live = live & (~active | (permitted != 0))
         score = tl.load(source + row * score_stride + column, live, other=0).to(tl.float32)
         tl.store(logits + row * width + column, tl.where(live, score, -float("inf")), column < width)
+
+    @triton.jit
+    def overlay_verify_tail(
+        logits, tentative, first, allowed, candidate_active,
+        start: tl.constexpr, width: tl.constexpr, tail_width: tl.constexpr,
+        row_stride: tl.constexpr, col_stride: tl.constexpr,
+        candidate_block: tl.constexpr, candidate_stride: tl.constexpr, BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        lane = tl.arange(0, BLOCK)
+        column = tl.load(first + row) + lane
+        live = (lane < tail_width) & (column >= start) & (column < start + width)
+        if candidate_stride > 0:
+            active = tl.load(candidate_active + row)
+            permitted = tl.load(
+                allowed + row * candidate_stride + column // candidate_block,
+                live, other=False,
+            )
+            live = live & (~active | (permitted != 0))
+        score = tl.load(tentative + row * row_stride + lane * col_stride, live, other=0)
+        tl.store(logits + row * width + column - start, score, live)
+
+    @triton.jit
+    def round_bf16(value):
+        bits = value.to(tl.bfloat16).to(tl.uint16, bitcast=True).to(tl.uint32)
+        return (bits << 16).to(tl.float32, bitcast=True)
+
+    @triton.jit
+    def accumulate_verify_head(dots, weights, accum, row, head, columns, mask,
+                               dot_row: tl.constexpr, dot_head: tl.constexpr,
+                               dot_col: tl.constexpr, weight_row: tl.constexpr,
+                               weight_head: tl.constexpr):
+        dot = tl.load(dots + row * dot_row + head * dot_head + columns * dot_col, mask, other=0)
+        weight = tl.load(weights + row * weight_row + head * weight_head)
+        bits = weight.to(tl.uint16, bitcast=True).to(tl.uint32)
+        weight = (bits << 16).to(tl.float32, bitcast=True)
+        value = round_bf16(tl.where(dot <= 0, 0., dot))
+        return round_bf16(value * weight + accum)
+
+    @triton.jit
+    def reduce_verify_heads(
+        dots, weights, live, result,
+        width: tl.constexpr, dot_row: tl.constexpr, dot_head: tl.constexpr,
+        dot_col: tl.constexpr, weight_row: tl.constexpr, weight_head: tl.constexpr,
+        live_row: tl.constexpr, live_col: tl.constexpr, BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        columns = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+        mask = columns < width
+        active = tl.load(live + row * live_row + columns * live_col, mask, other=False)
+        lane0 = tl.full((BLOCK,), 0., tl.float32)
+        lane1 = tl.full((BLOCK,), 0., tl.float32)
+        lane2 = tl.full((BLOCK,), 0., tl.float32)
+        lane3 = tl.full((BLOCK,), 0., tl.float32)
+        for group in range(8):
+            head = group * 4
+            lane0 = accumulate_verify_head(dots, weights, lane0, row, head, columns, active,
+                                           dot_row, dot_head, dot_col, weight_row, weight_head)
+            lane1 = accumulate_verify_head(dots, weights, lane1, row, head + 1, columns, active,
+                                           dot_row, dot_head, dot_col, weight_row, weight_head)
+            lane2 = accumulate_verify_head(dots, weights, lane2, row, head + 2, columns, active,
+                                           dot_row, dot_head, dot_col, weight_row, weight_head)
+            lane3 = accumulate_verify_head(dots, weights, lane3, row, head + 3, columns, active,
+                                           dot_row, dot_head, dot_col, weight_row, weight_head)
+        score = round_bf16(round_bf16(lane0 + lane2) + round_bf16(lane1 + lane3))
+        tl.store(result + row * width + columns, tl.where(active, score, -float("inf")), mask)
 
     @triton.jit
     def prepare_sparse_candidates(
@@ -492,6 +581,7 @@ def _compact_kernels():
 
     return SimpleNamespace(
         triton=triton, prepare_tiles=prepare_tiles, write_logits=write_logits,
+        overlay_verify_tail=overlay_verify_tail, reduce_verify_heads=reduce_verify_heads,
         prepare_sparse_candidates=prepare_sparse_candidates, pack_sparse_ranks=pack_sparse_ranks,
         finish_sparse_selection=finish_sparse_selection,
         collect_tile=collect_tile, finish_topk=finish_topk, merge_topk=merge_topk,
@@ -769,35 +859,141 @@ def select_visible_indices(
     return select_topk(scores, visible, valid_mask, topk), published
 
 
-def verify_indexer_scores(query, head_weights, *, cache, source_layer, ratio, positions, valid_mask):
-    """Use paged scoring for committed keys and the journal for tentative keys."""
+def verify_indexer_head_reduce(dots, weights_bf16, live):
+    """Run the original four-lane BF16 chain without contracting mul/add."""
+    kernels = _compact_kernels()
+    rows, _, width = dots.shape
+    scores = torch.empty((rows, width), dtype=torch.float32, device=dots.device)
+    block = min(32, kernels.triton.next_power_of_2(width))
+    kernels.reduce_verify_heads[(rows, kernels.triton.cdiv(width, block))](
+        dots, weights_bf16, live, scores,
+        width, *dots.stride(), *weights_bf16.stride(), *live.stride(),
+        block, num_warps=1, enable_fp_fusion=False,
+    )
+    return scores
+
+
+def _verify_score_tiles(
+    query, head_weights, *, cache, source_layer, ratio, positions, valid_mask,
+    fused, candidates=None, candidate_active=None, candidate_block_size=0, shared=None,
+):
+    """Score the paged prefix and write the journal scores into their native tiles."""
     from rtp_llm.models_py.modules.dsv41.ppu.graph_attention import score_indexer_entries
 
     native = cache.native_cache
-    first_tentative = cache.prefixes[cache.requests] // ratio
+    prefix_key = ("verify_indexer_prefix", id(cache), ratio)
+    if shared is not None and prefix_key in shared:
+        first_tentative = shared[prefix_key]
+    else:
+        first_tentative = cache.prefixes[cache.requests] // ratio
+        if shared is not None:
+            shared[prefix_key] = first_tentative
     verify_width = query.shape[0] // cache.prefixes.numel()
     tail_width = (verify_width + ratio - 1) // ratio
+    table = getattr(cache, "row_tables", {}).get(_INDEXER_POOL) if fused else None
+    if table is None:
+        table = native.tables[_INDEXER_POOL][cache.requests]
     paged_cache = SimpleNamespace(
         pool=native.pool,
-        tables={_INDEXER_POOL: native.tables[_INDEXER_POOL][cache.requests]},
+        tables={_INDEXER_POOL: table},
         entries=native.entries,
         spans=native.spans,
         max_seq_len=native.max_seq_len,
     )
-    committed = indexer_scores(
+    quantized_query = None
+    reducer = None
+    if shared is not None:
+        quantized_query = _quant.quantize_indexer_q(query)
+        head_weights = head_weights.to(torch.bfloat16).contiguous()
+        reducer = verify_indexer_head_reduce
+    tiles = list(_indexer_score_tiles(
         query, head_weights, cache=paged_cache, source_layer=source_layer, ratio=ratio,
-        positions=first_tentative * ratio - 1, valid_mask=valid_mask,
-    )
+        visible=first_tentative, valid_mask=valid_mask, fused_tiles=fused,
+        candidates=candidates, candidate_active=candidate_active,
+        candidate_block_size=candidate_block_size, candidate_flags_cache=shared,
+        quantized_query=quantized_query, tile_metadata_cache=shared,
+    ))
     offsets = torch.arange(tail_width, dtype=torch.int64, device=query.device)
     tentative = score_indexer_entries(
         query, head_weights, cache=cache, source_layer=source_layer, ratio=ratio,
         positions=positions, valid_mask=valid_mask, entries=first_tentative[:, None] + offsets,
+        quantized_query=quantized_query, score_reducer=reducer,
     )
+    if fused:
+        # Committed tile writes already set every column at and beyond the
+        # first tentative key to -inf. Only the journal's short tail can
+        # change these scores. Preserve dense columns and TopK tie order.
+        kernels = _compact_kernels()
+        allowed = None
+        if candidates is not None:
+            capacity = sum(tile.shape[1] for tile, _, _ in tiles)
+            allowed = _cached_candidate_flags(candidates, capacity, candidate_block_size, shared)
+        start = 0
+        for logits, _, _ in tiles:
+            width = logits.shape[1]
+            kernels.overlay_verify_tail[(query.shape[0],)](
+                logits, tentative, first_tentative, allowed, candidate_active,
+                start, width, tail_width, *tentative.stride(), candidate_block_size,
+                0 if allowed is None else allowed.shape[1],
+                kernels.triton.next_power_of_2(tail_width), num_warps=1,
+            )
+            start += width
+    return tiles, first_tentative, tentative
+
+
+def verify_indexer_scores(query, head_weights, *, cache, source_layer, ratio, positions, valid_mask):
+    """Use paged scoring for committed keys and the journal for tentative keys."""
+    fused = query.is_cuda and os.environ.get(_VERIFY_FUSED_INDEXER_ENV, "1") == "1"
+    tiles, first_tentative, tentative = _verify_score_tiles(
+        query, head_weights, cache=cache, source_layer=source_layer, ratio=ratio,
+        positions=positions, valid_mask=valid_mask, fused=fused,
+    )
+    committed = _join_tiles([logits for logits, _, _ in tiles])
+    if fused:
+        return committed
+    tail_width = tentative.shape[1]
     columns = torch.arange(committed.shape[1], dtype=torch.int64, device=query.device)
     relative = columns - first_tentative[:, None]
     tail = tentative.gather(1, relative.clamp(0, tail_width - 1))
     tail = tail.masked_fill(relative >= tail_width, float("-inf"))
     return torch.where(relative >= 0, tail, committed)
+
+
+def select_verify_indices(
+    query, head_weights, *, cache, source_layer, ratio, positions, valid_mask, topk,
+    candidate_block_size=0, candidate_topk_blocks=0, candidates=None,
+    candidate_active=None, shared,
+):
+    """Fuse Verify score preparation and preserve its native TopK sequence."""
+    if (
+        not query.is_cuda or topk not in (512, 1024, 2048)
+        or ratio not in (1, 2)
+        or os.environ.get(_VERIFY_FUSED_INDEXER_ENV, "1") != "1"
+        or os.environ.get(_VERIFY_FUSED_TOPK_ENV, "1") != "1"
+    ):
+        return None
+    tiles, _, _ = _verify_score_tiles(
+        query, head_weights, cache=cache, source_layer=source_layer, ratio=ratio,
+        positions=positions, valid_mask=valid_mask, fused=True,
+        candidates=candidates, candidate_active=candidate_active,
+        candidate_block_size=candidate_block_size, shared=shared,
+    )
+    visible_key = ("verify_indexer_visible", id(positions), ratio)
+    if visible_key not in shared:
+        shared[visible_key] = (positions + 1) // ratio
+    visible = shared[visible_key]
+    published = None
+    if candidate_topk_blocks > 0:
+        # Keep the legacy candidate torch.topk order on equal block scores.
+        candidate_tiles = [(logits, lengths, False) for logits, lengths, _ in tiles]
+        published = _candidate_tiles(
+            candidate_tiles, visible, candidate_block_size, candidate_topk_blocks,
+        )
+    # Dense assembly also retains the original native per-tile TopK launches
+    # and ATen merge order, including ties.
+    scores = _join_tiles([logits for logits, _, _ in tiles])
+    selected = select_topk(scores, visible, valid_mask, topk)
+    return selected, published, visible
 
 
 def select_topk(scores, visible, valid_mask, topk) -> torch.Tensor:

@@ -211,7 +211,6 @@ if os.environ.get("RTP_V41_N9_DIRECT_FIXTURE") == "1":
 
         class NativeDirectDraft(DeepSeekV41DSpark):
             def _create_python_model(self):
-                self._require_shared()
                 owner = self._weight_alias_owner
                 if owner is None or owner.py_model is None:
                     raise ValueError("N9 direct fixture requires its native target vocab owner")

@@ -160,23 +160,29 @@ sh_test(
     }),
 )
 
-sh_test(
-    name = "shared_dspark_direct_graph_test",
-    srcs = ["test_functional.sh"],
-    args = ["shared-dspark-direct-graph"],
-    data = ["//rtp_llm/models_py/modules/dsv41/ppu/test:shared_dspark_direct_native_sources"],
-    env = {
-        "GPU_COUNT": "8",
-        "RTP_V41_PPU_MOE_BACKEND": "grouped",
-        "RTP_V41_PPU_MOE_PRECISION": "w4a8",
-    },
-    tags = ["manual", "PPU-ZW890P"],
-    timeout = "eternal",
-    target_compatible_with = select({
-        "@//:using_ppu": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
-)
+[
+    sh_test(
+        name = name,
+        srcs = ["test_functional.sh"],
+        args = ["shared-dspark-direct-graph", backend, precision] + ([modes] if modes else []),
+        data = ["//rtp_llm/models_py/modules/dsv41/ppu/test:shared_dspark_direct_native_sources"],
+        env = {
+            "GPU_COUNT": "8",
+            "RTP_V41_PPU_MOE_BACKEND": backend,
+            "RTP_V41_PPU_MOE_PRECISION": precision,
+        },
+        tags = ["manual", "PPU-ZW890P"],
+        timeout = "eternal",
+        target_compatible_with = select({
+            "@//:using_ppu": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for name, backend, precision, modes in [
+        ("shared_dspark_direct_graph_test", "grouped", "w4a8", ""),
+        ("shared_dspark_megamoe_graph_test", "megamoe", "w4a4", "proposal,commit,dense"),
+    ]
+]
 
 [
     sh_test(

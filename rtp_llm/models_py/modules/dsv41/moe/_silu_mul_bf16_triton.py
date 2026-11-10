@@ -85,6 +85,38 @@ if triton is not None:
             out_ptr + pid_m * N + n_off, out.to(out_ptr.dtype.element_ty), mask=mask
         )
 
+    @triton.jit(do_not_specialize=["M"])
+    def _clamp_widen_gate_up_kernel(
+        gate_up_ptr,
+        gate_ptr,
+        up_ptr,
+        M,
+        N: tl.constexpr,
+        CLAMP_LIMIT: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+    ):
+        row = tl.program_id(0).to(tl.int64)
+        col = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+        mask = (row < M) & (col < N)
+        src = gate_up_ptr + row * (2 * N) + col
+        gate = tl.load(src, mask, other=0).to(tl.uint16, bitcast=True)
+        up = tl.load(src + N, mask, other=0).to(tl.uint16, bitcast=True)
+        if CLAMP_LIMIT > 0:
+            limit = tl.full((), CLAMP_LIMIT, tl.bfloat16).to(tl.uint16, bitcast=True)
+            # Compare the BF16 encodings to retain subnormal values and NaNs.
+            gate = tl.where((gate > limit) & (gate <= 0x7F80), limit, gate)
+            magnitude = up & 0x7FFF
+            up = tl.where(
+                (magnitude > limit) & (magnitude <= 0x7F80),
+                (up & 0x8000) | limit,
+                up,
+            )
+        gate_fp32 = (gate.to(tl.uint32) << 16).to(tl.float32, bitcast=True)
+        up_fp32 = (up.to(tl.uint32) << 16).to(tl.float32, bitcast=True)
+        dst = row * N + col
+        tl.store(gate_ptr + dst, gate_fp32, mask)
+        tl.store(up_ptr + dst, up_fp32, mask)
+
     @triton.jit
     def _mul_ftz(a, b):
         return tl.inline_asm_elementwise(
@@ -188,6 +220,31 @@ def silu_mul_split_bf16(
         num_warps=8,
     )
     return out
+
+
+def silu_mul_split_bf16_torch_exact(
+    gate_up: torch.Tensor,
+    clamp_limit: float = 10.0,
+) -> torch.Tensor:
+    """Fuse BF16 clamp and widening while keeping the PPU ATen activation."""
+    rows, width = gate_up.shape
+    n = width // 2
+    if rows * n == 0:
+        return gate_up.new_empty((rows, n))
+    gate = torch.empty((rows, n), dtype=torch.float32, device=gate_up.device)
+    up = torch.empty_like(gate)
+    block_n = 1024
+    _clamp_widen_gate_up_kernel[(rows, triton.cdiv(n, block_n))](
+        gate_up,
+        gate,
+        up,
+        rows,
+        N=n,
+        CLAMP_LIMIT=clamp_limit,
+        BLOCK_N=block_n,
+        num_warps=8,
+    )
+    return (torch.nn.functional.silu(gate) * up).to(torch.bfloat16)
 
 
 def silu_mul_fp8_g32_quant(

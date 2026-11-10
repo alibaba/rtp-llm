@@ -232,6 +232,7 @@ def sqrtsoftplus_gate(
     routed_scaling_factor: float = ROUTED_SCALING_FACTOR,
     image_rows: Optional[torch.Tensor] = None,
     graph_routes: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    allow_top3_graph_routes: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """DeepSeek-V4.1 sqrtsoftplus routing gate (torch reference).
 
@@ -294,7 +295,10 @@ def sqrtsoftplus_gate(
     ):
         direct_routes = (
             graph_routes
-            if graph_routes is not None and _can_write_graph_routes(logits, top_k, graph_routes)
+            if graph_routes is not None
+            and _can_write_graph_routes(
+                logits, top_k, graph_routes, allow_top3=allow_top3_graph_routes
+            )
             else None
         )
         weights, ids = _fused_sqrtsoftplus_gate_triton(
@@ -375,10 +379,10 @@ def _fused_gate_available(logits: torch.Tensor, bias: torch.Tensor) -> bool:
     return importlib.util.find_spec("triton") is not None
 
 
-def _can_write_graph_routes(logits, top_k, graph_routes) -> bool:
+def _can_write_graph_routes(logits, top_k, graph_routes, *, allow_top3=False) -> bool:
     valid, count = graph_routes
     return (
-        top_k == DEFAULT_TOP_K
+        (top_k == DEFAULT_TOP_K or (allow_top3 and top_k == 3))
         and valid.shape == (logits.shape[0],)
         and valid.dtype == torch.bool
         and valid.is_contiguous()
@@ -430,7 +434,7 @@ def _fused_sqrtsoftplus_gate_triton(
     if m == 0:
         return weights, indices
     block_n = triton.next_power_of_2(n)
-    block_k = triton.next_power_of_2(k)
+    block_k = triton.next_power_of_2(topk)
     block_m = max(1, min(4, 256 // block_n))
     num_warps = 1 if block_n <= 512 else 4
     grid = (triton.cdiv(m, block_m),)
@@ -698,6 +702,11 @@ def _get_triton_kernels():
                     tl.store(routed_rows_ptr, tl.sum(valid_rows.to(tl.int32), 0))
             tl.store(out_w_ptr, selected_vals, mask=store_mask)
             tl.store(out_i_ptr, selected_idx, mask=store_mask)
+            if K > BLOCK_K:
+                # Draft top3 keeps the legacy four-lane FP32 reduction.
+                tail_mask = mask_m[:, None] & (offs_k[None, :] + BLOCK_K < K)
+                tl.store(out_w_ptr + BLOCK_K * stride_wk, 0.0, mask=tail_mask)
+                tl.store(out_i_ptr + BLOCK_K * stride_ik, -1, mask=tail_mask)
 
         # Adapted from sglang-for-sail kernels/ops/moe/ep_moe_kernels.py
         # (512b03d), Apache-2.0: _fwd_kernel_ep_scatter_1.
@@ -2533,6 +2542,7 @@ def shared_expert_forward(
     swiglu_limit: float = SWIGLU_LIMIT,
     *,
     fused_activation: bool = False,
+    prefill_exact: bool = False,
 ) -> torch.Tensor:
     """Shared-expert SwiGLU forward on BF16-resident weights.
 
@@ -2542,6 +2552,19 @@ def shared_expert_forward(
     projection. Returns BF16.
     """
     gate_up = w13(x)
+    if (
+        prefill_exact
+        and gate_up.is_cuda
+        and gate_up.dtype == torch.bfloat16
+        and gate_up.ndim == 2
+        and gate_up.is_contiguous()
+        and importlib.util.find_spec("triton") is not None
+    ):
+        from rtp_llm.models_py.modules.dsv41.moe._silu_mul_bf16_triton import (
+            silu_mul_split_bf16_torch_exact,
+        )
+
+        return w2(silu_mul_split_bf16_torch_exact(gate_up, clamp_limit=swiglu_limit))
     if (
         fused_activation
         and gate_up.is_cuda

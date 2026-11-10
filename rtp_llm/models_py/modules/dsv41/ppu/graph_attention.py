@@ -7,14 +7,21 @@ attention. No tensor value controls Python flow, allocation sizes or loops.
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 from rtp_llm.models_py.modules.dsv41.ppu import _quant
 from rtp_llm.models_py.modules.dsv41.ppu.attention import flash_mla_sparse_fwd_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.indexer import _bf16_rounding_reduce
 
+_VERIFY_FP4_DEQUANT_ENV = "RTP_V41_PPU_VERIFY_FUSED_INDEXER_DEQUANT"
 
-def score_indexer_entries(query, head_weights, *, cache, source_layer, ratio, positions, valid_mask, entries):
+
+def score_indexer_entries(
+    query, head_weights, *, cache, source_layer, ratio, positions, valid_mask,
+    entries, quantized_query=None, score_reducer=None,
+):
     """Score explicit logical key entries through the cache's current view."""
     batch, columns = query.shape[0], entries.shape[-1]
     raw_positions = entries.expand(batch, columns) * ratio
@@ -22,14 +29,33 @@ def score_indexer_entries(query, head_weights, *, cache, source_layer, ratio, po
     valid = valid_mask[:, None] & (entries < visible[:, None])
     slots = cache.slots(source_layer, "indexer_kv", torch.where(valid, raw_positions, -1))
     packed = cache.read_rows(source_layer, "indexer_kv", slots)
-    keys = _quant.dequantize_mx_fp4_rows(
-        packed[..., :64].contiguous().view(torch.int8),
-        _quant._bytes_to_sf(packed[..., 64:].reshape(-1, 4).contiguous()).reshape(batch, columns),
-    )
-    payload, scales = _quant.quantize_indexer_q(query)
-    query = _quant.dequantize_mx_fp4_rows(payload, scales)
+    decoded = None
+    if (
+        score_reducer is not None
+        and quantized_query is not None
+        and batch == 32 and 1 <= columns <= 4 and ratio in (1, 2)
+        and os.environ.get(_VERIFY_FP4_DEQUANT_ENV, "1") == "1"
+    ):
+        from rtp_llm.models_py.modules.dsv41.ppu.dspark_graph import VerifyGraphJournal
+
+        if type(cache) is VerifyGraphJournal:
+            decoded = _quant.try_dequantize_verify_indexer(*quantized_query, packed)
+    if decoded is None:
+        keys = _quant.dequantize_mx_fp4_rows(
+            packed[..., :64].contiguous().view(torch.int8),
+            _quant._bytes_to_sf(packed[..., 64:].reshape(-1, 4).contiguous()).reshape(batch, columns),
+        )
+        payload, scales = (
+            _quant.quantize_indexer_q(query) if quantized_query is None else quantized_query
+        )
+        query = _quant.dequantize_mx_fp4_rows(payload, scales)
+    else:
+        query, keys = decoded
     dots = torch.bmm(query.float(), keys.float().transpose(1, 2))
-    scores = _bf16_rounding_reduce(dots, head_weights.to(torch.bfloat16))
+    weights = head_weights.to(torch.bfloat16)
+    if score_reducer is not None:
+        return score_reducer(dots, weights, valid & (slots >= 0))
+    scores = _bf16_rounding_reduce(dots, weights)
     return scores.masked_fill(~valid | (slots < 0), float("-inf"))
 
 

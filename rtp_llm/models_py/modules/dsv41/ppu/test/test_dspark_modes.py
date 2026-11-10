@@ -136,6 +136,8 @@ class SharedDSparkModeContracts(unittest.TestCase):
 
 def device_suite():
     import torch
+    from rtp_llm.models_py.modules.dsv41.ppu.dspark_graph import VerifyGraphJournal
+    from rtp_llm.models_py.modules.dsv41.ppu.graph_cache import NativeGraphCache
     from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache
     from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import SharedForwardState
     from rtp_llm.models_py.modules.dsv41.ppu.verify_transaction import SharedVerifyCache, SharedVerifyTransaction
@@ -241,6 +243,67 @@ def device_suite():
                 for key, pool in cache.pools.items():
                     self.assertTrue(torch.equal(pool.tensor, expected[key]), (counts, key))
                 self.assertTrue(tx.closed and not cache.journal)
+
+                # Run the fixed-row Graph journal against the same independent
+                # oracle, including the unfinished ratio-2 pair and SWA wrap.
+                graph_cache = NativeGraphCache.__new__(NativeGraphCache)
+                graph_cache.device = device
+                graph_cache.native = native
+                graph_cache.max_seq_len = 256
+                graph_cache.geometry = NS(pool_keys=lambda: keys, ratio=geometry.ratio)
+                graph_cache._framework_tags = {key: framework[key[1]] for key in keys}
+                graph_cache._pools = {key: pool.tensor for key, pool in cache.pools.items()}
+                graph_cache.entries = {}
+                graph_cache.spans = {}
+                graph_cache.tables = {}
+                for key, pool in cache.pools.items():
+                    pool.tensor.copy_(original[key])
+                    table_tag = graph_cache._table_tag(*key)
+                    graph_cache.entries[table_tag] = pool.entries
+                    graph_cache.spans[table_tag] = pool.span
+                    graph_cache.tables[table_tag] = pool.table
+
+                journal = VerifyGraphJournal(graph_cache, layout.rows)
+                journal.bind(
+                    requests, cu[:-1], torch.tensor(layout.prefixes, device=device), valid,
+                )
+                for owner, tag in keys:
+                    raw = pos
+                    if tag in ("global_kv_2", "indexer_kv"):
+                        raw = torch.where(pos % 2 == 1, pos - 1, -1)
+                    slots = journal.slots(owner, tag, raw)
+                    cols = torch.arange(widths[tag], device=device)
+                    payload = (raw[:, None] * 7 + cols + requests[:, None]) % 151
+                    journal.write_rows(owner, tag, slots, payload.to(graph_cache.pool(owner, tag).dtype))
+                journal.validate_bindings(cache, layout)
+                graph_tx = SharedVerifyTransaction(
+                    cache, request_ids, layout, windows, ids, call_id=2,
+                    max_backtracking=6, graph_journal=journal,
+                )
+                self.assertFalse(cache.journal)
+                if counts == (1, 2):
+                    write = graph_cache.write_rows
+                    calls = 0
+
+                    def fail_second(*args):
+                        nonlocal calls
+                        calls += 1
+                        if calls == 2:
+                            raise RuntimeError("commit fault")
+                        return write(*args)
+
+                    with patch.object(graph_cache, "write_rows", side_effect=fail_second):
+                        with self.assertRaisesRegex(RuntimeError, "commit fault"):
+                            graph_tx.finish(request_ids, torch.tensor(layout.prefixes), torch.tensor(counts))
+                    for key, pool in cache.pools.items():
+                        self.assertTrue(torch.equal(pool.tensor, original[key]), key)
+                graph_evidence = graph_tx.finish(
+                    request_ids, torch.tensor(layout.prefixes), torch.tensor(counts),
+                )
+                self.assertEqual(graph_evidence["native_rows_published"], evidence["native_rows_published"])
+                self.assertTrue(graph_tx.closed and not cache.journal)
+                for key, pool in cache.pools.items():
+                    self.assertTrue(torch.equal(pool.tensor, expected[key]), ("graph", counts, key))
                 observed.append({"counts": counts, "published_rows": evidence["native_rows_published"], "whole_native_bytes": "EXACT"})
             print(json.dumps({"schema": "n7-device-transaction-v1", "ragged_lengths": [2, 5],
                               "loop_view": MODES.target_loop_geometry((2, 5), True), "cases": observed}))

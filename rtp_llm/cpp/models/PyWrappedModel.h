@@ -92,6 +92,21 @@ public:
     }
     GptModelOutputs            forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
     void                       releaseBuffers() override;
+    void                       prepareSpeculativeForwardCompletion();
+#if USE_PPU
+    void                       startDSparkVerifyHostVote(int64_t local_proposal_rows);
+    bool                       tryStagePrivateDraftCommit(const GptModelInputs& inputs);
+    bool                       prepareSpeculativeForwardCompletionWithPrivateDraft(PyWrappedModel& draft,
+                                                                                    const torch::Tensor& prefixes);
+    bool                       tryFinishSpeculativeForwardWithPrivateDraft(PyWrappedModel& draft,
+                                                                             const torch::Tensor& request_ids,
+                                                                             const torch::Tensor& prefixes,
+                                                                             const torch::Tensor& accepted_rows);
+    void                       publishPrivateDraftCommit(const torch::Tensor& request_ids,
+                                                         const torch::Tensor& prefixes,
+                                                         const torch::Tensor& accepted_rows);
+    void                       abortPrivateDraftCommit();
+#endif
     void                       finishSpeculativeForward(const torch::Tensor& request_ids,
                                                           const torch::Tensor& prefixes,
                                                           const torch::Tensor& accepted_rows) override;
@@ -104,6 +119,9 @@ public:
                                                       bool                  skip_forward_event_sync,
                                                       const GptModelInputs* cache_store_host_inputs = nullptr,
                                                       bool                  defer_graph_prepare     = false);
+    void                       discardPreparedAttentionInputs() noexcept {
+        prepared_attention_inputs_.store(false, std::memory_order_release);
+    }
     void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
@@ -112,6 +130,7 @@ public:
 private:
     friend struct test::PyWrappedModelTestPeer;
 
+    GptModelOutputs forwardImpl(const GptModelInputs& inputs, bool private_draft_stage);
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:

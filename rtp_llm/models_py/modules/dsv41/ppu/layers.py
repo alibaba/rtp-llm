@@ -6,6 +6,7 @@ a CUDA Attention object or presenting a placeholder as AttentionFP8.
 """
 
 import importlib.util
+import os
 import weakref
 from dataclasses import replace
 
@@ -41,8 +42,32 @@ def _ordinary_decode_graph(runtime):
     )
 
 
+def _verify_packed_attention_graph(state):
+    return (
+        getattr(state, "is_graph", False)
+        and getattr(state, "verify", False)
+        and getattr(state, "packed_attention", None) is not None
+    )
+
+
+def _proposal_exact_ops(state):
+    return (
+        getattr(state, "is_graph", False)
+        and getattr(state, "proposal", False)
+        and state.grouped_moe is None
+        and os.environ.get("RTP_V41_PPU_PROPOSAL_EXACT_OPS", "1") == "1"
+    )
+
+
+def full_graph_rmsnorm_enabled(state):
+    return (
+        (getattr(state, "is_graph", False) or getattr(state, "is_graph_commit", False))
+        and os.environ.get("RTP_V41_PPU_GRAPH_FULL_RMSNORM", "1") == "1"
+    )
+
+
 def try_graph_rms_norm(hidden_states, weight, eps) -> torch.Tensor | None:
-    """Reuse the strided RMSNorm for ordinary Graph BF16 activations."""
+    """Normalize BF16 Graph activations with one FP32 reduction and BF16 store."""
     if (
         weight is None
         or not hidden_states.is_cuda
@@ -86,18 +111,62 @@ class PPUSharedRMSNorm(BaseNorm):
 
     def forward(self, hidden_states):
         self.calls += 1
-        if _ordinary_decode_graph(getattr(self, "runtime", None)):
+        runtime = getattr(self, "runtime", None)
+        state = runtime.current if runtime is not None else None
+        graph_runtime = getattr(self, "_full_graph_runtime", runtime)
+        graph_state = graph_runtime.current if graph_runtime is not None else None
+        if _ordinary_decode_graph(runtime) or full_graph_rmsnorm_enabled(graph_state):
             normalized = try_graph_rms_norm(
                 hidden_states, self.weight, self.variance_epsilon
             )
             if normalized is not None:
                 return normalized
+        verify_epilogue = (
+            _verify_packed_attention_graph(state)
+            and os.environ.get("RTP_V41_PPU_VERIFY_RMSNORM_EPILOGUE", "1") == "1"
+        )
+        proposal_epilogue = _proposal_exact_ops(state)
+        if (
+            (
+                proposal_epilogue
+                or (
+                    verify_epilogue
+                    and os.environ.get("RTP_V41_PPU_VERIFY_RMSNORM_WIDEN_SQUARE", "1") == "1"
+                )
+            )
+            and hidden_states.is_cuda
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.ndim >= 2
+            and hidden_states.shape[-1] == self.weight.numel()
+            and hidden_states.is_contiguous()
+            and self.weight.is_contiguous()
+            and self.weight.device == hidden_states.device
+            and not torch.is_grad_enabled()
+            and importlib.util.find_spec("triton") is not None
+        ):
+            from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import verify_rmsnorm_bf16
+
+            return verify_rmsnorm_bf16(hidden_states, self.weight, self.variance_epsilon)
         x = hidden_states.float()
-        return (
-            x
-            * torch.rsqrt(x.square().mean(-1, keepdim=True) + self.variance_epsilon)
-            * self.weight.float()
-        ).to(hidden_states.dtype)
+        inv = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.variance_epsilon)
+        if (
+            verify_epilogue
+            and hidden_states.is_cuda
+            and hidden_states.dtype == torch.bfloat16
+            and x.ndim >= 2
+            and x.shape[-1] == self.weight.numel()
+            and x.is_contiguous()
+            and self.weight.is_contiguous()
+            and self.weight.device == x.device
+            and not torch.is_grad_enabled()
+            and importlib.util.find_spec("triton") is not None
+        ):
+            from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import (
+                prefill_rmsnorm_epilogue,
+            )
+
+            return prefill_rmsnorm_epilogue(x, inv, self.weight)
+        return (x * inv * self.weight.float()).to(hidden_states.dtype)
 
 
 class PPUSharedHCUnit(HCUnitBase):
@@ -155,13 +224,17 @@ class PPUSharedHCUnit(HCUnitBase):
         previous = self._previous_ref() if self._previous_ref is not None else None
         if previous is not None and previous.state is None:
             raise RuntimeError("previous delayed mHC state was not produced")
-        state = self.ops.mhc(
-            x,
-            None,
-            phase="pre",
-            parameters=self.parameters_map,
-            state=previous.state if previous is not None else None,
-        )
+        previous_state = previous.state if previous is not None else None
+        reduce_block_m = getattr(self, "_graph_mhc_reduce_block_m", None)
+        if reduce_block_m is None:
+            state = self.ops.mhc(
+                x, None, phase="pre", parameters=self.parameters_map, state=previous_state,
+            )
+        else:
+            state = self.ops._mhc.pre(
+                x, self.parameters_map, state=previous_state,
+                reduce_block_m=reduce_block_m,
+            )
         # Native pre may flatten token axes; public HC consumers preserve them.
         leading_shape = tuple(x.shape[:-2])
         self.state = replace(
@@ -176,6 +249,16 @@ class PPUSharedHCUnit(HCUnitBase):
         return self.state.hidden, self.state.post_mix, self.state.residual_mix
 
     def _post_impl(self, x, residual, post, comb):
+        graph_post = getattr(self, "_graph_mhc_post", None)
+        if graph_post is not None:
+            from rtp_llm.models_py.modules.dsv41.ppu._mhc_triton import try_verify_mhc_post
+
+            mode, proposal_q3 = graph_post
+            updated = try_verify_mhc_post(
+                x, residual, post, comb, mode=mode, proposal_q3=proposal_q3,
+            )
+            if updated is not None:
+                return updated
         if (
             _ordinary_decode_graph(getattr(self, "runtime", None))
             and residual.is_cuda
@@ -324,11 +407,12 @@ class PPUSharedGate(nn.Module):
         self.top_k = views.geometry.n_activated_experts
         self.route_scale = views.geometry.routed_scaling_factor
 
-    def forward(self, hidden, *, graph_routes=None):
+    def forward(self, hidden, *, graph_routes=None, allow_top3_graph_routes=False):
         return sqrtsoftplus_gate(
             hidden, self.weight, self.bias,
             top_k=self.top_k, routed_scaling_factor=self.route_scale,
             graph_routes=graph_routes,
+            allow_top3_graph_routes=allow_top3_graph_routes,
         )
 
 
@@ -341,10 +425,11 @@ class PPUSharedExpert(nn.Module):
         self.w2 = views.linear(layer_id, W.v4_shared_w2_w)
         self.swiglu_limit = views.geometry.swiglu_limit
 
-    def forward(self, hidden, *, fused_activation=False):
+    def forward(self, hidden, *, fused_activation=False, prefill_exact=False):
         return shared_expert_forward(
             hidden, self.w13, self.w2, self.swiglu_limit,
             fused_activation=fused_activation,
+            prefill_exact=prefill_exact,
         )
 
 
@@ -393,8 +478,21 @@ class PPUSharedMoE(nn.Module):
             real = state.metadata.valid_mask
             routed_rows = state.routed_rows_device[self.layer_id]
             ordinary = _ordinary_decode_graph(runtime)
-            if ordinary and state.grouped_moe is None:
-                ids, weights = self.gate(flat, graph_routes=(real, routed_rows))
+            verify = _verify_packed_attention_graph(state) and state.grouped_moe is None
+            proposal = _proposal_exact_ops(state)
+            if state.grouped_moe is None and (
+                ordinary
+                or proposal
+                or (
+                    verify
+                    and os.environ.get("RTP_V41_PPU_VERIFY_DIRECT_MOE_ROUTES", "1") == "1"
+                )
+            ):
+                ids, weights = self.gate(
+                    flat,
+                    graph_routes=(real, routed_rows),
+                    allow_top3_graph_routes=proposal,
+                )
             else:
                 ids, weights = pad_topk_for_dispatch(*self.gate(flat))
                 ids = torch.where(real[:, None], ids, -1)
@@ -418,7 +516,12 @@ class PPUSharedMoE(nn.Module):
                     flat, physical, weights, layer_id=self.layer_id, expert_load=expert_load
                 )
             if self.shared_expert is not None:
-                shared = self.shared_expert(flat, fused_activation=ordinary)
+                if proposal or (
+                    verify and os.environ.get("RTP_V41_PPU_VERIFY_EXACT_SWIGLU", "1") == "1"
+                ):
+                    shared = self.shared_expert(flat, prefill_exact=True)
+                else:
+                    shared = self.shared_expert(flat, fused_activation=ordinary)
                 if _return_shared:
                     return routed.reshape(shape), shared.reshape(shape)
                 routed = combine_routed_and_shared(routed, shared)

@@ -254,6 +254,10 @@ def run_model_replays(
                         impl.writes.zero_()
                     else:
                         layers_before = impl.runtime.layer_calls.clone()
+                        grouped = impl.runtime.grouped
+                        if grouped is None:
+                            mega_stats = model._shared_ops.moe_engine._mega_recv_stats
+                            mega_before = mega_stats.clone()
                     graph.replay()
                     actual = outputs(captured)
                     if readonly_forward:
@@ -272,15 +276,19 @@ def run_model_replays(
                         counter_ok = counters["writes"] == [impl.rows] * 3
                     else:
                         layer_calls = (impl.runtime.layer_calls - layers_before).tolist()
-                        grouped = impl.runtime.grouped
                         counters = {"layer_calls": layer_calls}
                         counter_ok = layer_calls == [1] * len(model.v4.layers)
+                        expected = impl.rows * model.shared_weight_views.geometry.n_activated_experts * dist.get_world_size()
                         if grouped is not None:
                             received = grouped.received.clone()
                             dist.all_reduce(received)
                             counters["received_world_per_layer"] = received.sum(dim=1).tolist()
-                            expected = impl.rows * model.shared_weight_views.geometry.n_activated_experts * dist.get_world_size()
                             counter_ok &= counters["received_world_per_layer"] == [expected] * len(model.v4.layers)
+                        else:
+                            received = (mega_stats - mega_before).sum(dtype=torch.int64)
+                            dist.all_reduce(received)
+                            counters["megamoe_received_world"] = int(received.item())
+                            counter_ok &= counters["megamoe_received_world"] == expected * len(layer_calls)
                     report = validate_step(
                         step, initial, after, actual, independent, reference, mismatches,
                         before_accept, counters, addresses, unchanged,
@@ -480,6 +488,7 @@ def run_direct_device_fixture(target, draft, modes, output):
     from rtp_llm.model_loader.model_weight_info import ModelWeights
     from rtp_llm.models_py.modules.dsv41.ppu.engram import build_token_windows
     from rtp_llm.models_py.modules.dsv41.ppu.model import DeepSeekV41PPUModel
+    from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import moe_backend, moe_precision
     from rtp_llm.models_py.modules.dsv41.transformer import V4Transformer
     from rtp_llm.utils.model_weight import W
 
@@ -494,11 +503,14 @@ def run_direct_device_fixture(target, draft, modes, output):
         raise ValueError("fixture requires the two real cache-backed DP8/EP8 DSpark models")
     if draft.shared_mode.gamma != 3 or draft.shared_mode.query_width != 3 or not draft._dspark_confidence_enabled:
         raise ValueError("fixture requires gamma3 with sampled anchor and real confidence weights")
-    if type(target.v4).forward_decode is not V4Transformer.forward_decode or any(
-        (model._shared_ops.moe_engine.backend, model._shared_ops.moe_engine.precision) != ("grouped", "w4a8")
+    backend, precision = moe_backend(), moe_precision()
+    if (backend, precision) not in (("grouped", "w4a8"), ("megamoe", "w4a4")) or (
+        type(target.v4).forward_decode is not V4Transformer.forward_decode
+    ) or any(
+        (model._shared_ops.moe_engine.backend, model._shared_ops.moe_engine.precision) != (backend, precision)
         for model in models
     ):
-        raise ValueError("fixture requires inherited full target Decode and real grouped W4A8")
+        raise ValueError("fixture requires inherited full target Decode and the selected Graph MoE backend")
     aliases = {
         key: draft.weight.global_weights[key] is target.weight.global_weights[key]
         for key in (W.embedding, W.lm_head)
@@ -810,7 +822,7 @@ def run_direct_device_fixture(target, draft, modes, output):
             "model_weights": [type(model.weight).__name__ for model in models],
             "kv_cache": [type(model.kv_cache).__name__ for model in models],
             "vocab_aliases": aliases, "distinct_pool_views": True,
-            "routed_precision": "grouped W4A8",
+            "routed_precision": f"{backend} {precision.upper()}",
             "layer_counts": [len(model.v4.layers) for model in models],
             "native_domains": [len(target_pages.domains), len(draft_pages.domains)],
             "shares_backing_arena": bool(target_storage & draft_storage),

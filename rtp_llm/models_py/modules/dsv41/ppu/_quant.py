@@ -797,6 +797,30 @@ def _triton_kernels():
     ns.e2m1_code_to_fp32 = _e2m1_code_to_fp32
 
     @triton.jit
+    def _dequantize_verify_indexer_qk(
+        q_payload, q_scales, packed_keys, q_out, k_out, QUERY_ROWS: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        channel = tl.arange(0, 128)
+        group = channel // 32
+        if row < QUERY_ROWS:
+            packed = tl.load(q_payload + row * 64 + channel // 2).to(tl.uint8)
+            scale_word = tl.load(q_scales + row).to(tl.uint32, bitcast=True)
+            scale = (scale_word >> (8 * group)) & 255
+            output = q_out + row * 128
+        else:
+            key_row = row - QUERY_ROWS
+            source = packed_keys + key_row * 68
+            packed = tl.load(source + channel // 2)
+            scale = tl.load(source + 64 + group).to(tl.uint32)
+            output = k_out + key_row * 128
+        code = (packed.to(tl.uint32) >> (4 * (channel % 2))) & 15
+        value = _e2m1_code_to_fp32(code) * _ue8m0_to_fp32(scale)
+        tl.store(output + channel, value)
+
+    ns.dequantize_verify_indexer_qk = _dequantize_verify_indexer_qk
+
+    @triton.jit
     def _dequantize_k_cache_paged_v41_fp4_kernel(
         output_ptr,
         buf_uint8_ptr,
@@ -917,6 +941,39 @@ def quantize_indexer_q_ppu(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]
         flat = flat.float()
     payload, sf = _quantize_mx_rows_ppu(flat)
     return payload.view(*shape[:-1], 64), sf.view(*shape[:-1])
+
+
+def try_dequantize_verify_indexer(q_payload, q_scales, packed_keys):
+    """Decode fixed B32 Verify dot operands directly into the FP32 bmm layout."""
+    if not (
+        q_payload.shape == (32, 32, 64)
+        and q_payload.dtype == torch.int8
+        and q_scales.shape == (32, 32)
+        and q_scales.dtype == torch.int32
+        and packed_keys.ndim == 3
+        and packed_keys.shape[0] == 32
+        and 1 <= packed_keys.shape[1] <= 4
+        and packed_keys.shape[2] == INDEXER_K_ENTRY_BYTES
+        and packed_keys.dtype == torch.uint8
+        and all(
+            t.is_contiguous() and t.device == q_payload.device
+            for t in (q_payload, q_scales, packed_keys)
+        )
+        and _ppu_fast_path(q_payload)
+    ):
+        return None
+    q_out = torch.empty(
+        (*q_payload.shape[:-1], INDEXER_HEAD_DIM), dtype=torch.float32, device=q_payload.device,
+    )
+    k_out = torch.empty(
+        (*packed_keys.shape[:-1], INDEXER_HEAD_DIM), dtype=torch.float32, device=q_payload.device,
+    )
+    q_rows = q_scales.numel()
+    k_rows = packed_keys.numel() // INDEXER_K_ENTRY_BYTES
+    _triton_kernels().dequantize_verify_indexer_qk[(q_rows + k_rows,)](
+        q_payload, q_scales, packed_keys, q_out, k_out, q_rows, num_warps=4,
+    )
+    return q_out, k_out
 
 
 def dequantize_global_kv_slots_ppu(

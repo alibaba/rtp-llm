@@ -323,6 +323,9 @@ def _pre_triton(
     scale: torch.Tensor,
     base: torch.Tensor,
     config: MHCConfig,
+    *,
+    reduce_block_m: int | None = None,
+    aiu_prenorm: bool = False,
 ):
     kernels = _triton_kernels()
     hc = config.hc_mult
@@ -330,7 +333,10 @@ def _pre_triton(
     flat = residual.reshape(-1, hc * dim)
     if flat.stride(1) != 1:
         flat = flat.contiguous()
-    mixes = kernels.hc_mix_stats(flat, fn.float().contiguous(), config.rms_eps)
+    mixes = kernels.hc_mix_stats(
+        flat, fn.float().contiguous(), config.rms_eps,
+        reduce_block_m=reduce_block_m, aiu_prenorm=aiu_prenorm,
+    )
     return kernels.hc_split_sinkhorn(
         mixes,
         scale,
@@ -347,6 +353,8 @@ def mhc_pre(
     *,
     state: Optional[V41MHCResult] = None,
     config: Optional[MHCConfig] = None,
+    reduce_block_m: int | None = None,
+    aiu_prenorm: bool = False,
 ) -> PPUStepMix:
     """Predict the mix triplet and read the (un-normalized) sublayer input.
 
@@ -396,7 +404,10 @@ def mhc_pre(
         _check_pre_mix_shape(pre_state, residual, hc)
 
     if _prefer_triton(cfg, residual):
-        pre, post, comb = _pre_triton(residual, fn, scale, base, cfg)
+        pre, post, comb = _pre_triton(
+            residual, fn, scale, base, cfg, reduce_block_m=reduce_block_m,
+            aiu_prenorm=aiu_prenorm and not cfg.strict_bf16_fn,
+        )
     else:
         pre, post, comb = _pre_torch(residual, fn, scale, base, cfg)
 
@@ -584,8 +595,14 @@ class PPUMHC:
         )
 
     # Explicit per-phase helpers for direct call sites.
-    def pre(self, residual, parameters, *, state=None, config=None) -> PPUStepMix:
-        return mhc_pre(residual, parameters, state=state, config=config or self.config)
+    def pre(
+        self, residual, parameters, *, state=None, config=None,
+        reduce_block_m=None, aiu_prenorm=False,
+    ) -> PPUStepMix:
+        return mhc_pre(
+            residual, parameters, state=state, config=config or self.config,
+            reduce_block_m=reduce_block_m, aiu_prenorm=aiu_prenorm,
+        )
 
     def post(self, residual, branch, *, state=None, config=None) -> PPUStepMix:
         return mhc_post(residual, branch, state=state, config=config or self.config)

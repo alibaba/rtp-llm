@@ -222,6 +222,103 @@ class DecodeGraphMetadataTest(unittest.TestCase):
 )
 class GraphCacheDeviceTest(unittest.TestCase):
     @torch.inference_mode()
+    def test_packed_verify_replay_restores_reserved_pages(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.dspark_graph import VerifyGraphJournal
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_attention_layer import _shared_decode_attention
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_packed_attention import GraphPackedAttention
+        from rtp_llm.models_py.modules.dsv41.ppu.kv_codec import encode_kv
+        from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import DEPENDENCY_ENV
+
+        if not os.environ.get(DEPENDENCY_ENV):
+            self.skipTest("requires the pinned packed FlashMLA provider")
+        device = torch.device("cuda", torch.cuda.current_device())
+        torch.manual_seed(5531)
+        keys = ((0, "swa_kv"), (0, "global_kv_2"))
+        cache = NativeGraphCache.__new__(NativeGraphCache)
+        cache.device, cache.max_seq_len, cache.native = device, 512, None
+        cache.geometry = SimpleNamespace(pool_keys=lambda: keys, ratio=lambda owner: 2)
+        cache.entries = {"swa_kv": 128, "global_kv_2": 64}
+        cache.spans = dict.fromkeys(cache.entries, 128)
+        cache._framework_tags = {key: key[1] for key in keys}
+        cache.tables = {
+            "swa_kv": torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8]], device=device, dtype=torch.int32),
+            "global_kv_2": torch.tensor([[2, 3, 4, 1], [6, 7, 8, 5]], device=device, dtype=torch.int32),
+        }
+
+        def encoded(count, tag):
+            kv = torch.randn(count, 512, device=device, dtype=torch.bfloat16) * 0.25
+            return encode_kv(kv, pool_tag=tag)
+
+        cache._pools = {
+            (owner, tag): encoded(9 * cache.entries[tag], tag).reshape(9, -1)
+            for owner, tag in keys
+        }
+        before = {key: cache.pool(*key).clone() for key in keys}
+        rows = 8
+        journal = VerifyGraphJournal(cache, rows)
+        geometry = SimpleNamespace(window=128, head_dim=512, n_heads=64, sm_scale=lambda: 512**-0.5)
+        packed = GraphPackedAttention(cache, geometry, journal=journal)
+        sink = torch.zeros(64, device=device)
+        layer = SimpleNamespace(
+            layer_id=0, kv_source_layer_id=0, index_source_layer_id=0, compress_ratio=2,
+            geometry=geometry, attn_sink=sink,
+        )
+        positions = torch.zeros(rows, device=device, dtype=torch.int64)
+        valid = torch.ones(rows, device=device, dtype=torch.bool)
+        prefixes = torch.zeros(2, device=device, dtype=torch.int64)
+        starts = torch.tensor([0, 4], device=device)
+        requests = torch.arange(rows, device=device) // 4
+        metadata = SimpleNamespace(positions=positions, valid_mask=valid)
+        selected = torch.arange(512, device=device, dtype=torch.int32).repeat(rows, 1)
+        q = torch.randn(rows, 64, 512, device=device, dtype=torch.bfloat16)
+        payloads = {key: encoded(rows, key[1]) for key in keys}
+
+        def step():
+            journal.bind(requests, starts, prefixes, valid)
+            for key in keys:
+                if key[1] == "swa_kv":
+                    raw = torch.where(valid, positions, -1)
+                else:
+                    raw = torch.where(valid & ((positions & 1) == 1), positions - 1, -1)
+                journal.write_rows(*key, journal.slots(*key, raw), payloads[key])
+            shared = {}
+            output = packed.forward(layer, q, selected, metadata, shared)
+            swa, _ = packed._swa_indices(0, positions, valid, shared)
+            global_slots, _ = packed._global_indices(
+                0, 0, "global_kv_2", 2, selected, positions, valid, shared,
+            )
+            reference = _shared_decode_attention(
+                q, selected, cache=journal, layer_id=0, source_layer=0, ratio=2,
+                positions=positions, valid_mask=valid, window=128,
+                sm_scale=geometry.sm_scale(), attn_sink=sink,
+            )
+            return output, reference, swa, global_slots
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(stream):
+            step()
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            output, reference, swa, global_slots = step()
+        for bases, count in (((127, 129), 7), ((132, 5), 4), ((255, 253), 8)):
+            prefixes.copy_(torch.tensor(bases, device=device))
+            positions.copy_(prefixes[requests] + torch.arange(rows, device=device) % 4)
+            valid.copy_(torch.arange(rows, device=device) < count)
+            graph.replay()
+            torch.testing.assert_close(output, reference, rtol=0.02, atol=0.005)
+            self.assertEqual(int(torch.count_nonzero(output[~valid])), 0)
+            for key in keys:
+                self.assertTrue(torch.equal(cache.pool(*key), before[key]), (bases, key))
+            if bases == (127, 129):
+                self.assertEqual(swa[0, 0, -2:].tolist(), [254, 0])
+                self.assertEqual(swa[1, 0, -2:].tolist(), [0, 1])
+                self.assertEqual(int(global_slots[0, 0, 63]), 0)
+                self.assertEqual(int(global_slots[4, 0, 64]), 4)
+                self.assertTrue(bool((swa[7] == -1).all() and (global_slots[7] == -1).all()))
+
+    @torch.inference_mode()
     def test_packed_scheduler_replay_shares_only_equal_prefixes(self):
         from rtp_llm.models_py.modules.dsv41.ppu.graph_packed_attention import (
             GRAPH_SHARED_MLA_METADATA_ENV,
