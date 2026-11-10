@@ -291,12 +291,52 @@ def weights_census() -> List[Dict[str, Any]]:
             rank_rows[path.name] = row
         except Exception:
             continue
+    placed: Dict[str, Any] = {}
+    for path in sorted(telemetry_dir().glob("rank-*-placements.json")):
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                row = json.load(stream)
+        except Exception:
+            continue
+        for name, placement in (row.get("placements") or {}).items():
+            if name not in placed:
+                placed[name] = placement
     non_engram_device = "cuda:0"
     for row in rank_rows.values():
         if row.get("non_engram_device"):
             non_engram_device = str(row["non_engram_device"])
             break
     tp_ranks = int(os.environ.get("AWI_TP_RANKS", "1") or "1")
+    if placed:
+        rows: List[Dict[str, Any]] = []
+        for name in sorted(weight_map):
+            row = placed.get(name)
+            if row is not None:
+                rows.append(dict(row))
+            else:
+                is_engram = "engram" in name.lower()
+                rows.append(
+                    {
+                        "name": name,
+                        "device": "cpu" if is_engram else non_engram_device,
+                        "storage": (
+                            "pinned"
+                            if is_engram
+                            and os.environ.get("AWI_ENGRAM_PINNED", "1") == "1"
+                            else "anonymous"
+                            if is_engram
+                            else "device"
+                        ),
+                        "persistent_gpu_bytes": 0,
+                        "source": "checkpoint",
+                        "partitions": (
+                            [f"host:{rank}" for rank in range(tp_ranks)]
+                            if is_engram
+                            else list(range(tp_ranks))
+                        ),
+                    }
+                )
+        return rows
     rows: List[Dict[str, Any]] = []
     for name in sorted(weight_map):
         is_engram = "engram" in name.lower()

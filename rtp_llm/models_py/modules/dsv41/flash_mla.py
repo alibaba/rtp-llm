@@ -199,3 +199,29 @@ def flash_mla_with_kvcache(
         **kwargs,
     )
     return output[..., :heads, :], lse[:, :heads, :]
+
+
+def warmup_fallback(device) -> None:
+    """Compile the SM89 Triton sparse kernel outside CUDA graph capture."""
+    if _native_supported(device):
+        return
+    import torch
+
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_sparse_attn_triton import (
+        sparse_mla_fwd,
+    )
+
+    target = torch.device(device)
+    q = torch.zeros((1, 8, 512), dtype=torch.bfloat16, device=target)
+    kv = torch.zeros((1, 1, 512), dtype=torch.bfloat16, device=target)
+    indices = torch.zeros((1, 1, 1), dtype=torch.int32, device=target)
+    sink = torch.zeros((8,), dtype=torch.float32, device=target)
+    sparse_mla_fwd(
+        q,
+        kv,
+        indices,
+        1.0 / (512 ** 0.5),
+        attn_sink=sink,
+        topk_length=torch.ones((1,), dtype=torch.int32, device=target),
+    )
+    torch.cuda.synchronize(target)

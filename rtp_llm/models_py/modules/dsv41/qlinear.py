@@ -58,6 +58,19 @@ _FP4_LUT = torch.tensor(
 )
 
 
+_FP4_LUT_DEVICE: dict[torch.device, torch.Tensor] = {}
+
+
+def _fp4_lut(device: torch.device) -> torch.Tensor:
+    """Device-resident LUT created outside CUDA graph capture."""
+    device = torch.device(device)
+    cached = _FP4_LUT_DEVICE.get(device)
+    if cached is None:
+        cached = _FP4_LUT.to(device)
+        _FP4_LUT_DEVICE[device] = cached
+    return cached
+
+
 def _fp4_unpack_to_fp32(
     weight_int8: torch.Tensor, scale_ue8m0: torch.Tensor
 ) -> torch.Tensor:
@@ -72,7 +85,7 @@ def _fp4_unpack_to_fp32(
     )
     interleaved[:, 0::2] = low.long()
     interleaved[:, 1::2] = high.long()
-    lut = _FP4_LUT.to(weight_int8.device)
+    lut = _fp4_lut(weight_int8.device)
     w_f = lut[interleaved]
     scale_f = scale_ue8m0.to(torch.float32).repeat_interleave(FP4_BLOCK, 1)[:, :in_dim]
     return w_f * scale_f
@@ -154,6 +167,8 @@ class QuantizedLinear(nn.Module):
         self.weight = weight
         self.scale = scale
         self.scale_gemm = scale_gemm
+        # Materialize the decode LUT before any CUDA graph capture.
+        _fp4_lut(weight.device)
         if self.scale_gemm is None and _deepgemm_fp4_supported():
             self.scale_gemm = prepare_fp4_weight_scale_for_deepgemm(
                 scale, self.out_features, self.in_features

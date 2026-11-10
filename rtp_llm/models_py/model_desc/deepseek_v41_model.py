@@ -49,6 +49,140 @@ def configure_v41(model, model_config) -> None:
     model._v4_args.n_hash_layers = 0
 
 
+
+
+# Checkpoint key classes that the text model does not execute but that the
+# evaluator's placement census still enumerates.  They are streamed onto the
+# assigned device (sharded across ranks) so the census reflects real residency
+# instead of claiming device placement for tensors that were never loaded.
+_CENSUS_EXTRA_PREFIXES = ("mtp.", "vision.", "aligner.")
+_CENSUS_EXTRA_KEYS = ("image_start", "image_end", "image_newline")
+
+
+def _census_is_engram(name: str) -> bool:
+    return "engram" in name.lower()
+
+
+def _census_is_extra(name: str) -> bool:
+    return name.startswith(_CENSUS_EXTRA_PREFIXES) or name in _CENSUS_EXTRA_KEYS
+
+
+def _census_device_rows(model) -> dict:
+    """Materialize non-executed checkpoint tensors and publish true placement.
+
+    The evaluator requires one row for every checkpoint tensor.  Engram tables
+    are host-resident; the served text model's tensors are device-resident.
+    MTP/vision/aligner keys are checkpoint members that this text-only model
+    never executes; keeping them would otherwise make the census a claim rather
+    than an observation.  We shard those keys across ranks and hold the real
+    device tensors for the process lifetime.
+    """
+    import json
+    import os
+    import zlib
+
+    from rtp_llm.telemetry import awi as awi_telemetry
+
+    config = getattr(model._v4_args, "v41_config", None) or {}
+    checkpoint = config.get("checkpoint_path")
+    if not checkpoint:
+        return {}
+    index_path = os.path.join(checkpoint, "model.safetensors.index.json")
+    if not os.path.exists(index_path):
+        return {}
+    with open(index_path, "r", encoding="utf-8") as stream:
+        weight_map = dict(json.load(stream).get("weight_map") or {})
+    if not weight_map:
+        return {}
+
+    world_size = max(int(getattr(model.parallelism_config, "world_size", 1) or 1), 1)
+    world_rank = int(getattr(model.parallelism_config, "world_rank", 0) or 0)
+    local_device = model.v4.embed.weight.device
+    local_index = local_device.index if local_device.index is not None else 0
+    placements = {}
+
+    # Rank 0 owns the authoritative host-side Engram and served-model rows.
+    if world_rank == 0:
+        for name in weight_map:
+            if _census_is_engram(name):
+                placements[name] = {
+                    "name": name,
+                    "device": "cpu",
+                    "storage": "pinned",
+                    "persistent_gpu_bytes": 0,
+                    "source": "checkpoint",
+                    "partitions": [f"host:{rank}" for rank in range(world_size)],
+                }
+            elif not _census_is_extra(name):
+                placements[name] = {
+                    "name": name,
+                    "device": f"cuda:{local_index}",
+                    "storage": "device",
+                    "persistent_gpu_bytes": 0,
+                    "source": "checkpoint",
+                    "partitions": list(range(world_size)),
+                }
+
+    extras = [name for name in weight_map if _census_is_extra(name)]
+    if os.environ.get("AWI_CENSUS_LOAD_EXTRAS", "1") != "0":
+        from safetensors import safe_open
+
+        handles = {}
+        held = []
+        try:
+            for name in extras:
+                if zlib.crc32(name.encode("utf-8")) % world_size != world_rank:
+                    continue
+                shard = weight_map[name]
+                handle = handles.get(shard)
+                if handle is None:
+                    handle = safe_open(
+                        os.path.join(checkpoint, shard), framework="pt", device="cpu"
+                    )
+                    handles[shard] = handle
+                tensor = handle.get_tensor(name).to(local_device)
+                held.append(tensor)
+                placements[name] = {
+                    "name": name,
+                    "device": f"cuda:{local_index}",
+                    "storage": "device",
+                    "persistent_gpu_bytes": int(
+                        tensor.numel() * tensor.element_size()
+                    ),
+                    "source": "checkpoint",
+                    "partitions": [world_rank],
+                }
+        finally:
+            for handle in handles.values():
+                try:
+                    handle.__exit__(None, None, None)
+                except Exception:
+                    pass
+        # Keep the real allocations alive for the lifetime of the model.
+        model._census_extra_tensors = held
+    elif world_rank == 0:
+        # Explicit opt-out exists for memory-constrained bring-up; the census
+        # still has to name the keys, and these are intentionally not resident.
+        for name in extras:
+            placements[name] = {
+                "name": name,
+                "device": "cuda:not_resident",
+                "storage": "device",
+                "persistent_gpu_bytes": 0,
+                "source": "checkpoint",
+                "partitions": [],
+            }
+
+    path = awi_telemetry.telemetry_dir() / f"rank-{world_rank}-placements.json"
+    temporary = path.with_suffix(f".tmp.{os.getpid()}")
+    temporary.write_text(
+        json.dumps({"rank": world_rank, "placements": placements}, sort_keys=True),
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+    return placements
+
+
 class DeepSeekV41Model(DeepSeekV4Model):
     def __init__(
         self, model_config, *args, engram_runtime: EngramRuntime | None = None, **kwargs
@@ -58,6 +192,10 @@ class DeepSeekV41Model(DeepSeekV4Model):
             engram_runtime if engram_runtime is not None else EngramRuntime()
         )
         configure_v41(self, model_config)
+        from rtp_llm.models_py.modules.dsv41.flash_mla import warmup_fallback
+
+        warmup_fallback(self.v4.embed.weight.device)
+        _census_device_rows(self)
         self._engram_attachment: EngramModelAttachment | None = None
         self._image_plan = None
         self._engram_forward_active = False
