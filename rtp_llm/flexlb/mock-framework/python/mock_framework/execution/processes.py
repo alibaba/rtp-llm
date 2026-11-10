@@ -88,7 +88,7 @@ class ProcessSupervisor:
         except OSError as error:
             errors.append(f'{name}: cannot kill process group: {error}')
         try:
-            await asyncio.wait_for(child.wait(), timeout=3)
+            await asyncio.wait_for(child.wait(), timeout=grace)
         except TimeoutError:
             errors.append(f'{name}: process did not exit after intentional SIGKILL')
         if child.returncode is not None:
