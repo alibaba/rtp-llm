@@ -63,10 +63,16 @@ def rocm_sparse_mla_fwd(
         raise ValueError(
             f"kv head dim {kv_flat.shape[-1]} != q head dim {dim}"
         )
+    # Callers pass indices as [R, K] or with an inner q_len axis ([R, 1, K]);
+    # normalize to one key axis per query row.
+    if indices.dim() != 2:
+        indices = indices.reshape(rows, -1)
     if indices.dtype != torch.int64:
         indices = indices.to(torch.int64)
     topk = indices.shape[1]
     k_slots = torch.arange(topk, device=q.device)
+    if topk_length is not None:
+        topk_length = topk_length.reshape(rows)
     sink = None
     if attn_sink is not None:
         sink = attn_sink.to(torch.float32).reshape(1, heads, 1)
