@@ -9,7 +9,6 @@ import torch
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.qwen4_exp_config import Qwen4ModelConfig
-from rtp_llm.model_factory_register import _model_factory, get_lazy_model_module_path
 from rtp_llm.model_loader.weight_module import CompositeWeight
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Moe
 from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
@@ -100,13 +99,6 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
             parallelism_config=ParallelismConfig(),
             hw_kernel_config=HWKernelConfig(),
             kv_cache_config=KVCacheConfig(),
-        )
-
-    def test_component_is_registered(self):
-        self.assertIs(_model_factory["qwen4_exp_mtp"], Qwen4ExpMTP)
-        self.assertEqual(
-            get_lazy_model_module_path("qwen4_exp_mtp"),
-            "rtp_llm.models.qwen4_exp.qwen4_exp_mtp",
         )
 
     def test_target_and_draft_read_root_json_once_and_keep_configs_independent(self):

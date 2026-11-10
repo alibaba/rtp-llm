@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import torch
 
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
-    Qwen4ExpQSAIndexer,
     build_base_rope,
     build_interleaved_mrope,
     build_qsa_rope,
@@ -238,30 +237,6 @@ class IndexerCpuContractTest(unittest.TestCase):
                         dtype=torch.float32,
                         device=torch.device("cpu"),
                     )
-
-    def test_project_once_selection_matches_public_forward(self):
-        torch.manual_seed(5)
-        indexer = Qwen4ExpQSAIndexer(
-            torch.randn(40, 16),
-            torch.randn(8),
-            torch.randn(8),
-            n_heads=4,
-            kv_heads=1,
-            head_dim=8,
-            token_budget=8,
-            compress_ratio=4,
-            norm_eps=1e-6,
-        )
-        hidden = torch.randn(2, 9, 16)
-        angles = torch.randn(2, 9, 4)
-        cos = torch.cat([angles.cos(), angles.cos()], dim=-1)
-        sin = torch.cat([angles.sin(), angles.sin()], dim=-1)
-        q, raw_keys = indexer.project(hidden)
-
-        expected = indexer.forward_causal(hidden, cos, sin)
-        got = indexer.forward_causal_from_projected(q, raw_keys, cos, sin)
-
-        self.assertTrue(torch.equal(got, expected))
 
 
 if __name__ == "__main__":

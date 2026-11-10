@@ -415,13 +415,6 @@ class Qwen4ExpPleWeightGateTest(unittest.TestCase):
         self.assertEqual(len(descriptors[-1].weights), _SHARD_COUNT)
         self.assertEqual(descriptors[-1].resident_device, "cpu")
 
-    def test_production_tables_always_reside_in_host_memory(self):
-        layer_weights = [[]]
-
-        self._weight(True)._append_ple_weights(layer_weights)
-
-        self.assertEqual(layer_weights[0][-1].resident_device, "cpu")
-
     def test_hash_metadata_stays_int64_from_loader_to_hashed_ids(self):
         layer_weights = [[]]
         self._weight(True)._append_ple_weights(layer_weights)

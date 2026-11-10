@@ -223,13 +223,33 @@ class PagedScoreTest(unittest.TestCase):
 
         torch.testing.assert_close(paged, ref, atol=1e-3, rtol=1e-3)
 
-    def test_decode_shapes(self):
-        B, mblk, bs, mcl = 4, 1024, 64, 4096
-        q = (torch.randn(B, 1, _H, _D, device=_DEV) * 0.3).to(torch.bfloat16)
-        w = torch.full((B, _H), 1.0 / math.sqrt(_D), device=_DEV)
-        pool = (torch.randn(mblk * bs, _D, device=_DEV) * 0.3).to(torch.bfloat16)
-        bt = torch.randint(0, mblk, (B, mblk), dtype=torch.int32, device=_DEV)
-        ctx = torch.randint(0, mcl, (B, 1), dtype=torch.int32, device=_DEV)
+    def test_long_context_scores_follow_physical_blocks_and_mask_lengths(self):
+        B, bs, mcl = 4, 64, 4096
+        blocks = mcl // bs
+        gains = torch.arange(1, B + 1, device=_DEV)
+        q = torch.ones(B, 1, _H, _D, device=_DEV, dtype=torch.bfloat16)
+        q *= gains[:, None, None, None]
+        w = torch.full((B, _H), 1.0 / _H, device=_DEV)
+        # Each physical block has a known constant key. Different batch rows
+        # traverse different permutations of those blocks.
+        pool = (
+            torch.arange(blocks + 1, device=_DEV, dtype=torch.bfloat16)
+            .view(-1, 1, 1)
+            .expand(-1, bs, _D)
+            .reshape(-1, _D)
+            .contiguous()
+        )
+        bt = (
+            (
+                torch.arange(blocks, device=_DEV)
+                + 17 * torch.arange(B, device=_DEV)[:, None]
+            )
+            % blocks
+            + 1
+        ).to(torch.int32)
+        ctx = torch.tensor(
+            [[4096], [4095], [2049], [0]], dtype=torch.int32, device=_DEV
+        )
         logits = qsa_paged_indexer_score(
             q,
             w,
@@ -239,8 +259,9 @@ class PagedScoreTest(unittest.TestCase):
             block_size=bs,
             max_ctx_len=mcl,
         )
-        self.assertEqual(logits.shape, (B, mcl))
-        self.assertTrue(torch.isfinite(logits).any())
+        expected = bt.repeat_interleave(bs, dim=1).float() * (_D * gains[:, None])
+        expected.masked_fill_(torch.arange(mcl, device=_DEV) >= ctx, float("-inf"))
+        torch.testing.assert_close(logits, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

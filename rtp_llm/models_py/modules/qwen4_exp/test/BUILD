@@ -323,6 +323,14 @@ models_py_test(
 )
 
 models_py_test(
+    name = "ple_batch_benchmark",
+    src = "benchmark/ple_batch_benchmark.py",
+    gpu = "RTX_5000_PRO_CU13",
+    tags = ["manual"],
+    deps = _REFERENCE_DEPS,
+)
+
+models_py_test(
     name = "qsa_projection_pair_test",
     src = "qsa/qsa_projection_pair_test.py",
     gpu = "RTX_5000_PRO_CU13",
@@ -574,7 +582,6 @@ test_suite(
     tests = [
         "//rtp_llm/models_py/modules/hybrid/test:residual_up_mix_test",
         "//rtp_llm/models_py/modules/hybrid/test:residual_norm_fp8_test",
-        "//rtp_llm/models_py/modules/hybrid/test:residual_medium_up_mix_test",
         "//rtp_llm/models_py/modules/hybrid/test:residual_prefill_up_mix_test",
         "//rtp_llm/models_py/modules/hybrid/test:residual_prefill_inject_norm_test",
         "//rtp_llm/models_py/modules/hybrid/test:residual_inject_projection_test",

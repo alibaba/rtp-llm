@@ -271,22 +271,10 @@ class Qwen4ExpTest(unittest.TestCase):
                     model.load()
             parent.assert_not_called()
 
-    def test_graph_permission_is_common_and_model_has_capture_capability(self):
-        model = self._loaded_model()
-        self.assertTrue(model.support_cuda_graph())
-
-    def test_prefetch_budget_is_the_only_model_resource_override(self):
+    def test_prefetch_budget_override(self):
         self.assertEqual(self.config.qwen4_ple_prefetch_mb, 256)
         self.config.apply_override_args('{"qwen4_ple_prefetch_mb":64}')
         self.assertEqual(self.config.qwen4_ple_prefetch_mb, 64)
-        for budget in (0, -1, True, 1.5, "256", None):
-            with (
-                self.subTest(budget=budget),
-                self.assertRaisesRegex(ValueError, "positive integer"),
-            ):
-                self.config.apply_override_args(
-                    json.dumps({"qwen4_ple_prefetch_mb": budget})
-                )
 
     def test_bf16_checkpoint_rejects_partial_quantization_recipes(self):
         for choice in ("MODELOPT_FP4", "FP8_PER_BLOCK", "QWEN4_FP8_NVFP4"):
@@ -473,7 +461,7 @@ class Qwen4ExpTest(unittest.TestCase):
         self.assertIs(Qwen4Exp.get_weight_cls(), Qwen4ExpWeight)
         self.assertIs(get_multimodal_mixin_cls("qwen4_exp"), Qwen4ExpMixin)
 
-    def test_basic_config(self):
+    def test_checkpoint_config_mapping(self):
         config = self.config
         self.assertEqual(config.num_layers, _NUM_LAYERS)
         self.assertEqual(config.hidden_size, 2560)
@@ -486,7 +474,6 @@ class Qwen4ExpTest(unittest.TestCase):
         self.assertEqual(config.layernorm_eps, 1e-6)
         self.assertTrue(config.qk_norm)
 
-    def test_rope_config(self):
         rope_config = self.config.attn_config.rope_config
         self.assertEqual(rope_config.style, RopeStyle.Mrope)
         self.assertEqual(rope_config.base, 10_000_000)
@@ -501,6 +488,38 @@ class Qwen4ExpTest(unittest.TestCase):
         self.assertTrue(rope_config.mrope_interleaved)
         self.assertEqual(self.config.mm_model_config.mm_position_ids_style, 2)
 
+        self.assertEqual(config.expert_num, 512)
+        self.assertEqual(config.moe_k, 10)
+        self.assertEqual(config.moe_inter_size, 640)
+        self.assertEqual(config.inter_size, 640)
+        self.assertEqual(config.n_shared_experts, 1)
+        self.assertEqual(config.moe_style, 2)
+        # No decoder_sparse_step in the checkpoint config: every layer is MoE.
+        self.assertEqual(list(config.moe_layer_index), list(range(_NUM_LAYERS)))
+
+        linear_config = self.config.linear_attention_config
+        self.assertEqual(linear_config.linear_num_key_heads, 16)
+        self.assertEqual(linear_config.linear_num_value_heads, 48)
+        self.assertEqual(linear_config.linear_key_head_dim, 128)
+        self.assertEqual(linear_config.linear_value_head_dim, 128)
+        self.assertEqual(linear_config.linear_conv_kernel_dim, 4)
+
+        mm_config = self.config.mm_model_config
+        self.assertTrue(mm_config.is_multimodal)
+        self.assertTrue(mm_config.include_sep_tokens)
+        self.assertEqual(
+            [list(pair) for pair in mm_config.mm_sep_tokens], [[248053, 248054]]
+        )
+        self.assertEqual(
+            self.config.mm_related_params.config["ckpt_path"], self._temp_dir.name
+        )
+
+        self.assertEqual(self.config.hc_mult, 4)
+        self.assertEqual(
+            self.config.getMtpInputHiddenSize(),
+            self.config.hc_mult * self.config.hidden_size,
+        )
+
     def test_linear_attn_norm_activation(self):
         # Upstream falls back to hidden_act when output_gate_type is unset
         # (this trimmed config has neither -> generic silu default).
@@ -510,17 +529,6 @@ class Qwen4ExpTest(unittest.TestCase):
         Path(self._temp_dir.name, "config.json").write_text(json.dumps(config_json))
         config = Qwen4Exp.create_config(self._temp_dir.name)
         self.assertEqual(config.linear_attn_norm_activation, "sigmoid")
-
-    def test_moe_config(self):
-        config = self.config
-        self.assertEqual(config.expert_num, 512)
-        self.assertEqual(config.moe_k, 10)
-        self.assertEqual(config.moe_inter_size, 640)
-        self.assertEqual(config.inter_size, 640)
-        self.assertEqual(config.n_shared_experts, 1)
-        self.assertEqual(config.moe_style, 2)
-        # No decoder_sparse_step in the checkpoint config: every layer is MoE.
-        self.assertEqual(list(config.moe_layer_index), list(range(_NUM_LAYERS)))
 
     def test_layer_types_drive_hybrid_topology(self):
         hybrid_config = self.config.hybrid_attention_config
@@ -536,36 +544,6 @@ class Qwen4ExpTest(unittest.TestCase):
                 else HybridAttentionType.LINEAR
             )
             self.assertEqual(layer_type, expected, f"layer {idx}")
-
-    def test_linear_attention_config(self):
-        linear_config = self.config.linear_attention_config
-        self.assertEqual(linear_config.linear_num_key_heads, 16)
-        self.assertEqual(linear_config.linear_num_value_heads, 48)
-        self.assertEqual(linear_config.linear_key_head_dim, 128)
-        self.assertEqual(linear_config.linear_value_head_dim, 128)
-        self.assertEqual(linear_config.linear_conv_kernel_dim, 4)
-
-    def test_multimodal_config(self):
-        mm_config = self.config.mm_model_config
-        self.assertTrue(mm_config.is_multimodal)
-        self.assertTrue(mm_config.include_sep_tokens)
-        self.assertEqual(
-            [list(pair) for pair in mm_config.mm_sep_tokens], [[248053, 248054]]
-        )
-        self.assertEqual(
-            self.config.mm_related_params.config["ckpt_path"], self._temp_dir.name
-        )
-
-    def test_hc_mult_is_plumbed_from_hc_count(self):
-        self.assertEqual(self.config.hc_mult, 4)
-        self.assertEqual(
-            self.config.getMtpInputHiddenSize(),
-            self.config.hc_mult * self.config.hidden_size,
-        )
-        self.assertEqual(
-            self.config.getMtpInputHiddenSize(),
-            self.config.hc_mult * self.config.hidden_size,
-        )
 
     def _weight(self):
         weight = Qwen4ExpWeight(

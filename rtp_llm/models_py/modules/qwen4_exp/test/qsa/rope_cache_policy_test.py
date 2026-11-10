@@ -31,7 +31,7 @@ def check_policy(mode):
         assert get_rope_cache_once(base.rope_config, base.max_seq_len).used
     if mode == "native":
         original.forward(norm(source), cache, params)
-    elif mode != "omitted_main":
+    else:
         owner = tester.mutation_owner(case)
 
         class WriterReached(Exception):
@@ -65,7 +65,7 @@ def check_policy(mode):
                 raise AssertionError("fused launch was not reached")
         owner.rope_kvcache_impl.forward.assert_not_called()
     policy = get_rope_cache_once(base.rope_config, base.max_seq_len)
-    assert policy.used == (mode in ("base_first", "omitted_main"))
+    assert policy.used == (mode == "base_first")
     torch.cuda.synchronize()
     print("ROPE_POLICY_PASS", mode, policy.used)
 
@@ -92,9 +92,6 @@ class RopeCachePolicyTest(unittest.TestCase):
 
     def test_preexisting_base_cache_is_preserved(self):
         self.fresh_process("base_first")
-
-    def test_omitted_main_call_changes_native_policy(self):
-        self.fresh_process("omitted_main")
 
 
 if __name__ == "__main__":

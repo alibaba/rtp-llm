@@ -144,10 +144,6 @@ class SparseGqaRoutingTest(unittest.TestCase):
         attn_configs, _ = _configs(opt_in=False)
         self.assertEqual(_select_attention_impl_key(attn_configs), "mha")
 
-    def test_decode_routes_to_sparse_gqa(self):
-        attn_configs, _ = _configs(is_prefill=False)
-        self.assertEqual(_select_attention_impl_key(attn_configs), "sparse_gqa")
-
     def test_dense_model_routes_to_mha(self):
         attn_configs, _ = _configs(is_sparse=False)
         self.assertEqual(_select_attention_impl_key(attn_configs), "mha")

@@ -1,3 +1,4 @@
+import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -61,3 +62,33 @@ class PLEProjectionFixture:
                 outputs.append(output)
                 snapshots.append(state)
         return torch.cat(outputs, 1), snapshots
+
+
+class PLESourceBf16Fixture:
+    @classmethod
+    def setUpClass(cls):
+        if torch.version.hip is not None or torch.cuda.get_device_capability() != (
+            12,
+            0,
+        ):
+            raise unittest.SkipTest("The candidate is restricted to SM120")
+
+    def layer(self):
+        torch.manual_seed(81420)
+        layer = Qwen4ExpPLELayer(
+            SimpleNamespace(ngram_size=3, context_len=2),
+            torch.randn(10240, 2560, device="cuda", dtype=torch.bfloat16) * 0.02,
+            torch.randn(2560, 2560, device="cuda", dtype=torch.bfloat16) * 0.02,
+            torch.randn(10240, 1, 4, device="cuda", dtype=torch.bfloat16) * 0.1,
+            *[
+                torch.randn(10240, device="cuda", dtype=torch.bfloat16) * 0.07
+                for _ in range(3)
+            ],
+            hc_mult=4,
+            hidden_size=2560,
+            conv_kernel_size=4,
+            norm_eps=1e-6,
+        )
+        self.assertIsNone(layer.key_projection)
+        self.assertIsNone(layer.value_projection)
+        return layer

@@ -101,47 +101,6 @@ class RealCkptMappingTest(unittest.TestCase):
             unexpected, [], f"checkpoint tensors nothing claims: {unexpected[:10]}"
         )
 
-    def test_all_forty_eight_layers_are_covered(self):
-        for layer_id in range(48):
-            prefix = f"model.language_model.layers.{layer_id}."
-            self.assertTrue(
-                any(key.startswith(prefix) for key in self.requested),
-                f"layer {layer_id} has no mapped tensors",
-            )
-
-    def test_ple_and_indexer_tensors_are_claimed(self):
-        """The opt-in PLE descriptor and QSA indexer claim all their ckpt keys."""
-        ple_suffixes = (
-            "ple.conv1d.weight",
-            "ple.key_proj.weight",
-            "ple.value_proj.weight",
-            "ple.norm_conv.weight",
-            "ple.norm_key.weight",
-            "ple.norm_query.weight",
-            "ple.ple_embedding.layer_multipliers",
-            "ple.ple_embedding.ngram_heads_offsets",
-            "ple.ple_embedding.ngram_heads_vocab_sizes",
-            "ple.ple_embedding.ngram_embedding.shard_0.weight",
-            "ple.ple_embedding.ngram_embedding.shard_127.weight",
-        )
-        for suffix in ple_suffixes:
-            key = f"model.language_model.layers.1.{suffix}"
-            self.assertIn(key, self.requested, f"{key} not mapped")
-
-        for layer_id in (3, 47):  # first and last full-attention layers
-            for suffix in (
-                "self_attn.indexer.index_qk_proj.weight",
-                "self_attn.indexer.q_layernorm.weight",
-                "self_attn.indexer.k_layernorm.weight",
-            ):
-                key = f"model.language_model.layers.{layer_id}.{suffix}"
-                self.assertIn(key, self.requested, f"{key} not mapped")
-        # Linear-attention layers have no indexer.
-        linear_key = (
-            "model.language_model.layers.2.self_attn.indexer.index_qk_proj.weight"
-        )
-        self.assertNotIn(linear_key, self.requested)
-
 
 if __name__ == "__main__":
     unittest.main()

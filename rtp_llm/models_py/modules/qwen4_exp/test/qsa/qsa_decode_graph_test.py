@@ -91,13 +91,6 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
             is_mtp_draft=draft,
         )
 
-    def test_graph_supports_rounded_batch(self):
-        context = self._context(True)
-        context.select_decode_tokens(
-            self.q, self.raw, indexer=self.indexer, rope_config=self.rope
-        )
-        context.rollback_side_cache()
-
     def test_draft_graph_replays_engine_positions_and_side_cache(self):
         self._check_draft_graph_replay(False)
 

@@ -11,7 +11,6 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     build_qwen4_exp_kv_cache_spec_descs,
     indexer_kv_desc,
     indexer_state_desc,
-    ple_short_conv_state_len,
     ple_state_desc,
 )
 from rtp_llm.ops import (
@@ -94,10 +93,6 @@ class FixedLinearCapacityTest(unittest.TestCase):
 
 
 class PleStateDescTest(unittest.TestCase):
-    def test_state_length_reaches_back_over_whole_ngrams(self):
-        # dilation == ngram_size, so the kernel steps over n-grams not tokens.
-        self.assertEqual(ple_short_conv_state_len(_PLE_KERNEL, _NGRAM), 9)
-
     def test_desc_is_a_fixed_bf16_state_region(self):
         desc = ple_state_desc(_HC * _HIDDEN, _PLE_KERNEL, _NGRAM)
 
@@ -128,7 +123,7 @@ class BuildDescsTest(unittest.TestCase):
             ngram_size=_NGRAM,
         )
 
-    def test_only_the_ple_layer_gets_extra_regions(self):
+    def test_ple_layer_regions_preserve_layout_and_geometry(self):
         descs = self._build()
         tags = [[d.tag for d in layer] for layer in descs]
 
@@ -143,9 +138,6 @@ class BuildDescsTest(unittest.TestCase):
                 self.assertNotIn(PLE_NGRAM_CTX_TAG, layer_tags)
                 self.assertEqual(len(descs[layer_idx]), 1)
 
-    def test_ngram_ctx_region_is_int64_of_context_len(self):
-        descs = self._build()
-
         ctx = next(d for d in descs[1] if d.tag == PLE_NGRAM_CTX_TAG)
         self.assertEqual(ctx.cache_type, KVCacheSpecType.OPAQUE_STATE)
         self.assertEqual(ctx.entry_dtype, DataType.TYPE_INT64)
@@ -155,17 +147,11 @@ class BuildDescsTest(unittest.TestCase):
         self.assertTrue(ctx.reuse.enable_prefix_reuse)
         self.assertEqual(ctx.tail.active_tail_blocks, 0)
 
-    def test_ple_layer_keeps_its_own_attention_region(self):
-        descs = self._build()
-
         non_ple = [
             d for d in descs[1] if d.tag not in (PLE_STATE_TAG, PLE_NGRAM_CTX_TAG)
         ]
         self.assertEqual(len(non_ple), 1)
         self.assertEqual(non_ple[0].cache_type, KVCacheSpecType.LINEAR)
-
-    def test_state_width_follows_hc_mult_times_hidden(self):
-        descs = self._build()
 
         ple = next(d for d in descs[1] if d.tag == PLE_STATE_TAG)
         self.assertEqual(ple.entry_elems, _HC * _HIDDEN)

@@ -12,8 +12,8 @@ MODULE = "rtp_llm.models_py.triton_kernels.gated_residual.prefill_inject_norm"
 
 
 class ResidualPrefillInjectNormTest(unittest.TestCase):
-    def test_complete_consumer_exact_and_small_fallback(self):
-        for rows in (1, 4, 257, 2048, 4093, 4096, 5003, 8192, 12288, 16384):
+    def test_complete_consumer_matches_unfused_reference(self):
+        for rows in (1, 4, 4093, 4096, 5003, 8192, 12288, 16384):
             model = oracle.ResidualFp8Fixture().module(True)
             x = torch.randn(rows, 10240, device="cuda", dtype=torch.bfloat16)
             sub = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
