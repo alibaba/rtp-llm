@@ -21,12 +21,9 @@ Owner 由 Supervisor 启动，与 Worker 是兄弟进程。杀 Worker 不会沿�
 
 开启容器内恢复后默认使用 TCP，每个 Owner 直接提供自己的描述，默认端口 29484；没有中心协调进程，不写共享盘，不复制 ready.json，也没有文件心跳。权重数据仍通过 CUDA VMM/Fabric 访问，TCP 只用于启动连接和身份校验。
 
-每个容器仅保留自己的私有本地文件：
+Owner 读取 C2 下发的 `/etc/podinfo/annotations` 和 `labels`，并在读取请求前按 TCP 源 IP 拒绝组外连接。描述在 C2 隔离的网络内传输，平台须保留真实 Pod 源 IP 并限制组外访问 Owner 端口。Worker 校验请求挑战、模型版本、分片和本地分配摘要。C2 元数据缺失、成员不匹配或同组配置不一致时，实例保持不就绪。
 
-- 同组一致的认证密钥文件，默认 `/mnt/fuse/.rtp-engram-local/owner.key`，权限 0600，由部署侧分别下发到每个容器。Supervisor 启动时复制到自身私有目录；后续源文件轮换不改变正在运行的 Owner 或 Worker 重启所用的密钥。密钥不写进 env 或日志。
-- Supervisor 创建的临时状态目录，保存 generation 占位和描述摘要，供本容器重启后的 Worker 校验 allocation 未被替换。目录不与其他容器共享，不保存 Fabric 访问句柄。
-
-请求和响应均认证加密；随机 challenge 防止旧响应冒充当前存活 Owner。generation、模型版本、分片、描述和本地摘要均校验；错误不降级为重新加载或覆盖原权重。网络请求有大小、并发和时间限制；错误日志限频，避免错误请求刷屏。
+Supervisor 在 `/dev/shm` 下建立私有状态目录，保存描述摘要供 Worker 重启后复核，Fabric 句柄只留在进程内。若 `/dev/shm` 不可用，回退到系统临时目录并打印告警，此时 `TMPDIR` 必须是容器本地目录。
 
 ## 配置
 
@@ -36,7 +33,6 @@ Owner 由 Supervisor 启动，与 Worker 是兄弟进程。杀 Worker 不会沿�
 RTP_LLM_IN_CONTAINER_RESTART=1
 ```
 
-仍需在每个容器预置同组一致的 0600 认证文件（上文默认路径）；这不是共享目录。
 现有 checkpoint、gang 成员、`ENGRAM_SHARD_COUNT` 和存储模式继续复用。
 未显式指定存储模式、且已有分片数大于 1 时，本开关内自动选 `host_shared`。
 Decode 和不开启该开关的部署不执行这些自动配置。
@@ -45,37 +41,32 @@ Decode 和不开启该开关的部署不执行这些自动配置。
 |---|---|
 | Owner | 自动启动 `--discover --device 0` |
 | 发现 | TCP，复用 gang 成员，默认端口 29484 |
-| generation | 从本组密钥确定性生成，同组一致；换组换代需轮换密钥 |
+| generation | 从 C2 gang 版本和有序成员表推导 |
 | 模型标识 | 从 checkpoint 的 config 和索引生成稳定摘要；这是元数据标识，不是全量权重校验和 |
-| 状态 | Supervisor 私有本地目录；摘要和密钥快照跨 Worker 重启保留 |
-| 挂载 | Supervisor 复用现有 checkpoint，向子进程传本地路径 |
+| 状态 | Supervisor 私有本地目录（默认 `/dev/shm`）；摘要跨 Worker 重启保留 |
+| 挂载 | Supervisor 先解析启动参数，再挂载 checkpoint、tokenizer 和 draft 模型，向子进程传本地路径 |
 
-原先列出的 `RTP_LLM_RESIDENT_OWNER_ARGS`、`RTP_ENGRAM_RESIDENT_TRANSPORT`、
-`RTP_ENGRAM_RESIDENT_GENERATION`、`RTP_ENGRAM_MODEL_REVISION`、
-`RTP_ENGRAM_RESIDENT_KEY_FILE` 和 `RTP_ENGRAM_RESIDENT_ENDPOINTS` 都保留为高级覆盖项，
-普通部署无需逐个设置。显式设置空 Owner args 可保持纯消费者模式。
-
-TCP 模式不得同时设置旧的 `RTP_ENGRAM_RESIDENT_DIR`。旧文件模式须显式选择或保留原目录配置。
-同组必须可达 Owner 端口、时钟同步、模型版本一致；不能在旧消费者仍在线时就地改权重。
+同组必须可达 Owner 端口并使用相同的模型版本。旧消费者在线期间禁止就地修改权重。
+设置空 `RTP_LLM_RESIDENT_OWNER_ARGS` 可以保留纯消费者模式。
 
 ## 故障与责任边界
 
 | 故障 | RTP-LLM 行为 | ASI / C2 责任 |
 |---|---|---|
-| 内层 Worker / rank SIGKILL、SIGTERM、崩溃 | Watchdog/进程管理检测退出；清理本实例进程树，原地重启；Owner 不动 | health 失败照常摘本实例；Supervisor 存活时不得因此回收容器或重建 gang |
-| 业务无响应，Watchdog 能判定 | 终止本实例 Worker 后重启；无法清理的进程不重叠启动 | 同上；不能将单实例不健康升级为整组替换 |
+| 内层 Worker / rank SIGKILL、SIGTERM、崩溃 | 进程管理检测退出；清理本实例进程树，原地重启；Owner 不动 | health 失败照常摘本实例；Supervisor 存活时不得因此回收容器或重建 gang |
+| Worker 仍存活但业务无响应 | 保留现场，记录故障；本版本仅在 Worker 退出后自愈 | health 失败照常摘本实例；按故障原因处置 |
 | Worker 专用 cgroup OOM | Worker 被杀后恢复；Owner 在该 cgroup 外 | 需委派独立 worker leaf、memory.max、memory.oom.group=1；必须实际联调 |
 | 整容器/节点 OOM、Owner 被杀、GPU/Fabric 故障 | 不宣称单实例可恢复；本地 Owner 死亡后停止本地 Worker，入口存活并报 recovery_blocked | 按共享权重依赖范围摘流、换代；不能把此类故障归为普通 Worker 重启 |
 | Owner 网络暂时不可达 | 已导入权重的实例不依赖 TCP 持续服务；新 Worker 在启动期限内重试并保持不健康 | 保持容器；定位网络；不要仅因启动重试重建健康 Owner |
-| generation/认证/描述不一致 | 拒绝导入；保留旧 Owner，报告验证失败 | 修复部署配置；需要换代时统一安排依赖组升级 |
+| generation/成员/描述不一致 | 拒绝导入；保留旧 Owner，报告验证失败 | 修复部署配置；需要换代时统一安排依赖组升级 |
 | Supervisor / 容器退出、节点丢失 | 无法保证该容器 Owner 存活 | 作为共享依赖故障处理；入口存活策略不能覆盖 SIGKILL Supervisor 或节点故障 |
 | 计划升级/整组停止 | 收到平台停止信号后停止 Worker，再释放 Owner | 新组完整预热并接流后摘旧组；最后退出旧组。禁止逐个销毁仍被旧组使用的 Owner |
 
-重启失败会退避并持续不就绪。Owner 丢失时不在旧 generation 下重建 allocation。模型挂载或 Owner 启动阶段失败时记录 bootstrap_failed 并保持入口进程，等待显式平台停止。入口参数格式校验失败会在创建 Owner 前退出，需在发布前检查配置。
+重启失败会退避并持续不就绪。单次 Worker 启动期限默认 7200 秒，可用 `RTP_LLM_PREFILL_STARTUP_TIMEOUT_S` 调整。新 Worker 完成 warmup 且每个本地前端开始监听后才重新就绪。模型挂载或 Owner 启动阶段失败时记录 bootstrap_failed 并保持入口进程，等待显式平台停止。Supervisor 在创建 Owner 前校验 full-world；model_type、warmup 和 worker cgroup 由 Worker 按最终生效配置复核。入口参数格式校验失败会在创建 Owner 前退出，需在发布前检查配置。
 
 ## 必须留的证据
 
-日志包含时间、PID、generation，以及 Owner 分片/地址或 Worker 退出码；连接日志记录耗时、重试和失败类别，描述只记录 SHA256。禁止记录认证密钥或 Fabric 句柄。
+日志包含时间、PID、generation，以及 Owner 分片/地址或 Worker 退出码；连接日志记录耗时、重试和失败类别，描述只记录 SHA256。禁止记录 Fabric 句柄。
 
 验收每次记录：容器 ID/重启计数、Supervisor/Owner/Worker PID 与启动时间、generation、各分片摘要、health 变化、重启耗时、故障前后真实推理结果、其他实例连续请求成功率。对实际注入的信号单独记录目标 PID、身份校验和时间。
 

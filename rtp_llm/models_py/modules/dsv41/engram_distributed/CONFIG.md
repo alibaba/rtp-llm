@@ -237,31 +237,26 @@ export RTP_LLM_IN_CONTAINER_RESTART=1
 exec python -m rtp_llm.start_server
 ```
 
-默认认证文件为每个容器各自的 `/mnt/fuse/.rtp-engram-local/owner.key`，同组内容一致、0600。
-Supervisor 自动快照密钥，默认使用 TCP 并启动 `--discover --device 0` Owner。
-generation 从本组密钥确定性生成，模型元数据标识从 checkpoint 的 config/索引生成。
+Supervisor 默认用 TCP 启动 `--discover --device 0` Owner。从 C2 下发的 gang 版本和有序成员表推导 generation，并校验请求的真实 TCP 源 IP。Owner 端口须处在 C2 的 gang 网络隔离范围内。
+模型元数据标识从 checkpoint 的 config/索引生成。
 这不代替全量权重校验；模型不得在线原地替换。已有 checkpoint、分片数和存储配置继续复用。
 未提供存储模式、且已有分片数大于 1 时，本开关内自动选择 `host_shared`。
 上述自动配置不作用于未开启此开关的 Decode 或普通部署。
 
-需覆盖默认行为时，仍可设置 `RTP_ENGRAM_RESIDENT_KEY_FILE`、`RTP_ENGRAM_RESIDENT_GENERATION`、
-`RTP_ENGRAM_MODEL_REVISION`、`RTP_ENGRAM_RESIDENT_TRANSPORT` 或 `RTP_LLM_RESIDENT_OWNER_ARGS`。
 
-默认从 gang 成员发现 Owner，使用独立端口 29484。也可显式配置
-`RTP_ENGRAM_RESIDENT_ENDPOINTS=host0:29484,host1:29484,...`，同组顺序一致。
-Supervisor 自动建立私有本地状态目录，摘要跨 Worker 重启保留；不放句柄，不共享给其他容器。
-Owner 描述保存在自身内存中，请求/响应认证加密并绑定随机 challenge。
+默认从 gang 成员发现 Owner，使用独立端口 29484。
+TCP Owner 地址使用数值 IPv4（本地测试可用 `localhost`）。
+Supervisor 默认在 `/dev/shm` 下建立私有本地状态目录，摘要跨 Worker 重启保留；不放句柄，不共享给其他容器。
+Owner 描述保存在自身内存中，请求和响应使用随机 challenge 配对。
 新 Worker 在 `RTP_ENGRAM_COHORT_TIMEOUT`（默认 1800 秒）内有界等待。
 
-使用 GPU HBM 时设置 `RTP_ENGRAM_STORAGE=gpu_shared`，Owner 可传 `--gpu-devices 0 1 2 3`。
+使用 GPU HBM 时设置 `RTP_ENGRAM_STORAGE=gpu_shared`，自动发现的 Owner 默认使用本机各计算 rank 的 GPU。可以用 `--gpu-devices 0 1 2 3` 显式覆盖。
 每卡仍应用 `RTP_ENGRAM_GPU_RESERVE_BYTES`，需为权重、KV cache 和运行峰值预留空间。
 Owner 与消费者需处于受控 IMEX 域并具备设备权限。
 
-旧文件传输模式仅为兼容保留，有旧 `RTP_ENGRAM_RESIDENT_DIR` 时按文件模式配置解释；
-本方案不启用它。TCP 模式禁止同时设置 `RTP_ENGRAM_RESIDENT_DIR`。
 未设置 resident 参数的部署继续使用原有路径。
 
-Owner 丢失后不得在同一代重建 allocation。受影响共享组由平台使用新 UUID、新密钥恢复。
+Owner 丢失后不得在同一代重建 allocation。部署要求 C2 在任意容器退出时停止整个 gang，再启动新组。
 滚动升级应先预热新组、切流、排空旧组消费者，再停止旧 Owner。
 容器/节点退出会同时失去其中的 Owner；只有业务进程故障能保证容器内原地恢复。
 
@@ -281,10 +276,10 @@ export RTP_LLM_SUPERVISOR_STOP_TIMEOUT_S=300
 
 需要启用 resident Engram、真实 DSV4 Prefill warmup，并且完整计算 world 在同一个容器内。
 Supervisor 把 Owner 和业务进程放在不同 session。业务父进程退出时撤销就绪，
-回收同一业务进程组的所有残留进程，再以 1 至 60 秒的指数退避拉起业务。
+回收业务进程组和脱离该进程组的残留子进程，再以 1 至 60 秒的指数退避拉起业务。
 旧 rank 暂时未退出时，supervisor 保留容器和 Owner，持续回收旧进程并保持未就绪。
 同容器 Owner 保持原 PID 和 generation。新进程重新导入、校验和 warmup 后才能回流。
-默认开启 Prefill 本地 watchdog。Owner 退出后，当前容器撤销就绪并等待平台处理；
+Owner 退出后，当前容器撤销就绪并等待平台处理；
 共享组由平台使用新 generation 恢复。
 
 要隔离 Linux OOM，ASI 需为每个实例预建并授权独占的空业务 leaf cgroup v2，设置有限的 `memory.max`
@@ -300,22 +295,6 @@ Supervisor 日志记录自身和 Owner 的生命周期、业务退出码、停�
 先给业务父进程 TERM，使用现有优雅退出路径，超时再回收其进程组，然后停止本地 Owner。
 停止预算需要包含业务宽限、进程回收和 Owner 清理。共享 Owner 所在容器的更换需等该代
 所有消费者排空，或先切到已验证的新代。若要求容器替换时继续保留该代，使用外置 Owner。
-
-### 可选的 Prefill 本地运行期 watchdog
-
-在单业务实例内承载完整计算 world 的 Prefill 可设置 `RTP_LLM_PREFILL_WATCHDOG=1`。
-正常启动和 warmup 完成后，父进程定期走 loopback gRPC 发一个双 token 的本地 Prefill-only 请求。
-请求禁用 P→D 和缓存复用，只验证本实例能完成实际推理。收到明确的资源耗尽响应时中断失败计数。
-连续失败达到阈值后先撤销 `/health` 就绪门，再按既有失败路径回收该实例的子进程并以失败码退出。
-使用容器内 supervisor 时，业务进程由 supervisor 拉起并退避。否则由 ASI 重启容器。
-
-| 环境变量 | 默认值 |
-| --- | --- |
-| `RTP_LLM_PREFILL_WATCHDOG_INTERVAL_S` | 15 秒 |
-| `RTP_LLM_PREFILL_WATCHDOG_TIMEOUT_S` | 5 秒 |
-| `RTP_LLM_PREFILL_WATCHDOG_FAILURES` | 连续 3 次 |
-
-先在目标负载下验收探测开销和误判率。业务 P→D 链路、跨实例流量和共享组路由仍由实际链路指标和平台探测验收。
 
 ## 校验边界
 

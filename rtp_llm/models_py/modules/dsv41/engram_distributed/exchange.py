@@ -591,7 +591,14 @@ class EngramStartup:
 
         self._resident = None
         self._local_startup = None
-        if any(name in self._env for name in (RESIDENT_DIR_ENV, RESIDENT_GENERATION_ENV, "RTP_ENGRAM_RESIDENT_TRANSPORT")):
+        if any(
+            name in self._env
+            for name in (
+                RESIDENT_DIR_ENV,
+                RESIDENT_GENERATION_ENV,
+                "RTP_ENGRAM_RESIDENT_TRANSPORT",
+            )
+        ):
             from .resident import ResidentGeneration
 
             self._resident = ResidentGeneration(self._env, checkpoint=checkpoint)

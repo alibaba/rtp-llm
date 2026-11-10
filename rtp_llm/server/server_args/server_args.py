@@ -516,14 +516,7 @@ def init_all_group_args(
     init_dash_sc_grpc_group_args(parser, py_env_configs.dash_sc_grpc_config)
 
 
-def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
-    """Parse engine arguments into the canonical ``PyEnvConfigs`` object.
-
-    ``args=None`` preserves the server entry point behavior (parse ``sys.argv``).
-    Supplying an explicit sequence lets in-process tools, such as the offline
-    capacity estimator, reuse the exact same parser and config bindings without
-    temporarily replacing global process arguments.
-    """
+def _create_server_parser():
     # Internal backends must register parser and factory hooks before the
     # corresponding public argument groups and factories are initialized.
     ensure_backend_entrypoint_loaded()
@@ -537,6 +530,42 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
 
     # 使用统一的函数初始化所有参数组，并绑定到配置对象
     init_all_group_args(parser, py_env_configs)
+
+    return parser, py_env_configs
+
+
+def canonicalize_server_options(args, options):
+    """Resolve long option abbreviations using the same registry as the worker."""
+    parser, _ = _create_server_parser()
+    canonical = []
+    for index, arg in enumerate(args):
+        if arg == "--":
+            canonical.extend(args[index:])
+            break
+        option, separator, value = arg.partition("=")
+        if (
+            option.startswith("--")
+            and option not in parser._option_string_actions
+            and any(full.startswith(option) for full in options)
+        ):
+            candidates = parser._get_option_tuples(option)
+            if len(candidates) > 1:
+                raise ValueError(f"ambiguous server option {option}")
+            if candidates and candidates[0][1] in options:
+                arg = candidates[0][1] + separator + value
+        canonical.append(arg)
+    return canonical
+
+
+def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
+    """Parse engine arguments into the canonical ``PyEnvConfigs`` object.
+
+    ``args=None`` preserves the server entry point behavior (parse ``sys.argv``).
+    Supplying an explicit sequence lets in-process tools, such as the offline
+    capacity estimator, reuse the exact same parser and config bindings without
+    temporarily replacing global process arguments.
+    """
+    parser, py_env_configs = _create_server_parser()
 
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args(args)

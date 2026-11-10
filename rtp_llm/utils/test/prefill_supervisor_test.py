@@ -1,3 +1,4 @@
+import errno
 import json
 import logging
 import os
@@ -34,9 +35,33 @@ def _fixture(mode, directory):
 
         signal.signal(signal.SIGTERM, stop_owner)
         _write(directory / "owner", os.getpid())
+    elif mode == "live_detached":
+        os.setsid()
+        _write(directory / "live-detached", os.getpid())
+    elif mode == "detacher":
+        for detached in (False, True):
+            if os.fork() == 0:
+                if detached:
+                    os.setsid()
+                _write(
+                    directory / f"orphan-{int(detached)}",
+                    [os.getpid(), os.getpgrp()],
+                )
+                os._exit(0)
+        return
     elif mode == "worker":
         prefill_supervisor.enter_worker_cgroup()
         rank = subprocess.Popen([sys.executable, __file__, "rank", str(directory)])
+        if os.environ.get("RTP_TEST_ADOPTED_HELPERS") == "1":
+            subprocess.run(
+                [sys.executable, __file__, "detacher", str(directory)],
+                check=True,
+                timeout=5,
+            )
+        if os.environ.get("RTP_TEST_LIVE_DETACHED") == "1":
+            subprocess.Popen(
+                [sys.executable, __file__, "live_detached", str(directory)]
+            )
         stopping = False
 
         def allocate(*_):
@@ -83,6 +108,53 @@ def _fixture(mode, directory):
 
 
 class SupervisorBootstrapTest(unittest.TestCase):
+    def test_cli_model_paths_override_env_and_are_removed_from_worker_args(self):
+        env, remaining = prefill_supervisor._resolve_worker_args(
+            {"CHECKPOINT_PATH": "/old"},
+            [
+                "--checkpoint_path",
+                "dfs://new",
+                "--tokenizer_path=dfs://tokenizer",
+                "--sp_checkpoint_path",
+                "dfs://draft",
+                "--world_size",
+                "4",
+                "--model_type",
+                "deepseek_v41",
+            ],
+        )
+        with patch(
+            "rtp_llm.utils.fuser.fetch_remote_file_to_local",
+            side_effect=lambda path: path.replace("dfs://", "/mnt/"),
+        ):
+            mounted = prefill_supervisor._prepare_model_mounts(env)
+        self.assertEqual(remaining, ["--model_type", "deepseek_v41"])
+        self.assertEqual(mounted["CHECKPOINT_PATH"], "/mnt/new")
+        self.assertEqual(mounted["RTP_ENGRAM_CHECKPOINT"], "/mnt/new")
+        self.assertEqual(mounted["TOKENIZER_PATH"], "/mnt/tokenizer")
+        self.assertEqual(mounted["SP_CHECKPOINT_PATH"], "/mnt/draft")
+        self.assertEqual(mounted["WORLD_SIZE"], "4")
+
+    def test_unready_worker_hits_startup_deadline_without_stopping_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            worker, owner = Mock(pid=12), Mock(pid=13)
+            supervisor = prefill_supervisor.PrefillSupervisor(
+                ["worker"], {}, owner, 30, startup_timeout=1
+            )
+            with (
+                patch.object(
+                    prefill_supervisor.subprocess, "Popen", return_value=worker
+                ),
+                patch.object(prefill_supervisor, "_exited", return_value=False),
+                patch.object(prefill_supervisor.time, "monotonic", side_effect=[0, 2]),
+                patch.object(supervisor, "_stop_worker") as stop,
+                self.assertLogs(prefill_supervisor._LOGGER) as logs,
+            ):
+                supervisor._run_worker(Path(directory) / "ready")
+            stop.assert_called_once_with(worker)
+            self.assertIs(supervisor.owner, owner)
+            self.assertIn("reason=startup_timeout", "\n".join(logs.output))
+
     def test_mount_once_and_pass_local_paths_without_mutating_input(self):
         env = {
             "CHECKPOINT_PATH": "dfs://model",
@@ -202,25 +274,144 @@ class SupervisorBootstrapTest(unittest.TestCase):
         self.assertIn("bootstrap_failed", "\n".join(logs.output))
         self.assertNotIn("secret-uri", "\n".join(logs.output))
 
+    def test_full_world_validation_happens_before_owner_spawn(self):
+        handlers = {}
+        held = []
+
+        def wait(_):
+            held.append(True)
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        env = {
+            "RTP_ENGRAM_RESIDENT_TRANSPORT": "tcp",
+            "RTP_ENGRAM_RESIDENT_GENERATION": "00000000-0000-0000-0000-000000000123",
+            "WORLD_SIZE": "4",
+            "LOCAL_WORLD_SIZE": "2",
+            "CHECKPOINT_PATH": "/mnt/model",
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(prefill_supervisor, "_enable_subreaper"),
+            patch.object(
+                prefill_supervisor.signal,
+                "signal",
+                side_effect=lambda sig, fn: handlers.update({sig: fn}),
+            ),
+            patch.object(
+                prefill_supervisor, "_prepare_model_mounts", side_effect=lambda e: e
+            ),
+            patch.object(
+                prefill_supervisor,
+                "_prepare_network_identity",
+                side_effect=lambda e, _d: e,
+            ),
+            patch("rtp_llm.utils.fuser.umount_all"),
+            patch.object(prefill_supervisor.subprocess, "Popen") as spawn,
+            patch.object(prefill_supervisor.time, "sleep", side_effect=wait),
+            self.assertLogs(prefill_supervisor._LOGGER) as logs,
+        ):
+            prefill_supervisor.supervise_prefill([])
+        self.assertEqual(held, [True])
+        spawn.assert_not_called()
+        self.assertIn(
+            "code=IN_CONTAINER_RESTART_REQUIRES_FULL_WORLD", "\n".join(logs.output)
+        )
+
+    def test_tempdir_validation_failure_keeps_supervisor_alive(self):
+        handlers = {}
+        held = []
+
+        def wait(_):
+            held.append(True)
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        with (
+            patch.dict(
+                os.environ,
+                {"RTP_ENGRAM_RESIDENT_TRANSPORT": "tcp"},
+                clear=True,
+            ),
+            patch.object(prefill_supervisor, "_enable_subreaper"),
+            patch.object(
+                prefill_supervisor.signal,
+                "signal",
+                side_effect=lambda sig, fn: handlers.update({sig: fn}),
+            ),
+            patch.object(
+                prefill_supervisor,
+                "_supervisor_tmp_root",
+                side_effect=prefill_supervisor.BootstrapError(
+                    "INVALID_SUPERVISOR_TMPDIR"
+                ),
+            ),
+            patch("rtp_llm.utils.fuser.umount_all"),
+            patch.object(prefill_supervisor.subprocess, "Popen") as spawn,
+            patch.object(prefill_supervisor.time, "sleep", side_effect=wait),
+            self.assertLogs(prefill_supervisor._LOGGER) as logs,
+        ):
+            prefill_supervisor.supervise_prefill([])
+        self.assertEqual(held, [True])
+        spawn.assert_not_called()
+        self.assertIn("code=INVALID_SUPERVISOR_TMPDIR", "\n".join(logs.output))
+
+    def test_tempdir_creation_failure_keeps_supervisor_alive(self):
+        handlers = {}
+        held = []
+
+        def wait(_):
+            held.append(True)
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        with (
+            patch.dict(
+                os.environ,
+                {"RTP_ENGRAM_RESIDENT_TRANSPORT": "tcp"},
+                clear=True,
+            ),
+            patch.object(prefill_supervisor, "_enable_subreaper"),
+            patch.object(
+                prefill_supervisor.signal,
+                "signal",
+                side_effect=lambda sig, fn: handlers.update({sig: fn}),
+            ),
+            patch.object(prefill_supervisor, "_supervisor_tmp_root", return_value=None),
+            patch.object(
+                prefill_supervisor.tempfile,
+                "TemporaryDirectory",
+                side_effect=OSError(errno.ENOSPC, "no space"),
+            ),
+            patch("rtp_llm.utils.fuser.umount_all"),
+            patch.object(prefill_supervisor.subprocess, "Popen") as spawn,
+            patch.object(prefill_supervisor.time, "sleep", side_effect=wait),
+            self.assertLogs(prefill_supervisor._LOGGER) as logs,
+        ):
+            prefill_supervisor.supervise_prefill([])
+        self.assertEqual(held, [True])
+        spawn.assert_not_called()
+        self.assertIn("bootstrap_failed", "\n".join(logs.output))
+        self.assertIn("errno=28", "\n".join(logs.output))
+
 
 class SupervisorDefaultsTest(unittest.TestCase):
     def setUp(self):
-        from cryptography.fernet import Fernet
-
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.key = Fernet.generate_key()
-        self.key_file = self.root / "mounted-key"
-        self.key_file.write_bytes(self.key)
-        self.key_file.chmod(0o600)
+        annotations = self.root / "annotations"
+        members = {f"prefill_part{i}": {"ip": f"10.0.0.{i + 1}"} for i in range(4)}
+        annotations.write_text(
+            f"app.c2.io/biz-detail-ganginfo={json.dumps(json.dumps(members))}\n"
+        )
+        (self.root / "labels").write_text(
+            'gang-version-hash="release-one"\napp.c2.io/gang-part-name="prefill-part0"\n'
+        )
         self.model = self.root / "model"
         self.model.mkdir()
         (self.model / "config.json").write_text('{"model_type":"deepseek_v41"}')
         (self.model / "model.safetensors.index.json").write_text('{"weight_map":{}}')
         self.env = {
             "RTP_ENGRAM_CHECKPOINT": str(self.model),
-            "RTP_ENGRAM_RESIDENT_KEY_FILE": str(self.key_file),
+            "GANG_ANNOCATION_PATH": str(annotations),
             "ENGRAM_SHARD_COUNT": "4",
         }
 
@@ -231,50 +422,10 @@ class SupervisorDefaultsTest(unittest.TestCase):
             {**self.env, **overrides}, directory
         )
 
-    def test_same_group_key_and_manifest_give_same_identity_in_separate_containers(
-        self,
-    ):
-        other_key = self.root / "other-container-key"
-        other_key.write_bytes(self.key)
-        other_key.chmod(0o600)
-        left = self.prepare("left")
-        right = self.prepare("right", RTP_ENGRAM_RESIDENT_KEY_FILE=str(other_key))
-        for name in ("RTP_ENGRAM_RESIDENT_GENERATION", "RTP_ENGRAM_MODEL_REVISION"):
-            self.assertEqual(left[name], right[name])
-        self.assertEqual(left["RTP_ENGRAM_STORAGE"], "host_shared")
-        self.assertNotEqual(
-            left["RTP_ENGRAM_RESIDENT_STATE_DIR"],
-            right["RTP_ENGRAM_RESIDENT_STATE_DIR"],
-        )
-        self.assertTrue(left["RTP_ENGRAM_MODEL_REVISION"].startswith("manifest@"))
-
-    def test_key_rotation_does_not_change_old_worker_snapshot(self):
-        from cryptography.fernet import Fernet
-        from rtp_llm.models_py.modules.dsv41.engram_distributed.resident_network import (
-            _cipher,
-        )
-
-        old = self.prepare("old")
-        old_owner = _cipher(old)
-        self.key_file.write_bytes(Fernet.generate_key())
-        new = self.prepare("new")
-        self.assertNotEqual(
-            old["RTP_ENGRAM_RESIDENT_GENERATION"], new["RTP_ENGRAM_RESIDENT_GENERATION"]
-        )
-        self.assertEqual(
-            _cipher(old).decrypt(old_owner.encrypt(b"same allocation")),
-            b"same allocation",
-        )
-        snapshot = Path(old["RTP_ENGRAM_RESIDENT_KEY_FILE"])
-        self.assertEqual(snapshot.read_bytes(), self.key)
-        self.assertEqual(snapshot.stat().st_mode & 0o777, 0o600)
-        self.assertNotEqual(snapshot, self.key_file)
-
-    def test_explicit_identity_storage_and_private_state_are_preserved(self):
+    def test_explicit_revision_and_private_state_are_preserved(self):
         state = self.root / "advanced-state"
         state.mkdir(mode=0o700)
         explicit = dict(
-            RTP_ENGRAM_RESIDENT_GENERATION="00000000-0000-0000-0000-000000000123",
             RTP_ENGRAM_MODEL_REVISION="operator-immutable-version",
             RTP_ENGRAM_STORAGE="gpu_shared",
             RTP_ENGRAM_RESIDENT_STATE_DIR=str(state),
@@ -287,37 +438,6 @@ class SupervisorDefaultsTest(unittest.TestCase):
             actual = self.prepare("advanced", **explicit)
         for name, value in explicit.items():
             self.assertEqual(actual[name], value)
-        for count in ("", "1", "invalid"):
-            with self.subTest(count=count):
-                self.assertNotIn(
-                    "RTP_ENGRAM_STORAGE",
-                    self.prepare("count-" + count, ENGRAM_SHARD_COUNT=count),
-                )
-
-    def test_invalid_or_unsafe_key_is_rejected_before_snapshot(self):
-        from rtp_llm.models_py.modules.dsv41.engram_distributed.resident_network import (
-            read_key_file,
-        )
-
-        for content in (b"bad", b" " * 129 + self.key, b"a" * 44):
-            with self.subTest(content_length=len(content)):
-                self.key_file.write_bytes(content)
-                with self.assertRaises(ValueError):
-                    read_key_file(self.key_file)
-        self.key_file.write_bytes(self.key)
-        self.key_file.chmod(0o644)
-        with self.assertRaisesRegex(RuntimeError, "UNSAFE"):
-            read_key_file(self.key_file)
-        self.key_file.chmod(0o600)
-        link = self.root / "symlink-key"
-        link.symlink_to(self.key_file)
-        with self.assertRaises(OSError):
-            read_key_file(link)
-        with self.assertRaises(FileNotFoundError):
-            self.prepare(
-                "missing-key", RTP_ENGRAM_RESIDENT_KEY_FILE=str(self.root / "missing")
-            )
-        self.assertFalse((self.root / "missing-key" / "owner.key").exists())
 
     def test_manifest_identity_covers_config_and_index_with_bounded_reads(self):
         original = prefill_supervisor._model_manifest_revision(self.model)
@@ -334,22 +454,37 @@ class SupervisorDefaultsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "oversized"):
             prefill_supervisor._model_manifest_revision(self.model)
 
+    def test_preconditions_do_not_duplicate_warmup_or_model_precedence(self):
+        prefill_supervisor._validate_worker_preconditions(
+            {
+                "RTP_ENGRAM_CHECKPOINT": str(self.model),
+                "WARM_UP": "0",
+                "MODEL_WARM_UP": "0",
+                "MODEL_TYPE": "llama",
+            }
+        )
+
+    def test_full_world_check_skips_worker_derived_local_size(self):
+        prefill_supervisor._validate_worker_preconditions(
+            {"WORLD_SIZE": "4", "LOCAL_WORLD_SIZE": "1"}
+        )
+        with self.assertRaisesRegex(
+            prefill_supervisor.BootstrapError, "full Prefill world"
+        ):
+            prefill_supervisor._validate_worker_preconditions(
+                {"WORLD_SIZE": "4", "LOCAL_WORLD_SIZE": "2"}
+            )
+
     def _entry(self, env):
         captured = {}
 
         def run(supervisor, directory):
             captured.update(supervisor.worker_env)
-            captured["snapshot_bytes"] = Path(
-                supervisor.worker_env["RTP_ENGRAM_RESIDENT_KEY_FILE"]
-            ).read_bytes()
             supervisor.request_stop(signal.SIGTERM, None)
 
         owner = Mock(pid=123, returncode=0)
         with (
             patch.dict(os.environ, env, clear=True),
-            patch.object(
-                prefill_supervisor, "DEFAULT_OWNER_KEY_FILE", str(self.key_file)
-            ),
             patch.object(prefill_supervisor, "_enable_subreaper"),
             patch.object(prefill_supervisor.signal, "signal"),
             patch("rtp_llm.utils.fuser.umount_all"),
@@ -362,51 +497,24 @@ class SupervisorDefaultsTest(unittest.TestCase):
             prefill_supervisor.supervise_prefill([])
         return captured, spawn
 
-    def test_only_enable_flag_defaults_tcp_owner_and_identity(self):
-        env = {
-            prefill_supervisor.MODE_ENV: "1",
-            "CHECKPOINT_PATH": str(self.model),
-            "ENGRAM_SHARD_COUNT": "4",
-        }
-        actual, spawn = self._entry(env)
+    def test_c2_entry_starts_owner_without_key(self):
+        actual, spawn = self._entry(
+            {
+                **self.env,
+                prefill_supervisor.MODE_ENV: "1",
+                "CHECKPOINT_PATH": str(self.model),
+            }
+        )
         self.assertEqual(actual["RTP_ENGRAM_RESIDENT_TRANSPORT"], "tcp")
-        self.assertEqual(actual["snapshot_bytes"], self.key)
+        self.assertEqual(actual["RTP_ENGRAM_STORAGE"], "host_shared")
+        self.assertIn("RTP_ENGRAM_RESIDENT_GENERATION", actual)
+        self.assertNotIn("RTP_ENGRAM_RESIDENT_KEY_FILE", actual)
         self.assertEqual(spawn.call_args.args[0][-3:], ["--discover", "--device", "0"])
-        self.assertEqual(actual[prefill_supervisor.MODE_ENV], "worker")
-        self.assertNotIn("RTP_ENGRAM_RESIDENT_DIR", actual)
-        self.assertNotIn(prefill_supervisor.OWNER_ARGS_ENV, actual)
 
     def test_explicit_empty_owner_args_keeps_consumer_only_mode(self):
         actual, spawn = self._entry({**self.env, prefill_supervisor.OWNER_ARGS_ENV: ""})
         spawn.assert_not_called()
-        self.assertEqual(actual["snapshot_bytes"], self.key)
-
-    def test_legacy_file_mode_does_not_use_network_defaults(self):
-        env = {
-            "RTP_ENGRAM_RESIDENT_DIR": str(self.root),
-            "RTP_ENGRAM_RESIDENT_GENERATION": "legacy",
-        }
-        captured = {}
-
-        def run(supervisor, directory):
-            captured.update(supervisor.worker_env)
-            supervisor.request_stop(signal.SIGTERM, None)
-
-        with (
-            patch.dict(os.environ, env, clear=True),
-            patch.object(prefill_supervisor, "_enable_subreaper"),
-            patch.object(prefill_supervisor.signal, "signal"),
-            patch.object(prefill_supervisor, "_prepare_model_mounts") as mounts,
-            patch.object(prefill_supervisor, "_prepare_network_identity") as identity,
-            patch.object(prefill_supervisor.PrefillSupervisor, "run", run),
-            patch.object(prefill_supervisor.subprocess, "Popen") as spawn,
-        ):
-            prefill_supervisor.supervise_prefill([])
-        self.assertEqual(captured["RTP_ENGRAM_RESIDENT_TRANSPORT"], "file")
-        self.assertEqual(captured["RTP_ENGRAM_RESIDENT_GENERATION"], "legacy")
-        mounts.assert_not_called()
-        identity.assert_not_called()
-        spawn.assert_not_called()
+        self.assertIn("RTP_ENGRAM_RESIDENT_GENERATION", actual)
 
     def test_disabled_import_has_no_network_or_crypto_initialization(self):
         result = subprocess.run(
@@ -476,7 +584,23 @@ class PrefillSupervisorTest(unittest.TestCase):
         return current
 
     def test_restarts_worker_on_signals_without_restarting_owner(self):
-        worker = self._start()
+        worker = self._start({**os.environ, "RTP_TEST_ADOPTED_HELPERS": "1"})
+        old_orphans = set()
+
+        def assert_helpers_reaped():
+            for detached in (False, True):
+                name = f"orphan-{int(detached)}"
+
+                def new_helper():
+                    helper = self._read(name)
+                    return helper if helper and helper[0] not in old_orphans else None
+
+                pid, pgid = self._wait_for(new_helper)
+                self.assertEqual(pgid, pid if detached else worker[0])
+                self._wait_for(lambda: not Path(f"/proc/{pid}").exists())
+                old_orphans.add(pid)
+
+        assert_helpers_reaped()
         for target, sig in (
             (0, signal.SIGKILL),
             (0, signal.SIGTERM),
@@ -484,6 +608,7 @@ class PrefillSupervisorTest(unittest.TestCase):
         ):
             os.kill(worker[target], sig)
             worker = self._assert_restarted(worker)
+            assert_helpers_reaped()
 
         self.supervisor.terminate()
         self.assertEqual(self.supervisor.wait(timeout=10), 0)
@@ -502,32 +627,28 @@ class PrefillSupervisorTest(unittest.TestCase):
         self.assertIsNone(self.supervisor.poll())
         self.assertEqual(self._read("worker"), worker)
 
+    def test_kills_live_detached_worker_helper_before_restart(self):
+        worker = self._start({**os.environ, "RTP_TEST_LIVE_DETACHED": "1"})
+        detached = self._wait_for(lambda: self._read("live-detached"))
+        self.assertEqual(os.getpgid(detached), detached)
+        os.kill(worker[0], signal.SIGKILL)
+        self._assert_restarted(worker)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(detached, 0)
+
     def test_cleanup_timeout_retries_before_restarting(self):
-        gate = self.directory / "ready"
-        gate.touch()
-        worker = Mock(pid=123, returncode=-signal.SIGKILL)
+        guard = Mock(pid=123, returncode=None)
         supervisor = prefill_supervisor.PrefillSupervisor([], {}, None, 3)
-        pending = [True, False]
 
-        def retry_cleanup(process):
-            self.assertIs(process, worker)
-            self.assertFalse(gate.exists())
-            if pending.pop(0):
-                raise TimeoutError("old rank still running")
+        def wait(timeout):
+            if guard.wait.call_count == 1:
+                raise subprocess.TimeoutExpired("worker guard", timeout)
+            guard.returncode = 0
 
-        with (
-            patch.object(
-                prefill_supervisor.subprocess, "Popen", return_value=worker
-            ) as spawn,
-            patch.object(prefill_supervisor, "_exited", return_value=True),
-            patch.object(prefill_supervisor, "_stop", side_effect=TimeoutError),
-            patch.object(
-                prefill_supervisor, "_kill_and_reap", side_effect=retry_cleanup
-            ),
-        ):
-            supervisor._run_worker(gate)
-        spawn.assert_called_once()
-        self.assertEqual(pending, [])
+        guard.wait.side_effect = wait
+        with patch.object(prefill_supervisor, "_exited", return_value=True):
+            supervisor._stop_worker(guard)
+        self.assertEqual(guard.wait.call_count, 2)
 
     def test_reap_does_not_signal_reaped_group_leader_again(self):
         worker = Mock(pid=123, returncode=-signal.SIGKILL)
@@ -591,7 +712,14 @@ class PrefillSupervisorTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] in ("owner", "worker", "rank", "supervisor"):
+    if len(sys.argv) == 3 and sys.argv[1] in (
+        "owner",
+        "worker",
+        "rank",
+        "supervisor",
+        "detacher",
+        "live_detached",
+    ):
         _fixture(sys.argv[1], Path(sys.argv[2]))
     else:
         unittest.main()

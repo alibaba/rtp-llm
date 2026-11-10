@@ -41,7 +41,6 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_VALUE,
     ProcessManager,
-    RuntimeWatchdog,
 )
 from rtp_llm.utils.warmup import configure_warmup
 
@@ -488,6 +487,7 @@ def start_frontend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager=None,
+    frontend_ready_flags=None,
 ):
     from rtp_llm.start_frontend_server import start_frontend_server
 
@@ -519,6 +519,11 @@ def start_frontend_server_impl(
                 logging.info(
                     f"[PROCESS_SPAWN]Start frontend server process rank_{rank}_server_{i} outer"
                 )
+                ready_flag = None
+                if frontend_ready_flags is not None:
+                    # A shared-port health check can only see one frontend.
+                    ready_flag = multiprocessing.Value("b", False, lock=False)
+                    frontend_ready_flags.append(ready_flag)
                 process = multiprocessing.Process(
                     target=start_frontend_server,
                     args=(
@@ -526,6 +531,7 @@ def start_frontend_server_impl(
                         i,
                         global_controller,
                         py_env_configs,
+                        ready_flag,
                     ),
                     name=f"frontend_server_{i}",
                 )
@@ -538,7 +544,12 @@ def start_frontend_server_impl(
 
         def check_frontend_ready():
             return check_server_health(
-                py_env_configs.server_config.start_port, path="/frontend_health"
+                py_env_configs.server_config.start_port,
+                path=(
+                    "/liveness"
+                    if frontend_ready_flags is not None
+                    else "/frontend_health"
+                ),
             )
 
         process_manager.register_health_check(
@@ -646,60 +657,12 @@ def _mark_startup_warmup_health_gate_ready(gate_file):
         raise
 
 
-def _prefill_runtime_probe(server_port, timeout):
-    import grpc
-
-    from rtp_llm.cpp.model_rpc.model_rpc_client import (
-        _is_finished_response,
-        trans_input,
-    )
-    from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
-
-    request = _new_startup_real_warmup_input(
-        _new_startup_real_warmup_request_id(0),
-        STARTUP_REAL_WARMUP_MIN_TOKEN_LEN,
-        max(1, int(timeout * 1000)),
-        max_new_tokens=0,
-    )
-    request_pb = trans_input(request)
-    try:
-        with grpc.insecure_channel(
-            f"127.0.0.1:{server_port}", options=[("grpc.enable_http_proxy", 0)]
-        ) as channel:
-            responses = RpcServiceStub(channel).GenerateStreamCall(
-                request_pb, timeout=timeout
-            )
-            finished = False
-            for response in responses:
-                if (
-                    response.request_id != request_pb.request_id
-                    or response.error_info.error_code
-                ):
-                    return False
-                finished = _is_finished_response(response)
-            return finished
-    except grpc.RpcError as error:
-        if error.code() == grpc.StatusCode.RESOURCE_EXHAUSTED:
-            return None
-        logging.warning("prefill watchdog local RPC failed code=%s", error.code())
-    return False
-
-
-def _create_prefill_watchdog(py_env_configs):
-    if not _role_is_prefill(py_env_configs) or not str_to_bool(
-        os.environ.get("RTP_LLM_PREFILL_WATCHDOG", "0")
-    ):
-        return None
-    pc = py_env_configs.parallelism_config
-    if int(os.environ.get("LOCAL_WORLD_SIZE", pc.world_size)) != pc.world_size:
-        raise ValueError("Prefill watchdog requires the compute world in one instance")
-    port = py_env_configs.server_config.rpc_server_port
-    return RuntimeWatchdog(
-        lambda timeout: _prefill_runtime_probe(port, timeout),
-        interval=float(os.environ.get("RTP_LLM_PREFILL_WATCHDOG_INTERVAL_S", "15")),
-        timeout=float(os.environ.get("RTP_LLM_PREFILL_WATCHDOG_TIMEOUT_S", "5")),
-        failure_threshold=int(os.environ.get("RTP_LLM_PREFILL_WATCHDOG_FAILURES", "3")),
-    )
+def _wait_for_prefill_frontends(process_manager, ready_flags):
+    while process_manager.is_available():
+        if all(flag.value for flag in ready_flags):
+            return
+        time.sleep(1)
+    raise RuntimeError("Prefill exited before all frontends were ready")
 
 
 def _withdraw_readiness(gate_file):
@@ -786,9 +749,13 @@ def start_server(py_env_configs: PyEnvConfigs):
 
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
-    watchdog = _create_prefill_watchdog(py_env_configs)
+    frontend_ready_flags = []
+    supervise_readiness = (
+        _role_is_prefill(py_env_configs)
+        and os.environ.get(PREFILL_SUPERVISOR_MODE_ENV) == "worker"
+    )
     startup_warmup_gate_file = _setup_startup_warmup_health_gate(
-        py_env_configs, required=watchdog is not None
+        py_env_configs, required=supervise_readiness
     )
 
     try:
@@ -812,7 +779,12 @@ def start_server(py_env_configs: PyEnvConfigs):
             # vit has its own frontend server
             logging.info("start frontend server")
             frontend_process = start_frontend_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller,
+                py_env_configs,
+                process_manager,
+                frontend_ready_flags=(
+                    frontend_ready_flags if supervise_readiness else None
+                ),
             )
             process_manager.add_processes(frontend_process, shutdown_group="frontend")
 
@@ -834,11 +806,12 @@ def start_server(py_env_configs: PyEnvConfigs):
         # completed initialization. Keep the frontend readiness gate closed
         # through the subsequent real requests, including cached-prefix probes.
         _maybe_run_startup_real_warmup(py_env_configs)
-        _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
-        if watchdog is not None:
-            process_manager.set_runtime_watchdog(
-                watchdog, lambda: _withdraw_readiness(startup_warmup_gate_file)
+        if supervise_readiness:
+            _wait_for_prefill_frontends(process_manager, frontend_ready_flags)
+            process_manager.set_withdraw_readiness(
+                lambda: _withdraw_readiness(startup_warmup_gate_file)
             )
+        _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
 
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
@@ -1072,7 +1045,6 @@ def _new_startup_real_warmup_input(
     timeout_ms,
     token_id=STARTUP_REAL_WARMUP_TOKEN_ID,
     reuse=False,
-    max_new_tokens=None,
 ):
     from rtp_llm.config.generate_config import GenerateConfig
     from rtp_llm.utils.base_model_datatypes import GenerateInput
@@ -1082,11 +1054,7 @@ def _new_startup_real_warmup_input(
         token_ids=torch.full((token_len,), token_id, dtype=torch.int32),
         mm_inputs=[],
         generate_config=GenerateConfig(
-            max_new_tokens=(
-                _get_startup_real_warmup_max_new_tokens()
-                if max_new_tokens is None
-                else max_new_tokens
-            ),
+            max_new_tokens=_get_startup_real_warmup_max_new_tokens(),
             top_k=1,
             top_p=1.0,
             temperature=0.0,
