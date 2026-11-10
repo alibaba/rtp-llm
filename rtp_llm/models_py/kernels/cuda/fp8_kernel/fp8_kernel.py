@@ -212,26 +212,19 @@ def sgl_per_token_group_quant_fp8(
     return x_q, x_s
 
 
-# Per-device accumulators for the dynamic per-tensor path. The quant kernel
-# reduces with atomicMax, which needs a zero initial value, so the buffer is
-# reset with zero_() instead of allocating a fresh zeros(1) per call —
-# serving profiles count one such allocation per fp8 GEMM input (hundreds of
-# 0-dim aten::zeros per step). Buffer identity is per process per device;
-# the forward pass is single-threaded per rank, and the reset + two kernel
-# launches stay stream-ordered.
-# Constraint: the accumulator is shared per device, so dynamic per-tensor
-# quantization must stay on the rank's main stream. The side-stream surfaces
-# that run fp8 linears (moe shared_overlap / ep_tbo) are gated to DECODE
-# nvfp4/DeepEP layouts that do not take this path today; enabling them
-# requires keying this pool by stream.
+# Keep one accumulator per device and stream. Reset before each dynamic quant
+# because the absmax kernel reduces with atomicMax. Consumers must use the
+# returned scale on that stream before the next dynamic quant there. MoE
+# shared-expert overlap and prefill graph capture use distinct streams.
 _dynamic_scale_accumulators: "dict" = {}
 
 
 def _dynamic_scale_accumulator(device: torch.device) -> torch.Tensor:
-    buf = _dynamic_scale_accumulators.get(device)
+    key = (device, torch.cuda.current_stream(device).cuda_stream)
+    buf = _dynamic_scale_accumulators.get(key)
     if buf is None:
         buf = torch.zeros(1, device=device, dtype=torch.float32)
-        _dynamic_scale_accumulators[device] = buf
+        _dynamic_scale_accumulators[key] = buf
     else:
         buf.zero_()
     return buf
