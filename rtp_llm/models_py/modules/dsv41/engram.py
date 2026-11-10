@@ -2223,7 +2223,9 @@ class Engram(nn.Module):
             # All Engram checkpoint tensors stay in host RAM.  The projection
             # decodes its original FP8 blocks per forward and the gate weights
             # are staged as tiny bounded copies when the gate runs.
-            projection = HostResidentWKV(load("wkv.weight"), load("wkv.scale"))
+            projection = HostResidentWKV(
+                load("wkv.weight"), load("wkv.scale"), device=target
+            )
             return cls(
                 layout,
                 layer_hash_index,
@@ -2422,13 +2424,23 @@ class HostResidentWKV(nn.Module):
     Prefill uses a bounded transient device staging copy and releases it.
     """
 
-    def __init__(self, weight: torch.Tensor, scales: torch.Tensor):
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        scales: torch.Tensor,
+        *,
+        device: torch.device | str | None = None,
+    ):
         super().__init__()
         # Plain attributes, not buffers: model .to() must never migrate these.
         self.weight = weight.detach().cpu()
         self.scales = scales.detach().cpu()
         self._host_bf16 = None
         self._host_uva = None
+        if device is not None and torch.device(device).type == "cuda":
+            # Build the CUDA-mapped BF16 host view before CUDA graph capture.
+            # Dequantizing or cudaHostRegister-ing inside capture is illegal.
+            self._ensure_host(device)
 
     def _ensure_host(self, device) -> torch.Tensor:
         if self._host_bf16 is None:
