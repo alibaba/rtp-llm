@@ -124,7 +124,9 @@ def _fp4_unpack_into(
     torch.bitwise_right_shift(w_uint, 4, out=ws["high"])
     ws["indices"][:, 0::2].copy_(ws["low"])
     ws["indices"][:, 1::2].copy_(ws["high"])
-    torch.index_select(lut, 0, ws["indices"], out=ws["w_f"])
+    torch.index_select(
+        lut, 0, ws["indices"].view(-1), out=ws["w_f"].view(-1)
+    )
     ws["scale_rows"].copy_(scale_ue8m0)
     ws["scale_f"].view(out_dim, in_dim // FP4_BLOCK, FP4_BLOCK).copy_(
         ws["scale_rows"].unsqueeze(-1)
