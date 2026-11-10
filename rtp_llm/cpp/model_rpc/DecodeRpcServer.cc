@@ -739,10 +739,11 @@ grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          r
         return serializeErrorMsg(std::to_string(request.request_id()), status);
     prefill_request.CopyFrom(request);
     prefill_request.mutable_generate_config()->set_timeout_ms(input->generate_config->timeout_ms);
+    // Interleaved layouts carry ViT-generated text between feature spans.
+    // Keep the original tokens so Prefill can expand them from its ViT result.
     if (!request.enqueued_by_master() && !request.has_multimodal_token_layout() && !request.has_v41_inputs()
-        && input->multimodal_features && input->mm_locs) {
-        // Local ViT has already expanded the tokens used to register Decode's KV.
-        // Prefill validates the same spans against its fetched embeddings.
+        && input->multimodal_features && input->mm_locs && input->interleaved_multimodal_lengths.empty()) {
+        // Prefill validates the expanded spans against its fetched embeddings.
         const auto* token_ids = input->input_ids.data_ptr<int32_t>();
         auto* wire_tokens = prefill_request.mutable_token_ids();
         wire_tokens->Clear();

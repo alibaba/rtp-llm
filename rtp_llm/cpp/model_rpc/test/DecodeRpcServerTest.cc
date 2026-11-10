@@ -7,6 +7,7 @@
 #include <thread>
 #include <set>
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
+#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/PipelineLayoutCodec.h"
 #include "rtp_llm/cpp/model_rpc/BatchStreamOutputCollector.h"
@@ -561,6 +562,25 @@ public:
     std::promise<std::vector<GenerateStreamPtr>> batch_enqueued;
 };
 
+class InterleavedVideoProcessor: public MultimodalProcessor {
+public:
+    InterleavedVideoProcessor(): MultimodalProcessor(py::object{}, MMModelConfig{true, {{1}}, false}, 32) {}
+
+private:
+    ErrorResult<MultimodalOutput>
+    MultimodalEmbedding(const std::vector<MultimodalInput>, std::string, int64_t, grpc::ServerContext*) override {
+        MultimodalOutput result;
+        result.mm_features    = {torch::ones({2, 4}), torch::zeros({1, 4})};
+        result.mm_extra_input = std::vector<torch::Tensor>{
+            torch::tensor({-53530053, 1, 1, 0, 30}, torch::kInt32),
+            torch::tensor({-53530053, 0, 1, 0, 31}, torch::kInt32),
+        };
+        result.mm_feature_hashes =
+            std::vector<torch::Tensor>{torch::tensor({101, 102}, torch::kInt32), torch::tensor({103}, torch::kInt32)};
+        return result;
+    }
+};
+
 class LocalPrefillCancelService: public RpcService::Service {
 public:
     std::atomic<int>      calls{0};
@@ -601,6 +621,37 @@ bool waitForCancel(Predicate predicate) {
     return predicate();
 }
 }  // namespace
+
+TEST(DecodeRpcServerTest, InterleavedVideoUsesTheOriginalPrefillHandoffTokens) {
+    DecodeRpcServer server;
+    server.engine_       = std::make_shared<FallbackPrefillEngine>();
+    server.mm_processor_ = std::make_shared<InterleavedVideoProcessor>();
+    GenerateInputPB request;
+    request.add_token_ids(10);
+    request.add_token_ids(1);
+    request.add_token_ids(20);
+    auto* media = request.add_multimodal_inputs();
+    media->set_multimodal_url("video");
+    media->set_multimodal_type(2);
+    auto* config = request.mutable_generate_config();
+    config->set_max_new_tokens(8);
+    config->set_can_use_pd_separation(true);
+    config->set_timeout_ms(10000);
+
+    std::shared_ptr<GenerateInput> decode;
+    GenerateInputPB                handoff;
+    std::optional<PrefillPeerInfo> peer_info(std::in_place);
+    ASSERT_TRUE(server.preparePDRequest(request, currentTimeMs() + 10000, decode, handoff, peer_info, nullptr).ok());
+    EXPECT_FALSE(handoff.has_multimodal_token_layout());
+    EXPECT_EQ(handoff.SerializeAsString(), request.SerializeAsString());
+
+    auto                      prefill = QueryConverter::transQuery(&handoff);
+    InterleavedVideoProcessor prefill_processor;
+    ASSERT_TRUE(preprocessForPD(prefill, &prefill_processor, false, RoleType::PREFILL, nullptr, {}).ok());
+    EXPECT_TRUE(torch::equal(decode->input_ids, torch::tensor({10, 30, 101, 102, 31, 103, 20}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(decode->input_ids, prefill->input_ids));
+    EXPECT_EQ(prefill->multimodalLengths(), (std::map<int, int>{{2, 3}}));
+}
 
 TEST(DecodeRpcServerTest, IndependentCancelStopsForwardedFallbackStream) {
     auto prefill                                       = std::make_shared<PrefillRpcServer>();

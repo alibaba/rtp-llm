@@ -113,9 +113,13 @@ private:
         cfg.enable_hybrid_attention = enable_hybrid_attention;
         // Sparse GQA still owns ordinary MHA K/V and FP32 per-token/head scales.
         // Byte-packed scales belong to MLA/indexer regions, not the model-wide sparse flag.
-        cfg.is_mla = spec->type != KVCacheSpecType::MultiHeadAttention
-                     && (cache_config.use_mla || cache_config.is_sparse);
-        cfg.use_mla                    = cache_config.use_mla;
+        cfg.is_mla =
+            spec->type != KVCacheSpecType::MultiHeadAttention && (cache_config.use_mla || cache_config.is_sparse);
+        // Attention groups retain MLA's replicated transfer contract. Opaque
+        // indexer and recurrent state keep their physical block layout.
+        cfg.use_mla = cache_config.use_mla
+                      && (spec->type == KVCacheSpecType::MultiHeadLatentAttention
+                          || spec->type == KVCacheSpecType::MultiHeadAttention);
         cfg.seq_size_per_block         = seq_size_per_block;
         cfg.kernel_blocks_per_kv_block = kernel_blocks_per_kv_block;
 
