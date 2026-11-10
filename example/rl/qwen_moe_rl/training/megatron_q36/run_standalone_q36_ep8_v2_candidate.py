@@ -94,9 +94,10 @@ def main(config: DictConfig):
     run_name = Path(os.environ['Q36_RUN_ROOT']).name
     print(OmegaConf.to_yaml(config), flush=True)
     try:
-        address_info = ray.init(address=os.environ['Q36_RAY_ADDRESS'], runtime_env=runtime,
+        ray.init(address=os.environ['Q36_RAY_ADDRESS'], runtime_env=runtime,
                                 namespace='q36-' + run_name)
-        validate_cluster(ray, allowed, os.environ['Q36_RAY_SESSION_NAME'], address_info.get('session_name'))
+        validate_cluster(ray, allowed, os.environ['Q36_RAY_SESSION_NAME'],
+                         ray.get_runtime_context().get_session_name())
         trainer = AgentTrainer(config=config, backend='verl', agent_flow=python_math_agent,
                                evaluator=python_math_evaluator, train_dataset=dataset, val_dataset=None)
         trainer.train()
