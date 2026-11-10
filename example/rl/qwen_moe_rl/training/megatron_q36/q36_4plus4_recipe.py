@@ -1,0 +1,42 @@
+"""Frozen CPU-composed TP4/EP1 4+4 on-policy recipe."""
+import os
+
+def overrides():
+    args=[
+    'rllm/backend=verl','model_engine=megatron','rllm.algorithm.adv_estimator=grpo',
+    'rllm.data.train_batch_size=2','rllm.data.max_response_length=1024','rllm.disable_thinking=true',
+    'rllm.workflow.n_parallel_tasks=4','rllm.workflow.retry_limit=1','rllm.rollout.n=4',
+    'rllm.trainer.total_batches=2','rllm.trainer.total_epochs=2','rllm.trainer.save_freq=-1',
+    'actor_rollout_ref.model.path='+os.environ['Q36_MODEL_PATH'],'actor_rollout_ref.model.lora_rank=0',
+    'actor_rollout_ref.model.mtp.enable=false','actor_rollout_ref.model.mtp.enable_train=false',
+    'actor_rollout_ref.model.mtp.enable_rollout=false',
+    'actor_rollout_ref.actor.megatron.tensor_model_parallel_size=4',
+    'actor_rollout_ref.actor.megatron.expert_model_parallel_size=1',
+    'actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=4',
+    'actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=1',
+    'actor_rollout_ref.actor.megatron.context_parallel_size=1',
+    'actor_rollout_ref.actor.megatron.use_megatron_fsdp=false',
+    'actor_rollout_ref.actor.megatron.param_offload=false','actor_rollout_ref.actor.megatron.optimizer_offload=false',
+    'actor_rollout_ref.actor.megatron.use_distributed_optimizer=false',
+    '+actor_rollout_ref.actor.megatron.override_ddp_config.grad_reduce_in_fp32=false',
+    '+actor_rollout_ref.actor.megatron.override_ddp_config.overlap_grad_reduce=false',
+    '+actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=false',
+    'actor_rollout_ref.actor.megatron.override_transformer_config.attention_backend=fused',
+    '+actor_rollout_ref.actor.megatron.override_transformer_config.mtp_num_layers=0',
+    'actor_rollout_ref.actor.megatron.dtype=bfloat16','actor_rollout_ref.actor.optim.optimizer=adam',
+    'actor_rollout_ref.actor.optim.use_precision_aware_optimizer=false',
+    '+actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=true',
+    '+actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=1.0',
+    '+actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=false',
+    'actor_rollout_ref.actor.ppo_mini_batch_size=2','actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1',
+    'actor_rollout_ref.rollout.name=rtp','actor_rollout_ref.rollout.mode=async',
+    'actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1',
+    'actor_rollout_ref.rollout.tensor_model_parallel_size=4','actor_rollout_ref.rollout.data_parallel_size=1',
+    'actor_rollout_ref.rollout.pipeline_model_parallel_size=1','actor_rollout_ref.rollout.nnodes=1',
+    'actor_rollout_ref.rollout.n_gpus_per_node=4','rollout.nnodes=1','rollout.n_gpus_per_node=4',
+    'actor_rollout_ref.rollout.checkpoint_engine.backend=rtp_nixl_guarded',
+    'actor_rollout_ref.rollout.checkpoint_engine.custom_backend_module=verl_nixl_guarded',
+    'actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=16',
+    '+actor_rollout_ref.rollout.checkpoint_engine.engine_kwargs.rtp_nixl_guarded.max_tensor_bytes=17179869184',
+    'rllm.async_training.enable=false','trainer.nnodes=1','trainer.n_gpus_per_node=4']
+    return args
