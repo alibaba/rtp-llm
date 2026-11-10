@@ -347,8 +347,80 @@ TPS 以当前分支 Real 的 `RtpLLMMetrics.h/.cc` 和 `MtpExecutor.cc` 为合�
 
 本地原生 TPS 面板先合并同实例 priority；generate/total 的标题明确标为报告窗口 token 数。一分钟墙钟 TPS 使用累计 token Counter，不复用这些窗口计数。ViT 新增源面板 10691 对应的 embedding TPS（本地 310691）。
 
+## 指标口径
 
-ViT 的“已上报”表示按 [ViT 指标口径](../docs/component-reference.md#vit-指标口径) 上报：工作 QPS 带 `source=mm_embedding`，请求耗时带 `source=get_embedding_result,status=success/error`；二者不共用计数单位。缓存量是形状计费的逻辑驻留量。预处理只测量 Mock 实际执行的下载、读尺寸和规划，不代表真实像素处理成本；CUDA Graph、GreenNet 和进程 IPC 未模拟，保留无数据。
+事件均值用区间内 `_sum` 和 `_count` 的增量相除。跨实例先分别求和，再相除。事件速率从 `_total` Counter 求 `rate`，比率用分子和分母分别求增量后相除。KMonitor 使用原始事件样本及增量。Case 查询参数和返回类型见 [已注册的 Step](../python/mock_framework/execution/step/__init__.py)。
 
+### RTP 与 Client
 
-`rtp_llm_rpc_onflight_request` 已接入 P/D：在生成请求终态采样，包含当前请求，状态 RPC 不计。Prometheus 保留原始 sum/count，View 按事件权重求均值；未产生终态事件时无数据，不补零。
+| 指标 | 类型 | 含义 |
+| --- | --- | --- |
+| rtp_llm_requests_started_total | Counter | 校验并接纳后加一，入口拒绝不计。 |
+| rtp_llm_framework_requests_total | Counter，outcome=success/cancelled/timeout/error | 每个已接纳请求唯一终态，节点关闭计 error，不代替 Client 成功率。 |
+| rtp_llm_cache_lookup_tokens_total / rtp_llm_cache_hit_tokens_total | Counter | 分配时实际输入/历史命中 token，取消不撤销已发生查找。 |
+| rtp_llm_forward_tokens_total | Counter，kind=input/compute/output | 完成 Forward 的 token；input/compute 汇总本批全部执行成员，output 只计有效提交。计算完成但成员已取消时仍计 input/compute，output 为零；计算中止不补完成样本。 |
+| rtp_llm_model_forward_us | 事件：Prometheus Summary / KMonitor Gauge | Prefill 每次完成 Forward 的原始耗时样本，微秒。当前生产 MTP 兼容口径下 Decode 缺席。 |
+| rtp_llm_step_latency_us | 事件：Prometheus Summary / KMonitor Gauge | P/D 完成的非空执行步耗时，微秒，从调度返回到处理完本轮输出。 |
+| rtp_llm_context_tps / rtp_llm_context_tps_with_cache | Gauge，priority | 未命中计算量 / 对应有效执行秒数；with_cache 使用全部输入量。各 priority 共用整批执行时间。 |
+| rtp_llm_generate_tps / rtp_llm_total_tps | Gauge，priority | Real 原生合同是报告窗口内的 token 数，不是 token/s。D 使用停止截断和取消过滤前的验收量；P total 使用计算量。 |
+| rtp_llm_context_tokens / rtp_llm_context_tokens_with_cache | Gauge，priority | 与 context TPS 配对的报告窗口 token 数。 |
+| rtp_llm_context_wall_tps / rtp_llm_context_wall_tps_with_cache | Gauge，priority | 对应 context token 数 / 实际报告窗口秒数。 |
+| rtp_llm_wall_tps_report_interval_us | Gauge | P/D 实际 TPS 报告窗口，微秒；不按 priority 重复计数。 |
+| rtp_llm_context_forward_seconds_total / rtp_llm_context_forward_with_cache_seconds_total | Counter | 与 context TPS 同一执行边界的累计秒数；不是仅模型 Forward 时间。 |
+| rtp_llm_sp_estimate_tpot_us | 事件：Prometheus Summary / KMonitor Gauge | Decode 本轮执行耗时 ÷（模拟验收 token 总数 / 本轮参与 stream 数），微秒；不使用停止截断后的交付量。 |
+| rtp_llm_gather_model_input_us | 事件：Prometheus Summary / KMonitor Gauge | P/D 构造批输入的耗时，微秒；不含选批、KV 准备和模拟 Forward。 |
+| mock_client_tpot_seconds | Histogram | 成功请求收到首尾 token 的时间差，除以首 token 后的 token 数。单 token 请求不采样。 |
+| mock_model_forward_actual_us | Gauge | P/D 最近一次完成 Forward 的模拟实际耗时，微秒，用于与计划值对照。 |
+| mock_model_forward_planned_us | Gauge | 同一个完成 Forward 的计划耗时，微秒，包含公式和可选噪声。 |
+| rtp_llm_model_forward_seconds | Histogram | 完成 Forward 实际耗时秒，含 bucket/sum/count，排除排队，不是 TTFT。 |
+| rtp_llm_scheduler_requests | Gauge，state=waiting/running/loading/ready | 调度器报告的四类互斥请求数。 |
+| rtp_llm_kv_tokens | Gauge，state=total/available/free/held | token 容量，available 是可供活动请求使用的 device 额度，free 是瞬时容量模型中的空闲量。 |
+
+Decode 的估计 TPOT 包含构造批输入和模拟计算，计到完成回调进入输出处理前。分母用截断前的验收量。已完成计算的取消成员仍贡献验收量，其 token 不计入已提交输出。Client TPOT 按实际收包计时，交付帧可能合并多轮进度。
+
+Prefill 的有效执行时间从本批调度开始到处理完输出。各 priority 共享整批分母。Forward 在途且本期没有完成结果时保留原 TPS 窗口。请求终态计数区分成功、失败和取消，timeout 计入失败。
+
+`rtp_llm_wait_stream_size` 和 `rtp_llm_running_stream_size` 在选批完成后采样。实时 `rtp_llm_scheduler_requests` 的 loading 可包含 D 的协议等待。KV 容量按 device 报告，`rtp_llm_kv_cache_item_num` 统计统一索引中的块。
+
+`rtp_llm_wait_latency_us` 记录调度等待，`rtp_llm_stream_enqueue_to_canrun_us` 记录首次准入前的等待，`rtp_llm_stream_canrun_to_running_us` 记录缓存准备到首次运行。单位均为微秒。
+
+### 本地缓存准备指标
+
+| 名称 | 单位和触发点 |
+| --- | --- |
+| rtp_llm_device_input_length | tokens，完整输入块覆盖的 token 数。 |
+| rtp_llm_stream_cache_device_reuse_length | tokens，本地 KV 准入时复用的 token 数。 |
+| rtp_llm_kv_cache_match_to_ready_latency_us | 微秒，从准备到 KV 就绪，load_attempted=false。 |
+
+### ViT 指标口径
+
+多图 RPC、单媒体工作和 Forward batch 分别计数。以下口径对照 real 的 `mm_process_engine.py`、`mm_scheduler.py`、`mm_preprocess.py` 和 `mm_embedding_cache.py`。
+
+| 指标 | 样本与边界 |
+| --- | --- |
+| `py_rtp_vit_qps` | `source=mm_embedding`；唯一未命中工作真正开始执行时加一。多图可产生多个工作；缓存命中和 in-flight 消费者不加，异步提交启动的工作也计入；排队期间过期不补 QPS。 |
+| `py_rtp_vit_success_qps` | 唯一工作成功发布一次；无 source 标签。缓存重复消费不加。 |
+| `py_rtp_vit_error_qps` | 首次观察到失败时计一次；entry 标志防止共享结果的不同异常重复计数，异常标志防止工作与 RPC 层重复计数。入口校验和超时也可能计入错误，因此不以 success/QPS 代替客户端成功率。 |
+| `py_rtp_vit_request_rt` | ms，`source=get_embedding_result`、`status=success/error`；阻塞调用入口到返回或失败，包含下载、共享等待，不包含异步 ACK、RPC 传输、输出编码。纯 hash 命中不调用该路径；hash 缺失只处理缺失媒体。 |
+| `py_rtp_vit_image_count` / `py_rtp_vit_embedding_length` | 每个阻塞调用的图片数 / 成功返回的 embedding 行数。缓存返回仍记录；异步提交 ACK 不记录。 |
+| `py_rtp_vit_embedding_tps` | 成功实际计算的 embedding 行数，SDK 原生累计后折算速率；Prometheus 导出 `py_rtp_vit_embedding_tps_total`，查询 `rate(...[1m])` 得到墙钟每秒速率。失败、缓存和共享消费者不重复计入。 |
+| `py_rtp_vit_embedding_batch_size` / `forward_rt` | 每次 Forward 的工作 chunk 数 / 实际模拟执行毫秒。不是 RPC 数，也不是 embedding 行数。 |
+| `py_rtp_vit_embedding_queue_size` / `queue_wait_rt` / `embedding_rt` | 等待 Forward 的队列项数 / 首次入批前等待毫秒 / 成功工作提交 GPU 队列到 Forward 完成毫秒。最后一个不含下载和调用者晚取结果的时间。 |
+| `py_rtp_vit_embedding_overload_qps` | GPU scheduler 拒绝提交次数；CPU admission 拒绝走错误指标，不混为 GPU 队列溢出。 |
+| `py_rtp_vit_preprocess_queue_size` | 提交准备与离开准备时采样，包含排队和执行中的媒体。 |
+| `py_rtp_vit_preprocess_rt` / `download_rt` / `preprocess_other_rt` | 成功准备的总毫秒 / 下载毫秒 / 两者之差；跳过下载不制造样本。Mock 非下载部分只有读取尺寸、摘要及几何规划，没有真实像素处理。 |
+| `rtp_llm_vit_image_fetch_rt_us` | 成功下载微秒；当前 DeepSeek V4.1 图片规划使用 `model=deepseek_v41,mm_type=image`。 |
+| `py_rtp_vit_embedding_cache_{hit,miss,inflight,eviction}_qps` | 每 key 获取时区分驻留命中、新工作、共享等待；eviction 只计逻辑结果被容量淘汰，GPU→CPU 保留不计。GPU 淘汰且 CPU 放不下也必须计。 |
+| `py_rtp_vit_embedding_cache_tokens` / `bytes` | GPU+CPU 逻辑 embedding 驻留量。Mock 用形状计费，不代表真实 Tensor、GPU 内存或 JVM 物理内存。 |
+
+本地 View 按 `source` 筛选，合并请求成功与失败的原始 sum/count 后求均值。未模拟的 CUDA Graph、GreenNet、预处理进程和真实 Tensor 数据面保留无样本。WorkerStatus 的 `mm_inflight_inputs` 计去重后的在途媒体，覆盖排队、执行和结果发布。
+
+### 状态 RPC 的 RT 与 QPS
+
+`rtp_llm_rpc_cache_status_total_rt_us` 从进入查询计到缓存快照返回，包含缓存锁等待、版本检查和必要的 key 复制；不包含 protobuf 构建、响应提交、网络传输或指标上报。边界对照 real `LocalRpcServer::getCacheStatusInfo`。
+
+`rtp_llm_rpc_worker_status_total_rt_us` 计到缓存容量和任务状态采集完成；同样排除后续 protobuf 构建和响应提交，对照 real `GetWorkerStatus` 的 `request_after_ws_time_us`。这两个指标均不是客户端观察的完整 RPC 延迟；计时边界修正不代表消息构建、序列化的实际成本消失。
+
+对应 QPS 保持每次状态查询计一次。对比部署时先区分每实例和集群总量，再核对 Master 数量、轮询周期及重试机制，不通过调整 QPS 补偿不同轮询负载。
+
+`rtp_llm_rpc_onflight_request` 在生成 RPC 生命周期结束时采样当前实例的在途请求数，包含本次请求。P 批量 Enqueue 按子请求计数，Fetch 不重复计入。D 从 RemoteGenerate 开始计数，断开时释放。健康、WorkerStatus 和 CacheStatus 查询不计入。Prometheus 保留 sum/count，View 按事件权重计算均值。没有终态样本时曲线保持无数据。

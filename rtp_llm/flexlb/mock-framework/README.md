@@ -114,7 +114,7 @@ PROMETHEUS_BIN="$PROMETHEUS_BIN" ./scripts/test-framework.sh
 
 - [Case 指南](docs/case-guide.md)涵盖目录约定、YAML 字段、门禁和接口扩展。
 - [在 AoneCI 运行 Case](docs/ci-case.md)：构建环境镜像、指定源码和 Case、查看结果。
-- [组件配置与指标参考](docs/component-reference.md)：Master、RTP、ViT、KV、Compute/EOS、Client 协议及指标口径。
+- Master、RTP、ViT、KV、Compute 和 KVCM 参数见 [组件配置参考](docs/component-reference.md)。
 - [架构与设计边界](docs/architecture.md)：组件职责、Scheduler/EngineLoop、协议和资源生命周期、接口扩展。
 - [View 指南](docs/view-guide.md)：报告内容、事件标注、异常展示与服务生命周期。
 - [大盘说明](views/README.md)与[指标覆盖](views/coverage.md)：查询分区、标签与缺口。

@@ -113,9 +113,9 @@ flowchart LR
 
 每个实例同时至多执行一个 Forward。调度在短锁内提交状态，计算等待和网络发送在锁外。D 请求可连续参加多轮，输出发送进度不参与选批。批内取消只丢弃该成员的后续结果，Forward 仍持有正在使用的资源引用。整批成员都结束或实例关闭时才取消整轮计算。迟到回调按执行对象和请求句柄核验。
 
-RTP P 默认使用 `RtpFifoScheduler`，由 Scheduler 从单请求自主合批。显式 `group` 模式使用 `RtpPrefillGroupScheduler`，一次提交完整组，保留成员级结果、超时和取消。组在当前轮放不下的成员留待后续调度，D 始终按单请求准入。内部按请求统计 waiting、loading、running、ready。原生状态把 waiting、loading、ready 合并为 waiting，running 包含两轮计算之间仍留在执行集合的 D 请求。[RTP 节点参数](component-reference.md#rtp-节点与公共校验)
+RTP P 默认使用 `RtpFifoScheduler`，由 Scheduler 从单请求自主合批。显式 `group` 模式使用 `RtpPrefillGroupScheduler`，一次提交完整组，保留成员级结果、超时和取消。组在当前轮放不下的成员留待后续调度，D 始终按单请求准入。内部按请求统计 waiting、loading、running、ready。原生状态把 waiting、loading、ready 合并为 waiting，running 包含两轮计算之间仍留在执行集合的 D 请求。[RTP 节点参数](component-reference.md#engine-配置规则)
 
-ViT 使用自己的图片准备与合批循环。`VitPreparation` 管在途任务和发布，`VitScheduler` 执行合批，`VitCache` 管同键共享和驻留淘汰。元数据包含模拟形状和逐行 hash。几何、下载、缓存及负载模型见 [ViT 与输入准备](component-reference.md#通用-v-与输入准备)。
+ViT 使用自己的图片准备与合批循环。`VitPreparation` 管在途任务和发布，`VitScheduler` 执行合批，`VitCache` 管同键共享和驻留淘汰。元数据包含模拟形状和逐行 hash。几何、下载、缓存及负载模型见 [ViT 与输入准备](component-reference.md#vit-配置)。
 
 ### KV 准备、容量与回收
 
@@ -123,7 +123,7 @@ ViT 使用自己的图片准备与合批循环。`VitPreparation` 管在途任�
 
 初始 `KvCacheManager.prepare()` 同步匹配并分配。本地成功返回 `Ready` 和 lease。临时容量不足返回可重试的 `Failed`，由失败对象在容量或索引变化后重试。超过单请求容量则终止，已经进入生成的 D 请求在 KV 增长失败时也终止。D 的 P/D LOAD 是另一项协议依赖，完成前不会进入生成。
 
-成功结束时只发布已经计算的完整块。D 的最后一个仅采样 token 不计入发布前缀。缓存保留与驻留使用逻辑额度，Host 到 Device 的恢复按瞬时处理。KVCM Reporter 消费有效块变更、快照和心跳，处理的是元数据。P/D 交接仍由原生 RPC 驱动。[容量配置与 KVCM 契约](component-reference.md#block-容量与-rtp-缓存)
+成功结束时只发布已经计算的完整块。D 的最后一个仅采样 token 不计入发布前缀。缓存保留与驻留使用逻辑额度，Host 到 Device 的恢复按瞬时处理。KVCM Reporter 消费有效块变更、快照和心跳，处理的是元数据。P/D 交接仍由原生 RPC 驱动。[容量配置](component-reference.md#kv-容量和-prefill-cp) · [KVCM 接线](component-reference.md#dsv41-engine-与-kvcm-接线)
 
 ### P/D 交接和输出
 
@@ -144,7 +144,7 @@ ViT 使用自己的图片准备与合批循环。`VitPreparation` 管在途任�
 
 WorkerStatus 从接入会话与 Scheduler 采集任务快照，`TaskHistory` 提供按版本查询的 finished 增量。任务转换与快照复制使用同一调度锁，缓存单独采样。CacheStatus 按版本复制有效 key，随后在缓存锁外构建响应。两类状态 RPC 的服务端 RT 都截止到状态采集完成，包含必要的锁等待。健康检查直接读取关闭与致命失败状态。
 
-原始指标样本在对应业务事件记录。Prometheus 保存可查询的时间序列；使用 Reporter 时由独立发送线程提交样本，保留原始权重。采集快照在短锁内取值，编码和发送在锁外。指标队列溢出或上报失败会标记采集不完整，业务计算继续推进。[指标口径](component-reference.md#指标采集和查询)
+原始指标样本在对应业务事件记录。Prometheus 保存可查询的时间序列；使用 Reporter 时由独立发送线程提交样本，保留原始权重。采集快照在短锁内取值，编码和发送在锁外。指标队列溢出或上报失败会标记采集不完整，业务计算继续推进。[指标口径](../views/coverage.md#指标口径)
 
 ### Client 逐请求记录与查询
 
