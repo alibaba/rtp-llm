@@ -70,9 +70,15 @@ class VitMediaTraceTest(unittest.TestCase):
             [s.attributes[vit_media.MEDIA + "index"] for s in roots], [0, 1]
         )
         for root in roots:
+            self.assertEqual(root.attributes[attrs.REQUEST_ID], "42")
+            self.assertEqual(root.attributes[attrs.GEN_AI_OPERATION_NAME], "embeddings")
+            self.assertEqual(root.attributes[attrs.GEN_AI_SPAN_KIND], "LLM")
             self.assertEqual(root.attributes[vit_media.MEDIA + "url"], values[0].url)
             self.assertFalse(any("url_hash" in key for key in root.attributes))
             children = [s for s in spans if s.parent.span_id == root.context.span_id]
+            self.assertTrue(
+                all(child.attributes[attrs.REQUEST_ID] == "42" for child in children)
+            )
             self.assertTrue(
                 {
                     "rtp_llm.vit.preprocess.queue",

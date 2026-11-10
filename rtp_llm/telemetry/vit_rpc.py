@@ -20,16 +20,35 @@ _METHODS = {
     "WaitGreenNetVerdict": "wait_greennet_verdict",
 }
 _SERVICE = "/MultimodalRpcService/"
+INTERNAL_REQUEST_ID_METADATA_KEY = "x-rtp-llm-request-id"
 
 
-def _request_attributes(request):
+def _request_attributes(request, metadata=None):
     result = {}
+    inputs = getattr(request, "inputs", request)
     try:
-        inputs = getattr(request, "inputs", request)
         if hasattr(request, "keys") and not request.HasField("inputs"):
-            inputs = None  # A cache-only probe has no request ID (not request 0).
-        if hasattr(inputs, "request_id"):
-            result[attrs.REQUEST_ID] = str(inputs.request_id)
+            inputs = None
+    except Exception:
+        inputs = None
+
+    request_id = getattr(inputs, "request_id", None)
+    if request_id not in (None, "", 0):
+        result[attrs.REQUEST_ID] = str(request_id)
+    else:
+        try:
+            headers = tracing.metadata_to_headers(metadata)
+            request_id = headers.get(INTERNAL_REQUEST_ID_METADATA_KEY)
+            if isinstance(request_id, bytes):
+                request_id = request_id.decode("ascii", errors="ignore")
+            if not request_id:
+                request_id = headers.get("x-dashscope-request-id")
+            if request_id:
+                result[attrs.REQUEST_ID] = str(request_id)
+        except Exception:
+            pass
+
+    try:
         if hasattr(inputs, "multimodal_inputs"):
             result[attrs.RTP_LLM_VIT_INPUT_COUNT] = len(inputs.multimodal_inputs)
         if hasattr(request, "keys"):
@@ -67,9 +86,12 @@ def _error_code(error):
 
 
 def _start_client(method, target, request, metadata):
+    request_attributes = _request_attributes(request, metadata)
+    if attrs.REQUEST_ID not in request_attributes:
+        return None, list(metadata or ())
     span, carrier = tracing.start_client_span("rtp_llm.vit." + _METHODS[method], target)
     if span is not None:
-        for key, value in _request_attributes(request).items():
+        for key, value in request_attributes.items():
             span.set_attribute(key, value)
         span.set_attribute(attrs.RPC_METHOD, "MultimodalRpcService/" + method)
     # Only replace propagation keys when there is a new child. Preserve all
@@ -112,6 +134,15 @@ class VitServerTraceInterceptor(grpc.ServerInterceptor):
         def traced(request, context):
             if not tracing.is_telemetry_active():
                 return handler.unary_unary(request, context)
+            attributes = _request_attributes(request, details.invocation_metadata)
+            if attrs.REQUEST_ID not in attributes:
+                state_token = tracing.CURRENT_TRACE_STATE.set(None)
+                internal_token = tracing.CURRENT_INTERNAL_CONTEXT.set(None)
+                try:
+                    return handler.unary_unary(request, context)
+                finally:
+                    tracing.CURRENT_INTERNAL_CONTEXT.reset(internal_token)
+                    tracing.CURRENT_TRACE_STATE.reset(state_token)
             # A gRPC executor reuses threads. Never leave a previous request or
             # orchestration parent installed, even after abort/cancellation.
             state_token = tracing.CURRENT_TRACE_STATE.set(None)
@@ -119,7 +150,6 @@ class VitServerTraceInterceptor(grpc.ServerInterceptor):
             state = None
             error = None
             try:
-                attributes = _request_attributes(request)
                 attributes[attrs.RPC_SYSTEM] = "grpc"
                 attributes[attrs.RPC_METHOD] = "MultimodalRpcService/" + method
                 state = tracing.start_server_span(

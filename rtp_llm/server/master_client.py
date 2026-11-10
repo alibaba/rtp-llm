@@ -595,6 +595,7 @@ class MasterClient:
             probe_timeout,
             headers=input.headers if input is not None else None,
             fallback_on_unimplemented=input is not None,
+            request_id=input.request_id if input is not None else None,
         )
         if metadata is _HASH_RPC_UNSUPPORTED:
             route_logger.info(
@@ -662,6 +663,7 @@ class MasterClient:
             required=True,
             headers=input.headers,
             fallback_on_unimplemented=True,
+            request_id=input.request_id,
         )
         if filled is _HASH_RPC_UNSUPPORTED:
             return None
@@ -703,17 +705,24 @@ class MasterClient:
         required=False,
         headers=None,
         fallback_on_unimplemented=False,
+        request_id=None,
     ):
         started = time.monotonic()
         try:
             channel = await self._vit_channels.get(f"{address.ip}:{address.grpc_port}")
-            from rtp_llm.telemetry.vit_rpc import vit_client_span
+            from rtp_llm.telemetry.vit_rpc import (
+                INTERNAL_REQUEST_ID_METADATA_KEY,
+                vit_client_span,
+            )
 
+            metadata = list(dashscope_greennet_metadata(headers))
+            if request_id not in (None, "", 0):
+                metadata.append((INTERNAL_REQUEST_ID_METADATA_KEY, str(request_id)))
             with vit_client_span(
                 "GetMultimodalHashes",
                 f"{address.ip}:{address.grpc_port}",
                 request,
-                dashscope_greennet_metadata(headers),
+                metadata,
             ) as metadata:
                 response = await MultimodalRpcServiceStub(channel).GetMultimodalHashes(
                     request,
