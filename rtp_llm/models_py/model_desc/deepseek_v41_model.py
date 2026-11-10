@@ -107,6 +107,20 @@ class DeepSeekV41Model(DeepSeekV4Model):
         attachment = EngramModelAttachment.bind(
             self, self._engram_runtime, scale_group=scale_group
         )
+        # AWI evaluator contract: this is the last weight-materialization step
+        # for V4.1 - V4Transformer binding (dequant transforms) has run and the
+        # host-resident Engram tables are now attached. Publish this rank's
+        # checkpoint placement census and startup network-fetch count here so
+        # every key (including all 12 Engram keys) reflects its real resident
+        # tensor, not the stale pre-transform loader allocation.
+        try:
+            from rtp_llm.model_loader.awi_recorder import finalize_and_write
+            from rtp_llm.utils.awi_telemetry import StartupNetworkGuard
+
+            finalize_and_write()
+            StartupNetworkGuard.publish()
+        except Exception:  # noqa: BLE001
+            logging.exception("[awi] weight census finalize failed")
         if attachment.phase == "EMPTY":
             return
         logging.info(

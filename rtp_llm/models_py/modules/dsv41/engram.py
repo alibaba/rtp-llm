@@ -2195,13 +2195,26 @@ class Engram(nn.Module):
             # device persistently; ROCm keeps them in host RAM and stages
             # them transiently per forward instead.
             qk_target = target if torch.version.hip is None else torch.device("cpu")
+            q_weight = load("q_weight").to(qk_target)
+            k_weight = load("k_weight").to(qk_target)
+            # Under external storage the embed table/scales arrive via
+            # from_storage (not the load() hook), so register them here from
+            # the resident host tensors to cover both paths. All Engram keys
+            # are host-resident; this records their true placement.
+            try:
+                from rtp_llm.model_loader.awi_recorder import register_host_tensor
+
+                register_host_tensor(prefix + "embed.weight", embedding.weight)
+                register_host_tensor(prefix + "embed.scale", embedding.scales)
+            except Exception:  # noqa: BLE001
+                pass
             return cls(
                 layout,
                 layer_hash_index,
                 embedding,
                 projection,
-                load("q_weight").to(qk_target),
-                load("k_weight").to(qk_target),
+                q_weight,
+                k_weight,
                 float(_config_value(config, "rms_norm_eps")),
             )
         except BaseException:

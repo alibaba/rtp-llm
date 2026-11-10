@@ -305,21 +305,11 @@ class ModelFactory:
             target_model=model,
         )
 
-        # AWI evaluator contract: publish this rank's checkpoint weight
-        # placement census after every weight is bound and resident, plus
-        # this process's startup network-fetch count.
-        try:
-            from rtp_llm.model_loader.awi_recorder import finalize_and_write
-
-            finalize_and_write()
-        except Exception:  # noqa: BLE001
-            logging.exception("[awi] weight census finalize failed")
-        try:
-            from rtp_llm.utils.awi_telemetry import StartupNetworkGuard
-
-            StartupNetworkGuard.publish()
-        except Exception:  # noqa: BLE001
-            logging.exception("[awi] net guard publish failed")
+        # NOTE: the AWI weight-placement census is finalized later, from the
+        # model's _load_extra_weights, once V4Transformer binding (dequant
+        # transforms) and the host-resident Engram tables are materialized.
+        # Finalizing here (right after _create_model) would run before that
+        # second materialization phase and report stale pre-transform tensors.
 
         # Create engine using create_engine function (replaces AsyncModel)
         alog_conf_path = engine_config.profiling_debug_logging_config.ft_alog_conf_path
