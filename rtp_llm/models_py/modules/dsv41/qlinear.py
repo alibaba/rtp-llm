@@ -177,6 +177,12 @@ class QuantizedLinear(nn.Module):
         self.weight = weight
         self.scale = scale
         self.scale_gemm = scale_gemm
+        if not native_fp4_gemm_available():
+            # SM80 reference forward reads the raw UE8M0 scales; a caller
+            # may still pass the checkpoint's e8m0 _s_gemm tensor, which is
+            # not the DeepGEMM packed int32 layout.
+            self.scale_gemm = None
+            return
         # The packed int32 scale layout is a DeepGEMM/SM100 contract. Do not
         # build it on devices that will decode through the reference path:
         # that would import/JIT DeepGEMM kernels the device cannot run.
