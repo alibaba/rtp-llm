@@ -117,7 +117,10 @@ int SWACacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                             const BlockIndicesType& current_block_indices,
                                             int                     remaining_tokens,
                                             int                     reserve_step,
-                                            bool                    enable_reuse_cache) const {
+                                            bool                    enable_reuse_cache,
+                                            bool /*reclaim_history*/) const {
+    // SWA pools never adopt committed-history reclaim; the parameter exists
+    // to match the SingleTypeCacheManager virtual signature.
     const int        active_tail_blocks  = activeTailBlockCount();
     const int        prefill_tail_blocks = prefillTailBlocks(tail_blocks_, enable_reuse_cache);
     std::vector<int> block_costs;
@@ -158,7 +161,10 @@ int SWACacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                         int  remaining_tokens,
                                                         int  reserve_step,
                                                         bool enable_reuse_cache,
-                                                        int  target_batch_size) const {
+                                                        int  target_batch_size,
+                                                        bool /*reclaim_history*/) const {
+    // SWA pools never adopt committed-history reclaim; the parameter exists
+    // to match the SingleTypeCacheManager virtual signature.
     const int        prefill_tail_blocks = prefillTailBlocks(tail_blocks_, enable_reuse_cache);
     const int        batch_size          = std::max(target_batch_size, 1);
     const int        active_tail_blocks  = activeTailBlockCount();
@@ -193,7 +199,10 @@ NeedBlocksInfo SWACacheManager::getNeedBlocks(int                      common_se
                                               int                      reserve_step,
                                               int                      reuse_blocks_len,
                                               bool                     reuse_enabled,
-                                              const RequiredPositions& required_positions) const {
+                                              const RequiredPositions& required_positions,
+                                              size_t /*reclaimed_prefix_blocks*/) const {
+    // SWA pools never adopt committed-history reclaim; the parameter exists
+    // to match the SingleTypeCacheManager virtual signature.
     (void)reserve_step;
     const int      tail_blocks  = prefillTailBlocks(tail_blocks_, reuse_enabled);
     const int      reuse_slots  = reuse_enabled ? reuse_blocks_len : 0;

@@ -31,6 +31,21 @@ bool SingleTypeCacheManager::init() {
     return true;
 }
 
+void SingleTypeCacheManager::reclaimHistory(BlockIds& block_ids, size_t end) {
+    end = std::min(end, block_ids.blocksNum());
+    BlockIndicesType    released;
+    std::vector<size_t> positions;
+    for (size_t pos = block_ids.reclaimedPrefixBlocks(); pos < end; ++pos) {
+        if (!isNullBlockIdx(block_ids.blocks()[pos])) {
+            released.push_back(block_ids.blocks()[pos]);
+            positions.push_back(pos);
+        }
+    }
+    unreference(released);
+    block_ids.remove(positions);
+    block_ids.setReclaimedPrefixBlocks(end);
+}
+
 void SingleTypeCacheManager::setEvictCallback(EvictCallback callback) {
     evict_callback_ = std::move(callback);
 }

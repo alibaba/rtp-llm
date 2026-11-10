@@ -7,11 +7,10 @@ from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import torch
-from tqdm.auto import tqdm
-
 from rtp_llm.lora.lora_file import LoraCkpt
 from rtp_llm.utils import ckpt_file_info
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo, FinetuneType
+from tqdm.auto import tqdm
 
 _LAYER_RE = re.compile(r"(?:^|\.)(?:layers|h|blocks|layer)\.(\d+)\.")
 
@@ -260,7 +259,7 @@ class CkptDatabase(BaseDatabase):
         return name in self._tensor_index
 
     def get_tensor_type(self, name: str) -> torch.dtype:
-        return self.pretrain_file_list[0].get_tensor_type(name)
+        return self._tensor_index[name].get_tensor_type(name)
 
     def get_tensor_order(self, name: str) -> List[int]:
         orders = []
@@ -313,7 +312,6 @@ class CkptDatabase(BaseDatabase):
         stacked_key_config: Optional[Dict[str, str]] = None,
     ):
         from fastsafetensors import ParallelLoader, SingleGroup
-
         from rtp_llm.model_loader.per_expert_parallel_loader import (
             PerExpertParallelLoader,
         )
