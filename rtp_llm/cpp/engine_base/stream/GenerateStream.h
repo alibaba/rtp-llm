@@ -14,16 +14,17 @@
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <atomic>
-#include <condition_variable>
-#include <iterator>
+#include <cstddef>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -143,6 +144,12 @@ public:
     bool isStreamAlive() const {
         return stream_magic_ == STREAM_MAGIC;
     }
+
+    bool requiresFullContextForHiddenStateCapture() const;
+    bool isHiddenStateCaptureCandidate() const;
+    bool hasHiddenStateCaptureReservation() const;
+    void setHiddenStateCaptureReservation(HiddenStateCaptureReservationPtr reservation);
+    void cancelHiddenStateCapture() const;
 
 public:
     void setIsFakeStream(bool is_fake) {
@@ -909,6 +916,8 @@ protected:
     void reportMetricOnce();
 
 protected:
+    HiddenStateCaptureReservationPtr hidden_state_capture_reservation_;
+
     uint64_t                              stream_magic_ = STREAM_MAGIC;
     std::shared_ptr<GenerateInput>        generate_input_;
     std::shared_ptr<GenerateStateMachine> generate_status_;

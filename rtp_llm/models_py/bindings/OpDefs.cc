@@ -301,7 +301,11 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("hidden_states"),
              pybind11::arg("mtp_target_hidden_states"),
              "Initialize with hidden states and speculative target features")
-        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Canonical hidden states output tensor")
+        .def_readwrite("captured_hidden_states",
+                       &PyModelOutputs::captured_hidden_states,
+                       "Optional packed hidden states for capture side path")
+        .def_readwrite("capture_error", &PyModelOutputs::capture_error, "Recoverable capture-side diagnostic")
         .def_readwrite("mtp_target_hidden_states",
                        &PyModelOutputs::mtp_target_hidden_states,
                        "Optional target features consumed by speculative decoding");

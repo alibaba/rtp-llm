@@ -368,7 +368,12 @@ struct PyModelInputs {
 };
 
 struct PyModelOutputs {
+    // Canonical final hidden states consumed by LM head/sampler/response.
     torch::Tensor hidden_states;
+    // Optional packed auxiliary payload consumed only by the capture side path.
+    std::optional<torch::Tensor> captured_hidden_states;
+    // Recoverable capture-only diagnostic. Canonical serving output remains valid.
+    std::optional<std::string> capture_error;
     // Optional model-side features consumed by speculative decoders.  This is
     // a first-class forward output because CUDA graph replay does not execute
     // Python and therefore cannot safely recover it from mutable model state.

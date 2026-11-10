@@ -772,6 +772,9 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_all_hidden_states = (
         input_py.generate_config.return_all_hidden_states
     )
+    generate_config_pb.export_hidden_states = (
+        input_py.generate_config.export_hidden_states
+    )
     generate_config_pb.hidden_states_cut_dim = (
         input_py.generate_config.hidden_states_cut_dim
     )
@@ -1206,8 +1209,8 @@ class ModelRpcClient(object):
 
         # Initialize the channel pool
         self._channel_pool = GrpcHostChannelPool(
-            options=self._options, cleanup_interval=60  # clean up every minute
-        )
+            options=self._options, cleanup_interval=60
+        )  # clean up every minute
         logging.info(f"addresses: {self._addresses}")
 
     async def close(self) -> None:

@@ -37,6 +37,7 @@ struct NormalModelInputGathererConfig {
     std::vector<CacheGroupType> kv_cache_group_types;
     std::vector<std::string>    kv_cache_group_tags;
     bool                        warm_up{};
+    bool                        enable_hidden_state_capture{};
     bool                        enable_detail_log{};
     bool                        enable_model_inputs_log{};
 };

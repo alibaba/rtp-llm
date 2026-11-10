@@ -45,6 +45,35 @@ from rtp_llm.structure.request_extractor import RequestExtractor
 
 
 class TestPrefillOnlyGenerateConfig(unittest.TestCase):
+
+    def test_export_hidden_states_is_independent_of_response_and_prefill_mode(self):
+        for max_new_tokens in (0, 7):
+            with self.subTest(max_new_tokens=max_new_tokens):
+                default = GenerateConfig(max_new_tokens=max_new_tokens)
+                self.assertFalse(default.export_hidden_states)
+                for enabled in (False, True):
+                    config = GenerateConfig(
+                        max_new_tokens=max_new_tokens, export_hidden_states=enabled
+                    )
+                    config.validate()
+                    restored = GenerateConfig.model_validate_json(
+                        config.model_dump_json()
+                    )
+                    self.assertEqual(restored.export_hidden_states, enabled)
+                    self.assertEqual(restored.max_new_tokens, max_new_tokens)
+                    self.assertFalse(restored.return_hidden_states)
+                    self.assertFalse(restored.return_all_hidden_states)
+                    self.assertFalse(restored.return_logits)
+
+    def test_update_and_pop_preserves_export_hidden_states(self):
+        config = GenerateConfig(max_new_tokens=7)
+        self.assertEqual(config.update_and_pop({"export_hidden_states": True}), {})
+        config.update({"max_new_tokens": 0})
+        self.assertTrue(config.export_hidden_states)
+        self.assertTrue(config.is_prefill_only())
+        config.update({"export_hidden_states": False})
+        self.assertFalse(config.export_hidden_states)
+
     def test_prefill_only_preserves_cache_setting(self):
         config = GenerateConfig(max_new_tokens=0, reuse_cache=True)
 

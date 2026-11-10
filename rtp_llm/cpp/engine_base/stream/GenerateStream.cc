@@ -61,6 +61,33 @@ bool useStreamAsyncReserveTokens() {
 
 }  // namespace
 
+bool GenerateStream::requiresFullContextForHiddenStateCapture() const {
+    const auto role = stream_cache_resource_->resourceContext().role_type;
+    return role == RoleType::PREFILL || role == RoleType::PDFUSION;
+}
+
+bool GenerateStream::isHiddenStateCaptureCandidate() const {
+    return (generateConfig()->isPrefillOnly() || generateConfig()->export_hidden_states)
+           && requiresFullContextForHiddenStateCapture() && !chunkedPrefillEnabled() && !hasError() && !isFakeStream()
+           && !generate_input_->fake_query && isContextStream() && !hasNumBeams() && maxBatchSize() == 1
+           && currentBatchSize() == 1 && iterCount() == 0 && inputLength() > 0 && seqLength() == inputLength()
+           && reuseLength() == 0;
+}
+
+bool GenerateStream::hasHiddenStateCaptureReservation() const {
+    return hidden_state_capture_reservation_ && hidden_state_capture_reservation_->active();
+}
+
+void GenerateStream::setHiddenStateCaptureReservation(HiddenStateCaptureReservationPtr reservation) {
+    hidden_state_capture_reservation_ = std::move(reservation);
+}
+
+void GenerateStream::cancelHiddenStateCapture() const {
+    if (hidden_state_capture_reservation_) {
+        hidden_state_capture_reservation_->cancel();
+    }
+}
+
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                const ModelConfig&               model_config,
                                const RuntimeConfig&             runtime_config,
@@ -126,16 +153,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
-    // TorchSpec target hidden-state capture publishes one result per request and cannot be split across chunks.
+    // Chunked requests remain valid serving work, but are not capture candidates.
     const auto chunk_size = runtime_config.fifo_scheduler_config.prefill_chunk_size;
-    if (!input->fake_query && chunk_size > 0 && input->generate_config->isPrefillOnly()
-        && !model_config.hidden_state_capture_layer_ids.empty()
-        && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
-        reportEvent(StreamEvents::Error,
-                    ErrorCode::INVALID_PARAMS,
-                    "chunked prefill incompatible: hidden_state_capture");
-        return;
-    }
     if (!input->fake_query && chunk_size > 0
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
         const auto& config = *generateConfig();
@@ -262,6 +281,7 @@ void GenerateStream::releaseResource() {
     // Return KV blocks only after all workers that captured this stream finish.
     // Earlier release could let a worker write into blocks owned by another stream.
     waitPendingAsyncBookkeeping();
+    cancelHiddenStateCapture();
     std::lock_guard<std::mutex> lock(*mutex_);
     if (!stream_cache_resource_->isResourceReleased()) {
         stream_cache_resource_->releaseResource();
@@ -1618,6 +1638,7 @@ StreamCacheResource& GenerateStream::streamCacheResource() {
 
 void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_loss, bool share) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("GenerateStream::CopyOnWrite(copy_loss=%d, share=%d)", copy_loss, share);
+    hidden_state_capture_reservation_.reset();
     complete_token_ids_ = make_shared<CompleteTokenIds>(*other_stream.complete_token_ids_, share);
     grpc_normal_device_state_pending_ =
         std::make_shared<std::atomic<bool>>(other_stream.hasGrpcNormalDeviceStatePending());

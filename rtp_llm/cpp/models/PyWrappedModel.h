@@ -93,8 +93,7 @@ public:
     void                       prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string                waitCacheStorePublication() override;
-    HiddenStateCaptureStats    hiddenStateCaptureStats() const;
-    std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
+    HiddenStateCaptureReservationPtr tryReserveHiddenStateCapture(int64_t request_id, int64_t valid_tokens) override;
 
 private:
     friend struct test::PyWrappedModelTestPeer;
@@ -119,6 +118,7 @@ private:
     torch::Tensor runCustomOutput(const torch::Tensor& rows);
     torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
     bool          shouldCaptureHiddenStates(const GptModelInputs& inputs);
+    void          discardHiddenStateCapture(const GptModelInputs& inputs, const std::string& reason);
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
@@ -632,29 +632,32 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     }
 
     if (!params.hidden_state_capture_layer_ids.empty()) {
-        RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "supports_hidden_state_capture")
-                                    && py_model_.attr("supports_hidden_state_capture").cast<bool>(),
-                                "configured Python model does not support hidden-state capture");
-        RTP_LLM_CHECK_WITH_INFO(params.hidden_size > 0, "hidden-state capture requires a positive hidden size");
-        RTP_LLM_CHECK_WITH_INFO(params.hidden_state_capture_dtype == HiddenStateCaptureDtype::BF16
-                                    || params.hidden_state_capture_dtype == HiddenStateCaptureDtype::FP8_E4M3,
-                                "unsupported hidden-state capture dtype: %d",
-                                static_cast<int>(params.hidden_state_capture_dtype));
+        std::string initialization_error;
+        if (!py::hasattr(py_model_, "supports_hidden_state_capture")
+            || !py_model_.attr("supports_hidden_state_capture").cast<bool>()) {
+            initialization_error = "configured Python model does not support hidden-state capture";
+        } else if (params.hidden_size <= 0) {
+            initialization_error = "hidden-state capture requires a positive hidden size";
+        } else if (params.hidden_state_capture_dtype != HiddenStateCaptureDtype::BF16
+                   && params.hidden_state_capture_dtype != HiddenStateCaptureDtype::FP8_E4M3) {
+            initialization_error = "unsupported hidden-state capture dtype: "
+                                   + std::to_string(static_cast<int>(params.hidden_state_capture_dtype));
+        }
 #if USING_ROCM
-        RTP_LLM_CHECK_WITH_INFO(
-            params.hidden_state_capture_dtype != HiddenStateCaptureDtype::FP8_E4M3,
-            "TorchSpec hidden-state capture does not support FP8 on ROCm because TorchSpec stores float8_e4m3fn, "
-            "while ROCm requires float8_e4m3fnuz");
+        if (params.hidden_state_capture_dtype == HiddenStateCaptureDtype::FP8_E4M3) {
+            initialization_error =
+                "TorchSpec hidden-state capture does not support FP8 on ROCm because TorchSpec stores "
+                "float8_e4m3fn, while ROCm requires float8_e4m3fnuz";
+        }
 #endif
         std::unordered_set<int64_t> unique_capture_layer_ids;
         for (const auto layer_id : params.hidden_state_capture_layer_ids) {
-            RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_num_,
-                                    "hidden-state capture layer id %ld is outside [0, %zu)",
-                                    layer_id,
-                                    layer_num_);
-            RTP_LLM_CHECK_WITH_INFO(unique_capture_layer_ids.insert(layer_id).second,
-                                    "hidden-state capture layer ids must be unique; duplicate id %ld",
-                                    layer_id);
+            if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_num_) {
+                initialization_error = "hidden-state capture layer id is outside the model";
+            } else if (!unique_capture_layer_ids.insert(layer_id).second) {
+                initialization_error =
+                    "hidden-state capture layer ids must be unique; duplicate id " + std::to_string(layer_id);
+            }
         }
         hidden_state_capture_publisher_ = std::make_unique<HiddenStateCapturePublisher>(
             static_cast<int64_t>(params.hidden_state_capture_layer_ids.size()),
@@ -663,7 +666,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             dataTypeToTorchType(description_.data_type),
             params.parallelism_config.tp_rank == 0,
             params.parallelism_config.local_rank,
-            params.metrics_reporter);
+            params.metrics_reporter,
+            HiddenStateCaptureLimits{},
+            initialization_error);
     }
 
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");

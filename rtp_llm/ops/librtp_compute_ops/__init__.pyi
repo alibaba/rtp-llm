@@ -413,12 +413,27 @@ class PyModelOutputs:
     @property
     def hidden_states(self) -> torch.Tensor:
         """
-        Hidden states output tensor
+        Canonical hidden states output tensor
         """
 
     @hidden_states.setter
     def hidden_states(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def captured_hidden_states(self) -> torch.Tensor | None:
+        """
+        Optional packed hidden states for capture side path
+        """
 
+    @captured_hidden_states.setter
+    def captured_hidden_states(self, arg0: torch.Tensor | None) -> None: ...
+    @property
+    def capture_error(self) -> str | None:
+        """
+        Recoverable capture-side diagnostic
+        """
+
+    @capture_error.setter
+    def capture_error(self, arg0: str | None) -> None: ...
     @property
     def mtp_target_hidden_states(self) -> torch.Tensor | None:
         """
