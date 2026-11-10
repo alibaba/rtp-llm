@@ -71,6 +71,7 @@ class Qwen4GatedResidual(GatedResidual):
                 inject_weights,
                 self.norm_gamma,
                 self.norm_eps,
+                collect_scale=False,
             )
             if result is not None:
                 residual, normed, _ = result
