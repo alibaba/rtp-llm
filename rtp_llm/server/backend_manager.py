@@ -97,6 +97,15 @@ class BackendManager(object):
             engine_config.parallelism_config,
             world_info,
         )
+        def _mem(tag):
+            if __import__("os").environ.get("DSV41_DEBUG_MEM") == "1":
+                import torch as _t
+                print(
+                    f"[mem] {tag} allocated={_t.cuda.memory_allocated() / 2**30:.2f} GiB "
+                    f"reserved={_t.cuda.memory_reserved() / 2**30:.2f} GiB",
+                    flush=True,
+                )
+        _mem("start entry")
         # Build main model_config
         model_config = ModelFactory.create_model_config(
             model_args=self.py_env_configs.model_args,
@@ -115,6 +124,7 @@ class BackendManager(object):
             engine_config=engine_config,
             model_config=model_config,
         )
+        _mem("after model/engine config")
         # Generation-prefill is a secondary runner owned only by the normalized
         # PDFUSION language-model process. Validate its cross-option capacity
         # after EngineConfig has applied the implicit VIT role and ModelFactory
@@ -195,6 +205,7 @@ class BackendManager(object):
                     "use_mori_ep is set but MoriEP wrapper failed to initialize"
                 )
 
+        _mem("before propose config")
         # Optional propose model config
         propose_model_config = ModelFactory.create_propose_model_config(
             engine_config=engine_config,
@@ -202,6 +213,7 @@ class BackendManager(object):
             model_args=self.py_env_configs.model_args,
         )
 
+        _mem("before from_model_configs")
         # Finally create engine using the new API
         self.engine = ModelFactory.from_model_configs(
             model_config=model_config,
