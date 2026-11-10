@@ -624,7 +624,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         # M >= 2048: scatter_qkv (Triton, SGLang port) avoids the .view() ->
         # .contiguous() copies that torch.split + view triggers. Below 2048,
         # kernel launch overhead beats the savings (microbench measured).
-        if mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
+        if mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim and not _IS_ASCEND:
             query, key, value = scatter_qkv(
                 mixed_qkv,
                 self.local_num_k_heads,
@@ -825,16 +825,13 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         )
         origin_shape = mixed_qkv.shape
         mixed_qkv = mixed_qkv.reshape(batch, seq, -1).transpose(1, 2)
-        # Single consumer path: causal_conv1d_update dispatches to the
-        # device-metadata AscendC operator for single-token decode (shared by
-        # eager and aclgraph capture); conv_states is the raw pool view
-        # (pages, state_len, dim).
         out = causal_conv1d_update(
             mixed_qkv,
-            conv_states,
+            conv_states.transpose(1, 2),
             self.conv_weights,
             bias=None,
             activation="silu",
+            cache_seqlens=None,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
@@ -1316,7 +1313,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 seq_size_per_block,
             )
 
-        if full_mixed_qkv.shape[0] >= 2048 and gdn.head_k_dim == gdn.head_v_dim:
+        if full_mixed_qkv.shape[0] >= 2048 and gdn.head_k_dim == gdn.head_v_dim and not _IS_ASCEND:
             query, key, value = scatter_qkv(
                 full_mixed_qkv,
                 gdn.local_num_k_heads,
@@ -1900,6 +1897,10 @@ class Qwen35Model(Qwen3NextModel):
         text_tokens_mask = inputs.embedding_inputs.text_tokens_mask
         mm_features = inputs.multimodal_inputs.multimodal_features
         mm_feature_locs = inputs.multimodal_inputs.mm_features_locs
+
+        inputs_embeds = self.embed_tokens(
+            input_ids, position_ids, token_type_ids, text_tokens_mask
+        )
         hidden_states = self.multimodal_embedding_injector(
             inputs_embeds, mm_features, mm_feature_locs
         )
