@@ -444,6 +444,16 @@ py_test(
 )
 
 py_test(
+    name = "ple_hash_sm90_test",
+    srcs = ["ple_hash_triton_test.py", "ple_test.py"],
+    main = "ple_hash_triton_test.py",
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = 'gdn_prefill_norm_test',
     srcs = ['gdn_prefill_norm_test.py'],
     deps = ["//rtp_llm:testlib"],
