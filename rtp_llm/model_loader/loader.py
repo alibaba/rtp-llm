@@ -505,15 +505,24 @@ class ModelLoader:
                     model_weights.set_global_weight(name, tensor)
         return model_weights
 
+    def _is_engram_weight(self, weight, layer_id=None) -> bool:
+        try:
+            names = weight.get_tensor_names(layer_id, self._load_config)
+        except Exception:
+            return False
+        return any("engram" in str(name).lower() for name in names)
+
     def prepare_weights(self, device: str):
         if not self._is_attn_model:
             for id in range(self._load_config.num_layers):
                 results = self._load_layer_weights(id, device)
                 for name, tensor in results.items():
+                    if "engram" in str(name).lower():
+                        continue
                     yield (id, name, tensor)
 
         for weight in self._model_weights_info.weights:
-            if self._maybe_skip_weight(weight):
+            if self._maybe_skip_weight(weight) or self._is_engram_weight(weight):
                 continue
             weights = weight.load(
                 DatabaseTensorSource(self._load_config.database),
@@ -744,6 +753,11 @@ class ModelLoader:
         layer_weights = self._model_weights_info.layer_weights[layer_id]
         weights = {}
         for weight in layer_weights:
+            if self._is_engram_weight(weight, layer_id):
+                # Engram loads its table directly into host RAM from the
+                # checkpoint.  Loading it here would materialize ~98 GiB per
+                # table on the GPU and its dequant temporaries as well.
+                continue
             res = weight.load(
                 DatabaseTensorSource(self._load_config.database),
                 layer_id,
