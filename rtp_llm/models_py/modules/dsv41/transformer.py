@@ -241,7 +241,30 @@ class V4Transformer(nn.Module):
                 flush=True,
             )
             try:
-                torch.cuda.memory._dump_snapshot("/tmp/dsv41_mem.pkl")
+                _snap = torch.cuda.memory._snapshot()
+                _blocks = []
+                for _seg in _snap.get("segments", []):
+                    for _blk in _seg.get("blocks", []):
+                        if _blk.get("state") != "active_allocated":
+                            continue
+                        _size = _blk.get("size", 0)
+                        if _size < 256 * 2**20:
+                            continue
+                        _frames = " > ".join(
+                            _f.get("name", "?")
+                            for _f in (_blk.get("frames") or [])[:10]
+                        )
+                        _blocks.append((_size, _frames))
+                _blocks.sort(reverse=True)
+                _agg = {}
+                for _size, _frames in _blocks:
+                    _agg[_frames] = _agg.get(_frames, 0) + _size
+                _top = sorted(_agg.items(), key=lambda kv: kv[1], reverse=True)[:6]
+                for _frames, _size in _top:
+                    print(
+                        f"[mem] active {_size / 2**30:.2f} GiB stack={_frames}",
+                        flush=True,
+                    )
             except Exception as _exc:
                 print(f"[mem] snapshot failed: {_exc}", flush=True)
             _seen = []
