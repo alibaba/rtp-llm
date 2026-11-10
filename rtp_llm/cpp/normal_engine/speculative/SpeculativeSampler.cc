@@ -1173,14 +1173,16 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     // buffers on every path (forced rows included), so the zero inits are dead
     // stores; without it the legacy kernels/ops keep their zero-init contract.
     auto int_out_options      = torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false);
-    const int64_t token_count = static_cast<int64_t>(batch_size) * (propose_step_ + 1);
+    const int64_t batch_size_i64 = static_cast<int64_t>(batch_size);
+    const int64_t propose_step_i64 = static_cast<int64_t>(propose_step_);
+    const int64_t token_count = batch_size_i64 * (propose_step_i64 + 1);
     auto          result_d    = finalize_in_kernel ?
-                                    torch::empty({static_cast<int64_t>(batch_size) * (propose_step_ + 3)}, int_out_options) :
+                                    torch::empty({batch_size_i64 * (propose_step_i64 + 3)}, int_out_options) :
                                     torch::Tensor();
     auto          output_token_ids_d =
         finalize_in_kernel ?
-                     result_d.narrow(0, 0, token_count).view({batch_size, static_cast<int64_t>(propose_step_ + 1)}) :
-                     torch::zeros({batch_size, static_cast<int64_t>(propose_step_ + 1)}, int_out_options);
+                     result_d.narrow(0, 0, token_count).view({batch_size_i64, propose_step_i64 + 1}) :
+                     torch::zeros({batch_size_i64, propose_step_i64 + 1}, int_out_options);
     auto output_accepted_token_num_d =
         finalize_in_kernel ? result_d.narrow(0, token_count, batch_size) : torch::zeros({batch_size}, int_out_options);
     auto verified_lengths_d =
