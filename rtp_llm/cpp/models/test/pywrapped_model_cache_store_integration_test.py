@@ -15,22 +15,27 @@ from typing import Any, ClassVar, Optional, cast
 from unittest.mock import patch
 
 import torch
+
 from rtp_llm.config.cuda_graph import GenerationPrefillCudaGraphUnsupportedBackend
 
 
-def _install_single_rank_rocm_graph_capture_stub() -> None:
+def _install_isolated_graph_capture_stubs() -> None:
     """Keep this focused integration test independent of the production ops SO.
 
     The C++ test extension registers the same pybind types as the production
     extension, so importing ``rocm_rccl`` here would register those types a
-    second time. Single-rank capture has no RCCL work; these are the exact
-    no-op hooks used by the device shim for that case.
+    second time. This isolated fixture initializes no optional communicator;
+    these are the no-op graph admission hooks and single-rank RCCL hooks.
     """
 
     models_py = types.ModuleType("rtp_llm.models_py")
     models_py.__path__ = []
     distributed = types.ModuleType("rtp_llm.models_py.distributed")
     distributed.__path__ = []
+    collectives = types.ModuleType("rtp_llm.models_py.distributed.all_reduce")
+    collectives.begin_graph_capture = lambda: None
+    collectives.end_graph_capture = lambda: None
+    collectives.abort_graph_capture = lambda: None
     rocm_rccl = types.ModuleType("rtp_llm.models_py.distributed.rocm_rccl")
     rocm_rccl.set_graph_capture_nccl_comm = lambda *_args: None
     rocm_rccl.enter_graph_capture_mode = lambda *_args: None
@@ -38,14 +43,15 @@ def _install_single_rank_rocm_graph_capture_stub() -> None:
     rocm_rccl.finish_hipgraph_capture_session = lambda: None
 
     models_py.distributed = distributed
+    distributed.all_reduce = collectives
     distributed.rocm_rccl = rocm_rccl
     sys.modules["rtp_llm.models_py"] = models_py
     sys.modules["rtp_llm.models_py.distributed"] = distributed
+    sys.modules["rtp_llm.models_py.distributed.all_reduce"] = collectives
     sys.modules["rtp_llm.models_py.distributed.rocm_rccl"] = rocm_rccl
 
 
-if os.environ.get("TEST_USING_DEVICE") == "ROCM":
-    _install_single_rank_rocm_graph_capture_stub()
+_install_isolated_graph_capture_stubs()
 
 _extension = importlib.import_module(
     "rtp_llm.cpp.models.test.libth_pywrapped_model_cache_store_integration_test"

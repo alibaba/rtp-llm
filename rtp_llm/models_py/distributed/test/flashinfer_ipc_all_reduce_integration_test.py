@@ -164,6 +164,30 @@ def _worker(rank, store):
         value.fill_(rank + 2)
         graph.replay()
         torch.testing.assert_close(output, torch.full_like(output, 5), rtol=0, atol=0)
+    # Queue mixed NCCL/IPC shapes and graph/eager transitions without reading
+    # device results between calls. Per-call assertions would synchronize and
+    # hide ordering bugs in the shared staging buffer and counter protocol.
+    queued = []
+    for step in range(16):
+        for rows in (64, 32, 16, 8, 1):
+            expected = 2 * step + 3
+            value = torch.full(
+                (rows, 2560), rank + step + 1, dtype=torch.bfloat16, device=device
+            )
+            if communicator.should_use(value):
+                communicator.all_reduce_into(value, value)
+            else:
+                dist.all_reduce(value)
+            queued.append((value, expected))
+        for value, output, graph in captures:
+            value.fill_(rank + step + 2)
+            graph.replay()
+            queued.append((output.clone(), 2 * step + 5))
+    for actual, expected in queued:
+        torch.testing.assert_close(
+            actual, torch.full_like(actual, expected), rtol=0, atol=0
+        )
+
     x.fill_(rank + 3)
     communicator.all_reduce_into(x, x)
     torch.testing.assert_close(x, torch.full_like(x, 7), rtol=0, atol=0)

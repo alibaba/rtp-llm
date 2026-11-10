@@ -93,7 +93,7 @@ models_py_test(
 models_py_test(
     name = "zero_centered_compile_test",
     src = "zero_centered_compile_test.py",
-    gpu = "L20_CU13",
+    gpu = "RTX_5000_PRO_CU13",
 )
 
 models_py_test(
