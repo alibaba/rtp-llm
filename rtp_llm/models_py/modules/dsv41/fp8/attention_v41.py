@@ -3556,13 +3556,17 @@ class AttentionV41FP8(AttentionFP8):
                 .contiguous(),
                 global_topk_3d=slots.int().view(B, S, self.index_topk).contiguous(),
                 swa_block_table=metadata.pool_block_tables[SWA_KV][:B],
-                sched_meta=get_or_build_sched_meta(
-                    metadata,
-                    batch_size=B,
-                    q_len=S,
-                    num_heads=self.n_heads,
-                    topk=self.window_size,
-                    extra_attn_type=self._global_region(),
+                sched_meta=(
+                    None
+                    if torch.version.hip is not None
+                    else get_or_build_sched_meta(
+                        metadata,
+                        batch_size=B,
+                        q_len=S,
+                        num_heads=self.n_heads,
+                        topk=self.window_size,
+                        extra_attn_type=self._global_region(),
+                    )
                 ),
                 fp8_op=self._get_fp8_decode_op(),
             )
