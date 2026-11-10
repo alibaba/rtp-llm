@@ -68,6 +68,9 @@ public:
     void onInserted(const BlockTreeInsertResult& result);
     uint64_t               nextAccessSeq();
     void                   onMatched(TreeNode* node, size_t group_set_id);
+    // A real match hit: bump access clock / hit_count and re-sort in-heap entries.
+    void                   onMatched(const std::vector<TreeNode*>& path);
+    void                   onMatchedResources(const std::vector<std::pair<TreeNode*, size_t>>& resources);
     CandidateStats         candidateStats() const;
     size_t                 candidateCount(size_t group_set_id, Tier tier) const;
     std::vector<TreeNode*> candidateNodes(size_t group_set_id, Tier tier) const;

@@ -40,7 +40,7 @@ struct PrefillCPConfig {
     size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
     // When true + tp_size > 1, KV cache uses page-level round-robin sharding
     // across the CP (== TP) group. Each rank physically holds only owned blocks
-    // (block_idx % cp_size == cp_rank); see rtp_llm/cpp/cache/CPSlotMapper.h.
+    // (block_idx % cp_size == cp_rank); the external cache layout resolves it.
     bool kv_cache_sharded = false;
     // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     int64_t prefill_cp_size = 0;
@@ -151,10 +151,16 @@ constexpr double kDefaultDiskHighWatermarkRatio   = 0.97;
 
 struct KVCacheConfig {
     bool                                    reuse_cache           = false;
+    // Prefill DEVICE short-tail registration and reuse. Independent of prefix observability.
+    bool                                    enable_prefill_partial_tail_reuse = false;
+    // Prefill DEVICE interior common-prefix recovery point registration.
+    // Independent of and combinable with partial tail reuse; default off.
+    bool                                    enable_prefill_common_prefix_recovery = false;
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     int64_t                                 reserve_block_ratio                             = 5;
+    int                                     max_block_size_per_item                         = 16;
     int64_t                                 memory_cache_size_mb                            = 0;
     int64_t                                 memory_cache_sync_timeout_ms                    = 10000;
     std::string                             disk_cache_paths                                = "";
@@ -166,12 +172,12 @@ struct KVCacheConfig {
     int64_t                                 block_tree_transfer_worker_count                = 4;
     int64_t                                 block_tree_business_queue_max_size              = 10000;
     int64_t                                 block_tree_transfer_queue_max_size              = 10000;
-    double block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
-    double block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
-    double block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
-    double block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
-    double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
-    double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
+    double   block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
+    double   block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
+    double   block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
+    double   block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
+    double   block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
+    double   block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
     int      reuse_cache_tail_blocks                      = std::numeric_limits<int>::max();
     uint32_t linear_pool_blocks                           = 0;
     uint32_t swa_pool_blocks                              = 0;
@@ -186,6 +192,7 @@ struct KVCacheConfig {
     int         seq_size_per_block        = 0;
     int         kernel_seq_size_per_block = 0;
     int         test_block_num            = 0;
+    int         use_block_cache           = -1;
     bool        enable_device_cache       = true;
     bool        enable_memory_cache       = false;
     bool        enable_disk_cache         = false;
@@ -217,6 +224,8 @@ struct KVCacheConfig {
     // BlockTreeCache FULL prefix invariant scanner; interval 0 disables the scanner thread.
     // Batch size and detail cap are scanner-internal constants, not user-tunable.
     int64_t block_tree_full_prefix_scan_interval_ms = 0;
+    // C++-internal resolved startup switch; not a Python-facing schema option.
+    bool enable_prefix_cache_observability = false;
 
     // KVCM storage backend configuration fields
     bool        kvcm_enable_vipserver                = false;
@@ -363,16 +372,18 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
-    bool    cache_store_rdma_mode         = false;
-    int     thread_count                  = 32;
-    int     rdma_connect_timeout_ms       = 250;
-    int     rdma_qp_count_per_connection  = 2;
-    int     rdma_io_thread_count          = 4;
-    int     rdma_worker_thread_count      = 2;
-    int     messager_io_thread_count      = 2;
-    int     messager_worker_thread_count  = 32;
-    int64_t rdma_transfer_wait_timeout_ms = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
-    int rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
+    bool    cache_store_rdma_mode               = false;
+    int     wrr_available_ratio                 = 80;
+    int     rank_factor                         = 0;
+    int     thread_count                        = 32;
+    int     rdma_connect_timeout_ms             = 250;
+    int     rdma_qp_count_per_connection        = 2;
+    int     rdma_io_thread_count                = 4;
+    int     rdma_worker_thread_count            = 2;
+    int     messager_io_thread_count            = 2;
+    int     messager_worker_thread_count        = 32;
+    int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
+    int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_read_steal_before_deadline_ms =
         250;  // Decode read：在此距 deadline 时从 recv store steal，阻止新 transfer 匹配
     int64_t p2p_read_return_before_deadline_ms = 100;  // Decode read 与 Prefill send：transfer 层 deadline / worker
@@ -632,7 +643,7 @@ struct GrpcMapsConfig {
 struct GrpcConfig: GrpcMapsConfig {
     /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
     int max_server_pollers = 0;
-    GrpcConfig(){};
+    GrpcConfig() {};
     GrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);
@@ -640,7 +651,8 @@ struct GrpcConfig: GrpcMapsConfig {
 
 /// DashSc gRPC (predict_v2.proto) Python client/server channel options.
 struct DashScGrpcConfig: GrpcMapsConfig {
-    DashScGrpcConfig(){};
+    int max_server_workers = 4;
+    DashScGrpcConfig() {};
     DashScGrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);

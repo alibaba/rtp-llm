@@ -220,10 +220,10 @@ struct BackendEnvironment {
     StorageBackend::PoolsByTag pools_by_tag;
     BlockIdxType               block_id{NULL_BLOCK_IDX};
 
-    BackendEnvironment()                              = default;
-    BackendEnvironment(BackendEnvironment&&) noexcept = default;
-    BackendEnvironment& operator=(BackendEnvironment&&) = delete;
-    BackendEnvironment(const BackendEnvironment&)       = delete;
+    BackendEnvironment()                                     = default;
+    BackendEnvironment(BackendEnvironment&&) noexcept        = default;
+    BackendEnvironment& operator=(BackendEnvironment&&)      = delete;
+    BackendEnvironment(const BackendEnvironment&)            = delete;
     BackendEnvironment& operator=(const BackendEnvironment&) = delete;
     ~BackendEnvironment() {
         for (const auto& [tag, pool] : pools_by_tag) {
@@ -239,10 +239,10 @@ struct BackendHandle {
 
     BackendHandle() = default;
     explicit BackendHandle(std::unique_ptr<KVCMStorageBackend> value): backend(std::move(value)) {}
-    BackendHandle(BackendHandle&&) noexcept = default;
+    BackendHandle(BackendHandle&&) noexcept            = default;
     BackendHandle& operator=(BackendHandle&&) noexcept = default;
     BackendHandle(const BackendHandle&)                = delete;
-    BackendHandle& operator=(const BackendHandle&) = delete;
+    BackendHandle& operator=(const BackendHandle&)     = delete;
     ~BackendHandle() {
         if (backend) {
             backend->shutdown();
@@ -299,6 +299,7 @@ struct MatchObservation {
     size_t                                   matched_blocks_num{0};
     std::shared_ptr<StorageBackendMatchMeta> match_meta;
     bool                                     success{false};
+    PrefixCacheRemoteQueryStatus             query_status{PrefixCacheRemoteQueryStatus::UNSET};
 };
 
 template<typename T>
@@ -469,11 +470,13 @@ makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group
 [[maybe_unused]] MatchObservation match(KVCMStorageBackend& backend, StorageRequest request) {
     auto promise = std::make_shared<std::promise<MatchObservation>>();
     auto future  = promise->get_future();
-    backend.match(
-        std::move(request),
-        [promise](size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success) {
-            promise->set_value({matched_blocks_num, std::move(match_meta), success});
-        });
+    backend.match(std::move(request),
+                  [promise](size_t                                   matched_blocks_num,
+                            std::shared_ptr<StorageBackendMatchMeta> match_meta,
+                            bool                                     success,
+                            PrefixCacheRemoteQueryStatus             query_status) {
+                      promise->set_value({matched_blocks_num, std::move(match_meta), success, query_status});
+                  });
     return await(future);
 }
 
@@ -495,11 +498,13 @@ read(KVCMStorageBackend& backend, StorageRequest request, std::shared_ptr<Storag
 }
 
 [[maybe_unused]] bool initSingleRank(KVCMStorageBackend& backend, const BackendEnvironment& environment) {
-    return backend.init(environment.cache_config.topologyPtr(),
-                        environment.pools_by_tag,
-                        [&](int layer_id, const std::string& tag, int block_id) {
-                            return environmentBuffers(environment, layer_id, tag, block_id);
-                        });
+    return backend.init(
+        environment.cache_config.topologyPtr(),
+        environment.pools_by_tag,
+        [&](int layer_id, const std::string& tag, int block_id) {
+            return environmentBuffers(environment, layer_id, tag, block_id);
+        },
+        environment.cache_config.canonicalSizePerBlock());
 }
 
 }  // namespace

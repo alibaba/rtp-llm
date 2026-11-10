@@ -16,7 +16,6 @@
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/AlignedHostMemory.h"
@@ -110,9 +109,9 @@ CacheConfig makeSwaConfig(int block_size = 4) {
 
 CacheConfig makeHybridConfig(bool disable_linear_reuse = false) {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 4;
-    config.seq_size_per_block = 4;
+    config.dtype                   = DataType::TYPE_FP16;
+    config.layer_num               = 4;
+    config.seq_size_per_block      = 4;
     config.reuse_cache_tail_blocks = 2;
 
     auto linear_spec = test::makeResolvedLinearSpec(DataType::TYPE_FP16,
@@ -301,6 +300,7 @@ CacheConfig makeCompatibleSwaGroupsConfig(int                second_window,
     auto second = test::makeResolvedMhaSpec(
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
     auto first_policy                 = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    first_policy.cp_mapping           = CpBlockMappingMode::COMPACT_LAST_RANK;
     first_policy.enable_prefix_reuse  = true;
     first_policy.sliding_window_size  = 128;
     auto second_policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
@@ -318,9 +318,9 @@ CacheConfig makeCompatibleSwaGroupsConfig(int                second_window,
 
 CacheConfig makeCompatibleLinearGroupsConfig(uint32_t second_active_tail_blocks) {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 2;
-    config.seq_size_per_block = 4;
+    config.dtype                   = DataType::TYPE_FP16;
+    config.layer_num               = 2;
+    config.seq_size_per_block      = 4;
     config.reuse_cache_tail_blocks = 2;
 
     std::shared_ptr<LinearKVCacheSpec> first         = test::makeResolvedLinearSpec(DataType::TYPE_FP16,
@@ -374,6 +374,37 @@ CacheConfig makeReusableGroupsAroundDisabledConfig() {
         config, specs, {{0}, {1}, {2}}, {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::FULL}, policies);
 
     const size_t stride = config.group("group0").spec->block_size_bytes();
+    config.setGroupBlockLayout({"group0", "group1", "group2"}, {8, 8, 8}, {stride, stride, stride}, {0, 0, 0});
+    return config;
+}
+
+CacheConfig makeInterleavedLocalOnlySwaConfig() {
+    // Topology order: FULL(non-local), SWA(local-only), SWA(non-local).
+    // buildGroupMembers interleaves the local-only SWA group set at the middle
+    // index, so device_block_counts/pool_strides must stay 1:1 with
+    // group_members via zero placeholders or the host-tier loop indexes OOB.
+    CacheConfig config;
+    config.dtype              = DataType::TYPE_FP16;
+    config.layer_num          = 3;
+    config.seq_size_per_block = 4;
+
+    auto full_spec = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 8, 4);
+    auto swa_spec  = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 8, 4);
+
+    auto full_policy       = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto local_swa_policy  = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    local_swa_policy.local_only_state = true;
+    auto swa_policy        = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa_policy.enable_prefix_reuse    = true;
+    swa_policy.sliding_window_size    = 128;
+
+    test::configureIndexedTestGroups(config,
+                                     {full_spec, swa_spec, swa_spec->clone()},
+                                     {{0}, {1}, {2}},
+                                     {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::SWA},
+                                     {full_policy, local_swa_policy, swa_policy});
+
+    const size_t stride = full_spec->block_size_bytes();
     config.setGroupBlockLayout({"group0", "group1", "group2"}, {8, 8, 8}, {stride, stride, stride}, {0, 0, 0});
     return config;
 }
@@ -689,6 +720,18 @@ TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsUseWideIntermediateProduct
               (std::vector<size_t>{size_t{1} << 30}));
 }
 
+TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsSkipLocalOnlyPlaceholders) {
+    // A zero (blocks, stride) pair is a placeholder for a local-only group set.
+    // It is skipped in the proportional split and yields a zero entry; non-
+    // placeholder entries keep the same share they would have had without it.
+    EXPECT_EQ(computeTierBlockCounts(16 * 4096, {40, 0, 10}, {4096, 0, 8192}),
+              (std::vector<size_t>{10, 0, 2}));
+    EXPECT_EQ(computeTierBlockCounts(4 * 4096, {0, 8}, {0, 4096}),
+              (std::vector<size_t>{0, 4}));
+    // A zero count paired with a non-zero stride is not a valid placeholder.
+    EXPECT_ANY_THROW(computeTierBlockCounts(4096, {0, 8}, {4096, 4096}));
+}
+
 TEST(BlockTreeCacheFactoryUtilityTest, ResolveDiskMountPathUsesLocalRankAndRejectsInvalidShape) {
     EXPECT_EQ(resolveDiskMountPath("/mnt/d0,/mnt/d1,/mnt/d2", 3, 0), "/mnt/d0");
     EXPECT_EQ(resolveDiskMountPath(" /mnt/d0 , /mnt/d1 ", 2, 1), "/mnt/d1");
@@ -990,15 +1033,21 @@ TEST_F(BlockTreeCacheFactoryTest, CpSwaWindowUsesCanonicalKeysWithoutChangingPhy
     }
     policies[0].sliding_window_size = 128;
     test::setTestGroupPolicies(config, policies);
+    const auto        original_config = config;
+    ParallelismConfig parallelism;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    config.finalizeStorageLayout(parallelism);
     auto allocator = initAllocator<CoordinatorCacheManager>(config);
-    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 16));
-    auto cache = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+    auto cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
     auto swa = std::dynamic_pointer_cast<SWAGroupSet>(cache->groupSets().front());
     ASSERT_NE(swa, nullptr);
     EXPECT_EQ(config.group("group0").seqSizePerBlock(), 16u);
-    EXPECT_EQ(config.group("group0").cacheKeyTokenStride(), 16u);
-    EXPECT_EQ(swa->seqSizePerBlock(), 32u);
+    EXPECT_EQ(original_config.canonicalSizePerBlock(), 16u);
+    EXPECT_EQ(config.canonicalSizePerBlock(), 32u);
+    EXPECT_EQ(swa->canonicalSizePerBlock(), 32u);
     EXPECT_EQ(swa->computeReuseBlockCount(8), 4u);
     auto             validator = swa->createMatchValidator();
     GroupSetResource hole;
@@ -1023,6 +1072,62 @@ TEST_F(BlockTreeCacheFactoryTest, SwaGroupSetUsesDeclaredPolicyWindow) {
     ASSERT_NE(swa_group, nullptr);
     EXPECT_EQ(swa_group->groupTags(), tagsFor(config, {0}));
     EXPECT_EQ(swa_group->slidingWindowSize(), 128u);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, SwaCanonicalWindowDoesNotDefaultToPhysicalSpanInWarmupOrCp1) {
+    for (const auto& [cp_size, warmup] : std::vector<std::pair<int, bool>>{{1, false}, {2, false}, {4, true}}) {
+        auto config                = makeSwaConfig(64);
+        config.seq_size_per_block  = 16;
+        auto policy                = config.group("group0").policy;
+        policy.sliding_window_size = 64;
+        test::setTestGroupPolicies(config, {policy});
+        ParallelismConfig parallelism;
+        parallelism.tp_size                            = cp_size;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+        config.finalizeStorageLayout(parallelism, warmup);
+        auto allocator = initAllocator<CoordinatorCacheManager>(config);
+        auto cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+        ASSERT_NE(cache, nullptr);
+        auto swa = std::dynamic_pointer_cast<SWAGroupSet>(cache->groupSets().front());
+        ASSERT_NE(swa, nullptr);
+        const size_t expected_count = !warmup && cp_size == 2 ? 2 : 4;
+        EXPECT_EQ(swa->computeReuseBlockCount(8), expected_count);
+        EXPECT_EQ(swa->canonicalSizePerBlock(), config.canonicalSizePerBlock());
+        EXPECT_EQ(config.group("group0").seqSizePerBlock(), 64u);
+        auto validator = swa->createMatchValidator();
+        EXPECT_FALSE(validator->validate(GroupSetResource{}));
+        const auto  pool        = swa->devicePools().front();
+        const auto  free_before = pool->freeBlocksNum();
+        BlockIdList blocks;
+        for (size_t index = 0; index < expected_count; ++index) {
+            const auto block = pool->malloc();
+            ASSERT_TRUE(block.has_value());
+            pool->incRef(*block);
+            blocks.push_back(*block);
+            GroupSetResource resource;
+            resource.device_blocks = {*block};
+            EXPECT_EQ(validator->validate(resource), index + 1 == expected_count);
+        }
+        pool->decRef(blocks);
+        EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, HostTierProportionalSplitSkipsInterleavedLocalOnlyGroupSet) {
+    const auto config    = makeInterleavedLocalOnlySwaConfig();
+    auto       allocator = initAllocator<CoordinatorCacheManager>(config);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache               = true;
+    kv_cache_config.enable_prefill_partial_tail_reuse = true;
+    kv_cache_config.memory_cache_size_mb              = 1;
+
+    auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
+    ASSERT_NE(cache, nullptr);
+    ASSERT_EQ(cache->groupSets().size(), 3u);
+    EXPECT_NE(cache->groupSets()[0]->hostPool(), nullptr);
+    EXPECT_EQ(cache->groupSets()[1]->hostPool(), nullptr);
+    EXPECT_NE(cache->groupSets()[2]->hostPool(), nullptr);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, HybridTypeBindsExistingTargetGroupsByTag) {
@@ -2469,7 +2574,7 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     auto swa_group = std::dynamic_pointer_cast<SWAGroupSet>(factory_cache->groupSets()[1]);
     ASSERT_NE(swa_group, nullptr);
     EXPECT_EQ(swa_group->slidingWindowSize(), 2u);
-    EXPECT_EQ(swa_group->seqSizePerBlock(), 1u);
+    EXPECT_EQ(swa_group->canonicalSizePerBlock(), 1u);
 
     for (const GroupSetPtr& group : factory_cache->groupSets()) {
         ASSERT_NE(group, nullptr);

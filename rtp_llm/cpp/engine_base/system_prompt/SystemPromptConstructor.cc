@@ -4,7 +4,6 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
@@ -32,7 +31,7 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
         CHECK_AND_RETURN_REF(stream, engine->preRun(generate_input, preRunMode::build_system_prompt));
 
         if (insert_kv_cache) {
-            auto& kv_cache = stream->kvCacheMutable();
+            auto&                                             kv_cache = stream->kvCacheMutable();
             std::unordered_map<std::string, std::vector<int>> blocks_by_group;
             for (const auto& tag : kv_cache.cacheResource().groupTags()) {
                 blocks_by_group.emplace(tag, kv_cache.blocks(0, tag));
@@ -44,11 +43,7 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
                                             /*target_tier=*/rtp_llm::Tier::DEVICE};
             size_t              resident_prefix_length = 0;
             cache_manager->insertIntoCache(insert_info, resident_prefix_length);
-            size_t                              expected_prefix_length = kv_cache.cacheKeys(0).size();
-            const std::shared_ptr<CPSlotMapper> mapper                 = cache_manager->cpSlotMapper();
-            if (mapper && mapper->isSharded()) {
-                expected_prefix_length /= static_cast<size_t>(mapper->cpSize());
-            }
+            const size_t expected_prefix_length = cache_manager->canonicalKeyCount(kv_cache, 0);
             if (resident_prefix_length != expected_prefix_length) {
                 return absl::FailedPreconditionError(
                     "system prompt resident cache insertion incomplete: task_id=" + task_id

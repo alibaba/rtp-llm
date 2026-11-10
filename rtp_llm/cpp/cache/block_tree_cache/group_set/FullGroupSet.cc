@@ -7,7 +7,7 @@ std::unique_ptr<MatchValidator> FullGroupSet::createMatchValidator() {
 }
 
 size_t FullGroupSet::computeReuseBlockCount(size_t matched_block_count) const {
-    return group(groupTags().front()).reuseBlockCount(matched_block_count);
+    return matched_block_count;
 }
 
 // FullMatchValidator

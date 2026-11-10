@@ -85,6 +85,8 @@ public:
     ~PyWrappedModel();
 
     GptModelOutputs            forward(const GptModelInputs& inputs) override;
+    bool                       supportsSparseCacheSave() const override;
+    GptModelOutputs            forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
     void                       releaseBuffers() override;
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
@@ -136,6 +138,9 @@ private:
     // CP path's skip_final_layernorm=true) and returns the small [num_lm, hidden]
     // both as hidden_states and all_hidden_states.
     GptModelOutputs forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs);
+    MicroBatchPlan  planMicroBatches(const GptModelInputs& inputs);
+    std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
+                    splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
     void            holdInputsHostBuffers(const GptModelInputs& inputs);
     GraphBase*      selectGraphRunner(const torch_ext::PyAttentionInputs& attention_inputs) const;
     CudaGraphState& selectGraphState(const torch_ext::PyAttentionInputs& attention_inputs);
@@ -597,7 +602,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         std::make_shared<CacheStoreAsyncWriter>(static_cast<int>(params.parallelism_config.local_rank),
                                                 cache_manager_,
                                                 model_id_,
-                                                params.mtp_cache_config_index);
+                                                params.mtp_cache_config_index,
+                                                std::nullopt,
+                                                params.cache_store_producer_cp_topology);
 
     if (py::hasattr(py_model_, "has_mtp_hidden_buffer")) {
         has_mtp_hidden_buffer_ = py_model_.attr("has_mtp_hidden_buffer")().cast<bool>();
