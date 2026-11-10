@@ -279,6 +279,23 @@ class ModelFactory:
         import os as _os
         if _os.environ.get("DSV41_DEBUG_MEM") == "1":
             import torch as _torch
+            import traceback as _tb
+            _orig_empty = _torch.empty
+            def _dbg_empty(*a, **k):
+                t = _orig_empty(*a, **k)
+                try:
+                    nbytes = t.numel() * t.element_size()
+                    if nbytes > 1 << 30:
+                        print(
+                            f"[mem] torch.empty {nbytes / 2**30:.2f} GiB "
+                            f"shape={tuple(t.shape)} dtype={t.dtype}",
+                            flush=True,
+                        )
+                        _tb.print_stack(limit=12)
+                except Exception:
+                    pass
+                return t
+            _torch.empty = _dbg_empty
             if _torch.cuda.is_available():
                 _torch.cuda.memory._record_memory_history(max_entries=200000)
         # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs
