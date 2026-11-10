@@ -67,13 +67,17 @@ def _sparse_fwd_reference(q, kv, indices, sm_scale, attn_sink, topk_length):
         if attn_sink is not None:
             denom = denom + torch.exp(attn_sink.float().view(1, H) - row_max)
         acc = torch.einsum("thk,tkd->thd", exp_logits, keys)
-        any_valid = valid[start:stop].any(dim=-1).unsqueeze(1)  # [t, 1]
-        out = torch.where(any_valid, acc / denom.clamp_min(1e-38).unsqueeze(-1), acc)
+        any_valid = valid[start:stop].any(dim=-1)  # [t]
+        out = torch.where(
+            any_valid.view(-1, 1, 1),
+            acc / denom.clamp_min(1e-38).unsqueeze(-1),
+            acc,
+        )
         outs.append(out.to(q.dtype))
         maxes.append(row_max)
         lses.append(
             torch.where(
-                any_valid,
+                any_valid.view(-1, 1),
                 torch.log(raw_sum.clamp_min(1e-38)),
                 torch.full_like(row_max, float("inf")),
             )
