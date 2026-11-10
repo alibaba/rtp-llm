@@ -286,7 +286,18 @@ class GdnDecodeConvGateSM90Test(unittest.TestCase):
 
     @torch.inference_mode()
     def test_real_decode_bitwise_and_graph_page_replay(self):
-        old, new = self.make_pair()
+        self.check_decode_bitwise_and_graph_page_replay(8)
+
+    @torch.inference_mode()
+    def test_tp1_decode_bitwise_and_graph_page_replay(self):
+        self.check_decode_bitwise_and_graph_page_replay(1)
+
+    @torch.inference_mode()
+    def test_tp4_decode_bitwise_and_graph_page_replay(self):
+        self.check_decode_bitwise_and_graph_page_replay(4)
+
+    def check_decode_bitwise_and_graph_page_replay(self, tp):
+        old, new = self.make_pair(tp)
         with patch.object(new.decode_gdn, "_conv1d",
                           side_effect=AssertionError("Eligible call fell back")):
             for batch in (1, 16, 32, 64):
@@ -373,6 +384,30 @@ class GdnDecodeConvGateSM90Test(unittest.TestCase):
     def test_tp2_decode_graph_refreshes_paged_state(self):
         self.check_unpadded_decode_graph(2, tuple((b, (2048, 2048)) for b in (16, 32, 64)))
 
+    @torch.inference_mode()
+    def test_tp1_decode_graph_refreshes_paged_state(self):
+        self.check_unpadded_decode_graph(
+            1,
+            (
+                (1, (8192, 32768)),
+                (16, (2048, 2048)),
+                (32, (2048, 2048)),
+                (64, (2048, 2048)),
+            ),
+        )
+
+    @torch.inference_mode()
+    def test_tp4_decode_graph_refreshes_paged_state(self):
+        self.check_unpadded_decode_graph(
+            4,
+            (
+                (1, (8192, 32768)),
+                (16, (2048, 2048)),
+                (32, (2048, 2048)),
+                (64, (2048, 2048)),
+            ),
+        )
+
     def check_unpadded_decode_graph(self, tp, cases):
         old, new = self.make_pair(tp=tp)
         with patch.object(
@@ -434,14 +469,89 @@ class GdnDecodeConvGateSM90Test(unittest.TestCase):
 
     @torch.inference_mode()
     def test_target_verify_uses_original_multi_token_path(self):
-        old, new = self.make_pair()
-        hidden, initial, inputs, meta = self.make_decode_case(new, 3, tokens=2)
-        original, fused = initial.clone(), initial.clone()
-        expected = self.run_decode(old, hidden, original, inputs, meta)
-        with patch.object(new.decode_gdn, "_decode_conv_gate",
-                          side_effect=AssertionError("S>1 invoked the S=1 fusion")):
-            actual = self.run_decode(new, hidden, fused, inputs, meta)
-        self.assert_exact_decode(expected, actual, original, fused, initial)
+        for tp in (1, 2, 4, 8):
+            with self.subTest(tp=tp):
+                old, new = self.make_pair(tp)
+                hidden, initial, inputs, meta = self.make_decode_case(
+                    new, 3, tokens=2
+                )
+                original, fused = initial.clone(), initial.clone()
+                expected = self.run_decode(old, hidden, original, inputs, meta)
+                with patch.object(
+                    new.decode_gdn,
+                    "_decode_conv_gate",
+                    side_effect=AssertionError("S>1 invoked the S=1 fusion"),
+                ):
+                    actual = self.run_decode(new, hidden, fused, inputs, meta)
+                self.assert_exact_decode(expected, actual, original, fused, initial)
+
+    @torch.inference_mode()
+    def test_conv_gate_rejects_unsupported_inputs_without_state_writes(self):
+        from rtp_llm.models_py.modules.qwen4_exp.gdn_decode_conv_gate_triton import (
+            try_decode_conv_gate,
+        )
+
+        for tp in (1, 2, 4, 8):
+            with self.subTest(tp=tp):
+                batch, dim, heads = 2, 10240 // tp, 48 // tp
+
+                def bf16(*shape):
+                    return torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+
+                args = dict(
+                    x=bf16(batch, dim),
+                    weight=bf16(dim, 4),
+                    state=bf16(5, 3, dim),
+                    block_map=torch.tensor(
+                        [[1, 2], [3, 4]], device="cuda", dtype=torch.int32
+                    ),
+                    lengths=torch.full(
+                        (batch,), 65, device="cuda", dtype=torch.int32
+                    ),
+                    a=bf16(batch, heads),
+                    b=bf16(batch, heads),
+                    a_log=torch.zeros(heads, device="cuda"),
+                    dt_bias=torch.zeros(heads, device="cuda"),
+                    page=64,
+                )
+                self.assertIsNotNone(try_decode_conv_gate(**args))
+                snapshot = args["state"].clone()
+                # These are structural checks only: no host read of live
+                # lengths/page IDs is introduced into the production wrapper.
+                rejected = (
+                    dict(page=32),
+                    dict(x=bf16(0, dim)),
+                    dict(x=bf16(129, dim)),
+                    dict(x=bf16(batch, 640), a=bf16(batch, 3)),
+                    dict(x=bf16(batch, dim * 2)[:, ::2]),
+                    dict(weight=args["weight"].t().contiguous().t()),
+                    dict(state=args["state"].float()),
+                    dict(a=bf16(batch, heads * 2)[:, ::2]),
+                    dict(a_log=args["a_log"].half()),
+                    dict(lengths=args["lengths"].long()),
+                    dict(
+                        lengths=torch.ones(
+                            batch * 2, device="cuda", dtype=torch.int32
+                        )[::2]
+                    ),
+                    dict(block_map=None),
+                    dict(block_map=args["block_map"][:, ::2]),
+                )
+                for override in rejected:
+                    with self.subTest(rejected=tuple(override)):
+                        candidate = {**args, **override}
+                        state_before = candidate["state"].clone()
+                        self.assertIsNone(try_decode_conv_gate(**candidate))
+                        self.assertTrue(
+                            torch.equal(candidate["state"], state_before)
+                        )
+                        self.assertTrue(torch.equal(args["state"], snapshot))
+                for capability in ((8, 0), (10, 0), (12, 0)):
+                    with patch.object(
+                        torch.cuda, "get_device_capability", return_value=capability
+                    ):
+                        self.assertIsNone(try_decode_conv_gate(**args))
+                    self.assertTrue(torch.equal(args["state"], snapshot))
 
 
 if __name__ == "__main__":

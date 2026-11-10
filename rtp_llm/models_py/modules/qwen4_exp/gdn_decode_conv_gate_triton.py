@@ -92,10 +92,13 @@ def try_decode_conv_gate(
     if x.ndim != 2 or a.ndim != 2:
         return None
     dim, heads, block = x.shape[1], a.shape[1], 256
+    # Qwen4 has global Hk=16, Hv=48 and D=128. TP1/2/4/8 preserves
+    # Hv/Hk=3 and gives QKV widths 10240/5120/2560/1280. Each width is
+    # divisible by BLOCK=256, so every channel CTA is full and independent.
     if not (
         block_map is not None
         and lengths is not None
-        and (dim, heads) in ((1280, 6), (5120, 24))
+        and (dim, heads) in ((10240, 48), (5120, 24), (2560, 12), (1280, 6))
         and 0 < x.shape[0] <= 128
         and x.is_cuda
         and torch.version.hip is None

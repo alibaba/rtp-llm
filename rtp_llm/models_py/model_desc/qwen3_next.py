@@ -1185,7 +1185,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             and self._qkvz_ba_fused
             and norm_activation == "sigmoid"
             and (attn_tp_size, self.local_num_k_heads, self.local_num_v_heads)
-            in ((8, 2, 6), (2, 8, 24))
+            in ((1, 16, 48), (2, 8, 24), (4, 4, 12), (8, 2, 6))
             and self.head_k_dim == self.head_v_dim == 128
             and torch.version.hip is None
         ):

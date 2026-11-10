@@ -34,14 +34,19 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
 
 
 def _use_sm90_bv16_chunk_h(k, w, u, gk, state_dtype, num_sequences):
-    """Opt in for Qwen4 TP8/TP2 SM90 single-sequence prefill."""
+    """Opt in for Qwen4 TP1/2/4/8 SM90 single-sequence prefill."""
     return (
         env_flag("QWEN4_GDN_SM90_BV16")
         and not is_amd
         and num_sequences == 1
         and k.is_cuda
         and (k.shape[-2], u.shape[-2], k.shape[-1], u.shape[-1])
-        in ((2, 6, 128, 128), (8, 24, 128, 128))
+        in (
+            (16, 48, 128, 128),
+            (8, 24, 128, 128),
+            (4, 12, 128, 128),
+            (2, 6, 128, 128),
+        )
         and k.dtype == w.dtype == u.dtype == torch.bfloat16
         and state_dtype == torch.float32
         and gk is None

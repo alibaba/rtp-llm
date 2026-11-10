@@ -119,17 +119,27 @@ class ScatterQKVL2NormSM90Test(unittest.TestCase):
                         self.check_chunk(lengths, stress)
 
     def test_tp2_exact_qkv_and_chunk_boundaries(self):
-        geometry = (8, 24, 128, 128)
+        self.check_sharded_qkv_and_chunk_boundaries((8, 24, 128, 128))
+
+    def test_tp1_exact_qkv_and_chunk_boundaries(self):
+        self.check_sharded_qkv_and_chunk_boundaries((16, 48, 128, 128))
+
+    def test_tp4_exact_qkv_and_chunk_boundaries(self):
+        self.check_sharded_qkv_and_chunk_boundaries((4, 12, 128, 128))
+
+    def check_sharded_qkv_and_chunk_boundaries(self, geometry):
         with patch.dict(os.environ, {FLAG: "1", "QWEN4_GDN_SM90_BV16": "1"}):
-            for length in (8192, 32768):
-                with self.subTest(length=length):
+            # Include a partial final chunk and more than one packed sequence.
+            for lengths in ((2048, 31), (8192,), (32768,)):
+                length = sum(lengths)
+                with self.subTest(geometry=geometry, lengths=lengths):
                     x = self.packed(length, True, geometry)
                     q, k, v = scatter_qkv(x, *geometry)
                     fused = try_scatter_qkv_l2norm_sm90(x, *geometry)
                     self.assertIsNotNone(fused)
                     for actual, expected in zip(fused, (l2norm_fwd(q), l2norm_fwd(k), v)):
                         self.assert_bytes_equal(actual, expected)
-                    self.check_chunk((length,), False, geometry)
+                    self.check_chunk(lengths, False, geometry)
 
     def check_chunk(self, lengths, stress, geometry=GEOMETRY):
         m = sum(lengths)

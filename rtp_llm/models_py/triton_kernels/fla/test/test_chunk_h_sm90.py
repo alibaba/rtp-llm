@@ -81,6 +81,12 @@ class ChunkHSM90Test(unittest.TestCase):
     def test_tp2_opt_in_dispatch_and_exact_long_sequence_outputs(self):
         self.check_exact_long_sequences((8, 24), (8192, 32768))
 
+    def test_tp1_opt_in_dispatch_and_exact_long_sequence_outputs(self):
+        self.check_exact_long_sequences((16, 48), (65, 8192, 32768))
+
+    def test_tp4_opt_in_dispatch_and_exact_long_sequence_outputs(self):
+        self.check_exact_long_sequences((4, 12), (65, 8192, 32768))
+
     def check_exact_long_sequences(self, heads, lengths):
         recorder = KernelRecorder(
             chunk_delta_h.chunk_gated_delta_rule_fwd_kernel_h_blockdim64
