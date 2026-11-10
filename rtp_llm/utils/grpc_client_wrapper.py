@@ -83,6 +83,7 @@ class GrpcClientWrapper:
         server_port: int,
         dp_addresses: Optional[List[str]] = None,
         client_config: Optional[Dict[str, int]] = None,
+        awi_addresses: Optional[List[str]] = None,
     ):
         self.server_port = server_port
         self.address = f"localhost:{server_port}"
@@ -90,6 +91,9 @@ class GrpcClientWrapper:
         self.stub = None
         # All DP addresses for broadcast operations (defaults to local address)
         self.dp_addresses = dp_addresses if dp_addresses else [self.address]
+        # AWI probes arm and collect on EVERY rank's collector (TP workers
+        # included), so they address all members, not just DP leaders.
+        self.awi_addresses = awi_addresses if awi_addresses else self.dp_addresses
         self._dp_channels: Dict[str, Any] = {}
         self._dp_stubs: Dict[str, Any] = {}
         self._client_config = client_config or {}
@@ -366,7 +370,7 @@ class GrpcClientWrapper:
             context_tokens=int(req.get("context_tokens", 0)),
         )
         errors = []
-        for addr in self.dp_addresses:
+        for addr in self.awi_addresses:
             try:
                 await self._ensure_dp_connection(addr)
                 await self._dp_stubs[addr].AwiBarrier(request, timeout=10)
@@ -385,7 +389,7 @@ class GrpcClientWrapper:
         request = obs_pb(operation_id=str(req.get("operation_id", "")))
         backends: List[Dict[str, Any]] = []
         errors = []
-        for addr in self.dp_addresses:
+        for addr in self.awi_addresses:
             try:
                 await self._ensure_dp_connection(addr)
                 response = await self._dp_stubs[addr].AwiObservations(request, timeout=60)

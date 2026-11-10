@@ -434,11 +434,18 @@ class FrontendApp(object):
             world_info=world_info,
             parallelism_config=engine_config.parallelism_config,
         )
+        # AWI observations must inspect EVERY rank's collector (per-rank step
+        # aggregates, capture and placement rows), not just the DP leaders;
+        # each member runs its own model_rpc server on its own port.
+        awi_addresses = [
+            f"{member.ip}:{member.rpc_server_port}" for member in world_info.members
+        ]
         client_config = self.py_env_configs.grpc_config.get_client_config()
         self.grpc_client = GrpcClientWrapper(
             self.server_config.rpc_server_port,
             dp_addresses=dp_addresses,
             client_config=client_config,
+            awi_addresses=awi_addresses,
         )
 
         # AWI: ensure the outbound-fetch audit probe runs in this frontend
