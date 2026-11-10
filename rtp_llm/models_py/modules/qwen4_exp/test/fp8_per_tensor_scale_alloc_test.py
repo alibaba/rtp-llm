@@ -5,7 +5,7 @@ per step (~9ms of host dispatch): every fp8 GEMM input quantization goes
 through ``scaled_fp8_per_tensor_quant(scale=None)`` and allocates its
 scale accumulator with ``torch.zeros(1)``. The accumulator is zeroed only
 because ``per_tensor_absmax_kernel`` reduces with atomicMax, which needs a
-zero initial value — a per-device persistent buffer reset with ``zero_()``
+zero initial value — a per-stream persistent buffer reset with ``zero_()``
 (one aten call on a cached tensor) replaces the per-call ``zeros(1)``
 allocation while keeping the exact kernel semantics.
 
@@ -16,8 +16,8 @@ This test locks the contract:
   all-zero and large-magnitude inputs;
 * back-to-back calls with decreasing amax never observe a stale scale
   (the accumulator is reset before every dynamic call);
-* one dynamic call enqueues no ``aten::zero_``/``aten::fill_`` op and no
-  fill kernel (the zeros allocation itself is gone).
+* the warm path reuses its scale tensor, and different streams never share
+  that tensor.
 """
 
 import json
@@ -93,7 +93,7 @@ class Fp8PerTensorScaleAllocTest(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_dynamic_scale_is_a_shared_accumulator(self):
         # Locked documented behavior: the returned dynamic scale aliases one
-        # per-device accumulator, so a reference held across the next dynamic
+        # per-stream accumulator, so a reference held across the next dynamic
         # call observes the newer value. Callers must consume (enqueue the
         # consumer on the same stream) before quantizing again.
         x1 = torch.full((64, 128), 300.0, device=_DEV, dtype=torch.bfloat16)
@@ -103,11 +103,29 @@ class Fp8PerTensorScaleAllocTest(unittest.TestCase):
         self.assertIs(s1, s2)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_dynamic_scale_isolated_across_streams(self):
+        big = torch.full((64, 128), 300.0, device=_DEV, dtype=torch.bfloat16)
+        small = torch.full_like(big, 3.0)
+        main = torch.cuda.current_stream()
+        other = torch.cuda.Stream()
+        other.wait_stream(main)
+        _, main_scale = self._quant(big)
+        with torch.cuda.stream(other):
+            _, other_scale = self._quant(small)
+            _, reused = self._quant(small)
+        main.wait_stream(other)
+        self.assertIs(other_scale, reused)
+        self.assertNotEqual(main_scale.data_ptr(), other_scale.data_ptr())
+        fp8_max = torch.finfo(torch.float8_e4m3fn).max
+        self.assertAlmostEqual(main_scale.item(), 300.0 / fp8_max, places=6)
+        self.assertAlmostEqual(other_scale.item(), 3.0 / fp8_max, places=6)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_dynamic_quant_allocates_no_scale_tensor(self):
         from torch.profiler import ProfilerActivity, profile
 
         x = torch.randn(64, 512, device=_DEV, dtype=torch.bfloat16)
-        self._quant(x)  # warm the per-device accumulator outside the window
+        self._quant(x)  # warm the per-stream accumulator outside the window
         torch.cuda.synchronize()
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
             self._quant(x)
