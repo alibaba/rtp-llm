@@ -6,7 +6,7 @@ import sys
 import types
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -127,6 +127,19 @@ class MegaMoeSEWrapperTest(unittest.TestCase):
 
 
 class MegaMoeSEBufferCompatibilityTest(unittest.TestCase):
+    def test_prepacked_dispatch_accepts_activation_clamp(self):
+        module = object.__new__(mega_moe_se.GLM5MegaMoESE)
+        module._check_shared_expert_ready = Mock(
+            side_effect=RuntimeError("shared expert check reached")
+        )
+        hidden = torch.empty((1, 8), dtype=torch.bfloat16)
+
+        with (
+            patch.dict(sys.modules, {"deep_gemm": types.ModuleType("deep_gemm")}),
+            self.assertRaisesRegex(RuntimeError, "shared expert check reached"),
+        ):
+            module.forward_prepacked(hidden, activation_clamp=10.0)
+
     def test_deep_gemm_261_buffer_need_not_expose_shared_count(self):
         cfg = SimpleNamespace(
             layer_id=3,

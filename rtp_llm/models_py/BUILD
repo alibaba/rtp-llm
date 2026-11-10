@@ -143,6 +143,15 @@ py_test(
 )
 
 py_test(
+    name = "glm5_mega_moe_se_test",
+    srcs = ["modules/glm5_mega_moe/test_mega_moe_se.py"],
+    main = "modules/glm5_mega_moe/test_mega_moe_se.py",
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
+py_test(
     name = "hy4_attention_sink_test",
     srcs = ["modules/factory/attention/cuda_mla_impl/test_hy4_sink.py"],
     main = "modules/factory/attention/cuda_mla_impl/test_hy4_sink.py",

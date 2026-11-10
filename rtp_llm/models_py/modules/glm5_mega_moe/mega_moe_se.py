@@ -5,6 +5,8 @@ shared API.  It does not use the legacy ``fp8_fp4_mega_moe_fused`` operator,
 its dedicated buffer type, or an external shared intermediate workspace.
 """
 
+# allow: SIZE_OK — fused FP8xFP4 shared-expert kernel adapter
+
 from __future__ import annotations
 
 import logging
@@ -299,7 +301,11 @@ class GLM5MegaMoESE(GLM5MegaMoE):
         indices: torch.Tensor | None,
         *,
         inputs_prepacked: bool,
+        activation_clamp: Optional[float] = None,
     ) -> torch.Tensor:
+        # Fused shared experts keep their existing unclamped behavior. Accept
+        # the base-class argument so inherited prepacked dispatch stays valid.
+        del activation_clamp
         import deep_gemm
 
         self._check_shared_expert_ready()
