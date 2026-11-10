@@ -17,6 +17,10 @@ from rtp_llm.models_py.modules.dsv41._fused_inv_rope_fp8_quant_triton import (
 
 def is_supported(o, freqs, weight, weight_scale) -> bool:
     """Static gate, safe to evaluate during graph capture; no device reads."""
+    if weight is None or weight_scale is None:
+        # Pre-SM100 reference builds deliberately skip the MN-major TMA
+        # packing (DeepGEMM JIT cannot target sm80) and keep None buffers.
+        return False
     if (
         o.device.type != "cuda"
         or o.dtype != torch.bfloat16
