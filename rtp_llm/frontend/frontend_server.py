@@ -788,7 +788,9 @@ class FrontendServer(object):
             request_id,
             headers,
         )
-        return ORJSONResponse(result)
+        return ORJSONResponse(
+            result, headers={"X-AWI-Request-ID": str(external_id)}
+        )
 
     def awi_barrier(self, req: Dict[str, Any]):
         from rtp_llm.awi_telemetry import get_telemetry
