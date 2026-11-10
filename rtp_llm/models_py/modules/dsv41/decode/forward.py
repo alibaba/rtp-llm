@@ -382,9 +382,15 @@ def forward_layers(
         DecodeEngramPrefetch,
     )
 
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print("[cap] prefetch construct", flush=True)
     prefetch = DecodeEngramPrefetch(v4, attn_metadata)
+    if os.environ.get("DSV41_TRACE_CAPTURE"):
+        print("[cap] prefetch done", flush=True)
     try:
         for layer_idx, layer in enumerate(v4.layers):
+            if os.environ.get("DSV41_TRACE_CAPTURE"):
+                print(f"[cap] layer {layer_idx} start", flush=True)
             prefetch.before_layer(layer_idx)
             with layer_forward_range(layer_idx):
                 h = forward_decode_layer(
