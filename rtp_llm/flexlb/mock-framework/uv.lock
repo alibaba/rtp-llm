@@ -17,22 +17,22 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "pyyaml" },
-    { name = "zstandard" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
+    { name = "zstandard" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "pyyaml", specifier = ">=6,<7" },
-    { name = "zstandard", specifier = ">=0.23,<1" },
-]
+requires-dist = [{ name = "pyyaml", specifier = ">=6,<7" }]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8,<9" }]
+dev = [
+    { name = "pytest", specifier = ">=8,<9" },
+    { name = "zstandard", specifier = ">=0.23,<1" },
+]
 
 [[package]]
 name = "iniconfig"

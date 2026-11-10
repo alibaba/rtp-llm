@@ -134,7 +134,7 @@ def test_vision_playback_through_real_master(tmp_path):
         tmp_path / "requests.mckidx",
         (
             (
-                [10, 20 if i < 4 else 21],
+                2 if i < 4 else 3,
                 i * 250,
                 lengths[i % 4],
                 50,
@@ -142,7 +142,8 @@ def test_vision_playback_through_real_master(tmp_path):
             )
             for i in range(8)
         ),
-        media=[(1, 56, 28), (2, 56, 28)],
+        chains=[(1, 0, 2), (3, 1, 1)],
+        media=[(56, 28), (56, 28)],
     )
     path = tmp_path / "case.yaml"
     path.write_text(yaml.safe_dump(data))

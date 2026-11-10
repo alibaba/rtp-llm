@@ -6,14 +6,14 @@ build-backend = "setuptools.build_meta"
 name = "flexlb-mock-framework"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["PyYAML>=6,<7", "zstandard>=0.23,<1"]
+dependencies = ["PyYAML>=6,<7"]
 
 [project.scripts]
 mock-case = "mock_framework.case:main"
 mock-view = "mock_framework.view.__main__:main"
 
 [dependency-groups]
-dev = ["pytest>=8,<9"]
+dev = ["pytest>=8,<9", "zstandard>=0.23,<1"]
 
 [tool.setuptools.packages.find]
 where = ["python"]

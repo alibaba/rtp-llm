@@ -299,7 +299,9 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
 
     source = tmp_path / "traffic.mckidx"
     write_inputs(
-        source, (([1, 2, 3], 0, {"max_output_tokens": 3}, 50, []) for _ in range(800))
+        source,
+        ((3, 0, {"max_output_tokens": 3}, 50, []) for _ in range(800)),
+        chains=[(1, 0, 3)],
     )
     steps = [
         step("leader", "master/get", args={"is_leader": True}, expect={"count": 1}),

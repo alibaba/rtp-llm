@@ -262,11 +262,12 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
     }
     count = 720 if large_input else 12
     source = tmp_path / "requests.mckidx"
+    text_length = 1024 if large_input else 3
     write_inputs(
         source,
         (
             (
-                [index + 10000] * (1024 if large_input else 3),
+                (index + 1) * text_length,
                 0,
                 {"max_output_tokens": 3},
                 50,
@@ -274,6 +275,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
             )
             for index in range(count)
         ),
+        chains=[(index * text_length + 1, 0, text_length) for index in range(count)],
     )
     if large_input:
         start = data["phases"][0]["steps"][0]
@@ -525,7 +527,7 @@ def test_file_input_resolves_against_case_and_only_sends_metadata(
     tmp_path, monkeypatch
 ):
     source = tmp_path / "requests.mckidx"
-    write_inputs(source, [([1], 0, {"max_output_tokens": 2}, 50, [])])
+    write_inputs(source, [(1, 0, {"max_output_tokens": 2}, 50, [])])
     ctx = context()
     ctx.runtime.case = SimpleNamespace(directory=tmp_path)
     calls = []
@@ -541,7 +543,10 @@ def test_file_input_resolves_against_case_and_only_sends_metadata(
     assert calls[0]["requests_file"] == str(source) and "requests" not in calls[0]
 
 
-@pytest.mark.parametrize("source", ["", "https://example.com/data", None])
+@pytest.mark.parametrize(
+    "source",
+    ["", "https://example.com/data", None, "requests.jsonl", "basic.mckidx.json"],
+)
 def test_missing_or_invalid_input_source_fails_contract(source):
     value = args()
     value["requests_file"] = source

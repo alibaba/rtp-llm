@@ -253,22 +253,25 @@ Python 在 stop 或最终清理时收集异常，不增加实时发压监控。�
 
 图片位置用「前面有几个纯文本 token」表示。Client 在发送前插入一个图片占位，保留原有的 ViT 选路、元数据查询和 P/D 调度。图片引用来自数据集的匿名 ID，使用 `mock.vit.skip.download: true` 配置从记录的宽高模拟图片。参考展开长度与 Mock ViT 输出不一致时，Client 输出告警，继续用实际长度生成路由块键。
 
-用以下命令离线构建共享文件：
+[Basic 数据集](../data/traffic/basic.mckidx) 有 20 条请求，共享前两个文本 token，从第三个 token 开始分叉。下面用 JSON 摘录前两条请求和它们引用的数据表。
 
-```sh
-uv run --locked python scripts/build-indexed-traffic.py anonymous.jsonl traffic.mckidx
+```json
+{
+  "format": "MCKINDEX",
+  "prefix_chains": [
+    {"first": 1, "parent": 0, "length": 3},
+    {"first": 4, "parent": 2, "length": 1}
+  ],
+  "media": [],
+  "output_caps": [3],
+  "requests": [
+    {"arrival_ms": 0, "leaf": 3, "observed_output_tokens": -1, "priority": 50, "output_cap_id": 1, "images": []},
+    {"arrival_ms": 0, "leaf": 4, "observed_output_tokens": -1, "priority": 50, "output_cap_id": 1, "images": []}
+  ]
+}
 ```
 
-源文件是已脱敏的 JSONL，按到达顺序写请求，媒体 ID 从 1 连续编号并在引用前定义。示例：
-
-```jsonl
-["media",1,1024,768]
-["tokens",[10,20,30,40],0,{"observed_output_tokens":3,"max_output_tokens":8192},50,[[1,2,924]]]
-["tokens",[10,20,31,41],20,{"max_output_tokens":8192},50,[]]
-["end",2]
-```
-
-`tokens` 行依次为匿名文本符号、到达偏移毫秒、输出长度对象、优先级、图片列表。输出对象中的实际量和请求上限均可省略，空对象表示两项未知。实际量只填写可信观测；零表示确实没有输出，当前正常生成回放会在发送该条前报告不支持。图片三元组是媒体 ID、前置文本 token 数、参考展开长度（0 表示缺省）。匿名符号在一轮中用同一映射，保存逐 token 相等关系。输入必须在采集端完成脱敏。构建器在磁盘维护临时前缀索引，逐条匹配并封装结果。末行 `end` 包含请求总数。
+`parent: 2` 表示节点 4 接在节点 2 后面。两条请求的 `leaf` 分别指向节点 3 和 4，`output_cap_id: 1` 都引用输出上限表的第一项。Basic Case 用固定 QPS 计算发送时刻，所以数据中的到达偏移都是 0。带图数据集的每个图片引用依次记录媒体 ID、插入位置和参考展开 token 数，其中媒体 ID 从 1 开始。Case 的回放输入使用二进制 `.mckidx`。
 
 #### 回放与收尾
 
