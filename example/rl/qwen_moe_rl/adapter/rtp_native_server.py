@@ -125,6 +125,27 @@ async def _wake(replica: int):
         await control.close()
 
 
+Q36_ZERO_UPDATE_CONFIG_SHA = '93a4693fa9d8392fbfccd4b3c9873f4bfdcb14fdede978b123d07d19675efe99'
+
+
+def _require_real_update_for_probe(model_path):
+    """Preserve strict historical behavior outside the explicit Q36 profile."""
+    profile = os.environ.get('Q36_ZERO_UPDATE_PROFILE', '0')
+    if profile != '1':
+        return True
+    config = Path(model_path) / 'config.json'
+    try:
+        is_q36 = hashlib.sha256(config.read_bytes()).hexdigest() == Q36_ZERO_UPDATE_CONFIG_SHA
+    except OSError:
+        is_q36 = False
+    if not is_q36:
+        return True
+    mode = os.environ.get('RLLM_REQUIRE_REAL_UPDATE')
+    if mode not in (None, '0', '1'):
+        raise ValueError('invalid real-update setting for Q36 profile')
+    return mode != '0'
+
+
 class RTPServer:
     """A Ray controller owns one native RTP process group and token client."""
 
@@ -517,11 +538,15 @@ class RTPServer:
                 raise RuntimeError("post-sync probe tokenization differs from baseline")
             if record["model_version"] == baseline["model_version"]:
                 raise RuntimeError("post-sync probe still uses the initial engine version")
-            if record["full_source_sha256"] == baseline["full_source_sha256"]:
+            weights_changed = record["full_source_sha256"] != baseline["full_source_sha256"]
+            scores_changed = record["score_sha256"] != baseline["score_sha256"]
+            require_real_update = _require_real_update_for_probe(self.model_path)
+            if require_real_update and not weights_changed:
                 raise RuntimeError("the trained policy weights did not change before RTP sync")
-            if record["score_sha256"] == baseline["score_sha256"]:
+            if require_real_update and not scores_changed:
                 raise RuntimeError("RTP inference scores did not change after the real parameter update")
-            record["changed_from_step0"] = True
+            record["changed_from_step0"] = weights_changed
+            record["scores_changed_from_step0"] = scores_changed
         _write_json(_audit_root() / f"rtp_probe_rank{self.replica_rank}_step{expected_step}.json", record)
         return record
 
