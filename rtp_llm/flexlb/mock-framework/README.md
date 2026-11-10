@@ -100,7 +100,7 @@ View 只读已完成实验，复制 TSDB 后启动独立指标服务，不重跑
 
 多 Master 使用不同的回环 IP、相同服务端口。Linux 默认支持 127/8；macOS 未配置所需回环别名时无法运行双 Master，不会自动修改系统网络。每次实验独占 ZK 和选举路径。
 
-Case 字段、相对路径、共享资源、引用、断言、扩缩容与 Master 停启用法见 [Case 指南](docs/case-guide.md)。
+新增 Case、编写 YAML 和扩展接口见 [Case 指南](docs/case-guide.md)。
 
 ## 开发检查与详细文档
 
@@ -112,7 +112,7 @@ PROMETHEUS_BIN="$PROMETHEUS_BIN" ./scripts/test-framework.sh
 
 `test-framework.sh` 会先调用 `build-java.sh`，再运行 Python 测试。缺少 Prometheus 时会跳过真实采集集成测试；macOS 缺少回环别名时跳过双 Master 测试。报告检查结果时说明跳过项，测试通过不代替完整 Case 验收。
 
-- [Case 指南](docs/case-guide.md)：配置、路径、Step/ref、断言、启动配方与生命周期操作。
+- [Case 指南](docs/case-guide.md)涵盖目录约定、YAML 字段、门禁和接口扩展。
 - [在 AoneCI 运行 Case](docs/ci-case.md)：构建环境镜像、指定源码和 Case、查看结果。
 - [组件配置与指标参考](docs/component-reference.md)：Master、RTP、ViT、KV、Compute/EOS、Client 协议及指标口径。
 - [架构与设计边界](docs/architecture.md)：组件职责、Scheduler/EngineLoop、协议和资源生命周期、接口扩展。
