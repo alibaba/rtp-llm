@@ -4,6 +4,10 @@ import torch
 
 
 def dspark_softmax(logits: torch.Tensor) -> torch.Tensor:
+    if torch.version.hip is not None:
+        # FlashInfer's sampling module is CUDA-only.  The reference softmax is
+        # exact and keeps the ROCm draft path runnable without a feature flag.
+        return torch.softmax(logits, -1)
     if not (
         logits.is_cuda
         and logits.dtype == torch.float32

@@ -153,11 +153,11 @@ class QuantizedLinear(nn.Module):
         self.weight = weight
         self.scale = scale
         self.scale_gemm = scale_gemm
-        if self.scale_gemm is None:
+        if self.scale_gemm is None and torch.version.hip is None:
             self.scale_gemm = prepare_fp4_weight_scale_for_deepgemm(
                 scale, self.out_features, self.in_features
             )
-        if self.scale_gemm.dtype != torch.int32:
+        if self.scale_gemm is not None and self.scale_gemm.dtype != torch.int32:
             raise TypeError(
                 f"expected packed FP4 scale int32, got {self.scale_gemm.dtype}"
             )
@@ -212,10 +212,22 @@ class QuantizedLinear(nn.Module):
         )
         return out.to(x.dtype).reshape(*orig_shape[:-1], self.out_features)
 
+    def _fp4_forward_torch(self, x: torch.Tensor) -> torch.Tensor:
+        """Correct ROCm fallback: dequantize the native FP4 checkpoint block.
+
+        The packed E2M1 values and UE8M0 scales are consumed exactly as stored;
+        no new quantization is introduced.  This path is memory-read heavy and
+        exists so correctness/context bring-up is not blocked by DeepGEMM.
+        """
+        w = self.dequant_weight(out_dtype=torch.bfloat16)
+        return F.linear(x.to(torch.bfloat16), w).to(x.dtype)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.storage == "bf16":
             return F.linear(x, self.weight)
         if self.storage == "fp4":
+            if torch.version.hip is not None:
+                return self._fp4_forward_torch(x)
             return self._fp4_forward_deepgemm(x)
         # FP8: dequant to x's dtype on the fly.
         w = self.dequant_weight(out_dtype=x.dtype)
