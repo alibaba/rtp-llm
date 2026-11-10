@@ -1,0 +1,256 @@
+#include "rtp_llm/cpp/observability/ExecutionRecorder.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
+#include "alog/Logger.h"
+#include "autil/EnvUtil.h"
+#include "autil/legacy/jsonizable.h"
+
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <unistd.h>
+
+namespace rtp_llm {
+
+int64_t ExecutionRecorder::unixNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+std::string ExecutionRecorder::quote(const std::string& value) {
+    return toJson(value);
+}
+std::string ExecutionRecorder::toJson(const JsonValue& value) {
+    return autil::legacy::ToJsonString(value, /*isCompact=*/true);
+}
+
+ExecutionRecorder& ExecutionRecorder::instance(const ProfilingDebugLoggingConfig* config) {
+    std::string directory;
+    size_t      capacity = 4096;
+    if (config && config->enable_batch_record) {
+        // Manifest lives next to the alog batch_schedule sink (LOG_PATH).
+        directory = autil::EnvUtil::getEnv("LOG_PATH", std::string("logs")) + "/batch_record";
+        if (config->record_queue_size > 0)
+            capacity = static_cast<size_t>(config->record_queue_size);
+    }
+    static ExecutionRecorder recorder(directory, capacity);
+    return recorder;
+}
+
+ExecutionRecorder::ExecutionRecorder(std::string directory, size_t capacity):
+    directory_(std::move(directory)), capacity_(capacity) {
+    if (directory_.empty() || !capacity_)
+        return;
+    owner_   = std::to_string(getpid()) + "-" + std::to_string(unixNs());
+    next_id_ = unixNs();
+    directory_ += "/owner-" + owner_;
+    state_.store(State::Unconfigured, std::memory_order_release);
+}
+ExecutionRecorder::~ExecutionRecorder() {
+    close();
+}
+bool ExecutionRecorder::configure(int rank, int dp_rank, Json metadata) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_.load(std::memory_order_relaxed) != State::Unconfigured)
+        return false;
+    try {
+        rank_     = rank;
+        dp_rank_  = dp_rank;
+        metadata_ = std::move(metadata);
+        std::filesystem::create_directories(directory_);
+        manifest(false);
+        // The worker cannot dequeue until this lock is released. Publish Ready
+        // only after both the complete manifest and the worker are available.
+        worker_ = std::thread([this] { run(); });
+        state_.store(State::Ready, std::memory_order_release);
+        return true;
+    } catch (...) {
+        ++errors_;
+        state_.store(State::Failed, std::memory_order_release);
+        return false;
+    }
+}
+ExecutionRecorder::Json ExecutionRecorder::identity() const {
+    return {{"schema_version", 1},
+            {"session_id", std::string("")},
+            {"replica_id", "dp" + std::to_string(dp_rank_)},
+            {"dp_rank", dp_rank_},
+            {"world_rank", rank_},
+            {"owner_id", owner_}};
+}
+bool ExecutionRecorder::submitBatch(std::string line) noexcept {
+    return submitBatch([line = std::move(line)] { return line; });
+}
+bool ExecutionRecorder::submitBatch(std::function<std::string()> make_line) noexcept {
+    if (!enabled())
+        return false;
+    ++generated_;
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!enabled() || stop_ || queue_.size() >= capacity_) {
+            ++dropped_;
+            return false;
+        }
+        queue_.push_back(std::move(make_line));
+        ready_.notify_one();
+        return true;
+    } catch (...) {
+        ++dropped_;
+        return false;
+    }
+}
+void ExecutionRecorder::manifest(bool closed) {
+    std::ofstream out(directory_ + "/manifest.json.tmp");
+    out.exceptions(std::ios::failbit | std::ios::badbit);
+    auto record = identity();
+    record.insert({{"closed", closed},
+                   {"complete", false},
+                   {"storage_backend", std::string("alog")},
+                   {"delivery_policy", std::string("best_effort")},
+                   {"batch_log_logger", std::string("batch_schedule")},
+                   {"batch_log_location", std::string("alog_config")},
+                   {"request_log_format", std::string("batch_embedded_v1")},
+                   {"model_role", std::string("target")},
+                   {"length_source", std::string("cpu_input_snapshot")},
+                   {"generated", generated_.load()},
+                   {"written", JsonValue()},
+                   {"submitted_to_alog", submitted_.load()},
+                   {"dropped", dropped_.load()},
+                   {"sink_dropped", JsonValue()},
+                   {"errors", errors_.load()},
+                   {"scope", std::string("engine")},
+                   {"request_sampling", false},
+                   {"engine", metadata_},
+                   {"bytes_written", JsonValue()},
+                   {"bytes_submitted", total_bytes_}});
+    out << toJson(record) << '\n';
+    out.close();
+    std::filesystem::rename(directory_ + "/manifest.json.tmp", directory_ + "/manifest.json");
+}
+void ExecutionRecorder::tryWriteManifest(bool closed) noexcept {
+    try {
+        manifest(closed);
+    } catch (const std::exception& e) {
+        reportError("manifest update", e.what());
+    } catch (...) {
+        reportError("manifest update", "unknown exception");
+    }
+}
+void ExecutionRecorder::run() {
+    for (;;) {
+        Task task;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            ready_.wait(lock, [this] { return stop_ || !queue_.empty(); });
+            if (queue_.empty())
+                break;
+            task = std::move(queue_.front());
+            queue_.pop_front();
+        }
+        const char* operation = "logger lookup";
+        try {
+            auto* batch_logger = Logger::getBatchScheduleLogger();
+            if (!batch_logger->isLevelEnabled(alog::LOG_LEVEL_INFO)) {
+                ++dropped_;
+                continue;
+            }
+            operation       = "serialization";
+            const auto line = task();
+            // Sink configuration, asynchronous flush and rotation belong to alog.conf.
+            // Submission does not imply durable delivery.
+            operation = "log submission";
+            batch_logger->logBinaryMessage(alog::LOG_LEVEL_INFO, line);
+            total_bytes_ += line.size() + 1;
+            ++submitted_;
+        } catch (const std::exception& e) {
+            ++dropped_;
+            reportError(operation, e.what());
+            continue;
+        } catch (...) {
+            ++dropped_;
+            reportError(operation, "unknown exception");
+            continue;
+        }
+        // Metadata failures do not invalidate a submitted batch or disable
+        // recording. Retry at the next periodic update, not on every batch.
+        if (submitted_ % 64 == 0)
+            tryWriteManifest(false);
+    }
+}
+void ExecutionRecorder::reportSnapshotError(const char* message) noexcept {
+    reportError("snapshot", message);
+}
+void ExecutionRecorder::reportError(const char* operation, const char* message) noexcept {
+    markError();
+    const auto now =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    auto next = next_warning_ns_.load(std::memory_order_relaxed);
+    if (now >= next
+        && next_warning_ns_.compare_exchange_strong(next, now + 60LL * 1000 * 1000 * 1000, std::memory_order_relaxed)) {
+        try {
+            RTP_LLM_LOG_WARNING(
+                "batch recording %s failed: %s (warnings limited to once per minute)", operation, message);
+        } catch (...) {
+            // Observability failures must not interrupt inference.
+        }
+    }
+}
+
+void ExecutionRecorder::close() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_.store(State::Closed, std::memory_order_release);
+        stop_ = true;
+    }
+    ready_.notify_one();
+    if (worker_.joinable()) {
+        worker_.join();
+        try {
+            // Flush the batch sink only, never shut down global alog.
+            Logger::getBatchScheduleLogger()->flush();
+        } catch (const std::exception& e) {
+            reportError("log flush", e.what());
+        } catch (...) {
+            reportError("log flush", "unknown exception");
+        }
+        // Preserve final counters even if flushing the log sink failed.
+        tryWriteManifest(true);
+    }
+}
+
+RecordedBatch::RecordedBatch(ExecutionRecorder&                   recorder,
+                             ExecutionRecorder::Json              record,
+                             std::vector<ExecutionRecorder::Json> rows):
+    timings(rows.size()), recorder_(recorder), record_(std::move(record)), rows_(std::move(rows)) {}
+
+void RecordedBatch::markTimingError() noexcept {
+    if (!timing_error_.exchange(true, std::memory_order_acq_rel)) {
+        recorder_.reportSnapshotError("TTFT snapshot slot count mismatch");
+    }
+}
+
+RecordedBatch::~RecordedBatch() noexcept {
+    try {
+        recorder_.submitBatch(
+            [record = std::move(record_), rows = std::move(rows_), timings = std::move(timings)]() mutable {
+                ExecutionRecorder::JsonArray requests;
+                requests.reserve(rows.size());
+                for (size_t i = 0; i < rows.size(); ++i) {
+                    if (timings[i].ttft_us)
+                        rows[i]["ttft_us"] = *timings[i].ttft_us;
+                    if (timings[i].kv_len)
+                        rows[i]["kv_len"] = *timings[i].kv_len;
+                    if (timings[i].accept_len)
+                        rows[i]["accept_len"] = *timings[i].accept_len;
+                    requests.emplace_back(std::move(rows[i]));
+                }
+                record["requests"] = std::move(requests);
+                return ExecutionRecorder::toJson(record);
+            });
+    } catch (...) {
+        recorder_.markError();
+    }
+}
+
+}  // namespace rtp_llm

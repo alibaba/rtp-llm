@@ -147,6 +147,14 @@ protected:
 
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
 
+    // Phase-2 speculative recording: build the sp_verify record rows (one per
+    // request slot, decode streams first then context streams to match
+    // updateStreams timing slices). q_len is the verify width constant;
+    // kv_len/accept_len are backfilled at dispatch via RecordedTokenTiming.
+    // Must run after waitPreviousBookkeepingBeforeStreamPreparation (stream
+    // state stable). Throws on stream-state anomalies; caller contains it.
+    std::shared_ptr<RecordedBatch> buildSpVerifyRecord(int64_t record_id, const StreamGroups& groups) const;
+
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
@@ -188,7 +196,8 @@ protected:
                                       GptModelOutputs                              draft_prefill_model_output,
                                       SamplerOutput                                draft_prefill_sampler_output,
                                       std::shared_ptr<torch::Event>                rejection_event,
-                                      std::shared_ptr<torch::Event>                draft_event);
+                                      std::shared_ptr<torch::Event>                draft_event,
+                                      std::shared_ptr<RecordedBatch>               recorded_batch = nullptr);
 
     torch::Tensor gatherPreviousTargetTokens(const StreamGroups& stream_groups,
                                              int64_t             batch_size,
@@ -282,8 +291,8 @@ private:
     std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
     std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
-    bool                                                                     enable_detail_log_       = false;
-    int                                                                      tp_rank_                 = 0;
+    bool                                                                     enable_detail_log_ = false;
+    int                                                                      tp_rank_           = 0;
     ParallelismConfig                                                        parallelism_config_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;

@@ -29,11 +29,11 @@ public:
     virtual absl::Status dispatchPrefillOnly(const StreamGroups&              stream_groups,
                                              GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status =
                                                  GenerationPrefillCudaGraphStatus::NOT_REQUESTED) const;
-    virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,
-                                                            TensorHolder&       host_holder) const;
-    virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
-                                                              const GptModelInputs&  model_inputs,
-                                                              const GptModelOutputs& model_output) const;
+    virtual absl::StatusOr<GptModelInputs>
+    gatherModelInput(const StreamGroups& stream_groups, TensorHolder& host_holder, bool record_lengths = false) const;
+    virtual absl::StatusOr<SamplerInputs> gatherSamplerInput(const StreamGroups&    stream_groups,
+                                                             const GptModelInputs&  model_inputs,
+                                                             const GptModelOutputs& model_output) const;
 
     // Build only the CUDA kv_cache_kernel_block_id tensor in group_tags row order.
     // Read-only over streams: no stream->step() and no other fields.

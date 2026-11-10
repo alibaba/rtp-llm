@@ -1,12 +1,18 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <thread>
+#include <unistd.h>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -14,6 +20,9 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
+#include "rtp_llm/cpp/observability/ExecutionRecorder.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+#include "alog/Configurator.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagProcessor.h"
@@ -164,9 +173,11 @@ struct MtpExecutorTestConfig {
     int64_t mm_position_ids_style  = 0;
     int     position_id_len_factor = 1;
 
-    SpeculativeType sp_type              = SP_TYPE_MTP;
-    int64_t         dspark_mask_token_id = -1;
-    RoleType        role_type            = RoleType::PDFUSION;
+    SpeculativeType sp_type                   = SP_TYPE_MTP;
+    int64_t         dspark_mask_token_id      = -1;
+    RoleType        role_type                 = RoleType::PDFUSION;
+    bool            enable_batch_record       = false;
+    double          record_decode_sample_rate = 1.0;
 };
 
 template<typename T>
@@ -908,11 +919,13 @@ public:
 
         EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
         // createEngineInitParams resets MM defaults; apply the requested style afterwards.
-        model_config.mm_model_config.mm_position_ids_style         = test_config.mm_position_ids_style;
-        params.model_config_.mm_model_config.mm_position_ids_style = test_config.mm_position_ids_style;
-        params.sp_config                                           = sp_config;
-        params.pd_sep_config.role_type                             = test_config.role_type;
-        params.parallelism_config.role_type                        = test_config.role_type;
+        model_config.mm_model_config.mm_position_ids_style              = test_config.mm_position_ids_style;
+        params.model_config_.mm_model_config.mm_position_ids_style      = test_config.mm_position_ids_style;
+        params.sp_config                                                = sp_config;
+        params.pd_sep_config.role_type                                  = test_config.role_type;
+        params.parallelism_config.role_type                             = test_config.role_type;
+        params.profiling_debug_logging_config.enable_batch_record       = test_config.enable_batch_record;
+        params.profiling_debug_logging_config.record_decode_sample_rate = test_config.record_decode_sample_rate;
         if (test_config.vocab_size_override > 0) {
             params.model_config_.vocab_size = test_config.vocab_size_override;
         }
@@ -1041,9 +1054,9 @@ public:
         executor->setSampler(std::move(fake_sampler));
     }
 
-    void runTargetOnlyPrefillScenario(RoleType     role_type,
-                                      bool         simulate_multi_dp,
-                                      bool         expect_draft_forward,
+    void runTargetOnlyPrefillScenario(RoleType                   role_type,
+                                      bool                       simulate_multi_dp,
+                                      bool                       expect_draft_forward,
                                       bool                       simulate_cp_mutation   = false,
                                       std::optional<std::string> deferred_capture_error = std::nullopt,
                                       SpeculativeType            sp_type                = SP_TYPE_MTP,
@@ -1054,7 +1067,7 @@ public:
         if (sp_type == SP_TYPE_DSPARK) {
             test_config.dspark_mask_token_id = 0;
         }
-        auto components                               = createMtpExecutorComponents(test_config);
+        auto components = createMtpExecutorComponents(test_config);
         if (simulate_multi_dp) {
             ASSERT_EQ(components.executor->parallelism_config_.tp_size, 1);
             components.executor->parallelism_config_.dp_size    = 2;
@@ -1101,7 +1114,7 @@ public:
             draft_input.input_lengths         = torch::tensor({4}, torch::kInt32);
             draft_input.prefix_lengths        = torch::tensor({0}, torch::kInt32);
             draft_input.lm_output_indexes     = torch::tensor({3}, torch::kInt32);
-            draft_input.last_hidden_states = target_output.all_hidden_states;
+            draft_input.last_hidden_states    = target_output.all_hidden_states;
             draft_input.skip_lm_head          = true;
             draft_input.capture_hidden_states = false;
             draft_forward_model->setInputs({draft_input});
@@ -1167,8 +1180,14 @@ public:
         EXPECT_EQ(target_sampler->forwardCount(), 0);
     }
 
-    void runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers = true);
-    void runSingleBatchDecodeScenario(bool with_prefill_only);
+    void runSnapshotFaultScenario(const char* directory);
+    void runSingleBatchPrefillScenario(bool                         simulate_cp_mutation,
+                                       bool                         with_cp_hidden_buffers = true,
+                                       const MtpExecutorTestConfig* config_override        = nullptr,
+                                       MtpExecutorComponents*       out                    = nullptr);
+    void runSingleBatchDecodeScenario(bool                         with_prefill_only,
+                                      const MtpExecutorTestConfig* config_override   = nullptr,
+                                      int64_t*                     out_kv_len_before = nullptr);
 
     GptModelOutputs createRandomGptModelOutputs(size_t token_num, size_t vocab_size, size_t hidden_size) {
         auto output              = GptModelOutputs{};
@@ -1350,6 +1369,135 @@ TEST_F(MtpExecutorTest, MixedCacheSnapshotsPrepareTokensLengthsAndPositionsWitho
     }
 }
 
+// The recorder singleton is process-wide: constructing an MtpExecutor without
+// enable_batch_record first would leave it Disabled for the whole binary, so
+// this runs as a death test to own a fresh process (RecordingEngineTest pattern).
+TEST_F(MtpExecutorTest, CtorPublishesSpMetadata) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    ASSERT_EXIT(
+        {
+            char directory[] = "/tmp/rtp-mtp-record-ctor-XXXXXX";
+            ASSERT_NE(mkdtemp(directory), nullptr);
+            setenv("LOG_PATH", directory, 1);
+            MtpExecutorTestConfig test_config;
+            test_config.enable_batch_record = true;
+            test_config.gen_num_per_cycle   = 2;
+            auto components                 = createMtpExecutorComponents(test_config);
+            ExecutionRecorder::instance().close();
+            bool        manifest_found = false;
+            std::string manifest;
+            for (const auto& entry : std::filesystem::directory_iterator(std::string(directory) + "/batch_record")) {
+                if (entry.path().filename().string().rfind("owner-", 0) == 0) {
+                    std::ifstream in(entry.path() / "manifest.json");
+                    std::string   content((std::istreambuf_iterator<char>(in)), {});
+                    if (content.find("\"scope\":\"mtp_executor\"") != std::string::npos) {
+                        manifest_found = true;
+                        manifest       = content;
+                    }
+                }
+            }
+            ASSERT_TRUE(manifest_found) << "no mtp_executor manifest under " << directory;
+            for (const auto* field : {"cache_block_tokens", "cache_groups", "cache_config"}) {
+                EXPECT_NE(manifest.find(std::string("\"") + field + "\":"), std::string::npos) << manifest;
+            }
+            EXPECT_NE(manifest.find("\"sp_type\":\"mtp\""), std::string::npos) << manifest;
+            EXPECT_NE(manifest.find("\"propose_step\":2"), std::string::npos) << manifest;
+            EXPECT_NE(manifest.find("\"is_dspark\":false"), std::string::npos) << manifest;
+            EXPECT_NE(manifest.find("\"decode_filter_policy\":\"sp_verify_step_sampling\""), std::string::npos)
+                << manifest;
+            _exit(::testing::Test::HasFailure() ? 1 : 0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+}
+
+// Snapshot-anomaly containment: a gather path that skips the CPU length
+// snapshot must fail the recording only (warning + dropped record), never the
+// serving step — mirroring NormalExecutor's try/catch contract. Runs as a
+// death test for process-wide singleton isolation.
+class SnapshotFaultProcessor: public MtpBatchStreamProcessor {
+public:
+    using MtpBatchStreamProcessor::MtpBatchStreamProcessor;
+    absl::StatusOr<GptModelInputs>
+    gatherModelInput(const StreamGroups& stream_groups, TensorHolder& host_holder, bool record_lengths) const override {
+        (void)record_lengths;  // Drop the flag: simulate a snapshot-less gather.
+        return NormalBatchStreamProcessor::gatherModelInput(stream_groups, host_holder, false);
+    }
+};
+
+void MtpExecutorTest::runSnapshotFaultScenario(const char* directory) {
+    setenv("LOG_PATH", directory, 1);
+    MtpExecutorTestConfig test_config;
+    test_config.enable_batch_record = true;
+    auto components                 = createMtpExecutorComponents(test_config);
+    // Minimal single-request prefill data, mirroring the batch scenario.
+    GenerateStreamPtr stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3});
+    auto target_input              = GptModelInputs{};
+    auto target_output             = GptModelOutputs{};
+    target_input.combo_tokens      = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({4}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({0}, torch::kInt32);
+    target_input.lm_output_indexes = torch::tensor({3}, torch::kInt32);
+    target_output.logits           = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({1, 4});
+    target_output.all_hidden_states =
+        torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
+    components.fake_target_model->setInputs({target_input});
+    components.fake_target_model->setOutputs({target_output});
+    auto draft_input               = GptModelInputs{};
+    auto draft_output              = GptModelOutputs{};
+    draft_input.combo_tokens       = torch::tensor({1, 2, 3, 1}, torch::kInt32);
+    draft_input.input_lengths      = torch::tensor({4}, torch::kInt32);
+    draft_input.prefix_lengths     = torch::tensor({0}, torch::kInt32);
+    draft_input.lm_output_indexes  = torch::tensor({3}, torch::kInt32);
+    draft_input.last_hidden_states = target_output.all_hidden_states;
+    draft_output.logits            = torch::tensor({0.5f, 0.6f, 0.7f, 0.8f}).reshape({1, 4});
+    draft_output.all_hidden_states =
+        torch::tensor({0.11f, 0.12f, 0.13f, 0.14f, 0.15f, 0.16f, 0.17f, 0.18f}).reshape({4, 2});
+    components.fake_draft_model->setInputs({draft_input});
+    components.fake_draft_model->setOutputs({draft_output});
+    auto sampler_input  = SamplerInputs{target_output.logits};
+    auto sampler_output = SamplerOutput{torch::tensor({1}, torch::kInt32).reshape({1, 1})};
+    components.fake_sampler->setInputs({sampler_input});
+    components.fake_sampler->setOutputs({sampler_output});
+    const auto topk_probs = torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4});
+    const auto topk_ids   = torch::tensor({2}, torch::kInt32).reshape({1, 1});
+    const auto fast_topk  = spec::FastTopKSamplerOutput{topk_probs, topk_ids};
+    components.fake_fast_topk_sampler->setInputs({draft_output.logits});
+    components.fake_fast_topk_sampler->setOutputs({fast_topk});
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+    components.executor->setBatchProcessor(
+        std::make_unique<SnapshotFaultProcessor>(components.model_config,
+                                                 PDSepConfig{},
+                                                 ProfilingDebugLoggingConfig{},
+                                                 components.resource_context.cache_manager->cacheConfig(),
+                                                 SpeculativeExecutionConfig{},
+                                                 false));
+    bool step_ok = false;
+    try {
+        const auto status = components.executor->process({stream});
+        step_ok           = status.ok() && !stream->hasError();
+    } catch (...) {}
+    ExecutionRecorder::instance().close();
+    if (!step_ok) {
+        fprintf(stderr, "snapshot fault must not fail the serving step\n");
+        _exit(1);
+    }
+    _exit(0);
+}
+
+TEST_F(MtpExecutorTest, SnapshotFaultDoesNotFailServingStep) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    char directory[]                        = "/tmp/rtp-mtp-record-fault-XXXXXX";
+    ASSERT_NE(mkdtemp(directory), nullptr);
+    ASSERT_EXIT(runSnapshotFaultScenario(directory), ::testing::ExitedWithCode(0), "");
+}
+
 TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     MtpExecutorTestConfig test_config;
     test_config.sp_type           = SP_TYPE_MTP;
@@ -1363,8 +1511,14 @@ TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     }
 }
 
-void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers) {
+void MtpExecutorTest::runSingleBatchPrefillScenario(bool                         simulate_cp_mutation,
+                                                    bool                         with_cp_hidden_buffers,
+                                                    const MtpExecutorTestConfig* config_override,
+                                                    MtpExecutorComponents*       out) {
     MtpExecutorTestConfig test_config;
+    if (config_override) {
+        test_config = *config_override;
+    }
     test_config.gen_num_per_cycle = 4;
     auto components               = createMtpExecutorComponents(test_config);
     if (simulate_cp_mutation) {
@@ -1471,6 +1625,9 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
             EXPECT_NE(std::string(error.what()).find("CP MTP draft last-hidden buffer must contain per-request rows"),
                       std::string::npos);
         }
+        if (out) {
+            *out = std::move(components);
+        }
         return;
     }
 
@@ -1498,10 +1655,156 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
         EXPECT_EQ(speculative_sampler->forwardCount(), 0);
         EXPECT_EQ(target_sampler->forwardCount(), 1);
     }
+    if (out) {
+        *out = std::move(components);
+    }
 }
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     runSingleBatchPrefillScenario(/*simulate_cp_mutation=*/false);
+}
+
+// Phase-1 speculative recording: prefill batches only, request timing via the
+// shared FIFO enqueue path (request_id itself is scheduler-side and asserted
+// by RecordingEngineTest). Death test for singleton isolation.
+TEST_F(MtpExecutorTest, PrefillStepRecordsBatch) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    ASSERT_EXIT(
+        {
+            char directory[] = "/tmp/rtp-mtp-record-prefill-XXXXXX";
+            ASSERT_NE(mkdtemp(directory), nullptr);
+            setenv("LOG_PATH", directory, 1);
+            const auto batch_config =
+                std::string("alog.max_msg_len=0\nalog.logger.batch_schedule=INFO, batchScheduleAppender\n")
+                + "inherit.batch_schedule=false\nalog.appender.batchScheduleAppender=FileAppender\n"
+                  "alog.appender.batchScheduleAppender.fileName="
+                + std::string(directory)
+                + "/batch_schedule.log\n"
+                  "alog.appender.batchScheduleAppender.layout=PatternLayout\n"
+                  "alog.appender.batchScheduleAppender.layout.LogPattern=%%m\n"
+                  "alog.appender.batchScheduleAppender.async_flush=true\n";
+            alog::Configurator::configureLoggerFromString(batch_config.c_str());
+            MtpExecutorTestConfig test_config;
+            test_config.enable_batch_record = true;
+            MtpExecutorComponents components;
+            runSingleBatchPrefillScenario(false, true, &test_config, &components);
+            // Empty alignment round must not record anything new.
+            ASSERT_TRUE(components.executor->process({}).ok());
+            // close() drains the recorder queue before flushing alog; flushing
+            // alog alone cannot wait for records still queued in the recorder.
+            ExecutionRecorder::instance().close();
+            std::ifstream in(std::string(directory) + "/batch_schedule.log");
+            ASSERT_TRUE(in.good());
+            const std::string  batches((std::istreambuf_iterator<char>(in)), {});
+            std::istringstream lines(batches);
+            size_t             batch_count = 0;
+            for (std::string line; std::getline(lines, line);) {
+                if (!line.empty()) {
+                    ++batch_count;
+                }
+            }
+            EXPECT_EQ(batch_count, 1u) << "expected only the prefill batch; empty process() must not record: "
+                                       << batches;
+            EXPECT_NE(batches.find("\"phase\":\"prefill\""), std::string::npos) << batches;
+            EXPECT_NE(batches.find("\"input_len\":4"), std::string::npos) << batches;
+            EXPECT_NE(batches.find("\"q_len\":4"), std::string::npos) << batches;
+            EXPECT_NE(batches.find("\"kv_len\":0"), std::string::npos) << batches;
+            EXPECT_NE(batches.find("\"ttft_us\":"), std::string::npos) << batches;
+            EXPECT_EQ(batches.find("\"ttft_us\":null"), std::string::npos) << batches;
+            {
+                const auto key_pos = batches.find("\"step_duration_us\":");
+                ASSERT_NE(key_pos, std::string::npos) << batches;
+                ASSERT_GT(std::stoull(batches.substr(key_pos + strlen("\"step_duration_us\":"), 12)), 0u) << batches;
+            }
+            _exit(::testing::Test::HasFailure() ? 1 : 0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+}
+
+// Phase-2 speculative recording: a decode step records one sp_verify row per
+// request slot with the verify width as q_len, the pre-verify cached length as
+// kv_len, and the accepted token count backfilled at dispatch (same timing
+// pattern as ttft_us). Draft-forward composition stays invisible to replay.
+TEST_F(MtpExecutorTest, DecodeStepRecordsVerifyRows) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    ASSERT_EXIT(
+        {
+            char directory[] = "/tmp/rtp-mtp-record-decode-XXXXXX";
+            ASSERT_NE(mkdtemp(directory), nullptr);
+            setenv("LOG_PATH", directory, 1);
+            const auto batch_config =
+                std::string("alog.max_msg_len=0\nalog.logger.batch_schedule=INFO, batchScheduleAppender\n")
+                + "inherit.batch_schedule=false\nalog.appender.batchScheduleAppender=FileAppender\n"
+                  "alog.appender.batchScheduleAppender.fileName="
+                + std::string(directory)
+                + "/batch_schedule.log\n"
+                  "alog.appender.batchScheduleAppender.layout=PatternLayout\n"
+                  "alog.appender.batchScheduleAppender.layout.LogPattern=%%m\n"
+                  "alog.appender.batchScheduleAppender.async_flush=true\n";
+            alog::Configurator::configureLoggerFromString(batch_config.c_str());
+            MtpExecutorTestConfig test_config;
+            test_config.enable_batch_record = true;
+            int64_t kv_len_before           = -1;
+            runSingleBatchDecodeScenario(false, &test_config, &kv_len_before);
+            ASSERT_GE(kv_len_before, 0);
+            rtp_llm::Logger::getBatchScheduleLogger()->flush();
+            ExecutionRecorder::instance().close();
+            std::ifstream     in(std::string(directory) + "/batch_schedule.log");
+            const std::string batches((std::istreambuf_iterator<char>(in)), {});
+            EXPECT_NE(batches.find("\"phase\":\"sp_verify\""), std::string::npos) << batches;
+            EXPECT_NE(batches.find("\"q_len\":5"), std::string::npos) << batches;
+            EXPECT_NE(batches.find("\"kv_len\":" + std::to_string(kv_len_before)), std::string::npos) << batches;
+            EXPECT_NE(batches.find("\"accept_len\":3"), std::string::npos) << batches;
+            EXPECT_NE(batches.find("\"request_id\":\"r"), std::string::npos) << batches;
+            EXPECT_NE(batches.find("\"ttft_us\":"), std::string::npos) << batches;
+            EXPECT_EQ(batches.find("\"accept_len\":null"), std::string::npos) << batches;
+            EXPECT_EQ(batches.find("\"kv_len\":null"), std::string::npos) << batches;
+            {
+                const auto key_pos = batches.find("\"step_duration_us\":");
+                ASSERT_NE(key_pos, std::string::npos) << batches;
+                ASSERT_GT(std::stoull(batches.substr(key_pos + strlen("\"step_duration_us\":"), 12)), 0u) << batches;
+            }
+            _exit(::testing::Test::HasFailure() ? 1 : 0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+}
+
+// The Bresenham decode sampling gate applies to speculative verify steps with
+// the same semantics as the normal engine: rate < 1 thins steps without
+// spending credit on non-recordable (empty/warmup) rounds.
+TEST_F(MtpExecutorTest, DecodeSampleRateThinsSpVerifyRecords) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    ASSERT_EXIT(
+        {
+            char directory[] = "/tmp/rtp-mtp-record-sample-XXXXXX";
+            ASSERT_NE(mkdtemp(directory), nullptr);
+            setenv("LOG_PATH", directory, 1);
+            const auto batch_config =
+                std::string("alog.max_msg_len=0\nalog.logger.batch_schedule=INFO, batchScheduleAppender\n")
+                + "inherit.batch_schedule=false\nalog.appender.batchScheduleAppender=FileAppender\n"
+                  "alog.appender.batchScheduleAppender.fileName="
+                + std::string(directory)
+                + "/batch_schedule.log\n"
+                  "alog.appender.batchScheduleAppender.layout=PatternLayout\n"
+                  "alog.appender.batchScheduleAppender.layout.LogPattern=%%m\n"
+                  "alog.appender.batchScheduleAppender.async_flush=true\n";
+            alog::Configurator::configureLoggerFromString(batch_config.c_str());
+            MtpExecutorTestConfig test_config;
+            test_config.enable_batch_record       = true;
+            test_config.record_decode_sample_rate = 0.5;
+            // First decode step: credit 0.5 < 1.0 -> the step is skipped whole.
+            runSingleBatchDecodeScenario(false, &test_config, nullptr);
+            rtp_llm::Logger::getBatchScheduleLogger()->flush();
+            ExecutionRecorder::instance().close();
+            std::ifstream     in(std::string(directory) + "/batch_schedule.log");
+            const std::string batches((std::istreambuf_iterator<char>(in)), {});
+            EXPECT_EQ(batches.find("\"phase\":\"sp_verify\""), std::string::npos) << batches;
+            _exit(::testing::Test::HasFailure() ? 1 : 0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
 }
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefillRestoresCpInputBeforeDraftShift) {
@@ -1521,8 +1824,7 @@ TEST_F(MtpExecutorTest, testTargetOnlyRunsDraftPrefillForMultiDpAlignmentWithout
 }
 
 TEST_F(MtpExecutorTest, testDeferredCaptureErrorDoesNotOverwriteExistingStreamError) {
-    runTargetOnlyPrefillScenario(
-        RoleType::PREFILL, false, false, false, "injected capture failure", SP_TYPE_MTP, true);
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, false, "injected capture failure", SP_TYPE_MTP, true);
 }
 
 TEST_F(MtpExecutorTest, testDeferredCaptureErrorCompletesMultiDpDraftAlignmentBeforeFailing) {
@@ -2043,7 +2345,9 @@ TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
     checkOutput(stream2, {2, 3, 0}, {0, 1}, {0.0, 0.0, 1.0, 0.0}, {1.13, 1.14});
 }
 
-void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
+void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         with_prefill_only,
+                                                   const MtpExecutorTestConfig* config_override,
+                                                   int64_t*                     out_kv_len_before) {
     // test single batch decode accept partial
     // input [0, 1, 2] + [3]
     // darft [3] + [2, 1, 3]
@@ -2056,7 +2360,11 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle   = propose_step;
     test_config.vocab_size_override = 4;
-    auto components                 = createMtpExecutorComponents(test_config);
+    if (config_override) {
+        test_config.enable_batch_record       = config_override->enable_batch_record;
+        test_config.record_decode_sample_rate = config_override->record_decode_sample_rate;
+    }
+    auto components = createMtpExecutorComponents(test_config);
 
     size_t batch_size = 1;
 
@@ -2237,6 +2545,17 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
                     std::move(components.fake_draft_prefill_model));
 
     // Verify executor was created successfully
+    // Mirror the production enqueue path so recorded rows carry request
+    // identity, then capture the pre-step cached length (kv before verify) on
+    // the same thread that builds the record rows: the decode step reads the
+    // same value after waitPreviousBookkeeping, before any update commits new
+    // tokens.
+    if (config_override && config_override->enable_batch_record) {
+        stream1->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
+    }
+    if (out_kv_len_before && !with_prefill_only) {
+        *out_kv_len_before = stream1->seqLength() - 1;
+    }
     auto status = with_prefill_only ? components.executor->process({prefill_only_stream, stream1}) :
                                       components.executor->process({stream1});
     ASSERT_TRUE(status.ok());

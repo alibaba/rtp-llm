@@ -58,6 +58,7 @@ public:
         }
         {
             std::lock_guard<std::mutex> lock(lock_);
+            stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
             waiting_streams_.emplace_back(stream);
             if (waiting_streams_.size() % 16 == 0) {
                 RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d",
@@ -92,6 +93,14 @@ public:
             enqueue_successes.push_back(success);
             if (success) {
                 stream_enqueued.emplace_back(stream);
+            }
+        }
+        if (!stream_enqueued.empty()) {
+            // One timestamp per group, mirroring FIFOSchedulerBase::enqueueGroup: publishes the
+            // recorded request identity before the streams become visible to the scheduler loop.
+            const auto enqueue_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            for (auto& stream : stream_enqueued) {
+                stream->recordSchedulerEnqueueTime(enqueue_time_us);
             }
         }
         {
@@ -279,7 +288,7 @@ private:
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
     bool                         reorder_request_;
-    uint32_t                     current_step_ = 0;
+    uint32_t                     current_step_         = 0;
     bool                         draining_mixed_modes_ = false;
 
     std::shared_ptr<KVCacheManager> cache_manager_;
