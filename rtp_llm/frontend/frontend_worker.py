@@ -120,7 +120,17 @@ class FrontendWorker:
             parallelism_config=engine_config.parallelism_config,
             prefill_cp_config=py_env_configs.prefill_cp_config,
             model_config=model_config,
-            prefix_cache=TokenizerPrefixCache(self.tokenizer),
+            prefix_cache=TokenizerPrefixCache(
+                self.tokenizer,
+                # Sized for the served workload: append-only sessions re-send the
+                # whole history each step, so the cache must hold every active
+                # session's latest prompt (~tokens x sessions) with headroom,
+                # otherwise the LRU evicts entries right before their reuse and
+                # every step falls back to a full O(history) re-encode on the
+                # '/' inference path.
+                max_entries=32,
+                max_cached_ids=8_000_000,
+            ),
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         self.generate_env_config = py_env_configs.generate_env_config

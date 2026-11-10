@@ -139,3 +139,12 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "frontend_prefix_cache_capacity_test",
+    srcs = ["frontend_prefix_cache_capacity_test.py"],
+    deps = [
+        "//rtp_llm:rtp_llm_frontend_lib",
+        "//rtp_llm:testlib",
+    ],
+)

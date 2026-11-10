@@ -157,6 +157,18 @@ class TokenizerPrefixCache:
             old = self._entries.pop(text, None)
             if old is not None:
                 self._cached_ids -= len(old)
+            # A cached text that is a strict prefix of the new one is a
+            # superseded version of the same append-only history: no future
+            # prompt can prefer it over the new entry (the longest-prefix
+            # match always finds the new one first), and keeping it only
+            # accelerates capacity eviction of live sessions.  Drop such dead
+            # versions eagerly so entry/id capacity tracks the live sessions.
+            # Correctness never depends on an entry being present: a miss
+            # simply falls back to a full encode.
+            for cached_text in list(self._entries.keys()):
+                if len(cached_text) < len(text) and text.startswith(cached_text):
+                    evicted = self._entries.pop(cached_text)
+                    self._cached_ids -= len(evicted)
             self._entries[text] = ids
             self._cached_ids += len(ids)
             while self._entries and (
