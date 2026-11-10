@@ -50,7 +50,10 @@ def _sparse_fwd_reference(q, kv, indices, sm_scale, attn_sink, topk_length):
     if topk_length is not None:
         cols = torch.arange(K, device=indices.device).view(1, -1)
         valid = valid & (cols < topk_length.reshape(T, 1).to(torch.int64))
-    chunk = max(int(os.environ.get("DSV41_SM80_SPARSE_Q_CHUNK", "1024")), 1)
+    # 256-row chunks keep the fp32 gathered-key temporary near ~70 MB so the
+    # reference fits in the runtime reserve even when KV pools fill the card
+    # (rows are independent; chunk size is numerically neutral).
+    chunk = max(int(os.environ.get("DSV41_SM80_SPARSE_Q_CHUNK", "256")), 1)
     outs, maxes, lses = [], [], []
     for start in range(0, T, chunk):
         stop = min(start + chunk, T)
