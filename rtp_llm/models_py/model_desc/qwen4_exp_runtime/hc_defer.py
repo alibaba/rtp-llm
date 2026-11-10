@@ -1,7 +1,7 @@
 """Selection policy for delayed HC residual materialization."""
 
 
-def should_defer_hc_residual(*, enabled, cuda, hip, shape, bf16, sm, graph):
+def should_defer_hc_residual(*, enabled, cuda, hip, shape, bf16, sm, graph, extended=False):
     """Keep the existing prefill policy; opt into an SM90 small-M candidate.
 
     The caller captures this decision with the CUDA graph. Changing the flag
@@ -13,4 +13,5 @@ def should_defer_hc_residual(*, enabled, cuda, hip, shape, bf16, sm, graph):
     rows = shape[0]
     existing = not graph and sm == (12, 0) and 4093 <= rows <= 12288
     candidate = enabled and sm == (9, 0) and 1 <= rows <= 32
-    return existing or candidate
+    wide_candidate = extended and sm == (9, 0) and 1 <= rows <= 12288
+    return existing or candidate or wide_candidate

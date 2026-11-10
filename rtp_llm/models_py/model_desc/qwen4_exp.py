@@ -1576,6 +1576,7 @@ class Qwen4ExpModel(Qwen35Model):
             ple_input_ids = self._ple_input_ids(inputs)
         pending_injection = None
         hc_defer_sm90 = os.environ.get("RTP_LLM_QWEN4_HC_DEFER_SM90", "0") == "1"
+        hc_fusion_extended = os.environ.get("RTP_LLM_QWEN4_HC_FUSION_EXTENDED", "0") == "1"
         hc_defer_shape = (
             hyper_states.ndim == 2
             and hyper_states.shape[1] == 10240
@@ -1583,6 +1584,7 @@ class Qwen4ExpModel(Qwen35Model):
             and (
                 (not is_cuda_graph and 4093 <= hyper_states.shape[0] <= 12288)
                 or (hc_defer_sm90 and 1 <= hyper_states.shape[0] <= 32)
+                or (hc_fusion_extended and 1 <= hyper_states.shape[0] <= 12288)
             )
         )
         defer_residual = should_defer_hc_residual(
@@ -1597,6 +1599,7 @@ class Qwen4ExpModel(Qwen35Model):
                 else None
             ),
             graph=is_cuda_graph,
+            extended=hc_fusion_extended,
         )
         layer_forward_range = make_layer_forward_range()
         for i, decoder_layer in enumerate(self.layers):

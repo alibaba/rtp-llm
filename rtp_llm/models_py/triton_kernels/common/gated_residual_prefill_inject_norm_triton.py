@@ -54,11 +54,11 @@ def _hc_prefill_inject_norm(
         tl.store(AMAX + row * 4 + group, tl.max(absolute, 0))
 
 
-def _inject_grouped_norm(x, sublayer, gates, gamma, eps=1e-6):
+def _inject_grouped_norm(x, sublayer, gates, gamma, eps=1e-6, *, collect_scale=True):
     rows = x.numel() // 10240
     residual = torch.empty_like(x)
     norm = torch.empty_like(x)
-    collect = (
+    collect = collect_scale and (
         1 <= rows <= 4096 or 8192 <= rows <= 12288
     )
     partial = (
@@ -92,7 +92,7 @@ def _inject_grouped_norm(x, sublayer, gates, gamma, eps=1e-6):
     return residual, norm, scale
 
 
-def try_inject_grouped_norm(x, sublayer, gates, gamma, eps):
+def try_inject_grouped_norm(x, sublayer, gates, gamma, eps, *, collect_scale=True):
     if not (
         x.is_cuda
         and torch.version.hip is None
@@ -115,4 +115,4 @@ def try_inject_grouped_norm(x, sublayer, gates, gamma, eps):
         and cached_device_capability(x.device) in ((9, 0), (12, 0))
     ):
         return None
-    return _inject_grouped_norm(x, sublayer, gates, gamma, eps)
+    return _inject_grouped_norm(x, sublayer, gates, gamma, eps, collect_scale=collect_scale)

@@ -27,6 +27,13 @@ class HcDeferPolicyTest(unittest.TestCase):
         self.assertFalse(_module.should_defer_hc_residual(**(args | {"graph": True})))
         self.assertFalse(_module.should_defer_hc_residual(**(args | {"shape": (4092, 10240)})))
 
+    def test_sm90_extended_is_separate_opt_in(self):
+        args = dict(enabled=False, cuda=True, hip=False, shape=(2155, 10240), bf16=True, sm=(9, 0), graph=True)
+        self.assertFalse(_module.should_defer_hc_residual(**args))
+        self.assertTrue(_module.should_defer_hc_residual(**args, extended=True))
+        self.assertFalse(_module.should_defer_hc_residual(**(args | {"shape": (12289, 10240)}), extended=True))
+        self.assertFalse(_module.should_defer_hc_residual(**(args | {"sm": (8, 9)}), extended=True))
+
 
 if __name__ == "__main__":
     unittest.main()

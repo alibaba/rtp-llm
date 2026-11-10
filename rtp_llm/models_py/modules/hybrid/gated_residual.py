@@ -1,3 +1,4 @@
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -123,6 +124,7 @@ class GatedResidual(nn.Module):
             else None
         )
         self.merged_down_inject = None
+        self.bf16_fp8_down_inject = None
         if (
             inject is not None
             and hc_mult == 4
@@ -137,6 +139,53 @@ class GatedResidual(nn.Module):
             self.merged_down_inject = torch.cat(
                 (mix_down, inject, mix_down.new_zeros((padding, hc_hidden))), dim=0
             ).contiguous()
+
+        # Optional candidate changes the down projection's numerical path.
+        # Build the dequantized copy once during model initialization, never
+        # during forward or CUDA Graph replay; unsupported cases fall back.
+        if (
+            os.environ.get("RTP_LLM_QWEN4_HC_BF16_DOWN_INJECT", "0") == "1"
+            and inject is not None
+            and hc_mult == 4
+            and self.down_projection is not None
+            and self.down_projection.use_scaled_mm
+            and mix_down.dtype == torch.float8_e4m3fn
+            and tuple(mix_down.shape) == (320, 10240)
+            and mix_down.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(mix_down.device) == (9, 0)
+        ):
+            inject_bf16 = (
+                self.inject_projection.compute_weight
+                if self.inject_projection is not None
+                else inject
+            )
+            if (
+                inject_bf16 is not None
+                and inject_bf16.dtype == torch.bfloat16
+                and inject_bf16.device == mix_down.device
+            ):
+                down_bf16 = (
+                    self.down_projection.weight.float() * self.down_projection.scale
+                ).to(torch.bfloat16)
+                padding = (-(down_bf16.shape[0] + hc_mult)) % 16
+                self.bf16_fp8_down_inject = torch.cat(
+                    (down_bf16, inject_bf16, down_bf16.new_zeros((padding, hc_hidden))),
+                    dim=0,
+                ).contiguous()
+
+    def _use_bf16_down_inject(self, x: torch.Tensor) -> bool:
+        """Choose the opt-in candidate before graph capture; caller recaptures on changes."""
+        merged = self.bf16_fp8_down_inject
+        return (
+            os.environ.get("RTP_LLM_QWEN4_HC_BF16_DOWN_INJECT", "0") == "1"
+            and merged is not None
+            and x.is_cuda
+            and x.dtype == torch.bfloat16
+            and x.is_contiguous()
+            and x.device == merged.device
+            and 1 <= x.numel() // self.hc_hidden_size <= 12288
+        )
 
     def _norm(self, hyper_input: torch.Tensor) -> torch.Tensor:
         return grouped_rms_norm(
@@ -155,9 +204,17 @@ class GatedResidual(nn.Module):
             self.down_projection is not None
             and self.down_projection.use_scaled_mm
             and tuple(self.down_projection.weight.shape) == (320, 10240)
+            and not self._use_bf16_down_inject(hyper_input)
             and (
                 1 <= hyper_input.numel() // self.hc_hidden_size <= 32
                 or 8192 <= hyper_input.numel() // self.hc_hidden_size <= 12288
+                or (
+                    os.environ.get("RTP_LLM_QWEN4_HC_SM90_PREFILL_NORM_SCALE", "0") == "1"
+                    and 33 <= hyper_input.numel() // self.hc_hidden_size <= 4096
+                    and hyper_input.is_cuda
+                    and torch.version.hip is None
+                    and torch.cuda.get_device_capability(hyper_input.device) == (9, 0)
+                )
             )
             and hyper_input.is_cuda
             and torch.version.hip is None
@@ -182,22 +239,33 @@ class GatedResidual(nn.Module):
         sublayer_out: torch.Tensor,
         inject_weights: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        if (
+        fp8_down = (
             self.down_projection is not None
             and self.down_projection.use_scaled_mm
             and tuple(self.down_projection.weight.shape) == (320, 10240)
-        ):
+        )
+        bf16_candidate = (
+            os.environ.get("RTP_LLM_QWEN4_HC_FUSION_EXTENDED", "0") == "1"
+            and self.down_projection is None
+            and self.merged_down_inject is not None
+            and hyper_input.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(hyper_input.device) == (9, 0)
+        )
+        if fp8_down or bf16_candidate:
             from rtp_llm.models_py.triton_kernels.common.gated_residual_prefill_inject_norm_triton import (
                 try_inject_grouped_norm,
             )
 
-            fused = try_inject_grouped_norm(
-                hyper_input,
-                sublayer_out,
-                inject_weights,
-                self.norm_gamma,
-                self.norm_eps,
-            )
+            if fp8_down and not self._use_bf16_down_inject(hyper_input):
+                fused = try_inject_grouped_norm(
+                    hyper_input, sublayer_out, inject_weights, self.norm_gamma, self.norm_eps
+                )
+            else:
+                fused = try_inject_grouped_norm(
+                    hyper_input, sublayer_out, inject_weights, self.norm_gamma,
+                    self.norm_eps, collect_scale=False
+                )
             if fused is not None:
                 residual, normed, scale = fused
                 return self._forward_normed(residual, normed, down_input_scale=scale)
@@ -208,13 +276,23 @@ class GatedResidual(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
 
         inject_weights = None
-        merged = self.merged_down_inject
+        bf16_fp8_candidate = self._use_bf16_down_inject(normed)
+        merged = self.bf16_fp8_down_inject if bf16_fp8_candidate else self.merged_down_inject
+        rows = normed.numel() // self.hc_hidden_size
+        extended_bf16 = (
+            os.environ.get("RTP_LLM_QWEN4_HC_FUSION_EXTENDED", "0") == "1"
+            and merged is not None
+            and normed.is_cuda
+            and torch.version.hip is None
+            and 33 <= rows <= 12288
+            and torch.cuda.get_device_capability(normed.device) == (9, 0)
+        )
         if (
             merged is not None
             and normed.is_contiguous()
             and normed.dtype == merged.dtype
             and normed.device == merged.device
-            and 1 <= normed.numel() // self.hc_hidden_size <= 32
+            and (1 <= rows <= 32 or extended_bf16 or bf16_fp8_candidate)
         ):
             from rtp_llm.models_py.triton_kernels.common.gated_residual_down_triton import (
                 down_inject_epilogue,
