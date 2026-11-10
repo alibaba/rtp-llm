@@ -750,6 +750,12 @@ class ModelLoader:
                         flush=True,
                     )
                     _prev = _now
+        if _debug:
+            _now = torch.cuda.memory_allocated()
+            print(
+                f"[mem] scratch loader returned allocated={_now / 2**30:.2f} GiB",
+                flush=True,
+            )
         return weights
 
     def _load_layer_weights(self, layer_id: int, device: str):
