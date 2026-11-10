@@ -240,6 +240,10 @@ class V4Transformer(nn.Module):
                 f"reserved={torch.cuda.memory_reserved() / 2**30:.2f} GiB",
                 flush=True,
             )
+            try:
+                torch.cuda.memory._dump_snapshot("/tmp/dsv41_mem.pkl")
+            except Exception as _exc:
+                print(f"[mem] snapshot failed: {_exc}", flush=True)
             _seen = []
             for _o in _gc.get_objects():
                 try:

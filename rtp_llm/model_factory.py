@@ -276,6 +276,11 @@ class ModelFactory:
         Returns:
             BaseEngine instance (RPCEngine or EmbeddingCppEngine)
         """
+        import os as _os
+        if _os.environ.get("DSV41_DEBUG_MEM") == "1":
+            import torch as _torch
+            if _torch.cuda.is_available():
+                _torch.cuda.memory._record_memory_history(max_entries=200000)
         # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs
         # for RoPE cache sizing in speculative decoding
         model_config.gen_num_per_cycle = engine_config.sp_config.gen_num_per_cycle
