@@ -12,7 +12,11 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.dsv41.fp8.indexer import _TOPK_V3_OK, _get_topk_workspace
+from rtp_llm.models_py.modules.dsv41.fp8.indexer import (
+    _TOPK_V3_OK,
+    _get_topk_workspace,
+    _topk_native_supported,
+)
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -26,6 +30,9 @@ def is_supported(logits: torch.Tensor, visible: torch.Tensor, topk: int = 512) -
         _TOPK_V3_OK
         and torch.version.hip is None
         and logits.is_cuda
+        # The native selectors have no pre-SM100 images; callers retain the
+        # torch.topk finite-filter fallback there.
+        and _topk_native_supported(logits.device)
         and (
             logits.dtype == torch.float32
             or (logits.dtype == torch.bfloat16 and supports_bf16())

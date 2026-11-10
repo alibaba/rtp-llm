@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 from contextlib import suppress
+from functools import lru_cache
 from typing import Any, Callable, Dict, NamedTuple, Optional
 
 import torch
@@ -79,6 +80,22 @@ _FAST_PREFILL_TOPK_OK = hasattr(rtp_llm_ops, "fast_topk_v2_variable")
 _TOPK_V3_WORKSPACE_SIZE = 1024 * 1024
 _FAST_PREFILL_TOPK_MAX_INPUT_TOKENS = 12 * 1024
 _topk_v3_workspace_cache: Dict[torch.device, torch.Tensor] = {}
+
+
+@lru_cache(maxsize=None)
+def _topk_native_supported(device) -> bool:
+    """The native V4 topk kernels ship no pre-SM100 device images.
+
+    Observed on L20/sm89: ``topk_v3`` dies with "no kernel image is
+    available for execution on the device". Every native selector
+    (topk_v3, fast_topk_v2_variable, dsv4_top_k_per_row_prefill) keeps
+    its existing torch/Triton fallback on lower architectures.
+    """
+    return (
+        device is not None
+        and torch.device(device).type == "cuda"
+        and torch.cuda.get_device_capability(device)[0] >= 10
+    )
 
 
 def _topk_v3_enabled() -> bool:
@@ -151,7 +168,7 @@ def _run_prefill_topk(
     topk: int,
     compress_ratio: int,
 ) -> None:
-    if _fp8_prefill_topk_use_torch():
+    if _fp8_prefill_topk_use_torch() or not _topk_native_supported(logits.device):
         _run_prefill_topk_torch(logits, row_starts, row_ends, out, topk)
         return
     estimated_input_tokens = int(logits.size(1)) * int(compress_ratio)
@@ -204,7 +221,11 @@ def _run_topk_v3(
     k: int,
     max_seq_len: int,
 ) -> bool:
-    if k not in (512, 1024, 2048) or not _topk_v3_enabled():
+    if (
+        k not in (512, 1024, 2048)
+        or not _topk_v3_enabled()
+        or not _topk_native_supported(logits.device)
+    ):
         return False
     rtp_llm_ops.topk_v3(
         logits, lengths, output, _get_topk_workspace(logits.device), k, max_seq_len
