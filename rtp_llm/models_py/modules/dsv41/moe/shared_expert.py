@@ -188,6 +188,11 @@ class W13SharedExpert(nn.Module):
             and (x.dim() == 2)
             and isinstance(self.w13, V41MXFP8Linear)
             and isinstance(self.w2, V41MXFP8Linear)
+            # The fused epilogue emits group32 FP8 consumed by
+            # forward_quantized, which is DeepGEMM-only. Pre-SM100 fallbacks
+            # keep the BF16 SiLU path, where both linears dequantize exactly.
+            and self.w13.native_fp4_gemm
+            and self.w2.native_fp4_gemm
         )
 
     def _forward_mxfp8_fused_silu(self, x: torch.Tensor) -> torch.Tensor:

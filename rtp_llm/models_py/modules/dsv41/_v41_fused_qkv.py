@@ -60,6 +60,11 @@ def is_supported(linear, x, q_norm, q_rank) -> bool:
     """Metadata-only gate; unsupported inputs retain the two original linears."""
     return (
         isinstance(linear, V41MXFP8Linear)
+        # The quantized-input consumer below is DeepGEMM-only. Pre-SM100
+        # linears must retain the plain projection so forward_quantized is
+        # never reached; this gate also closes the front-gemm and fused
+        # attn-norm producers whose pairs feed it.
+        and linear.native_fp4_gemm
         and x.is_cuda
         and x.dtype == torch.bfloat16
         and x.ndim in (2, 3)
