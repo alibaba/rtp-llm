@@ -817,7 +817,9 @@ def sparse_paged_gqa_attn(
             gate = output_gate if bthd_output else output_gate.transpose(1, 2)
             output = output * torch.sigmoid(gate)
         return output
-    grouped_ok = _grouped_split_supported(
+    # SM90 single-token decode needs the online kernel's FP32 PV weights.
+    # Explicit BTHD output is the grouped prefill layout.
+    grouped_ok = (query_len > 1 or bthd_output) and _grouped_split_supported(
         q, kv_cache, selected, page_size=page_size, selected_width=selected_width
     )
     if bthd_output and not grouped_ok:
