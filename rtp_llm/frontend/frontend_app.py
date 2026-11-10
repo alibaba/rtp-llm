@@ -946,6 +946,42 @@ class FrontendApp(object):
             check_not_draining(request)
             return self.frontend_server.tokenize(req)
 
+        # AWI evaluator contract: pretokenized benchmark generation.
+        # example {"input_ids": [...], "max_tokens": 256,
+        #          "extra_configs": {"min_new_tokens": 256, "ignore_eos": true}}
+        # The X-AWI-Request-ID header becomes the engine request id (int64, or
+        # a stable 63-bit hash for non-numeric ids) so scheduler observations
+        # and /awi/barrier share one identifier space; the id is echoed back.
+        @app.post("/awi/generate")
+        async def awi_generate(request: Request):
+            check_not_draining(request)
+            body = await request.json()
+            awi_request_id = request.headers.get("X-AWI-Request-ID")
+            return await self.frontend_server.awi_generate(body, awi_request_id)
+
+        # AWI evaluator contract: arm an operation-scoped admission/residency
+        # barrier; fans out through the existing scheduler-info channel so
+        # every rank's FIFO scheduler arms identically.
+        @app.post("/awi/barrier")
+        async def awi_barrier(request: Request):
+            check_not_draining(request)
+            body = await request.json()
+            operation_id = str(body.get("operation_id") or "")
+            request_ids = [str(r) for r in (body.get("request_ids") or [])]
+            if not operation_id or not request_ids:
+                return ORJSONResponse(
+                    {"error": "operation_id and request_ids are required"},
+                    status_code=400,
+                )
+            payload = {
+                "awi_barrier": {
+                    "operation_id": operation_id,
+                    "request_ids": request_ids,
+                    "context_tokens": int(body.get("context_tokens") or 0),
+                }
+            }
+            return await self.grpc_client.post_request("update_scheduler_info", payload)
+
         if self.frontend_server.is_embedding:
             # embedding
             @app.post("/v1/embeddings/similarity")

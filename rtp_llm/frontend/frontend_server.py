@@ -780,6 +780,111 @@ class FrontendServer(object):
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
 
+    async def awi_generate(self, body: Dict[str, Any], awi_request_id: str | None):
+        """AWI evaluator contract: pretokenized generation, non-streaming.
+
+        Body: {"input_ids": [...], "max_tokens": N, "extra_configs": {...}}.
+        extra_configs entries that match GenerateConfig fields (e.g.
+        min_new_tokens, ignore_eos) are passed through verbatim; unknown keys
+        are rejected so typos cannot silently drop benchmark constraints.
+        The resolved engine request id is echoed as "request_id" (stringified,
+        matching what the scheduler-side registry keys on).
+        """
+        import hashlib
+        import time as _time
+
+        from rtp_llm.config.generate_config import GenerateConfig
+
+        try:
+            token_ids = body.get("input_ids")
+            if not isinstance(token_ids, list) or not token_ids:
+                return ORJSONResponse(
+                    {"error": "input_ids must be a nonempty list of ints"},
+                    status_code=400,
+                )
+            token_ids = [int(t) for t in token_ids]
+            max_tokens = int(body.get("max_tokens", 1))
+            extra = dict(body.get("extra_configs") or {})
+            known = set(GenerateConfig.model_fields.keys())
+            unknown = sorted(k for k in extra if k not in known)
+            if unknown:
+                return ORJSONResponse(
+                    {"error": f"unknown extra_configs keys: {unknown}"},
+                    status_code=400,
+                )
+            generate_config = GenerateConfig(
+                max_new_tokens=max_tokens,
+                aux_info=True,
+                **extra,
+            )
+            if awi_request_id:
+                try:
+                    request_id = int(awi_request_id)
+                except ValueError:
+                    digest = hashlib.blake2b(
+                        awi_request_id.encode("utf-8"), digest_size=8
+                    ).digest()
+                    request_id = int.from_bytes(digest, "big", signed=False) >> 1
+            else:
+                request_id = generate_request_id()
+            pipeline = self._frontend_worker.pipeline
+            final = None
+            async for response in pipeline.generate_stream(
+                request_id,
+                token_ids,
+                [],
+                generate_config,
+                headers={"x-awi-request-id": awi_request_id or ""},
+            ):
+                final = response
+            if final is None:
+                return ORJSONResponse(
+                    {"error": "engine returned no response"}, status_code=500
+                )
+            output = final.generate_outputs.generate_outputs[0]
+            text = final.generate_texts[0] if final.generate_texts else ""
+            aux = getattr(output, "aux_info", None)
+            completion_tokens = int(getattr(aux, "output_len", 0) or 0)
+            usage = {
+                "prompt_tokens": len(token_ids),
+                "completion_tokens": completion_tokens,
+                "total_tokens": len(token_ids) + completion_tokens,
+            }
+            aux_dict = None
+            if aux is not None:
+                aux_dict = {
+                    k: getattr(aux, k)
+                    for k in (
+                        "input_len",
+                        "output_len",
+                        "reuse_len",
+                        "iter_count",
+                        "first_token_cost_time",
+                        "cost_time",
+                    )
+                    if hasattr(aux, k)
+                }
+            return ORJSONResponse(
+                {
+                    "id": str(request_id),
+                    "object": "chat.completion",
+                    "created": int(_time.time()),
+                    "model": "",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": text},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": usage,
+                    "request_id": str(request_id),
+                    "aux_info": aux_dict,
+                }
+            )
+        except Exception as e:
+            return ORJSONResponse(format_exception(e), status_code=500)
+
     def tokenizer_encode(self, req: Union[str, Dict[Any, Any]]):
         try:
             if isinstance(req, str):
