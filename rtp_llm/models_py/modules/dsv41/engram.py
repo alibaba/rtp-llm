@@ -2180,13 +2180,18 @@ class Engram(nn.Module):
                 projection = _ReferenceWKV(
                     dequantize_block_weight(load("wkv.weight"), load("wkv.scale"))
                 )
+            # Engram offload policy: every engram checkpoint key stays
+            # host-resident. CUDA stages the tiny gate matrices onto the
+            # device persistently; ROCm keeps them in host RAM and stages
+            # them transiently per forward instead.
+            qk_target = target if torch.version.hip is None else torch.device("cpu")
             return cls(
                 layout,
                 layer_hash_index,
                 embedding,
                 projection,
-                load("q_weight").to(target),
-                load("k_weight").to(target),
+                load("q_weight").to(qk_target),
+                load("k_weight").to(qk_target),
                 float(_config_value(config, "rms_norm_eps")),
             )
         except BaseException:
@@ -2340,17 +2345,38 @@ class Engram(nn.Module):
         else:
             kv = self.wkv(rows)
         del rows
+        q_weight = self.q_weight
+        k_weight = self.k_weight
+        if q_weight.device != hidden.device:
+            # Host-resident gate matrices (Engram offload policy): stage the
+            # ~40 KB copies for this call only; no persistent device mirror.
+            q_weight = q_weight.to(hidden.device)
+            k_weight = k_weight.to(hidden.device)
         return gated_engram_residual(
-            hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask, out=out
+            hidden, kv, q_weight, k_weight, self.eps, token_mask, out=out
         )
 
 
 class _ReferenceWKV(nn.Module):
-    """CPU validation path for small synthetic checkpoints."""
+    """Host-resident WKV projection (CPU validation and the ROCm path).
+
+    The weight is an Engram checkpoint derivative and must stay in host
+    RAM (offload policy: no persistent GPU mirror). When the inputs are on
+    a device, the matrix is staged for the duration of one GEMM and the
+    staged copy is dropped immediately.
+    """
 
     def __init__(self, weight):
         super().__init__()
         self.register_buffer("weight", weight, persistent=False)
 
     def forward(self, rows):
-        return F.linear(mxfp8_activation_reference(rows), self.weight)
+        x = mxfp8_activation_reference(rows)
+        weight = self.weight
+        if x.device != weight.device:
+            staged = weight.to(x.device)
+            try:
+                return F.linear(x, staged)
+            finally:
+                del staged
+        return F.linear(x, weight)
