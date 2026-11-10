@@ -115,20 +115,65 @@ def register_host_tensor(checkpoint_key: str, tensor: torch.Tensor) -> None:
         _host_tensors[checkpoint_key] = record
 
 
+def _checkpoint_dir(database: Any) -> Optional[str]:
+    """Derive the checkpoint directory from the database's first shard path."""
+    try:
+        files = getattr(database, "pretrain_file_list", None)
+        if files:
+            return os.path.dirname(files[0].file_name)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _full_checkpoint_index(ckpt_dir: Optional[str]) -> Dict[str, str]:
+    """Return {tensor_name: absolute safetensors path} for EVERY checkpoint key.
+
+    This is the authoritative full set (model.safetensors.index.json), which
+    is larger than ``database.get_pretrain_tensor_names()``: the main loader's
+    database omits keys it does not consume (disabled MTP draft, the vision
+    tower under text-only serving). The evaluator census must cover all of
+    them, so we read the index directly.
+    """
+    if not ckpt_dir:
+        return {}
+    index_path = os.path.join(ckpt_dir, "model.safetensors.index.json")
+    try:
+        import json
+
+        with open(index_path) as handle:
+            weight_map = json.load(handle)["weight_map"]
+        return {name: os.path.join(ckpt_dir, rel) for name, rel in weight_map.items()}
+    except Exception:  # noqa: BLE001
+        logging.exception("[awi] could not read full checkpoint index")
+        return {}
+
+
 def _park_unconsumed(
-    universe: List[str],
+    full_index: Dict[str, str],
     consumed: Set[str],
     device: str,
-    database: Any,
 ) -> Dict[str, Any]:
+    """Load every not-otherwise-resident checkpoint key onto the device.
+
+    Offload policy: only Engram keys live in host RAM; every other checkpoint
+    key must be device-resident. Keys this deployment does not consume (MTP
+    draft with speculative decoding off, the vision tower under text-only
+    serving, image placeholder tokens) are parked here so the census reports a
+    real device allocation for all of them instead of omitting them.
+    """
+    from safetensors import safe_open
+
     stats = {"parked": 0, "park_failed": [], "engram_pattern": 0}
-    for name in universe:
-        if name in consumed or _ENGRAM_KEY.search(name):
-            if _ENGRAM_KEY.search(name):
-                stats["engram_pattern"] += 1
+    for name, path in full_index.items():
+        if name in consumed:
+            continue
+        if _ENGRAM_KEY.search(name):
+            stats["engram_pattern"] += 1
             continue
         try:
-            tensor = database.load_tensor(name)
+            with safe_open(path, framework="pt", device="cpu") as handle:
+                tensor = handle.get_tensor(name)
             try:
                 resident = tensor.to(device)
             except Exception:  # noqa: BLE001
@@ -158,7 +203,12 @@ def snapshot_loader(loader: Any, weights: Any, device: str) -> None:
     global _snapshot
     try:
         database = loader._load_config.database
-        universe = list(database.get_pretrain_tensor_names())
+        # Authoritative full checkpoint key set (larger than the loader's
+        # database universe, which omits MTP-draft and vision keys under
+        # text-only, SP-off serving). The evaluator census must cover all.
+        full_index = _full_checkpoint_index(_checkpoint_dir(database))
+        db_universe = set(database.get_pretrain_tensor_names())
+        universe = set(full_index.keys()) | db_universe
         tensor_to_weight_map, _ = loader._generate_weight_info()
         consumed: Dict[str, Any] = {}
         for name, info in tensor_to_weight_map.items():
@@ -183,8 +233,7 @@ def snapshot_loader(loader: Any, weights: Any, device: str) -> None:
                 "record": _tensor_record(tensor) if tensor is not None else None,
             }
         with _lock:
-            already = set(consumed.keys()) | set(_parked_rows.keys())
-            parked_stats = _park_unconsumed(universe, already, device, database)
+            parked_stats = _park_unconsumed(full_index, set(consumed.keys()), device)
             if _snapshot is None:
                 _snapshot = {
                     "device": device,
@@ -193,14 +242,16 @@ def snapshot_loader(loader: Any, weights: Any, device: str) -> None:
                     "parked_stats": {"parked": 0, "park_failed": [], "engram_pattern": 0},
                     "snapshot_ns": time.time_ns(),
                 }
-            _snapshot["universe"].extend(universe)
+            _snapshot["universe"] = sorted(universe)
             _snapshot["consumed"].update(consumed)
             _snapshot["parked_stats"]["parked"] += parked_stats["parked"]
             _snapshot["parked_stats"]["park_failed"].extend(parked_stats["park_failed"])
             _snapshot["parked_stats"]["engram_pattern"] += parked_stats["engram_pattern"]
         logging.info(
-            "[awi] census snapshot: universe=%d consumed=%d parked=%d park_failed=%d",
+            "[awi] census snapshot: universe=%d (index=%d db=%d) consumed=%d parked=%d park_failed=%d",
             len(universe),
+            len(full_index),
+            len(db_universe),
             len(consumed),
             parked_stats["parked"],
             len(parked_stats["park_failed"]),
@@ -230,6 +281,7 @@ def finalize_and_write() -> Optional[str]:
         return None
     rows: List[Dict[str, Any]] = []
     missing: List[str] = []
+    merge_groups: Dict[int, Dict[str, Any]] = {}
     consumed = _snapshot["consumed"]
     groups = _merged_group_bytes(consumed)
     transformed = 0
@@ -253,6 +305,21 @@ def finalize_and_write() -> Optional[str]:
         ptr = record["ptr"]
         group = groups.get(ptr, [name])
         transform = transforms.get(ptr)
+        # Record one merge-group entry per distinct resident tensor (keyed by
+        # ptr) instead of embedding the full sibling list in every row, which
+        # would be O(group^2) for the 384-expert stacks.
+        if len(group) > 1 and ptr not in merge_groups:
+            merge_groups[ptr] = {
+                "descriptor": entry["descriptor"],
+                "layer_id": entry["layer_id"],
+                "size": len(group),
+                "transform": transform["transform"] if transform else None,
+                "outputs": transform["outputs"] if transform else [record],
+                "resident_bytes": (
+                    transform["out_bytes"] if transform else record["bytes"]
+                ),
+            }
+        merge_group_id = str(ptr) if len(group) > 1 else None
         if transform is not None:
             transformed += 1
             share = transform["out_bytes"] // max(1, len(group))
@@ -268,8 +335,7 @@ def finalize_and_write() -> Optional[str]:
                     "provenance": {
                         **base["provenance"],
                         "transform": transform["transform"],
-                        "merged_with": sorted(group),
-                        "outputs": transform["outputs"],
+                        "merge_group_id": merge_group_id,
                     },
                 }
             )
@@ -286,7 +352,7 @@ def finalize_and_write() -> Optional[str]:
                 "shape": record["shape"],
                 "provenance": {
                     **base["provenance"],
-                    "merged_with": sorted(group) if len(group) > 1 else None,
+                    "merge_group_id": merge_group_id,
                 },
             }
         )
@@ -347,9 +413,11 @@ def finalize_and_write() -> Optional[str]:
             "host_registered": len(host_snapshot),
             "parked": _snapshot["parked_stats"]["parked"],
             "park_failed": _snapshot["parked_stats"]["park_failed"],
+            "merge_groups": len(merge_groups),
             "missing": missing,
         },
         "rows": rows,
+        "merge_groups": list(merge_groups.values()),
     }
     _census_written = True
     path = write_rank_document("weights", document)

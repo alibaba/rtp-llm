@@ -20,7 +20,6 @@ derived from live tensors, events come from engine instrumentation, and the
 network-fetch count from the StartupNetworkGuard installed at process start.
 """
 
-import json
 import logging
 import os
 import time
@@ -113,41 +112,81 @@ def register_awi_routes(app: Any, frontend_app: Any) -> None:
                 generate_config[key] = body[key]
 
         awi_request_id = request.headers.get("x-awi-request-id", "")
-        legacy_req = {
-            "prompt_tokens": input_ids,
-            "generate_config": generate_config,
-        }
+        worker = getattr(frontend_app.frontend_server, "_frontend_worker", None)
+        pipeline = getattr(worker, "pipeline", None)
+        if pipeline is None:
+            return ORJSONResponse(
+                status_code=503, content={"error": "generation pipeline unavailable"}
+            )
+
+        from dataclasses import asdict
+
+        from rtp_llm.pipeline.pipeline import request_counter
+
+        request_id = request_counter.increment()
+        headers = {"x-awi-request-id": awi_request_id} if awi_request_id else {}
         start_ns = time.time_ns()
-        rep = await frontend_app.frontend_server.inference(legacy_req, request)
+        last = None
+        try:
+            stream = pipeline.pipeline_async_pretokenized(
+                input_ids,
+                request_id,
+                generate_config=generate_config,
+                headers=headers,
+            )
+            async for response in stream:
+                last = response
+        except Exception as error:  # noqa: BLE001
+            logging.exception("[awi] generate failed")
+            return ORJSONResponse(
+                status_code=500,
+                content={
+                    "error_code": 500,
+                    "error_code_str": "500_AWI_GENERATE_ERROR",
+                    "message": f"{type(error).__name__}: {error}",
+                    "aux_info": {
+                        "input_len": 0,
+                        "output_len": 0,
+                        "step_output_len": 0,
+                        "reuse_len": 0,
+                    },
+                },
+            )
         end_ns = time.time_ns()
 
-        status_code = getattr(rep, "status_code", 200)
+        if last is None:
+            return ORJSONResponse(
+                status_code=502, content={"error": "backend produced no response"}
+            )
+
+        text = ""
         try:
-            payload = json.loads(bytes(rep.body).decode())  # type: ignore[arg-type]
+            texts = getattr(last, "generate_texts", None)
+            if texts:
+                text = texts[0]
         except Exception:  # noqa: BLE001
-            return ORJSONResponse(
-                status_code=502,
-                content={"error": "backend produced a non-JSON response"},
-            )
-        if payload.get("error_code") not in (None, 0):
-            return ORJSONResponse(
-                status_code=status_code if status_code >= 400 else 500,
-                content=payload,
-            )
-        aux = payload.get("aux_info") or {}
-        text = payload.get("response") or ""
+            text = ""
+        aux: Dict[str, Any] = {}
+        finished = True
+        try:
+            out0 = last.generate_outputs.generate_outputs[0]
+            finished = bool(out0.finished)
+            if out0.aux_info is not None:
+                aux = asdict(out0.aux_info)
+        except Exception:  # noqa: BLE001
+            aux = {}
         prompt_tokens = int(aux.get("input_len") or len(input_ids))
         completion_tokens = int(aux.get("output_len") or 0)
         return ORJSONResponse(
             content={
-                "id": awi_request_id or str(payload.get("request_id", "")),
+                "id": awi_request_id or str(request_id),
                 "object": "chat.completion",
                 "created": int(time.time()),
                 "choices": [
                     {
                         "index": 0,
                         "message": {"role": "assistant", "content": text},
-                        "finish_reason": "stop" if payload.get("finished") else "length",
+                        "finish_reason": "stop" if finished else "length",
                     }
                 ],
                 "usage": {
@@ -158,6 +197,7 @@ def register_awi_routes(app: Any, frontend_app: Any) -> None:
                 "aux_info": aux,
                 "awi": {
                     "request_id": awi_request_id,
+                    "internal_request_id": request_id,
                     "frontend_start_ns": start_ns,
                     "frontend_end_ns": end_ns,
                 },

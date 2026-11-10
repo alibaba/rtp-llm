@@ -296,6 +296,45 @@ class Pipeline(object):
             **kwargs,
         )
 
+    def pipeline_async_pretokenized(  # type: ignore
+        self,
+        token_ids: List[int],
+        request_id: int = None,
+        **kwargs: Any,
+    ) -> AsyncGenerator[GenerateResponse, None]:
+        """Pretokenized generation for the AWI benchmark path.
+
+        Mirrors ``pipeline_async`` but consumes caller-supplied ``token_ids``
+        verbatim (no tokenizer round-trip), so the evaluator's exact input
+        token count reaches the engine unchanged. ``request_headers`` carries
+        X-AWI-Request-ID into RequestInfoPB.request_id for scheduler-side
+        observation correlation.
+        """
+        if request_id is None:
+            request_id = request_counter.increment()
+        request_headers = normalize_request_headers(kwargs.pop("headers", None))
+        generate_config_json = kwargs.pop("generate_config", {})
+        generate_config = self.create_generate_config(
+            generate_config_json,
+            len(self.tokenizer),
+            self._special_tokens,
+            self.tokenizer,
+            **kwargs,
+        )
+        if not token_ids:
+            raise FtRuntimeException(
+                ExceptionType.EMPTY_PROMPT_ERROR,
+                "pretokenized input_ids must be non-empty",
+            )
+        return self.generate_stream(
+            request_id,
+            [int(t) for t in token_ids],
+            [],
+            generate_config,
+            headers=request_headers,
+            **kwargs,
+        )
+
     @staticmethod
     def process_stop_id(
         generate_config: GenerateConfig,
